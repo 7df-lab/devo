@@ -155,11 +155,12 @@ fn build_provider(
             let model = model.unwrap_or(default_model);
             eprintln!("Using Anthropic API (model: {})", model);
 
-            let mut p = claw_provider::anthropic::AnthropicProvider::new(key);
-            if let Some(url) = base_url {
+            let p = if let Some(url) = base_url {
                 eprintln!("  base_url: {}", url);
-                p = p.with_base_url(url);
-            }
+                claw_provider::anthropic::AnthropicProvider::new_with_url(&key, url)
+            } else {
+                claw_provider::anthropic::AnthropicProvider::new(&key)
+            };
             Ok(ResolvedProvider {
                 provider: Box::new(p),
                 model,
