@@ -1,0 +1,20 @@
+[package]
+name = "claw-provider"
+description = "Unified model provider interface with streaming support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+async-anthropic = { workspace = true }
+async-openai = { workspace = true }

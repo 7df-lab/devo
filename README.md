@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🦀 Claude Code Rust
+# 🦀 Claw RS
 
 **A modular agent runtime extracted from Claude Code, rebuilt in Rust, and still in active development.**
 
@@ -101,7 +101,7 @@ cargo run -- -q "list files in the current directory"
 ### CLI Options
 
 ```text
-Usage: claude [OPTIONS]
+Usage: claw-rs [OPTIONS]
 
 Options:
   -m, --model <MODEL>          Model name (default: auto per provider)
@@ -149,64 +149,63 @@ This project aims to:
 
 | Crate | Purpose | Derived From (Claude Code) |
 |-------|---------|---------------------------|
-| `agent-core` | Message model, state container, main loop, session | `query.ts`, `QueryEngine.ts`, `state/store.ts` |
-| `agent-tools` | Tool trait, registry, execution orchestration | `Tool.ts`, `tools.ts`, tool service layer |
-| `agent-tasks` | Long task lifecycle and notification mechanism | `Task.ts`, `tasks.ts` |
-| `agent-permissions` | Tool call authorization and rule matching | `types/permissions.ts`, `utils/permissions/` |
-| `agent-provider` | Unified model interface, streaming, retry | `services/api/` |
-| `agent-compact` | Context trimming and token budget control | `services/compact/`, `query/tokenBudget.ts` |
-| `agent-mcp` | MCP client, connection, discovery, reconnect | `services/mcp/` |
-| `tools-builtin` | Built-in tool implementations | `tools/` |
-| `claude-cli` | Executable entry point, assembles all crates | CLI layer |
+| `claw-core` | Message model, state container, main loop, session | `query.ts`, `QueryEngine.ts`, `state/store.ts` |
+| `claw-tools` | Tool trait, registry, execution orchestration, and built-in tools | `Tool.ts`, `tools.ts`, tool service layer |
+| `claw-tasks` | Long task lifecycle and notification mechanism | `Task.ts`, `tasks.ts` |
+| `claw-permissions` | Tool call authorization and rule matching | `types/permissions.ts`, `utils/permissions/` |
+| `claw-provider` | Unified model interface, streaming, retry | `services/api/` |
+| `claw-compact` | Context trimming and token budget control | `services/compact/`, `query/tokenBudget.ts` |
+| `claw-mcp` | MCP client, connection, discovery, reconnect | `services/mcp/` |
+| `claw-cli` | Executable entry point, assembles all crates | CLI layer |
 
 ## 🔍 Crate Overview
 
 <details>
-<summary><b>agent-core</b> — The foundation</summary>
+<summary><b>claw-core</b> — The foundation</summary>
 
 Manages how a conversation turn starts, continues, and stops. Defines the unified message model, main loop, and session state. This is the bedrock of the entire system.
 </details>
 
 <details>
-<summary><b>agent-tools</b> — Tool definition & dispatch</summary>
+<summary><b>claw-tools</b> — Tools and dispatch</summary>
 
-Defines "what a tool looks like" and "how tools are scheduled." The Rust version avoids stuffing all context into one giant object — instead, tools only receive the parts they actually need.
+Defines tools, schedules them, and ships the built-in file, shell, search, and edit capabilities in one crate.
 </details>
 
 <details>
-<summary><b>agent-tasks</b> — Background task runtime</summary>
+<summary><b>claw-tasks</b> — Background task runtime</summary>
 
 Separating tool calls from runtime tasks is critical for supporting long commands, background agents, and completion notifications fed back into the conversation.
 </details>
 
 <details>
-<summary><b>agent-permissions</b> — Authorization layer</summary>
+<summary><b>claw-permissions</b> — Authorization layer</summary>
 
 Controls what the agent can do, when it must ask the user, and when to refuse outright. Essential whenever agents read files, write files, or execute commands.
 </details>
 
 <details>
-<summary><b>agent-provider</b> — Model abstraction</summary>
+<summary><b>claw-provider</b> — Model abstraction</summary>
 
 Shields the system from differences between model backends. Unifies streaming output, retry logic, and error recovery.
 </details>
 
 <details>
-<summary><b>agent-compact</b> — Context management</summary>
+<summary><b>claw-compact</b> — Context management</summary>
 
 Ensures long session stability. Not just "summarization" — applies different compression levels and budget controls based on context to prevent unbounded growth.
 </details>
 
 <details>
-<summary><b>agent-mcp</b> — MCP integration</summary>
+<summary><b>claw-mcp</b> — MCP integration</summary>
 
 Connects to external MCP services, bringing remote tools, resources, and prompts into the unified capability surface.
 </details>
 
 <details>
-<summary><b>tools-builtin</b> — Built-in tools</summary>
+<summary><b>claw-cli</b> — CLI entry point</summary>
 
-Implements the most commonly used tools, prioritizing file operations, shell commands, search, and editing — the basic operations any agent needs.
+Packages the executable as `claw-rs` and wires together the runtime crates for interactive and one-shot use.
 </details>
 
 ## 🗺 Roadmap
@@ -215,29 +214,15 @@ Implements the most commonly used tools, prioritizing file operations, shell com
 <img src="./docs/assets/roadmap.svg" alt="Roadmap" width="100%" />
 </div>
 
-### Phase 1: Get It Running
+### 1-Week Plan
 
-- Set up `agent-core`, `agent-tools`, `agent-provider`, `agent-permissions`
-- Implement basic `Bash`, `FileRead`, `FileWrite` tools
-- Deliver a minimal runnable CLI
-
-> **Goal:** A basic version that can chat, call tools, execute commands, and read/write files.
-
-### Phase 2: Make Sessions Stable
-
-- Add `agent-tasks` for background tasks and notifications
-- Add `agent-compact` for long sessions and large result handling
-- Expand `tools-builtin` with editing, search, and sub-agent capabilities
-
-> **Goal:** Sessions that can last longer without becoming fragile due to oversized outputs or long-running tasks.
-
-### Phase 3: Open the Boundaries
-
-- Integrate `agent-mcp`
-- Add plugin/skill loading capabilities
-- Support SDK / headless usage for embedded scenarios
-
-> **Goal:** Not just a CLI, but a complete agent runtime that can be integrated into other systems.
+- **Day 1**: Finalize crate boundaries and wire the minimal CLI
+- **Day 2**: Land `Bash`, `FileRead`, and `FileWrite`
+- **Day 3**: Stabilize provider flow, permissions, and session state
+- **Day 4**: Add editing and search tools
+- **Day 5**: Improve long-session handling with tasks and compaction
+- **Day 6**: Start MCP and plugin/skill integration
+- **Day 7**: Run focused testing, fix gaps, and document the next slice
 
 
 ## 🤝 Contributing

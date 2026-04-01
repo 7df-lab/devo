@@ -1,0 +1,29 @@
+[package]
+name = "claw-cli"
+description = "CLI entry point that assembles all crates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "claw-rs"
+path = "src/main.rs"
+
+[dependencies]
+claw-core = { workspace = true }
+claw-tools = { workspace = true }
+claw-provider = { workspace = true }
+claw-permissions = { workspace = true }
+claw-tasks = { workspace = true }
+claw-compact = { workspace = true }
+
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+dirs = "6"

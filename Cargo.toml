@@ -1,15 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/agent-core",
-    "crates/agent-tools",
-    "crates/agent-provider",
-    "crates/agent-permissions",
-    "crates/agent-tasks",
-    "crates/agent-compact",
-    "crates/agent-mcp",
-    "crates/tools-builtin",
-    "crates/claude-cli",
+    "crates/core",
+    "crates/tools",
+    "crates/provider",
+    "crates/permissions",
+    "crates/tasks",
+    "crates/compact",
+    "crates/mcp",
+    "crates/claw-cli",
 ]
 
 [workspace.package]
@@ -20,14 +19,13 @@ rust-version = "1.75"
 
 [workspace.dependencies]
 # Internal crates
-agent-core = { path = "crates/agent-core" }
-agent-tools = { path = "crates/agent-tools" }
-agent-provider = { path = "crates/agent-provider" }
-agent-permissions = { path = "crates/agent-permissions" }
-agent-tasks = { path = "crates/agent-tasks" }
-agent-compact = { path = "crates/agent-compact" }
-agent-mcp = { path = "crates/agent-mcp" }
-tools-builtin = { path = "crates/tools-builtin" }
+claw-core = { path = "crates/core" }
+claw-tools = { path = "crates/tools" }
+claw-provider = { path = "crates/provider" }
+claw-permissions = { path = "crates/permissions" }
+claw-tasks = { path = "crates/tasks" }
+claw-compact = { path = "crates/compact" }
+claw-mcp = { path = "crates/mcp" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

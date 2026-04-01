@@ -1,0 +1,24 @@
+[package]
+name = "claw-core"
+description = "Message model, session state, and agent main loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+claw-tools = { workspace = true }
+claw-provider = { workspace = true }
+claw-permissions = { workspace = true }
+claw-compact = { workspace = true }
+
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
