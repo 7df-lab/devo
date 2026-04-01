@@ -36,9 +36,9 @@ impl std::str::FromStr for OutputFormat {
 #[derive(Parser, Debug)]
 #[command(name = "claude", version, about)]
 struct Cli {
-    /// Model to use
-    #[arg(short, long, default_value = "claude-sonnet-4-20250514")]
-    model: String,
+    /// Model to use (e.g. claude-sonnet-4-20250514, qwen3.5:9b)
+    #[arg(short, long)]
+    model: Option<String>,
 
     /// System prompt
     #[arg(
@@ -68,6 +68,14 @@ struct Cli {
     /// Maximum turns per conversation
     #[arg(long, default_value = "100")]
     max_turns: usize,
+
+    /// Provider: anthropic, ollama (auto-detected if not set)
+    #[arg(long)]
+    provider: Option<String>,
+
+    /// Ollama server URL
+    #[arg(long, default_value = "http://localhost:11434")]
+    ollama_url: String,
 }
 
 #[tokio::main]
@@ -85,20 +93,14 @@ async fn main() -> Result<()> {
     // --print is an alias for --query; --query takes precedence if both given
     let single_prompt = cli.query.or(cli.print);
 
-    let config = SessionConfig {
-        model: cli.model.clone(),
-        system_prompt: cli.system.clone(),
-        max_turns: cli.max_turns,
-        permission_mode: match cli.permission.as_str() {
-            "auto" => PermissionMode::AutoApprove,
-            "interactive" => PermissionMode::Interactive,
-            "deny" => PermissionMode::Deny,
-            other => {
-                eprintln!("unknown permission mode '{}', using auto", other);
-                PermissionMode::AutoApprove
-            }
-        },
-        ..Default::default()
+    let permission_mode = match cli.permission.as_str() {
+        "auto" => PermissionMode::AutoApprove,
+        "interactive" => PermissionMode::Interactive,
+        "deny" => PermissionMode::Deny,
+        other => {
+            eprintln!("unknown permission mode '{}', using auto", other);
+            PermissionMode::AutoApprove
+        }
     };
 
     // Register tools
@@ -107,17 +109,61 @@ async fn main() -> Result<()> {
     let registry = Arc::new(registry);
     let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
 
-    // Pick provider based on environment
-    let provider: Box<dyn ModelProvider> = match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) if !key.is_empty() => {
-            eprintln!("Using Anthropic API (model: {})", cli.model);
-            Box::new(agent_provider::anthropic::AnthropicProvider::new(key))
+    // Resolve provider
+    let resolved_provider = cli.provider.as_deref().unwrap_or_else(|| {
+        if std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty()).is_some() {
+            "anthropic"
+        } else {
+            "ollama"
         }
-        _ => {
-            eprintln!("⚠ ANTHROPIC_API_KEY not set — running with stub provider.");
-            eprintln!("  Set the env var to use a real model.\n");
-            Box::new(StubProvider)
+    });
+
+    let (provider, model_name): (Box<dyn ModelProvider>, String) = match resolved_provider {
+        "anthropic" => {
+            let key = std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .expect("ANTHROPIC_API_KEY is required for anthropic provider");
+            let model = cli.model.unwrap_or_else(|| "claude-sonnet-4-20250514".into());
+            eprintln!("Using Anthropic API (model: {})", model);
+            (
+                Box::new(agent_provider::anthropic::AnthropicProvider::new(key)),
+                model,
+            )
         }
+        "ollama" | "openai" => {
+            let base_url = if resolved_provider == "ollama" {
+                cli.ollama_url.clone()
+            } else {
+                std::env::var("OPENAI_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.openai.com".into())
+            };
+            let model = cli.model.unwrap_or_else(|| "qwen3.5:9b".into());
+            eprintln!("Using {} (url: {}, model: {})", resolved_provider, base_url, model);
+            let mut p = agent_provider::openai_compat::OpenAICompatProvider::new(&base_url);
+            if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+                p = p.with_api_key(key);
+            }
+            (Box::new(p), model)
+        }
+        "stub" => {
+            let model = cli.model.unwrap_or_else(|| "stub".into());
+            eprintln!("Using stub provider (no real model calls)");
+            (Box::new(StubProvider), model)
+        }
+        other => {
+            eprintln!("Unknown provider '{}', falling back to stub", other);
+            let model = cli.model.unwrap_or_else(|| "stub".into());
+            (Box::new(StubProvider), model)
+        }
+    };
+
+    let config = SessionConfig {
+        model: model_name,
+        system_prompt: cli.system.clone(),
+        max_turns: cli.max_turns,
+        permission_mode,
+        ..Default::default()
     };
 
     let mut session = SessionState::new(config, cwd);

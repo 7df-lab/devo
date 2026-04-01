@@ -21,6 +21,7 @@
 ## 📖 Table of Contents
 
 - [What is This](#-what-is-this)
+- [Quick Start](#-quick-start)
 - [Why Rebuild in Rust](#-why-rebuild-in-rust)
 - [Design Goals](#-design-goals)
 - [Architecture](#-architecture)
@@ -53,6 +54,74 @@ Think of it as an **agent runtime skeleton**:
 | **Bottom** | Concrete implementations: built-in tools, MCP client, context management |
 
 > If the boundaries are clean enough, this can serve not only Claude-style coding agents, but any agent system that needs a solid runtime foundation.
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- **Rust** 1.75+ ([install](https://rustup.rs/))
+- **Model backend** — one of the following:
+  - [Ollama](https://ollama.com/) (recommended for local development)
+  - Anthropic API key
+
+### Build
+
+```bash
+git clone <repo-url> && cd rust-clw
+cargo build
+```
+
+### Run with Ollama (local, no API key needed)
+
+Make sure Ollama is running and has a model pulled:
+
+```bash
+# Pull a model (only needed once)
+ollama pull qwen3.5:9b
+
+# Single query
+cargo run -- --provider ollama -m "qwen3.5:9b" -q "list files in the current directory"
+
+# Interactive REPL
+cargo run -- --provider ollama -m "qwen3.5:9b"
+```
+
+Any model with tool-calling support works. Larger models produce better tool-use results:
+
+```bash
+cargo run -- --provider ollama -m "qwen3.5:27b" -q "read Cargo.toml and summarize the workspace"
+```
+
+### Run with Anthropic API
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+cargo run -- -q "list files in the current directory"
+```
+
+### CLI Options
+
+```text
+Usage: claude [OPTIONS]
+
+Options:
+  -m, --model <MODEL>          Model name (default: auto per provider)
+  -s, --system <SYSTEM>        System prompt
+  -p, --permission <MODE>      Permission mode: auto, interactive, deny
+  -q, --query <QUERY>          Single query (non-interactive), omit for REPL
+      --provider <PROVIDER>    Provider: anthropic, ollama, openai, stub
+      --ollama-url <URL>       Ollama server URL (default: http://localhost:11434)
+      --max-turns <N>          Max turns per conversation (default: 100)
+```
+
+### Supported Providers
+
+| Provider | Backend | How to activate |
+|----------|---------|-----------------|
+| `ollama` | Ollama (local) | `--provider ollama` or auto when no `ANTHROPIC_API_KEY` |
+| `anthropic` | Anthropic API | Set `ANTHROPIC_API_KEY` env var |
+| `openai` | Any OpenAI-compatible API | `--provider openai` + `OPENAI_BASE_URL` |
+| `stub` | No real model (for testing) | `--provider stub` |
 
 ## 🤔 Why Rebuild in Rust
 
@@ -215,7 +284,8 @@ rust-clw/
 │   │       ├── provider.rs             #   ModelProvider trait (complete + stream)
 │   │       ├── request.rs              #   ModelRequest, RequestMessage, ToolDefinition
 │   │       ├── response.rs             #   ModelResponse, StreamEvent, StopReason, Usage
-│   │       └── anthropic.rs            #   Anthropic API impl with SSE stream parsing
+│   │       ├── anthropic.rs            #   Anthropic API impl with SSE stream parsing
+│   │       └── openai_compat.rs        #   OpenAI-compatible impl (Ollama, vLLM, etc.)
 │   │
 │   ├── agent-permissions/              # Authorization layer
 │   │   └── src/

@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod openai_compat;
 mod provider;
 mod request;
 mod response;
