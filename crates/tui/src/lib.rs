@@ -17,8 +17,6 @@ pub use app::AppExit;
 
 /// Immutable configuration used to launch the interactive terminal UI.
 pub struct InteractiveTuiConfig {
-    /// Human-readable provider name displayed in the header.
-    pub provider_name: String,
     /// Model identifier used for requests and shown in the header.
     pub model: String,
     /// System prompt supplied to the query loop.

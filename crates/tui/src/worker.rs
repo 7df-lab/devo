@@ -34,6 +34,8 @@ pub(crate) struct QueryWorkerConfig {
 enum WorkerCommand {
     /// Submit a new user prompt to the session.
     SubmitPrompt(String),
+    /// Update the model used for future requests.
+    SetModel(String),
     /// Stop the worker loop.
     Shutdown,
 }
@@ -68,12 +70,33 @@ impl QueryWorkerHandle {
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
+    /// Updates the active session model for future turns.
+    pub(crate) fn set_model(&self, model: String) -> Result<()> {
+        self.command_tx
+            .send(WorkerCommand::SetModel(model))
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
     /// Stops the worker task and waits for it to finish.
     pub(crate) async fn shutdown(self) -> Result<()> {
         let _ = self.command_tx.send(WorkerCommand::Shutdown);
         self.join_handle.abort();
         let _ = self.join_handle.await.map_err(map_join_error);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl QueryWorkerHandle {
+    /// Creates a lightweight stub worker handle for unit tests that exercise UI logic only.
+    pub(crate) fn stub() -> Self {
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let (_event_tx, event_rx) = mpsc::unbounded_channel();
+        Self {
+            command_tx,
+            event_rx,
+            join_handle: tokio::spawn(async {}),
+        }
     }
 }
 
@@ -153,6 +176,9 @@ async fn run_worker(
                         });
                     }
                 }
+            }
+            WorkerCommand::SetModel(model) => {
+                session.config.model = model;
             }
             WorkerCommand::Shutdown => break,
         }

@@ -81,6 +81,8 @@ pub(crate) enum TranscriptItemKind {
     ToolResult,
     /// Failed tool result or runtime error.
     Error,
+    /// Local UI/system note that is not model-authored content.
+    System,
 }
 
 impl TranscriptItemKind {
@@ -92,6 +94,7 @@ impl TranscriptItemKind {
             TranscriptItemKind::ToolCall => Color::Yellow,
             TranscriptItemKind::ToolResult => Color::Blue,
             TranscriptItemKind::Error => Color::Red,
+            TranscriptItemKind::System => Color::Magenta,
         }
     }
 }

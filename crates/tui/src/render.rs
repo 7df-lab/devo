@@ -62,9 +62,6 @@ fn render_header(app: &TuiApp) -> Paragraph<'static> {
                 Style::new().white().add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
-            Span::styled("provider ", Style::new().dark_gray()),
-            Span::raw(app.provider_name.clone()),
-            Span::raw("   "),
             Span::styled("cwd ", Style::new().dark_gray()),
             Span::raw(cwd_name),
         ]),
@@ -119,8 +116,11 @@ fn render_footer(app: &TuiApp) -> Paragraph<'static> {
         .map(|(input, output)| format!("last turn {input} in / {output} out"))
         .unwrap_or_else(|| "last turn n/a".to_string());
     let footer = format!(
-        "Ctrl+C quit  Ctrl+L clear  Esc clear input  PgUp/PgDn scroll  turns {}  total {} in / {} out  {}",
-        app.turn_count, app.total_input_tokens, app.total_output_tokens, usage
+        "/model [/name]  /status  /exit  Ctrl+C quit  PgUp/PgDn scroll  turns {}  total {} in / {} out  {}",
+        app.turn_count,
+        app.total_input_tokens,
+        app.total_output_tokens,
+        usage
     );
     Paragraph::new(footer).style(Style::new().dark_gray())
 }

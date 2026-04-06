@@ -26,8 +26,6 @@ pub struct AppExit {
 
 /// In-memory application state for the interactive terminal UI.
 pub(crate) struct TuiApp {
-    /// Human-readable provider name shown in the header.
-    pub(crate) provider_name: String,
     /// Model identifier shown in the header.
     pub(crate) model: String,
     /// Current working directory shown in the header.
@@ -76,7 +74,6 @@ impl TuiApp {
         });
 
         let mut app = Self {
-            provider_name: config.provider_name,
             model: config.model,
             cwd: config.cwd,
             transcript: Vec::new(),
@@ -186,7 +183,7 @@ impl TuiApp {
             }
             KeyCode::Enter if !self.busy => {
                 let prompt = self.input.take();
-                if let Err(error) = self.submit_prompt(prompt) {
+                if let Err(error) = self.handle_submission(prompt) {
                     self.push_item(
                         TranscriptItemKind::Error,
                         "Submit failed",
@@ -228,6 +225,13 @@ impl TuiApp {
         }
     }
 
+    fn handle_submission(&mut self, prompt: String) -> Result<()> {
+        if prompt.trim_start().starts_with('/') {
+            return self.handle_slash_command(prompt);
+        }
+        self.submit_prompt(prompt)
+    }
+
     fn submit_prompt(&mut self, prompt: String) -> Result<()> {
         if self.input.is_blank() && prompt.trim().is_empty() {
             return Ok(());
@@ -239,6 +243,77 @@ impl TuiApp {
         self.pending_assistant_index = None;
         self.status_message = "Waiting for model response".to_string();
         self.worker.submit_prompt(prompt)
+    }
+
+    fn handle_slash_command(&mut self, prompt: String) -> Result<()> {
+        let trimmed = prompt.trim();
+        let mut parts = trimmed.splitn(2, char::is_whitespace);
+        let command = parts.next().unwrap_or_default();
+        let argument = parts.next().map(str::trim).unwrap_or_default();
+
+        match command {
+            "/exit" => {
+                self.push_item(
+                    TranscriptItemKind::System,
+                    "Command",
+                    "Exiting interactive session",
+                );
+                self.status_message = "Exiting".to_string();
+                self.should_quit = true;
+                Ok(())
+            }
+            "/status" => {
+                let usage = self
+                    .last_turn_usage
+                    .map(|(input, output)| format!("last turn {input} in / {output} out"))
+                    .unwrap_or_else(|| "last turn n/a".to_string());
+                self.push_item(
+                    TranscriptItemKind::System,
+                    "Status",
+                    format!(
+                        "turns: {}\nmodel: {}\ntokens: {} in / {} out\n{}\nbusy: {}",
+                        self.turn_count,
+                        self.model,
+                        self.total_input_tokens,
+                        self.total_output_tokens,
+                        usage,
+                        self.busy
+                    ),
+                );
+                self.status_message = "Session status shown".to_string();
+                Ok(())
+            }
+            "/model" => {
+                if argument.is_empty() {
+                    self.push_item(
+                        TranscriptItemKind::System,
+                        "Model",
+                        format!("current model: {}", self.model),
+                    );
+                    self.status_message = "Current model shown".to_string();
+                    return Ok(());
+                }
+
+                self.worker.set_model(argument.to_string())?;
+                self.model = argument.to_string();
+                self.push_item(
+                    TranscriptItemKind::System,
+                    "Model",
+                    format!("switched model to {}", self.model),
+                );
+                self.status_message = format!("Model set to {}", self.model);
+                Ok(())
+            }
+            _ => {
+                self.push_item(
+                    TranscriptItemKind::Error,
+                    "Unknown command",
+                    "Available commands: /model [name], /status, /exit",
+                );
+                self.status_message = "Unknown command".to_string();
+                Ok(())
+            }
+        }
     }
 
     fn handle_worker_event(&mut self, event: WorkerEvent) {
@@ -340,5 +415,91 @@ impl TuiApp {
         if self.follow_output {
             self.scroll = 0;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use pretty_assertions::assert_eq;
+
+    use super::TuiApp;
+    use crate::{
+        events::{TranscriptItem, TranscriptItemKind, WorkerEvent},
+        input::InputBuffer,
+        worker::QueryWorkerHandle,
+    };
+
+    fn test_app() -> TuiApp {
+        TuiApp {
+            model: "test-model".to_string(),
+            cwd: PathBuf::from("."),
+            transcript: Vec::new(),
+            input: InputBuffer::new(),
+            status_message: "Ready".to_string(),
+            busy: false,
+            spinner_index: 0,
+            scroll: 0,
+            follow_output: true,
+            turn_count: 3,
+            total_input_tokens: 10,
+            total_output_tokens: 20,
+            last_turn_usage: Some((4, 5)),
+            pending_assistant_index: None,
+            worker: QueryWorkerHandle::stub(),
+            should_quit: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn assistant_text_deltas_append_to_same_item() {
+        let mut app = test_app();
+        app.handle_worker_event(WorkerEvent::TextDelta("hel".to_string()));
+        app.handle_worker_event(WorkerEvent::TextDelta("lo".to_string()));
+
+        assert_eq!(app.transcript.len(), 1);
+        assert_eq!(app.transcript[0].kind, TranscriptItemKind::Assistant);
+        assert_eq!(app.transcript[0].body, "hello");
+    }
+
+    #[tokio::test]
+    async fn tool_results_create_separate_items() {
+        let mut app = test_app();
+        app.handle_worker_event(WorkerEvent::ToolResult {
+            content: "done".to_string(),
+            is_error: false,
+        });
+
+        assert_eq!(app.transcript.len(), 1);
+        assert_eq!(app.transcript[0].kind, TranscriptItemKind::ToolResult);
+        assert_eq!(app.transcript[0].body, "done");
+    }
+
+    #[tokio::test]
+    async fn slash_status_adds_system_transcript_item() {
+        let mut app = test_app();
+
+        app.handle_slash_command("/status".to_string())
+            .expect("status command should succeed");
+
+        assert_eq!(
+            app.transcript,
+            vec![TranscriptItem::new(
+                TranscriptItemKind::System,
+                "Status",
+                "turns: 3\nmodel: test-model\ntokens: 10 in / 20 out\nlast turn 4 in / 5 out\nbusy: false",
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_exit_requests_shutdown() {
+        let mut app = test_app();
+
+        app.handle_slash_command("/exit".to_string())
+            .expect("exit command should succeed");
+
+        assert!(app.should_quit);
     }
 }

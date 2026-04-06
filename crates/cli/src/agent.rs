@@ -109,7 +109,6 @@ pub async fn run_agent(cli: AgentCli) -> Result<()> {
 
     if interactive {
         run_interactive_tui(InteractiveTuiConfig {
-            provider_name: resolved.provider.name().to_string(),
             model: resolved.model,
             system_prompt: cli.system,
             max_turns: cli.max_turns,
