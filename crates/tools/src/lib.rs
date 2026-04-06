@@ -7,6 +7,7 @@ mod glob;
 mod grep;
 mod orchestrator;
 mod registry;
+mod spec;
 mod tool;
 
 pub use bash::BashTool;
@@ -18,6 +19,7 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use orchestrator::*;
 pub use registry::*;
+pub use spec::*;
 pub use tool::{Tool, ToolOutput, ToolProgressEvent};
 
 use std::sync::Arc;

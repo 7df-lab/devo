@@ -19,3 +19,5 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 glob = { workspace = true }
 regex = { workspace = true }
+chrono = { workspace = true }
+smol_str = { workspace = true }
