@@ -2,6 +2,7 @@ use std::io::{self, Write};
 
 use anyhow::Result;
 use clap::Args;
+use clawcr_core::BuiltinModelCatalog;
 use clawcr_safety::legacy_permissions::PermissionMode;
 use clawcr_server::{
     InputItem, ItemEnvelope, ItemKind, ServerEvent, SessionStartParams, StdioServerClient,
@@ -81,7 +82,7 @@ pub struct AgentCli {
 }
 
 /// Runs the interactive or one-shot coding-agent entrypoint.
-pub async fn run_agent(cli: AgentCli) -> Result<()> {
+pub async fn run_agent(cli: AgentCli, force_onboarding: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let single_prompt = cli.query.or(cli.print);
     let interactive = single_prompt.is_none();
@@ -96,24 +97,68 @@ pub async fn run_agent(cli: AgentCli) -> Result<()> {
         }
     };
 
-    if cli.provider.as_deref() == Some("ollama") {
-        config::ensure_ollama(&cli.ollama_url, interactive)?;
-    }
+    let model_catalog = BuiltinModelCatalog::load()?;
+    let stored_config = config::load_config().unwrap_or_default();
+    let onboarding_mode = force_onboarding
+        || (interactive
+            && stored_config.default_provider.is_none()
+            && stored_config.anthropic.is_empty()
+            && stored_config.openai.is_empty()
+            && stored_config.ollama.is_empty());
 
-    let resolved = config::resolve_provider_settings(
-        cli.provider.as_deref(),
-        cli.model.as_deref(),
-        &cli.ollama_url,
-        interactive,
-    )?;
+    let resolved = if onboarding_mode {
+        let provider = cli
+            .provider
+            .as_deref()
+            .and_then(|provider| {
+                config::resolve_provider_settings(
+                    Some(provider),
+                    cli.model.as_deref(),
+                    &cli.ollama_url,
+                    false,
+                )
+                .ok()
+            })
+            .map(|resolved| resolved.provider)
+            .unwrap_or(clawcr_core::ProviderKind::Openai);
+        let model = cli.model.clone().unwrap_or_else(|| match provider {
+            clawcr_core::ProviderKind::Anthropic => "claude-sonnet-4-20250514".to_string(),
+            clawcr_core::ProviderKind::Ollama => "qwen3.5:9b".to_string(),
+            clawcr_core::ProviderKind::Openai => "gpt-4o".to_string(),
+        });
+        config::ResolvedProviderSettings {
+            provider,
+            model,
+            base_url: Some(match provider {
+                clawcr_core::ProviderKind::Anthropic => "https://api.anthropic.com".to_string(),
+                clawcr_core::ProviderKind::Ollama => "http://localhost:11434/v1".to_string(),
+                clawcr_core::ProviderKind::Openai => "https://api.openai.com/v1".to_string(),
+            }),
+            api_key: None,
+        }
+    } else {
+        if cli.provider.as_deref() == Some("ollama") {
+            config::ensure_ollama(&cli.ollama_url, interactive)?;
+        }
+        config::resolve_provider_settings(
+            cli.provider.as_deref(),
+            cli.model.as_deref(),
+            &cli.ollama_url,
+            interactive,
+        )?
+    };
     let server_env = server_env_overrides(&resolved);
+    let show_model_onboarding = interactive && onboarding_mode;
 
     if interactive {
         run_interactive_tui(InteractiveTuiConfig {
             model: resolved.model,
+            provider: resolved.provider,
             cwd,
             server_env,
             startup_prompt: None,
+            model_catalog,
+            show_model_onboarding,
         })
         .await?;
         return Ok(());
@@ -135,7 +180,10 @@ pub async fn run_agent(cli: AgentCli) -> Result<()> {
 
 fn server_env_overrides(resolved: &config::ResolvedProviderSettings) -> Vec<(String, String)> {
     let mut env = vec![
-        ("CLAWCR_PROVIDER".to_string(), resolved.provider.clone()),
+        (
+            "CLAWCR_PROVIDER".to_string(),
+            resolved.provider.as_str().to_string(),
+        ),
         ("CLAWCR_MODEL".to_string(), resolved.model.clone()),
     ];
     if let Some(base_url) = &resolved.base_url {

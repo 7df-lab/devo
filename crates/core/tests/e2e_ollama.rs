@@ -19,7 +19,7 @@ use clawcr_core::{
     query, ContentBlock, EventCallback, Message, QueryEvent, Role, SessionConfig, SessionState,
     TokenBudget,
 };
-use clawcr_provider::openai_compat::OpenAICompatProvider;
+use clawcr_provider::openai::OpenAIProvider;
 use clawcr_safety::legacy_permissions::PermissionMode;
 use clawcr_tools::{ToolOrchestrator, ToolRegistry};
 
@@ -29,13 +29,14 @@ const MODEL: &str = "qwen2.5:3b";
 // Generous timeout — Ollama cold-starts can be slow.
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-fn make_provider() -> OpenAICompatProvider {
-    OpenAICompatProvider::new(OLLAMA_BASE)
+fn make_provider() -> OpenAIProvider {
+    OpenAIProvider::new(OLLAMA_BASE)
 }
 
 fn make_e2e_session(prompt: &str) -> SessionState {
     let config = SessionConfig {
         model: MODEL.to_string(),
+        base_instructions: String::new(),
         system_prompt: "You are a helpful assistant. Be concise.".to_string(),
         max_turns: 10,
         token_budget: TokenBudget::new(32_000, 2_048),
@@ -304,19 +305,20 @@ async fn e2e_multi_turn_conversation() {
 }
 
 // ============================================================================
-// 1.9: Memory prefetch — CLAUDE.md loaded into system prompt
+// 1.9: Memory prefetch — instruction files loaded into system prompt
 // ============================================================================
 
 #[tokio::test]
 #[ignore = "requires local Ollama"]
-async fn e2e_memory_prefetch_claude_md() {
+async fn e2e_memory_prefetch_instruction_files() {
     let provider = make_provider();
     let registry = Arc::new(ToolRegistry::new());
     let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
 
-    // Create a temp directory with a CLAUDE.md containing a secret phrase
+    // Create a temp directory with instruction files containing a secret phrase
     let tmp = std::env::temp_dir().join(format!("clawcr_e2e_{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(&tmp.join("AGENTS.md"), "Follow the workspace contract.").unwrap();
     let claude_md = tmp.join("CLAUDE.md");
     std::fs::write(
         &claude_md,
@@ -326,6 +328,7 @@ async fn e2e_memory_prefetch_claude_md() {
 
     let config = SessionConfig {
         model: MODEL.to_string(),
+        base_instructions: String::new(),
         system_prompt: "You are a helpful assistant.".to_string(),
         max_turns: 5,
         token_budget: TokenBudget::new(32_000, 2_048),
@@ -377,6 +380,7 @@ async fn e2e_auto_compact_on_budget_threshold() {
     // Tiny budget so compaction triggers quickly
     let config = SessionConfig {
         model: MODEL.to_string(),
+        base_instructions: String::new(),
         system_prompt: "Be concise.".to_string(),
         max_turns: 10,
         token_budget: TokenBudget::new(4_000, 512),
@@ -492,6 +496,7 @@ async fn e2e_micro_compact_large_tool_result() {
 
     let config = SessionConfig {
         model: MODEL.to_string(),
+        base_instructions: String::new(),
         system_prompt: "You have a tool called big_result. Call it now.".to_string(),
         max_turns: 5,
         token_budget: TokenBudget::new(32_000, 2_048),
@@ -570,6 +575,7 @@ async fn e2e_tool_use_round_trip() {
 
     let config = SessionConfig {
         model: MODEL.to_string(),
+        base_instructions: String::new(),
         system_prompt: "You have access to a bash tool. Use it when asked to run commands."
             .to_string(),
         max_turns: 5,
@@ -662,7 +668,7 @@ async fn e2e_tool_use_round_trip() {
 #[tokio::test]
 #[ignore = "requires local Ollama"]
 async fn e2e_connection_error_is_provider_error() {
-    let bad_provider = OpenAICompatProvider::new("http://localhost:1/v1");
+    let bad_provider = OpenAIProvider::new("http://localhost:1/v1");
     let registry = Arc::new(ToolRegistry::new());
     let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
 
@@ -698,6 +704,7 @@ async fn e2e_system_prompt_affects_response() {
 
     let config = SessionConfig {
         model: MODEL.to_string(),
+        base_instructions: String::new(),
         system_prompt: "You are a pirate. Always respond starting with 'Arrr'.".to_string(),
         max_turns: 5,
         token_budget: TokenBudget::new(32_000, 2_048),

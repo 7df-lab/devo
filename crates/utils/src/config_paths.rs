@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::find_clawcr_home;
+
 /// The fixed directory name used for user-level and project-level config folders.
 pub const APP_CONFIG_DIR_NAME: &str = ".clawcr";
 
@@ -58,16 +60,14 @@ impl FileSystemConfigPathResolver {
 
     /// Creates a config-path resolver using the current process home directory.
     pub fn from_env() -> Result<Self, ConfigPathError> {
-        let user_home = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .ok_or(ConfigPathError::HomeDirectoryUnavailable)?;
+        let user_home =
+            find_clawcr_home().map_err(|_| ConfigPathError::HomeDirectoryUnavailable)?;
         Ok(Self::new(user_home))
     }
 
     /// Returns the canonical user-level config directory path.
     pub fn user_config_dir(&self) -> PathBuf {
-        self.user_home.join(APP_CONFIG_DIR_NAME)
+        self.user_home.clone()
     }
 
     /// Returns the canonical user-level config file path.
@@ -111,10 +111,10 @@ mod tests {
             .resolve_paths(Some(PathBuf::from("/repo").as_path()))
             .expect("paths");
 
-        assert_eq!(paths.user_config_dir, PathBuf::from("/home/tester/.clawcr"));
+        assert_eq!(paths.user_config_dir, PathBuf::from("/home/tester"));
         assert_eq!(
             paths.user_config_file,
-            PathBuf::from("/home/tester/.clawcr/config.toml")
+            PathBuf::from("/home/tester/config.toml")
         );
         assert_eq!(
             paths.project_config_dir,
@@ -135,7 +135,7 @@ mod tests {
         assert!(paths.project_config_file.is_none());
         assert_eq!(
             paths.user_config_file,
-            PathBuf::from("C:\\Users\\tester\\.clawcr\\config.toml")
+            PathBuf::from("C:\\Users\\tester\\config.toml")
         );
     }
 

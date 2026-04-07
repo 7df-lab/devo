@@ -2,7 +2,7 @@ use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 
 use tokio::{sync::Mutex, task::JoinHandle};
 
-use clawcr_core::{SessionConfig, SessionId, SessionRecord, SessionState};
+use clawcr_core::{ModelCatalog, SessionConfig, SessionId, SessionRecord, SessionState};
 use clawcr_provider::ModelProvider;
 use clawcr_tools::ToolRegistry;
 
@@ -19,6 +19,8 @@ pub struct ServerRuntimeDependencies {
     pub(crate) registry: Arc<ToolRegistry>,
     /// Default model applied when no model override is present.
     pub(crate) default_model: String,
+    /// Model catalog used to resolve builtin prompt metadata.
+    pub(crate) model_catalog: Arc<dyn ModelCatalog>,
 }
 
 impl ServerRuntimeDependencies {
@@ -27,11 +29,13 @@ impl ServerRuntimeDependencies {
         provider: Arc<dyn ModelProvider>,
         registry: Arc<ToolRegistry>,
         default_model: String,
+        model_catalog: Arc<dyn ModelCatalog>,
     ) -> Self {
         Self {
             provider,
             registry,
             default_model,
+            model_catalog,
         }
     }
 
@@ -42,15 +46,30 @@ impl ServerRuntimeDependencies {
         cwd: PathBuf,
         model: Option<String>,
     ) -> SessionState {
+        let model = model.unwrap_or_else(|| self.default_model.clone());
+        let base_instructions = self
+            .model_catalog
+            .get(&model)
+            .map(|model| model.base_instructions.clone())
+            .unwrap_or_default();
         let mut state = SessionState::new(
             SessionConfig {
-                model: model.unwrap_or_else(|| self.default_model.clone()),
+                model,
+                base_instructions,
                 ..Default::default()
             },
             cwd,
         );
         state.id = session_id.to_string();
         state
+    }
+
+    /// Returns the builtin base instructions for a model slug, if one is known.
+    pub(crate) fn base_instructions_for_model(&self, model: &str) -> String {
+        self.model_catalog
+            .get(model)
+            .map(|model| model.base_instructions.clone())
+            .unwrap_or_default()
     }
 }
 

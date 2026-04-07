@@ -960,14 +960,15 @@ mod tests {
         TitleModelSelection,
     };
     use crate::model::{
-        InMemoryModelCatalog, InputModality, ModelConfig, ModelVisibility, ReasoningLevel,
-        TruncationPolicyConfig,
+        InMemoryModelCatalog, InputModality, ModelConfig, ModelVisibility, ProviderKind,
+        ReasoningLevel, TruncationPolicyConfig,
     };
 
     fn test_model(slug: &str) -> ModelConfig {
         ModelConfig {
             slug: slug.into(),
             display_name: slug.into(),
+            provider: ProviderKind::Anthropic,
             description: None,
             default_reasoning_level: ReasoningLevel::Medium,
             supported_reasoning_levels: vec![ReasoningLevel::Medium],
@@ -1003,13 +1004,13 @@ mod tests {
     #[test]
     fn loader_merges_user_and_project_layers() {
         let root = unique_temp_dir("config-merge");
-        let home = root.join("home");
+        let home = root.join("home").join(".clawcr");
         let workspace = root.join("workspace");
-        std::fs::create_dir_all(home.join(".clawcr")).expect("home config dir");
+        std::fs::create_dir_all(&home).expect("home config dir");
         std::fs::create_dir_all(workspace.join(".clawcr")).expect("workspace config dir");
 
         std::fs::write(
-            home.join(".clawcr").join("config.toml"),
+            home.join("config.toml"),
             "logging.level = 'debug'\n[tools.file_search]\nmax_results = 50\n",
         )
         .expect("write user config");

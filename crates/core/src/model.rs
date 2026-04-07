@@ -1,7 +1,31 @@
 use serde::{Deserialize, Serialize};
 
+/// Supported provider families for models and persisted configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    /// Anthropic Claude models.
+    Anthropic,
+    /// OpenAI-compatible hosted models.
+    Openai,
+    /// Local Ollama models.
+    Ollama,
+}
+
+impl ProviderKind {
+    /// Returns the stable provider label used in config and UI text.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderKind::Anthropic => "anthropic",
+            ProviderKind::Openai => "openai",
+            ProviderKind::Ollama => "ollama",
+        }
+    }
+}
+
 /// Enumerates the reasoning effort levels a model may support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ReasoningLevel {
     /// Select the cheapest and most lightweight reasoning mode.
     Low,
@@ -13,8 +37,15 @@ pub enum ReasoningLevel {
     XHigh,
 }
 
+impl Default for ReasoningLevel {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
 /// Enumerates the verbosity levels a model may support for user-facing output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Verbosity {
     /// Request a terse response style.
     Low,
@@ -24,8 +55,15 @@ pub enum Verbosity {
     High,
 }
 
+impl Default for Verbosity {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
 /// Enumerates the input modalities accepted by a model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum InputModality {
     /// The model accepts text input.
     Text,
@@ -33,8 +71,15 @@ pub enum InputModality {
     Image,
 }
 
+impl Default for InputModality {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
 /// Controls how a model should be exposed in user-facing selection surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ModelVisibility {
     /// The model is visible in standard pickers.
     Visible,
@@ -42,6 +87,12 @@ pub enum ModelVisibility {
     Hidden,
     /// The model is exposed only as an experimental option.
     Experimental,
+}
+
+impl Default for ModelVisibility {
+    fn default() -> Self {
+        Self::Visible
+    }
 }
 
 /// Describes how prompt items should be truncated before provider submission.
@@ -59,13 +110,28 @@ pub struct TruncationPolicyConfig {
     pub preserve_json_shape: bool,
 }
 
+impl Default for TruncationPolicyConfig {
+    fn default() -> Self {
+        Self {
+            default_max_chars: 8_000,
+            tool_output_max_chars: 16_000,
+            user_input_max_chars: 32_000,
+            binary_placeholder: "[binary]".into(),
+            preserve_json_shape: true,
+        }
+    }
+}
+
 /// Stores the normalized configuration and budgeting metadata for a model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ModelConfig {
     /// The stable unique model slug.
     pub slug: String,
     /// The human-readable display name for the model.
     pub display_name: String,
+    /// The provider family that serves this model.
+    pub provider: ProviderKind,
     /// Optional descriptive text for UI or diagnostics.
     pub description: Option<String>,
     /// The reasoning level used when no explicit override is supplied.
@@ -94,8 +160,31 @@ pub struct ModelConfig {
     pub priority: i32,
 }
 
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            slug: String::new(),
+            display_name: String::new(),
+            provider: ProviderKind::Anthropic,
+            description: None,
+            default_reasoning_level: ReasoningLevel::default(),
+            supported_reasoning_levels: vec![ReasoningLevel::default()],
+            base_instructions: String::new(),
+            context_window: 200_000,
+            effective_context_window_percent: 90,
+            auto_compact_token_limit: None,
+            truncation_policy: TruncationPolicyConfig::default(),
+            input_modalities: vec![InputModality::default()],
+            supports_image_detail_original: false,
+            visibility: ModelVisibility::default(),
+            supported_in_api: true,
+            priority: 0,
+        }
+    }
+}
+
 /// Provides read-only access to model definitions and turn-resolution behavior.
-pub trait ModelCatalog {
+pub trait ModelCatalog: Send + Sync {
     /// Returns the models that should be treated as visible.
     fn list_visible(&self) -> Vec<&ModelConfig>;
 
@@ -163,13 +252,14 @@ pub enum ModelConfigError {
 mod tests {
     use super::{
         InMemoryModelCatalog, InputModality, ModelCatalog, ModelConfig, ModelVisibility,
-        ReasoningLevel, TruncationPolicyConfig,
+        ProviderKind, ReasoningLevel, TruncationPolicyConfig,
     };
 
     fn model(slug: &str, priority: i32, visibility: ModelVisibility) -> ModelConfig {
         ModelConfig {
             slug: slug.into(),
             display_name: slug.into(),
+            provider: ProviderKind::Anthropic,
             description: None,
             default_reasoning_level: ReasoningLevel::Medium,
             supported_reasoning_levels: vec![ReasoningLevel::Medium],

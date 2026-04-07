@@ -12,10 +12,12 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = { workspace = true }
 clawcr-core = { workspace = true }
+clawcr-utils = { workspace = true }
 clawcr-server = { workspace = true }
 crossterm = { workspace = true }
 futures = { workspace = true }
 ratatui = { workspace = true }
+toml = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

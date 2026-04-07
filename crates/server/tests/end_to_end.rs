@@ -12,6 +12,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use clawcr_core::BuiltinModelCatalog;
 use clawcr_provider::{ModelProvider, ModelRequest, ModelResponse, StreamEvent};
 use clawcr_server::{ServerRuntime, ServerRuntimeDependencies};
 use clawcr_tools::ToolRegistry;
@@ -182,6 +183,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
             Arc::new(PendingProvider),
             Arc::new(ToolRegistry::new()),
             "test-model".to_string(),
+            Arc::new(BuiltinModelCatalog::default()),
         ),
     );
     let listen = vec![format!("ws://{bind_address}")];

@@ -602,7 +602,10 @@ impl ServerRuntime {
             }
             if let Some(model) = params.model.clone() {
                 session.summary.resolved_model = Some(model.clone());
-                session.core_session.lock().await.config.model = model;
+                let base_instructions = self.deps.base_instructions_for_model(&model);
+                let mut core_session = session.core_session.lock().await;
+                core_session.config.model = model;
+                core_session.config.base_instructions = base_instructions;
             }
             let turn = TurnSummary {
                 turn_id: TurnId::new(),

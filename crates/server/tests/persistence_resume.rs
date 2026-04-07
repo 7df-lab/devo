@@ -8,6 +8,7 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
+use clawcr_core::BuiltinModelCatalog;
 use clawcr_provider::{
     ModelProvider, ModelRequest, ModelResponse, ResponseContent, StopReason, StreamEvent, Usage,
 };
@@ -379,6 +380,7 @@ fn build_runtime(data_root: &std::path::Path) -> Result<Arc<ServerRuntime>> {
             Arc::new(SingleReplyProvider),
             Arc::new(ToolRegistry::new()),
             "test-model".to_string(),
+            Arc::new(BuiltinModelCatalog::default()),
         ),
     ))
 }

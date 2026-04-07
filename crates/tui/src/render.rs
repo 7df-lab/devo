@@ -17,8 +17,9 @@ use crate::{
 pub(crate) fn draw(frame: &mut Frame, app: &TuiApp) {
     let content_area = centered_content_area(frame.area());
     let composer_height = composer_height(app, content_area);
+    let transcript_height = transcript_height(app, content_area);
     let [transcript_area, spacer_area, composer_area, footer_area] = Layout::vertical([
-        Constraint::Min(6),
+        Constraint::Length(transcript_height),
         Constraint::Length(1),
         Constraint::Length(composer_height),
         Constraint::Length(1),
@@ -57,6 +58,15 @@ pub(crate) fn get_max_scroll(app: &TuiApp, area: Rect) -> u16 {
     line_count.saturating_sub(area.height)
 }
 
+pub(crate) fn transcript_height(app: &TuiApp, area: Rect) -> u16 {
+    let line_count = transcript_line_count(app, area.width.max(1)).max(1);
+    let composer_height = composer_height(app, area);
+    let available = area
+        .height
+        .saturating_sub(composer_height.saturating_add(2));
+    line_count.min(available.max(1))
+}
+
 fn render_transcript(app: &TuiApp, area: Rect) -> Paragraph<'static> {
     let content = transcript_text(app, area.width.max(1));
     let max_scroll = content.lines.len().saturating_sub(area.height as usize) as u16;
@@ -71,7 +81,16 @@ fn render_transcript(app: &TuiApp, area: Rect) -> Paragraph<'static> {
 
 fn render_composer(app: &TuiApp, inner_width: u16) -> Paragraph<'_> {
     let mut lines = Vec::new();
+    if let Some(prompt) = app.onboarding_prompt.as_deref() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("{prompt}>"),
+            Style::new().cyan().add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(""));
+    }
+
     let rendered_input = app.input.rendered_lines(inner_width);
+
     if app.input.text().is_empty() {
         lines.push(Line::from(vec![
             Span::styled("> ", Style::new().cyan().add_modifier(Modifier::BOLD)),
@@ -94,44 +113,39 @@ fn render_composer(app: &TuiApp, inner_width: u16) -> Paragraph<'_> {
             }
         }
     }
+
     let suggestions = app.slash_suggestions();
     if !suggestions.is_empty() {
         lines.push(Line::from(""));
+
         for (index, suggestion) in suggestions.iter().enumerate() {
             let selected = index == app.slash_selection.min(suggestions.len() - 1);
-            let bullet_style = if selected {
+
+            let text_style = if selected {
                 Style::new().black().on_gray().add_modifier(Modifier::BOLD)
             } else {
                 Style::new().dark_gray()
             };
-            let text_style = if selected {
-                Style::new().black().on_gray()
-            } else {
-                Style::new().dark_gray()
-            };
+
             append_wrapped_composer_text(
                 &mut lines,
-                &format!(
-                    "  {} {}  {}",
-                    if selected { ">" } else { "•" },
-                    suggestion.name,
-                    suggestion.description
-                ),
+                &format!("  {}  {}", suggestion.name, suggestion.description),
                 inner_width,
                 text_style,
-                bullet_style,
-                selected,
             );
         }
     }
+
     if let Some(panel) = &app.aux_panel {
         lines.push(Line::from(""));
+
         append_wrapped_composer_line(
             &mut lines,
             &format!("  {}", panel.title),
             inner_width,
             Style::new().dark_gray().add_modifier(Modifier::BOLD),
         );
+
         match &panel.content {
             AuxPanelContent::Text(body) => {
                 for line in body.lines() {
@@ -152,6 +166,7 @@ fn render_composer(app: &TuiApp, inner_width: u16) -> Paragraph<'_> {
                         Style::new().dark_gray(),
                     );
                 }
+
                 for (index, entry) in entries.iter().enumerate() {
                     let selected =
                         index == app.aux_panel_selection.min(entries.len().saturating_sub(1));
@@ -166,6 +181,7 @@ fn render_composer(app: &TuiApp, inner_width: u16) -> Paragraph<'_> {
                     } else {
                         Style::new().dark_gray().add_modifier(Modifier::BOLD)
                     };
+
                     append_wrapped_composer_session_entry(
                         &mut lines,
                         &format!(
@@ -181,11 +197,72 @@ fn render_composer(app: &TuiApp, inner_width: u16) -> Paragraph<'_> {
                     );
                 }
             }
+            AuxPanelContent::ModelList(entries) => {
+                if entries.is_empty() {
+                    append_wrapped_composer_line(
+                        &mut lines,
+                        "  No models available.",
+                        inner_width,
+                        Style::new().dark_gray(),
+                    );
+                }
+
+                for (index, entry) in entries.iter().enumerate() {
+                    let selected =
+                        index == app.aux_panel_selection.min(entries.len().saturating_sub(1));
+                    let marker = if entry.is_current { "*" } else { " " };
+                    let label = if entry.is_custom_mode {
+                        "custom"
+                    } else if entry.is_builtin {
+                        entry.provider.as_str()
+                    } else {
+                        "current"
+                    };
+                    let style = if selected {
+                        Style::new().black().on_gray()
+                    } else {
+                        Style::new().dark_gray()
+                    };
+                    let title_style = if selected {
+                        style.add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new().dark_gray().add_modifier(Modifier::BOLD)
+                    };
+
+                    let description = entry
+                        .description
+                        .as_deref()
+                        .filter(|description| !description.trim().is_empty())
+                        .unwrap_or(label);
+                    let row = if app.show_model_onboarding {
+                        format!(
+                            "  {marker} {}  [{}]  {}",
+                            entry.display_name, entry.slug, description
+                        )
+                    } else {
+                        format!(
+                            "  {} {marker} {}  [{}]  {}",
+                            if selected { ">" } else { "•" },
+                            entry.display_name,
+                            entry.slug,
+                            description
+                        )
+                    };
+                    append_wrapped_composer_session_entry(
+                        &mut lines,
+                        &row,
+                        inner_width,
+                        style,
+                        title_style,
+                    );
+                }
+            }
         }
+
         lines.push(Line::from(""));
         append_wrapped_composer_line(
             &mut lines,
-            "  press esc to leave",
+            "  press enter to choose, esc to leave",
             inner_width,
             Style::new().dark_gray(),
         );
@@ -193,7 +270,6 @@ fn render_composer(app: &TuiApp, inner_width: u16) -> Paragraph<'_> {
 
     Paragraph::new(Text::from(lines))
 }
-
 fn render_footer(app: &TuiApp) -> Paragraph<'static> {
     let cwd_name = app
         .cwd
@@ -226,8 +302,21 @@ fn transcript_text(app: &TuiApp, inner_width: u16) -> Text<'static> {
         return Text::from(lines);
     }
 
+    let mut previous_kind = None;
     for item in &app.transcript {
+        if matches!(item.kind, TranscriptItemKind::User)
+            && previous_kind.is_some()
+            && !matches!(previous_kind, Some(TranscriptItemKind::User))
+        {
+            lines.push(Line::from(""));
+        }
+        if matches!(previous_kind, Some(TranscriptItemKind::User))
+            && !matches!(item.kind, TranscriptItemKind::User)
+        {
+            lines.push(Line::from(""));
+        }
         append_transcript_item(&mut lines, item, app.spinner_index, inner_width);
+        previous_kind = Some(item.kind);
     }
     Text::from(lines)
 }
@@ -327,7 +416,8 @@ fn append_transcript_body(
     item: &crate::events::TranscriptItem,
     inner_width: u16,
 ) {
-    if item.body.is_empty() {
+    let body = rendered_transcript_body(item);
+    if body.is_empty() {
         return;
     }
     let style = match item.kind {
@@ -335,14 +425,33 @@ fn append_transcript_body(
         TranscriptItemKind::ToolCall | TranscriptItemKind::ToolResult => Style::new().dark_gray(),
         _ => Style::new(),
     };
-    append_wrapped_styled_text(
-        lines,
-        item.body.trim_end_matches('\n'),
-        "  └ ",
-        "    ",
-        inner_width,
-        style,
-    );
+    append_wrapped_styled_text(lines, &body, "  └ ", "    ", inner_width, style);
+}
+
+fn rendered_transcript_body(item: &crate::events::TranscriptItem) -> String {
+    match item.kind {
+        TranscriptItemKind::ToolResult => match item.fold_stage {
+            0 => item.body.trim_end_matches('\n').to_string(),
+            1 => fold_tool_output(&item.body, 6),
+            _ => fold_tool_output(&item.body, 3),
+        },
+        _ => item.body.trim_end_matches('\n').to_string(),
+    }
+}
+
+fn fold_tool_output(body: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    if lines.len() <= max_lines {
+        return body.trim_end_matches('\n').to_string();
+    }
+
+    let mut folded = lines[..max_lines].join("\n");
+    folded.push_str("\n...");
+    folded
 }
 
 fn title_style(kind: TranscriptItemKind) -> Style {
@@ -471,31 +580,15 @@ fn append_wrapped_composer_text(
     text: &str,
     inner_width: u16,
     text_style: Style,
-    bullet_style: Style,
-    selected: bool,
 ) {
     let content_width = inner_width.max(1) as usize;
     let wrapped = textwrap::wrap(text, Options::new(content_width).break_words(false));
-    for (index, segment) in wrapped.iter().enumerate() {
-        if index == 0 && selected {
-            lines.push(Line::from(vec![
-                Span::styled("  ", text_style),
-                Span::styled(">", bullet_style),
-                Span::styled(
-                    segment
-                        .strip_prefix("  >")
-                        .or_else(|| segment.strip_prefix("  •"))
-                        .unwrap_or(segment)
-                        .to_string(),
-                    text_style,
-                ),
-            ]));
-        } else {
-            lines.push(Line::from(vec![Span::styled(
-                segment.to_string(),
-                text_style,
-            )]));
-        }
+
+    for segment in wrapped {
+        lines.push(Line::from(vec![Span::styled(
+            segment.to_string(),
+            text_style,
+        )]));
     }
 }
 
@@ -527,6 +620,9 @@ fn append_wrapped_composer_session_entry(
 pub(crate) fn composer_height(app: &TuiApp, area: Rect) -> u16 {
     let inner_width = area.width.max(1);
     let mut total = app.input.visual_line_count(inner_width);
+    if app.onboarding_prompt.is_some() {
+        total = total.saturating_add(2);
+    }
 
     let suggestions = app.slash_suggestions();
     if !suggestions.is_empty() {
@@ -586,10 +682,52 @@ pub(crate) fn composer_height(app: &TuiApp, area: Rect) -> u16 {
                     ));
                 }
             }
+            AuxPanelContent::ModelList(entries) => {
+                if entries.is_empty() {
+                    total = total.saturating_add(wrapped_line_count_with_prefix(
+                        "  No models available.",
+                        inner_width,
+                        0,
+                    ));
+                }
+                for (index, entry) in entries.iter().enumerate() {
+                    let selected =
+                        index == app.aux_panel_selection.min(entries.len().saturating_sub(1));
+                    let marker = if entry.is_current { "*" } else { " " };
+                    let description = entry
+                        .description
+                        .as_deref()
+                        .filter(|description| !description.trim().is_empty())
+                        .unwrap_or(if entry.is_custom_mode {
+                            "custom model"
+                        } else {
+                            entry.provider.as_str()
+                        });
+                    let rendered = if app.show_model_onboarding {
+                        format!(
+                            "  {marker} {}  [{}]  {}",
+                            entry.display_name, entry.slug, description
+                        )
+                    } else {
+                        format!(
+                            "  {} {marker} {}  [{}]  {}",
+                            if selected { ">" } else { "•" },
+                            entry.display_name,
+                            entry.slug,
+                            description
+                        )
+                    };
+                    total = total.saturating_add(wrapped_line_count_with_prefix(
+                        &rendered,
+                        inner_width,
+                        0,
+                    ));
+                }
+            }
         }
         total = total.saturating_add(1);
         total = total.saturating_add(wrapped_line_count_with_prefix(
-            "  press esc to leave",
+            "  press enter to choose, esc to leave",
             inner_width,
             0,
         ));
@@ -600,8 +738,12 @@ pub(crate) fn composer_height(app: &TuiApp, area: Rect) -> u16 {
 
 fn composer_cursor(app: &TuiApp, area: Rect) -> (u16, u16) {
     let (cursor_x, cursor_y) = app.input.visual_cursor(area.width);
+    let y_offset = u16::from(app.onboarding_prompt.is_some()) * 2;
     (
         area.x + cursor_x,
-        area.y + cursor_y.min(area.height.saturating_sub(1)),
+        area.y
+            + cursor_y
+                .saturating_add(y_offset)
+                .min(area.height.saturating_sub(1)),
     )
 }

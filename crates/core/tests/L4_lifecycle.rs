@@ -179,13 +179,14 @@ async fn abort_preserves_session_state() {
 // 1.9  Memory Prefetch
 // ---------------------------------------------------------------------------
 
-/// When the working directory contains a CLAUDE.md file, its contents should
+/// When the working directory contains instruction files, their contents should
 /// be prepended/appended to the system prompt before the first query.
 #[tokio::test]
-async fn memory_prefetch_loads_claude_md() {
+async fn memory_prefetch_loads_project_instructions() {
     // Create a temp directory with a CLAUDE.md file
     let tmp = std::env::temp_dir().join(format!("claw-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("AGENTS.md"), "Follow the repo contract.").unwrap();
     std::fs::write(tmp.join("CLAUDE.md"), "Always respond in haiku format.").unwrap();
 
     let provider = ScriptedProvider::builder()
@@ -206,6 +207,11 @@ async fn memory_prefetch_loads_claude_md() {
         .as_ref()
         .expect("system prompt should be set");
     assert!(
+        system.contains("Follow the repo contract"),
+        "system prompt should include AGENTS.md content, got: {}",
+        system
+    );
+    assert!(
         system.contains("Always respond in haiku format"),
         "system prompt should include CLAUDE.md content, got: {}",
         system
@@ -215,12 +221,12 @@ async fn memory_prefetch_loads_claude_md() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// When no CLAUDE.md exists, the system prompt should be unaffected.
+/// When no instruction files exist, the system prompt should be unaffected.
 #[tokio::test]
 async fn memory_prefetch_missing_file() {
     let tmp = std::env::temp_dir().join(format!("claw-test-empty-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp).unwrap();
-    // No CLAUDE.md file created
+    // No instruction files created
 
     let config = SessionConfig {
         system_prompt: "base prompt".to_string(),
@@ -242,11 +248,9 @@ async fn memory_prefetch_missing_file() {
         .unwrap();
 
     let requests = captured.lock().unwrap();
-    assert_eq!(
-        requests[0].system,
-        Some("base prompt".to_string()),
-        "system prompt should be unchanged when CLAUDE.md is missing"
-    );
+    let system = requests[0].system.as_deref().expect("system prompt");
+    assert!(system.contains("base prompt"));
+    assert!(system.contains("Environment context (read only):"));
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

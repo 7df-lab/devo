@@ -8,6 +8,7 @@ use crate::{Message, TokenBudget};
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     pub model: String,
+    pub base_instructions: String,
     pub system_prompt: String,
     pub max_turns: usize,
     pub token_budget: TokenBudget,
@@ -18,6 +19,7 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             model: "claude-sonnet-4-20250514".to_string(),
+            base_instructions: String::new(),
             system_prompt: String::new(),
             max_turns: 100,
             token_budget: TokenBudget::default(),
@@ -81,6 +83,7 @@ mod tests {
     fn session_config_default_values() {
         let config = SessionConfig::default();
         assert_eq!(config.model, "claude-sonnet-4-20250514");
+        assert!(config.base_instructions.is_empty());
         assert!(config.system_prompt.is_empty());
         assert_eq!(config.max_turns, 100);
         assert_eq!(config.permission_mode, PermissionMode::AutoApprove);

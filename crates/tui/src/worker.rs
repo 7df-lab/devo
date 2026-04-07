@@ -32,6 +32,15 @@ enum WorkerCommand {
     SubmitPrompt(String),
     /// Update the model used for future turns.
     SetModel(String),
+    /// Replace the provider connection settings and restart the server client.
+    ReconfigureProvider {
+        /// Model identifier to use for future turns.
+        model: String,
+        /// Optional provider base URL override.
+        base_url: Option<String>,
+        /// Optional provider API key override.
+        api_key: Option<String>,
+    },
     /// Request a session list from the server.
     ListSessions,
     /// Clear the active session so the next prompt starts a fresh one lazily.
@@ -80,6 +89,22 @@ impl QueryWorkerHandle {
     pub(crate) fn set_model(&self, model: String) -> Result<()> {
         self.command_tx
             .send(WorkerCommand::SetModel(model))
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    /// Reconfigures the provider connection used by the background server client.
+    pub(crate) fn reconfigure_provider(
+        &self,
+        model: String,
+        base_url: Option<String>,
+        api_key: Option<String>,
+    ) -> Result<()> {
+        self.command_tx
+            .send(WorkerCommand::ReconfigureProvider {
+                model,
+                base_url,
+                api_key,
+            })
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -160,12 +185,8 @@ async fn run_worker_inner(
     command_rx: &mut mpsc::UnboundedReceiver<WorkerCommand>,
     event_tx: &mpsc::UnboundedSender<WorkerEvent>,
 ) -> Result<()> {
-    let mut client = StdioServerClient::spawn(StdioServerClientConfig {
-        program: std::env::current_exe().context("resolve current executable for server launch")?,
-        workspace_root: Some(config.cwd.clone()),
-        env: config.server_env,
-    })
-    .await?;
+    let mut server_env = config.server_env;
+    let mut client = spawn_client(&config.cwd, server_env.clone()).await?;
     let _ = client.initialize().await?;
     let mut session_id: Option<SessionId> = None;
     let mut model = config.model;
@@ -209,6 +230,21 @@ async fn run_worker_inner(
                     }
                     Some(WorkerCommand::SetModel(next_model)) => {
                         model = next_model;
+                    }
+                    Some(WorkerCommand::ReconfigureProvider {
+                        model: next_model,
+                        base_url,
+                        api_key,
+                    }) => {
+                        model = next_model;
+                        apply_env_override(&mut server_env, "CLAWCR_MODEL", &model);
+                        apply_optional_env_override(&mut server_env, "CLAWCR_BASE_URL", base_url);
+                        apply_optional_env_override(&mut server_env, "CLAWCR_API_KEY", api_key);
+                        client.shutdown().await?;
+                        client = spawn_client(&config.cwd, server_env.clone()).await?;
+                        client.initialize().await?;
+                        session_id = None;
+                        active_turn_id = None;
                     }
                     Some(WorkerCommand::ListSessions) => {
                         match client.session_list(SessionListParams::default()).await {
@@ -429,6 +465,30 @@ async fn ensure_session_started(
     Ok(session.session_id)
 }
 
+async fn spawn_client(cwd: &PathBuf, env: Vec<(String, String)>) -> Result<StdioServerClient> {
+    StdioServerClient::spawn(StdioServerClientConfig {
+        program: std::env::current_exe().context("resolve current executable for server launch")?,
+        workspace_root: Some(cwd.clone()),
+        env,
+    })
+    .await
+}
+
+fn apply_env_override(env: &mut Vec<(String, String)>, key: &str, value: &str) {
+    if let Some((_, existing)) = env.iter_mut().find(|(existing_key, _)| existing_key == key) {
+        *existing = value.to_string();
+    } else {
+        env.push((key.to_string(), value.to_string()));
+    }
+}
+
+fn apply_optional_env_override(env: &mut Vec<(String, String)>, key: &str, value: Option<String>) {
+    match value {
+        Some(value) => apply_env_override(env, key, &value),
+        None => env.retain(|(existing_key, _)| existing_key != key),
+    }
+}
+
 fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSender<WorkerEvent>) {
     match payload.item {
         ItemEnvelope {
@@ -456,12 +516,10 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
                 .get("is_error")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            let preview = truncate_tool_output(&content);
-            let truncated = preview != content;
             let _ = event_tx.send(WorkerEvent::ToolResult {
-                preview,
+                preview: content,
                 is_error,
-                truncated,
+                truncated: false,
             });
         }
         _ => {}

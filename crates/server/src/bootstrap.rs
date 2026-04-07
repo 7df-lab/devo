@@ -1,8 +1,9 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
-use clawcr_core::{AppConfigLoader, FileSystemAppConfigLoader};
+use clawcr_core::{AppConfigLoader, BuiltinModelCatalog, FileSystemAppConfigLoader, ModelCatalog};
 use clawcr_tools::ToolRegistry;
 use clawcr_utils::FileSystemConfigPathResolver;
 
@@ -60,12 +61,14 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
         &resolver.user_config_file(),
         config.default_model.as_deref(),
     )?;
+    let model_catalog: Arc<dyn ModelCatalog> = Arc::new(BuiltinModelCatalog::load()?);
     let runtime = ServerRuntime::new(
         resolver.user_config_dir(),
         ServerRuntimeDependencies::new(
             provider.provider,
-            std::sync::Arc::new(registry),
+            Arc::new(registry),
             provider.default_model,
+            model_catalog,
         ),
     );
     runtime.load_persisted_sessions().await?;

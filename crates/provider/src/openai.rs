@@ -26,11 +26,11 @@ use crate::{
 ///
 /// Works with OpenAI, Ollama, vLLM, LM Studio, and any other
 /// OpenAI-format API by setting a custom base URL.
-pub struct OpenAICompatProvider {
+pub struct OpenAIProvider {
     client: Client<OpenAIConfig>,
 }
 
-impl OpenAICompatProvider {
+impl OpenAIProvider {
     pub fn new(base_url: impl Into<String>) -> Self {
         let config = OpenAIConfig::new().with_api_base(base_url.into());
         Self {
@@ -50,7 +50,7 @@ impl OpenAICompatProvider {
 }
 
 #[async_trait]
-impl ModelProvider for OpenAICompatProvider {
+impl ModelProvider for OpenAIProvider {
     async fn complete(&self, request: ModelRequest) -> anyhow::Result<ModelResponse> {
         let req = build_request(&request)?;
         debug!(model = %request.model, "openai-compat complete");

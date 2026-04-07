@@ -718,6 +718,17 @@ mod tests {
     };
     use crate::{PermissionPolicy, SandboxPolicyTransformer};
 
+    fn abs_path(suffix: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!("C:\\{suffix}"))
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from(format!("/{suffix}"))
+        }
+    }
+
     #[test]
     fn default_redactor_detects_and_redacts_openai_keys() {
         let registry = InMemorySecretDetectorRegistry::with_default_detectors();
@@ -772,16 +783,16 @@ mod tests {
     fn transformer_merges_additional_permissions() {
         let transformer = DefaultSandboxPolicyTransformer;
         let mut readable = BTreeSet::new();
-        readable.insert(PathBuf::from("C:\\repo"));
+        readable.insert(abs_path("repo"));
         let mut writable = BTreeSet::new();
-        writable.insert(PathBuf::from("C:\\repo"));
+        writable.insert(abs_path("repo"));
         let fs_policy = FileSystemPolicyRecord {
             readable_roots: readable,
             writable_roots: writable,
             denied_roots: BTreeSet::new(),
         };
         let mut extra_writable = BTreeSet::new();
-        extra_writable.insert(PathBuf::from("C:\\tmp"));
+        extra_writable.insert(abs_path("tmp"));
         let mut hosts = BTreeSet::new();
         hosts.insert("example.com".to_string());
         let profile = PermissionProfile {
@@ -802,7 +813,7 @@ mod tests {
             )
             .expect("effective policy");
 
-        assert!(effective.writable_roots.contains(&PathBuf::from("C:\\tmp")));
+        assert!(effective.writable_roots.contains(&abs_path("tmp")));
         assert_eq!(effective.network, NetworkPolicy::AllowHosts { hosts });
     }
 
@@ -833,7 +844,7 @@ mod tests {
             resource: ResourceKind::FileWrite,
             action_summary: "write file".into(),
             justification: "need to edit file".into(),
-            path: Some(PathBuf::from("C:\\repo\\file.rs")),
+            path: Some(abs_path("repo/file.rs")),
             host: None,
             target: None,
         };
@@ -849,7 +860,7 @@ mod tests {
     #[test]
     fn safety_summary_renders_constraints() {
         let mut writable = BTreeSet::new();
-        writable.insert(PathBuf::from("C:\\repo"));
+        writable.insert(abs_path("repo"));
         let lines = super::render_safety_summary(&PolicySnapshot {
             mode: SafetyPolicyMode::StaticPolicy,
             policy_model: PolicyModelSelection::UseTurnModel,
