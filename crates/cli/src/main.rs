@@ -1,6 +1,10 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use clawcr_core::{
+    AppConfig, AppConfigLoader, FileSystemAppConfigLoader, LoggingBootstrap, LoggingRuntime,
+};
 use clawcr_server::{run_server_process, ServerProcessArgs};
+use clawcr_utils::find_clawcr_home;
 
 mod agent;
 mod config;
@@ -30,15 +34,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .init();
-
     let cli = Cli::parse();
+    let _logging = install_logging(&cli)?;
+
     match cli.command {
         Some(Commands::Server(args)) => run_server_process(args).await,
         Some(Commands::Onboard) => {
@@ -49,4 +47,25 @@ async fn main() -> Result<()> {
         }
         None => run_agent(cli.agent, false).await,
     }
+}
+
+fn install_logging(cli: &Cli) -> Result<LoggingRuntime> {
+    let home_dir = find_clawcr_home()?;
+    let loader = FileSystemAppConfigLoader::new(home_dir.clone());
+    let current_dir = std::env::current_dir()?;
+    let workspace_root = match &cli.command {
+        Some(Commands::Server(args)) => args.workspace_root.as_deref(),
+        _ => Some(current_dir.as_path()),
+    };
+    let app_config = loader.load(workspace_root).unwrap_or_else(|err| {
+        eprintln!("warning: failed to load app config for logging: {err}");
+        AppConfig::default()
+    });
+    LoggingBootstrap {
+        process_name: "cli",
+        config: app_config.logging,
+        home_dir,
+    }
+    .install()
+    .map_err(Into::into)
 }

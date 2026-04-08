@@ -84,6 +84,12 @@ impl Default for AppConfig {
                 level: "info".into(),
                 json: false,
                 redact_secrets_in_logs: true,
+                file: LoggingFileConfig {
+                    directory: None,
+                    filename_prefix: "clawcr".into(),
+                    rotation: LogRotation::Daily,
+                    max_files: 14,
+                },
             },
             project_root_markers: vec![".git".into()],
         }
@@ -240,6 +246,34 @@ pub struct LoggingConfig {
     pub json: bool,
     /// Whether secrets should be redacted from logs before emission.
     pub redact_secrets_in_logs: bool,
+    /// Durable file-log persistence settings.
+    pub file: LoggingFileConfig,
+}
+
+/// Stores persistence settings for rolling file logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoggingFileConfig {
+    /// The directory used for persisted log files. Relative paths resolve under `CLAWCR_HOME`.
+    pub directory: Option<PathBuf>,
+    /// The stable filename prefix written before the process suffix and rotation timestamp.
+    pub filename_prefix: String,
+    /// The file-rotation cadence applied to persisted logs.
+    pub rotation: LogRotation,
+    /// The maximum number of rotated files retained on disk.
+    pub max_files: usize,
+}
+
+/// Selects the rolling cadence used for persisted log files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LogRotation {
+    /// Keep appending to one file until the process rotates it manually.
+    Never,
+    /// Rotate once per minute.
+    Minutely,
+    /// Rotate once per hour.
+    Hourly,
+    /// Rotate once per day.
+    Daily,
 }
 
 /// Describes one config layer discovered during loading.
@@ -311,12 +345,12 @@ pub trait AppConfigResolver {
 /// Filesystem-backed loader for user and project application config files.
 #[derive(Debug, Clone)]
 pub struct FileSystemAppConfigLoader {
-    /// The home directory used to locate the user-level `.clawcr/config.toml`.
+    /// The user-level `.clawcr` directory used to locate `config.toml`.
     user_home: PathBuf,
 }
 
 impl FileSystemAppConfigLoader {
-    /// Creates a filesystem-backed loader rooted at the provided user home directory.
+    /// Creates a filesystem-backed loader rooted at the provided user config directory.
     pub fn new(user_home: PathBuf) -> Self {
         Self { user_home }
     }
@@ -865,6 +899,7 @@ struct RawLoggingConfig {
     level: Option<String>,
     json: Option<bool>,
     redact_secrets_in_logs: Option<bool>,
+    file: Option<RawLoggingFileConfig>,
 }
 
 impl Merge for RawLoggingConfig {
@@ -878,6 +913,7 @@ impl Merge for RawLoggingConfig {
         if other.redact_secrets_in_logs.is_some() {
             self.redact_secrets_in_logs = other.redact_secrets_in_logs;
         }
+        merge_optional(&mut self.file, other.file);
     }
 }
 
@@ -889,6 +925,43 @@ impl RawLoggingConfig {
             redact_secrets_in_logs: self
                 .redact_secrets_in_logs
                 .unwrap_or(defaults.redact_secrets_in_logs),
+            file: self.file.unwrap_or_default().apply(defaults.file),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RawLoggingFileConfig {
+    directory: Option<Option<PathBuf>>,
+    filename_prefix: Option<String>,
+    rotation: Option<LogRotation>,
+    max_files: Option<usize>,
+}
+
+impl Merge for RawLoggingFileConfig {
+    fn merge(&mut self, other: Self) {
+        if other.directory.is_some() {
+            self.directory = other.directory;
+        }
+        if other.filename_prefix.is_some() {
+            self.filename_prefix = other.filename_prefix;
+        }
+        if other.rotation.is_some() {
+            self.rotation = other.rotation;
+        }
+        if other.max_files.is_some() {
+            self.max_files = other.max_files;
+        }
+    }
+}
+
+impl RawLoggingFileConfig {
+    fn apply(self, defaults: LoggingFileConfig) -> LoggingFileConfig {
+        LoggingFileConfig {
+            directory: self.directory.unwrap_or(defaults.directory),
+            filename_prefix: self.filename_prefix.unwrap_or(defaults.filename_prefix),
+            rotation: self.rotation.unwrap_or(defaults.rotation),
+            max_files: self.max_files.unwrap_or(defaults.max_files),
         }
     }
 }
@@ -943,6 +1016,18 @@ fn validate_app_config(config: &AppConfig) -> Result<(), AppConfigError> {
     if config.server.listen.iter().any(|addr| !seen.insert(addr)) {
         return Err(AppConfigError::Validation {
             message: "server.listen must not contain duplicate endpoints".into(),
+        });
+    }
+
+    if config.logging.file.max_files < 1 {
+        return Err(AppConfigError::Validation {
+            message: "logging.file.max_files must be at least 1".into(),
+        });
+    }
+
+    if config.logging.file.filename_prefix.trim().is_empty() {
+        return Err(AppConfigError::Validation {
+            message: "logging.file.filename_prefix must not be empty".into(),
         });
     }
 
@@ -1043,6 +1128,39 @@ mod tests {
         let parsed = toml::from_str::<super::RawAppConfig>(raw).expect("parse");
         let result = parsed.into_app_config();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn loader_merges_logging_file_settings() {
+        let root = unique_temp_dir("logging-merge");
+        let home = root.join("home").join(".clawcr");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&home).expect("home config dir");
+        std::fs::create_dir_all(workspace.join(".clawcr")).expect("workspace config dir");
+
+        std::fs::write(
+            home.join("config.toml"),
+            "[logging]\nlevel = 'debug'\n[logging.file]\nmax_files = 30\n",
+        )
+        .expect("write user config");
+        std::fs::write(
+            workspace.join(".clawcr").join("config.toml"),
+            "[logging.file]\ndirectory = 'diagnostics'\nfilename_prefix = 'agent'\n",
+        )
+        .expect("write project config");
+
+        let loader = FileSystemAppConfigLoader::new(home);
+        let config = loader.load(Some(&workspace)).expect("load config");
+
+        assert_eq!(config.logging.level, "debug");
+        assert_eq!(config.logging.file.max_files, 30);
+        assert_eq!(
+            config.logging.file.directory,
+            Some(PathBuf::from("diagnostics"))
+        );
+        assert_eq!(config.logging.file.filename_prefix, "agent");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

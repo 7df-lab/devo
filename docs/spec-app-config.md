@@ -200,6 +200,21 @@ pub struct LoggingConfig {
     pub level: String,
     pub json: bool,
     pub redact_secrets_in_logs: bool,
+    pub file: LoggingFileConfig,
+}
+
+pub struct LoggingFileConfig {
+    pub directory: Option<PathBuf>,
+    pub filename_prefix: String,
+    pub rotation: LogRotation,
+    pub max_files: usize,
+}
+
+pub enum LogRotation {
+    Never,
+    Minutely,
+    Hourly,
+    Daily,
 }
 ```
 
@@ -369,6 +384,8 @@ Required validations:
 - `tools.shell.default_timeout_ms` must be less than or equal to `tools.shell.max_timeout_ms`
 - `tools.file_search.max_results` must be at least 1
 - server listener config must not define duplicate identical endpoints
+- `logging.file.max_files` must be at least 1
+- `logging.file.filename_prefix` must not be empty
 - `RequireGitGhostCommit` must be rejected when running in environments that explicitly disable git integration
 
 Cross-module validations:
@@ -403,6 +420,15 @@ Logs must include:
 - resolved snapshot backend mode
 - whether project config was loaded
 - active project-root markers
+- durable rolling file sink details including directory, rotation mode, and retention count
+
+Logging persistence:
+
+- default durable log directory is `~/.clawcr/logs`
+- relative `logging.file.directory` values resolve under `CLAWCR_HOME`
+- file logging uses rolling appenders with bounded retention
+- tracing diagnostics are file-only; stderr is reserved for user-facing UI or command output
+- the bootstrap should keep sink composition extensible so future telemetry exporters can be added without replacing local file logs
 
 Metrics:
 

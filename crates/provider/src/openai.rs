@@ -52,15 +52,26 @@ impl OpenAIProvider {
 #[async_trait]
 impl ModelProvider for OpenAIProvider {
     async fn complete(&self, request: ModelRequest) -> anyhow::Result<ModelResponse> {
+        let api_base = self.client.config().api_base().to_string();
+        debug!(
+            provider = "openai",
+            api_base = %api_base,
+            model = %request.model,
+            messages = request.messages.len(),
+            tools = request.tools.as_ref().map_or(0, Vec::len),
+            max_tokens = request.max_tokens,
+            has_system = request.system.is_some(),
+            "building openai completion request"
+        );
         let req = build_request(&request)?;
-        debug!(model = %request.model, "openai-compat complete");
+        debug!(model = %request.model, provider = "openai", "openai complete");
 
         let resp = self
             .client
             .chat()
             .create(req)
             .await
-            .map_err(|e| anyhow::anyhow!("OpenAI-compat API error: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("OpenAI-compat API error for model {}: {e}", request.model))?;
 
         let choice = resp.choices.into_iter().next();
         let mut content = Vec::new();
@@ -107,15 +118,26 @@ impl ModelProvider for OpenAIProvider {
         &self,
         request: ModelRequest,
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>> {
+        let api_base = self.client.config().api_base().to_string();
+        debug!(
+            provider = "openai",
+            api_base = %api_base,
+            model = %request.model,
+            messages = request.messages.len(),
+            tools = request.tools.as_ref().map_or(0, Vec::len),
+            max_tokens = request.max_tokens,
+            has_system = request.system.is_some(),
+            "building openai streaming request"
+        );
         let req = build_request(&request)?;
-        debug!(model = %request.model, "openai-compat stream");
+        debug!(model = %request.model, provider = "openai", "openai stream");
 
         let mut sdk_stream = self
             .client
             .chat()
             .create_stream(req)
             .await
-            .map_err(|e| anyhow::anyhow!("OpenAI-compat stream error: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("OpenAI-compat stream error for model {}: {e}", request.model))?;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(64);
 
@@ -135,7 +157,18 @@ impl ModelProvider for OpenAIProvider {
                 let chunk = match chunk {
                     Ok(c) => c,
                     Err(e) => {
-                        let _ = tx.send(Err(anyhow::anyhow!("stream error: {e}"))).await;
+                        tracing::warn!(
+                            provider = "openai",
+                            model = %request.model,
+                            error = %e,
+                            "openai stream chunk error"
+                        );
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!(
+                                "openai stream chunk error for model {}: {e}",
+                                request.model
+                            )))
+                            .await;
                         return;
                     }
                 };
@@ -266,7 +299,7 @@ impl ModelProvider for OpenAIProvider {
     }
 
     fn name(&self) -> &str {
-        "openai-compat"
+        "openai"
     }
 }
 

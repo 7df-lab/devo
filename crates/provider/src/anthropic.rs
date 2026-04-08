@@ -56,8 +56,17 @@ impl AnthropicProvider {
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
     async fn complete(&self, request: ModelRequest) -> anyhow::Result<ModelResponse> {
+        debug!(
+            provider = "anthropic",
+            model = %request.model,
+            messages = request.messages.len(),
+            tools = request.tools.as_ref().map_or(0, Vec::len),
+            max_tokens = request.max_tokens,
+            has_system = request.system.is_some(),
+            "building anthropic completion request"
+        );
         let req = build_request(&request, false)?;
-        debug!(model = %request.model, "anthropic complete");
+        debug!(model = %request.model, provider = "anthropic", "anthropic complete");
         let resp = self
             .client
             .messages()
@@ -94,10 +103,23 @@ impl ModelProvider for AnthropicProvider {
         &self,
         request: ModelRequest,
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>> {
+        debug!(
+            provider = "anthropic",
+            model = %request.model,
+            messages = request.messages.len(),
+            tools = request.tools.as_ref().map_or(0, Vec::len),
+            max_tokens = request.max_tokens,
+            has_system = request.system.is_some(),
+            "building anthropic streaming request"
+        );
         let req = build_request(&request, true)?;
-        debug!(model = %request.model, "anthropic stream");
+        debug!(model = %request.model, provider = "anthropic", "anthropic stream");
 
-        let mut sdk_stream = self.client.messages().create_stream(req).await;
+        let mut sdk_stream = self
+            .client
+            .messages()
+            .create_stream(req)
+            .await;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(64);
 
@@ -114,7 +136,18 @@ impl ModelProvider for AnthropicProvider {
                 let evt = match event {
                     Ok(e) => e,
                     Err(e) => {
-                        let _ = tx.send(Err(anyhow::anyhow!("stream error: {e}"))).await;
+                        tracing::warn!(
+                            provider = "anthropic",
+                            model = %request.model,
+                            error = %e,
+                            "anthropic stream chunk error"
+                        );
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!(
+                                "anthropic stream chunk error for model {}: {e}",
+                                request.model
+                            )))
+                            .await;
                         return;
                     }
                 };

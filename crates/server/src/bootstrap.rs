@@ -25,13 +25,7 @@ pub struct ServerProcessArgs {
 /// configuration and listener set.
 pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     let resolver = FileSystemConfigPathResolver::from_env()?;
-    let loader = FileSystemAppConfigLoader::new(
-        resolver
-            .user_config_dir()
-            .parent()
-            .expect("config dir should have a parent home directory")
-            .to_path_buf(),
-    );
+    let loader = FileSystemAppConfigLoader::new(resolver.user_config_dir());
     let config = loader.load(args.workspace_root.as_deref())?;
     let listen_targets = resolve_listen_targets(&config.server.listen)?;
     let effective_listen = listen_targets

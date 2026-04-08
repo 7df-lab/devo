@@ -63,7 +63,8 @@ textwrap = "0.16"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
 # Utilities
 uuid = { version = "1", features = ["serde", "v4", "v7"] }

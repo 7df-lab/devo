@@ -4,7 +4,7 @@ use std::sync::Arc;
 use chrono::Local;
 use futures::StreamExt;
 use serde_json::json;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, info_span, warn};
 
 use clawcr_provider::{ModelProvider, ModelRequest, ResponseContent, StopReason, StreamEvent};
 use clawcr_tools::{ToolCall, ToolContext, ToolOrchestrator, ToolRegistry};
@@ -253,7 +253,15 @@ pub async fn query(
         }
 
         session.turn_count += 1;
-        info!(turn = session.turn_count, "starting turn");
+        let turn_span = info_span!(
+            "turn",
+            turn = session.turn_count,
+            session_id = %session.id,
+            model = %session.config.model,
+            cwd = %session.cwd.display()
+        );
+        let _turn_guard = turn_span.enter();
+        info!("starting turn");
 
         // Build model request
         let system = build_system_prompt(
@@ -274,6 +282,13 @@ pub async fn query(
             tools: Some(registry.tool_definitions()),
             temperature: None,
         };
+        debug!(
+            messages = request.messages.len(),
+            tools = request.tools.as_ref().map_or(0, Vec::len),
+            max_tokens = request.max_tokens,
+            has_system = request.system.is_some(),
+            "built model request"
+        );
 
         // 3.2: Stream with error classification
         let stream_result = provider.stream(request).await;
@@ -285,6 +300,13 @@ pub async fn query(
                 s
             }
             Err(e) => {
+                warn!(
+                    provider = provider.name(),
+                    model = %session.config.model,
+                    turn = session.turn_count,
+                    error = ?e,
+                    "failed to create provider stream"
+                );
                 match classify_error(&e) {
                     ErrorClass::ContextTooLong => {
                         // 1.5: Compact history and retry once
@@ -355,7 +377,13 @@ pub async fn query(
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    warn!(error = %e, "stream error");
+                    warn!(
+                        provider = provider.name(),
+                        model = %session.config.model,
+                        turn = session.turn_count,
+                        error = ?e,
+                        "stream error"
+                    );
                     return Err(AgentError::Provider(e));
                 }
             }
