@@ -10,20 +10,18 @@
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/)
 
-[English](./README.md) | [简体中文](./docs/i18n/README.zh-CN.md) | [日本語](./docs/i18n/README.ja.md) | [한국어](./docs/i18n/README.ko.md) | [Español](./docs/i18n/README.es.md) | [Français](./docs/i18n/README.fr.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Español](./README.es.md) | [Français](./README.fr.md)
 
 🚧Early-stage project under active development — not production-ready yet.
 
 ⭐ Star us to follow 
 
-<div style="text-align:center;">
-  <img 
-    src="./docs/assets/screenshot_20260408.png" 
-    alt="Project Overview" 
-    width="100%"
-    style="border-radius: 8px; box-shadow: 0 15px 40px rgba(0,0,0,0.25);object-fit:cover;"
-  />
-</div>
+<img 
+  src="./docs/assets/screenshot_20260408.png" 
+  alt="Project Overview" 
+  width="100%"
+  style="border-radius: 8px; box-shadow: 0 15px 40px rgba(0,0,0,0.25);object-fit:cover;"
+/>
 
 </div>
 
