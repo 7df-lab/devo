@@ -271,7 +271,7 @@ mod tests {
     fn token_budget_default_values() {
         let budget = TokenBudget::default();
         assert_eq!(budget.context_window, 200_000);
-        assert_eq!(budget.max_output_tokens, 16_000);
+        assert_eq!(budget.max_output_tokens, 8192);
         assert!((budget.compact_threshold - 0.9).abs() < f64::EPSILON);
     }
 
