@@ -1,13 +1,27 @@
 mod approval;
 mod connection;
+mod conversation;
 mod event;
+mod model;
 mod protocol;
+mod response;
+mod role;
 mod session;
+mod thinking;
+mod truncation;
 mod turn;
+mod user_input;
 
 pub use approval::*;
 pub use connection::*;
+pub use conversation::*;
 pub use event::*;
+pub use model::*;
 pub use protocol::*;
+pub use response::*;
+pub use role::*;
 pub use session::*;
+pub use thinking::*;
+pub use truncation::*;
 pub use turn::*;
+pub use user_input::*;

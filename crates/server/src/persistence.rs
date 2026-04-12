@@ -293,8 +293,7 @@ impl ReplayState {
 
     fn into_runtime_session(self, deps: &ServerRuntimeDependencies) -> Result<RuntimeSession> {
         let record = self.session.context("missing SessionMetaLine in rollout")?;
-        let mut core_session =
-            deps.new_session_state(record.id, record.cwd.clone(), record.model.clone());
+        let mut core_session = deps.new_session_state(record.id, record.cwd.clone());
         let mut ordered_items = self.pending_items;
         ordered_items.sort_by(|left, right| {
             left.seq

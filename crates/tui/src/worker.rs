@@ -6,7 +6,11 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 
-use clawcr_core::{SessionId, TurnId, TurnStatus};
+use clawcr_core::{
+    Model, ModelCatalog, PresetModelCatalog, SessionId, TurnId, TurnStatus, test_model_connection,
+};
+use clawcr_protocol::ProviderFamily;
+use clawcr_provider::{ModelProviderSDK, anthropic::AnthropicProvider, openai::OpenAIProvider};
 use clawcr_server::{
     InputItem, ItemEnvelope, ItemEventPayload, ItemKind, ServerEvent, SessionHistoryItem,
     SessionHistoryItemKind, SessionListParams, SessionResumeParams, SessionStartParams,
@@ -29,6 +33,8 @@ pub(crate) struct QueryWorkerConfig {
     pub(crate) cwd: PathBuf,
     /// Environment overrides applied to the spawned server child process.
     pub(crate) server_env: Vec<(String, String)>,
+    /// Optional log-level override forwarded to the server child process.
+    pub(crate) server_log_level: Option<String>,
     /// Initial thinking mode used for new turns.
     pub(crate) thinking_selection: Option<String>,
 }
@@ -52,6 +58,7 @@ enum OperationCommand {
     },
     /// Validates provider settings with a temporary probe request.
     ValidateProvider {
+        provider: ProviderFamily,
         model: String,
         base_url: Option<String>,
         api_key: Option<String>,
@@ -133,12 +140,14 @@ impl QueryWorkerHandle {
     /// Validates provider settings with a temporary probe request.
     pub(crate) fn validate_provider(
         &self,
+        provider: ProviderFamily,
         model: String,
         base_url: Option<String>,
         api_key: Option<String>,
     ) -> Result<()> {
         self.command_tx
             .send(OperationCommand::ValidateProvider {
+                provider,
                 model,
                 base_url,
                 api_key,
@@ -229,7 +238,12 @@ async fn run_worker_inner(
     // The worker owns the server client and translates UI commands into server
     // calls, then turns server notifications back into lightweight UI events.
     let mut server_env = config.server_env;
-    let mut client = spawn_client(&config.cwd, server_env.clone()).await?;
+    let mut client = spawn_client(
+        &config.cwd,
+        server_env.clone(),
+        config.server_log_level.clone(),
+    )
+    .await?;
     let _ = client.initialize().await?;
     let mut session_id: Option<SessionId> = None;
     let mut model = config.model;
@@ -286,13 +300,13 @@ async fn run_worker_inner(
                         thinking_selection = next_thinking;
                     }
                     Some(OperationCommand::ValidateProvider {
+                        provider,
                         model: next_model,
                         base_url,
                         api_key,
                     }) => {
                         match validate_provider_connection(
-                            &config.cwd,
-                            &server_env,
+                            provider,
                             &next_model,
                             base_url,
                             api_key,
@@ -321,7 +335,12 @@ async fn run_worker_inner(
                         apply_optional_env_override(&mut server_env, "CLAWCR_BASE_URL", base_url);
                         apply_optional_env_override(&mut server_env, "CLAWCR_API_KEY", api_key);
                         client.shutdown().await?;
-                        client = spawn_client(&config.cwd, server_env.clone()).await?;
+                        client = spawn_client(
+                            &config.cwd,
+                            server_env.clone(),
+                            config.server_log_level.clone(),
+                        )
+                        .await?;
                         client.initialize().await?;
                         session_id = None;
                         active_turn_id = None;
@@ -486,6 +505,11 @@ async fn run_worker_inner(
                                     let _ = event_tx.send(WorkerEvent::TextDelta(payload.delta));
                                 }
                             }
+                            "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
+                                if let ServerEvent::ItemDelta { payload, .. } = event {
+                                    let _ = event_tx.send(WorkerEvent::ReasoningDelta(payload.delta));
+                                }
+                            }
                             "item/completed" => {
                                 if let ServerEvent::ItemCompleted(payload) = event {
                                     if let Some(text) = completed_agent_message_text(&payload) {
@@ -596,11 +620,19 @@ async fn ensure_session_started(
     })
 }
 
-async fn spawn_client(cwd: &PathBuf, env: Vec<(String, String)>) -> Result<StdioServerClient> {
+async fn spawn_client(
+    cwd: &PathBuf,
+    env: Vec<(String, String)>,
+    server_log_level: Option<String>,
+) -> Result<StdioServerClient> {
     StdioServerClient::spawn(StdioServerClientConfig {
         program: std::env::current_exe().context("resolve current executable for server launch")?,
         workspace_root: Some(cwd.clone()),
         env,
+        args: server_log_level
+            .into_iter()
+            .flat_map(|level| ["--log-level".to_string(), level])
+            .collect(),
     })
     .await
 }
@@ -637,10 +669,37 @@ fn completed_agent_message_text(payload: &ItemEventPayload) -> Option<String> {
 }
 
 fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSender<WorkerEvent>) {
-    // Only tool lifecycle items need special handling here; other item kinds are
-    // intentionally ignored because they are either streamed separately or not
-    // shown in the TUI transcript.
     match payload.item {
+        ItemEnvelope {
+            item_kind: ItemKind::AgentMessage,
+            payload,
+            ..
+        } => {
+            let text = payload
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned);
+            if let Some(text) = text {
+                let _ = event_tx.send(WorkerEvent::AssistantMessageCompleted(text));
+            }
+        }
+        ItemEnvelope {
+            item_kind: ItemKind::Reasoning,
+            payload,
+            ..
+        } => {
+            let text = payload
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned);
+            if let Some(text) = text {
+                let _ = event_tx.send(WorkerEvent::ReasoningCompleted(text));
+            }
+        }
         ItemEnvelope {
             item_kind: ItemKind::ToolCall,
             payload,
@@ -852,87 +911,76 @@ fn truncate_tool_output(content: &str) -> String {
 }
 
 async fn validate_provider_connection(
-    cwd: &PathBuf,
-    server_env: &[(String, String)],
+    provider: ProviderFamily,
     model: &str,
     base_url: Option<String>,
     api_key: Option<String>,
 ) -> Result<String> {
-    let mut env = server_env.to_vec();
-    apply_env_override(&mut env, "CLAWCR_MODEL", model);
-    apply_optional_env_override(&mut env, "CLAWCR_BASE_URL", base_url);
-    apply_optional_env_override(&mut env, "CLAWCR_API_KEY", api_key);
+    let validation_model = resolve_validation_model(provider, model)?;
+    let validation_provider = build_validation_provider(provider, base_url, api_key)?;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        test_model_connection(
+            validation_provider.as_ref(),
+            &validation_model,
+            "Reply with OK only.",
+        ),
+    )
+    .await
+    .context("provider validation timed out after 20s")?
+    .map_err(Into::into)
+}
 
-    let mut client = spawn_client(cwd, env).await?;
-    let result = async {
-        let _ = client.initialize().await?;
-        let session = client
-            .session_start(SessionStartParams {
-                cwd: cwd.clone(),
-                ephemeral: true,
-                title: None,
-                model: Some(model.to_string()),
-            })
-            .await?;
-        let _ = client
-            .turn_start(TurnStartParams {
-                session_id: session.session_id,
-                input: vec![InputItem::Text {
-                    text: "Reply with OK only.".to_string(),
-                }],
-                model: Some(model.to_string()),
-                thinking: None,
-                sandbox: None,
-                approval_policy: None,
-                cwd: None,
-            })
-            .await?;
+fn resolve_validation_model(provider: ProviderFamily, model: &str) -> Result<Model> {
+    let catalog = PresetModelCatalog::load()?;
+    if let Some(entry) = catalog.get(model) {
+        return Ok(entry.clone());
+    }
+    Ok(Model {
+        slug: model.to_string(),
+        provider: provider,
+        ..Model::default()
+    })
+}
 
-        let mut reply_preview = String::new();
-        loop {
-            match client.recv_event().await? {
-                Some((method, event)) => match method.as_str() {
-                    "item/agentMessage/delta" => {
-                        if let ServerEvent::ItemDelta { payload, .. } = event {
-                            reply_preview.push_str(&payload.delta);
-                        }
-                    }
-                    "item/completed" => {
-                        if let ServerEvent::ItemCompleted(payload) = event {
-                            if let Some(text) = completed_agent_message_text(&payload) {
-                                if reply_preview.trim().is_empty() {
-                                    reply_preview = text;
-                                }
-                            }
-                        }
-                    }
-                    "turn/failed" => {
-                        let message = if reply_preview.trim().is_empty() {
-                            "provider validation failed".to_string()
-                        } else {
-                            reply_preview.trim().to_string()
-                        };
-                        anyhow::bail!("{message}");
-                    }
-                    "turn/completed" => {
-                        let preview = reply_preview.trim();
-                        if preview.is_empty() {
-                            anyhow::bail!("provider validation completed without a model reply");
-                        }
-                        return Ok(preview.to_string());
-                    }
-                    _ => {}
-                },
-                None => anyhow::bail!("provider validation connection closed unexpectedly"),
-            }
+fn build_validation_provider(
+    provider: ProviderFamily,
+    base_url: Option<String>,
+    api_key: Option<String>,
+) -> Result<std::sync::Arc<dyn ModelProviderSDK>> {
+    match provider {
+        ProviderFamily::Anthropic { .. } => {
+            let api_key = api_key.context("anthropic provider requires an API key")?;
+            let base_url = base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string());
+            Ok(std::sync::Arc::new(
+                AnthropicProvider::new(base_url).with_api_key(api_key),
+            ))
         }
-    };
+        ProviderFamily::Openai { .. } => {
+            let base_url = normalize_openai_base_url(
+                &base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
+            );
+            let provider = if let Some(api_key) = api_key {
+                OpenAIProvider::new(base_url).with_api_key(api_key)
+            } else {
+                OpenAIProvider::new(base_url)
+            };
+            Ok(std::sync::Arc::new(provider))
+        }
+    }
+}
 
-    let outcome = tokio::time::timeout(Duration::from_secs(20), result)
-        .await
-        .context("provider validation timed out after 20s")?;
-    let _ = client.shutdown().await;
-    outcome
+fn normalize_openai_base_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    let Some(scheme_sep) = trimmed.find("://") else {
+        return trimmed.to_string();
+    };
+    let has_explicit_path = trimmed[scheme_sep + 3..].contains('/');
+    if has_explicit_path {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
 }
 
 fn normalize_display_output(content: &str) -> String {

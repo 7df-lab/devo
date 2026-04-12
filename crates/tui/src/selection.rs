@@ -1,7 +1,7 @@
 use super::*;
 use crate::events::ThinkingListEntry;
 use crate::onboarding::save_last_used_model;
-use clawcr_core::SessionId;
+use clawcr_core::{ModelCatalog, SessionId};
 use clawcr_utils::find_clawcr_home;
 use std::io::{BufRead, BufReader};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -110,7 +110,7 @@ impl TuiApp {
                     .map(|model| ModelListEntry {
                         slug: model.slug.clone(),
                         display_name: model.display_name.clone(),
-                        provider: model.provider,
+                        provider: model.provider_family(),
                         description: model.description.clone(),
                         is_current: model.slug == self.model,
                         is_builtin: true,
@@ -165,7 +165,7 @@ impl TuiApp {
             entries.push(ModelListEntry {
                 slug: model.slug.clone(),
                 display_name: model.display_name.clone(),
-                provider: model.provider,
+                provider: model.provider_family(),
                 description: model.description.clone(),
                 is_current: model.slug == self.model,
                 is_builtin: true,
@@ -241,6 +241,19 @@ impl TuiApp {
 
     pub(crate) fn saved_model_entry(&self, model: &str) -> Option<&SavedModelEntry> {
         self.saved_models.iter().find(|entry| entry.model == model)
+    }
+
+    pub(crate) fn onboarding_provider_for_model(
+        &self,
+        model: &str,
+    ) -> clawcr_protocol::ProviderFamily {
+        if let Some(entry) = self.saved_model_entry(model) {
+            return entry.provider;
+        }
+        if let Some(entry) = self.model_catalog.get(model) {
+            return entry.provider_family();
+        }
+        self.provider
     }
 
     pub(crate) fn handle_slash_command(&mut self, prompt: String) -> Result<()> {
@@ -698,7 +711,7 @@ impl TuiApp {
             .thinking_selection
             .as_deref()
             .map(str::to_lowercase)
-            .unwrap_or_else(|| model.default_reasoning_level.label().to_lowercase());
+            .unwrap_or_else(|| model.default_thinking_selection().unwrap_or_default());
 
         options
             .into_iter()

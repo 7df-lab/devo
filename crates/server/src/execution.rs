@@ -3,10 +3,10 @@ use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 use tokio::{sync::Mutex, task::JoinHandle};
 
 use clawcr_core::{
-    ModelCatalog, SessionConfig, SessionId, SessionRecord, SessionState, ThinkingCapability,
+    Model, ModelCatalog, SessionConfig, SessionId, SessionRecord, SessionState, TurnConfig,
     default_base_instructions,
 };
-use clawcr_provider::ModelProvider;
+use clawcr_provider::ModelProviderSDK;
 use clawcr_tools::ToolRegistry;
 
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
 /// Shared server-owned runtime dependencies used by live turn execution.
 pub struct ServerRuntimeDependencies {
     /// Provider used for all model requests.
-    pub(crate) provider: Arc<dyn ModelProvider>,
+    pub(crate) provider: Arc<dyn ModelProviderSDK>,
     /// Shared built-in tool registry used by turn execution.
     pub(crate) registry: Arc<ToolRegistry>,
     /// Default model applied when no model override is present.
@@ -29,7 +29,7 @@ pub struct ServerRuntimeDependencies {
 impl ServerRuntimeDependencies {
     /// Creates a new bundle of runtime dependencies for the transport server.
     pub fn new(
-        provider: Arc<dyn ModelProvider>,
+        provider: Arc<dyn ModelProviderSDK>,
         registry: Arc<ToolRegistry>,
         default_model: String,
         model_catalog: Arc<dyn ModelCatalog>,
@@ -43,56 +43,40 @@ impl ServerRuntimeDependencies {
     }
 
     /// Creates an initial core session state for a newly created server session.
-    pub(crate) fn new_session_state(
-        &self,
-        session_id: SessionId,
-        cwd: PathBuf,
-        model: Option<String>,
-    ) -> SessionState {
-        let model = model.unwrap_or_else(|| self.default_model.clone());
-        let base_instructions = self
-            .model_catalog
-            .get(&model)
-            .map(|model| model.base_instructions.trim().to_string())
-            .filter(|instructions| !instructions.is_empty())
-            .unwrap_or_else(|| default_base_instructions().to_string());
-        let reasoning_level = self
-            .model_catalog
-            .get(&model)
-            .map(|model| model.default_reasoning_level.clone())
-            .unwrap_or_default();
-        let thinking_selection = self
-            .model_catalog
-            .get(&model)
-            .map(|model| match model.effective_thinking_capability() {
-                ThinkingCapability::Disabled => None,
-                ThinkingCapability::Toggle => Some(String::from("enabled")),
-                ThinkingCapability::Levels(_) => {
-                    Some(model.default_reasoning_level.label().to_lowercase())
-                }
-            })
-            .unwrap_or_default();
-        let mut state = SessionState::new(
-            SessionConfig {
-                model,
-                base_instructions,
-                reasoning_level,
-                thinking_selection,
-                ..Default::default()
-            },
-            cwd,
-        );
+    pub(crate) fn new_session_state(&self, session_id: SessionId, cwd: PathBuf) -> SessionState {
+        let mut state = SessionState::new(SessionConfig::default(), cwd);
         state.id = session_id.to_string();
         state
     }
 
-    /// Returns the builtin base instructions for a model slug, if one is known.
-    pub(crate) fn base_instructions_for_model(&self, model: &str) -> String {
+    /// Resolves one runtime model for a turn, applying the server default when needed.
+    pub(crate) fn resolve_turn_model(&self, requested_model: Option<&str>) -> Model {
+        if let Some(model) = requested_model.and_then(|requested| self.model_catalog.get(requested))
+        {
+            return model.clone();
+        }
+
         self.model_catalog
-            .get(model)
-            .map(|model| model.base_instructions.trim().to_string())
-            .filter(|instructions| !instructions.is_empty())
-            .unwrap_or_else(|| default_base_instructions().to_string())
+            .resolve_for_turn(Some(&self.default_model))
+            .or_else(|_| self.model_catalog.resolve_for_turn(None))
+            .cloned()
+            .unwrap_or_else(|_| Model {
+                slug: self.default_model.clone(),
+                base_instructions: default_base_instructions().to_string(),
+                ..Model::default()
+            })
+    }
+
+    /// Resolves the full turn configuration used by the core query loop.
+    pub(crate) fn resolve_turn_config(
+        &self,
+        requested_model: Option<&str>,
+        thinking_selection: Option<String>,
+    ) -> TurnConfig {
+        TurnConfig {
+            model: self.resolve_turn_model(requested_model),
+            thinking_selection,
+        }
     }
 }
 

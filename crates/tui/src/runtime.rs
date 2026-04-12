@@ -8,6 +8,7 @@ impl TuiApp {
             model: config.model.clone(),
             cwd: config.cwd.clone(),
             server_env: config.server_env,
+            server_log_level: config.server_log_level,
             thinking_selection: None,
         });
 
@@ -29,6 +30,7 @@ impl TuiApp {
             aux_panel: None,
             pending_status_index: None,
             pending_assistant_index: None,
+            pending_reasoning_index: None,
             pending_tool_items: std::collections::HashMap::new(),
             thinking_selection: None,
             worker,
@@ -532,9 +534,11 @@ impl TuiApp {
             let Some(model) = self.onboarding_selected_model.clone() else {
                 anyhow::bail!("onboarding model selection was lost before validation");
             };
+            let provider = self.onboarding_provider_for_model(&model);
             self.busy = true;
             self.status_message = "Validating provider connection".to_string();
             self.worker.validate_provider(
+                provider,
                 model,
                 self.onboarding_selected_base_url.clone(),
                 self.onboarding_selected_api_key.clone(),

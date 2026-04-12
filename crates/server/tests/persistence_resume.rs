@@ -8,18 +8,18 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
-use clawcr_core::BuiltinModelCatalog;
-use clawcr_provider::{
-    ModelProvider, ModelRequest, ModelResponse, ResponseContent, ResponseMetadata, StopReason,
-    StreamEvent, Usage,
+use clawcr_core::PresetModelCatalog;
+use clawcr_protocol::{
+    ModelRequest, ModelResponse, ResponseContent, ResponseMetadata, StopReason, StreamEvent, Usage,
 };
+use clawcr_provider::ModelProviderSDK;
 use clawcr_server::{ClientTransportKind, ServerRuntime, ServerRuntimeDependencies};
 use clawcr_tools::ToolRegistry;
 
 struct SingleReplyProvider;
 
 #[async_trait]
-impl ModelProvider for SingleReplyProvider {
+impl ModelProviderSDK for SingleReplyProvider {
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
         Ok(ModelResponse {
             id: "title-1".into(),
@@ -383,7 +383,7 @@ fn build_runtime(data_root: &std::path::Path) -> Result<Arc<ServerRuntime>> {
             Arc::new(SingleReplyProvider),
             Arc::new(ToolRegistry::new()),
             "test-model".to_string(),
-            Arc::new(BuiltinModelCatalog::default()),
+            Arc::new(PresetModelCatalog::default()),
         ),
     ))
 }

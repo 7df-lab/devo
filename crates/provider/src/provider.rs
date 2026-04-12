@@ -1,18 +1,8 @@
 use std::pin::Pin;
 
 use async_trait::async_trait;
+use clawcr_protocol::{ModelRequest, ModelResponse, ProviderFamily, RequestRole, StreamEvent};
 use futures::Stream;
-
-use crate::{ModelRequest, ModelResponse, RequestRole, StreamEvent};
-
-/// High-level provider families supported by the provider layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderFamily {
-    /// OpenAI chat completions, Responses, and OpenAI-compatible vendors.
-    OpenAI,
-    /// Anthropic Messages API and Anthropic-compatible vendors.
-    Anthropic,
-}
 
 /// Capability flags that describe what a provider family or model can emit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,20 +103,4 @@ pub trait ModelProviderSDK: Send + Sync {
 
     /// Human-readable provider name (e.g. "anthropic", "openai").
     fn name(&self) -> &str;
-
-    /// Backward-compatible alias for `completion`.
-    async fn complete(&self, request: ModelRequest) -> anyhow::Result<ModelResponse> {
-        self.completion(request).await
-    }
-
-    /// Backward-compatible alias for `completion_stream`.
-    async fn stream(
-        &self,
-        request: ModelRequest,
-    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>> {
-        self.completion_stream(request).await
-    }
 }
-
-/// Backward-compatible alias for the provider SDK trait.
-pub use ModelProviderSDK as ModelProvider;

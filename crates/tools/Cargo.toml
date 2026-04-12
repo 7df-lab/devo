@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 clawcr-safety = { workspace = true }
 clawcr-provider = { workspace = true }
+clawcr-protocol = { workspace = true }
 
 tokio = { workspace = true }
 futures = { workspace = true }

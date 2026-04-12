@@ -1,22 +1,27 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use clawcr_protocol::{
+    ModelRequest, RequestContent, RequestMessage, ResolvedThinkingRequest, ResponseContent,
+    ResponseExtra, SamplingControls, StopReason, StreamEvent, UserInput,
+};
 use futures::StreamExt;
-use serde_json::json;
+use tokio::time::sleep;
 use tracing::{debug, info, info_span, warn};
 
-use clawcr_provider::{
-    ModelProvider, ModelRequest, ResponseContent, SamplingControls, StopReason, StreamEvent,
-};
+use clawcr_provider::ModelProviderSDK;
 use clawcr_tools::{ToolCall, ToolContext, ToolOrchestrator, ToolRegistry};
 
-use crate::{AgentError, ContentBlock, Message, Role, SessionState};
+use crate::{AgentError, ContentBlock, Message, Model, Role, SessionState, TurnConfig};
 
 /// Events emitted during a query for the caller (CLI/UI) to observe.
 #[derive(Debug, Clone)]
 pub enum QueryEvent {
     /// Incremental text from the assistant.
     TextDelta(String),
+    /// Incremental reasoning text from the assistant.
+    ReasoningDelta(String),
     /// Incremental token usage update from the provider stream.
     UsageDelta {
         input_tokens: usize,
@@ -59,22 +64,70 @@ pub type EventCallback = Arc<dyn Fn(QueryEvent) + Send + Sync>;
 
 enum ErrorClass {
     ContextTooLong,
+    ParameterError,
+    FileContentAnomaly,
+    AuthenticationFailure,
+    FeatureUnavailable,
+    TaskNotFound,
     RateLimit,
+    NoApiPermission,
+    FileTooLarge,
     ServerError,
     Unretryable,
 }
 
 fn classify_error(e: &anyhow::Error) -> ErrorClass {
     let msg = e.to_string().to_lowercase();
+    // TODO: Expand the error of ContextTooLong
     if msg.contains("context_too_long") {
         ErrorClass::ContextTooLong
+    } else if msg.contains("401")
+        || msg.contains("authentication failure")
+        || msg.contains("token timeout")
+        || msg.contains("unauthorized")
+        || msg.contains("api key")
+    {
+        ErrorClass::AuthenticationFailure
+    } else if msg.contains("404")
+        && (msg.contains("feature not available")
+            || msg.contains("fine-tuning feature not available"))
+    {
+        ErrorClass::FeatureUnavailable
+    } else if msg.contains("404")
+        && (msg.contains("task does not exist")
+            || msg.contains("does not exist")
+            || msg.contains("not found"))
+    {
+        ErrorClass::TaskNotFound
     } else if msg.contains("429") || msg.contains("rate limit") {
         ErrorClass::RateLimit
+    } else if msg.contains("434") || msg.contains("no api permission") || msg.contains("beta phase")
+    {
+        ErrorClass::NoApiPermission
+    } else if msg.contains("435")
+        || msg.contains("file size exceeds 100mb")
+        || msg.contains("smaller than 100mb")
+    {
+        ErrorClass::FileTooLarge
+    } else if msg.contains("400")
+        && (msg.contains("file content anomaly")
+            || msg.contains("jsonl file content")
+            || msg.contains("jsonl"))
+    {
+        ErrorClass::FileContentAnomaly
+    } else if msg.contains("400")
+        || msg.contains("parameter error")
+        || msg.contains("invalid parameter")
+        || msg.contains("bad request")
+    {
+        ErrorClass::ParameterError
     } else if msg.starts_with('5')
         || msg.contains("500")
         || msg.contains("502")
         || msg.contains("503")
+        || msg.contains("504")
         || msg.contains("internal server error")
+        || msg.contains("server error occurred while processing the request")
     {
         ErrorClass::ServerError
     } else {
@@ -86,6 +139,7 @@ fn classify_error(e: &anyhow::Error) -> ErrorClass {
 // Session compaction (capabilities 1.3 / 1.7)
 // ---------------------------------------------------------------------------
 
+/// TODO: The context compact is weired, should compact with a seperate LLM invoke.
 /// Remove older messages to bring the conversation within budget.
 /// Returns how many messages were removed.
 fn compact_session(session: &mut SessionState) -> usize {
@@ -126,6 +180,9 @@ fn compact_session(session: &mut SessionState) -> usize {
 // Micro compact (capability 1.4)
 // ---------------------------------------------------------------------------
 
+/// TODO: Now, the micro compact acts like a truncation, however, we already
+/// have truncation policy, should follow model's truncation policy, so the
+/// micro compact should be removed in the future.
 const MICRO_COMPACT_THRESHOLD: usize = 10_000;
 
 fn micro_compact(content: String) -> String {
@@ -142,6 +199,9 @@ fn micro_compact(content: String) -> String {
 // Memory prefetch (capability 1.9)
 // ---------------------------------------------------------------------------
 
+/// TODO: Current the Agent automatically read the `AGENTS.md` / `CLAUDE.md` at
+/// current workspace root directory, for those md in sub-directory, what is
+/// the load policy ? not sure, should investigate and design.
 fn load_prompt_md(cwd: &std::path::Path) -> Option<String> {
     let mut sections = Vec::new();
 
@@ -150,7 +210,12 @@ fn load_prompt_md(cwd: &std::path::Path) -> Option<String> {
         if let Ok(content) = std::fs::read_to_string(path) {
             let content = content.trim().to_string();
             if !content.is_empty() {
-                sections.push(content);
+                sections.push(format!(
+                    "# {} instructions for {}\n\n <INSTRUCTIONS>\n{}\n</INSTRUCTIONS>",
+                    file_name,
+                    cwd.display(),
+                    content,
+                ));
             }
         }
     }
@@ -162,24 +227,10 @@ fn load_prompt_md(cwd: &std::path::Path) -> Option<String> {
     }
 }
 
-fn build_system_prompt(
-    base_instructions: &str,
-    system_prompt: &str,
-    memory: &Option<String>,
-    cwd: &Path,
-) -> String {
+fn build_system_prompt(base_instructions: &str) -> String {
     let mut sections = Vec::new();
     if !base_instructions.is_empty() {
-        sections.push(base_instructions.to_string());
-    }
-    sections.push(build_environment_context(cwd));
-    if !system_prompt.is_empty() {
-        sections.push(system_prompt.to_string());
-    }
-    if let Some(mem) = memory {
-        if !mem.is_empty() {
-            sections.push(mem.clone());
-        }
+        sections.push(format!("{}", base_instructions.to_string()));
     }
     sections.join("\n\n")
 }
@@ -188,29 +239,73 @@ fn build_environment_context(cwd: &Path) -> String {
     let shell = std::env::var("SHELL")
         .ok()
         .or_else(|| std::env::var("COMSPEC").ok())
-        .unwrap_or_default();
-    let payload = json!({
-        "OS": std::env::consts::OS,
-        "Arch": std::env::consts::ARCH,
-        "Family": std::env::consts::FAMILY,
-        "CWD": cwd.display().to_string(),
-        "Shell": shell,
-    });
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let shell = shell
+        .rsplit(std::path::MAIN_SEPARATOR)
+        .next()
+        .unwrap_or(&shell)
+        .to_lowercase();
+
+    let current_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
+
     format!(
-        "Environment context (read only):\n```json\n{}\n```",
-        serde_json::to_string_pretty(&payload).expect("environment context should serialize")
+        "<environment_context>\n  <cwd>{}</cwd>\n  <shell>{}</shell>\n  <current_date>{}</current_date>\n  <timezone>{}</timezone>\n</environment_context>",
+        cwd.display(),
+        shell,
+        current_date,
+        timezone,
     )
+}
+
+fn build_prefetched_user_inputs(cwd: &Path) -> Vec<UserInput> {
+    let mut inputs = Vec::new();
+    if let Some(text) = load_prompt_md(cwd) {
+        inputs.push(UserInput::Text {
+            text,
+            text_elements: Vec::new(),
+        });
+    }
+    inputs.push(UserInput::Text {
+        text: build_environment_context(cwd),
+        text_elements: Vec::new(),
+    });
+    inputs
+}
+
+fn append_prefetched_user_inputs(messages: &mut Vec<RequestMessage>, user_inputs: &[UserInput]) {
+    messages.splice(
+        0..0,
+        user_inputs.iter().filter_map(|input| match input {
+            UserInput::Text { text, .. } if !text.trim().is_empty() => Some(RequestMessage {
+                role: Role::User.as_str().to_string(),
+                content: vec![RequestContent::Text { text: text.clone() }],
+            }),
+            UserInput::Text { .. }
+            | UserInput::Image { .. }
+            | UserInput::LocalImage { .. }
+            | UserInput::Skill { .. }
+            | UserInput::Mention { .. }
+            | _ => None,
+        }),
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Main query loop
 // ---------------------------------------------------------------------------
 
-const MAX_RETRIES: usize = 3;
+const MAX_RETRIES: usize = 5;
+const INITIAL_RETRY_BACKOFF_MS: u64 = 250;
+
+/// TODO: The body of `query` is too lengthy, we should move out `stream lop` out, I am
+/// not sure whether we should do this.
 
 /// The recursive agent loop — the beating heart of the runtime.
 ///
-/// This is the Rust equivalent of Claude Code's `query.ts`. It drives
+/// The implementation refers to Claude Code's `query.ts`. It drives
 /// multi-turn conversations by:
 ///
 /// 1. Building the model request from session state
@@ -222,29 +317,31 @@ const MAX_RETRIES: usize = 3;
 ///
 /// The loop terminates when:
 /// - The model emits `end_turn` with no tool calls
-/// - Max turns are exceeded
 /// - An unrecoverable error occurs
 pub async fn query(
     session: &mut SessionState,
-    provider: &dyn ModelProvider,
+    turn_config: &TurnConfig,
+    provider: &dyn ModelProviderSDK,
     registry: Arc<ToolRegistry>,
     orchestrator: &ToolOrchestrator,
     on_event: Option<EventCallback>,
 ) -> Result<(), AgentError> {
+    // emit is the event callback function.
     let emit = |event: QueryEvent| {
         if let Some(ref cb) = on_event {
             cb(event);
         }
     };
 
-    // 1.9: Memory prefetch — load CLAUDE.md once before the loop
-    let memory_content = load_prompt_md(&session.cwd);
+    // Memory prefetch — load workspace instructions and environment context once
+    // before the loop and inject them as leading user inputs.
+    let prefetched_user_inputs = build_prefetched_user_inputs(&session.cwd);
 
     let mut retry_count: usize = 0;
     let mut context_compacted = false;
 
     loop {
-        // 1.3 + 1.7: Check token budget and compact before building the request
+        // Check token budget and compact before building the request
         if session.last_input_tokens > 0
             && session
                 .config
@@ -255,47 +352,56 @@ pub async fn query(
             compact_session(session);
         }
 
-        if session.turn_count >= session.config.max_turns {
-            return Err(AgentError::MaxTurnsExceeded(session.config.max_turns));
-        }
-
         session.turn_count += 1;
         let turn_span = info_span!(
             "turn",
             turn = session.turn_count,
             session_id = %session.id,
-            model = %session.config.model,
+            model = %turn_config.model.slug,
             cwd = %session.cwd.display()
         );
         let _turn_guard = turn_span.enter();
         info!("starting turn");
 
         // Build model request
-        let system = build_system_prompt(
-            &session.config.base_instructions,
-            &session.config.system_prompt,
-            &memory_content,
-            &session.cwd,
-        );
+        // TODO: Should remove `memory_content` from system prompt
+        let system = build_system_prompt(&turn_config.model.base_instructions);
+
+        // resolve thinking request parameter
+        let ResolvedThinkingRequest {
+            request_model,
+            request_thinking,
+            extra_body,
+            effective_reasoning_effort: _,
+        } = turn_config
+            .model
+            .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
+
+        let mut messages = session.to_request_messages();
+        append_prefetched_user_inputs(&mut messages, &prefetched_user_inputs);
+
         let request = ModelRequest {
-            model: session.config.model.clone(),
+            model: request_model,
             system: if system.is_empty() {
                 None
             } else {
                 Some(system)
             },
-            messages: session.to_request_messages(),
-            max_tokens: session.config.token_budget.max_output_tokens,
+            messages,
+            max_tokens: turn_config
+                .model
+                .max_tokens
+                .map_or(session.config.token_budget.max_output_tokens, |value| {
+                    value as usize
+                }),
             tools: Some(registry.tool_definitions()),
-            temperature: None,
-            sampling: SamplingControls::default(),
-            thinking: Some(
-                session
-                    .config
-                    .thinking_selection
-                    .clone()
-                    .unwrap_or_else(|| session.config.reasoning_level.label().to_lowercase()),
-            ),
+            sampling: SamplingControls {
+                temperature: turn_config.model.temperature,
+                top_p: turn_config.model.top_p,
+                top_k: turn_config.model.top_k.map(|value| value as u32),
+            },
+            thinking: request_thinking,
+            extra_body,
         };
         debug!(
             messages = request.messages.len(),
@@ -305,8 +411,8 @@ pub async fn query(
             "built model request"
         );
 
-        // 3.2: Stream with error classification
-        let stream_result = provider.stream(request).await;
+        // Stream with error classification
+        let stream_result = provider.completion_stream(request).await;
 
         let mut stream = match stream_result {
             Ok(s) => {
@@ -317,14 +423,14 @@ pub async fn query(
             Err(e) => {
                 warn!(
                     provider = provider.name(),
-                    model = %session.config.model,
+                    model = %turn_config.model.slug,
                     turn = session.turn_count,
                     error = ?e,
                     "failed to create provider stream"
                 );
                 match classify_error(&e) {
                     ErrorClass::ContextTooLong => {
-                        // 1.5: Compact history and retry once
+                        // Compact history and retry once
                         if context_compacted {
                             return Err(AgentError::ContextTooLong);
                         }
@@ -337,44 +443,68 @@ pub async fn query(
                     ErrorClass::RateLimit | ErrorClass::ServerError => {
                         if retry_count < MAX_RETRIES {
                             retry_count += 1;
-                            warn!(attempt = retry_count, "transient error — retrying");
+                            let backoff = retry_backoff_duration(retry_count);
+                            warn!(
+                                attempt = retry_count,
+                                backoff_ms = backoff.as_millis(),
+                                "transient error — retrying with exponential backoff"
+                            );
+                            sleep(backoff).await;
                             session.turn_count -= 1;
                             continue;
                         }
                         return Err(AgentError::Provider(e));
                     }
-                    ErrorClass::Unretryable => {
+                    ErrorClass::ParameterError
+                    | ErrorClass::FileContentAnomaly
+                    | ErrorClass::AuthenticationFailure
+                    | ErrorClass::FeatureUnavailable
+                    | ErrorClass::TaskNotFound
+                    | ErrorClass::NoApiPermission
+                    | ErrorClass::FileTooLarge
+                    | ErrorClass::Unretryable => {
                         return Err(AgentError::Provider(e));
                     }
                 }
             }
         };
 
+        // HTTP return ok, then processing Server Sent Event
+
         let mut assistant_text = String::new();
-        let mut tool_uses: Vec<(String, String, String)> = Vec::new(); // (id, name, json_accum)
+        let mut reasoning_text = String::new();
+        let mut tool_uses: Vec<(String, String, serde_json::Value, String, bool)> = Vec::new();
+        let mut final_response = None;
         let mut stop_reason = None;
 
         while let Some(event) = stream.next().await {
             match event {
+                Ok(StreamEvent::TextStart { .. }) => {}
                 Ok(StreamEvent::TextDelta { text, .. }) => {
                     assistant_text.push_str(&text);
                     emit(QueryEvent::TextDelta(text));
                 }
-                Ok(StreamEvent::ContentBlockStart {
-                    content: ResponseContent::ToolUse { id, name, .. },
-                    ..
-                }) => {
-                    tool_uses.push((id, name, String::new()));
+                Ok(StreamEvent::ReasoningStart { .. }) => {}
+                Ok(StreamEvent::ReasoningDelta { text, .. }) => {
+                    reasoning_text.push_str(&text);
+                    emit(QueryEvent::ReasoningDelta(text));
                 }
-                Ok(StreamEvent::InputJsonDelta { partial_json, .. }) => {
+                Ok(StreamEvent::ToolCallStart {
+                    id, name, input, ..
+                }) => {
+                    tool_uses.push((id, name, input, String::new(), false));
+                }
+                Ok(StreamEvent::ToolCallInputDelta { partial_json, .. }) => {
                     if let Some(last) = tool_uses.last_mut() {
-                        last.2.push_str(&partial_json);
+                        last.3.push_str(&partial_json);
+                        last.4 = true;
                     }
                 }
                 Ok(StreamEvent::MessageDone { response }) => {
                     stop_reason = response.stop_reason.clone();
+                    final_response = Some(response.clone());
 
-                    // 1.11: Accumulate all usage counters at completion time.
+                    // Accumulate all usage counters at completion time.
                     session.total_input_tokens += response.usage.input_tokens;
                     session.total_output_tokens += response.usage.output_tokens;
                     session.total_cache_creation_tokens +=
@@ -398,16 +528,59 @@ pub async fn query(
                         cache_read_input_tokens: usage.cache_read_input_tokens,
                     });
                 }
-                Ok(_) => {}
                 Err(e) => {
                     warn!(
                         provider = provider.name(),
-                        model = %session.config.model,
+                        model = %turn_config.model.slug,
                         turn = session.turn_count,
                         error = ?e,
                         "stream error"
                     );
                     return Err(AgentError::Provider(e));
+                }
+            }
+        }
+
+        if let Some(response) = &final_response {
+            if assistant_text.is_empty() {
+                assistant_text = response
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ResponseContent::Text(text) => Some(text.as_str()),
+                        ResponseContent::ToolUse { .. } => None,
+                    })
+                    .collect();
+            }
+            if tool_uses.is_empty() {
+                tool_uses = response
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ResponseContent::ToolUse { id, name, input } => Some((
+                            id.clone(),
+                            name.clone(),
+                            input.clone(),
+                            String::new(),
+                            false,
+                        )),
+                        ResponseContent::Text(_) => None,
+                    })
+                    .collect();
+            }
+            if reasoning_text.is_empty() {
+                let final_reasoning = response
+                    .metadata
+                    .extras
+                    .iter()
+                    .filter_map(|extra| match extra {
+                        ResponseExtra::ReasoningText { text } => Some(text.as_str()),
+                        ResponseExtra::ProviderSpecific { .. } => None,
+                    })
+                    .collect::<String>();
+                if !final_reasoning.is_empty() {
+                    emit(QueryEvent::ReasoningDelta(final_reasoning.clone()));
+                    reasoning_text = final_reasoning;
                 }
             }
         }
@@ -423,9 +596,12 @@ pub async fn query(
 
         let tool_calls: Vec<ToolCall> = tool_uses
             .into_iter()
-            .map(|(id, name, json_str)| {
-                let input = serde_json::from_str(&json_str)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            .map(|(id, name, initial_input, json_str, saw_delta)| {
+                let input = if saw_delta {
+                    serde_json::from_str(&json_str).unwrap_or(initial_input)
+                } else {
+                    initial_input
+                };
                 emit(QueryEvent::ToolUseStart {
                     id: id.clone(),
                     name: name.clone(),
@@ -447,7 +623,7 @@ pub async fn query(
 
         // If no tool calls, check stop reason
         if tool_calls.is_empty() {
-            // 1.6: MaxOutputTokens auto-continue
+            // MaxOutputTokens auto-continue
             if stop_reason == Some(StopReason::MaxTokens) {
                 debug!("max_tokens reached — injecting continuation prompt");
                 session.push_message(Message::user("Please continue from where you left off."));
@@ -473,7 +649,7 @@ pub async fn query(
         let results = orchestrator.execute_batch(&tool_calls, &tool_ctx).await;
 
         // Build tool result message (user role, per Anthropic API convention)
-        // 1.4: Apply micro-compact to large tool results
+        // Apply micro-compact to large tool results
         let result_content: Vec<ContentBlock> = results
             .into_iter()
             .map(|r| {
@@ -498,32 +674,105 @@ pub async fn query(
     }
 }
 
+/// Sends a minimal provider probe request used by onboarding and configuration checks.
+pub async fn test_model_connection(
+    provider: &dyn ModelProviderSDK,
+    model: &Model,
+    prompt: &str,
+) -> Result<String, AgentError> {
+    let ResolvedThinkingRequest {
+        request_model,
+        request_thinking,
+        extra_body,
+        effective_reasoning_effort: _,
+    } = model.resolve_thinking_selection(None);
+    let request = ModelRequest {
+        model: request_model,
+        system: None,
+        messages: vec![clawcr_protocol::RequestMessage {
+            role: "user".to_string(),
+            content: vec![clawcr_protocol::RequestContent::Text {
+                text: prompt.to_string(),
+            }],
+        }],
+        max_tokens: model.max_tokens.map_or(64, |value| value as usize),
+        tools: None,
+        sampling: SamplingControls {
+            temperature: model.temperature,
+            top_p: model.top_p,
+            top_k: model.top_k.map(|value| value as u32),
+        },
+        thinking: request_thinking,
+        extra_body,
+    };
+    let mut stream = provider.completion_stream(request).await?;
+    let mut reply_preview = String::new();
+    while let Some(event) = stream.next().await {
+        match event? {
+            StreamEvent::TextDelta { text, .. } => reply_preview.push_str(&text),
+            StreamEvent::MessageDone { response } => {
+                if reply_preview.trim().is_empty() {
+                    reply_preview = response
+                        .content
+                        .into_iter()
+                        .find_map(|content| match content {
+                            ResponseContent::Text(text) => Some(text),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    let preview = reply_preview.trim();
+    if preview.is_empty() {
+        return Err(AgentError::Provider(anyhow::anyhow!(
+            "provider validation completed without a model reply"
+        )));
+    }
+    Ok(preview.to_string())
+}
+
+fn retry_backoff_duration(attempt: usize) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(10) as u32;
+    let multiplier = 2u64.pow(exponent);
+    Duration::from_millis(INITIAL_RETRY_BACKOFF_MS.saturating_mul(multiplier))
+}
+
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use futures::Stream;
-    use serde_json::json;
-
-    use clawcr_provider::{
-        ModelRequest, ModelResponse, ResponseContent, StopReason, StreamEvent, Usage,
+    use clawcr_protocol::{
+        ModelRequest, ModelResponse, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
+        StreamEvent, Usage,
     };
     use clawcr_safety::legacy_permissions::PermissionMode;
     use clawcr_tools::{Tool, ToolOrchestrator, ToolOutput, ToolRegistry};
+    use futures::Stream;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
 
-    use super::query;
-    use crate::{ContentBlock, Message, SessionConfig, SessionState};
+    use super::{QueryEvent, query, test_model_connection};
+    use crate::{
+        ContentBlock, Message, Model, ProviderFamily, ReasoningEffort, Role, SessionConfig,
+        SessionState, ThinkingCapability, ThinkingImplementation, ThinkingVariant,
+        ThinkingVariantConfig, TruncationMode, TruncationPolicyConfig, TurnConfig,
+    };
 
     struct SingleToolUseProvider {
         requests: AtomicUsize,
     }
 
     #[async_trait]
-    impl clawcr_provider::ModelProvider for SingleToolUseProvider {
+    impl clawcr_provider::ModelProviderSDK for SingleToolUseProvider {
         async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
             unreachable!("tests stream responses only")
         }
@@ -536,15 +785,13 @@ mod tests {
 
             let events = if request_number == 0 {
                 vec![
-                    Ok(StreamEvent::ContentBlockStart {
+                    Ok(StreamEvent::ToolCallStart {
                         index: 0,
-                        content: ResponseContent::ToolUse {
-                            id: "tool-1".into(),
-                            name: "mutating_tool".into(),
-                            input: json!({ "value": 1 }),
-                        },
+                        id: "tool-1".into(),
+                        name: "mutating_tool".into(),
+                        input: json!({}),
                     }),
-                    Ok(StreamEvent::InputJsonDelta {
+                    Ok(StreamEvent::ToolCallInputDelta {
                         index: 0,
                         partial_json: r#"{"value":1}"#.into(),
                     }),
@@ -588,24 +835,40 @@ mod tests {
         }
     }
 
-    #[test]
-    fn system_prompt_includes_environment_context() {
-        let prompt = super::build_system_prompt(
-            "base instructions",
-            "system prompt",
-            &Some("memory".to_string()),
-            std::path::Path::new("/tmp/project"),
-        );
+    struct MutatingTool;
 
-        assert!(prompt.contains("base instructions"));
-        assert!(prompt.contains("Environment context (read only):"));
-        assert!(prompt.contains("\"OS\""));
-        assert!(prompt.contains("/tmp/project"));
-        assert!(prompt.contains("system prompt"));
-        assert!(prompt.contains("memory"));
+    struct CapturingProvider {
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
     }
 
-    struct MutatingTool;
+    #[async_trait]
+    impl clawcr_provider::ModelProviderSDK for CapturingProvider {
+        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            unreachable!("tests stream responses only")
+        }
+
+        async fn completion_stream(
+            &self,
+            request: ModelRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            self.requests.lock().expect("lock requests").push(request);
+            Ok(Box::pin(futures::stream::iter(vec![Ok(
+                StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: "resp".into(),
+                        content: vec![ResponseContent::Text("done".into())],
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage: Usage::default(),
+                        metadata: Default::default(),
+                    },
+                },
+            )])))
+        }
+
+        fn name(&self) -> &str {
+            "capturing-provider"
+        }
+    }
 
     #[async_trait]
     impl Tool for MutatingTool {
@@ -654,6 +917,10 @@ mod tests {
 
         query(
             &mut session,
+            &TurnConfig {
+                model: Model::default(),
+                thinking_selection: None,
+            },
             &SingleToolUseProvider {
                 requests: AtomicUsize::new(0),
             },
@@ -691,6 +958,195 @@ mod tests {
         assert!(
             content.contains("permission denied"),
             "expected tool_result to mention permission denial, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_resolves_model_variant_thinking_before_building_request() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = CapturingProvider {
+            requests: Arc::clone(&requests),
+        };
+        let registry = Arc::new(ToolRegistry::new());
+        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let model = Model {
+            slug: "kimi-k2.5".into(),
+            display_name: "Kimi K2.5".into(),
+            provider: ProviderFamily::openai(),
+            description: None,
+            thinking_capability: ThinkingCapability::Toggle,
+            default_reasoning_effort: Some(ReasoningEffort::Medium),
+            thinking_implementation: Some(ThinkingImplementation::ModelVariant(
+                ThinkingVariantConfig {
+                    variants: vec![
+                        ThinkingVariant {
+                            selection_value: "disabled".into(),
+                            model_slug: "kimi-k2.5".into(),
+                            reasoning_effort: None,
+                            label: "Off".into(),
+                            description: "Use the standard model".into(),
+                        },
+                        ThinkingVariant {
+                            selection_value: "enabled".into(),
+                            model_slug: "kimi-k2.5-thinking".into(),
+                            reasoning_effort: Some(ReasoningEffort::Medium),
+                            label: "On".into(),
+                            description: "Use the thinking model".into(),
+                        },
+                    ],
+                },
+            )),
+            base_instructions: String::new(),
+            context_window: 200_000,
+            effective_context_window_percent: None,
+            truncation_policy: TruncationPolicyConfig {
+                mode: TruncationMode::Tokens,
+                limit: 10_000,
+            },
+            input_modalities: vec![],
+            supports_image_detail_original: false,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            max_tokens: None,
+        };
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("hello"));
+
+        query(
+            &mut session,
+            &TurnConfig {
+                model,
+                thinking_selection: Some("enabled".into()),
+            },
+            &provider,
+            registry,
+            &orchestrator,
+            None,
+        )
+        .await
+        .expect("query should succeed");
+
+        let captured = requests.lock().expect("lock requests");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].model, "kimi-k2.5-thinking");
+        assert_eq!(captured[0].thinking, None);
+    }
+
+    #[tokio::test]
+    async fn test_model_connection_sends_minimal_request() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = CapturingProvider {
+            requests: Arc::clone(&requests),
+        };
+        let model = Model {
+            slug: "glm-4.5".into(),
+            top_p: Some(0.95),
+            ..Model::default()
+        };
+        let preview = test_model_connection(&provider, &model, "Reply with OK only.")
+            .await
+            .expect("probe request should succeed");
+
+        let captured = requests.lock().expect("lock requests");
+        assert_eq!(preview, "done");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].system, None);
+        assert!(captured[0].tools.is_none());
+        assert_eq!(captured[0].messages.len(), 1);
+        assert_eq!(captured[0].sampling.top_p, Some(0.95));
+    }
+
+    #[tokio::test]
+    async fn query_emits_reasoning_without_polluting_assistant_message_content() {
+        struct ReasoningProvider;
+
+        #[async_trait]
+        impl clawcr_provider::ModelProviderSDK for ReasoningProvider {
+            async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+                unreachable!("tests stream responses only")
+            }
+
+            async fn completion_stream(
+                &self,
+                _request: ModelRequest,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+                Ok(Box::pin(futures::stream::iter(vec![
+                    Ok(StreamEvent::ReasoningStart { index: 0 }),
+                    Ok(StreamEvent::ReasoningDelta {
+                        index: 0,
+                        text: "plan".into(),
+                    }),
+                    Ok(StreamEvent::TextStart { index: 1 }),
+                    Ok(StreamEvent::TextDelta {
+                        index: 1,
+                        text: "final".into(),
+                    }),
+                    Ok(StreamEvent::MessageDone {
+                        response: ModelResponse {
+                            id: "resp-3".into(),
+                            content: vec![ResponseContent::Text("final".into())],
+                            stop_reason: Some(StopReason::EndTurn),
+                            usage: Usage::default(),
+                            metadata: ResponseMetadata {
+                                extras: vec![ResponseExtra::ReasoningText {
+                                    text: "plan".into(),
+                                }],
+                            },
+                        },
+                    }),
+                ])))
+            }
+
+            fn name(&self) -> &str {
+                "reasoning-provider"
+            }
+        }
+
+        let registry = Arc::new(ToolRegistry::new());
+        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("hello"));
+        let seen_events = Arc::new(Mutex::new(Vec::new()));
+        let callback_events = Arc::clone(&seen_events);
+        let callback = Arc::new(move |event: QueryEvent| {
+            callback_events.lock().expect("lock callback").push(event);
+        });
+
+        query(
+            &mut session,
+            &TurnConfig {
+                model: Model::default(),
+                thinking_selection: None,
+            },
+            &ReasoningProvider,
+            registry,
+            &orchestrator,
+            Some(callback),
+        )
+        .await
+        .expect("query should succeed");
+
+        let events = seen_events.lock().expect("lock events");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            QueryEvent::ReasoningDelta(text) if text == "plan"
+        )));
+        drop(events);
+
+        let assistant_message = session
+            .messages
+            .iter()
+            .find(|message| matches!(message.role, Role::Assistant))
+            .expect("assistant message");
+        assert_eq!(
+            assistant_message,
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "final".into(),
+                }],
+            }
         );
     }
 }

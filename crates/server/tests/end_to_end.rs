@@ -12,8 +12,9 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use clawcr_core::BuiltinModelCatalog;
-use clawcr_provider::{ModelProvider, ModelRequest, ModelResponse, StreamEvent};
+use clawcr_core::PresetModelCatalog;
+use clawcr_protocol::{ModelRequest, ModelResponse, StreamEvent};
+use clawcr_provider::ModelProviderSDK;
 use clawcr_server::{ServerRuntime, ServerRuntimeDependencies};
 use clawcr_tools::ToolRegistry;
 use futures::stream;
@@ -52,7 +53,7 @@ fn initialize_request(transport: &str) -> serde_json::Value {
 struct PendingProvider;
 
 #[async_trait]
-impl ModelProvider for PendingProvider {
+impl ModelProviderSDK for PendingProvider {
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
         anyhow::bail!("test provider does not support completion")
     }
@@ -188,7 +189,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
             Arc::new(PendingProvider),
             Arc::new(ToolRegistry::new()),
             "test-model".to_string(),
-            Arc::new(BuiltinModelCatalog::default()),
+            Arc::new(PresetModelCatalog::default()),
         ),
     );
     let listen = vec![format!("ws://{bind_address}")];

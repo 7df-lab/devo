@@ -2,6 +2,10 @@ use std::{collections::HashMap, pin::Pin};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use clawcr_protocol::{
+    ModelRequest, ModelResponse, RequestContent, ResponseContent, ResponseExtra, ResponseMetadata,
+    StopReason, StreamEvent, Usage,
+};
 use futures::{Stream, StreamExt};
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -9,10 +13,8 @@ use reqwest_eventsource::{Event, EventSource};
 use serde_json::{Value, json};
 use tracing::debug;
 
-use crate::{
-    ModelProviderSDK, ModelRequest, ModelResponse, RequestContent, ResponseContent, ResponseExtra,
-    ResponseMetadata, StopReason, StreamEvent, Usage,
-};
+use crate::text_normalization::{TaggedTextFragment, TaggedTextParser, split_tagged_text};
+use crate::{ModelProviderSDK, merge_extra_body};
 
 use super::capabilities::{OpenAITransport, resolve_request_profile};
 use super::{
@@ -21,7 +23,7 @@ use super::{
 };
 
 /// OpenAI Responses API provider.
-///
+/// <https://developers.openai.com/api/reference/resources/responses>
 /// This adapter keeps the new Responses wire format isolated from the legacy
 /// chat-completions adapter so the transport can evolve independently.
 pub struct OpenAIResponsesProvider {
@@ -76,9 +78,8 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
         root["tools"] = tool_definitions(tools);
     }
 
-    let temperature = request.sampling.temperature.or(request.temperature);
     if profile.supports_temperature
-        && let Some(temperature) = temperature
+        && let Some(temperature) = request.sampling.temperature
     {
         root["temperature"] = json!(temperature);
     }
@@ -102,6 +103,8 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
     if stream {
         root["stream_options"] = json!({ "include_usage": true });
     }
+
+    merge_extra_body(&mut root, request.extra_body.as_ref());
 
     root
 }
@@ -174,6 +177,28 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
                     text: reasoning_content.to_string(),
                 });
             }
+            if matches!(item.get("type").and_then(Value::as_str), Some("message")) {
+                if let Some(items) = item.get("content").and_then(Value::as_array) {
+                    for message_item in items {
+                        if let Some(text) = message_item.get("text").and_then(Value::as_str) {
+                            let (assistant_text, reasoning) = split_tagged_text(text);
+                            for text in reasoning {
+                                if !text.is_empty() {
+                                    metadata.extras.push(ResponseExtra::ReasoningText { text });
+                                }
+                            }
+                            if !assistant_text.is_empty() {
+                                content.push(ResponseContent::Text(assistant_text));
+                            }
+                            continue;
+                        }
+                        if let Some(parsed) = parse_message_content(message_item) {
+                            content.push(parsed);
+                        }
+                    }
+                }
+                continue;
+            }
             content.extend(parse_output_item(item));
         }
     }
@@ -236,12 +261,15 @@ fn parse_output_item(item: &Value) -> Vec<ResponseContent> {
 
 fn parse_message_content(item: &Value) -> Option<ResponseContent> {
     match item.get("type").and_then(Value::as_str) {
-        Some("output_text") | Some("text") | Some("input_text") => Some(ResponseContent::Text(
-            item.get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        )),
+        Some("output_text") | Some("text") | Some("input_text") => {
+            let assistant_text =
+                split_tagged_text(item.get("text").and_then(Value::as_str).unwrap_or_default()).0;
+            if assistant_text.is_empty() {
+                None
+            } else {
+                Some(ResponseContent::Text(assistant_text))
+            }
+        }
         Some("tool_call") | Some("function_call") => Some(ResponseContent::ToolUse {
             id: item
                 .get("call_id")
@@ -337,9 +365,13 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
             .context("failed to create openai responses event source")?;
         let stream = async_stream::try_stream! {
             let mut text_buf = String::new();
+            let mut reasoning_buf = String::new();
+            let mut text_parser = TaggedTextParser::default();
             let mut response_id = String::new();
             let mut tool_calls: HashMap<String, (String, String, String)> = HashMap::new();
             let mut usage: Option<Usage> = None;
+            let mut reasoning_started = false;
+            let mut text_started = false;
 
             futures::pin_mut!(event_source);
             while let Some(event) = event_source.next().await {
@@ -378,32 +410,117 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                                     .or_else(|| chunk.get("text").and_then(Value::as_str))
                                     .unwrap_or_default();
                                 if !delta.is_empty() {
-                                    if text_buf.is_empty() {
-                                        yield StreamEvent::ContentBlockStart {
-                                            index: 0,
-                                            content: ResponseContent::Text(String::new()),
-                                        };
+                                    for fragment in text_parser.consume(delta) {
+                                        match fragment {
+                                            TaggedTextFragment::Text(text) => {
+                                                if text.is_empty() {
+                                                    continue;
+                                                }
+                                                if !text_started {
+                                                    text_started = true;
+                                                    yield StreamEvent::TextStart { index: 0 };
+                                                }
+                                                text_buf.push_str(&text);
+                                                yield StreamEvent::TextDelta { index: 0, text };
+                                            }
+                                            TaggedTextFragment::Reasoning(text) => {
+                                                if text.is_empty() {
+                                                    continue;
+                                                }
+                                                if !reasoning_started {
+                                                    reasoning_started = true;
+                                                    yield StreamEvent::ReasoningStart { index: 1 };
+                                                }
+                                                reasoning_buf.push_str(&text);
+                                                yield StreamEvent::ReasoningDelta { index: 1, text };
+                                            }
+                                        }
                                     }
-                                    text_buf.push_str(delta);
-                                    yield StreamEvent::TextDelta {
-                                        index: 0,
-                                        text: delta.to_string(),
-                                    };
                                 }
                             }
                             "response.output_item.added" => {
                                 if let Some(item) = chunk.get("item") {
+                                    if let Some(reasoning_content) =
+                                        item.get("reasoning_content").and_then(Value::as_str)
+                                    {
+                                        if !reasoning_content.is_empty() {
+                                            if !reasoning_started {
+                                                reasoning_started = true;
+                                                yield StreamEvent::ReasoningStart { index: 1 };
+                                            }
+                                            reasoning_buf.push_str(reasoning_content);
+                                            yield StreamEvent::ReasoningDelta {
+                                                index: 1,
+                                                text: reasoning_content.to_string(),
+                                            };
+                                        }
+                                    }
                                     if let Some(ResponseContent::ToolUse { id, name, input }) = parse_output_item(item).into_iter().next() {
                                         let key = id.clone();
                                         tool_calls.insert(key.clone(), (id.clone(), name.clone(), input.to_string()));
-                                        yield StreamEvent::ContentBlockStart {
-                                            index: tool_calls.len(),
-                                            content: ResponseContent::ToolUse { id, name, input },
+                                        let index = tool_calls.len();
+                                        yield StreamEvent::ToolCallStart {
+                                            index,
+                                            id,
+                                            name,
+                                            input,
                                         };
                                     }
                                 }
                             }
+                            "response.function_call_arguments.delta" | "response.output_item.delta" => {
+                                let partial_json = chunk
+                                    .get("delta")
+                                    .or_else(|| chunk.get("arguments_delta"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+                                let call_id = chunk
+                                    .get("item_id")
+                                    .or_else(|| chunk.get("call_id"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+                                if !partial_json.is_empty()
+                                    && !call_id.is_empty()
+                                    && let Some((index, entry)) = tool_calls
+                                        .values_mut()
+                                        .enumerate()
+                                        .find(|(_, entry)| entry.0 == call_id)
+                                {
+                                    let input = &mut entry.2;
+                                    input.push_str(partial_json);
+                                    yield StreamEvent::ToolCallInputDelta {
+                                        index: index + 1,
+                                        partial_json: partial_json.to_string(),
+                                    };
+                                }
+                            }
                             "response.completed" | "response.done" => {
+                                for fragment in text_parser.finish() {
+                                    match fragment {
+                                        TaggedTextFragment::Text(text) => {
+                                            if text.is_empty() {
+                                                continue;
+                                            }
+                                            if !text_started {
+                                                text_started = true;
+                                                yield StreamEvent::TextStart { index: 0 };
+                                            }
+                                            text_buf.push_str(&text);
+                                            yield StreamEvent::TextDelta { index: 0, text };
+                                        }
+                                        TaggedTextFragment::Reasoning(text) => {
+                                            if text.is_empty() {
+                                                continue;
+                                            }
+                                            if !reasoning_started {
+                                                reasoning_started = true;
+                                                yield StreamEvent::ReasoningStart { index: 1 };
+                                            }
+                                            reasoning_buf.push_str(&text);
+                                            yield StreamEvent::ReasoningDelta { index: 1, text };
+                                        }
+                                    }
+                                }
                                 let response = if let Some(parsed) = chunk.get("response") {
                                     parse_response(parsed.clone())?
                                 } else {
@@ -427,7 +544,15 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                                         },
                                         stop_reason: Some(StopReason::EndTurn),
                                         usage: usage.unwrap_or_default(),
-                                        metadata: ResponseMetadata::default(),
+                                        metadata: if reasoning_buf.is_empty() {
+                                            ResponseMetadata::default()
+                                        } else {
+                                            ResponseMetadata {
+                                                extras: vec![ResponseExtra::ReasoningText {
+                                                    text: reasoning_buf.clone(),
+                                                }],
+                                            }
+                                        },
                                     }
                                 };
                                 yield StreamEvent::MessageDone { response };
@@ -436,6 +561,13 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                             _ => {}
                         }
                     }
+                }
+            }
+
+            for fragment in text_parser.finish() {
+                match fragment {
+                    TaggedTextFragment::Text(text) => text_buf.push_str(&text),
+                    TaggedTextFragment::Reasoning(text) => reasoning_buf.push_str(&text),
                 }
             }
 
@@ -459,7 +591,15 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                 },
                 stop_reason: Some(StopReason::EndTurn),
                 usage: usage.unwrap_or_default(),
-                metadata: ResponseMetadata::default(),
+                metadata: if reasoning_buf.is_empty() {
+                    ResponseMetadata::default()
+                } else {
+                    ResponseMetadata {
+                        extras: vec![ResponseExtra::ReasoningText {
+                            text: reasoning_buf,
+                        }],
+                    }
+                },
             };
             yield StreamEvent::MessageDone { response };
         };
@@ -474,14 +614,16 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
 
 #[cfg(test)]
 mod tests {
+    use clawcr_protocol::{
+        ModelRequest, RequestContent, RequestMessage, SamplingControls, ToolDefinition,
+    };
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
     use super::parse_response;
-    use crate::{
-        ModelRequest, RequestContent, RequestMessage, ResponseContent, ResponseExtra,
-        SamplingControls, ToolDefinition, openai::responses::build_request,
-    };
+    use clawcr_protocol::{ResponseContent, ResponseExtra};
+
+    use crate::openai::responses::build_request;
 
     #[test]
     fn debug_request_body_includes_reasoning_and_tools() {
@@ -500,13 +642,13 @@ mod tests {
                 description: "Get weather by city".to_string(),
                 input_schema: json!({"type": "object"}),
             }]),
-            temperature: Some(0.2),
             sampling: SamplingControls {
                 temperature: Some(0.4),
                 top_p: Some(0.7),
                 top_k: Some(12),
             },
             thinking: Some("medium".to_string()),
+            extra_body: None,
         };
 
         let body = build_request(&request, true);

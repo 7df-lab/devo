@@ -5,7 +5,8 @@ use std::{
 };
 
 use anyhow::Result;
-use clawcr_core::{BuiltinModelCatalog, ModelCatalog, ProviderKind};
+use clawcr_core::PresetModelCatalog;
+use clawcr_protocol::ProviderFamily;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -62,7 +63,7 @@ pub(crate) struct TuiApp {
     /// Model identifier shown in the header.
     pub(crate) model: String,
     /// Provider family currently driving the active session.
-    pub(crate) provider: ProviderKind,
+    pub(crate) provider: ProviderFamily,
     /// Current working directory shown in the header.
     pub(crate) cwd: PathBuf,
     /// Scrollable chat history pane.
@@ -97,12 +98,14 @@ pub(crate) struct TuiApp {
     pub(crate) pending_status_index: Option<usize>,
     /// Index of the assistant transcript item currently receiving streamed text.
     pub(crate) pending_assistant_index: Option<usize>,
+    /// Index of the reasoning transcript item currently receiving streamed text.
+    pub(crate) pending_reasoning_index: Option<usize>,
     /// Map from tool call id to the transcript row that should be updated with the result.
     pub(crate) pending_tool_items: HashMap<String, usize>,
     /// Background query worker owned by the UI.
     pub(crate) worker: QueryWorkerHandle,
     /// Built-in model catalog used for onboarding and model selection.
-    pub(crate) model_catalog: BuiltinModelCatalog,
+    pub(crate) model_catalog: PresetModelCatalog,
     /// Persisted model entries available for switching in the composer popup.
     pub(crate) saved_models: Vec<SavedModelEntry>,
     /// Whether the app should open the model picker on startup.
@@ -152,13 +155,15 @@ pub struct InteractiveTuiConfig {
     /// Model identifier used for requests and shown in the header.
     pub model: String,
     /// Provider family used for requests and shown in the picker.
-    pub provider: ProviderKind,
+    pub provider: ProviderFamily,
     /// Working directory shown in the header and passed to the session.
     pub cwd: PathBuf,
     /// Environment overrides applied to the spawned stdio server process.
     pub server_env: Vec<(String, String)>,
+    /// Optional CLI log-level override to forward to the spawned server process.
+    pub server_log_level: Option<String>,
     /// Built-in model catalog used for onboarding and model selection.
-    pub model_catalog: BuiltinModelCatalog,
+    pub model_catalog: PresetModelCatalog,
     /// Persisted model entries available for switching in the composer popup.
     pub saved_models: Vec<SavedModelEntry>,
     /// Whether to open the model picker on startup.
