@@ -203,7 +203,7 @@ fn render_context_usage(app: &TuiApp) -> String {
 
     let input_budget = usize::try_from(model.context_window)
         .unwrap_or_default()
-        .saturating_mul(usize::from(model.effective_context_window_percent))
+        .saturating_mul(usize::from(model.effective_context_window_percent()))
         / 100;
     if input_budget == 0 {
         return "context n/a".to_string();

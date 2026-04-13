@@ -2,8 +2,8 @@ use clawcr_provider::ProviderFamily;
 use serde::Deserialize;
 
 use crate::{
-    InputModality, ModelCatalog, ModelConfig, ModelConfigError, ModelVisibility,
-    ReasoningEffort, ThinkingCapability, TruncationPolicyConfig,
+    InputModality, ModelCatalog, ModelPreset, ModelPresetError, ReasoningEffort,
+    ThinkingCapability, TruncationPolicyConfig,
 };
 
 const DEFAULT_BASE_INSTRUCTIONS: &str = include_str!("../default_base_instructions.txt");
@@ -11,7 +11,7 @@ const DEFAULT_BASE_INSTRUCTIONS: &str = include_str!("../default_base_instructio
 /// Filesystem-independent loader for the built-in model catalog bundled with the binary.
 #[derive(Debug, Clone, Default)]
 pub struct BuiltinModelCatalog {
-    models: Vec<ModelConfig>,
+    models: Vec<ModelPreset>,
 }
 
 impl BuiltinModelCatalog {
@@ -23,33 +23,30 @@ impl BuiltinModelCatalog {
     }
 
     /// Creates a catalog from an already-loaded model list.
-    pub fn new(models: Vec<ModelConfig>) -> Self {
+    pub fn new(models: Vec<ModelPreset>) -> Self {
         Self { models }
     }
 
     /// Returns the loaded models by value.
-    pub fn into_inner(self) -> Vec<ModelConfig> {
+    pub fn into_inner(self) -> Vec<ModelPreset> {
         self.models
     }
 }
 
 impl ModelCatalog for BuiltinModelCatalog {
-    fn list_visible(&self) -> Vec<&ModelConfig> {
-        self.models
-            .iter()
-            .filter(|model| model.visibility == ModelVisibility::Visible)
-            .collect()
+    fn list_visible(&self) -> Vec<&ModelPreset> {
+        self.models.iter().collect()
     }
 
-    fn get(&self, slug: &str) -> Option<&ModelConfig> {
+    fn get(&self, slug: &str) -> Option<&ModelPreset> {
         self.models.iter().find(|model| model.slug == slug)
     }
 
-    fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&ModelConfig, ModelConfigError> {
+    fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&ModelPreset, ModelPresetError> {
         if let Some(slug) = requested {
             return self
                 .get(slug)
-                .ok_or_else(|| ModelConfigError::ModelNotFound {
+                .ok_or_else(|| ModelPresetError::ModelNotFound {
                     slug: slug.to_string(),
                 });
         }
@@ -57,17 +54,17 @@ impl ModelCatalog for BuiltinModelCatalog {
         self.list_visible()
             .into_iter()
             .max_by_key(|model| model.priority)
-            .ok_or(ModelConfigError::NoVisibleModels)
+            .ok_or(ModelPresetError::NoVisibleModels)
     }
 }
 
 /// Loads the built-in model list bundled with the crate.
-pub fn load_builtin_models() -> Result<Vec<ModelConfig>, BuiltinModelCatalogError> {
-    let raw_models: Vec<RawBuiltinModelConfig> =
+pub fn load_builtin_models() -> Result<Vec<ModelPreset>, BuiltinModelCatalogError> {
+    let raw_models: Vec<RawBuiltinModelPreset> =
         serde_json::from_str(include_str!("../models.json"))?;
     Ok(raw_models
         .into_iter()
-        .map(RawBuiltinModelConfig::into_model)
+        .map(RawBuiltinModelPreset::into_model)
         .collect())
 }
 
@@ -85,7 +82,7 @@ pub enum BuiltinModelCatalogError {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct RawBuiltinModelConfig {
+struct RawBuiltinModelPreset {
     slug: String,
     display_name: String,
     provider: ProviderFamily,
@@ -112,17 +109,27 @@ struct RawBuiltinModelConfig {
     input_modalities: Vec<InputModality>,
     #[serde(default)]
     supports_image_detail_original: bool,
-    #[serde(default)]
-    visibility: ModelVisibility,
-    #[serde(default)]
-    supported_in_api: bool,
+    #[serde(default, alias = "supported_in_api")]
+    api_configured: bool,
     #[serde(default)]
     priority: i32,
 }
 
-impl RawBuiltinModelConfig {
-    fn into_model(self) -> ModelConfig {
-        let mut model = ModelConfig::default();
+impl RawBuiltinModelPreset {
+    fn into_model(self) -> ModelPreset {
+        let supported_reasoning_efforts = if self.supported_reasoning_efforts.is_empty() {
+            vec![self.default_reasoning_effort]
+        } else {
+            self.supported_reasoning_efforts
+        };
+        let thinking_capability = match self.thinking_capability.unwrap_or_default() {
+            RawThinkingCapability::Levels => {
+                ThinkingCapability::Levels(supported_reasoning_efforts.clone())
+            }
+            RawThinkingCapability::Toggle => ThinkingCapability::Toggle,
+            RawThinkingCapability::Disabled => ThinkingCapability::Disabled,
+        };
+        let mut model = ModelPreset::default();
         model.slug = self.slug;
         model.display_name = self.display_name;
         model.provider = self.provider;
@@ -131,24 +138,11 @@ impl RawBuiltinModelConfig {
         } else {
             Some(self.description)
         };
-        model.default_reasoning_effort = self.default_reasoning_effort;
-        model.supported_reasoning_efforts = if self.supported_reasoning_efforts.is_empty() {
-            vec![model.default_reasoning_effort]
-        } else {
-            self.supported_reasoning_efforts
-        };
-        model.thinking_capability = self.thinking_capability.map(|capability| match capability {
-            RawThinkingCapability::Levels => {
-                ThinkingCapability::Levels(model.supported_reasoning_efforts.clone())
-            }
-            RawThinkingCapability::Toggle => ThinkingCapability::Toggle,
-            RawThinkingCapability::Disabled => ThinkingCapability::Disabled,
-        });
+        model.default_reasoning_effort = Some(self.default_reasoning_effort);
+        model.thinking_capability = thinking_capability;
         model.base_instructions = self.base_instructions;
         model.context_window = self.context_window.unwrap_or(model.context_window);
-        model.effective_context_window_percent = self
-            .effective_context_window_percent
-            .unwrap_or(model.effective_context_window_percent);
+        model.effective_context_window_percent = self.effective_context_window_percent;
         model.truncation_policy = self.truncation_policy;
         model.input_modalities = if self.input_modalities.is_empty() {
             vec![InputModality::Text]
@@ -156,8 +150,7 @@ impl RawBuiltinModelConfig {
             self.input_modalities
         };
         model.supports_image_detail_original = self.supports_image_detail_original;
-        model.visibility = self.visibility;
-        model.supported_in_api = self.supported_in_api;
+        model.api_configured = self.api_configured;
         model.priority = self.priority;
         model
     }

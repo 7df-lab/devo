@@ -161,10 +161,13 @@ fn first_configured_provider(config: &ProviderConfigFile) -> Option<ProviderFami
     }
 }
 
-fn provider_for_model(config: &ProviderConfigFile, requested_model: &str) -> Option<ProviderFamily> {
+fn provider_for_model(
+    config: &ProviderConfigFile,
+    requested_model: &str,
+) -> Option<ProviderFamily> {
     for (provider, profile) in [
         (ProviderFamily::Anthropic, &config.anthropic),
-        (ProviderFamily::OpenAI, &config.openai)
+        (ProviderFamily::OpenAI, &config.openai),
     ] {
         if profile.last_model.as_deref() == Some(requested_model)
             || profile.default_model.as_deref() == Some(requested_model)

@@ -698,7 +698,7 @@ impl TuiApp {
             .thinking_selection
             .as_deref()
             .map(str::to_lowercase)
-            .unwrap_or_else(|| model.default_reasoning_effort.label().to_lowercase());
+            .unwrap_or_else(|| model.default_thinking_selection().unwrap_or_default());
 
         options
             .into_iter()

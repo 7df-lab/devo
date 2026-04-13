@@ -89,12 +89,13 @@ fn nearest_effort(target: ReasoningEffort, supported: &[ReasoningEffort]) -> Rea
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReasoningEffortOption {
+/// One selectable reasoning-effort option presented to the UI or protocol client.
+pub struct ReasoningEffortPreset {
     pub effort: ReasoningEffort,
     pub description: String,
 }
 
-impl ReasoningEffortOption {
+impl ReasoningEffortPreset {
     pub fn new(effort: ReasoningEffort, description: impl Into<String>) -> Self {
         Self {
             effort,
@@ -104,7 +105,8 @@ impl ReasoningEffortOption {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThinkingOption {
+/// One selectable thinking option presented to the UI or protocol client.
+pub struct ThinkingPreset {
     pub label: String,
     pub description: String,
     pub value: String,
@@ -121,16 +123,16 @@ pub enum ThinkingCapability {
 }
 
 impl ThinkingCapability {
-    pub fn options(&self) -> Vec<ThinkingOption> {
+    pub fn options(&self) -> Vec<ThinkingPreset> {
         match self {
             ThinkingCapability::Disabled => Vec::new(),
             ThinkingCapability::Toggle => vec![
-                ThinkingOption {
+                ThinkingPreset {
                     label: "Off".to_string(),
                     description: "Disable thinking for this turn".to_string(),
                     value: "disabled".to_string(),
                 },
-                ThinkingOption {
+                ThinkingPreset {
                     label: "On".to_string(),
                     description: "Enable the model's thinking mode".to_string(),
                     value: "enabled".to_string(),
@@ -139,7 +141,7 @@ impl ThinkingCapability {
             ThinkingCapability::Levels(levels) => levels
                 .iter()
                 .copied()
-                .map(|effort| ThinkingOption {
+                .map(|effort| ThinkingPreset {
                     label: effort.label().to_string(),
                     description: effort.description().to_string(),
                     value: effort.label().to_lowercase(),
@@ -165,28 +167,17 @@ impl Default for Verbosity {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+/// Supported input types that a model can accept.
 pub enum InputModality {
+    /// Plain text input.
     Text,
+    /// Image input.
     Image,
 }
 
 impl Default for InputModality {
     fn default() -> Self {
         Self::Text
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ModelVisibility {
-    Visible,
-    Hidden,
-    Experimental,
-}
-
-impl Default for ModelVisibility {
-    fn default() -> Self {
-        Self::Visible
     }
 }
 
@@ -213,117 +204,141 @@ impl Default for TruncationPolicyConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ModelConfig {
+/// Static metadata and capability flags for one model in the catalog.
+pub struct ModelPreset {
+    /// Stable model identifier used in config and requests. such as `claude-sonnet-20250425`
     pub slug: String,
+    /// Human-readable display name shown in the UI. such as `claude-sonnet-4.6`
     pub display_name: String,
+    /// Provider family that serves this model.
     pub provider: ProviderFamily,
+    /// Optional short description of the model.
     pub description: Option<String>,
-    pub default_reasoning_effort: ReasoningEffort,
-    pub supported_reasoning_efforts: Vec<ReasoningEffort>,
-    pub thinking_capability: Option<ThinkingCapability>,
+    /// Thinking control available for this model.
+    pub thinking_capability: ThinkingCapability,
+    /// Default reasoning effort selected for the model when no levels are exposed.
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+    /// Base system instructions bundled with the model.
     pub base_instructions: String,
+    /// Maximum context window in tokens.
     pub context_window: u32,
-    pub effective_context_window_percent: u8,
+    /// Percentage of the context window treated as effectively usable.
+    pub effective_context_window_percent: Option<u8>,
+    /// Optional token threshold for auto-compaction.
     pub auto_compact_token_limit: Option<u32>,
+    /// Policy used when truncating content for requests.
     pub truncation_policy: TruncationPolicyConfig,
+    /// Input types accepted by the model.
     pub input_modalities: Vec<InputModality>,
+    /// Whether the model supports original-resolution image detail.
     pub supports_image_detail_original: bool,
-    pub visibility: ModelVisibility,
-    pub supported_in_api: bool,
+    /// Whether the user configured API access for this model.
+    #[serde(rename = "supported_in_api")]
+    pub api_configured: bool,
+    /// Relative priority used when choosing a default visible model.
     pub priority: i32,
 }
 
-impl Default for ModelConfig {
+impl Default for ModelPreset {
     fn default() -> Self {
         Self {
             slug: String::new(),
             display_name: String::new(),
             provider: ProviderFamily::OpenAI,
             description: None,
-            default_reasoning_effort: ReasoningEffort::default(),
-            supported_reasoning_efforts: vec![ReasoningEffort::default()],
-            thinking_capability: None,
+            thinking_capability: ThinkingCapability::Disabled,
+            default_reasoning_effort: Some(ReasoningEffort::default()),
             base_instructions: String::new(),
             context_window: 200_000,
-            effective_context_window_percent: 90,
+            effective_context_window_percent: None,
             auto_compact_token_limit: None,
             truncation_policy: TruncationPolicyConfig::default(),
             input_modalities: vec![InputModality::default()],
             supports_image_detail_original: false,
-            visibility: ModelVisibility::default(),
-            supported_in_api: true,
+            api_configured: true,
             priority: 0,
         }
     }
 }
 
-impl ModelConfig {
-    pub fn reasoning_effort_options(&self) -> Vec<ReasoningEffortOption> {
-        let mut options = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-
-        let push_effort =
-            |effort: &ReasoningEffort,
-             options: &mut Vec<ReasoningEffortOption>,
-             seen: &mut std::collections::HashSet<ReasoningEffort>| {
-                if seen.insert(*effort) {
-                    options.push(ReasoningEffortOption::new(*effort, effort.description()));
-                }
-            };
-
-        push_effort(&self.default_reasoning_effort, &mut options, &mut seen);
-        for effort in &self.supported_reasoning_efforts {
-            push_effort(effort, &mut options, &mut seen);
+impl ModelPreset {
+    pub fn reasoning_effort_options(&self) -> Vec<ReasoningEffortPreset> {
+        match &self.thinking_capability {
+            ThinkingCapability::Levels(levels) => levels
+                .iter()
+                .copied()
+                .map(|effort| ReasoningEffortPreset::new(effort, effort.description()))
+                .collect(),
+            _ => self
+                .default_reasoning_effort
+                .iter()
+                .copied()
+                .map(|effort| ReasoningEffortPreset::new(effort, effort.description()))
+                .collect(),
         }
-        options
     }
 
     pub fn effective_thinking_capability(&self) -> ThinkingCapability {
-        self.thinking_capability
-            .clone()
-            .unwrap_or_else(|| ThinkingCapability::Levels(self.supported_reasoning_efforts.clone()))
+        self.thinking_capability.clone()
+    }
+
+    pub fn effective_context_window_percent(&self) -> u8 {
+        self.effective_context_window_percent.unwrap_or(95)
+    }
+
+    pub fn default_thinking_selection(&self) -> Option<String> {
+        match &self.thinking_capability {
+            ThinkingCapability::Disabled => None,
+            ThinkingCapability::Toggle => Some(String::from("enabled")),
+            ThinkingCapability::Levels(levels) => self
+                .default_reasoning_effort
+                .or_else(|| levels.first().copied())
+                .map(|effort| effort.label().to_lowercase()),
+        }
     }
 
     pub fn nearest_supported_reasoning_effort(&self, target: ReasoningEffort) -> ReasoningEffort {
-        nearest_effort(target, &self.supported_reasoning_efforts)
+        match &self.thinking_capability {
+            ThinkingCapability::Levels(levels) if !levels.is_empty() => {
+                nearest_effort(target, levels)
+            }
+            _ => self.default_reasoning_effort.unwrap_or(target),
+        }
     }
 }
 
 /// Provides read-only access to model definitions and turn-resolution behavior.
 pub trait ModelCatalog: Send + Sync {
-    fn list_visible(&self) -> Vec<&ModelConfig>;
-    fn get(&self, slug: &str) -> Option<&ModelConfig>;
-    fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&ModelConfig, ModelConfigError>;
+    fn list_visible(&self) -> Vec<&ModelPreset>;
+    fn get(&self, slug: &str) -> Option<&ModelPreset>;
+    fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&ModelPreset, ModelPresetError>;
 }
 
 #[derive(Debug, Clone)]
 pub struct InMemoryModelCatalog {
-    models: Vec<ModelConfig>,
+    models: Vec<ModelPreset>,
 }
 
 impl InMemoryModelCatalog {
-    pub fn new(models: Vec<ModelConfig>) -> Self {
+    pub fn new(models: Vec<ModelPreset>) -> Self {
         Self { models }
     }
 }
 
 impl ModelCatalog for InMemoryModelCatalog {
-    fn list_visible(&self) -> Vec<&ModelConfig> {
-        self.models
-            .iter()
-            .filter(|model| model.visibility == ModelVisibility::Visible)
-            .collect()
+    fn list_visible(&self) -> Vec<&ModelPreset> {
+        self.models.iter().collect()
     }
 
-    fn get(&self, slug: &str) -> Option<&ModelConfig> {
+    fn get(&self, slug: &str) -> Option<&ModelPreset> {
         self.models.iter().find(|model| model.slug == slug)
     }
 
-    fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&ModelConfig, ModelConfigError> {
+    fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&ModelPreset, ModelPresetError> {
         if let Some(slug) = requested {
             return self
                 .get(slug)
-                .ok_or_else(|| ModelConfigError::ModelNotFound {
+                .ok_or_else(|| ModelPresetError::ModelNotFound {
                     slug: slug.to_string(),
                 });
         }
@@ -331,12 +346,12 @@ impl ModelCatalog for InMemoryModelCatalog {
         self.list_visible()
             .into_iter()
             .max_by_key(|model| model.priority)
-            .ok_or(ModelConfigError::NoVisibleModels)
+            .ok_or(ModelPresetError::NoVisibleModels)
     }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ModelConfigError {
+pub enum ModelPresetError {
     #[error("model not found: {slug}")]
     ModelNotFound { slug: String },
     #[error("no visible models available")]
@@ -348,22 +363,21 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        InMemoryModelCatalog, InputModality, ModelCatalog, ModelConfig, ModelVisibility,
-        ProviderFamily, ReasoningEffort, TruncationPolicyConfig,
+        InMemoryModelCatalog, InputModality, ModelCatalog, ModelPreset, ProviderFamily,
+        ReasoningEffort, ThinkingCapability, TruncationPolicyConfig,
     };
 
-    fn model(slug: &str, priority: i32, visibility: ModelVisibility) -> ModelConfig {
-        ModelConfig {
+    fn model(slug: &str, priority: i32) -> ModelPreset {
+        ModelPreset {
             slug: slug.into(),
             display_name: slug.into(),
             provider: ProviderFamily::Anthropic,
             description: None,
-            default_reasoning_effort: ReasoningEffort::Medium,
-            supported_reasoning_efforts: vec![ReasoningEffort::Medium],
-            thinking_capability: None,
+            thinking_capability: ThinkingCapability::Disabled,
+            default_reasoning_effort: Some(ReasoningEffort::Medium),
             base_instructions: String::new(),
             context_window: 200_000,
-            effective_context_window_percent: 90,
+            effective_context_window_percent: None,
             auto_compact_token_limit: None,
             truncation_policy: TruncationPolicyConfig {
                 default_max_chars: 8_000,
@@ -374,27 +388,14 @@ mod tests {
             },
             input_modalities: vec![InputModality::Text],
             supports_image_detail_original: false,
-            visibility,
-            supported_in_api: true,
+            api_configured: true,
             priority,
         }
     }
 
     #[test]
-    fn resolve_for_turn_uses_highest_priority_visible_default() {
-        let catalog = InMemoryModelCatalog::new(vec![
-            model("hidden", 100, ModelVisibility::Hidden),
-            model("visible-low", 1, ModelVisibility::Visible),
-            model("visible-high", 10, ModelVisibility::Visible),
-        ]);
-
-        let resolved = catalog.resolve_for_turn(None).expect("resolve default");
-        assert_eq!(resolved.slug, "visible-high");
-    }
-
-    #[test]
     fn resolve_for_turn_honors_requested_slug() {
-        let catalog = InMemoryModelCatalog::new(vec![model("test", 1, ModelVisibility::Visible)]);
+        let catalog = InMemoryModelCatalog::new(vec![model("test", 1)]);
         let resolved = catalog
             .resolve_for_turn(Some("test"))
             .expect("resolve explicit");
