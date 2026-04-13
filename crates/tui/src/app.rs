@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
-use clawcr_core::{BuiltinModelCatalog, ModelCatalog};
+use clawcr_core::{PresetModelCatalog, ModelCatalog};
 use clawcr_provider::ProviderFamily;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
@@ -103,7 +103,7 @@ pub(crate) struct TuiApp {
     /// Background query worker owned by the UI.
     pub(crate) worker: QueryWorkerHandle,
     /// Built-in model catalog used for onboarding and model selection.
-    pub(crate) model_catalog: BuiltinModelCatalog,
+    pub(crate) model_catalog: PresetModelCatalog,
     /// Persisted model entries available for switching in the composer popup.
     pub(crate) saved_models: Vec<SavedModelEntry>,
     /// Whether the app should open the model picker on startup.
@@ -159,7 +159,7 @@ pub struct InteractiveTuiConfig {
     /// Environment overrides applied to the spawned stdio server process.
     pub server_env: Vec<(String, String)>,
     /// Built-in model catalog used for onboarding and model selection.
-    pub model_catalog: BuiltinModelCatalog,
+    pub model_catalog: PresetModelCatalog,
     /// Persisted model entries available for switching in the composer popup.
     pub saved_models: Vec<SavedModelEntry>,
     /// Whether to open the model picker on startup.

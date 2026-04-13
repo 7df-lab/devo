@@ -22,7 +22,7 @@ use crate::{
     events::{ModelListEntry, ThinkingListEntry},
     slash::SlashCommandSpec,
 };
-use clawcr_core::{BuiltinModelCatalog, ModelCatalog};
+use clawcr_core::{PresetModelCatalog, ModelCatalog};
 use textwrap::{Options, wrap};
 use unicode_width::UnicodeWidthStr;
 
@@ -35,8 +35,8 @@ const MAX_TEXT_OVERLAY_HEIGHT: u16 = 12;
 const BRAND_HEADER_HEIGHT: u16 = 6;
 static GIT_BRANCH_CACHE: LazyLock<Mutex<HashMap<String, Option<String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static BUILTIN_MODEL_CATALOG: LazyLock<Option<BuiltinModelCatalog>> =
-    LazyLock::new(|| BuiltinModelCatalog::load().ok());
+static BUILTIN_MODEL_CATALOG: LazyLock<Option<PresetModelCatalog>> =
+    LazyLock::new(|| PresetModelCatalog::load().ok());
 
 pub(crate) fn draw(frame: &mut Frame, app: &TuiApp, inline_mode: bool) {
     if inline_mode {

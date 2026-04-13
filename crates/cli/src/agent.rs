@@ -1,12 +1,12 @@
 use anyhow::Result;
-use clawcr_core::{BuiltinModelCatalog, load_config, resolve_provider_settings};
+use clawcr_core::{PresetModelCatalog, load_config, resolve_provider_settings};
 use clawcr_provider::ProviderFamily;
 use clawcr_tui::{InteractiveTuiConfig, SavedModelEntry, TerminalMode, run_interactive_tui};
 
 /// Runs the interactive coding-agent entrypoint.
 pub async fn run_agent(force_onboarding: bool, no_alt_screen: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let model_catalog = BuiltinModelCatalog::load()?;
+    let model_catalog = PresetModelCatalog::load()?;
     let stored_config = load_config().unwrap_or_default();
     let onboarding_mode = force_onboarding
         || (stored_config.anthropic.is_empty()

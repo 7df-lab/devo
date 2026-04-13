@@ -1,7 +1,7 @@
 mod records;
 
 pub use clawcr_protocol::{
-    ItemId, SessionId, SessionTitleFinalSource, SessionTitleState, TurnId, TurnStatus, TurnUsage,
+    ItemId, SessionId, SessionTitleState, TurnId, TurnStatus, TurnUsage,
 };
 pub use records::{
     ApprovalDecisionItem, ApprovalRequestItem, CompactionSnapshotLine, ItemLine, ItemRecord,

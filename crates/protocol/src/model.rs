@@ -5,6 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strum_macros::{Display, EnumIter};
 
+use crate::truncation::TruncationPolicyConfig;
+
 /// OpenAI models support reasoning effort.
 /// See <https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning>
 #[derive(
@@ -113,6 +115,7 @@ pub struct ThinkingPreset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ThinkingCapability {
     /// Model thinking cannot be controlled.
     Disabled,
@@ -181,26 +184,6 @@ impl Default for InputModality {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TruncationPolicyConfig {
-    pub default_max_chars: usize,
-    pub tool_output_max_chars: usize,
-    pub user_input_max_chars: usize,
-    pub binary_placeholder: String,
-    pub preserve_json_shape: bool,
-}
-
-impl Default for TruncationPolicyConfig {
-    fn default() -> Self {
-        Self {
-            default_max_chars: 8_000,
-            tool_output_max_chars: 16_000,
-            user_input_max_chars: 32_000,
-            binary_placeholder: "[binary]".into(),
-            preserve_json_shape: true,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -211,24 +194,37 @@ pub struct ModelPreset {
     /// Human-readable display name shown in the UI. such as `claude-sonnet-4.6`
     pub display_name: String,
     /// Provider family that serves this model.
-    pub provider: ProviderFamily,
+    pub provider_family: ProviderFamily,
     /// Optional short description of the model.
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub description: Option<String>,
     /// Thinking control available for this model.
+    #[serde(
+        default = "default_thinking_capability",
+        deserialize_with = "deserialize_thinking_capability"
+    )]
     pub thinking_capability: ThinkingCapability,
     /// Default reasoning effort selected for the model when no levels are exposed.
+    #[serde(
+        default = "default_reasoning_effort",
+        alias = "default_reasoning_level",
+        deserialize_with = "deserialize_reasoning_effort_option"
+    )]
     pub default_reasoning_effort: Option<ReasoningEffort>,
     /// Base system instructions bundled with the model.
     pub base_instructions: String,
     /// Maximum context window in tokens.
+    #[serde(default = "default_context_window")]
     pub context_window: u32,
     /// Percentage of the context window treated as effectively usable.
     pub effective_context_window_percent: Option<u8>,
     /// Optional token threshold for auto-compaction.
     pub auto_compact_token_limit: Option<u32>,
     /// Policy used when truncating content for requests.
+    #[serde(default, deserialize_with = "crate::truncation::deserialize_truncation_policy_config")]
     pub truncation_policy: TruncationPolicyConfig,
     /// Input types accepted by the model.
+    #[serde(default = "default_input_modalities")]
     pub input_modalities: Vec<InputModality>,
     /// Whether the model supports original-resolution image detail.
     pub supports_image_detail_original: bool,
@@ -252,7 +248,7 @@ impl Default for ModelPreset {
         Self {
             slug: String::new(),
             display_name: String::new(),
-            provider: ProviderFamily::OpenAI,
+            provider_family: ProviderFamily::OpenAI,
             description: None,
             thinking_capability: ThinkingCapability::Disabled,
             default_reasoning_effort: Some(ReasoningEffort::default()),
@@ -263,7 +259,7 @@ impl Default for ModelPreset {
             truncation_policy: TruncationPolicyConfig::default(),
             input_modalities: vec![InputModality::default()],
             supports_image_detail_original: false,
-            api_configured: true,
+            api_configured: false,
             temperature: None,
             top_p: None,
             top_k: None,
@@ -316,6 +312,65 @@ impl ModelPreset {
             }
             _ => self.default_reasoning_effort.unwrap_or(target),
         }
+    }
+}
+
+fn default_reasoning_effort() -> Option<ReasoningEffort> {
+    Some(ReasoningEffort::default())
+}
+
+fn default_context_window() -> u32 {
+    200_000
+}
+
+fn default_input_modalities() -> Vec<InputModality> {
+    vec![InputModality::Text, InputModality::Image]
+}
+
+fn default_thinking_capability() -> ThinkingCapability {
+    ThinkingCapability::Disabled
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    }))
+}
+
+fn deserialize_reasoning_effort_option<'de, D>(
+    deserializer: D,
+) -> Result<Option<ReasoningEffort>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(default_reasoning_effort()),
+        serde_json::Value::String(text) if text.trim().is_empty() => Ok(default_reasoning_effort()),
+        other => serde_json::from_value(other)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
+fn deserialize_thinking_capability<'de, D>(deserializer: D) -> Result<ThinkingCapability, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(default_thinking_capability()),
+        serde_json::Value::String(text) if text.trim().is_empty() => Ok(default_thinking_capability()),
+        other => serde_json::from_value(other).map_err(serde::de::Error::custom),
     }
 }
 
@@ -383,7 +438,7 @@ mod tests {
         ModelPreset {
             slug: slug.into(),
             display_name: slug.into(),
-            provider: ProviderFamily::Anthropic,
+            provider_family: ProviderFamily::Anthropic,
             description: None,
             thinking_capability: ThinkingCapability::Disabled,
             default_reasoning_effort: Some(ReasoningEffort::Medium),
@@ -392,11 +447,8 @@ mod tests {
             effective_context_window_percent: None,
             auto_compact_token_limit: None,
             truncation_policy: TruncationPolicyConfig {
-                default_max_chars: 8_000,
-                tool_output_max_chars: 16_000,
-                user_input_max_chars: 32_000,
-                binary_placeholder: "[binary]".into(),
-                preserve_json_shape: true,
+                mode: crate::TruncationMode::Tokens,
+                limit: 10000,
             },
             input_modalities: vec![InputModality::Text],
             supports_image_detail_original: false,
