@@ -9,10 +9,10 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
 use clawcr_core::PresetModelCatalog;
-use clawcr_provider::{
-    ModelProviderSDK, ModelRequest, ModelResponse, ResponseContent, ResponseMetadata, StopReason,
-    StreamEvent, Usage,
+use clawcr_protocol::{
+    ModelRequest, ModelResponse, ResponseContent, ResponseMetadata, StopReason, StreamEvent, Usage,
 };
+use clawcr_provider::ModelProviderSDK;
 use clawcr_server::{ClientTransportKind, ServerRuntime, ServerRuntimeDependencies};
 use clawcr_tools::ToolRegistry;
 

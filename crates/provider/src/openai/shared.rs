@@ -1,7 +1,6 @@
+use clawcr_protocol::{RequestRole, ToolDefinition};
 use serde_json::{Value, json};
 use tracing::warn;
-
-use crate::{RequestRole, ToolDefinition};
 
 use super::capabilities::{OpenAIReasoningMode, OpenAIRequestProfile};
 use super::{OpenAIReasoningEffort, OpenAIRole};

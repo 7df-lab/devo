@@ -10,8 +10,8 @@ use clawcr_core::{SessionId, TurnId, TurnStatus};
 use clawcr_server::{
     InputItem, ItemEnvelope, ItemEventPayload, ItemKind, ServerEvent, SessionHistoryItem,
     SessionHistoryItemKind, SessionListParams, SessionResumeParams, SessionStartParams,
-    SessionTitleUpdateParams, StdioServerClient, StdioServerClientConfig, TurnEventPayload,
-    TurnInterruptParams, TurnStartParams,
+    SessionTitleUpdateParams, StdioServerClient, StdioServerClientConfig, SystemPromptMode,
+    TurnEventPayload, TurnInterruptParams, TurnStartParams, TurnToolsMode,
 };
 
 use crate::events::{SessionListEntry, TranscriptItem, TranscriptItemKind, WorkerEvent};
@@ -260,6 +260,8 @@ async fn run_worker_inner(
                             session_id: active_session_id,
                             input: vec![InputItem::Text { text: prompt }],
                             model: Some(model.clone()),
+                            system_prompt: SystemPromptMode::Default,
+                            tools: TurnToolsMode::Include,
                             thinking: thinking_selection.clone(),
                             sandbox: None,
                             approval_policy: None,
@@ -881,6 +883,8 @@ async fn validate_provider_connection(
                     text: "Reply with OK only.".to_string(),
                 }],
                 model: Some(model.to_string()),
+                system_prompt: SystemPromptMode::Omit,
+                tools: TurnToolsMode::Omit,
                 thinking: None,
                 sandbox: None,
                 approval_policy: None,

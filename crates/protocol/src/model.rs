@@ -16,8 +16,9 @@
 //! - raw preset/config concerns live in `clawcr-core`
 //! - this module describes runtime state and runtime-facing interfaces only
 //!
-use clawcr_provider::ProviderFamily;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::fmt;
 
 use crate::{
     ReasoningEffort, ReasoningEffortPreset, ResolvedThinkingRequest, ThinkingCapability,
@@ -38,6 +39,72 @@ impl Default for Verbosity {
     }
 }
 
+/// Sampling controls and model-selection hints shared across adapters.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SamplingControls {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+}
+
+/// A message in the request to the model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestMessage {
+    pub role: String,
+    pub content: Vec<RequestContent>,
+}
+
+/// Full request to the model provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRequest {
+    pub model: String,
+    pub system: Option<String>,
+    pub messages: Vec<RequestMessage>,
+    pub max_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolDefinition>>,
+    #[serde(default)]
+    pub sampling: SamplingControls,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<Value>,
+}
+
+/// A tool definition sent to the model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+/// A content block within a message sent to the model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum RequestContent {
+    #[serde(rename = "text")]
+    Text { text: String },
+
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 /// Supported input types that a model can accept.
@@ -51,6 +118,38 @@ pub enum InputModality {
 impl Default for InputModality {
     fn default() -> Self {
         Self::Text
+    }
+}
+
+/// High-level provider families supported by the provider layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderFamily {
+    /// OpenAI chat completions, Responses, and OpenAI-compatible vendors.
+    OpenAI,
+    /// Anthropic Messages API and Anthropic-compatible vendors.
+    Anthropic,
+}
+
+impl ProviderFamily {
+    /// Returns the stable wire label for this provider family.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAI => "openai",
+            Self::Anthropic => "anthropic",
+        }
+    }
+}
+
+impl fmt::Display for ProviderFamily {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<ProviderFamily> for &'static str {
+    fn from(value: ProviderFamily) -> Self {
+        value.as_str()
     }
 }
 
@@ -85,11 +184,11 @@ pub struct Model {
     /// Whether the model supports original-resolution image detail.
     pub supports_image_detail_original: bool,
     /// Default temperature to use when the model does not override it.
-    pub temperature: Option<f32>,
+    pub temperature: Option<f64>,
     /// Default nucleus sampling value to use when the model does not override it.
-    pub top_p: Option<f32>,
+    pub top_p: Option<f64>,
     /// Default top-k sampling value to use when the model does not override it.
-    pub top_k: Option<f32>,
+    pub top_k: Option<f64>,
     /// Default maximum token limit for responses from this model.
     pub max_tokens: Option<u32>,
 }
@@ -302,7 +401,7 @@ pub enum ModelError {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ThinkingVariant, ThinkingVariantConfig};
+    use crate::{RequestRole, ThinkingVariant, ThinkingVariantConfig};
     use pretty_assertions::assert_eq;
 
     use super::{
@@ -442,5 +541,96 @@ mod tests {
 
         assert_eq!(resolved.request_model, "deepseek-chat");
         assert_eq!(resolved.request_thinking, None);
+    }
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tool_definition_serde_roundtrip() {
+        let def = ToolDefinition {
+            name: "bash".into(),
+            description: "run commands".into(),
+            input_schema: json!({"type": "object", "properties": {"cmd": {"type": "string"}}}),
+        };
+        let json = serde_json::to_string(&def).unwrap();
+        let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "bash");
+        assert_eq!(deserialized.description, "run commands");
+    }
+
+    #[test]
+    fn request_content_text_serde() {
+        let content = RequestContent::Text {
+            text: "hello".into(),
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains(r#""type":"text""#));
+        let deserialized: RequestContent = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            RequestContent::Text { text } => assert_eq!(text, "hello"),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn request_content_tool_result_skips_none_error() {
+        let content = RequestContent::ToolResult {
+            tool_use_id: "t1".into(),
+            content: "ok".into(),
+            is_error: None,
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(!json.contains("is_error"));
+    }
+
+    #[test]
+    fn request_content_tool_result_includes_error() {
+        let content = RequestContent::ToolResult {
+            tool_use_id: "t1".into(),
+            content: "failed".into(),
+            is_error: Some(true),
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("is_error"));
+    }
+
+    #[test]
+    fn model_request_serde() {
+        let req = ModelRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            system: Some("You are helpful.".into()),
+            messages: vec![RequestMessage {
+                role: "user".into(),
+                content: vec![RequestContent::Text { text: "hi".into() }],
+            }],
+            max_tokens: 4096,
+            tools: None,
+            sampling: SamplingControls::default(),
+            thinking: None,
+            extra_body: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("tools"));
+        assert!(!json.contains("temperature"));
+        let deserialized: ModelRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.model, "claude-sonnet-4-20250514");
+        assert_eq!(deserialized.messages.len(), 1);
+    }
+
+    #[test]
+    fn request_role_roundtrip() {
+        for role in [
+            RequestRole::System,
+            RequestRole::Developer,
+            RequestRole::User,
+            RequestRole::Assistant,
+            RequestRole::Tool,
+            RequestRole::Function,
+        ] {
+            let rendered = role.as_str();
+            let parsed: RequestRole = rendered.parse().unwrap();
+            assert_eq!(parsed, role);
+        }
     }
 }

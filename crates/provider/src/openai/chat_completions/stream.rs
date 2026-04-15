@@ -1,6 +1,10 @@
 use std::{collections::BTreeMap, pin::Pin};
 
 use anyhow::{Context, Result};
+use clawcr_protocol::{
+    ModelRequest, ModelResponse, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
+    StreamEvent, Usage,
+};
 use futures::{Stream, StreamExt};
 use reqwest_eventsource::{Event, EventSource};
 use serde::Deserialize;
@@ -13,10 +17,7 @@ use super::{
     OpenAIProvider, build_provider_specific_response_payload, build_request, parse_finish_reason,
     parse_tool_use,
 };
-use crate::{
-    ModelRequest, ModelResponse, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
-    StreamEvent, Usage,
-};
+use crate::text_normalization::{TaggedTextFragment, TaggedTextParser};
 
 /// <https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events>
 /// Represents a streamed chunk of a chat completion response returned by the model, based on the provided input.
@@ -62,13 +63,14 @@ pub(super) async fn completion_stream(
     request: ModelRequest,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
     let body = build_request(&request, true);
-    tracing::debug!(
+    tracing::info!(
         provider = "openai",
         api_base = %provider.base_url,
         model = %request.model,
         messages = request.messages.len(),
         tools = request.tools.as_ref().map_or(0, Vec::len),
         max_tokens = request.max_tokens,
+        http_body = %body,
         "sending openai streaming request"
     );
 
@@ -119,6 +121,8 @@ struct ChatCompletionStreamState {
     service_tier: Option<String>,
     system_fingerprint: Option<String>,
     text: StreamTextBlock,
+    text_parser: TaggedTextParser,
+    reasoning: StreamTextBlock,
     refusal: String,
     role: Option<String>,
     tool_calls: BTreeMap<u32, PartialToolCall>,
@@ -179,19 +183,21 @@ impl ChatCompletionStreamState {
             self.refusal.push_str(&refusal);
         }
 
+        if let Some(reasoning_content) = choice
+            .delta
+            .reasoning_content
+            .filter(|reasoning_content| !reasoning_content.is_empty())
+        {
+            self.push_reasoning_delta(reasoning_content, events);
+        }
+
         if let Some(content) = choice.delta.content.filter(|content| !content.is_empty()) {
-            if !self.text.started {
-                self.text.started = true;
-                events.push(StreamEvent::ContentBlockStart {
-                    index: 0,
-                    content: ResponseContent::Text(String::new()),
-                });
+            for fragment in self.text_parser.consume(&content) {
+                match fragment {
+                    TaggedTextFragment::Text(text) => self.push_text_delta(text, events),
+                    TaggedTextFragment::Reasoning(text) => self.push_reasoning_delta(text, events),
+                }
             }
-            self.text.value.push_str(&content);
-            events.push(StreamEvent::TextDelta {
-                index: 0,
-                text: content,
-            });
         }
 
         for tool_call_delta in choice.delta.tool_calls {
@@ -199,12 +205,42 @@ impl ChatCompletionStreamState {
         }
 
         if let Some(reason) = choice.finish_reason {
+            for fragment in self.text_parser.finish() {
+                match fragment {
+                    TaggedTextFragment::Text(text) => self.push_text_delta(text, events),
+                    TaggedTextFragment::Reasoning(text) => self.push_reasoning_delta(text, events),
+                }
+            }
             self.finish_reason = Some(parse_finish_reason(&reason));
             self.choice_metadata
                 .entry(choice_index)
                 .or_default()
                 .finish_reason = Some(reason);
         }
+    }
+
+    fn push_text_delta(&mut self, text: String, events: &mut Vec<StreamEvent>) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.text.started {
+            self.text.started = true;
+            events.push(StreamEvent::TextStart { index: 0 });
+        }
+        self.text.value.push_str(&text);
+        events.push(StreamEvent::TextDelta { index: 0, text });
+    }
+
+    fn push_reasoning_delta(&mut self, text: String, events: &mut Vec<StreamEvent>) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.reasoning.started {
+            self.reasoning.started = true;
+            events.push(StreamEvent::ReasoningStart { index: 1 });
+        }
+        self.reasoning.value.push_str(&text);
+        events.push(StreamEvent::ReasoningDelta { index: 1, text });
     }
 
     fn apply_tool_call_delta(
@@ -255,24 +291,22 @@ impl ChatCompletionStreamState {
 
         if !entry.started && tool_call_delta_starts_block(entry) {
             entry.started = true;
-            events.push(StreamEvent::ContentBlockStart {
+            events.push(StreamEvent::ToolCallStart {
                 index: content_index,
-                content: ResponseContent::ToolUse {
-                    id: entry.id.clone(),
-                    name: entry.name.clone(),
-                    input: entry.kind.empty_input(),
-                },
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                input: entry.kind.empty_input(),
             });
         }
 
         if let Some(arguments) = function_arguments_delta {
-            events.push(StreamEvent::InputJsonDelta {
+            events.push(StreamEvent::ToolCallInputDelta {
                 index: content_index,
                 partial_json: arguments,
             });
         }
         if let Some(input) = custom_input_delta {
-            events.push(StreamEvent::InputJsonDelta {
+            events.push(StreamEvent::ToolCallInputDelta {
                 index: content_index,
                 partial_json: input,
             });
@@ -281,6 +315,12 @@ impl ChatCompletionStreamState {
 
     fn metadata(&self) -> ResponseMetadata {
         let mut metadata = ResponseMetadata::default();
+
+        if !self.reasoning.value.is_empty() {
+            metadata.extras.push(ResponseExtra::ReasoningText {
+                text: self.reasoning.value.clone(),
+            });
+        }
 
         if let Some(payload) = self.provider_specific_payload() {
             metadata.extras.push(ResponseExtra::ProviderSpecific {
@@ -336,7 +376,11 @@ impl ChatCompletionStreamState {
             audio: None,
             function_call: None,
             tool_calls: self.provider_tool_calls(),
-            reasoning_content: None,
+            reasoning_content: if self.reasoning.value.is_empty() {
+                None
+            } else {
+                Some(self.reasoning.value.clone())
+            },
         };
 
         if self.choice_metadata.is_empty()
@@ -551,6 +595,8 @@ struct ChatCompletionStreamDelta {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     refusal: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ChatCompletionStreamToolCallDelta>,
@@ -629,13 +675,7 @@ mod tests {
             ]
         })));
         assert_eq!(events.len(), 2);
-        assert!(matches!(
-            &events[0],
-            StreamEvent::ContentBlockStart {
-                index: 0,
-                content: ResponseContent::Text(text),
-            } if text.is_empty()
-        ));
+        assert!(matches!(&events[0], StreamEvent::TextStart { index: 0 }));
         assert!(matches!(
             &events[1],
             StreamEvent::TextDelta { index: 0, text } if text == "Hello"
@@ -690,10 +730,8 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(
             &events[0],
-            StreamEvent::ContentBlockStart {
-                index: 1,
-                content: ResponseContent::ToolUse { id, name, input },
-            } if id == "call_123" && name == "get_weather" && input == &json!({})
+            StreamEvent::ToolCallStart { index: 1, id, name, input }
+            if id == "call_123" && name == "get_weather" && input == &json!({})
         ));
 
         let events = state.apply_chunk(parse_chunk(json!({
@@ -717,7 +755,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(
             &events[0],
-            StreamEvent::InputJsonDelta {
+            StreamEvent::ToolCallInputDelta {
                 index: 1,
                 partial_json,
             } if partial_json == "{\"city\":\"Boston\"}"
@@ -866,10 +904,8 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(
             &events[0],
-            StreamEvent::ContentBlockStart {
-                index: 1,
-                content: ResponseContent::ToolUse { id, name, .. },
-            } if id == "call_mix" && name == "lookup_weather"
+            StreamEvent::ToolCallStart { index: 1, id, name, .. }
+            if id == "call_mix" && name == "lookup_weather"
         ));
 
         let events = state.apply_chunk(parse_chunk(json!({
@@ -897,7 +933,7 @@ mod tests {
         ));
         assert!(matches!(
             &events[1],
-            StreamEvent::InputJsonDelta { index: 1, partial_json }
+            StreamEvent::ToolCallInputDelta { index: 1, partial_json }
             if partial_json == "{\"city\":\"Boston\"}"
         ));
 
@@ -934,14 +970,12 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(
             &events[0],
-            StreamEvent::ContentBlockStart {
-                index: 1,
-                content: ResponseContent::ToolUse { id, name, input },
-            } if id == "call_custom" && name == "draft_sql" && input == &json!("")
+            StreamEvent::ToolCallStart { index: 1, id, name, input }
+            if id == "call_custom" && name == "draft_sql" && input == &json!("")
         ));
         assert!(matches!(
             &events[1],
-            StreamEvent::InputJsonDelta { index: 1, partial_json }
+            StreamEvent::ToolCallInputDelta { index: 1, partial_json }
             if partial_json == "select *"
         ));
 
@@ -958,5 +992,61 @@ mod tests {
 
     fn parse_chunk(value: Value) -> ChatCompletionStreamChunk {
         serde_json::from_value(value).expect("valid stream chunk")
+    }
+
+    #[test]
+    fn reasoning_content_and_tagged_text_emit_reasoning_events() {
+        let mut state = ChatCompletionStreamState::default();
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "id": "chatcmpl-reasoning",
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": "internal plan",
+                        "content": "<think>hidden</think>visible"
+                    },
+                    "finish_reason": "stop"
+                }
+            ]
+        })));
+
+        assert_eq!(events.len(), 5);
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ReasoningStart { index: 1 }
+        ));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::ReasoningDelta { index: 1, text } if text == "internal plan"
+        ));
+        assert!(matches!(
+            &events[2],
+            StreamEvent::ReasoningDelta { index: 1, text } if text == "hidden"
+        ));
+        assert!(matches!(&events[3], StreamEvent::TextStart { index: 0 }));
+        assert!(matches!(
+            &events[4],
+            StreamEvent::TextDelta { index: 0, text } if text == "visible"
+        ));
+
+        let response = state.into_response();
+        assert_eq!(response.id, "chatcmpl-reasoning");
+        assert_eq!(
+            response.content,
+            vec![ResponseContent::Text("visible".into())]
+        );
+        assert_eq!(response.stop_reason, Some(StopReason::EndTurn));
+        assert_eq!(response.usage, Usage::default());
+        assert!(response.metadata.extras.iter().any(|extra| matches!(
+            extra,
+            ResponseExtra::ReasoningText { text } if text == "internal planhidden"
+        )));
+        assert!(response.metadata.extras.iter().any(|extra| matches!(
+            extra,
+            ResponseExtra::ProviderSpecific { provider, payload }
+            if provider == "openai"
+                && payload["choices"][0]["index"] == json!(0)
+        )));
     }
 }

@@ -2,24 +2,27 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clawcr_protocol::ResolvedThinkingRequest;
+use clawcr_protocol::{
+    ModelRequest, ResolvedThinkingRequest, ResponseContent, ResponseExtra, SamplingControls,
+    StopReason, StreamEvent,
+};
 use futures::StreamExt;
 use serde_json::json;
 use tokio::time::sleep;
 use tracing::{debug, info, info_span, warn};
 
-use clawcr_provider::{
-    ModelProviderSDK, ModelRequest, ResponseContent, SamplingControls, StopReason, StreamEvent,
-};
+use clawcr_provider::ModelProviderSDK;
 use clawcr_tools::{ToolCall, ToolContext, ToolOrchestrator, ToolRegistry};
 
-use crate::{AgentError, ContentBlock, Message, Role, SessionState, TurnConfig};
+use crate::{AgentError, ContentBlock, Message, Role, SessionState, TurnConfig, TurnToolsMode};
 
 /// Events emitted during a query for the caller (CLI/UI) to observe.
 #[derive(Debug, Clone)]
 pub enum QueryEvent {
     /// Incremental text from the assistant.
     TextDelta(String),
+    /// Incremental reasoning text from the assistant.
+    ReasoningDelta(String),
     /// Incremental token usage update from the provider stream.
     UsageDelta {
         input_tokens: usize,
@@ -320,11 +323,15 @@ pub async fn query(
         info!("starting turn");
 
         // Build model request
-        let system = build_system_prompt(
-            &turn_config.model.base_instructions,
-            &memory_content,
-            &session.cwd,
-        );
+        let system = match &turn_config.system_prompt {
+            crate::SystemPromptMode::Default => build_system_prompt(
+                &turn_config.model.base_instructions,
+                &memory_content,
+                &session.cwd,
+            ),
+            crate::SystemPromptMode::Inline { text } => text.clone(),
+            crate::SystemPromptMode::Omit => String::new(),
+        };
 
         // resolve thinking request parameter
         let ResolvedThinkingRequest {
@@ -350,7 +357,10 @@ pub async fn query(
                 .map_or(session.config.token_budget.max_output_tokens, |value| {
                     value as usize
                 }),
-            tools: Some(registry.tool_definitions()),
+            tools: match turn_config.tools {
+                TurnToolsMode::Include => Some(registry.tool_definitions()),
+                TurnToolsMode::Omit => None,
+            },
             sampling: SamplingControls {
                 temperature: turn_config.model.temperature.map(f64::from),
                 top_p: turn_config.model.top_p.map(f64::from),
@@ -426,28 +436,37 @@ pub async fn query(
         };
 
         let mut assistant_text = String::new();
-        let mut tool_uses: Vec<(String, String, String)> = Vec::new(); // (id, name, json_accum)
+        let mut reasoning_text = String::new();
+        let mut tool_uses: Vec<(String, String, serde_json::Value, String, bool)> = Vec::new();
+        let mut final_response = None;
         let mut stop_reason = None;
 
         while let Some(event) = stream.next().await {
             match event {
+                Ok(StreamEvent::TextStart { .. }) => {}
                 Ok(StreamEvent::TextDelta { text, .. }) => {
                     assistant_text.push_str(&text);
                     emit(QueryEvent::TextDelta(text));
                 }
-                Ok(StreamEvent::ContentBlockStart {
-                    content: ResponseContent::ToolUse { id, name, .. },
-                    ..
-                }) => {
-                    tool_uses.push((id, name, String::new()));
+                Ok(StreamEvent::ReasoningStart { .. }) => {}
+                Ok(StreamEvent::ReasoningDelta { text, .. }) => {
+                    reasoning_text.push_str(&text);
+                    emit(QueryEvent::ReasoningDelta(text));
                 }
-                Ok(StreamEvent::InputJsonDelta { partial_json, .. }) => {
+                Ok(StreamEvent::ToolCallStart {
+                    id, name, input, ..
+                }) => {
+                    tool_uses.push((id, name, input, String::new(), false));
+                }
+                Ok(StreamEvent::ToolCallInputDelta { partial_json, .. }) => {
                     if let Some(last) = tool_uses.last_mut() {
-                        last.2.push_str(&partial_json);
+                        last.3.push_str(&partial_json);
+                        last.4 = true;
                     }
                 }
                 Ok(StreamEvent::MessageDone { response }) => {
                     stop_reason = response.stop_reason.clone();
+                    final_response = Some(response.clone());
 
                     // 1.11: Accumulate all usage counters at completion time.
                     session.total_input_tokens += response.usage.input_tokens;
@@ -473,7 +492,6 @@ pub async fn query(
                         cache_read_input_tokens: usage.cache_read_input_tokens,
                     });
                 }
-                Ok(_) => {}
                 Err(e) => {
                     warn!(
                         provider = provider.name(),
@@ -483,6 +501,50 @@ pub async fn query(
                         "stream error"
                     );
                     return Err(AgentError::Provider(e));
+                }
+            }
+        }
+
+        if let Some(response) = &final_response {
+            if assistant_text.is_empty() {
+                assistant_text = response
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ResponseContent::Text(text) => Some(text.as_str()),
+                        ResponseContent::ToolUse { .. } => None,
+                    })
+                    .collect();
+            }
+            if tool_uses.is_empty() {
+                tool_uses = response
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ResponseContent::ToolUse { id, name, input } => Some((
+                            id.clone(),
+                            name.clone(),
+                            input.clone(),
+                            String::new(),
+                            false,
+                        )),
+                        ResponseContent::Text(_) => None,
+                    })
+                    .collect();
+            }
+            if reasoning_text.is_empty() {
+                let final_reasoning = response
+                    .metadata
+                    .extras
+                    .iter()
+                    .filter_map(|extra| match extra {
+                        ResponseExtra::ReasoningText { text } => Some(text.as_str()),
+                        ResponseExtra::ProviderSpecific { .. } => None,
+                    })
+                    .collect::<String>();
+                if !final_reasoning.is_empty() {
+                    emit(QueryEvent::ReasoningDelta(final_reasoning.clone()));
+                    reasoning_text = final_reasoning;
                 }
             }
         }
@@ -498,9 +560,12 @@ pub async fn query(
 
         let tool_calls: Vec<ToolCall> = tool_uses
             .into_iter()
-            .map(|(id, name, json_str)| {
-                let input = serde_json::from_str(&json_str)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            .map(|(id, name, initial_input, json_str, saw_delta)| {
+                let input = if saw_delta {
+                    serde_json::from_str(&json_str).unwrap_or(initial_input)
+                } else {
+                    initial_input
+                };
                 emit(QueryEvent::ToolUseStart {
                     id: id.clone(),
                     name: name.clone(),
@@ -588,19 +653,19 @@ mod tests {
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use futures::Stream;
-    use serde_json::json;
-
-    use clawcr_provider::{
-        ModelRequest, ModelResponse, ProviderFamily, ResponseContent, StopReason, StreamEvent,
-        Usage,
+    use clawcr_protocol::{
+        ModelRequest, ModelResponse, ProviderFamily, ResponseContent, ResponseExtra,
+        ResponseMetadata, StopReason, StreamEvent, Usage,
     };
     use clawcr_safety::legacy_permissions::PermissionMode;
     use clawcr_tools::{Tool, ToolOrchestrator, ToolOutput, ToolRegistry};
+    use futures::Stream;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
 
-    use super::query;
+    use super::{QueryEvent, query};
     use crate::{
-        ContentBlock, Message, Model, ReasoningEffort, SessionConfig, SessionState,
+        ContentBlock, Message, Model, ReasoningEffort, Role, SessionConfig, SessionState,
         ThinkingCapability, ThinkingImplementation, ThinkingVariant, ThinkingVariantConfig,
         TruncationMode, TruncationPolicyConfig, TurnConfig,
     };
@@ -623,15 +688,13 @@ mod tests {
 
             let events = if request_number == 0 {
                 vec![
-                    Ok(StreamEvent::ContentBlockStart {
+                    Ok(StreamEvent::ToolCallStart {
                         index: 0,
-                        content: ResponseContent::ToolUse {
-                            id: "tool-1".into(),
-                            name: "mutating_tool".into(),
-                            input: json!({ "value": 1 }),
-                        },
+                        id: "tool-1".into(),
+                        name: "mutating_tool".into(),
+                        input: json!({}),
                     }),
-                    Ok(StreamEvent::InputJsonDelta {
+                    Ok(StreamEvent::ToolCallInputDelta {
                         index: 0,
                         partial_json: r#"{"value":1}"#.into(),
                     }),
@@ -774,6 +837,8 @@ mod tests {
             &mut session,
             &TurnConfig {
                 model: Model::default(),
+                system_prompt: crate::SystemPromptMode::Default,
+                tools: crate::TurnToolsMode::Include,
                 thinking_selection: None,
             },
             &SingleToolUseProvider {
@@ -872,6 +937,8 @@ mod tests {
             &mut session,
             &TurnConfig {
                 model,
+                system_prompt: crate::SystemPromptMode::Default,
+                tools: crate::TurnToolsMode::Include,
                 thinking_selection: Some("enabled".into()),
             },
             &provider,
@@ -886,5 +953,133 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].model, "kimi-k2.5-thinking");
         assert_eq!(captured[0].thinking, None);
+    }
+
+    #[tokio::test]
+    async fn query_omits_system_prompt_and_tools_when_turn_config_requests_it() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = CapturingProvider {
+            requests: Arc::clone(&requests),
+        };
+        let registry = Arc::new(ToolRegistry::new());
+        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("hello"));
+
+        query(
+            &mut session,
+            &TurnConfig {
+                model: Model::default(),
+                system_prompt: crate::SystemPromptMode::Omit,
+                tools: crate::TurnToolsMode::Omit,
+                thinking_selection: None,
+            },
+            &provider,
+            registry,
+            &orchestrator,
+            None,
+        )
+        .await
+        .expect("query should succeed without a system prompt");
+
+        let captured = requests.lock().expect("lock requests");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].system, None);
+        assert!(captured[0].tools.is_none());
+    }
+
+    #[tokio::test]
+    async fn query_emits_reasoning_without_polluting_assistant_message_content() {
+        struct ReasoningProvider;
+
+        #[async_trait]
+        impl clawcr_provider::ModelProviderSDK for ReasoningProvider {
+            async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+                unreachable!("tests stream responses only")
+            }
+
+            async fn completion_stream(
+                &self,
+                _request: ModelRequest,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+                Ok(Box::pin(futures::stream::iter(vec![
+                    Ok(StreamEvent::ReasoningStart { index: 0 }),
+                    Ok(StreamEvent::ReasoningDelta {
+                        index: 0,
+                        text: "plan".into(),
+                    }),
+                    Ok(StreamEvent::TextStart { index: 1 }),
+                    Ok(StreamEvent::TextDelta {
+                        index: 1,
+                        text: "final".into(),
+                    }),
+                    Ok(StreamEvent::MessageDone {
+                        response: ModelResponse {
+                            id: "resp-3".into(),
+                            content: vec![ResponseContent::Text("final".into())],
+                            stop_reason: Some(StopReason::EndTurn),
+                            usage: Usage::default(),
+                            metadata: ResponseMetadata {
+                                extras: vec![ResponseExtra::ReasoningText {
+                                    text: "plan".into(),
+                                }],
+                            },
+                        },
+                    }),
+                ])))
+            }
+
+            fn name(&self) -> &str {
+                "reasoning-provider"
+            }
+        }
+
+        let registry = Arc::new(ToolRegistry::new());
+        let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("hello"));
+        let seen_events = Arc::new(Mutex::new(Vec::new()));
+        let callback_events = Arc::clone(&seen_events);
+        let callback = Arc::new(move |event: QueryEvent| {
+            callback_events.lock().expect("lock callback").push(event);
+        });
+
+        query(
+            &mut session,
+            &TurnConfig {
+                model: Model::default(),
+                system_prompt: crate::SystemPromptMode::Default,
+                tools: crate::TurnToolsMode::Include,
+                thinking_selection: None,
+            },
+            &ReasoningProvider,
+            registry,
+            &orchestrator,
+            Some(callback),
+        )
+        .await
+        .expect("query should succeed");
+
+        let events = seen_events.lock().expect("lock events");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            QueryEvent::ReasoningDelta(text) if text == "plan"
+        )));
+        drop(events);
+
+        let assistant_message = session
+            .messages
+            .iter()
+            .find(|message| matches!(message.role, Role::Assistant))
+            .expect("assistant message");
+        assert_eq!(
+            assistant_message,
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: "final".into(),
+                }],
+            }
+        );
     }
 }

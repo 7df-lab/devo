@@ -31,6 +31,10 @@ pub struct TurnStartParams {
     pub session_id: SessionId,
     pub input: Vec<InputItem>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub system_prompt: SystemPromptMode,
+    #[serde(default)]
+    pub tools: TurnToolsMode,
     pub thinking: Option<String>,
     pub sandbox: Option<String>,
     pub approval_policy: Option<String>,
@@ -76,6 +80,25 @@ pub enum TurnKind {
     Review,
     ManualCompaction,
     Other(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SystemPromptMode {
+    #[default]
+    Default,
+    Inline {
+        text: String,
+    },
+    Omit,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnToolsMode {
+    #[default]
+    Include,
+    Omit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

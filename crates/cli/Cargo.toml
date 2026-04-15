@@ -13,6 +13,7 @@ path = "src/main.rs"
 clawcr-core = { workspace = true }
 clawcr-tools = { workspace = true }
 clawcr-provider = { workspace = true }
+clawcr-protocol = { workspace = true }
 clawcr-safety = { workspace = true }
 clawcr-tasks = { workspace = true }
 clawcr-utils = { workspace = true }

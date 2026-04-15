@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use clawcr_protocol::ToolDefinition;
+
 use crate::Tool;
 
 /// Central registry of available tools.
@@ -33,10 +35,10 @@ impl ToolRegistry {
     }
 
     /// Build tool definitions suitable for the model API.
-    pub fn tool_definitions(&self) -> Vec<clawcr_provider::ToolDefinition> {
+    pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .values()
-            .map(|t| clawcr_provider::ToolDefinition {
+            .map(|t| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 input_schema: t.input_schema(),

@@ -1,7 +1,14 @@
-use std::{collections::HashMap, pin::Pin};
+use std::{
+    collections::{BTreeMap, HashMap},
+    pin::Pin,
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use clawcr_protocol::{
+    ModelRequest, ModelResponse, ProviderFamily, RequestContent, RequestMessage, ResponseContent,
+    ResponseExtra, ResponseMetadata, StopReason, StreamEvent, Usage,
+};
 use futures::{Stream, StreamExt};
 use reqwest::Client;
 use reqwest::header::{CONTENT_TYPE, HeaderValue};
@@ -11,11 +18,7 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use super::AnthropicAIRole;
-use crate::{
-    ModelProviderSDK, ModelRequest, ModelResponse, ProviderAdapter, ProviderCapabilities,
-    ProviderFamily, RequestContent, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
-    StreamEvent, Usage, merge_extra_body,
-};
+use crate::{ModelProviderSDK, ProviderAdapter, ProviderCapabilities, merge_extra_body};
 
 /// <https://platform.claude.com/docs/en/api/messages>
 /// Anthropic provider backed by the official HTTP API.
@@ -271,7 +274,8 @@ impl ModelProviderSDK for AnthropicProvider {
             let mut input_tokens = 0usize;
             let mut output_tokens = 0usize;
             let mut stop_reason: Option<StopReason> = None;
-            let mut content_blocks: Vec<ResponseContent> = Vec::new();
+            let mut content_blocks: BTreeMap<usize, ResponseContent> = BTreeMap::new();
+            let mut reasoning_blocks: BTreeMap<usize, String> = BTreeMap::new();
             let mut tool_json: HashMap<usize, String> = HashMap::new();
 
             futures::pin_mut!(event_source);
@@ -311,19 +315,56 @@ impl ModelProviderSDK for AnthropicProvider {
                                 let Some(content_block) = data.get("content_block") else {
                                     continue;
                                 };
-                                let Some(parsed) = parse_content_block(content_block) else {
-                                    continue;
-                                };
-                                while content_blocks.len() <= index as usize {
-                                    content_blocks.push(ResponseContent::Text(String::new()));
-                                }
-                                content_blocks[index as usize] = parsed.clone();
-                                if matches!(parsed, ResponseContent::ToolUse { .. }) {
-                                    tool_json.insert(index as usize, String::new());
-                                }
-                                yield StreamEvent::ContentBlockStart {
-                                    index: index as usize,
-                                    content: parsed,
+                                let block: AnthropicResponseContentBlock =
+                                    serde_json::from_value(content_block.clone()).map_err(|error| {
+                                        anyhow::anyhow!(
+                                            "failed to parse anthropic content block start: {error}"
+                                        )
+                                    })?;
+                                match block.kind.as_str() {
+                                    "text" => {
+                                        content_blocks.insert(
+                                            index as usize,
+                                            ResponseContent::Text(String::new()),
+                                        );
+                                        yield StreamEvent::TextStart {
+                                            index: index as usize,
+                                        };
+                                    }
+                                    "tool_use" | "server_tool_use" => {
+                                        let Some(id) = block.id.clone() else {
+                                            continue;
+                                        };
+                                        let Some(name) = block.name.clone() else {
+                                            continue;
+                                        };
+                                        let input = block
+                                            .input
+                                            .clone()
+                                            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                                        content_blocks.insert(
+                                            index as usize,
+                                            ResponseContent::ToolUse {
+                                                id: id.clone(),
+                                                name: name.clone(),
+                                                input: input.clone(),
+                                            },
+                                        );
+                                        tool_json.insert(index as usize, String::new());
+                                        yield StreamEvent::ToolCallStart {
+                                            index: index as usize,
+                                            id,
+                                            name,
+                                            input,
+                                        };
+                                    }
+                                    "thinking" => {
+                                        reasoning_blocks.insert(index as usize, String::new());
+                                        yield StreamEvent::ReasoningStart {
+                                            index: index as usize,
+                                        };
+                                    }
+                                    _ => {}
                                 };
                             }
                             "content_block_delta" => {
@@ -341,11 +382,26 @@ impl ModelProviderSDK for AnthropicProvider {
                                             .and_then(Value::as_str)
                                             .unwrap_or_default();
                                         if let Some(ResponseContent::Text(value)) =
-                                            content_blocks.get_mut(index as usize)
+                                            content_blocks.get_mut(&(index as usize))
                                         {
                                             value.push_str(text);
                                         }
                                         yield StreamEvent::TextDelta {
+                                            index: index as usize,
+                                            text: text.to_string(),
+                                        };
+                                    }
+                                    Some("thinking_delta") => {
+                                        let text = delta
+                                            .get("thinking")
+                                            .or_else(|| delta.get("text"))
+                                            .and_then(Value::as_str)
+                                            .unwrap_or_default();
+                                        if let Some(value) = reasoning_blocks.get_mut(&(index as usize))
+                                        {
+                                            value.push_str(text);
+                                        }
+                                        yield StreamEvent::ReasoningDelta {
                                             index: index as usize,
                                             text: text.to_string(),
                                         };
@@ -358,7 +414,7 @@ impl ModelProviderSDK for AnthropicProvider {
                                         if let Some(acc) = tool_json.get_mut(&(index as usize)) {
                                             acc.push_str(partial_json);
                                         }
-                                        yield StreamEvent::InputJsonDelta {
+                                        yield StreamEvent::ToolCallInputDelta {
                                             index: index as usize,
                                             partial_json: partial_json.to_string(),
                                         };
@@ -371,7 +427,7 @@ impl ModelProviderSDK for AnthropicProvider {
                                 if let Some(json_str) = tool_json.remove(&index) {
                                     if let Ok(parsed) = serde_json::from_str(&json_str) {
                                         if let Some(ResponseContent::ToolUse { input, .. }) =
-                                            content_blocks.get_mut(index)
+                                            content_blocks.get_mut(&index)
                                         {
                                             *input = parsed;
                                         }
@@ -402,7 +458,7 @@ impl ModelProviderSDK for AnthropicProvider {
                             "message_stop" => {
                                 let response = ModelResponse {
                                     id: message_id.clone(),
-                                    content: content_blocks.clone(),
+                                    content: content_blocks.into_values().collect(),
                                     stop_reason: stop_reason.clone(),
                                     usage: Usage {
                                         input_tokens,
@@ -410,7 +466,14 @@ impl ModelProviderSDK for AnthropicProvider {
                                         cache_creation_input_tokens: None,
                                         cache_read_input_tokens: None,
                                     },
-                                    metadata: ResponseMetadata::default(),
+                                    metadata: ResponseMetadata {
+                                        extras: reasoning_blocks
+                                            .values()
+                                            .filter(|text| !text.is_empty())
+                                            .cloned()
+                                            .map(|text| ResponseExtra::ReasoningText { text })
+                                            .collect(),
+                                    },
                                 };
                                 yield StreamEvent::MessageDone { response };
                                 return;
@@ -423,7 +486,7 @@ impl ModelProviderSDK for AnthropicProvider {
 
             let response = ModelResponse {
                 id: message_id,
-                content: content_blocks,
+                content: content_blocks.into_values().collect(),
                 stop_reason,
                 usage: Usage {
                     input_tokens,
@@ -431,7 +494,13 @@ impl ModelProviderSDK for AnthropicProvider {
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
                 },
-                metadata: ResponseMetadata::default(),
+                metadata: ResponseMetadata {
+                    extras: reasoning_blocks
+                        .into_values()
+                        .filter(|text| !text.is_empty())
+                        .map(|text| ResponseExtra::ReasoningText { text })
+                        .collect(),
+                },
             };
             yield StreamEvent::MessageDone { response };
         };
@@ -727,7 +796,7 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
     })
 }
 
-fn build_message(message: &crate::RequestMessage) -> AnthropicInputMessage {
+fn build_message(message: &RequestMessage) -> AnthropicInputMessage {
     let role = message
         .role
         .parse::<AnthropicAIRole>()
@@ -758,26 +827,6 @@ fn build_content_block(block: &RequestContent) -> AnthropicInputContentBlock {
             content: content.clone(),
             is_error: *is_error,
         },
-    }
-}
-
-fn parse_content_block(value: &Value) -> Option<ResponseContent> {
-    let block: AnthropicResponseContentBlock = serde_json::from_value(value.clone()).ok()?;
-    parse_streaming_content_block(&block)
-}
-
-fn parse_streaming_content_block(block: &AnthropicResponseContentBlock) -> Option<ResponseContent> {
-    match block.kind.as_str() {
-        "text" => Some(ResponseContent::Text(String::new())),
-        "tool_use" | "server_tool_use" => Some(ResponseContent::ToolUse {
-            id: block.id.clone()?,
-            name: block.name.clone()?,
-            input: block
-                .input
-                .clone()
-                .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
-        }),
-        _ => None,
     }
 }
 
@@ -883,14 +932,14 @@ fn build_thinking(level: &str) -> Option<AnthropicThinkingConfig> {
 
 #[cfg(test)]
 mod tests {
+    use clawcr_protocol::{
+        ModelRequest, RequestContent, RequestMessage, SamplingControls, ToolDefinition,
+    };
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
     use super::{build_request, parse_response, parse_stop_reason};
-    use crate::{
-        ModelRequest, RequestContent, RequestMessage, ResponseContent, ResponseExtra,
-        SamplingControls, StopReason, ToolDefinition,
-    };
+    use clawcr_protocol::{ResponseContent, ResponseExtra, StopReason};
 
     #[test]
     fn build_request_includes_sampling_tools_and_thinking() {

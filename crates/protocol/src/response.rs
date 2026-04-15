@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A content block in the model's response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ResponseContent {
     Text(String),
     ToolUse {
@@ -12,17 +12,16 @@ pub enum ResponseContent {
 }
 
 /// Token usage statistics.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
-    // Number of tokens in the prompt.
+    /// Number of tokens in the prompt.
     pub input_tokens: usize,
-    // Number of tokens in the generated completion.
+    /// Number of tokens in the generated completion.
     pub output_tokens: usize,
-    // The number of input tokens used to create the cache entry.
-    // (Only supported by Anthropic Provider SDK)
+    /// The number of input tokens used to create the cache entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<usize>,
-    // The number of input tokens read from the cache. / Cached tokens present in the prompt.
+    /// The number of input tokens read from the cache.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<usize>,
 }
@@ -34,17 +33,6 @@ pub enum StopReason {
     ToolUse,
     MaxTokens,
     StopSequence,
-}
-
-/// Complete model response (non-streaming).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelResponse {
-    pub id: String,
-    pub content: Vec<ResponseContent>,
-    pub stop_reason: Option<StopReason>,
-    pub usage: Usage,
-    #[serde(default)]
-    pub metadata: ResponseMetadata,
 }
 
 /// Optional provider-specific response data preserved alongside the shared IR.
@@ -66,18 +54,60 @@ pub struct ResponseMetadata {
     pub extras: Vec<ResponseExtra>,
 }
 
+/// Complete model response (non-streaming).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelResponse {
+    pub id: String,
+    pub content: Vec<ResponseContent>,
+    pub stop_reason: Option<StopReason>,
+    pub usage: Usage,
+    #[serde(default)]
+    pub metadata: ResponseMetadata,
+}
+
+/// Incremental events emitted during streaming.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StreamEvent {
+    /// Start of a new text block.
+    TextStart { index: usize },
+    /// Incremental text delta.
+    TextDelta { index: usize, text: String },
+    /// Start of a new reasoning block.
+    ReasoningStart { index: usize },
+    /// Incremental reasoning delta.
+    ReasoningDelta { index: usize, text: String },
+    /// A tool call started.
+    ToolCallStart {
+        index: usize,
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// Incremental JSON delta for tool input.
+    ToolCallInputDelta { index: usize, partial_json: String },
+    /// Usage update mid-stream.
+    UsageDelta(Usage),
+    /// The full message is complete.
+    MessageDone { response: ModelResponse },
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use pretty_assertions::assert_eq;
     use serde_json::json;
+
+    use super::{
+        ModelResponse, ResponseContent, ResponseExtra, ResponseMetadata, StopReason, StreamEvent,
+        Usage,
+    };
 
     #[test]
     fn usage_default() {
         let usage = Usage::default();
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 0);
-        assert!(usage.cache_creation_input_tokens.is_none());
-        assert!(usage.cache_read_input_tokens.is_none());
+        assert_eq!(usage.cache_creation_input_tokens, None);
+        assert_eq!(usage.cache_read_input_tokens, None);
     }
 
     #[test]
@@ -88,7 +118,7 @@ mod tests {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         };
-        let json = serde_json::to_string(&usage).unwrap();
+        let json = serde_json::to_string(&usage).expect("serialize usage");
         assert!(!json.contains("cache_creation"));
         assert!(!json.contains("cache_read"));
     }
@@ -101,8 +131,9 @@ mod tests {
             StopReason::MaxTokens,
             StopReason::StopSequence,
         ] {
-            let json = serde_json::to_string(&reason).unwrap();
-            let deserialized: StopReason = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(&reason).expect("serialize stop reason");
+            let deserialized: StopReason =
+                serde_json::from_str(&json).expect("deserialize stop reason");
             assert_eq!(deserialized, reason);
         }
     }
@@ -121,8 +152,9 @@ mod tests {
             },
             metadata: ResponseMetadata::default(),
         };
-        let json = serde_json::to_string(&resp).unwrap();
-        let deserialized: ModelResponse = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&resp).expect("serialize response");
+        let deserialized: ModelResponse =
+            serde_json::from_str(&json).expect("deserialize response");
         assert_eq!(deserialized.id, "msg-123");
         assert_eq!(deserialized.content.len(), 1);
         assert_eq!(deserialized.stop_reason, Some(StopReason::EndTurn));
@@ -135,8 +167,9 @@ mod tests {
             name: "bash".into(),
             input: json!({"cmd": "ls"}),
         };
-        let json = serde_json::to_string(&content).unwrap();
-        let deserialized: ResponseContent = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&content).expect("serialize content");
+        let deserialized: ResponseContent =
+            serde_json::from_str(&json).expect("deserialize content");
         match deserialized {
             ResponseContent::ToolUse { id, name, input } => {
                 assert_eq!(id, "tu-1");
@@ -146,24 +179,29 @@ mod tests {
             _ => panic!("expected ToolUse"),
         }
     }
-}
 
-/// Incremental events emitted during streaming.
-#[derive(Debug, Clone)]
-pub enum StreamEvent {
-    /// Start of a new content block.
-    ContentBlockStart {
-        index: usize,
-        content: ResponseContent,
-    },
-    /// Incremental text delta.
-    TextDelta { index: usize, text: String },
-    /// Incremental JSON delta for tool input.
-    InputJsonDelta { index: usize, partial_json: String },
-    /// A content block is complete.
-    ContentBlockStop { index: usize },
-    /// The full message is complete.
-    MessageDone { response: ModelResponse },
-    /// Usage update mid-stream.
-    UsageDelta(Usage),
+    #[test]
+    fn response_extra_reasoning_text_roundtrip() {
+        let extra = ResponseExtra::ReasoningText {
+            text: "internal reasoning".into(),
+        };
+        let json = serde_json::to_string(&extra).expect("serialize response extra");
+        let deserialized: ResponseExtra =
+            serde_json::from_str(&json).expect("deserialize response extra");
+        assert_eq!(deserialized, extra);
+    }
+
+    #[test]
+    fn stream_event_tool_call_roundtrip() {
+        let event = StreamEvent::ToolCallStart {
+            index: 1,
+            id: "call_123".into(),
+            name: "get_weather".into(),
+            input: json!({}),
+        };
+        let json = serde_json::to_string(&event).expect("serialize stream event");
+        let deserialized: StreamEvent =
+            serde_json::from_str(&json).expect("deserialize stream event");
+        assert_eq!(deserialized, event);
+    }
 }

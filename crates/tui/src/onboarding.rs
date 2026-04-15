@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clawcr_provider::ProviderFamily;
+use clawcr_protocol::ProviderFamily;
 use clawcr_utils::find_clawcr_home;
 use toml::Value;
 

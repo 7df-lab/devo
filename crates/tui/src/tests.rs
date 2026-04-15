@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clawcr_core::{Model, PresetModelCatalog, SessionId};
-use clawcr_provider::ProviderFamily;
+use clawcr_protocol::ProviderFamily;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pretty_assertions::assert_eq;
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};

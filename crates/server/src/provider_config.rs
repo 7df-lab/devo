@@ -3,9 +3,8 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use clawcr_provider::{
-    ModelProviderSDK, ProviderFamily, anthropic::AnthropicProvider, openai::OpenAIProvider,
-};
+use clawcr_protocol::ProviderFamily;
+use clawcr_provider::{ModelProviderSDK, anthropic::AnthropicProvider, openai::OpenAIProvider};
 
 /// Resolved provider bootstrap owned by the server runtime.
 pub struct ResolvedServerProvider {

@@ -1,7 +1,6 @@
-use clawcr_provider::{
+use clawcr_protocol::{
     ModelRequest, RequestContent, RequestMessage, ResponseContent, SamplingControls,
 };
-
 /// Derives a cheap deterministic provisional session title from the first user prompt.
 pub(crate) fn derive_provisional_title(input: &str) -> Option<String> {
     let mut text = strip_code_fences(input);
@@ -145,10 +144,10 @@ fn sentence_case(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use clawcr_protocol::ResponseContent;
     use pretty_assertions::assert_eq;
 
     use super::{derive_provisional_title, normalize_generated_title};
-    use clawcr_provider::ResponseContent;
 
     #[test]
     fn derives_title_from_plain_text_prompt() {

@@ -1,9 +1,10 @@
 use std::fmt;
 use std::str::FromStr;
 
-use clawcr_provider::{RequestContent, RequestMessage};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::{RequestContent, RequestMessage};
 
 macro_rules! define_id {
     ($name:ident) => {

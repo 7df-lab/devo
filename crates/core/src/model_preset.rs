@@ -15,11 +15,11 @@
 //! - turn execution should consume `Model`, not `ModelPreset`
 //! - loading policy and catalog access live in `model_catalog.rs`; this file only defines the raw shape
 //!
+use clawcr_protocol::ProviderFamily;
 use clawcr_protocol::{
     InputModality, Model, ReasoningEffort, ThinkingCapability, ThinkingImplementation,
     TruncationPolicyConfig,
 };
-use clawcr_provider::ProviderFamily;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,11 +73,11 @@ pub struct ModelPreset {
     #[serde(rename = "supported_in_api")]
     pub api_configured: bool,
     /// Default temperature to use when the model does not override it.
-    pub temperature: Option<f32>,
+    pub temperature: Option<f64>,
     /// Default nucleus sampling value to use when the model does not override it.
-    pub top_p: Option<f32>,
+    pub top_p: Option<f64>,
     /// Default top-k sampling value to use when the model does not override it.
-    pub top_k: Option<f32>,
+    pub top_k: Option<f64>,
     /// Default maximum token limit for responses from this model.
     pub max_tokens: Option<u32>,
     /// Relative priority used when choosing a default visible model.

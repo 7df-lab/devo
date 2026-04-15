@@ -3,8 +3,8 @@ use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 use tokio::{sync::Mutex, task::JoinHandle};
 
 use clawcr_core::{
-    Model, ModelCatalog, SessionConfig, SessionId, SessionRecord, SessionState, TurnConfig,
-    default_base_instructions,
+    Model, ModelCatalog, SessionConfig, SessionId, SessionRecord, SessionState, SystemPromptMode,
+    TurnConfig, TurnToolsMode, default_base_instructions,
 };
 use clawcr_provider::ModelProviderSDK;
 use clawcr_tools::ToolRegistry;
@@ -71,10 +71,14 @@ impl ServerRuntimeDependencies {
     pub(crate) fn resolve_turn_config(
         &self,
         requested_model: Option<&str>,
+        system_prompt: SystemPromptMode,
+        tools: TurnToolsMode,
         thinking_selection: Option<String>,
     ) -> TurnConfig {
         TurnConfig {
             model: self.resolve_turn_model(requested_model),
+            system_prompt,
+            tools,
             thinking_selection,
         }
     }

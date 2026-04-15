@@ -4,26 +4,24 @@ Shared provider layer for model invocation.
 
 This crate defines:
 
-- a common request/response IR used by the rest of the project
+- provider adapter traits and concrete provider implementations
 - traits for provider SDK implementations
 - concrete adapters for OpenAI-family and Anthropic-family transports
 - provider capability metadata used by higher layers to shape requests
 
 ## What lives in this crate
 
-The crate is organized around three shared building blocks:
+The crate is organized around two main building blocks plus the provider-neutral
+protocol dependency:
 
-- `request.rs`
-  Defines the normalized request types:
+- `clawcr_protocol`
+  Owns the normalized provider-agnostic model I/O IR:
   - `ModelRequest`
   - `RequestMessage`
   - `RequestContent`
   - `SamplingControls`
   - `ToolDefinition`
   - `RequestRole`
-
-- `response.rs`
-  Defines the normalized response and streaming types:
   - `ModelResponse`
   - `ResponseContent`
   - `Usage`
@@ -32,6 +30,9 @@ The crate is organized around three shared building blocks:
   - `StreamEvent`
   - `StopReason`
 
+- `request.rs`
+  Defines provider-local request helpers such as extra-body merging.
+
 - `provider.rs`
   Defines the provider abstraction:
   - `ModelProviderSDK`
@@ -39,9 +40,10 @@ The crate is organized around three shared building blocks:
   - `ProviderFamily`
   - `ProviderCapabilities`
 
-In short, higher layers construct a `ModelRequest`, send it through a
-`ModelProviderSDK`, and receive either a complete `ModelResponse` or a stream
-of `StreamEvent` values.
+In short, higher layers construct a `clawcr_protocol::ModelRequest`, send it
+through a `ModelProviderSDK`, and receive either a complete
+`clawcr_protocol::ModelResponse` or a stream of `clawcr_protocol::StreamEvent`
+values.
 
 ## Provider families
 
@@ -146,15 +148,11 @@ Those concerns belong in higher-level crates such as `core`, `server`, and
 
 ## Public exports
 
-The crate root re-exports the shared request/response/provider types:
+The crate root re-exports the provider traits and capability types:
 
-- `clawcr_provider::ModelRequest`
-- `clawcr_provider::ModelResponse`
-- `clawcr_provider::StreamEvent`
 - `clawcr_provider::ModelProviderSDK`
 - `clawcr_provider::ProviderAdapter`
 - `clawcr_provider::ProviderCapabilities`
-- `clawcr_provider::ProviderFamily`
 
 It also exposes the provider family modules:
 
@@ -167,7 +165,7 @@ Today this crate ships:
 
 - one Anthropic transport
 - two OpenAI-family transports
-- a shared IR for requests, responses, and streaming
+- translation from provider wire formats into the shared protocol IR
 - typed request/response parsing inside each adapter
 
 If a new provider family or transport is added, it should follow the same

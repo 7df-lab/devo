@@ -668,9 +668,12 @@ impl ServerRuntime {
                 .model
                 .as_deref()
                 .or(session.summary.resolved_model.as_deref());
-            let turn_config = self
-                .deps
-                .resolve_turn_config(requested_model, params.thinking.clone());
+            let turn_config = self.deps.resolve_turn_config(
+                requested_model,
+                params.system_prompt.clone(),
+                params.tools.clone(),
+                params.thinking.clone(),
+            );
             let resolved_request = turn_config
                 .model
                 .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
@@ -1004,6 +1007,9 @@ impl ServerRuntime {
             let mut assistant_item_id = None;
             let mut assistant_item_seq = None;
             let mut assistant_text = String::new();
+            let mut reasoning_item_id = None;
+            let mut reasoning_item_seq = None;
+            let mut reasoning_text = String::new();
             let mut latest_usage: Option<TurnUsage> = None;
             let mut usage_base: Option<(usize, usize)> = None;
             while let Some(event) = event_rx.recv().await {
@@ -1045,6 +1051,43 @@ impl ServerRuntime {
                             .await;
                         let _ = item_seq;
                     }
+                    QueryEvent::ReasoningDelta(text) => {
+                        let (item_id, item_seq) = match (reasoning_item_id, reasoning_item_seq) {
+                            (Some(item_id), Some(item_seq)) => (item_id, item_seq),
+                            (None, None) => {
+                                let (item_id, item_seq) = runtime
+                                    .start_item(
+                                        session_id,
+                                        turn_for_events.turn_id,
+                                        ItemKind::Reasoning,
+                                        serde_json::json!({ "title": "Reasoning", "text": "" }),
+                                    )
+                                    .await;
+                                reasoning_item_id = Some(item_id);
+                                reasoning_item_seq = Some(item_seq);
+                                (item_id, item_seq)
+                            }
+                            _ => continue,
+                        };
+                        reasoning_text.push_str(&text);
+                        runtime
+                            .broadcast_event(ServerEvent::ItemDelta {
+                                delta_kind: ItemDeltaKind::ReasoningTextDelta,
+                                payload: ItemDeltaPayload {
+                                    context: EventContext {
+                                        session_id,
+                                        turn_id: Some(turn_for_events.turn_id),
+                                        item_id: Some(item_id),
+                                        seq: 0,
+                                    },
+                                    delta: text,
+                                    stream_index: None,
+                                    channel: None,
+                                },
+                            })
+                            .await;
+                        let _ = item_seq;
+                    }
                     QueryEvent::ToolUseStart { id, name, input } => {
                         if let (Some(item_id), Some(item_seq)) =
                             (assistant_item_id.take(), assistant_item_seq.take())
@@ -1066,6 +1109,27 @@ impl ServerRuntime {
                                 )
                                 .await;
                             assistant_text.clear();
+                        }
+                        if let (Some(item_id), Some(item_seq)) =
+                            (reasoning_item_id.take(), reasoning_item_seq.take())
+                        {
+                            runtime
+                                .complete_item(
+                                    session_id,
+                                    turn_for_events.turn_id,
+                                    item_id,
+                                    item_seq,
+                                    ItemKind::Reasoning,
+                                    TurnItem::Reasoning(TextItem {
+                                        text: reasoning_text.clone(),
+                                    }),
+                                    serde_json::json!({
+                                        "title": "Reasoning",
+                                        "text": reasoning_text,
+                                    }),
+                                )
+                                .await;
+                            reasoning_text.clear();
                         }
                         runtime
                             .emit_turn_item(
@@ -1177,6 +1241,21 @@ impl ServerRuntime {
                             text: assistant_text.clone(),
                         }),
                         serde_json::json!({ "title": "Assistant", "text": assistant_text }),
+                    )
+                    .await;
+            }
+            if let (Some(item_id), Some(item_seq)) = (reasoning_item_id, reasoning_item_seq) {
+                runtime
+                    .complete_item(
+                        session_id,
+                        turn_for_events.turn_id,
+                        item_id,
+                        item_seq,
+                        ItemKind::Reasoning,
+                        TurnItem::Reasoning(TextItem {
+                            text: reasoning_text.clone(),
+                        }),
+                        serde_json::json!({ "title": "Reasoning", "text": reasoning_text }),
                     )
                     .await;
             }

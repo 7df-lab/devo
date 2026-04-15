@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clawcr_provider::ProviderFamily;
+use clawcr_protocol::ProviderFamily;
 use serde::{Deserialize, Serialize};
 
 use clawcr_utils::current_user_config_file;

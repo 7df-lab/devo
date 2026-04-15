@@ -1,4 +1,5 @@
 pub use clawcr_protocol::{
-    ActiveTurnSteeringState, InputItem, SteerInputRecord, TurnInterruptParams, TurnInterruptResult,
-    TurnKind, TurnStartParams, TurnStartResult, TurnSteerParams, TurnSteerResult, TurnSummary,
+    ActiveTurnSteeringState, InputItem, SteerInputRecord, SystemPromptMode, TurnInterruptParams,
+    TurnInterruptResult, TurnKind, TurnStartParams, TurnStartResult, TurnSteerParams,
+    TurnSteerResult, TurnSummary, TurnToolsMode,
 };

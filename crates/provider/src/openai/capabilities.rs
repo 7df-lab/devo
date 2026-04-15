@@ -1,4 +1,4 @@
-use crate::RequestRole;
+use clawcr_protocol::RequestRole;
 
 /// Transport variants used to resolve OpenAI-family capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

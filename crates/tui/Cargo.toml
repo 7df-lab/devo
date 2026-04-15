@@ -15,6 +15,7 @@ clawcr-core = { workspace = true }
 clawcr-utils = { workspace = true }
 clawcr-server = { workspace = true }
 clawcr-provider = { workspace = true }
+clawcr-protocol = { workspace = true }
 crossterm = { workspace = true }
 futures = { workspace = true }
 ratatui = { workspace = true }

@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use clawcr_core::SessionId;
-use clawcr_provider::ProviderFamily;
+use clawcr_protocol::ProviderFamily;
 const TOOL_RESULT_FOLD_INITIAL_DELAY_MS: u64 = 420;
 const TOOL_RESULT_FOLD_STEP_DELAY_MS: u64 = 90;
 const TOOL_RESULT_FOLD_FINAL_STAGE: u8 = 3;
