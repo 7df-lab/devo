@@ -14,10 +14,15 @@ pub enum ResponseContent {
 /// Token usage statistics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
+    // Number of tokens in the prompt.
     pub input_tokens: usize,
+    // Number of tokens in the generated completion.
     pub output_tokens: usize,
+    // The number of input tokens used to create the cache entry.
+    // (Only supported by Anthropic Provider SDK)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<usize>,
+    // The number of input tokens read from the cache. / Cached tokens present in the prompt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<usize>,
 }

@@ -235,7 +235,8 @@ const MAX_RETRIES: usize = 3;
 /// - An unrecoverable error occurs
 /// TODO: Not sure should we put `provider: &dyn ModelProviderSDK` into runtime `Model`,
 /// so that the turn_config has the `provider`.
-/// TODO: The body of `query` 
+/// TODO: The body of `query` is too lengthy, we should move out `stream lop` out, I am
+/// not sure whether we should do this.
 pub async fn query(
     session: &mut SessionState,
     turn_config: &TurnConfig,
