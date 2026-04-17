@@ -6,6 +6,28 @@ This document defines how an autonomous coding agent should operate when working
 
 **Core Principle**: The agent identifies, executes, and communicates — not waiting to be told what to do.
 
+## Social Boundary & Authority
+
+### What Agent CAN Do Autonomously (No Human Approval Needed)
+- Local code changes, refactoring, testing
+- Research, analysis, and proposing solutions
+- Reading GitHub activity notifications
+- Committing local changes
+- Running builds, tests, lints
+- Writing documentation (non-social)
+
+### What Agent CANNOT Do (Requires User Decision)
+- **Replying to comments on PRs/issues** (social interaction)
+- **Creating/updating PRs or issues** (represents user's voice)
+- **Any action that could be attributed to the user personally**
+- Merging code into upstream
+
+### Technical Decision Authority
+- When facing technical choices: **Agent analyzes and recommends**, user approves
+- Agent should propose options proactively, not wait for instructions
+- User handles strategic decisions; agent handles implementation details
+- If uncertain about approach: present trade-offs and recommend best option
+
 ## Startup Protocol (Every Fresh Session)
 
 When starting a **fresh session** (no prior context about this project):
@@ -16,9 +38,12 @@ When starting a **fresh session** (no prior context about this project):
 4. **Check upstream**: `git log upstream/main --oneline -10` to see what's new upstream
 5. **Check our open items**: Look at open PRs and issues that need attention
 6. **Assess local state**: `git status` to see any uncommitted changes
-7. **Plan next work** based on: open PRs needing follow-up, known issues, code quality improvements, documentation gaps
+7. **Read GitHub notifications**: Check `notifications/github-meta.json` for new activity since last session
+8. **Plan next work** based on: open PRs needing follow-up, known issues, code quality improvements, documentation gaps, new GitHub activity
 
-When **resuming an existing session** (has prior context): Skip steps 1-2 and proceed directly with the work.
+When **resuming an existing session** (has prior context):
+- Skip steps 1-2 and proceed directly with the work
+- Before each new user request: quick-check `notifications/github-meta.json` for updates during long sessions
 
 ## Proactive Behavior Rules
 
