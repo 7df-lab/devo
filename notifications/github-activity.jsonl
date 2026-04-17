@@ -1,0 +1,100 @@
+{"timestamp":"2026-04-17T15:55:17Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"64eb42c","message":"Merge pull request #37 from bigmanBass666/feat/prompt-cli-only","author":"wangtsiao"}
+{"timestamp":"2026-04-17T13:37:45Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"ee84dad","message":"feat: add prompt subcommand, --model flag, doctor command, and request timeout","author":"wingIsCrazy"}
+{"timestamp":"2026-04-17T07:11:20Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"3200938","message":"Merge pull request #34 from 7df-lab/dev/wang","author":"wangtsiao"}
+{"timestamp":"2026-04-17T07:06:22Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"78d6357","message":"fix config BUG; add markdown support for TUI","author":"wangtsiao"}
+{"timestamp":"2026-04-16T07:52:44Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"ae60725","message":"add CONTRIBUTING.md","author":"wangtsiao"}
+{"timestamp":"2026-04-16T07:37:39Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"c9ed44f","message":"Merge pull request #27 from Distortedlogic/feature/skills","author":"wangtsiao"}
+{"timestamp":"2026-04-16T07:32:43Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"6bd6766","message":"feat: implement skills","author":"distortedlogic"}
+{"timestamp":"2026-04-16T06:26:04Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"c384c9c","message":"Merge pull request #33 from 7df-lab/dev/fix-thinking","author":"wangtsiao"}
+{"timestamp":"2026-04-16T06:25:26Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"eb69273","message":"Merge pull request #32 from 7df-lab/dev/refactor-0414","author":"wangtsiao"}
+{"timestamp":"2026-04-16T06:24:30Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"2ca51fb","message":"Merge pull request #31 from 7df-lab/dev/api-doc","author":"wangtsiao"}
+{"timestamp":"2026-04-16T06:23:01Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"32b5463","message":"feature: add openai reponses, chat completion api","author":"wangtsiao"}
+{"timestamp":"2026-04-16T06:23:01Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"e243110","message":"remove TurnToolMode ; SystemPromptMode; add a dedicated test function for model test","author":"wangtsiao"}
+{"timestamp":"2026-04-16T06:21:49Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"f039257","message":"refactor: move RequestContent,RequestMessage,","author":"wangtsiao"}
+{"timestamp":"2026-04-16T06:21:49Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"ccb6480","message":"simplify query.ts","author":"wangtsiao"}
+{"timestamp":"2026-04-16T06:21:49Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"a8f04ac","message":"seperate stream from openai/chat_comletions.ts","author":"wangtsiao"}
+{"timestamp":"2026-04-16T06:20:26Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"bd2883f","message":"remove temperature inside ModelRequest","author":"wangtsiao"}
+{"timestamp":"2026-04-16T06:20:26Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"acaad28","message":"add documentation to openai/chat_completions.ts;","author":"wangtsiao"}
+{"timestamp":"2026-04-16T06:20:25Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"30c7dfd","message":"review crates/core/src/query.rs","author":"wangtsiao"}
+{"timestamp":"2026-04-14T15:08:56Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"2853385","message":"Merge pull request #25 from 7df-lab/dev/tools0412","author":"wangtsiao"}
+{"timestamp":"2026-04-14T15:08:25Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"ea79b64","message":"rename model provider to model provider sdk; delete complete and stream;","author":"wangtsiao"}
+{"timestamp":"2026-04-13T16:43:27Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"c83d1c7","message":"Merge pull request #24 from 7df-lab/dev/tools0412","author":"wangtsiao"}
+{"timestamp":"2026-04-13T16:42:41Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"1917db7","message":"fix fmt; doc; test;","author":"wangtsiao"}
+{"timestamp":"2026-04-13T16:33:59Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"7cb0bad","message":"remove auto_compact_token_limit","author":"wangtsiao"}
+{"timestamp":"2026-04-13T16:29:47Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"f54a674","message":"add truncation policy","author":"wangtsiao"}
+{"timestamp":"2026-04-13T15:34:39Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"9ab0b59","message":"add temperature; top_p, top_k; max_tokens to model preset config","author":"wangtsiao"}
+{"timestamp":"2026-04-13T15:27:14Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"f819d95","message":"define ModelPreset","author":"wangtsiao"}
+{"timestamp":"2026-04-13T14:51:10Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"31c1f82","message":"delete ProviderKind","author":"wangtsiao"}
+{"timestamp":"2026-04-13T10:16:54Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"122e423","message":"update reason effort","author":"wangtsiao"}
+{"timestamp":"2026-04-12T17:05:52Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"167add6","message":"fix cargo doc","author":"wangtsiao"}
+{"timestamp":"2026-04-12T16:56:59Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"90cd3a1","message":"Merge pull request #23 from claw-cli/dev/0411config","author":"wangtsiao"}
+{"timestamp":"2026-04-12T15:53:37Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"4fca9dc","message":"client crate ; protocol crate","author":"wangtsiao"}
+{"timestamp":"2026-04-12T04:11:05Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"8c08c4f","message":"fix test; fix logging file name;","author":"wangtsiao"}
+{"timestamp":"2026-04-12T02:41:29Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"d1b2fe2","message":"align anthropic api and openai api","author":"wangtsiao"}
+{"timestamp":"2026-04-11T16:36:43Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"8eadb2a","message":"add openai/anthropic provider support","author":"wangtsiao"}
+{"timestamp":"2026-04-11T14:20:02Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"7ac1636","message":"take core/src/config as single config truth","author":"wangtsiao"}
+{"timestamp":"2026-04-11T03:06:55Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"5a36504","message":"Merge pull request #22 from claw-cli/dev/review0411","author":"wangtsiao"}
+{"timestamp":"2026-04-11T03:03:59Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"578c776","message":"fix apply_patch tool; fix tui;","author":"wangtsiao"}
+{"timestamp":"2026-04-10T17:46:33Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"208b2a3","message":"refactor","author":"wangtsiao"}
+{"timestamp":"2026-04-10T08:56:52Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"f7a1fde","message":"refactor cli","author":"wangtsiao"}
+{"timestamp":"2026-04-10T08:17:28Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"e2e5de7","message":"improve tui","author":"wangtsiao"}
+{"timestamp":"2026-04-10T07:33:53Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"6f43d86","message":"add tools","author":"wangtsiao"}
+{"timestamp":"2026-04-09T06:59:33Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"d48d1e1","message":"add i18n","author":"wangtsiao"}
+{"timestamp":"2026-04-09T06:56:37Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"da75dd5","message":"update i18n readme","author":"wangtsiao"}
+{"timestamp":"2026-04-09T06:52:49Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"c352d6a","message":"fix test","author":"wangtsiao"}
+{"timestamp":"2026-04-09T06:49:09Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"d22d299","message":"fix README.md","author":"wangtsiao"}
+{"timestamp":"2026-04-09T06:38:29Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"c77d274","message":"Merge pull request #20 from claw-cli/dev/thinking","author":"wangtsiao"}
+{"timestamp":"2026-04-09T06:37:13Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"9dbdeed","message":"update readme","author":"wangtsiao"}
+{"timestamp":"2026-04-09T06:08:18Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"ce28ca9","message":"remove goal","author":"wangtsiao"}
+{"timestamp":"2026-04-08T16:24:50Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"5191664","message":"try to add thinking but still not work","author":"wangtsiao"}
+{"timestamp":"2026-04-08T15:32:19Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"fd107d2","message":"update TUI","author":"wangtsiao"}
+{"timestamp":"2026-04-08T15:22:39Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"5c84be4","message":"add default base instructions","author":"wangtsiao"}
+{"timestamp":"2026-04-08T15:18:42Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"3e64dfb","message":"update defaut max_tokens","author":"wangtsiao"}
+{"timestamp":"2026-04-08T15:02:04Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"5253025","message":"Merge pull request #19 from claw-cli/dev/rock","author":"wangtsiao"}
+{"timestamp":"2026-04-08T14:59:17Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"2d1293d","message":"fix cargo check","author":"wangtsiao"}
+{"timestamp":"2026-04-08T14:56:45Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"9b25988","message":"add test note","author":"wangtsiao"}
+{"timestamp":"2026-04-08T14:55:22Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"4b227f5","message":"fix test","author":"wangtsiao"}
+{"timestamp":"2026-04-08T14:12:53Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"e420723","message":"cargo fmt","author":"wangtsiao"}
+{"timestamp":"2026-04-08T13:14:26Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"62be028","message":"upgrade","author":"wangtsiao"}
+{"timestamp":"2026-04-08T09:50:40Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"f08e9c3","message":"fix api base url issue","author":"wangtsiao"}
+{"timestamp":"2026-04-08T09:45:43Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"1e4aa83","message":"remove dead cli options","author":"wangtsiao"}
+{"timestamp":"2026-04-08T09:11:36Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"803d574","message":"(feature) add log tracing","author":"wangtsiao"}
+{"timestamp":"2026-04-08T08:44:27Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"b6db9fc","message":"refactor tui","author":"wangtsiao"}
+{"timestamp":"2026-04-08T08:08:33Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"6d92110","message":"improve onboarding","author":"wangtsiao"}
+{"timestamp":"2026-04-07T17:35:29Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"313c2b2","message":"Merge pull request #18 from claw-cli/dev/rock","author":"wangtsiao"}
+{"timestamp":"2026-04-07T17:32:45Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"32c811a","message":"fix ci:test","author":"wangtsiao"}
+{"timestamp":"2026-04-07T17:29:00Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"7af2882","message":"fmt","author":"wangtsiao"}
+{"timestamp":"2026-04-07T17:26:43Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"6f3d67b","message":"add onboarding","author":"wangtsiao"}
+{"timestamp":"2026-04-07T16:49:27Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"a0b1ca6","message":"support more model","author":"wangtsiao"}
+{"timestamp":"2026-04-07T16:26:20Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"9e02f1b","message":"improve TUI","author":"wangtsiao"}
+{"timestamp":"2026-04-07T15:50:07Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"ef966e8","message":"add model.json; add base instructions;","author":"wangtsiao"}
+{"timestamp":"2026-04-07T05:06:02Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"4af12b6","message":"change OpenAICompac to OpenAI","author":"wangtsiao"}
+{"timestamp":"2026-04-07T04:54:20Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"4129ab4","message":"remove '>' before slash options","author":"wangtsiao"}
+{"timestamp":"2026-04-06T17:01:54Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"4356719","message":"Merge pull request #15 from claw-cli/dev/rock","author":"wangtsiao"}
+{"timestamp":"2026-04-06T16:46:29Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"7540ae2","message":"remove cargo clippy from ci","author":"wangtsiao"}
+{"timestamp":"2026-04-06T16:45:01Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"ae85833","message":"add session to TUI; fix TUI bug;","author":"wangtsiao"}
+{"timestamp":"2026-04-06T13:28:21Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"274b505","message":"mordern TUI","author":"wangtsiao"}
+{"timestamp":"2026-04-06T10:13:22Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"2f5d404","message":"fix cargo clippy","author":"wangtsiao"}
+{"timestamp":"2026-04-06T10:10:19Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"1664055","message":"Merge pull request #14 from claw-cli/dev/rock","author":"wangtsiao"}
+{"timestamp":"2026-04-06T10:07:28Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"ca8e8b3","message":"cargo fmt","author":"wangtsiao"}
+{"timestamp":"2026-04-06T10:06:50Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"7fba7b1","message":"improve TUI/CLI","author":"wangtsiao"}
+{"timestamp":"2026-04-06T09:57:48Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"2188be6","message":"update tool call in TUI/CLI","author":"wangtsiao"}
+{"timestamp":"2026-04-06T09:46:35Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"fc0c665","message":"wire cli with server","author":"wangtsiao"}
+{"timestamp":"2026-04-06T09:20:45Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"5f9593e","message":"add subcommand to tui cli","author":"wangtsiao"}
+{"timestamp":"2026-04-06T09:04:22Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"9ae8922","message":"migrate cli to tui based","author":"wangtsiao"}
+{"timestamp":"2026-04-06T08:49:17Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"9b4ef41","message":"rename clawcr-cli to cli","author":"wangtsiao"}
+{"timestamp":"2026-04-06T08:33:41Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"c63ab0e","message":"add stdio and websocket to server","author":"wangtsiao"}
+{"timestamp":"2026-04-06T08:14:30Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"9672ed6","message":"command design","author":"wangtsiao"}
+{"timestamp":"2026-04-06T07:21:59Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"d9e483a","message":"move permission to safety","author":"wangtsiao"}
+{"timestamp":"2026-04-06T07:13:16Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"5ac0676","message":"try integration","author":"wangtsiao"}
+{"timestamp":"2026-04-06T07:12:39Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"cf31825","message":"add server","author":"wangtsiao"}
+{"timestamp":"2026-04-06T05:37:36Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"4575060","message":"add tools crate","author":"wangtsiao"}
+{"timestamp":"2026-04-06T05:37:12Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"39ba9ee","message":"add safety","author":"wangtsiao"}
+{"timestamp":"2026-04-06T05:23:05Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"d0fc53a","message":"add server","author":"wangtsiao"}
+{"timestamp":"2026-04-06T05:20:31Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"457dee2","message":"add config; model; converstaion;","author":"wangtsiao"}
+{"timestamp":"2026-04-06T05:04:54Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"1123464","message":"reviwed document","author":"wangtsiao"}
+{"timestamp":"2026-04-05T17:33:34Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"d6e4ec8","message":"Merge pull request #7 from claw-cli/dev/rock","author":"wangtsiao"}
+{"timestamp":"2026-04-05T17:31:44Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"b512d27","message":"add detail spec","author":"wangtsiao"}
+{"timestamp":"2026-04-05T15:45:45Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"d33849e","message":"add design-overview.md","author":"wangtsiao"}
+{"timestamp":"2026-04-02T16:36:01Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"63660ac","message":"fix(not utf8 output of powershell)","author":"wangtsiao"}
+{"timestamp":"2026-04-02T15:49:10Z","type":"upstream_commit","repo":"7df-lab/claw-code-rust","hash":"521997c","message":"fix(model name not readed from config file)","author":"wangtsiao"}
