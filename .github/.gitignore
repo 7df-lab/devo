@@ -1,8 +1,0 @@
-# Agent-specific files (do not submit to upstream PRs)
-AGENTS.md
-progress.txt
-notifications/
-
-# Planning and agent rules
-docs/plans/
-docs/agent-rules/
