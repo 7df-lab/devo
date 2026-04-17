@@ -1,0 +1,42 @@
+# Progress
+
+## Last Updated: 2026-04-17
+
+## Current Status
+
+### Open PRs
+| # | Title | Status |
+|---|-------|--------|
+| #37 | feat: prompt subcommand, --model flag, doctor command | OPEN - awaiting merge |
+
+### Open Issues
+| # | Title | Status |
+|---|-------|--------|
+| #35 | feat: non-interactive prompt mode | CLOSED (by PR #37) |
+| #36 | bug: CJK panic | OPEN - upstream says already fixed |
+
+### Streaming Fix
+- Status: LOCAL ONLY (not committed)
+- Files: `chat_completions.rs` (timeout→read_timeout), `stream.rs` (improved error messages)
+- Testing: Short prompts pass 5/5, long prompts intermittently fail
+- Root cause: NVIDIA NIM API instability + reqwest_eventsource compatibility
+- Recommendation: Keep local until verified stable
+
+## Recent Commits (local main)
+- `4a5d596` feat: add prompt subcommand, --model flag, doctor command, and request timeout
+- `a8aaf41` fix: panic on CJK text in streaming response (char boundary issue)
+
+## Upstream Activity
+- `3200938` (latest): Merge PR #34 (fix config BUG + markdown TUI)
+- `c9ed44f`: Merge PR #27: feat: implement skills (big feature by Distortedlogic)
+- Our local diverged from upstream at `ae60725`
+
+## Git Strategy
+- Branch: `main` (diverged from upstream)
+- PR branch: `feat/prompt-cli-only` → PR #37
+- Remote: `upstream` → 7df-lab/claw-code-rust, `origin` → bigmanBass666/claw-code-rust
+- **Commits are local-only until merged to upstream** - safe to commit frequently on local branches
+
+## Key Files Changed (local, uncommitted)
+- `AGENTS.md` - autonomous agent mode rules + commit-after-every-change rule
+- `progress.txt` - new project status tracking file
