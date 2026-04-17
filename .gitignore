@@ -1,9 +1,0 @@
-# Agent-specific files (do not submit to upstream PRs)
-# These are fork-maintenance only and should not appear in upstream PR diffs
-AGENTS.md
-progress.txt
-notifications/
-docs/plans/
-
-# Debug artifacts
-notifications/debug-log.txt

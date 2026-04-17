@@ -1,82 +1,81 @@
-# Progress
+# 进度记录
 
 ## Iteration 1: 2026-04-17
 
-### US-035 (Issue #35) COMPLETED - Non-interactive prompt mode
-- **PR**: #37 → **MERGED** into upstream main (commit 64eb42c)
+### US-035 (Issue #35) ✅ 完成 - 非交互式 prompt 模式
+- **PR**: #37 → **已合并**到上游 main (commit 64eb42c)
 - **Files**: `crates/cli/src/main.rs`, `crates/cli/src/agent.rs`, `crates/provider/src/openai/chat_completions.rs`
 - **Features**:
-  - `clawcr prompt <text>` - non-interactive subcommand (sends message, prints response, exits)
-  - `clawcr --model <name>` - global CLI flag to override default model
-  - `clawcr doctor` - diagnostic command (checks toolchain, config, provider, catalog)
-  - `CLAWCR_REQUEST_TIMEOUT` env var for HTTP timeout (default: 300s)
-- **Status**: ✅ COMPLETED
+  - `clawcr prompt <text>` - 非交互式子命令（发送消息、打印响应、退出）
+  - `clawcr --model <name>` - 全局 CLI 参数覆盖默认模型
+  - `clawcr doctor` - 诊断命令（检查工具链、配置、provider、catalog）
+  - `CLAWCR_REQUEST_TIMEOUT` 环境变量设置 HTTP 超时（默认 300s）
+- **Status**: ✅ 完成
 
-### US-036 (Issue #36) CLOSED - CJK text streaming panic
-- **Issue**: #36 - panic on CJK text in streaming response
-- **Root cause**: `earliest_partial_start()` used byte indexing instead of char_indices()
-- **Status**: Upstream already has the fix (same approach) - no need to PR
+### US-036 (Issue #36) ✅ 关闭 - CJK 文本流式 panic
+- **Issue**: #36 - 流式响应中 CJK 文本导致 panic
+- **Root cause**: `earliest_partial_start()` 使用字节索引而非 char_indices()
+- **Status**: 上游已有相同修复 - 不用再 PR
 
-### Streaming Fix LOCAL ONLY - read_timeout improvement
+### Streaming Fix 本地暂存 - read_timeout 改进
 - **Files**: `crates/provider/src/openai/chat_completions.rs`, `stream.rs`
 - **Changes**:
-  - `.timeout()` → `.read_timeout()` (resets on each data chunk)
-  - Improved error messages for timeout/decoding errors
-- **Testing**: Short prompts pass 5/5, long prompts intermittently fail
-- **Root cause**: NVIDIA NIM API instability + reqwest_eventsource compatibility
-- **Status**: UNCOMMITTED - requires more testing before commit/PR
+  - `.timeout()` → `.read_timeout()`（每次数据块后重置）
+  - 改进 timeout/decoding 错误信息
+- **Testing**: 短 prompt 5/5 通过，长 prompt 偶发失败
+- **Root cause**: NVIDIA NIM API 不稳定 + reqwest_eventsource 兼容性问题
+- **Status**: 未提交 - 需要更多测试后再提交/PR
 
-### AGENTS.md Setup COMPLETED
-- Established autonomous agent mode
-- Split into: AGENTS.md (constitution) + `docs/agent-rules/` (detailed rules)
-- **AGENTS.md** (730 chars): Social boundary, startup protocol, notification consumption, commit discipline, file awareness
-- **docs/agent-rules/git-workflow.md**: Branch strategy, upstream collaboration
-- **docs/agent-rules/rust-conventions.md**: Rust coding and testing standards
-- **docs/agent-rules/cli-operations.md**: PowerShell gotchas, notification system, debugging
-- `.github/.gitignore`: Excludes fork-specific files from upstream PRs
-- **New Workflow**: Use feature branches (`fork/feat/xxx`) for upstream PRs, keep `fork/main` for own maintenance
+### AGENTS.md 配置 ✅ 完成
+- 建立自主 Agent 模式
+- 拆分为：AGENTS.md（宪法）+ `docs/agent-rules/`（详细规则）
+- **AGENTS.md**（730字符）：社交边界、启动协议、通知消费、提交纪律、文件意识
+- **docs/agent-rules/git-workflow.md**：分支策略、上游协作
+- **docs/agent-rules/rust-conventions.md**：Rust 编码和测试标准
+- **docs/agent-rules/cli-operations.md**：PowerShell 坑点、通知系统、调试方法
+- **新工作流**：给上游提 PR 用 feature 分支（`fork/feat/xxx`），`fork/main` 留给自己维护
 
-### US-NOTIFY COMPLETED - GitHub Activity Notification System
+### US-NOTIFY ✅ 完成 - GitHub 活动通知系统
 - **Design**: `docs/plans/2026-04-18-github-notification-design.md`
 - **Files**:
-  - `.github/workflows/github-notifications.yml` - Actions workflow (30min cron)
-  - `notifications/github-meta.json` - metadata (timestamps, unread count)
-  - `notifications/github-activity.jsonl` - event log (JSON Lines format)
+  - `.github/workflows/github-notifications.yml` - Actions 工作流（30分钟 cron）
+  - `notifications/github-meta.json` - 元数据（时间戳、未读数）
+  - `notifications/github-activity.jsonl` - 事件日志（JSON Lines 格式）
 - **Features**:
-  - Auto-collects: upstream commits, PR activity, issue updates, comments
-  - Uses public GitHub API for upstream (no auth needed for public repos)
-  - Agent reads on session start + long-session mid-request check
-  - 30-day auto-cleanup of old entries
-- **Testing**: Successfully collected 100 events from upstream history
-- **Status**: LIVE - running every 30 minutes on fork
+  - 自动采集：上游 commits、PR 活动、issue 更新、评论
+  - 上游使用公开 GitHub API（公开仓库无需认证）
+  - Agent 在会话启动时 + 长会话中按需读取
+  - 30天自动清理旧记录
+- **Testing**: 成功从上游历史采集 100 个事件
+- **Status**: 运行中 - 每 30 分钟在 fork 上执行
 
-## Verification Status
-- `cargo build --release`: PASSED
-- `clawcr prompt "hi"`: PASSED (short prompt)
+## 验证状态
+- `cargo build --release`: 通过
+- `clawcr prompt "hi"`: 通过（短 prompt）
 
-## Pre-existing Features (verified working)
-- Interactive TUI mode
-- Server mode (`clawcr server`)
-- Onboarding wizard (`clawcr onboard`)
-- NVIDIA NIM provider support (`stepfun-ai/step-3.5-flash`)
+## 已验证可用的现有功能
+- 交互式 TUI 模式
+- 服务器模式（`clawcr server`）
+- 引导向导（`clawcr onboard`）
+- NVIDIA NIM provider 支持（`stepfun-ai/step-3.5-flash`）
 
-## Known Issues
-- Complex prompts sometimes fail with `error decoding response body` - likely NVIDIA NIM API instability
-- Other NVIDIA NIM models unavailable (404 errors)
-- Context compaction needs LLM-based compression (see query.rs TODOs)
+## 已知问题
+- 复杂 prompt 有时失败 `error decoding response body` - 可能是 NVIDIA NIM API 不稳定
+- 其他 NVIDIA NIM 模型不可用（404 错误）
+- 上下文压缩需要 LLM-based 压缩（见 query.rs TODO）
 
-## Upstream Activity (from notifications)
-- **64eb42c**: Merge PR #37 (feat: prompt, --model, doctor) ← **our PR!**
+## 上游动态（来自通知系统）
+- **64eb42c**: 合并 PR #37 (feat: prompt, --model, doctor) ← **我们的 PR！**
 - **ee84dad**: feat: add prompt subcommand, --model flag, doctor command
-- **3200938**: Merge PR #34 (fix config BUG + markdown TUI)
-- Upstream main: `64eb42c`
+- **3200938**: 合并 PR #34 (fix config BUG + markdown TUI)
+- 上游 main: `64eb42c`
 
-## Git Status
-- **Branch**: `main` (ahead of origin/main, behind upstream/main)
-- **Upstream main**: `64eb42c` (includes our PR #37)
+## Git 状态
+- **Branch**: `main`（领先 origin/main，落后 upstream/main）
+- **Upstream main**: `64eb42c`（包含我们的 PR #37）
 - **Remote**: `origin` → bigmanBass666/claw-code-rust, `upstream` → 7df-lab/claw-code-rust
 
-## Branch Workflow (IMPORTANT)
-- `fork/main`: Own maintenance branch (anything goes, ignore upstream)
-- `fork/feat/xxx`: For upstream PRs only (clean, minimal diff)
-- **Rule**: Never mix fork-maintenance commits with upstream-PR commits
+## 分支工作流（重要）
+- `fork/main`：自己的维护分支（随便改，不用管上游）
+- `fork/feat/xxx`：只给上游提 PR 用（干净、最小 diff）
+- **Rule**: 不要把 fork 维护的 commit 和给上游 PR 的 commit 混在一起
