@@ -1,0 +1,7 @@
+---
+source: crates/tui/src/v2/diff_render.rs
+assertion_line: 1964
+expression: snapshot
+---
+insert=Some(Rgb(12, 34, 56))
+delete=Some(Rgb(74, 34, 29))

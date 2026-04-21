@@ -1,15 +1,21 @@
-use anyhow::{Context, Result};
-use clawcr_core::{
-    ModelCatalog, PresetModelCatalog, ProviderConfigFile, ProviderWireApi,
-    ResolvedProviderSettings, load_config, resolve_provider_settings,
-};
+use anyhow::Context;
+use anyhow::Result;
+use clawcr_core::ModelCatalog;
+use clawcr_core::PresetModelCatalog;
+use clawcr_core::ProviderConfigFile;
+use clawcr_core::ProviderWireApi;
+use clawcr_core::ResolvedProviderSettings;
+use clawcr_core::load_config;
+use clawcr_core::resolve_provider_settings;
 use clawcr_protocol::ProviderFamily;
-use clawcr_tui::{InteractiveTuiConfig, SavedModelEntry, TerminalMode, run_interactive_tui};
+use clawcr_tui::InitialTuiSession;
+use clawcr_tui::InteractiveTuiConfig;
+use clawcr_tui::SavedModelEntry;
+use clawcr_tui::run_interactive_tui;
 
 /// Runs the interactive coding-agent entrypoint.
 pub async fn run_agent(
     force_onboarding: bool,
-    no_alt_screen: bool,
     log_level: Option<&str>,
     model_override: Option<&str>,
 ) -> Result<()> {
@@ -61,20 +67,17 @@ pub async fn run_agent(
     } = resolved;
 
     run_interactive_tui(InteractiveTuiConfig {
-        model,
-        provider,
-        cwd,
+        initial_session: InitialTuiSession {
+            model,
+            provider,
+            cwd,
+        },
         server_env,
         server_log_level: log_level.map(ToOwned::to_owned),
         model_catalog,
         saved_models,
         thinking_selection: resolved.model_thinking_selection,
         show_model_onboarding: onboarding_mode,
-        terminal_mode: if no_alt_screen {
-            TerminalMode::Never
-        } else {
-            TerminalMode::Auto
-        },
     })
     .await
     .map(|_| ())
@@ -143,7 +146,9 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::resolve_initial_provider_settings;
-    use clawcr_core::{Model, PresetModelCatalog, ProviderConfigFile};
+    use clawcr_core::Model;
+    use clawcr_core::PresetModelCatalog;
+    use clawcr_core::ProviderConfigFile;
     use clawcr_protocol::ProviderFamily;
 
     fn test_catalog() -> PresetModelCatalog {

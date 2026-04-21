@@ -1,13 +1,16 @@
-use std::{
-    fs::File,
-    io::{BufRead, BufReader, Read},
-    path::{Path, PathBuf},
-};
+use std::fs::File;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Read;
+use std::path::Path;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::{Tool, ToolContext, ToolOutput};
+use crate::Tool;
+use crate::ToolContext;
+use crate::ToolOutput;
 
 const DESCRIPTION: &str = include_str!("read.txt");
 
@@ -56,12 +59,12 @@ impl Tool for ReadTool {
         let offset = input["offset"].as_u64().map(|value| value as usize);
         let limit = input["limit"].as_u64().map(|value| value as usize);
 
-        if let Some(offset) = offset {
-            if offset < 1 {
-                return Ok(ToolOutput::error(
-                    "offset must be greater than or equal to 1",
-                ));
-            }
+        if let Some(offset) = offset
+            && offset < 1
+        {
+            return Ok(ToolOutput::error(
+                "offset must be greater than or equal to 1",
+            ));
         }
 
         if !Path::new(&filepath).is_absolute() {
@@ -97,7 +100,7 @@ fn read_directory(path: &Path, limit: usize, offset: usize) -> anyhow::Result<To
             if is_dir { format!("{name}/") } else { name }
         })
         .collect::<Vec<_>>();
-    items.sort_unstable_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    items.sort_unstable_by_key(|a| a.to_lowercase());
 
     let start = offset.saturating_sub(1);
     let sliced = items
@@ -326,13 +329,14 @@ fn missing_file_message(filepath: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        env,
-        fs::{self, File},
-        io::Write,
-        path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::env;
+    use std::fs::File;
+    use std::fs::{self};
+    use std::io::Write;
+    use std::path::Path;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
 
     fn create_temp_dir(prefix: &str) -> PathBuf {
         let mut path = env::temp_dir();
@@ -408,7 +412,7 @@ mod tests {
     fn is_binary_file_detects_null_bytes() {
         let dir = create_temp_dir("binary");
         let path = dir.join("payload.bin");
-        fs::write(&path, &[0u8, 1, 2]).unwrap();
+        fs::write(&path, [0u8, 1, 2]).unwrap();
 
         assert!(is_binary_file(&path).unwrap());
     }

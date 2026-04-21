@@ -1,0 +1,15 @@
+---
+source: crates/tui/src/v2/diff_render.rs
+assertion_line: 1371
+expression: terminal.backend()
+---
+"1 +fn very_long_function_name(arg_one: String, arg_two: String, arg_three: Strin          "
+"   g, arg_four: String) -> Result<String, Box<dyn std::error::Error>> { Ok(arg_o          "
+"   ne) }                                                                                  "
+"                                                                                          "
+"                                                                                          "
+"                                                                                          "
+"                                                                                          "
+"                                                                                          "
+"                                                                                          "
+"                                                                                          "

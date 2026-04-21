@@ -1,26 +1,46 @@
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
-};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use chrono::{Datelike, SecondsFormat, Utc};
+use anyhow::Context;
+use anyhow::Result;
+use chrono::Datelike;
+use chrono::SecondsFormat;
+use chrono::Utc;
 use tokio::sync::Mutex;
 
-use clawcr_core::{
-    ContentBlock, ItemLine, ItemRecord, Message, Role, RolloutLine, SessionId, SessionMetaLine,
-    SessionRecord, SessionTitleFinalSource, SessionTitleState, SessionTitleUpdatedLine, TextItem,
-    ToolCallItem, ToolResultItem, TurnId, TurnItem, TurnLine, TurnRecord, TurnStatus, Worklog,
-};
+use clawcr_core::ContentBlock;
+use clawcr_core::ItemLine;
+use clawcr_core::ItemRecord;
+use clawcr_core::Message;
+use clawcr_core::Role;
+use clawcr_core::RolloutLine;
+use clawcr_core::SessionId;
+use clawcr_core::SessionMetaLine;
+use clawcr_core::SessionRecord;
+use clawcr_core::SessionTitleFinalSource;
+use clawcr_core::SessionTitleState;
+use clawcr_core::SessionTitleUpdatedLine;
+use clawcr_core::TextItem;
+use clawcr_core::ToolCallItem;
+use clawcr_core::ToolResultItem;
+use clawcr_core::TurnId;
+use clawcr_core::TurnItem;
+use clawcr_core::TurnLine;
+use clawcr_core::TurnRecord;
+use clawcr_core::TurnStatus;
+use clawcr_core::Worklog;
 
-use crate::{
-    execution::{RuntimeSession, ServerRuntimeDependencies},
-    projection::history_item_from_turn_item,
-    session::{SessionRuntimeStatus, SessionSummary},
-    turn::TurnSummary,
-};
+use crate::execution::RuntimeSession;
+use crate::execution::ServerRuntimeDependencies;
+use crate::projection::history_item_from_turn_item;
+use crate::session::SessionRuntimeStatus;
+use crate::session::SessionSummary;
+use crate::turn::TurnSummary;
 
 /// Owns canonical append-only rollout persistence rooted at the server data directory.
 #[derive(Debug, Clone)]
@@ -36,6 +56,7 @@ impl RolloutStore {
     }
 
     /// Constructs a canonical durable session record for a newly created session.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_session_record(
         &self,
         id: SessionId,
@@ -485,16 +506,83 @@ fn apply_turn_item(
     }
 }
 
+fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(root).with_context(|| format!("read dir {}", root.display()))? {
+        let entry = entry.with_context(|| format!("read entry in {}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read file type for {}", path.display()))?;
+        if file_type.is_dir() {
+            collect_rollout_files(&path, files)?;
+        } else if file_type.is_file()
+            && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Creates one canonical persisted turn record from the transport-facing runtime state.
+pub(crate) fn build_turn_record(turn: &TurnSummary) -> TurnRecord {
+    TurnRecord {
+        id: turn.turn_id,
+        session_id: turn.session_id,
+        sequence: turn.sequence,
+        started_at: turn.started_at,
+        completed_at: turn.completed_at,
+        status: turn.status.clone(),
+        model_slug: turn.model_slug.clone(),
+        input_token_estimate: None,
+        usage: turn.usage.clone(),
+        schema_version: 1,
+    }
+}
+
+/// Creates one canonical persisted item record from a normalized turn item payload.
+pub(crate) fn build_item_record(
+    session_id: SessionId,
+    turn_id: TurnId,
+    item_id: clawcr_core::ItemId,
+    seq: u64,
+    item: TurnItem,
+    turn_status: Option<TurnStatus>,
+    worklog: Option<Worklog>,
+) -> ItemRecord {
+    ItemRecord {
+        id: item_id,
+        session_id,
+        turn_id,
+        seq,
+        timestamp: Utc::now(),
+        attempt_placement: None,
+        turn_status,
+        sibling_turn_ids: Vec::new(),
+        input_items: Vec::new(),
+        output_items: vec![item],
+        worklog,
+        error: None,
+        schema_version: 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use chrono::TimeZone;
+    use chrono::Utc;
     use pretty_assertions::assert_eq;
 
     use super::ReplayState;
-    use clawcr_core::{
-        ItemId, ItemLine, ItemRecord, RolloutLine, SessionId, TextItem, ToolCallItem, TurnId,
-        TurnItem,
-    };
+    use clawcr_core::ItemId;
+    use clawcr_core::ItemLine;
+    use clawcr_core::ItemRecord;
+    use clawcr_core::RolloutLine;
+    use clawcr_core::SessionId;
+    use clawcr_core::TextItem;
+    use clawcr_core::ToolCallItem;
+    use clawcr_core::TurnId;
+    use clawcr_core::TurnItem;
 
     #[test]
     fn replay_orders_items_by_sequence_before_timestamp() {
@@ -571,66 +659,5 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(titles, vec!["assistant 1", "date"]);
-    }
-}
-
-fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(root).with_context(|| format!("read dir {}", root.display()))? {
-        let entry = entry.with_context(|| format!("read entry in {}", root.display()))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("read file type for {}", path.display()))?;
-        if file_type.is_dir() {
-            collect_rollout_files(&path, files)?;
-        } else if file_type.is_file()
-            && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-        {
-            files.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// Creates one canonical persisted turn record from the transport-facing runtime state.
-pub(crate) fn build_turn_record(turn: &TurnSummary) -> TurnRecord {
-    TurnRecord {
-        id: turn.turn_id,
-        session_id: turn.session_id,
-        sequence: turn.sequence,
-        started_at: turn.started_at,
-        completed_at: turn.completed_at,
-        status: turn.status.clone(),
-        model_slug: turn.model_slug.clone(),
-        input_token_estimate: None,
-        usage: turn.usage.clone(),
-        schema_version: 1,
-    }
-}
-
-/// Creates one canonical persisted item record from a normalized turn item payload.
-pub(crate) fn build_item_record(
-    session_id: SessionId,
-    turn_id: TurnId,
-    item_id: clawcr_core::ItemId,
-    seq: u64,
-    item: TurnItem,
-    turn_status: Option<TurnStatus>,
-    worklog: Option<Worklog>,
-) -> ItemRecord {
-    ItemRecord {
-        id: item_id,
-        session_id,
-        turn_id,
-        seq,
-        timestamp: Utc::now(),
-        attempt_placement: None,
-        turn_status,
-        sibling_turn_ids: Vec::new(),
-        input_items: Vec::new(),
-        output_items: vec![item],
-        worklog,
-        error: None,
-        schema_version: 1,
     }
 }

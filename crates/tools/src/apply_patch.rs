@@ -1,11 +1,15 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::Component;
+use std::path::Path;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::json;
 use tokio::fs;
 use tracing::debug;
 
-use crate::{Tool, ToolContext, ToolOutput};
+use crate::Tool;
+use crate::ToolContext;
+use crate::ToolOutput;
 
 const DESCRIPTION: &str = include_str!("apply_patch.txt");
 
@@ -644,7 +648,8 @@ fn select_hunk_anchor(hunk: &PatchHunk) -> Option<(usize, &str)> {
                         .unwrap_or(true)
                 {
                     best_anchor = Some(candidate);
-                } else if best_anchor.is_none() {
+                }
+                if best_anchor.is_none() {
                     best_anchor = Some(candidate);
                 }
                 sequence_index += 1;
@@ -734,16 +739,23 @@ fn normalized_lines(content: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
 
-    use clawcr_safety::legacy_permissions::{PermissionMode, RuleBasedPolicy};
+    use clawcr_safety::legacy_permissions::PermissionMode;
+    use clawcr_safety::legacy_permissions::RuleBasedPolicy;
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
-    use super::{
-        ApplyPatchTool, HunkLine, PatchHunk, PatchKind, apply_hunks, parse_patch, resolve_relative,
-    };
-    use crate::{Tool, ToolContext};
+    use super::ApplyPatchTool;
+    use super::HunkLine;
+    use super::PatchHunk;
+    use super::PatchKind;
+    use super::apply_hunks;
+    use super::parse_patch;
+    use super::resolve_relative;
+    use crate::Tool;
+    use crate::ToolContext;
 
     fn unique_temp_dir(name: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()

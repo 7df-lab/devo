@@ -1,24 +1,39 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    pin::Pin,
-};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::pin::Pin;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
-use clawcr_protocol::{
-    ModelRequest, ModelResponse, ProviderFamily, RequestContent, RequestMessage, ResponseContent,
-    ResponseExtra, ResponseMetadata, StopReason, StreamEvent, Usage,
-};
-use futures::{Stream, StreamExt};
+use clawcr_protocol::ModelRequest;
+use clawcr_protocol::ModelResponse;
+use clawcr_protocol::ProviderFamily;
+use clawcr_protocol::RequestContent;
+use clawcr_protocol::RequestMessage;
+use clawcr_protocol::ResponseContent;
+use clawcr_protocol::ResponseExtra;
+use clawcr_protocol::ResponseMetadata;
+use clawcr_protocol::StopReason;
+use clawcr_protocol::StreamEvent;
+use clawcr_protocol::Usage;
+use futures::Stream;
+use futures::StreamExt;
 use reqwest::Client;
-use reqwest::header::{CONTENT_TYPE, HeaderValue};
-use reqwest_eventsource::{Event, EventSource};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use reqwest::header::CONTENT_TYPE;
+use reqwest::header::HeaderValue;
+use reqwest_eventsource::Event;
+use reqwest_eventsource::EventSource;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
 use tracing::debug;
 
 use super::AnthropicAIRole;
-use crate::{ModelProviderSDK, ProviderAdapter, ProviderCapabilities, merge_extra_body};
+use crate::ModelProviderSDK;
+use crate::ProviderAdapter;
+use crate::ProviderCapabilities;
+use crate::merge_extra_body;
 
 /// <https://platform.claude.com/docs/en/api/messages>
 /// Anthropic provider backed by the official HTTP API.
@@ -300,13 +315,12 @@ impl ModelProviderSDK for AnthropicProvider {
                                 {
                                     message_id = id.to_string();
                                 }
-                                if let Some(usage) = data.get("usage") {
-                                    if let Some(input) =
+                                if let Some(usage) = data.get("usage")
+                                    && let Some(input) =
                                         usage.get("input_tokens").and_then(Value::as_u64)
                                     {
                                         input_tokens = input as usize;
                                     }
-                                }
                             }
                             "content_block_start" => {
                                 let Some(index) = data.get("index").and_then(Value::as_u64) else {
@@ -424,24 +438,21 @@ impl ModelProviderSDK for AnthropicProvider {
                             }
                             "content_block_stop" => {
                                 let index = data.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                                if let Some(json_str) = tool_json.remove(&index) {
-                                    if let Ok(parsed) = serde_json::from_str(&json_str) {
-                                        if let Some(ResponseContent::ToolUse { input, .. }) =
+                                if let Some(json_str) = tool_json.remove(&index)
+                                    && let Ok(parsed) = serde_json::from_str(&json_str)
+                                        && let Some(ResponseContent::ToolUse { input, .. }) =
                                             content_blocks.get_mut(&index)
                                         {
                                             *input = parsed;
                                         }
-                                    }
-                                }
                             }
                             "message_delta" => {
-                                if let Some(delta) = data.get("delta").and_then(Value::as_object) {
-                                    if let Some(reason) =
+                                if let Some(delta) = data.get("delta").and_then(Value::as_object)
+                                    && let Some(reason) =
                                         delta.get("stop_reason").and_then(Value::as_str)
                                     {
                                         stop_reason = Some(parse_stop_reason(reason));
                                     }
-                                }
                                 if let Some(usage) = data.get("usage") {
                                     if let Some(output) = usage.get("output_tokens").and_then(Value::as_u64)
                                     {
@@ -713,7 +724,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
 ///   `stop_details`, `stop_sequence`, `type`, server-tool result blocks,
 ///   thinking blocks, citations, and the richer usage breakdown are not
 ///   currently projected into `ModelResponse`.
-/// -------------------------- Below is an example -------------------------
+///   -------------------------- Below is an example -------------------------
 /// ```json
 /// {
 ///  "id": "msg_013Zva2CMHLNnXjNJJKqJ2EF",
@@ -932,14 +943,20 @@ fn build_thinking(level: &str) -> Option<AnthropicThinkingConfig> {
 
 #[cfg(test)]
 mod tests {
-    use clawcr_protocol::{
-        ModelRequest, RequestContent, RequestMessage, SamplingControls, ToolDefinition,
-    };
+    use clawcr_protocol::ModelRequest;
+    use clawcr_protocol::RequestContent;
+    use clawcr_protocol::RequestMessage;
+    use clawcr_protocol::SamplingControls;
+    use clawcr_protocol::ToolDefinition;
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
-    use super::{build_request, parse_response, parse_stop_reason};
-    use clawcr_protocol::{ResponseContent, ResponseExtra, StopReason};
+    use super::build_request;
+    use super::parse_response;
+    use super::parse_stop_reason;
+    use clawcr_protocol::ResponseContent;
+    use clawcr_protocol::ResponseExtra;
+    use clawcr_protocol::StopReason;
 
     #[test]
     fn build_request_includes_sampling_tools_and_thinking() {

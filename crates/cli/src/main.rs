@@ -1,10 +1,18 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
-use clawcr_core::{
-    AppConfig, AppConfigLoader, FileSystemAppConfigLoader, LoggingBootstrap, LoggingRuntime,
-    ModelCatalog, PresetModelCatalog, load_config, resolve_provider_settings,
-};
-use clawcr_server::{ServerProcessArgs, run_server_process};
+use clap::Parser;
+use clap::Subcommand;
+use clap::ValueEnum;
+use clawcr_core::AppConfig;
+use clawcr_core::AppConfigLoader;
+use clawcr_core::FileSystemAppConfigLoader;
+use clawcr_core::LoggingBootstrap;
+use clawcr_core::LoggingRuntime;
+use clawcr_core::ModelCatalog;
+use clawcr_core::PresetModelCatalog;
+use clawcr_core::load_config;
+use clawcr_core::resolve_provider_settings;
+use clawcr_server::ServerProcessArgs;
+use clawcr_server::run_server_process;
 use clawcr_utils::find_clawcr_home;
 
 mod agent;
@@ -23,10 +31,6 @@ struct Cli {
     #[arg(long, global = true)]
     model: Option<String>,
 
-    /// Keep the UI in the main terminal buffer instead of switching to the alternate screen.
-    #[arg(long = "no-alt-screen", default_value_t = false)]
-    no_alt_screen: bool,
-
     /// Override the logging level for this process.
     #[arg(long = "log-level", global = true, value_enum)]
     log_level: Option<LogLevel>,
@@ -41,8 +45,7 @@ async fn main() -> Result<()> {
         Some(Command::Server(args)) => run_server_process(args).await,
         Some(Command::Onboard) => {
             run_agent(
-                true,
-                cli.no_alt_screen,
+                /*force_onboarding*/ true,
                 cli.log_level.map(LogLevel::as_str),
                 cli.model.as_deref(),
             )
@@ -59,8 +62,7 @@ async fn main() -> Result<()> {
         Some(Command::Doctor) => run_doctor().await,
         None => {
             run_agent(
-                false,
-                cli.no_alt_screen,
+                /*force_onboarding*/ false,
                 cli.log_level.map(LogLevel::as_str),
                 cli.model.as_deref(),
             )
@@ -161,8 +163,11 @@ async fn run_prompt(
             .with_env_filter(tracing_subscriber::EnvFilter::new(level))
             .try_init();
     }
-    use clawcr_core::{SessionConfig, SessionState, default_base_instructions};
-    use clawcr_tools::{ToolOrchestrator, ToolRegistry};
+    use clawcr_core::SessionConfig;
+    use clawcr_core::SessionState;
+    use clawcr_core::default_base_instructions;
+    use clawcr_tools::ToolOrchestrator;
+    use clawcr_tools::ToolRegistry;
 
     let cwd = std::env::current_dir()?;
     let _stored_config = load_config().unwrap_or_default();
@@ -248,7 +253,7 @@ async fn run_doctor() -> Result<()> {
 
     let mut all_ok = true;
 
-    println!("{} {}", "✓".green().bold(), "Rust toolchain:");
+    println!("{} Rust toolchain:", "✓".green().bold());
     let rustc = Command::new("rustc").arg("--version").output();
     match rustc {
         Ok(output) => {
@@ -262,7 +267,7 @@ async fn run_doctor() -> Result<()> {
     }
     println!();
 
-    println!("{} {}", "✓".green().bold(), "Config home (CLAWCR_HOME):");
+    println!("{} Config home (CLAWCR_HOME):", "✓".green().bold());
     match find_clawcr_home() {
         Ok(home) => {
             println!("  {}", home.display());
@@ -274,7 +279,7 @@ async fn run_doctor() -> Result<()> {
     }
     println!();
 
-    println!("{} {}", "✓".green().bold(), "Config file:");
+    println!("{} Config file:", "✓".green().bold());
     if let Ok(home) = find_clawcr_home() {
         let config_path = home.join("config.toml");
         if config_path.exists() {
@@ -304,7 +309,7 @@ async fn run_doctor() -> Result<()> {
     }
     println!();
 
-    println!("{} {}", "✓".green().bold(), "Provider resolution:");
+    println!("{} Provider resolution:", "✓".green().bold());
     match resolve_provider_settings() {
         Ok(resolved) => {
             println!("  provider:   {}", resolved.provider_id);
@@ -328,7 +333,7 @@ async fn run_doctor() -> Result<()> {
     }
     println!();
 
-    println!("{} {}", "✓".green().bold(), "Model catalog:");
+    println!("{} Model catalog:", "✓".green().bold());
     match clawcr_core::PresetModelCatalog::load() {
         Ok(catalog) => {
             let count = catalog.into_inner().len();
@@ -358,9 +363,12 @@ async fn run_doctor() -> Result<()> {
 mod tests {
     use pretty_assertions::assert_eq;
 
-    use super::{
-        Cli, Command, LogLevel, ServerProcessArgs, cli_logging_overrides, logging_process_name,
-    };
+    use super::Cli;
+    use super::Command;
+    use super::LogLevel;
+    use super::ServerProcessArgs;
+    use super::cli_logging_overrides;
+    use super::logging_process_name;
 
     #[test]
     fn logging_process_name_defaults_to_cli() {
@@ -387,7 +395,6 @@ mod tests {
         let cli = Cli {
             command: None,
             model: None,
-            no_alt_screen: false,
             log_level: None,
         };
 
@@ -402,7 +409,6 @@ mod tests {
         let cli = Cli {
             command: None,
             model: None,
-            no_alt_screen: false,
             log_level: Some(LogLevel::Debug),
         };
 

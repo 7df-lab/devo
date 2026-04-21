@@ -1,0 +1,15 @@
+---
+source: crates/tui/src/v2/diff_render.rs
+assertion_line: 1371
+expression: terminal.backend()
+---
+"• Added new_file.txt (+2 -0)                                                    "
+"    1 +alpha                                                                    "
+"    2 +beta                                                                     "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "

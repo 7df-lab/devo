@@ -2,18 +2,36 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clawcr_protocol::{
-    ModelRequest, RequestContent, RequestMessage, ResolvedThinkingRequest, ResponseContent,
-    ResponseExtra, SamplingControls, StopReason, StreamEvent, UserInput,
-};
+use clawcr_protocol::ModelRequest;
+use clawcr_protocol::RequestContent;
+use clawcr_protocol::RequestMessage;
+use clawcr_protocol::ResolvedThinkingRequest;
+use clawcr_protocol::ResponseContent;
+use clawcr_protocol::ResponseExtra;
+use clawcr_protocol::SamplingControls;
+use clawcr_protocol::StopReason;
+use clawcr_protocol::StreamEvent;
+use clawcr_protocol::UserInput;
 use futures::StreamExt;
 use tokio::time::sleep;
-use tracing::{debug, info, info_span, warn};
+use tracing::debug;
+use tracing::info;
+use tracing::info_span;
+use tracing::warn;
 
 use clawcr_provider::ModelProviderSDK;
-use clawcr_tools::{ToolCall, ToolContext, ToolOrchestrator, ToolRegistry};
+use clawcr_tools::ToolCall;
+use clawcr_tools::ToolContext;
+use clawcr_tools::ToolOrchestrator;
+use clawcr_tools::ToolRegistry;
 
-use crate::{AgentError, ContentBlock, Message, Model, Role, SessionState, TurnConfig};
+use crate::AgentError;
+use crate::ContentBlock;
+use crate::Message;
+use crate::Model;
+use crate::Role;
+use crate::SessionState;
+use crate::TurnConfig;
 
 /// Events emitted during a query for the caller (CLI/UI) to observe.
 #[derive(Debug, Clone)]
@@ -236,7 +254,7 @@ fn load_prompt_md(cwd: &std::path::Path) -> Option<String> {
 fn build_system_prompt(base_instructions: &str) -> String {
     let mut sections = Vec::new();
     if !base_instructions.is_empty() {
-        sections.push(format!("{}", base_instructions.to_string()));
+        sections.push(base_instructions.to_string());
     }
     sections.join("\n\n")
 }
@@ -310,7 +328,6 @@ const INITIAL_RETRY_BACKOFF_MS: u64 = 250;
 
 /// TODO: The body of `query` is too lengthy, we should move out `stream lop` out, I am
 /// not sure whether we should do this.
-
 /// The recursive agent loop — the beating heart of the runtime.
 ///
 /// The implementation refers to Claude Code's `query.ts`. It drives
@@ -758,26 +775,46 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use clawcr_protocol::{
-        ModelRequest, ModelResponse, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
-        StreamEvent, Usage,
-    };
+    use clawcr_protocol::ModelRequest;
+    use clawcr_protocol::ModelResponse;
+    use clawcr_protocol::ResponseContent;
+    use clawcr_protocol::ResponseExtra;
+    use clawcr_protocol::ResponseMetadata;
+    use clawcr_protocol::StopReason;
+    use clawcr_protocol::StreamEvent;
+    use clawcr_protocol::Usage;
     use clawcr_safety::legacy_permissions::PermissionMode;
-    use clawcr_tools::{Tool, ToolOrchestrator, ToolOutput, ToolRegistry};
+    use clawcr_tools::Tool;
+    use clawcr_tools::ToolOrchestrator;
+    use clawcr_tools::ToolOutput;
+    use clawcr_tools::ToolRegistry;
     use futures::Stream;
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
-    use super::{QueryEvent, query, test_model_connection};
-    use crate::{
-        ContentBlock, Message, Model, ProviderFamily, ReasoningEffort, Role, SessionConfig,
-        SessionState, ThinkingCapability, ThinkingImplementation, ThinkingVariant,
-        ThinkingVariantConfig, TruncationMode, TruncationPolicyConfig, TurnConfig,
-    };
+    use super::QueryEvent;
+    use super::query;
+    use super::test_model_connection;
+    use crate::ContentBlock;
+    use crate::Message;
+    use crate::Model;
+    use crate::ProviderFamily;
+    use crate::ReasoningEffort;
+    use crate::Role;
+    use crate::SessionConfig;
+    use crate::SessionState;
+    use crate::ThinkingCapability;
+    use crate::ThinkingImplementation;
+    use crate::ThinkingVariant;
+    use crate::ThinkingVariantConfig;
+    use crate::TruncationMode;
+    use crate::TruncationPolicyConfig;
+    use crate::TurnConfig;
 
     struct SingleToolUseProvider {
         requests: AtomicUsize,

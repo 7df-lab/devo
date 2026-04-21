@@ -1,5 +1,8 @@
-use anyhow::{Context, Result};
-use clawcr_core::{ProviderWireApi, provider_id_for_endpoint, provider_name_for_endpoint};
+use anyhow::Context;
+use anyhow::Result;
+use clawcr_core::ProviderWireApi;
+use clawcr_core::provider_id_for_endpoint;
+use clawcr_core::provider_name_for_endpoint;
 use clawcr_protocol::ProviderFamily;
 use clawcr_utils::find_clawcr_home;
 use toml::Value;
@@ -68,6 +71,7 @@ pub(crate) fn save_last_used_model(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn save_thinking_selection(selection: Option<&str>) -> Result<()> {
     let path = find_clawcr_home()
         .context("could not determine user config path")?
@@ -93,6 +97,7 @@ pub(crate) fn save_thinking_selection(selection: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn merge_thinking_selection(mut root: Value, selection: Option<&str>) -> Result<Value> {
     let table = root
         .as_table_mut()

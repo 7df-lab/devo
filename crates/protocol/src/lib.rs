@@ -3,7 +3,8 @@ mod connection;
 mod conversation;
 mod event;
 mod model;
-mod protocol;
+pub mod parse_command;
+pub mod protocol;
 mod response;
 mod role;
 mod session;
@@ -11,7 +12,7 @@ mod skill;
 mod thinking;
 mod truncation;
 mod turn;
-mod user_input;
+pub mod user_input;
 
 pub use approval::*;
 pub use connection::*;

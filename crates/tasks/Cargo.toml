@@ -1,17 +1,17 @@
 [package]
-name = "clawcr-tasks"
 description = "Long-running task lifecycle and notification mechanism"
-version.workspace = true
 edition.workspace = true
 license.workspace = true
+name = "clawcr-tasks"
+version.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-tokio = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }

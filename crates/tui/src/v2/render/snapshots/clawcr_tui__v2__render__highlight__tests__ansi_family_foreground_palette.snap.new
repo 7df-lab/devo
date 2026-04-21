@@ -1,0 +1,22 @@
+---
+source: crates/tui/src/v2/render/highlight.rs
+assertion_line: 1049
+expression: out
+---
+ansi:
+  Blue
+  Green
+  Magenta
+  Yellow
+base16:
+  Blue
+  Gray
+  Green
+  Indexed(9)
+  Magenta
+base16-256:
+  Blue
+  Gray
+  Green
+  Indexed(16)
+  Magenta

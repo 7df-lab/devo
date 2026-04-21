@@ -1,38 +1,83 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use chrono::Utc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
-use clawcr_core::{
-    ItemId, Message, QueryEvent, SessionId, SessionTitleFinalSource, SessionTitleState, TextItem,
-    ToolCallItem, ToolResultItem, TurnConfig, TurnId, TurnItem, TurnStatus, TurnUsage, Worklog,
-    query,
-};
+use clawcr_core::ItemId;
+use clawcr_core::Message;
+use clawcr_core::QueryEvent;
+use clawcr_core::SessionId;
+use clawcr_core::SessionTitleFinalSource;
+use clawcr_core::SessionTitleState;
+use clawcr_core::TextItem;
+use clawcr_core::ToolCallItem;
+use clawcr_core::ToolResultItem;
+use clawcr_core::TurnConfig;
+use clawcr_core::TurnId;
+use clawcr_core::TurnItem;
+use clawcr_core::TurnStatus;
+use clawcr_core::TurnUsage;
+use clawcr_core::Worklog;
+use clawcr_core::query;
 use clawcr_tools::ToolOrchestrator;
 
-use crate::{
-    ClientTransportKind, ConnectionState, ErrorResponse, EventContext, EventsSubscribeParams,
-    EventsSubscribeResult, InitializeParams, InitializeResult, ItemDeltaKind, ItemDeltaPayload,
-    ItemEnvelope, ItemEventPayload, ItemKind, NotificationEnvelope, ProtocolError,
-    ProtocolErrorCode, ServerCapabilities, ServerEvent, ServerRequestResolvedPayload,
-    SessionEventPayload, SessionForkParams, SessionForkResult, SessionListParams,
-    SessionListResult, SessionResumeParams, SessionResumeResult, SessionRuntimeStatus,
-    SessionStartParams, SessionStartResult, SessionStatusChangedPayload, SessionTitleUpdateParams,
-    SessionTitleUpdateResult, SuccessResponse, TurnEventPayload, TurnInterruptParams,
-    TurnInterruptResult, TurnStartParams, TurnStartResult, TurnSteerParams, TurnSteerResult,
-    TurnSummary, TurnUsageUpdatedPayload,
-    execution::{RuntimeSession, ServerRuntimeDependencies},
-    persistence::{RolloutStore, build_item_record, build_turn_record},
-    projection::history_item_from_turn_item,
-    titles::{build_title_generation_request, derive_provisional_title, normalize_generated_title},
-};
+use crate::ClientTransportKind;
+use crate::ConnectionState;
+use crate::ErrorResponse;
+use crate::EventContext;
+use crate::EventsSubscribeParams;
+use crate::EventsSubscribeResult;
+use crate::InitializeParams;
+use crate::InitializeResult;
+use crate::ItemDeltaKind;
+use crate::ItemDeltaPayload;
+use crate::ItemEnvelope;
+use crate::ItemEventPayload;
+use crate::ItemKind;
+use crate::NotificationEnvelope;
+use crate::ProtocolError;
+use crate::ProtocolErrorCode;
+use crate::ServerCapabilities;
+use crate::ServerEvent;
+use crate::ServerRequestResolvedPayload;
+use crate::SessionEventPayload;
+use crate::SessionForkParams;
+use crate::SessionForkResult;
+use crate::SessionListParams;
+use crate::SessionListResult;
+use crate::SessionResumeParams;
+use crate::SessionResumeResult;
+use crate::SessionRuntimeStatus;
+use crate::SessionStartParams;
+use crate::SessionStartResult;
+use crate::SessionStatusChangedPayload;
+use crate::SessionTitleUpdateParams;
+use crate::SessionTitleUpdateResult;
+use crate::SuccessResponse;
+use crate::TurnEventPayload;
+use crate::TurnInterruptParams;
+use crate::TurnInterruptResult;
+use crate::TurnStartParams;
+use crate::TurnStartResult;
+use crate::TurnSteerParams;
+use crate::TurnSteerResult;
+use crate::TurnSummary;
+use crate::TurnUsageUpdatedPayload;
+use crate::execution::RuntimeSession;
+use crate::execution::ServerRuntimeDependencies;
+use crate::persistence::RolloutStore;
+use crate::persistence::build_item_record;
+use crate::persistence::build_turn_record;
+use crate::projection::history_item_from_turn_item;
+use crate::titles::build_title_generation_request;
+use crate::titles::derive_provisional_title;
+use crate::titles::normalize_generated_title;
 
 mod skills;
 
@@ -282,14 +327,14 @@ impl ServerRuntime {
             total_output_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
-        if let Some(record) = &record {
-            if let Err(error) = self.rollout_store.append_session_meta(record) {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    format!("failed to persist session metadata: {error}"),
-                );
-            }
+        if let Some(record) = &record
+            && let Err(error) = self.rollout_store.append_session_meta(record)
+        {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InternalError,
+                format!("failed to persist session metadata: {error}"),
+            );
         }
         let core_session = self.deps.new_session_state(session_id, params.cwd.clone());
         let steering_queue = Arc::clone(&core_session.pending_user_prompts);
@@ -762,17 +807,16 @@ impl ServerRuntime {
         };
         self.maybe_assign_provisional_title(params.session_id, &display_input)
             .await;
-        if let Some(record) = session_arc.lock().await.record.clone() {
-            if let Err(error) = self
+        if let Some(record) = session_arc.lock().await.record.clone()
+            && let Err(error) = self
                 .rollout_store
                 .append_turn(&record, build_turn_record(&turn))
-            {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    format!("failed to persist turn start: {error}"),
-                );
-            }
+        {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InternalError,
+                format!("failed to persist turn start: {error}"),
+            );
         }
 
         tracing::info!(
@@ -866,17 +910,16 @@ impl ServerRuntime {
             }
             turn
         };
-        if let Some(record) = session_arc.lock().await.record.clone() {
-            if let Err(error) = self
+        if let Some(record) = session_arc.lock().await.record.clone()
+            && let Err(error) = self
                 .rollout_store
                 .append_turn(&record, build_turn_record(&interrupted_turn))
-            {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    format!("failed to persist interrupted turn: {error}"),
-                );
-            }
+        {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InternalError,
+                format!("failed to persist interrupted turn: {error}"),
+            );
         }
 
         tracing::info!(
@@ -1318,8 +1361,8 @@ impl ServerRuntime {
                                     session_id,
                                     turn_id: turn_for_events.turn_id,
                                     usage,
-                                    total_input_tokens: base.0 + input_tokens as usize,
-                                    total_output_tokens: base.1 + output_tokens as usize,
+                                    total_input_tokens: base.0 + input_tokens,
+                                    total_output_tokens: base.1 + output_tokens,
                                 },
                             ))
                             .await;
@@ -1431,28 +1474,27 @@ impl ServerRuntime {
             session.summary.total_output_tokens = session_total_output_tokens;
             final_turn
         };
-        if let Some(record) = session_arc.lock().await.record.clone() {
-            if let Err(error) = self
+        if let Some(record) = session_arc.lock().await.record.clone()
+            && let Err(error) = self
                 .rollout_store
                 .append_turn(&record, build_turn_record(&final_turn))
-            {
-                tracing::warn!(session_id = %session_id, error = %error, "failed to persist terminal turn line");
-            }
+        {
+            tracing::warn!(session_id = %session_id, error = %error, "failed to persist terminal turn line");
         }
-        if final_turn.status == TurnStatus::Completed {
-            if let Some(first_assistant_reply) = first_assistant_reply {
-                let runtime = Arc::clone(&self);
-                let input_for_title = display_input.clone();
-                tokio::spawn(async move {
-                    runtime
-                        .maybe_generate_final_title(
-                            session_id,
-                            &input_for_title,
-                            &first_assistant_reply,
-                        )
-                        .await;
-                });
-            }
+        if final_turn.status == TurnStatus::Completed
+            && let Some(first_assistant_reply) = first_assistant_reply
+        {
+            let runtime = Arc::clone(&self);
+            let input_for_title = display_input.clone();
+            tokio::spawn(async move {
+                runtime
+                    .maybe_generate_final_title(
+                        session_id,
+                        &input_for_title,
+                        &first_assistant_reply,
+                    )
+                    .await;
+            });
         }
 
         if let Err(error) = result {
@@ -1746,6 +1788,7 @@ impl ServerRuntime {
         .await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn complete_item(
         &self,
         session_id: SessionId,
@@ -1770,6 +1813,7 @@ impl ServerRuntime {
             .await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn persist_item(
         &self,
         session_id: SessionId,

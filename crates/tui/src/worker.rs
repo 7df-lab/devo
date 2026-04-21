@@ -1,25 +1,49 @@
-use std::{path::PathBuf, time::Duration};
+use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
-use tokio::{
-    sync::mpsc,
-    task::{JoinError, JoinHandle},
-};
+use anyhow::Context;
+use anyhow::Result;
+use tokio::sync::mpsc;
+use tokio::task::JoinError;
+use tokio::task::JoinHandle;
 
-use clawcr_core::{
-    Model, ModelCatalog, PresetModelCatalog, ProviderWireApi, SessionId, TurnId, TurnStatus,
-    test_model_connection,
-};
+use clawcr_core::Model;
+use clawcr_core::ModelCatalog;
+use clawcr_core::PresetModelCatalog;
+use clawcr_core::ProviderWireApi;
+use clawcr_core::SessionId;
+use clawcr_core::TurnId;
+use clawcr_core::TurnStatus;
+use clawcr_core::test_model_connection;
 use clawcr_protocol::ProviderFamily;
-use clawcr_provider::{ModelProviderSDK, anthropic::AnthropicProvider, openai::OpenAIProvider};
-use clawcr_server::{
-    InputItem, ItemEnvelope, ItemEventPayload, ItemKind, ServerEvent, SessionHistoryItem,
-    SessionHistoryItemKind, SessionListParams, SessionResumeParams, SessionStartParams,
-    SessionTitleUpdateParams, SkillListParams, SkillSource, StdioServerClient,
-    StdioServerClientConfig, TurnEventPayload, TurnInterruptParams, TurnStartParams,
-};
+use clawcr_provider::ModelProviderSDK;
+use clawcr_provider::anthropic::AnthropicProvider;
+use clawcr_provider::openai::OpenAIProvider;
+use clawcr_server::InputItem;
+use clawcr_server::ItemEnvelope;
+use clawcr_server::ItemEventPayload;
+use clawcr_server::ItemKind;
+use clawcr_server::ServerEvent;
+use clawcr_server::SessionHistoryItem;
+use clawcr_server::SessionHistoryItemKind;
+use clawcr_server::SessionListParams;
+use clawcr_server::SessionResumeParams;
+use clawcr_server::SessionStartParams;
+use clawcr_server::SessionTitleUpdateParams;
+use clawcr_server::SkillListParams;
+use clawcr_server::SkillSource;
+use clawcr_server::StdioServerClient;
+use clawcr_server::StdioServerClientConfig;
+use clawcr_server::TurnEventPayload;
+use clawcr_server::TurnInterruptParams;
+use clawcr_server::TurnStartParams;
 
-use crate::events::{SessionListEntry, TranscriptItem, TranscriptItemKind, WorkerEvent};
+use crate::events::SessionListEntry;
+use crate::events::TranscriptItem;
+use crate::events::TranscriptItemKind;
+use crate::events::WorkerEvent;
+use crate::v2::app_command::InputHistoryDirection;
 
 struct EnsureSessionOutcome {
     session_id: SessionId,
@@ -78,6 +102,8 @@ enum OperationCommand {
     RenameSession(String),
     /// Interrupt the active turn when one is running.
     InterruptTurn,
+    /// Browse persisted input history via the server/runtime session state.
+    BrowseInputHistory(InputHistoryDirection),
     /// Stop the worker loop.
     Shutdown,
 }
@@ -204,13 +230,32 @@ impl QueryWorkerHandle {
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
-    /// Stops the worker task and waits for it to finish.
+    pub(crate) fn browse_input_history(&self, direction: InputHistoryDirection) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::BrowseInputHistory(direction))
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    /// Stops the worker task and waits briefly for it to finish.
     pub(crate) async fn shutdown(self) -> Result<()> {
         let _ = self.command_tx.send(OperationCommand::Shutdown);
-        match self.join_handle.await {
-            Ok(()) => Ok(()),
-            Err(error) if error.is_cancelled() => Ok(()),
-            Err(error) => Err(map_join_error(error)),
+        let mut join_handle = self.join_handle;
+        tokio::select! {
+            result = &mut join_handle => {
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.is_cancelled() => Ok(()),
+                    Err(error) => Err(map_join_error(error)),
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                join_handle.abort();
+                match join_handle.await {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.is_cancelled() => Ok(()),
+                    Err(error) => Err(map_join_error(error)),
+                }
+            }
         }
     }
 }
@@ -268,6 +313,7 @@ async fn run_worker_inner(
     let mut total_input_tokens = 0usize;
     let mut total_output_tokens = 0usize;
     let mut latest_completed_agent_message: Option<String> = None;
+    let mut input_history_cursor: Option<usize> = None;
 
     loop {
         tokio::select! {
@@ -310,6 +356,7 @@ async fn run_worker_inner(
                     }
                     Some(OperationCommand::SetModel(next_model)) => {
                         model = next_model;
+                        input_history_cursor = None;
                     }
                     Some(OperationCommand::SetThinking(next_thinking)) => {
                         thinking_selection = next_thinking;
@@ -456,7 +503,11 @@ async fn run_worker_inner(
                         active_turn_id = None;
                         session_id = None;
                         session_cwd = config.cwd.clone();
-                        let _ = event_tx.send(WorkerEvent::NewSessionPrepared);
+                        input_history_cursor = None;
+                        let _ = event_tx.send(WorkerEvent::NewSessionPrepared {
+                            cwd: session_cwd.clone(),
+                            model: model.clone(),
+                        });
                     }
                     Some(OperationCommand::SwitchSession(next_session_id)) => {
                         match client
@@ -469,8 +520,10 @@ async fn run_worker_inner(
                                 active_turn_id = None;
                                 session_id = Some(next_session_id);
                                 session_cwd = result.session.cwd.clone();
+                                input_history_cursor = None;
                                 let _ = event_tx.send(WorkerEvent::SessionSwitched {
                                     session_id: next_session_id.to_string(),
+                                    cwd: result.session.cwd,
                                     title: result.session.title,
                                     model: result.session.resolved_model,
                                     total_input_tokens: result.session.total_input_tokens,
@@ -528,8 +581,8 @@ async fn run_worker_inner(
                         }
                     }
                     Some(OperationCommand::InterruptTurn) => {
-                        if let (Some(turn_id), Some(active_session_id)) = (active_turn_id, session_id) {
-                            if let Err(error) = client
+                        if let (Some(turn_id), Some(active_session_id)) = (active_turn_id, session_id)
+                            && let Err(error) = client
                                 .turn_interrupt(TurnInterruptParams {
                                     session_id: active_session_id,
                                     turn_id,
@@ -544,7 +597,66 @@ async fn run_worker_inner(
                                     total_output_tokens,
                                 });
                             }
-                        }
+                    }
+                    Some(OperationCommand::BrowseInputHistory(direction)) => {
+                        let text = if let Some(active_session_id) = session_id {
+                            match client
+                                .session_resume(SessionResumeParams {
+                                    session_id: active_session_id,
+                                })
+                                .await
+                            {
+                                Ok(result) => {
+                                    let entries = result
+                                        .history_items
+                                        .iter()
+                                        .filter(|item| item.kind == SessionHistoryItemKind::User)
+                                        .map(|item| item.body.clone())
+                                        .filter(|body| !body.trim().is_empty())
+                                        .collect::<Vec<_>>();
+                                    let total = entries.len();
+                                    match direction {
+                                        InputHistoryDirection::Previous => {
+                                            if total == 0 {
+                                                None
+                                            } else {
+                                                let next_index = match input_history_cursor {
+                                                    None => total.saturating_sub(1),
+                                                    Some(0) => 0,
+                                                    Some(index) => index.saturating_sub(1),
+                                                };
+                                                input_history_cursor = Some(next_index);
+                                                entries.get(next_index).cloned()
+                                            }
+                                        }
+                                        InputHistoryDirection::Next => match input_history_cursor {
+                                            None => None,
+                                            Some(index) if index + 1 >= total => {
+                                                input_history_cursor = None;
+                                                None
+                                            }
+                                            Some(index) => {
+                                                let next_index = index + 1;
+                                                input_history_cursor = Some(next_index);
+                                                entries.get(next_index).cloned()
+                                            }
+                                        },
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                        message: error.to_string(),
+                                        turn_count,
+                                        total_input_tokens,
+                                        total_output_tokens,
+                                    });
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let _ = event_tx.send(WorkerEvent::InputHistoryLoaded { direction, text });
                     }
                     Some(OperationCommand::Shutdown) | None => {
                         break;
@@ -635,14 +747,13 @@ async fn run_worker_inner(
                                 }
                             }
                             "session/title/updated" => {
-                                if let ServerEvent::SessionTitleUpdated(payload) = event {
-                                    if let Some(title) = payload.session.title {
+                                if let ServerEvent::SessionTitleUpdated(payload) = event
+                                    && let Some(title) = payload.session.title {
                                         let _ = event_tx.send(WorkerEvent::SessionTitleUpdated {
                                             session_id: payload.session.session_id.to_string(),
                                             title,
                                         });
                                     }
-                                }
                             }
                             _ => {}
                         }
@@ -659,7 +770,7 @@ async fn run_worker_inner(
 
 async fn ensure_session_started(
     client: &mut StdioServerClient,
-    cwd: &PathBuf,
+    cwd: &Path,
     model: &str,
     session_id: &mut Option<SessionId>,
 ) -> Result<EnsureSessionOutcome> {
@@ -672,7 +783,7 @@ async fn ensure_session_started(
 
     let session = client
         .session_start(SessionStartParams {
-            cwd: cwd.clone(),
+            cwd: cwd.to_path_buf(),
             ephemeral: false,
             title: None,
             model: Some(model.to_string()),
@@ -686,13 +797,13 @@ async fn ensure_session_started(
 }
 
 async fn spawn_client(
-    cwd: &PathBuf,
+    cwd: &Path,
     env: Vec<(String, String)>,
     server_log_level: Option<String>,
 ) -> Result<StdioServerClient> {
     StdioServerClient::spawn(StdioServerClientConfig {
         program: std::env::current_exe().context("resolve current executable for server launch")?,
-        workspace_root: Some(cwd.clone()),
+        workspace_root: Some(cwd.to_path_buf()),
         env,
         args: server_log_level
             .into_iter()
@@ -850,22 +961,21 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
 
     while index < items.len() {
         let item = &items[index];
-        if item.kind == SessionHistoryItemKind::ToolCall {
-            if let Some(next) = items.get(index + 1) {
-                if matches!(
-                    next.kind,
-                    SessionHistoryItemKind::ToolResult | SessionHistoryItemKind::Error
-                ) {
-                    let merged = if next.kind == SessionHistoryItemKind::Error {
-                        TranscriptItem::tool_error(item.title.clone(), next.body.clone())
-                    } else {
-                        TranscriptItem::restored_tool_result(item.title.clone(), next.body.clone())
-                    };
-                    transcript.push(merged);
-                    index += 2;
-                    continue;
-                }
-            }
+        if item.kind == SessionHistoryItemKind::ToolCall
+            && let Some(next) = items.get(index + 1)
+            && matches!(
+                next.kind,
+                SessionHistoryItemKind::ToolResult | SessionHistoryItemKind::Error
+            )
+        {
+            let merged = if next.kind == SessionHistoryItemKind::Error {
+                TranscriptItem::tool_error(item.title.clone(), next.body.clone())
+            } else {
+                TranscriptItem::restored_tool_result(item.title.clone(), next.body.clone())
+            };
+            transcript.push(merged);
+            index += 2;
+            continue;
         }
 
         let kind = match item.kind {
@@ -1032,7 +1142,7 @@ fn resolve_validation_model(provider: ProviderFamily, model: &str) -> Result<Mod
     }
     Ok(Model {
         slug: model.to_string(),
-        provider: provider,
+        provider,
         ..Model::default()
     })
 }
@@ -1100,15 +1210,19 @@ mod tests {
     use chrono::Utc;
     use pretty_assertions::assert_eq;
 
-    use clawcr_core::{SessionId, SessionTitleState};
-    use clawcr_server::{SessionRuntimeStatus, SessionSummary};
+    use clawcr_core::SessionId;
+    use clawcr_core::SessionTitleState;
+    use clawcr_server::SessionRuntimeStatus;
+    use clawcr_server::SessionSummary;
 
-    use super::{
-        normalize_display_output, project_history_items, summarize_tool_call, truncate_tool_output,
-    };
+    use super::normalize_display_output;
+    use super::project_history_items;
+    use super::summarize_tool_call;
+    use super::truncate_tool_output;
     use crate::events::SessionListEntry;
     use crate::events::TranscriptItem;
-    use clawcr_server::{SessionHistoryItem, SessionHistoryItemKind};
+    use clawcr_server::SessionHistoryItem;
+    use clawcr_server::SessionHistoryItemKind;
 
     #[test]
     fn bash_tool_summary_uses_command_text() {

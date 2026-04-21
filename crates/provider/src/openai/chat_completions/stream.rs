@@ -45,17 +45,17 @@ use crate::text_normalization::{TaggedTextFragment, TaggedTextParser};
 ///       - type: optional "function"
 ///         The type of the tool. Currently, only function is supported.
 ///    - finish_reason: "stop" or "length" or "tool_calls" or "content_filter" or "function_call"
-///       The reason the model stopped generating tokens. This will be stop if the model hit a natural stop point or a provided stop sequence, length if the maximum number of tokens specified in the request was reached, content_filter if content was omitted due to a flag from our content filters, tool_calls if the model called a tool, or function_call (deprecated) if the model called a function.
+///      The reason the model stopped generating tokens. This will be stop if the model hit a natural stop point or a provided stop sequence, length if the maximum number of tokens specified in the request was reached, content_filter if content was omitted due to a flag from our content filters, tool_calls if the model called a tool, or function_call (deprecated) if the model called a function.
 ///    - index: number
 ///      The index of the choice in the list of choices.
 ///    - logprobs: optional object
 ///      Log probability information for the choice.
 /// - created: number
-/// The Unix timestamp (in seconds) of when the chat completion was created. Each chunk has the same timestamp.
+///   The Unix timestamp (in seconds) of when the chat completion was created. Each chunk has the same timestamp.
 /// - model: string
-/// The model to generate the completion.
+///   The model to generate the completion.
 /// - object: "chat.completion.chunk"
-/// The object type, which is always chat.completion.chunk
+///   The object type, which is always chat.completion.chunk
 /// - service_tier: optional "auto" or "default" or "flex" or "scale" or "priority"
 /// - usage: optional CompletionUsage
 pub(super) async fn completion_stream(
@@ -135,10 +135,10 @@ impl ChatCompletionStreamState {
     fn apply_chunk(&mut self, chunk: ChatCompletionStreamChunk) -> Vec<StreamEvent> {
         let mut events = Vec::new();
 
-        if self.response_id.is_empty() {
-            if let Some(id) = chunk.id {
-                self.response_id = id;
-            }
+        if self.response_id.is_empty()
+            && let Some(id) = chunk.id
+        {
+            self.response_id = id;
         }
         if self.created.is_none() {
             self.created = chunk.created;

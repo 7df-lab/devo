@@ -1,23 +1,23 @@
 [package]
-name = "clawcr-protocol"
 description = "Shared client/server protocol types for ClawCR"
-version.workspace = true
 edition.workspace = true
 license.workspace = true
+name = "clawcr-protocol"
+version.workspace = true
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
+chrono = { workspace = true, features = ["serde"] }
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-chrono = { workspace = true }
 smol_str = { workspace = true }
-uuid = { workspace = true }
-schemars = { workspace = true }
 strum = { workspace = true }
 strum_macros = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

@@ -1,0 +1,6 @@
+---
+source: crates/tui/src/v2/markdown_render_tests.rs
+assertion_line: 830
+expression: rendered
+---
+See tmp-rs/tui/src/markdown_render.rs:74.

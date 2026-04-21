@@ -1,0 +1,13 @@
+---
+source: crates/tui/src/v2/diff_render.rs
+assertion_line: 1371
+expression: terminal.backend()
+---
+"1 +this is a very long line that should wrap across multiple terminal columns an          "
+"   d continue                                                                             "
+"                                                                                          "
+"                                                                                          "
+"                                                                                          "
+"                                                                                          "
+"                                                                                          "
+"                                                                                          "

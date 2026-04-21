@@ -16,27 +16,27 @@
 //! - raw preset/config concerns live in `clawcr-core`
 //! - this module describes runtime state and runtime-facing interfaces only
 //!
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use std::fmt;
 
-use crate::{
-    ReasoningEffort, ReasoningEffortPreset, ResolvedThinkingRequest, ThinkingCapability,
-    ThinkingImplementation, nearest_effort, truncation::TruncationPolicyConfig,
-};
+use crate::ReasoningEffort;
+use crate::ReasoningEffortPreset;
+use crate::ResolvedThinkingRequest;
+use crate::ThinkingCapability;
+use crate::ThinkingImplementation;
+use crate::nearest_effort;
+use crate::truncation::TruncationPolicyConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Verbosity {
     Low,
+    #[default]
     Medium,
     High,
-}
-
-impl Default for Verbosity {
-    fn default() -> Self {
-        Self::Medium
-    }
 }
 
 /// Sampling controls and model-selection hints shared across adapters.
@@ -108,31 +108,23 @@ pub enum RequestContent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 /// Supported input types that a model can accept.
+#[derive(Default)]
 pub enum InputModality {
     /// Plain text input.
+    #[default]
     Text,
     /// Image input.
     Image,
 }
 
-impl Default for InputModality {
-    fn default() -> Self {
-        Self::Text
-    }
-}
-
 /// OpenAI-family API surfaces supported by the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum OpenAiApi {
+    #[default]
     ChatCompletions,
     Responses,
-}
-
-impl Default for OpenAiApi {
-    fn default() -> Self {
-        OpenAiApi::ChatCompletions
-    }
 }
 
 /// Anthropic-family API surfaces supported by the runtime.
@@ -276,7 +268,7 @@ impl Default for Model {
 
 impl Model {
     pub fn provider_family(&self) -> ProviderFamily {
-        self.provider.clone()
+        self.provider
     }
 
     pub fn reasoning_effort_options(&self) -> Vec<ReasoningEffortPreset> {
@@ -300,7 +292,7 @@ impl Model {
     }
 
     pub fn effective_thinking_implementation(&self) -> ThinkingImplementation {
-        self.thinking_implementation.clone().unwrap_or_else(|| {
+        self.thinking_implementation.clone().unwrap_or({
             if matches!(self.thinking_capability, ThinkingCapability::Disabled) {
                 ThinkingImplementation::Disabled
             } else {
@@ -479,13 +471,20 @@ pub enum ModelError {
 
 #[cfg(test)]
 mod tests {
-    use crate::{RequestRole, ThinkingVariant, ThinkingVariantConfig};
+    use crate::RequestRole;
+    use crate::ThinkingVariant;
+    use crate::ThinkingVariantConfig;
     use pretty_assertions::assert_eq;
 
-    use super::{
-        InMemoryModelCatalog, InputModality, Model, ModelCatalog, ProviderFamily, ReasoningEffort,
-        ThinkingCapability, ThinkingImplementation, TruncationPolicyConfig,
-    };
+    use super::InMemoryModelCatalog;
+    use super::InputModality;
+    use super::Model;
+    use super::ModelCatalog;
+    use super::ProviderFamily;
+    use super::ReasoningEffort;
+    use super::ThinkingCapability;
+    use super::ThinkingImplementation;
+    use super::TruncationPolicyConfig;
 
     fn model(slug: &str) -> Model {
         Model {
