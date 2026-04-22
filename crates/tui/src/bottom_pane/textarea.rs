@@ -957,6 +957,25 @@ impl TextArea {
         id
     }
 
+    pub fn update_element_by_id(&mut self, id: u64, text: &str) -> bool {
+        if let Some(elem_idx) = self.elements.iter().position(|e| e.id == id) {
+            let old_range = self.elements[elem_idx].range.clone();
+            let start = old_range.start;
+            self.replace_range_raw(old_range, text);
+            let new_end = start + text.len();
+            self.elements.retain(|e| e.id != id);
+            self.elements.push(TextElement {
+                id,
+                range: start..new_end,
+                name: None,
+            });
+            self.elements.sort_by_key(|e| e.range.start);
+            true
+        } else {
+            false
+        }
+    }
+
     #[cfg(not(target_os = "linux"))]
     pub fn insert_named_element(&mut self, text: &str, id: String) {
         let start = self.clamp_pos_for_insertion(self.cursor_pos);

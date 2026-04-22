@@ -218,19 +218,48 @@ impl BottomPane {
         self.map_composer_input_result(input_result)
     }
 
-    pub(crate) fn handle_paste(&mut self, text: String) {
-        self.reset_external_history_navigation();
-        let needs_redraw = self.composer.handle_paste(text);
-        self.composer.sync_popups();
-        if needs_redraw {
-            self.request_redraw();
+    pub fn handle_paste(&mut self, pasted: String) {
+        if !self.view_stack.is_empty() {
+            let (needs_redraw, view_complete) = {
+                let last_index = self.view_stack.len() - 1;
+                let view = &mut self.view_stack[last_index];
+                (view.handle_paste(pasted), view.is_complete())
+            };
+            if view_complete {
+                self.view_stack.clear();
+                self.on_active_view_complete();
+            }
+            if needs_redraw {
+                self.request_redraw();
+            }
+        } else {
+            let needs_redraw = self.composer.handle_paste(pasted);
+            self.composer.sync_popups();
+            if needs_redraw {
+                self.request_redraw();
+            }
         }
+    }
+
+    fn on_active_view_complete(&mut self) {
+        self.set_composer_input_enabled(/*enabled*/ true, /*placeholder*/ None);
+    }
+
+    pub(crate) fn set_composer_input_enabled(
+        &mut self,
+        enabled: bool,
+        placeholder: Option<String>,
+    ) {
+        self.composer.set_input_enabled(enabled, placeholder);
+        self.request_redraw();
     }
 
     pub(crate) fn pre_draw_tick(&mut self) {
         self.composer.sync_popups();
         if self.composer.flush_paste_burst_if_due() {
             self.request_redraw();
+        } else if self.composer.is_in_paste_burst() {
+            self.request_redraw_in(ChatComposer::recommended_paste_flush_delay());
         }
     }
 
@@ -511,7 +540,7 @@ impl Renderable for BottomPane {
             &self.pending_input_preview,
             &self.composer,
         ];
-        self.desired_children_height(width, &children).min(12)
+        self.desired_children_height(width, &children)
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {

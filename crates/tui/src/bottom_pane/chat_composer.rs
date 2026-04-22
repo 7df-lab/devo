@@ -207,6 +207,7 @@ use std::time::Instant;
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
+const ACTIVE_LARGE_PASTE_PLACEHOLDER: &str = "[Pasting...]";
 
 fn user_input_too_large_message(actual_chars: usize) -> String {
     format!(
@@ -234,6 +235,13 @@ pub enum InputResult {
 struct AttachedImage {
     placeholder: String,
     path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveLargePaste {
+    placeholder: String,
+    element_id: u64,
+    last_input_at: Instant,
 }
 
 /// Feature flags for reusing the chat composer in other bottom-pane surfaces.
@@ -292,6 +300,7 @@ pub(crate) struct ChatComposer {
     dismissed_file_popup_token: Option<String>,
     current_file_query: Option<String>,
     pending_pastes: Vec<(String, String)>,
+    active_large_paste: Option<ActiveLargePaste>,
     large_paste_counters: HashMap<usize, usize>,
     has_focus: bool,
     frame_requester: Option<FrameRequester>,
@@ -423,6 +432,7 @@ impl ChatComposer {
             dismissed_file_popup_token: None,
             current_file_query: None,
             pending_pastes: Vec::new(),
+            active_large_paste: None,
             large_paste_counters: HashMap::new(),
             has_focus: has_input_focus,
             frame_requester: None,
@@ -700,9 +710,7 @@ impl ChatComposer {
         let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
         let char_count = pasted.chars().count();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
-            let placeholder = self.next_large_paste_placeholder(char_count);
-            self.textarea.insert_element(&placeholder);
-            self.pending_pastes.push((placeholder, pasted));
+            self.insert_large_paste_placeholder(pasted);
         } else if char_count > 1
             && self.image_paste_enabled()
             && self.handle_paste_image_path(pasted.clone())
@@ -1125,7 +1133,7 @@ impl ChatComposer {
     /// This includes actively buffering, having a non-empty burst buffer, or holding the first
     /// ASCII char for flicker suppression.
     pub(crate) fn is_in_paste_burst(&self) -> bool {
-        self.paste_burst.is_active()
+        self.paste_burst.is_active() || self.active_large_paste.is_some()
     }
 
     /// Returns a delay that reliably exceeds the paste-burst timing threshold.
@@ -1195,6 +1203,94 @@ impl ChatComposer {
         } else {
             format!("{base} #{next_suffix}")
         }
+    }
+
+    fn insert_large_paste_placeholder(&mut self, pasted: String) -> String {
+        let placeholder = self.next_large_paste_placeholder(pasted.chars().count());
+        self.textarea.insert_element(&placeholder);
+        self.pending_pastes.push((placeholder.clone(), pasted));
+        placeholder
+    }
+
+    fn insert_active_large_paste_placeholder(&mut self, pasted: String, now: Instant) {
+        let placeholder = ACTIVE_LARGE_PASTE_PLACEHOLDER.to_string();
+        let element_id = self.textarea.insert_element(&placeholder);
+        self.pending_pastes.push((placeholder.clone(), pasted));
+        self.active_large_paste = Some(ActiveLargePaste {
+            placeholder,
+            element_id,
+            last_input_at: now,
+        });
+    }
+
+    fn append_to_active_large_paste(&mut self, ch: char, now: Instant) -> bool {
+        let Some(active) = &self.active_large_paste else {
+            return false;
+        };
+        if now.duration_since(active.last_input_at) >= PasteBurst::recommended_flush_delay() {
+            self.active_large_paste = None;
+            return false;
+        }
+        let placeholder = active.placeholder.clone();
+        let Some((_, pasted)) = self
+            .pending_pastes
+            .iter_mut()
+            .find(|(candidate, _)| candidate == &placeholder)
+        else {
+            self.active_large_paste = None;
+            return false;
+        };
+        pasted.push(ch);
+        if let Some(active) = &mut self.active_large_paste {
+            active.last_input_at = now;
+        }
+        true
+    }
+
+    fn finalize_active_large_paste_if_idle(&mut self, now: Instant) -> bool {
+        if !self.active_large_paste.as_ref().is_some_and(|active| {
+            now.duration_since(active.last_input_at) >= PasteBurst::recommended_flush_delay()
+        }) {
+            return false;
+        }
+
+        let Some(active) = self.active_large_paste.take() else {
+            return false;
+        };
+        let Some(index) = self
+            .pending_pastes
+            .iter()
+            .position(|(placeholder, _)| placeholder == &active.placeholder)
+        else {
+            return false;
+        };
+        let final_placeholder =
+            self.next_large_paste_placeholder(self.pending_pastes[index].1.chars().count());
+        if self
+            .textarea
+            .update_element_by_id(active.element_id, &final_placeholder)
+        {
+            self.pending_pastes[index].0 = final_placeholder;
+            self.paste_burst.clear_after_explicit_paste();
+            self.sync_popups();
+            true
+        } else {
+            self.pending_pastes.remove(index);
+            self.paste_burst.clear_after_explicit_paste();
+            false
+        }
+    }
+
+    fn promote_paste_burst_to_large_placeholder_if_needed(&mut self, now: Instant) -> bool {
+        if self.paste_burst.buffered_char_count() <= LARGE_PASTE_CHAR_THRESHOLD {
+            return false;
+        }
+        let Some(pasted) = self.paste_burst.flush_before_modified_input() else {
+            return false;
+        };
+        self.insert_active_large_paste_placeholder(pasted, now);
+        self.sync_popups();
+        true
     }
 
     pub(crate) fn insert_str(&mut self, text: &str) {
@@ -1361,6 +1457,10 @@ impl ChatComposer {
         } = input
         {
             if self.paste_burst.try_append_char_if_active(ch, now) {
+                self.promote_paste_burst_to_large_placeholder_if_needed(now);
+                return (InputResult::None, true);
+            }
+            if self.append_to_active_large_paste(ch, now) {
                 return (InputResult::None, true);
             }
             // Non-ASCII input often comes from IMEs and can arrive in quick bursts.
@@ -1375,6 +1475,7 @@ impl ChatComposer {
                 match decision {
                     CharDecision::BufferAppend => {
                         self.paste_burst.append_char_to_buffer(ch, now);
+                        self.promote_paste_burst_to_large_placeholder_if_needed(now);
                         return (InputResult::None, true);
                     }
                     CharDecision::BeginBuffer { retro_chars } => {
@@ -1394,6 +1495,7 @@ impl ChatComposer {
                             }
                             // seed the paste burst buffer with everything (grabbed + new)
                             self.paste_burst.append_char_to_buffer(ch, now);
+                            self.promote_paste_burst_to_large_placeholder_if_needed(now);
                             return (InputResult::None, true);
                         }
                         // If decide_begin_buffer opted not to start buffering,
@@ -2198,6 +2300,10 @@ impl ChatComposer {
             && !in_slash_context
             && self.paste_burst.append_newline_if_active(now)
         {
+            self.promote_paste_burst_to_large_placeholder_if_needed(now);
+            return (InputResult::None, true);
+        }
+        if !in_slash_context && self.append_to_active_large_paste('\n', now) {
             return (InputResult::None, true);
         }
 
@@ -2553,6 +2659,9 @@ impl ChatComposer {
     /// - UI ticks via [`ChatComposer::flush_paste_burst_if_due`], so held first-chars can render.
     /// - Input handling via [`ChatComposer::handle_input_basic`], so a due burst does not lag.
     fn handle_paste_burst_flush(&mut self, now: Instant) -> bool {
+        if self.finalize_active_large_paste_if_idle(now) {
+            return true;
+        }
         match self.paste_burst.flush_if_due(now) {
             FlushResult::Paste(pasted) => {
                 self.handle_paste(pasted);
@@ -2610,6 +2719,7 @@ impl ChatComposer {
             && self.paste_burst.is_active()
             && self.paste_burst.append_newline_if_active(now)
         {
+            self.promote_paste_burst_to_large_placeholder_if_needed(now);
             return (InputResult::None, true);
         }
 
@@ -2625,6 +2735,9 @@ impl ChatComposer {
         } = input
         {
             let has_ctrl_or_alt = has_ctrl_or_alt(modifiers);
+            if !has_ctrl_or_alt && self.append_to_active_large_paste(ch, now) {
+                return (InputResult::None, true);
+            }
             if !has_ctrl_or_alt && !self.disable_paste_burst {
                 // Non-ASCII characters (e.g., from IMEs) can arrive in quick bursts, so avoid
                 // holding the first char while still allowing burst detection for paste input.
@@ -2635,6 +2748,7 @@ impl ChatComposer {
                 match self.paste_burst.on_plain_char(ch, now) {
                     CharDecision::BufferAppend => {
                         self.paste_burst.append_char_to_buffer(ch, now);
+                        self.promote_paste_burst_to_large_placeholder_if_needed(now);
                         return (InputResult::None, true);
                     }
                     CharDecision::BeginBuffer { retro_chars } => {
@@ -2650,6 +2764,7 @@ impl ChatComposer {
                                 self.textarea.replace_range(grab.start_byte..safe_cur, "");
                             }
                             self.paste_burst.append_char_to_buffer(ch, now);
+                            self.promote_paste_burst_to_large_placeholder_if_needed(now);
                             return (InputResult::None, true);
                         }
                         // If decide_begin_buffer opted not to start buffering,
@@ -2658,6 +2773,7 @@ impl ChatComposer {
                     CharDecision::BeginBufferFromPending => {
                         // First char was held; now append the current one.
                         self.paste_burst.append_char_to_buffer(ch, now);
+                        self.promote_paste_burst_to_large_placeholder_if_needed(now);
                         return (InputResult::None, true);
                     }
                     CharDecision::RetainFirstChar => {

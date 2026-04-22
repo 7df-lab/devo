@@ -40,6 +40,8 @@ struct InteractiveLoopState {
     total_input_tokens: usize,
     total_output_tokens: usize,
     pending_onboarding: Option<PendingOnboarding>,
+    // indicate whther LLM worker is working, is started by TurnStarted,
+    // it ended by TurnFailed/TurnFinished
     busy: bool,
     last_ctrl_c_at: Option<Instant>,
 }
@@ -48,6 +50,7 @@ struct InteractiveLoopState {
 enum LoopAction {
     Continue,
     Exit,
+    ClearAndExit,
 }
 
 /// Runs the interactive terminal UI until the user exits or the worker stops.
@@ -56,6 +59,9 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
     let initial_session = config.initial_session.clone();
     let terminal = crate::tui::init()?;
     let mut tui = crate::tui::Tui::new(terminal);
+
+    // spawn a worker with stdio transport with server, it'll emit events
+    // such as `[WorkerEvent::TurnStarted]`, `[WorkerEvent::UsageUpdated]` etc.
     let mut worker = QueryWorkerHandle::spawn(QueryWorkerConfig {
         model: initial_session.model.clone(),
         cwd: initial_session.cwd.clone(),
@@ -64,6 +70,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
     });
 
     // TODO: Should we change it to bounded channel?
+    // app events, such as `[AppEvent::Command]`, `[AppEvent::Exit]`
     let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
     let app_event_sender = AppEventSender::new(app_event_tx);
 
@@ -109,6 +116,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         chat_widget.set_thinking_selection(Some(thinking_selection));
     }
 
+    // tui events, such as `[TuiEvent::Draw]`, `[TuiEvent::Key]`, `TuiEvent::Paste`
     let events = tui.event_stream();
     tokio::pin!(events);
 
@@ -118,37 +126,51 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
     loop {
         tokio::select! {
             tui_event = events.next() => {
-                if handle_tui_event(
+                match handle_tui_event(
                     tui_event,
                     &mut tui,
                     &worker,
                     &mut chat_widget,
                     &mut loop_state,
-                )? == LoopAction::Exit {
-                    break;
+                )? {
+                    LoopAction::Continue => {}
+                    LoopAction::Exit => break,
+                    LoopAction::ClearAndExit => {
+                        clear_before_exit(&mut tui)?;
+                        break;
+                    }
                 }
             }
             app_event = app_event_rx.recv() => {
-                if handle_app_event(
+                match handle_app_event(
                     app_event,
-                    &mut tui,
                     &worker,
                     &mut chat_widget,
                     &config.model_catalog,
                     initial_session.provider,
                     &mut loop_state,
-                )? == LoopAction::Exit {
-                    break;
+                )? {
+                    LoopAction::Continue => {}
+                    LoopAction::Exit => break,
+                    LoopAction::ClearAndExit => {
+                        clear_before_exit(&mut tui)?;
+                        break;
+                    }
                 }
             }
             worker_event = worker.event_rx.recv() => {
-                if handle_worker_event(
+                match handle_worker_event(
                     worker_event,
                     &worker,
                     &mut chat_widget,
                     &mut loop_state,
-                )? == LoopAction::Exit {
-                    break;
+                )? {
+                    LoopAction::Continue => {}
+                    LoopAction::Exit => break,
+                    LoopAction::ClearAndExit => {
+                        clear_before_exit(&mut tui)?;
+                        break;
+                    }
                 }
             }
         }
@@ -164,6 +186,14 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
     })
 }
 
+fn clear_before_exit(tui: &mut Tui) -> Result<()> {
+    if tui.is_alt_screen_active() {
+        tui.leave_alt_screen()?;
+    }
+    tui.terminal.clear_scrollback_and_visible_screen_ansi()?;
+    Ok(())
+}
+
 fn handle_tui_event(
     tui_event: Option<TuiEvent>,
     tui: &mut Tui,
@@ -177,18 +207,21 @@ fn handle_tui_event(
 
     match tui_event {
         TuiEvent::Draw => {
-            // Render the latest chat state and keep scrollback/alt-screen in sync.
+            // Update time-sensitive widget state before measuring or rendering.
             chat_widget.pre_draw_tick();
-            if chat_widget.is_resume_browser_open() && !tui.is_alt_screen_active() {
-                tui.enter_alt_screen()?;
-            } else if !chat_widget.is_resume_browser_open() && tui.is_alt_screen_active() {
+
+            if !chat_widget.is_resume_browser_open() && tui.is_alt_screen_active() {
                 tui.leave_alt_screen()?;
             }
+
+            // Wrap pending scrollback using the current terminal width.
             let width = tui.terminal.size()?.width.max(1);
             let scrollback_lines = chat_widget.drain_scrollback_lines(width);
             if !scrollback_lines.is_empty() {
                 tui.insert_history_lines(scrollback_lines);
             }
+
+            // Size the chat area within the visible terminal and render the frame.
             let height = chat_widget
                 .desired_height(width)
                 .min(tui.terminal.size()?.height.saturating_sub(1))
@@ -196,6 +229,7 @@ fn handle_tui_event(
             tui.draw(height, |frame| {
                 let area = frame.area();
                 chat_widget.render(area, frame.buffer_mut());
+                // Restore the terminal cursor to the widget-provided input position.
                 if let Some((x, y)) = chat_widget.cursor_pos(area) {
                     frame.set_cursor_position((x, y));
                 }
@@ -206,25 +240,31 @@ fn handle_tui_event(
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 if loop_state.busy {
                     worker.interrupt_turn()?;
-                    chat_widget.set_status_message("Interrupted; waiting for model to stop");
+                    chat_widget.set_status_message("Interrupted;");
                 } else {
                     let now = Instant::now();
                     if loop_state
                         .last_ctrl_c_at
                         .is_some_and(|last| now.duration_since(last) <= Duration::from_secs(2))
                     {
-                        return Ok(LoopAction::Exit);
+                        return Ok(LoopAction::ClearAndExit);
                     }
                     loop_state.last_ctrl_c_at = Some(now);
-                    chat_widget.set_status_message("Press Ctrl-C again within 2s to exit");
+                    chat_widget.set_status_message("Press Ctrl-C again to exit");
                 }
             } else {
                 loop_state.last_ctrl_c_at = None;
                 chat_widget.handle_key_event(key);
             }
         }
-        TuiEvent::Paste(text) => {
-            chat_widget.handle_paste(text);
+        // TODO: Still BUG here, if user pasted long text to the cli, the cli would blow away, take each line as a prompt submit.
+        TuiEvent::Paste(pasted) => {
+            // Many terminals convert newlines to \r when pasting (e.g., iTerm2),
+            // but tui-textarea expects \n. Normalize CR to LF.
+            // [tui-textarea]: <https://github.com/rhysd/tui-textarea/blob/4d18622eeac13b309e0ff6a55a46ac6706da68cf/src/textarea.rs#L782-L783>
+            // [iTerm2]: <https://github.com/gnachman/iTerm2/blob/5d0c0d9f68523cbd0494dad5422998964a2ecd8d/sources/iTermPasteHelper.m#L206-L216>
+            let pasted = pasted.replace("\r", "\n");
+            chat_widget.handle_paste(pasted);
         }
     }
 
@@ -233,7 +273,6 @@ fn handle_tui_event(
 
 fn handle_app_event(
     app_event: Option<AppEvent>,
-    tui: &mut Tui,
     worker: &QueryWorkerHandle,
     chat_widget: &mut ChatWidget,
     model_catalog: &impl ModelCatalog,
@@ -247,10 +286,7 @@ fn handle_app_event(
     if let AppEvent::Exit(exit_mode) = &app_event {
         // Shutdown requests may need the normal screen restored before clearing it.
         if matches!(exit_mode, crate::app_event::ExitMode::ShutdownFirst) {
-            if tui.is_alt_screen_active() {
-                tui.leave_alt_screen()?;
-            }
-            tui.terminal.clear_scrollback_and_visible_screen_ansi()?;
+            return Ok(LoopAction::ClearAndExit);
         }
         return Ok(LoopAction::Exit);
     }

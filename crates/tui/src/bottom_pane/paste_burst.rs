@@ -361,6 +361,11 @@ impl PasteBurst {
         self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
     }
 
+    /// Number of characters currently buffered as paste content.
+    pub fn buffered_char_count(&self) -> usize {
+        self.buffer.chars().count() + usize::from(self.pending_first_char.is_some())
+    }
+
     /// Try to append a char into the burst buffer only if a burst is already active.
     ///
     /// Returns true when the char was captured into the existing burst, false otherwise.

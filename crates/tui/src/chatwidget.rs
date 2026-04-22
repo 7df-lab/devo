@@ -319,7 +319,7 @@ impl ChatWidget {
             has_input_focus: true,
             enhanced_keys_supported,
             placeholder_text: "Ask Devo".to_string(),
-            disable_paste_burst: true,
+            disable_paste_burst: false,
             skills: None,
         });
 
