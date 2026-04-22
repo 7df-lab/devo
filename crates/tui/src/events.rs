@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::v2::app_command::InputHistoryDirection;
+use crate::app_command::InputHistoryDirection;
 use devo_core::SessionId;
 use devo_protocol::ProviderWireApi;
 const TOOL_RESULT_FOLD_FINAL_STAGE: u8 = 3;

@@ -39,11 +39,11 @@ use devo_server::TurnEventPayload;
 use devo_server::TurnInterruptParams;
 use devo_server::TurnStartParams;
 
+use crate::app_command::InputHistoryDirection;
 use crate::events::SessionListEntry;
 use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
-use crate::v2::app_command::InputHistoryDirection;
 
 struct EnsureSessionOutcome {
     session_id: SessionId,
