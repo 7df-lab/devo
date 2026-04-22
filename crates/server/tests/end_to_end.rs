@@ -172,7 +172,7 @@ async fn stdio_server_process_supports_handshake_and_session_start() -> Result<(
         serde_json::json!(test_cwd)
     );
     assert_eq!(
-        session_start_response["result"]["resolved_model"],
+        session_start_response["result"]["session"]["model"],
         serde_json::json!("test-model")
     );
 
@@ -258,7 +258,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
         .iter()
         .find(|value| value.get("id") == Some(&serde_json::json!(2)))
         .context("find session/start response")?;
-    let session_id = session_response["result"]["session_id"]
+    let session_id = session_response["result"]["session"]["session_id"]
         .as_str()
         .context("extract session id")?
         .to_string();

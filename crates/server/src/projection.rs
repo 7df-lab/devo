@@ -4,9 +4,9 @@ use devo_core::{
 };
 
 use crate::session::{
-    SessionHistoryItem, SessionHistoryItemKind, SessionRuntimeStatus, SessionSummary,
+    SessionHistoryItem, SessionHistoryItemKind, SessionMetadata, SessionRuntimeStatus,
 };
-use crate::turn::TurnSummary;
+use crate::turn::TurnMetadata;
 
 /// Projects a canonical core session record into the API-visible session summary.
 pub trait SessionProjector {
@@ -16,13 +16,13 @@ pub trait SessionProjector {
         session: &SessionRecord,
         ephemeral: bool,
         status: SessionRuntimeStatus,
-    ) -> SessionSummary;
+    ) -> SessionMetadata;
 }
 
 /// Projects a canonical core turn record into the API-visible turn summary.
 pub trait TurnProjector {
     /// Converts one core turn record into a transport-facing turn summary.
-    fn project_turn(&self, turn: &TurnRecord) -> TurnSummary;
+    fn project_turn(&self, turn: &TurnRecord) -> TurnMetadata;
 }
 
 /// Default projector that performs field-by-field protocol projection.
@@ -43,22 +43,28 @@ impl DefaultProjection {
                             SessionHistoryItemKind::Assistant
                         };
                         history.push(SessionHistoryItem {
+                            tool_call_id: None,
                             kind,
                             title: String::new(),
                             body: text.clone(),
                         });
                     }
-                    ContentBlock::ToolUse { name, input, .. } => {
+                    ContentBlock::ToolUse { id, name, input } => {
                         history.push(SessionHistoryItem {
+                            tool_call_id: Some(id.clone()),
                             kind: SessionHistoryItemKind::ToolCall,
                             title: summarize_tool_call(name, input),
                             body: String::new(),
                         });
                     }
                     ContentBlock::ToolResult {
-                        content, is_error, ..
+                        tool_use_id,
+                        content,
+                        is_error,
+                        ..
                     } => {
                         history.push(SessionHistoryItem {
+                            tool_call_id: Some(tool_use_id.clone()),
                             kind: if *is_error {
                                 SessionHistoryItemKind::Error
                             } else {
@@ -85,6 +91,7 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
     match item {
         TurnItem::UserMessage(TextItem { text }) | TurnItem::SteerInput(TextItem { text }) => {
             Some(SessionHistoryItem {
+                tool_call_id: None,
                 kind: SessionHistoryItemKind::User,
                 title: String::new(),
                 body: text.clone(),
@@ -97,30 +104,33 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
         | TurnItem::ImageGeneration(TextItem { text })
         | TurnItem::ContextCompaction(TextItem { text })
         | TurnItem::HookPrompt(TextItem { text }) => Some(SessionHistoryItem {
+            tool_call_id: None,
             kind: SessionHistoryItemKind::Assistant,
             title: String::new(),
             body: text.clone(),
         }),
         TurnItem::ToolCall(ToolCallItem {
-            tool_name, input, ..
+            tool_call_id,
+            tool_name,
+            input,
         }) => Some(SessionHistoryItem {
+            tool_call_id: Some(tool_call_id.clone()),
             kind: SessionHistoryItemKind::ToolCall,
             title: summarize_tool_call(tool_name, input),
             body: String::new(),
         }),
         TurnItem::ToolResult(ToolResultItem {
+            tool_call_id,
+            tool_name,
             output, is_error, ..
         }) => Some(SessionHistoryItem {
+            tool_call_id: Some(tool_call_id.clone()),
             kind: if *is_error {
                 SessionHistoryItemKind::Error
             } else {
                 SessionHistoryItemKind::ToolResult
             },
-            title: if *is_error {
-                "Tool error".to_string()
-            } else {
-                "Tool output".to_string()
-            },
+            title: summarize_tool_result(tool_name.as_deref(), *is_error),
             body: match output {
                 serde_json::Value::String(text) => text.clone(),
                 other => other.to_string(),
@@ -138,8 +148,8 @@ impl SessionProjector for DefaultProjection {
         session: &SessionRecord,
         ephemeral: bool,
         status: SessionRuntimeStatus,
-    ) -> SessionSummary {
-        SessionSummary {
+    ) -> SessionMetadata {
+        SessionMetadata {
             session_id: session.id,
             cwd: session.cwd.clone(),
             created_at: session.created_at,
@@ -147,7 +157,8 @@ impl SessionProjector for DefaultProjection {
             title: session.title.clone(),
             title_state: session.title_state.clone(),
             ephemeral,
-            resolved_model: session.model.clone(),
+            model: session.model.clone(),
+            thinking: session.thinking.clone(),
             total_input_tokens: 0,
             total_output_tokens: 0,
             status,
@@ -156,13 +167,16 @@ impl SessionProjector for DefaultProjection {
 }
 
 impl TurnProjector for DefaultProjection {
-    fn project_turn(&self, turn: &TurnRecord) -> TurnSummary {
-        TurnSummary {
+    fn project_turn(&self, turn: &TurnRecord) -> TurnMetadata {
+        TurnMetadata {
             turn_id: turn.id,
             session_id: turn.session_id,
             sequence: turn.sequence,
             status: turn.status.clone(),
-            model_slug: turn.model_slug.clone(),
+            model: turn.model.clone(),
+            thinking: turn.thinking.clone(),
+            request_model: turn.request_model.clone(),
+            request_thinking: turn.request_thinking.clone(),
             started_at: turn.started_at,
             completed_at: turn.completed_at,
             usage: turn.usage.clone(),
@@ -178,5 +192,14 @@ fn summarize_tool_call(tool_name: &str, input: &serde_json::Value) -> String {
             .map(|command| format!("Ran {command}"))
             .unwrap_or_else(|| "Ran shell command".to_string()),
         other => format!("Ran {other}"),
+    }
+}
+
+fn summarize_tool_result(tool_name: Option<&str>, is_error: bool) -> String {
+    match (tool_name, is_error) {
+        (Some(tool_name), true) => format!("{tool_name} error"),
+        (Some(tool_name), false) => format!("{tool_name} output"),
+        (None, true) => "Tool error".to_string(),
+        (None, false) => "Tool output".to_string(),
     }
 }

@@ -48,6 +48,7 @@ use crate::slash_command::SlashCommand;
 use crate::tui::frame_requester::FrameRequester;
 
 pub(crate) const QUIT_SHORTCUT_TIMEOUT: Duration = Duration::from_secs(2);
+const FOOTER_STATUS_ANIMATION_PREFIX: &str = "[[devo-status-animated]] ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CancellationEvent {
@@ -261,6 +262,13 @@ impl BottomPane {
         } else if self.composer.is_in_paste_burst() {
             self.request_redraw_in(ChatComposer::recommended_paste_flush_delay());
         }
+        if self
+            .status_message
+            .as_deref()
+            .is_some_and(status_message_is_active)
+        {
+            self.request_redraw_in(Duration::from_millis(32));
+        }
     }
 
     pub(crate) fn set_status_message(&mut self, message: impl Into<String>) {
@@ -277,6 +285,14 @@ impl BottomPane {
         let placeholder = placeholder.into();
         self.placeholder_text = placeholder.clone();
         self.composer.set_placeholder_text(placeholder);
+        self.request_redraw();
+    }
+
+    pub(crate) fn clear_composer(&mut self) {
+        self.composer
+            .set_text_content(String::new(), Vec::new(), Vec::new());
+        self.external_history_active = false;
+        self.external_history_draft = None;
         self.request_redraw();
     }
 
@@ -446,12 +462,21 @@ impl BottomPane {
     }
 
     fn sync_status_line(&mut self) {
+        let animated_prefix = if self
+            .status_message
+            .as_deref()
+            .is_some_and(status_message_is_active)
+        {
+            FOOTER_STATUS_ANIMATION_PREFIX
+        } else {
+            Default::default()
+        };
         let status_line = match (&self.session_summary, &self.status_message) {
             (Some(summary), Some(status)) => {
-                Some(Line::from(format!("{status}  |  {summary}")).dim())
+                Some(Line::from(format!("{animated_prefix}{status}  |  {summary}")).dim())
             }
             (Some(summary), None) => Some(Line::from(summary.clone()).dim()),
-            (None, Some(status)) => Some(Line::from(status.clone()).dim()),
+            (None, Some(status)) => Some(Line::from(format!("{animated_prefix}{status}")).dim()),
             (None, None) => None,
         };
         let changed = self.composer.set_status_line(status_line);
@@ -510,6 +535,19 @@ impl BottomPane {
     fn request_redraw_in(&self, dur: Duration) {
         self.frame_requester.schedule_frame_in(dur);
     }
+}
+
+fn status_message_is_active(message: &str) -> bool {
+    let normalized = message.trim().to_ascii_lowercase();
+    normalized == "thinking"
+        || normalized == "generating"
+        || normalized.starts_with("tool ")
+        || normalized.starts_with("loading")
+        || normalized.contains("validating")
+}
+
+pub(crate) fn footer_status_animation_prefix() -> &'static str {
+    FOOTER_STATUS_ANIMATION_PREFIX
 }
 
 impl Renderable for BottomPane {

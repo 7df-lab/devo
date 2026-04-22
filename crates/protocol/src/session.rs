@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::SessionId;
 use crate::SessionTitleState;
-use crate::turn::TurnSummary;
+use crate::turn::TurnMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,7 +20,7 @@ pub enum SessionRuntimeStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSummary {
+pub struct SessionMetadata {
     pub session_id: SessionId,
     pub cwd: PathBuf,
     pub created_at: DateTime<Utc>,
@@ -28,7 +28,8 @@ pub struct SessionSummary {
     pub title: Option<String>,
     pub title_state: SessionTitleState,
     pub ephemeral: bool,
-    pub resolved_model: Option<String>,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
     pub status: SessionRuntimeStatus,
@@ -44,11 +45,7 @@ pub struct SessionStartParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStartResult {
-    pub session_id: SessionId,
-    pub created_at: DateTime<Utc>,
-    pub cwd: PathBuf,
-    pub ephemeral: bool,
-    pub resolved_model: Option<String>,
+    pub session: SessionMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,8 +55,8 @@ pub struct SessionResumeParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionResumeResult {
-    pub session: SessionSummary,
-    pub latest_turn: Option<TurnSummary>,
+    pub session: SessionMetadata,
+    pub latest_turn: Option<TurnMetadata>,
     pub loaded_item_count: u64,
     pub history_items: Vec<SessionHistoryItem>,
 }
@@ -76,6 +73,7 @@ pub enum SessionHistoryItemKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionHistoryItem {
+    pub tool_call_id: Option<String>,
     pub kind: SessionHistoryItemKind,
     pub title: String,
     pub body: String,
@@ -86,7 +84,7 @@ pub struct SessionListParams {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionListResult {
-    pub sessions: Vec<SessionSummary>,
+    pub sessions: Vec<SessionMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,7 +95,19 @@ pub struct SessionTitleUpdateParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTitleUpdateResult {
-    pub session: SessionSummary,
+    pub session: SessionMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMetadataUpdateParams {
+    pub session_id: SessionId,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMetadataUpdateResult {
+    pub session: SessionMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +119,37 @@ pub struct SessionForkParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionForkResult {
-    pub session: SessionSummary,
+    pub session: SessionMetadata,
     pub forked_from_session_id: SessionId,
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+    use crate::SessionTitleState;
+
+    #[test]
+    fn session_metadata_roundtrips_with_model_and_thinking() {
+        let metadata = SessionMetadata {
+            session_id: SessionId::new(),
+            cwd: "/tmp".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            title: Some("Test".to_string()),
+            title_state: SessionTitleState::Unset,
+            ephemeral: false,
+            model: Some("test-model".to_string()),
+            thinking: Some("medium".to_string()),
+            total_input_tokens: 12,
+            total_output_tokens: 34,
+            status: SessionRuntimeStatus::Idle,
+        };
+
+        let json = serde_json::to_string(&metadata).expect("serialize");
+        let restored: SessionMetadata = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, metadata);
+    }
 }

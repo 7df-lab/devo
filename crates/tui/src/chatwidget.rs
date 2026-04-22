@@ -6,6 +6,7 @@
 //! through `Model` instead of a TUI-local reasoning enum.
 
 use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crossterm::event::KeyCode;
@@ -61,6 +62,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) frame_requester: FrameRequester,
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) initial_session: TuiSessionState,
+    pub(crate) initial_thinking_selection: Option<String>,
     pub(crate) initial_user_message: Option<UserMessage>,
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) is_first_run: bool,
@@ -69,7 +71,10 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) startup_tooltip_override: Option<String>,
 }
 
-/// Live UI projection of the active session identity.
+/// Resolved runtime session projection owned by the chat widget.
+///
+/// Unlike `InitialTuiSession`, this is internal TUI state: the model slug has already been resolved
+/// into model metadata when available, and provider is derived from that projection.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TuiSessionState {
     pub(crate) cwd: PathBuf,
@@ -159,6 +164,19 @@ struct ResumeBrowserState {
     selection: usize,
 }
 
+#[derive(Debug, Clone)]
+struct ActiveToolCall {
+    tool_use_id: String,
+    lines: Vec<Line<'static>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DotStatus {
+    Pending,
+    Completed,
+    Failed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerMode {
     Model,
@@ -166,13 +184,19 @@ enum PickerMode {
 }
 
 pub(crate) struct ChatWidget {
+    // App event, such as UserTurn, List Sessions, New Session, Onboard or Browser Input History
     app_event_tx: AppEventSender,
+    // Frame requester for scheduling future frame draws on the TUI event loop.
     frame_requester: FrameRequester,
+    // The session state utlized for TUI rendering, currently simple: cwd, Model, ProviderWireApi
+    // TODO: Shoule expland the session state, and move thinking_selection into session state.
     session: TuiSessionState,
     thinking_selection: Option<String>,
+    // sub widget, bottom pane, including such input textarea, slash command popup, status summary.
     bottom_pane: BottomPane,
     active_cell: Option<Box<dyn HistoryCell>>,
     active_cell_revision: u64,
+    active_tool_calls: HashMap<String, ActiveToolCall>,
     history: Vec<Box<dyn HistoryCell>>,
     next_history_flush_index: usize,
     queued_user_messages: VecDeque<UserMessage>,
@@ -191,6 +215,31 @@ pub(crate) struct ChatWidget {
 }
 
 impl ChatWidget {
+    fn build_header_box(
+        cwd: &std::path::Path,
+        model: Option<&Model>,
+        is_first_run: bool,
+        startup_tooltip_override: Option<String>,
+    ) -> Box<dyn HistoryCell> {
+        let model = model.cloned().unwrap_or_else(|| Model {
+            slug: "unknown".to_string(),
+            display_name: "unknown".to_string(),
+            provider: ProviderWireApi::OpenAIChatCompletions,
+            ..Model::default()
+        });
+        Box::new(history_cell::new_session_info(
+            cwd,
+            &model.slug,
+            model.display_name.clone(),
+            model.thinking_capability.clone(),
+            model.default_reasoning_effort,
+            model.thinking_implementation.clone(),
+            is_first_run,
+            startup_tooltip_override,
+            /*show_fast_status*/ false,
+        ))
+    }
+
     fn trim_trailing_blank_lines(lines: &mut Vec<Line<'static>>) {
         while lines
             .last()
@@ -205,7 +254,7 @@ impl ChatWidget {
     }
 
     fn pending_dot_prefix() -> Line<'static> {
-        Line::from("• ".dim())
+        Line::from("• ".cyan())
     }
 
     fn truncate_display_text(value: &str, max_chars: usize) -> String {
@@ -230,6 +279,22 @@ impl ChatWidget {
 
     fn tool_text_style() -> Style {
         Style::default().fg(Color::Rgb(176, 176, 176))
+    }
+
+    fn tool_dot_prefix() -> Line<'static> {
+        Self::completed_dot_prefix()
+    }
+
+    fn failed_dot_prefix() -> Line<'static> {
+        Line::from("• ").red()
+    }
+
+    fn dot_prefix(status: DotStatus) -> Line<'static> {
+        match status {
+            DotStatus::Pending => Self::pending_dot_prefix(),
+            DotStatus::Completed => Self::completed_dot_prefix(),
+            DotStatus::Failed => Self::failed_dot_prefix(),
+        }
     }
 
     fn format_token_count(value: usize) -> String {
@@ -281,6 +346,31 @@ impl ChatWidget {
             .set_session_summary(self.session_summary_text());
     }
 
+    fn push_session_header(
+        &mut self,
+        is_first_run: bool,
+        startup_tooltip_override: Option<String>,
+    ) {
+        self.history.push(Self::build_header_box(
+            &self.session.cwd,
+            self.session.model.as_ref(),
+            is_first_run,
+            startup_tooltip_override,
+        ));
+    }
+
+    fn clear_for_session_switch(&mut self) {
+        self.history.clear();
+        self.next_history_flush_index = 0;
+        self.active_cell = None;
+        self.active_cell_revision = 0;
+        self.active_tool_calls.clear();
+        self.active_assistant_text.clear();
+        self.active_reasoning_text.clear();
+        self.bottom_pane.clear_composer();
+        self.set_status_message("Resuming session");
+    }
+
     fn set_default_placeholder(&mut self) {
         self.bottom_pane
             .set_placeholder_text("Ask Devo".to_string());
@@ -292,10 +382,12 @@ impl ChatWidget {
     }
 
     pub(crate) fn new_with_app_event(common: ChatWidgetInit) -> Self {
+        // Pull the constructor inputs apart up front so the setup below reads in stages.
         let ChatWidgetInit {
             frame_requester,
             app_event_tx,
             initial_session,
+            initial_thinking_selection,
             initial_user_message,
             enhanced_keys_supported,
             is_first_run,
@@ -304,15 +396,21 @@ impl ChatWidget {
             startup_tooltip_override,
         } = common;
 
-        let thinking_selection = initial_session
-            .model
-            .as_ref()
-            .and_then(Model::default_thinking_selection);
+        // Prefer an explicit startup selection, but fall back to the model's default thinking mode.
+        let thinking_selection = initial_thinking_selection.or_else(|| {
+            initial_session
+                .model
+                .as_ref()
+                .and_then(Model::default_thinking_selection)
+        });
+
+        // Queue any startup user message so it is processed through the same path as normal input.
         let mut queued_user_messages = VecDeque::new();
         if let Some(initial_user_message) = initial_user_message {
             queued_user_messages.push_back(initial_user_message);
         }
 
+        // Build the bottom composer first, since the widget delegates all live input handling there.
         let bottom_pane = BottomPane::new(BottomPaneParams {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
@@ -323,21 +421,14 @@ impl ChatWidget {
             skills: None,
         });
 
-        let mut history: Vec<Box<dyn HistoryCell>> = Vec::new();
-        if let Some(model) = &initial_session.model {
-            history.push(Box::new(history_cell::new_session_info(
-                &initial_session.cwd,
-                &model.slug,
-                model.display_name.clone(),
-                model.thinking_capability.clone(),
-                model.default_reasoning_effort,
-                model.thinking_implementation.clone(),
-                is_first_run,
-                startup_tooltip_override,
-                /*show_fast_status*/ false,
-            )));
-        }
+        let history: Vec<Box<dyn HistoryCell>> = vec![Self::build_header_box(
+            &initial_session.cwd,
+            initial_session.model.as_ref(),
+            is_first_run,
+            startup_tooltip_override,
+        )];
 
+        // Assemble the full widget state from the initial session, composer, history, and queues.
         let mut widget = Self {
             app_event_tx,
             frame_requester,
@@ -346,6 +437,7 @@ impl ChatWidget {
             bottom_pane,
             active_cell: None,
             active_cell_revision: 0,
+            active_tool_calls: HashMap::new(),
             history,
             next_history_flush_index: 0,
             queued_user_messages,
@@ -362,9 +454,13 @@ impl ChatWidget {
             total_output_tokens: 0,
             busy: false,
         };
+
+        // Model onboarding can inject additional startup UI before the first frame is drawn.
         if show_model_onboarding {
             widget.begin_onboarding();
         }
+
+        // Keep the bottom pane summary in sync with the assembled widget state.
         widget.sync_bottom_pane_summary();
         widget
     }
@@ -456,8 +552,9 @@ impl ChatWidget {
 
     pub(crate) fn handle_worker_event(&mut self, event: WorkerEvent) {
         match event {
-            WorkerEvent::TurnStarted { model } => {
-                self.update_session_model_slug(model);
+            WorkerEvent::TurnStarted { model, thinking } => {
+                self.update_session_request_model(model);
+                self.thinking_selection = thinking;
                 self.busy = true;
                 self.active_assistant_text.clear();
                 self.active_reasoning_text.clear();
@@ -480,60 +577,75 @@ impl ChatWidget {
                 self.set_status_message("Thinking");
             }
             WorkerEvent::ToolCall {
-                tool_use_id: _,
+                tool_use_id,
                 summary,
                 detail,
             } => {
-                self.commit_active_streams();
+                self.commit_active_streams(DotStatus::Completed);
                 let message = detail
                     .map(|detail| format!("{summary}\n{detail}"))
                     .unwrap_or(summary);
-                self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
-                    vec![Line::from(message).patch_style(Self::tool_text_style())],
-                    Line::from("• ").patch_style(Self::tool_text_style()),
-                    "  ",
-                    false,
-                ));
+                self.active_tool_calls.insert(
+                    tool_use_id.clone(),
+                    ActiveToolCall {
+                        tool_use_id,
+                        lines: vec![Line::from(message).patch_style(Self::tool_text_style())],
+                    },
+                );
+                self.frame_requester.schedule_frame();
                 self.set_status_message("Tool started");
             }
             WorkerEvent::ToolResult {
-                tool_use_id: _,
+                tool_use_id,
+                title,
                 preview,
                 is_error,
                 truncated,
             } => {
-                self.commit_active_streams();
-                let title = if is_error {
-                    "Tool error"
+                self.commit_active_streams(DotStatus::Completed);
+                let dot_status = if is_error {
+                    DotStatus::Failed
                 } else {
-                    "Tool output"
+                    DotStatus::Completed
                 };
-                if is_error {
-                    self.add_to_history(history_cell::new_error_event_with_hint(
-                        preview,
-                        Some(title.to_string()),
-                    ))
-                } else {
-                    let mut lines = Vec::new();
-                    let mut preview_lines = truncated_tool_output_preview(&preview, 80, 12);
-                    if truncated && preview_lines.is_empty() {
-                        preview_lines.push(Line::from("…").patch_style(Self::tool_text_style()));
-                    }
-                    for mut line in preview_lines {
-                        line.spans = line
-                            .spans
-                            .into_iter()
-                            .map(|span| span.patch_style(Self::tool_text_style()))
-                            .collect();
-                        lines.push(line);
-                    }
+                let active_tool_lines = self
+                    .active_tool_calls
+                    .remove(&tool_use_id)
+                    .map(|tool| tool.lines);
+                if let Some(lines) = active_tool_lines {
                     self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
                         lines,
-                        Line::from("• ").patch_style(Self::tool_text_style()),
+                        Self::dot_prefix(dot_status),
+                        "  ",
+                        false,
+                    ));
+                } else if !title.is_empty() {
+                    self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
+                        vec![Line::from(title).patch_style(Self::tool_text_style())],
+                        Self::dot_prefix(dot_status),
                         "  ",
                         false,
                     ));
                 }
+                let mut lines = Vec::new();
+                let mut preview_lines = truncated_tool_output_preview(&preview, 80, 12);
+                if truncated && preview_lines.is_empty() {
+                    preview_lines.push(Line::from("…").patch_style(Self::tool_text_style()));
+                }
+                for mut line in preview_lines {
+                    line.spans = line
+                        .spans
+                        .into_iter()
+                        .map(|span| span.patch_style(Self::tool_text_style()))
+                        .collect();
+                    lines.push(line);
+                }
+                self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
+                    lines,
+                    Self::dot_prefix(dot_status),
+                    "  ",
+                    false,
+                ));
                 self.set_status_message(if is_error {
                     "Tool returned an error"
                 } else {
@@ -555,7 +667,8 @@ impl ChatWidget {
                 total_input_tokens,
                 total_output_tokens,
             } => {
-                self.commit_active_streams();
+                self.commit_active_streams(DotStatus::Completed);
+                self.active_tool_calls.clear();
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -568,7 +681,8 @@ impl ChatWidget {
                 total_input_tokens,
                 total_output_tokens,
             } => {
-                self.commit_active_streams();
+                self.commit_active_streams(DotStatus::Failed);
+                self.active_tool_calls.clear();
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -579,7 +693,7 @@ impl ChatWidget {
             WorkerEvent::ProviderValidationSucceeded { reply_preview } => {
                 if let Some(OnboardingStep::Validating { model, .. }) = self.onboarding_step.take()
                 {
-                    self.update_session_model_slug(model);
+                    self.update_session_request_model(model);
                 }
                 self.add_to_history(history_cell::new_info_event(
                     format!("Validation reply: {reply_preview}"),
@@ -611,9 +725,14 @@ impl ChatWidget {
                 self.add_markdown_history("Skills", &body);
                 self.set_status_message("Skills loaded");
             }
-            WorkerEvent::NewSessionPrepared { cwd, model } => {
+            WorkerEvent::NewSessionPrepared {
+                cwd,
+                model,
+                thinking,
+            } => {
                 self.session.cwd = cwd;
-                self.update_session_model_slug(model);
+                self.update_session_request_model(model);
+                self.thinking_selection = thinking;
                 self.active_assistant_text.clear();
                 self.active_reasoning_text.clear();
                 self.history.clear();
@@ -622,6 +741,9 @@ impl ChatWidget {
                 self.turn_count = 0;
                 self.total_input_tokens = 0;
                 self.total_output_tokens = 0;
+                self.push_session_header(
+                    /*is_first_run*/ false, /*startup_tooltip_override*/ None,
+                );
                 self.set_status_message("New session ready; send a prompt to start it");
             }
             WorkerEvent::SessionSwitched {
@@ -629,6 +751,7 @@ impl ChatWidget {
                 cwd,
                 title,
                 model,
+                thinking,
                 total_input_tokens,
                 total_output_tokens,
                 history_items,
@@ -636,18 +759,23 @@ impl ChatWidget {
             } => {
                 self.session.cwd = cwd;
                 if let Some(model) = model {
-                    self.update_session_model_slug(model);
+                    self.update_session_request_model(model);
                 }
+                self.thinking_selection = thinking;
                 self.history.clear();
                 self.next_history_flush_index = 0;
                 self.active_assistant_text.clear();
                 self.active_reasoning_text.clear();
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.push_session_header(
+                    /*is_first_run*/ false, /*startup_tooltip_override*/ None,
+                );
+                let loaded_any_history = !history_items.is_empty();
                 for item in history_items {
                     self.add_transcript_item(item);
                 }
-                if self.history.is_empty() {
+                if !loaded_any_history {
                     self.add_to_history(history_cell::new_info_event(
                         format!(
                             "switched to {session_id}; title: {}; loaded items: {loaded_item_count}",
@@ -792,6 +920,7 @@ impl ChatWidget {
         }
     }
 
+    // TODO: Now, the onboarding TUI is too simple and crude, should be a more designed, specifially designed for onboarding.
     fn begin_onboarding(&mut self) {
         self.onboarding_step = Some(OnboardingStep::ModelName);
         self.set_onboarding_placeholder("model name");
@@ -918,7 +1047,7 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
-    fn update_session_model_slug(&mut self, slug: String) {
+    fn update_session_request_model(&mut self, slug: String) {
         if let Some(model) = self
             .available_models
             .iter()
@@ -948,6 +1077,10 @@ impl ChatWidget {
     }
 
     fn add_markdown_history(&mut self, title: &str, body: &str) {
+        self.add_markdown_history_with_status(title, body, DotStatus::Completed);
+    }
+
+    fn add_markdown_history_with_status(&mut self, title: &str, body: &str, status: DotStatus) {
         let mut lines = if title == "Assistant" || title == "Reasoning" {
             Vec::new()
         } else {
@@ -959,17 +1092,10 @@ impl ChatWidget {
             Some(&self.session.cwd),
             &mut lines,
         );
-        if title == "Assistant" {
+        if title == "Assistant" || title == "Reasoning" {
             self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
                 lines,
-                Self::completed_dot_prefix(),
-                "  ",
-                false,
-            ));
-        } else if title == "Reasoning" {
-            self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
-                lines,
-                Self::pending_dot_prefix(),
+                Self::dot_prefix(status),
                 "  ",
                 false,
             ));
@@ -1020,13 +1146,13 @@ impl ChatWidget {
             TranscriptItemKind::ToolCall => {
                 self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
                     vec![Line::from(item.title).patch_style(Self::tool_text_style())],
-                    Line::from("• ").patch_style(Self::tool_text_style()),
+                    Self::tool_dot_prefix(),
                     "  ",
                     false,
                 ));
             }
             TranscriptItemKind::ToolResult => {
-                let mut lines = Vec::new();
+                let mut lines = vec![Line::from(item.title).patch_style(Self::tool_text_style())];
                 for mut line in truncated_tool_output_preview(&item.body, 80, 12) {
                     line.spans = line
                         .spans
@@ -1037,7 +1163,7 @@ impl ChatWidget {
                 }
                 self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
                     lines,
-                    Line::from("• ").patch_style(Self::tool_text_style()),
+                    Self::tool_dot_prefix(),
                     "  ",
                     false,
                 ));
@@ -1051,14 +1177,14 @@ impl ChatWidget {
         }
     }
 
-    fn commit_active_streams(&mut self) {
+    fn commit_active_streams(&mut self, status: DotStatus) {
         if !self.active_reasoning_text.trim().is_empty() {
             let reasoning_text = std::mem::take(&mut self.active_reasoning_text);
-            self.add_markdown_history("Reasoning", &reasoning_text);
+            self.add_markdown_history_with_status("Reasoning", &reasoning_text, status);
         }
         if !self.active_assistant_text.trim().is_empty() {
             let text = std::mem::take(&mut self.active_assistant_text);
-            self.add_markdown_history("Assistant", &text);
+            self.add_markdown_history_with_status("Assistant", &text, status);
         }
     }
 
@@ -1221,40 +1347,6 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
-    fn history_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        for cell in &self.history {
-            lines.extend(cell.display_lines(width));
-            lines.push(Line::from(""));
-        }
-        if let Some(active_cell) = &self.active_cell {
-            lines.extend(active_cell.display_lines(width));
-        }
-        if !self.active_reasoning_text.trim().is_empty() {
-            lines.extend(
-                self.bulleted_markdown_cell(
-                    &self.active_reasoning_text,
-                    Self::pending_dot_prefix(),
-                )
-                .display_lines(width),
-            );
-        }
-        if !self.active_assistant_text.trim().is_empty() {
-            lines.extend(
-                self.bulleted_markdown_cell(
-                    &self.active_assistant_text,
-                    Self::pending_dot_prefix(),
-                )
-                .display_lines(width),
-            );
-        }
-        if lines.is_empty() {
-            lines.push(Line::from("No transcript yet".dim()));
-        }
-        Self::trim_trailing_blank_lines(&mut lines);
-        lines
-    }
-
     fn active_viewport_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         if let Some(active_cell) = &self.active_cell {
@@ -1332,7 +1424,7 @@ impl ChatWidget {
             return;
         }
 
-        self.update_session_model_slug(slug.clone());
+        self.update_session_request_model(slug.clone());
         self.thinking_selection = self
             .session
             .model
@@ -1426,12 +1518,11 @@ impl ChatWidget {
             }
             KeyCode::Enter => {
                 if let Some(selected) = browser.sessions.get(browser.selection) {
-                    self.app_event_tx
-                        .send(AppEvent::Command(AppCommand::switch_session(
-                            selected.session_id,
-                        )));
+                    let session_id = selected.session_id;
                     self.resume_browser = None;
-                    self.set_status_message("Resuming session");
+                    self.clear_for_session_switch();
+                    self.app_event_tx
+                        .send(AppEvent::Command(AppCommand::switch_session(session_id)));
                 }
             }
             _ => {}

@@ -38,6 +38,8 @@ pub(crate) enum WorkerEvent {
     TurnStarted {
         /// The model slug resolved by the server for this turn.
         model: String,
+        /// The logical thinking selection used for this turn.
+        thinking: Option<String>,
     },
     /// Incremental assistant text.
     TextDelta(String),
@@ -60,6 +62,8 @@ pub(crate) enum WorkerEvent {
     ToolResult {
         /// Stable identifier used to match the corresponding tool call.
         tool_use_id: String,
+        /// Human-readable title for the tool result when no prior tool-call row is cached.
+        title: String,
         /// Human-readable output preview shown in the transcript.
         preview: String,
         /// Whether the tool returned an error.
@@ -122,6 +126,8 @@ pub(crate) enum WorkerEvent {
         cwd: std::path::PathBuf,
         /// Model currently configured for the next newly-created session.
         model: String,
+        /// Thinking selection currently configured for the next newly-created session.
+        thinking: Option<String>,
     },
     /// The active session changed.
     SessionSwitched {
@@ -133,6 +139,8 @@ pub(crate) enum WorkerEvent {
         title: Option<String>,
         /// The model restored from the resumed session, when one exists.
         model: Option<String>,
+        /// The thinking selection restored from the resumed session, when one exists.
+        thinking: Option<String>,
         /// Total input tokens accumulated for the resumed session.
         total_input_tokens: usize,
         /// Total output tokens accumulated for the resumed session.

@@ -11,7 +11,7 @@ use devo_server::{
     ApprovalScopeValue, ClientRequest, ClientTransportKind, DefaultProjection, EventContext,
     EventsSubscribeParams, InitializeParams, InputItem, ItemDeltaKind, ItemDeltaPayload,
     PendingServerRequestContext, ProtocolError, ProtocolErrorCode, ServerEvent, ServerRequestKind,
-    SessionProjector, SessionRuntimeStatus, SessionSummary, SessionTitleUpdateParams,
+    SessionProjector, SessionRuntimeStatus, SessionMetadata, SessionTitleUpdateParams,
     SteerInputRecord, TurnKind, TurnProjector,
 };
 use pretty_assertions::assert_eq;
@@ -201,7 +201,7 @@ fn session_projection_maps_core_record() {
         agent_path: None,
         model_provider: "anthropic".into(),
         model: Some("claude-sonnet".into()),
-        reasoning_effort: None,
+        thinking: None,
         cwd: ".".into(),
         cli_version: "0.1.0".into(),
         title: Some("Test".into()),
@@ -220,7 +220,7 @@ fn session_projection_maps_core_record() {
 
     let projected = projection.project_session(&session, false, SessionRuntimeStatus::Idle);
     assert_eq!(projected.session_id, session.id);
-    assert_eq!(projected.resolved_model, session.model);
+    assert_eq!(projected.model, session.model);
 }
 
 #[test]
@@ -233,7 +233,10 @@ fn turn_projection_preserves_turn_status_vocabulary() {
         started_at: Utc::now(),
         completed_at: None,
         status: TurnStatus::Running,
-        model_slug: "claude-sonnet".into(),
+        model: "claude-sonnet".into(),
+        thinking: None,
+        request_model: "claude-sonnet".into(),
+        request_thinking: None,
         input_token_estimate: None,
         usage: None,
         schema_version: 1,
@@ -292,7 +295,7 @@ fn session_title_update_params_roundtrip() {
 #[test]
 fn session_title_updated_event_serializes_expected_kind() {
     let event = ServerEvent::SessionTitleUpdated(devo_server::SessionEventPayload {
-        session: SessionSummary {
+        session: SessionMetadata {
             session_id: SessionId::new(),
             cwd: ".".into(),
             created_at: Utc::now(),
@@ -300,7 +303,8 @@ fn session_title_updated_event_serializes_expected_kind() {
             title: Some("Renamed session".into()),
             title_state: SessionTitleState::Final(SessionTitleFinalSource::UserRename),
             ephemeral: false,
-            resolved_model: Some("claude-sonnet".into()),
+            model: Some("claude-sonnet".into()),
+            thinking: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             status: SessionRuntimeStatus::Idle,

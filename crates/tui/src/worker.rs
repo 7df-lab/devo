@@ -28,6 +28,8 @@ use devo_server::ServerEvent;
 use devo_server::SessionHistoryItem;
 use devo_server::SessionHistoryItemKind;
 use devo_server::SessionListParams;
+use devo_server::ToolCallPayload;
+use devo_server::ToolResultPayload;
 use devo_server::SessionResumeParams;
 use devo_server::SessionStartParams;
 use devo_server::SessionTitleUpdateParams;
@@ -47,7 +49,8 @@ use crate::events::WorkerEvent;
 
 struct EnsureSessionOutcome {
     session_id: SessionId,
-    resolved_model: Option<String>,
+    model: Option<String>,
+    thinking: Option<String>,
 }
 
 /// Immutable runtime configuration used to construct the background server client worker.
@@ -324,9 +327,13 @@ async fn run_worker_inner(
                             &mut session_id,
                         )
                         .await?;
-                        if let Some(resolved_model) = session_start.resolved_model.clone() {
-                            model = resolved_model;
+                        if let Some(start_model) = session_start.model.clone() {
+                            model = start_model;
                         }
+                        thinking_selection = session_start
+                            .thinking
+                            .clone()
+                            .or(thinking_selection);
                         let active_session_id = session_start.session_id;
                         let start_result = client.turn_start(TurnStartParams {
                             session_id: active_session_id,
@@ -354,9 +361,27 @@ async fn run_worker_inner(
                     Some(OperationCommand::SetModel(next_model)) => {
                         model = next_model;
                         input_history_cursor = None;
+                        if let Some(active_session_id) = session_id {
+                            let _ = client
+                                .session_metadata_update(devo_server::SessionMetadataUpdateParams {
+                                    session_id: active_session_id,
+                                    model: Some(model.clone()),
+                                    thinking: thinking_selection.clone(),
+                                })
+                                .await;
+                        }
                     }
                     Some(OperationCommand::SetThinking(next_thinking)) => {
                         thinking_selection = next_thinking;
+                        if let Some(active_session_id) = session_id {
+                            let _ = client
+                                .session_metadata_update(devo_server::SessionMetadataUpdateParams {
+                                    session_id: active_session_id,
+                                    model: Some(model.clone()),
+                                    thinking: thinking_selection.clone(),
+                                })
+                                .await;
+                        }
                     }
                     Some(OperationCommand::ValidateProvider {
                         provider,
@@ -484,6 +509,7 @@ async fn run_worker_inner(
                         let _ = event_tx.send(WorkerEvent::NewSessionPrepared {
                             cwd: session_cwd.clone(),
                             model: model.clone(),
+                            thinking: thinking_selection.clone(),
                         });
                     }
                     Some(OperationCommand::SwitchSession(next_session_id)) => {
@@ -502,12 +528,19 @@ async fn run_worker_inner(
                                     session_id: next_session_id.to_string(),
                                     cwd: result.session.cwd,
                                     title: result.session.title,
-                                    model: result.session.resolved_model,
+                                    model: result.session.model.clone(),
+                                    thinking: result.session.thinking.clone(),
                                     total_input_tokens: result.session.total_input_tokens,
                                     total_output_tokens: result.session.total_output_tokens,
                                     history_items: project_history_items(&result.history_items),
                                     loaded_item_count: result.loaded_item_count,
                                 });
+                                model = result
+                                    .session
+                                    .model
+                                    .clone()
+                                    .unwrap_or(model);
+                                thinking_selection = result.session.thinking.clone();
                                 total_input_tokens = result.session.total_input_tokens;
                                 total_output_tokens = result.session.total_output_tokens;
                             }
@@ -647,9 +680,11 @@ async fn run_worker_inner(
                             "turn/started" => {
                                 if let ServerEvent::TurnStarted(payload) = event {
                                     active_turn_id = Some(payload.turn.turn_id);
-                                    model = payload.turn.model_slug.clone();
+                                    model = payload.turn.model.clone();
+                                    thinking_selection = payload.turn.thinking.clone();
                                     let _ = event_tx.send(WorkerEvent::TurnStarted {
-                                        model: payload.turn.model_slug,
+                                        model: payload.turn.model,
+                                        thinking: payload.turn.thinking,
                                     });
                                 }
                                 latest_completed_agent_message = None;
@@ -754,7 +789,8 @@ async fn ensure_session_started(
     if let Some(session_id) = session_id {
         return Ok(EnsureSessionOutcome {
             session_id: *session_id,
-            resolved_model: Some(model.to_string()),
+            model: Some(model.to_string()),
+            thinking: None,
         });
     }
 
@@ -766,10 +802,11 @@ async fn ensure_session_started(
             model: Some(model.to_string()),
         })
         .await?;
-    *session_id = Some(session.session_id);
+    *session_id = Some(session.session.session_id);
     Ok(EnsureSessionOutcome {
-        session_id: session.session_id,
-        resolved_model: session.resolved_model,
+        session_id: session.session.session_id,
+        model: session.session.model,
+        thinking: session.session.thinking,
     })
 }
 
@@ -867,18 +904,14 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
             payload,
             ..
         } => {
-            let tool_use_id = payload
-                .get("tool_use_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
+            let Ok(payload) = serde_json::from_value::<ToolCallPayload>(payload) else {
+                return;
+            };
             let summary = summarize_tool_call(&payload);
-            let detail = payload
-                .get("input")
-                .map(render_json_preview)
+            let detail = Some(render_json_preview(&payload.parameters))
                 .filter(|detail| !detail.is_empty());
             let _ = event_tx.send(WorkerEvent::ToolCall {
-                tool_use_id,
+                tool_use_id: payload.tool_call_id,
                 summary,
                 detail,
             });
@@ -888,23 +921,14 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
             payload,
             ..
         } => {
-            let content = payload
-                .get("content")
-                .map(render_json_value_text)
-                .unwrap_or_default();
-            let is_error = payload
-                .get("is_error")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let tool_use_id = payload
-                .get("tool_use_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
+            let Ok(payload) = serde_json::from_value::<ToolResultPayload>(payload) else {
+                return;
+            };
             let _ = event_tx.send(WorkerEvent::ToolResult {
-                tool_use_id,
-                preview: content,
-                is_error,
+                tool_use_id: payload.tool_call_id,
+                title: summarize_tool_result_title(payload.tool_name.as_deref(), payload.is_error),
+                preview: render_json_value_text(&payload.content),
+                is_error: payload.is_error,
                 truncated: false,
             });
         }
@@ -913,25 +937,45 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
 }
 
 fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
+    use std::collections::HashMap;
+
+    let mut paired_result_by_call_id = HashMap::new();
+    let mut consumed_result_indexes = HashMap::new();
+
+    for (index, item) in items.iter().enumerate() {
+        if matches!(
+            item.kind,
+            SessionHistoryItemKind::ToolResult | SessionHistoryItemKind::Error
+        ) && let Some(tool_call_id) = item.tool_call_id.as_deref()
+        {
+            paired_result_by_call_id
+                .entry(tool_call_id.to_string())
+                .or_insert(index);
+        }
+    }
+
     let mut transcript = Vec::new();
     let mut index = 0usize;
 
     while index < items.len() {
         let item = &items[index];
         if item.kind == SessionHistoryItemKind::ToolCall
-            && let Some(next) = items.get(index + 1)
-            && matches!(
-                next.kind,
-                SessionHistoryItemKind::ToolResult | SessionHistoryItemKind::Error
-            )
+            && let Some(tool_call_id) = item.tool_call_id.as_deref()
+            && let Some(result_index) = paired_result_by_call_id.get(tool_call_id).copied()
         {
-            let merged = if next.kind == SessionHistoryItemKind::Error {
-                TranscriptItem::tool_error(item.title.clone(), next.body.clone())
+            let result_item = &items[result_index];
+            consumed_result_indexes.insert(result_index, ());
+            transcript.push(if result_item.kind == SessionHistoryItemKind::Error {
+                TranscriptItem::tool_error(item.title.clone(), result_item.body.clone())
             } else {
-                TranscriptItem::restored_tool_result(item.title.clone(), next.body.clone())
-            };
-            transcript.push(merged);
-            index += 2;
+                TranscriptItem::restored_tool_result(item.title.clone(), result_item.body.clone())
+            });
+            index += 1;
+            continue;
+        }
+
+        if consumed_result_indexes.contains_key(&index) {
+            index += 1;
             continue;
         }
 
@@ -961,17 +1005,21 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
     transcript
 }
 
-fn summarize_tool_call(payload: &serde_json::Value) -> String {
-    let tool_name = payload
-        .get("tool_name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("tool");
-    let input = payload.get("input").unwrap_or(&serde_json::Value::Null);
-    let detail = summarize_tool_input(tool_name, input);
+fn summarize_tool_result_title(tool_name: Option<&str>, is_error: bool) -> String {
+    match (tool_name, is_error) {
+        (Some(tool_name), true) => format!("{tool_name} error"),
+        (Some(tool_name), false) => format!("{tool_name} output"),
+        (None, true) => "Tool error".to_string(),
+        (None, false) => "Tool output".to_string(),
+    }
+}
+
+fn summarize_tool_call(payload: &ToolCallPayload) -> String {
+    let detail = summarize_tool_input(&payload.tool_name, &payload.parameters);
     if detail.is_empty() {
-        tool_name.to_string()
+        payload.tool_name.clone()
     } else {
-        format!("{tool_name}: {detail}")
+        format!("{}: {detail}", payload.tool_name)
     }
 }
 
@@ -1181,7 +1229,7 @@ mod tests {
     use devo_core::SessionId;
     use devo_core::SessionTitleState;
     use devo_server::SessionRuntimeStatus;
-    use devo_server::SessionSummary;
+    use devo_server::SessionMetadata;
 
     use super::normalize_display_output;
     use super::project_history_items;
@@ -1191,15 +1239,17 @@ mod tests {
     use crate::events::TranscriptItem;
     use devo_server::SessionHistoryItem;
     use devo_server::SessionHistoryItemKind;
+    use devo_server::ToolCallPayload;
 
     #[test]
     fn bash_tool_summary_uses_command_text() {
-        let payload = serde_json::json!({
-            "tool_name": "bash",
-            "input": {
+        let payload = ToolCallPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "bash".to_string(),
+            parameters: serde_json::json!({
                 "command": "Get-Date -Format \"yyyy-MM-dd\""
-            }
-        });
+            }),
+        };
 
         assert_eq!(
             summarize_tool_call(&payload),
@@ -1223,7 +1273,7 @@ mod tests {
     #[test]
     fn session_list_entries_keep_title_before_identifier() {
         let active_session_id = SessionId::new();
-        let summary = SessionSummary {
+        let summary = SessionMetadata {
             session_id: active_session_id,
             cwd: ".".into(),
             created_at: Utc::now(),
@@ -1231,7 +1281,8 @@ mod tests {
             title: Some("Saved conversation".to_string()),
             title_state: SessionTitleState::Provisional,
             ephemeral: false,
-            resolved_model: Some("test-model".to_string()),
+            model: Some("test-model".to_string()),
+            thinking: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             status: SessionRuntimeStatus::Idle,
@@ -1252,7 +1303,7 @@ mod tests {
 
     #[test]
     fn session_list_entries_mark_inactive_sessions() {
-        let summary = SessionSummary {
+        let summary = SessionMetadata {
             session_id: SessionId::new(),
             cwd: ".".into(),
             created_at: Utc::now(),
@@ -1260,7 +1311,8 @@ mod tests {
             title: Some("Saved conversation".to_string()),
             title_state: SessionTitleState::Provisional,
             ephemeral: false,
-            resolved_model: Some("test-model".to_string()),
+            model: Some("test-model".to_string()),
+            thinking: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             status: SessionRuntimeStatus::Idle,
@@ -1290,11 +1342,13 @@ mod tests {
     fn project_history_merges_tool_call_and_result() {
         let items = vec![
             SessionHistoryItem {
+                tool_call_id: Some("call-1".to_string()),
                 kind: SessionHistoryItemKind::ToolCall,
                 title: "Ran powershell -Command \"Get-Date\"".to_string(),
                 body: String::new(),
             },
             SessionHistoryItem {
+                tool_call_id: Some("call-1".to_string()),
                 kind: SessionHistoryItemKind::ToolResult,
                 title: "Tool output".to_string(),
                 body: "2026-04-09".to_string(),
@@ -1307,6 +1361,44 @@ mod tests {
                 "Ran powershell -Command \"Get-Date\"",
                 "2026-04-09"
             )]
+        );
+    }
+
+    #[test]
+    fn project_history_pairs_tool_results_by_call_id_not_time_adjacency() {
+        let items = vec![
+            SessionHistoryItem {
+                tool_call_id: Some("call-a".to_string()),
+                kind: SessionHistoryItemKind::ToolCall,
+                title: "Ran read a".to_string(),
+                body: String::new(),
+            },
+            SessionHistoryItem {
+                tool_call_id: Some("call-b".to_string()),
+                kind: SessionHistoryItemKind::ToolCall,
+                title: "Ran read b".to_string(),
+                body: String::new(),
+            },
+            SessionHistoryItem {
+                tool_call_id: Some("call-b".to_string()),
+                kind: SessionHistoryItemKind::ToolResult,
+                title: "Tool output".to_string(),
+                body: "B".to_string(),
+            },
+            SessionHistoryItem {
+                tool_call_id: Some("call-a".to_string()),
+                kind: SessionHistoryItemKind::ToolResult,
+                title: "Tool output".to_string(),
+                body: "A".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            project_history_items(&items),
+            vec![
+                TranscriptItem::restored_tool_result("Ran read a", "A"),
+                TranscriptItem::restored_tool_result("Ran read b", "B"),
+            ]
         );
     }
 }

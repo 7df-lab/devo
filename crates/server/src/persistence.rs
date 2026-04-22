@@ -39,8 +39,8 @@ use crate::execution::RuntimeSession;
 use crate::execution::ServerRuntimeDependencies;
 use crate::projection::history_item_from_turn_item;
 use crate::session::SessionRuntimeStatus;
-use crate::session::SessionSummary;
-use crate::turn::TurnSummary;
+use crate::session::SessionMetadata;
+use crate::turn::TurnMetadata;
 
 /// Owns canonical append-only rollout persistence rooted at the server data directory.
 #[derive(Debug, Clone)]
@@ -64,6 +64,7 @@ impl RolloutStore {
         cwd: PathBuf,
         title: Option<String>,
         model: Option<String>,
+        thinking: Option<String>,
         model_provider: String,
         parent_session_id: Option<SessionId>,
     ) -> SessionRecord {
@@ -83,7 +84,7 @@ impl RolloutStore {
             agent_path: None,
             model_provider,
             model,
-            reasoning_effort: None,
+            thinking,
             cwd,
             cli_version: env!("CARGO_PKG_VERSION").into(),
             title,
@@ -250,7 +251,7 @@ impl RolloutStore {
 struct ReplayState {
     session: Option<SessionRecord>,
     latest_turn: Option<TurnRecord>,
-    latest_turn_summary: Option<TurnSummary>,
+    latest_turn_metadata: Option<TurnMetadata>,
     loaded_item_count: u64,
     next_item_seq: u64,
     turns_seen: u32,
@@ -281,12 +282,15 @@ impl ReplayState {
                         usage.cache_read_input_tokens.unwrap_or(0) as usize;
                     self.last_input_tokens = usage.input_tokens as usize;
                 }
-                self.latest_turn_summary = Some(TurnSummary {
+                self.latest_turn_metadata = Some(TurnMetadata {
                     turn_id: line.turn.id,
                     session_id: line.turn.session_id,
                     sequence: line.turn.sequence,
                     status: line.turn.status.clone(),
-                    model_slug: line.turn.model_slug.clone(),
+                    model: line.turn.model.clone(),
+                    thinking: line.turn.thinking.clone(),
+                    request_model: line.turn.request_model.clone(),
+                    request_thinking: line.turn.request_thinking.clone(),
                     started_at: line.turn.started_at,
                     completed_at: line.turn.completed_at,
                     usage: line.turn.usage.clone(),
@@ -328,10 +332,12 @@ impl ReplayState {
 
         let mut replayed_messages = self.messages;
         let mut replayed_history_items = self.history_items;
+        let mut tool_names_by_id = HashMap::new();
         for pending_item in ordered_items {
             apply_turn_item(
                 &mut replayed_messages,
                 &mut replayed_history_items,
+                &mut tool_names_by_id,
                 pending_item.turn_item,
             );
         }
@@ -344,7 +350,7 @@ impl ReplayState {
         core_session.total_cache_read_tokens = self.total_cache_read_tokens;
         core_session.last_input_tokens = self.last_input_tokens;
 
-        let summary = SessionSummary {
+        let summary = SessionMetadata {
             session_id: record.id,
             cwd: record.cwd.clone(),
             created_at: record.created_at,
@@ -352,7 +358,8 @@ impl ReplayState {
             title: record.title.clone(),
             title_state: record.title_state.clone(),
             ephemeral: false,
-            resolved_model: record.model.clone(),
+            model: record.model.clone(),
+            thinking: record.thinking.clone(),
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,
             status: SessionRuntimeStatus::Idle,
@@ -363,7 +370,7 @@ impl ReplayState {
             summary,
             core_session: std::sync::Arc::new(Mutex::new(core_session)),
             active_turn: None,
-            latest_turn: self.latest_turn_summary,
+            latest_turn: self.latest_turn_metadata,
             loaded_item_count: self.loaded_item_count,
             history_items: replayed_history_items,
             steering_queue: std::sync::Arc::new(std::sync::Mutex::new(
@@ -422,8 +429,36 @@ struct ReplayHistoryItem {
 fn apply_turn_item(
     messages: &mut Vec<Message>,
     history_items: &mut Vec<crate::SessionHistoryItem>,
+    tool_names_by_id: &mut HashMap<String, String>,
     item: TurnItem,
 ) {
+    let item = match item {
+        TurnItem::ToolCall(ToolCallItem {
+            tool_call_id,
+            tool_name,
+            input,
+        }) => {
+            tool_names_by_id.insert(tool_call_id.clone(), tool_name.clone());
+            TurnItem::ToolCall(ToolCallItem {
+                tool_call_id,
+                tool_name,
+                input,
+            })
+        }
+        TurnItem::ToolResult(ToolResultItem {
+            tool_call_id,
+            tool_name,
+            output,
+            is_error,
+        }) => TurnItem::ToolResult(ToolResultItem {
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.or_else(|| tool_names_by_id.get(&tool_call_id).cloned()),
+            output,
+            is_error,
+        }),
+        other => other,
+    };
+
     if let Some(history_item) = history_item_from_turn_item(&item) {
         history_items.push(history_item);
     }
@@ -459,6 +494,7 @@ fn apply_turn_item(
         },
         TurnItem::ToolResult(ToolResultItem {
             tool_call_id,
+            tool_name: _,
             output,
             is_error,
         }) => {
@@ -525,7 +561,7 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 /// Creates one canonical persisted turn record from the transport-facing runtime state.
-pub(crate) fn build_turn_record(turn: &TurnSummary) -> TurnRecord {
+pub(crate) fn build_turn_record(turn: &TurnMetadata) -> TurnRecord {
     TurnRecord {
         id: turn.turn_id,
         session_id: turn.session_id,
@@ -533,7 +569,10 @@ pub(crate) fn build_turn_record(turn: &TurnSummary) -> TurnRecord {
         started_at: turn.started_at,
         completed_at: turn.completed_at,
         status: turn.status.clone(),
-        model_slug: turn.model_slug.clone(),
+        model: turn.model.clone(),
+        thinking: turn.thinking.clone(),
+        request_model: turn.request_model.clone(),
+        request_thinking: turn.request_thinking.clone(),
         input_token_estimate: None,
         usage: turn.usage.clone(),
         schema_version: 1,
@@ -569,11 +608,14 @@ pub(crate) fn build_item_record(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use chrono::TimeZone;
     use chrono::Utc;
     use pretty_assertions::assert_eq;
 
     use super::ReplayState;
+    use crate::persistence::apply_turn_item;
     use devo_core::ItemId;
     use devo_core::ItemLine;
     use devo_core::ItemRecord;
@@ -581,6 +623,7 @@ mod tests {
     use devo_core::SessionId;
     use devo_core::TextItem;
     use devo_core::ToolCallItem;
+    use devo_core::ToolResultItem;
     use devo_core::TurnId;
     use devo_core::TurnItem;
 
@@ -659,5 +702,38 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(titles, vec!["assistant 1", "date"]);
+    }
+
+    #[test]
+    fn replay_backfills_tool_result_name_from_prior_tool_call() {
+        let mut messages = Vec::new();
+        let mut history_items = Vec::new();
+        let mut tool_names_by_id = HashMap::new();
+
+        apply_turn_item(
+            &mut messages,
+            &mut history_items,
+            &mut tool_names_by_id,
+            TurnItem::ToolCall(ToolCallItem {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "read".to_string(),
+                input: serde_json::json!({"filePath":"/tmp/test.txt"}),
+            }),
+        );
+        apply_turn_item(
+            &mut messages,
+            &mut history_items,
+            &mut tool_names_by_id,
+            TurnItem::ToolResult(ToolResultItem {
+                tool_call_id: "call-1".to_string(),
+                tool_name: None,
+                output: serde_json::Value::String("hello".to_string()),
+                is_error: false,
+            }),
+        );
+
+        assert_eq!(history_items.len(), 2);
+        assert_eq!(history_items[0].title, "Ran read");
+        assert_eq!(history_items[1].title, "read output");
     }
 }

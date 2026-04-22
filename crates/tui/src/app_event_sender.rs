@@ -1,3 +1,4 @@
+use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app_command::AppCommand;
@@ -5,19 +6,42 @@ use crate::app_event::AppEvent;
 
 #[derive(Clone, Debug)]
 pub(crate) struct AppEventSender {
-    pub app_event_tx: UnboundedSender<AppEvent>,
+    app_event_tx: AppEventTx,
+}
+
+#[derive(Clone, Debug)]
+enum AppEventTx {
+    Bounded(Sender<AppEvent>),
+    Unbounded(UnboundedSender<AppEvent>),
 }
 
 impl AppEventSender {
     pub(crate) fn new(app_event_tx: UnboundedSender<AppEvent>) -> Self {
-        Self { app_event_tx }
+        Self {
+            app_event_tx: AppEventTx::Unbounded(app_event_tx),
+        }
+    }
+
+    pub(crate) fn new_bounded(app_event_tx: Sender<AppEvent>) -> Self {
+        Self {
+            app_event_tx: AppEventTx::Bounded(app_event_tx),
+        }
     }
 
     /// Send an event to the app event channel. If the receiver has gone away,
     /// the UI is shutting down, so logging the failure is enough.
     pub(crate) fn send(&self, event: AppEvent) {
-        if let Err(err) = self.app_event_tx.send(event) {
-            tracing::error!("failed to send v2 app event: {err}");
+        match &self.app_event_tx {
+            AppEventTx::Bounded(tx) => {
+                if let Err(err) = tx.try_send(event) {
+                    tracing::error!("failed to send v2 app event: {err}");
+                }
+            }
+            AppEventTx::Unbounded(tx) => {
+                if let Err(err) = tx.send(event) {
+                    tracing::error!("failed to send v2 app event: {err}");
+                }
+            }
         }
     }
 

@@ -51,6 +51,10 @@ use crate::SessionForkParams;
 use crate::SessionForkResult;
 use crate::SessionListParams;
 use crate::SessionListResult;
+use crate::ToolCallPayload;
+use crate::ToolResultPayload;
+use crate::SessionMetadataUpdateParams;
+use crate::SessionMetadataUpdateResult;
 use crate::SessionResumeParams;
 use crate::SessionResumeResult;
 use crate::SessionRuntimeStatus;
@@ -67,7 +71,7 @@ use crate::TurnStartParams;
 use crate::TurnStartResult;
 use crate::TurnSteerParams;
 use crate::TurnSteerResult;
-use crate::TurnSummary;
+use crate::TurnMetadata;
 use crate::TurnUsageUpdatedPayload;
 use crate::execution::RuntimeSession;
 use crate::execution::ServerRuntimeDependencies;
@@ -210,6 +214,9 @@ impl ServerRuntime {
         match method.as_str() {
             "session/start" => Some(self.handle_session_start(connection_id, id?, params).await),
             "session/list" => Some(self.handle_session_list(id?, params).await),
+            "session/metadata/update" => {
+                Some(self.handle_session_metadata_update(id?, params).await)
+            }
             "session/title/update" => Some(self.handle_session_title_update(id?, params).await),
             "session/resume" => Some(self.handle_session_resume(connection_id, id?, params).await),
             "session/fork" => Some(self.handle_session_fork(connection_id, id?, params).await),
@@ -295,7 +302,7 @@ impl ServerRuntime {
 
         let now = Utc::now();
         let session_id = SessionId::new();
-        let resolved_model = params
+        let model = params
             .model
             .clone()
             .unwrap_or_else(|| self.deps.default_model.clone());
@@ -305,12 +312,13 @@ impl ServerRuntime {
                 now,
                 params.cwd.clone(),
                 params.title.clone(),
-                Some(resolved_model.clone()),
+                Some(model.clone()),
+                None,
                 self.deps.provider.name().to_string(),
                 None,
             )
         });
-        let summary = crate::SessionSummary {
+        let summary = crate::SessionMetadata {
             session_id,
             cwd: params.cwd.clone(),
             created_at: now,
@@ -322,7 +330,8 @@ impl ServerRuntime {
                 .map(|_| SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate))
                 .unwrap_or(SessionTitleState::Unset),
             ephemeral: params.ephemeral,
-            resolved_model: Some(resolved_model.clone()),
+            model: Some(model.clone()),
+            thinking: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             status: SessionRuntimeStatus::Idle,
@@ -361,7 +370,7 @@ impl ServerRuntime {
             session_id = %session_id,
             cwd = %summary.cwd.display(),
             ephemeral = summary.ephemeral,
-            resolved_model = ?summary.resolved_model,
+            model = ?summary.model,
             has_title = summary.title.is_some(),
             "started session"
         );
@@ -373,11 +382,7 @@ impl ServerRuntime {
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: SessionStartResult {
-                session_id,
-                created_at: now,
-                cwd: params.cwd,
-                ephemeral: params.ephemeral,
-                resolved_model: Some(resolved_model),
+                session: summary,
             },
         })
         .expect("serialize session/start response")
@@ -414,6 +419,57 @@ impl ServerRuntime {
             },
         })
         .expect("serialize session/list response")
+    }
+
+    async fn handle_session_metadata_update(
+        &self,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let params: SessionMetadataUpdateParams = match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    format!("invalid session/metadata/update params: {error}"),
+                );
+            }
+        };
+        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+        let updated_session = {
+            let mut session = session_arc.lock().await;
+            session.summary.model = params.model.clone();
+            session.summary.thinking = params.thinking.clone();
+            let updated_at = Utc::now();
+            session.summary.updated_at = updated_at;
+            if let Some(record) = session.record.as_mut() {
+                record.model = params.model;
+                record.thinking = params.thinking;
+                record.updated_at = updated_at;
+                if let Err(error) = self.rollout_store.append_session_meta(record) {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to persist session metadata update: {error}"),
+                    );
+                }
+            }
+            session.summary.clone()
+        };
+        serde_json::to_value(SuccessResponse {
+            id: request_id,
+            result: SessionMetadataUpdateResult {
+                session: updated_session,
+            },
+        })
+        .expect("serialize session/metadata/update response")
     }
 
     async fn handle_session_title_update(
@@ -566,10 +622,10 @@ impl ServerRuntime {
         let fork_cwd = params.cwd.unwrap_or_else(|| source.summary.cwd.clone());
         let fork_model = source
             .summary
-            .resolved_model
+            .model
             .clone()
             .unwrap_or_else(|| self.deps.default_model.clone());
-        let summary = crate::SessionSummary {
+        let summary = crate::SessionMetadata {
             session_id: forked_id,
             cwd: fork_cwd.clone(),
             created_at: now,
@@ -577,7 +633,8 @@ impl ServerRuntime {
             title: params.title.or_else(|| source.summary.title.clone()),
             title_state: source.summary.title_state.clone(),
             ephemeral: source.summary.ephemeral,
-            resolved_model: Some(fork_model.clone()),
+            model: Some(fork_model.clone()),
+            thinking: source.summary.thinking.clone(),
             total_input_tokens: source_core_session.total_input_tokens,
             total_output_tokens: source_core_session.total_output_tokens,
             status: SessionRuntimeStatus::Idle,
@@ -622,7 +679,8 @@ impl ServerRuntime {
                     now,
                     forked_session.summary.cwd.clone(),
                     forked_session.summary.title.clone(),
-                    forked_session.summary.resolved_model.clone(),
+                    forked_session.summary.model.clone(),
+                    forked_session.summary.thinking.clone(),
                     self.deps.provider.name().to_string(),
                     Some(params.session_id),
                 );
@@ -646,7 +704,7 @@ impl ServerRuntime {
             forked_session_id = %forked_id,
             cwd = %summary.cwd.display(),
             ephemeral = summary.ephemeral,
-            resolved_model = ?summary.resolved_model,
+            model = ?summary.model,
             "forked session"
         );
         self.broadcast_event(ServerEvent::SessionStarted(SessionEventPayload {
@@ -754,15 +812,20 @@ impl ServerRuntime {
             let requested_model = params
                 .model
                 .as_deref()
-                .or(session.summary.resolved_model.as_deref());
+                .or(session.summary.model.as_deref());
+            let requested_thinking = params
+                .thinking
+                .clone()
+                .or_else(|| session.summary.thinking.clone());
             let turn_config = self
                 .deps
-                .resolve_turn_config(requested_model, params.thinking.clone());
+                .resolve_turn_config(requested_model, requested_thinking.clone());
             let resolved_request = turn_config
                 .model
                 .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
-            session.summary.resolved_model = Some(turn_config.model.slug.clone());
-            let turn = TurnSummary {
+            session.summary.model = Some(turn_config.model.slug.clone());
+            session.summary.thinking = turn_config.thinking_selection.clone();
+            let turn = TurnMetadata {
                 turn_id: TurnId::new(),
                 session_id: params.session_id,
                 sequence: session
@@ -770,7 +833,10 @@ impl ServerRuntime {
                     .as_ref()
                     .map_or(1, |turn| turn.sequence + 1),
                 status: TurnStatus::Running,
-                model_slug: resolved_request.request_model,
+                model: turn_config.model.slug.clone(),
+                thinking: turn_config.thinking_selection.clone(),
+                request_model: resolved_request.request_model,
+                request_thinking: resolved_request.request_thinking,
                 started_at: now,
                 completed_at: None,
                 usage: None,
@@ -823,7 +889,7 @@ impl ServerRuntime {
             session_id = %params.session_id,
             turn_id = %turn.turn_id,
             sequence = turn.sequence,
-            model_slug = %turn.model_slug,
+            request_model = %turn.request_model,
             input_chars = input_text.len(),
             "started turn"
         );
@@ -1120,7 +1186,7 @@ impl ServerRuntime {
     async fn execute_turn(
         self: Arc<Self>,
         session_id: SessionId,
-        turn: TurnSummary,
+        turn: TurnMetadata,
         turn_config: TurnConfig,
         display_input: String,
         input: String,
@@ -1151,6 +1217,7 @@ impl ServerRuntime {
             let mut reasoning_item_id = None;
             let mut reasoning_item_seq = None;
             let mut reasoning_text = String::new();
+            let mut tool_names_by_id = HashMap::new();
             let mut latest_usage: Option<TurnUsage> = None;
             let mut usage_base: Option<(usize, usize)> = None;
             while let Some(event) = event_rx.recv().await {
@@ -1230,6 +1297,7 @@ impl ServerRuntime {
                         let _ = item_seq;
                     }
                     QueryEvent::ToolUseStart { id, name, input } => {
+                        tool_names_by_id.insert(id.clone(), name.clone());
                         if let (Some(item_id), Some(item_seq)) =
                             (assistant_item_id.take(), assistant_item_seq.take())
                         {
@@ -1282,11 +1350,12 @@ impl ServerRuntime {
                                     tool_name: name.clone(),
                                     input: input.clone(),
                                 }),
-                                serde_json::json!({
-                                    "tool_use_id": id,
-                                    "tool_name": name,
-                                    "input": input,
-                                }),
+                                serde_json::to_value(ToolCallPayload {
+                                    tool_call_id: id,
+                                    tool_name: name,
+                                    parameters: input,
+                                })
+                                .expect("serialize tool call payload"),
                             )
                             .await;
                     }
@@ -1295,6 +1364,7 @@ impl ServerRuntime {
                         content,
                         is_error,
                     } => {
+                        let tool_name = tool_names_by_id.get(&tool_use_id).cloned();
                         runtime
                             .emit_turn_item(
                                 session_id,
@@ -1302,14 +1372,17 @@ impl ServerRuntime {
                                 ItemKind::ToolResult,
                                 TurnItem::ToolResult(ToolResultItem {
                                     tool_call_id: tool_use_id.clone(),
+                                    tool_name: tool_name.clone(),
                                     output: serde_json::Value::String(content.clone()),
                                     is_error,
                                 }),
-                                serde_json::json!({
-                                    "tool_use_id": tool_use_id,
-                                    "content": content,
-                                    "is_error": is_error,
-                                }),
+                                serde_json::to_value(ToolResultPayload {
+                                    tool_call_id: tool_use_id,
+                                    tool_name,
+                                    content: serde_json::Value::String(content),
+                                    is_error,
+                                })
+                                .expect("serialize tool result payload"),
                             )
                             .await;
                     }
@@ -1603,7 +1676,7 @@ impl ServerRuntime {
             (
                 session
                     .summary
-                    .resolved_model
+                    .model
                     .clone()
                     .unwrap_or_else(|| self.deps.default_model.clone()),
                 session.summary.title_state.clone(),

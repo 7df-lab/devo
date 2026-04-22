@@ -6,12 +6,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ItemId, SessionId, TurnId, TurnStatus, TurnUsage};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnSummary {
+pub struct TurnMetadata {
     pub turn_id: TurnId,
     pub session_id: SessionId,
     pub sequence: u32,
     pub status: TurnStatus,
-    pub model_slug: String,
+    pub model: String,
+    pub thinking: Option<String>,
+    pub request_model: String,
+    pub request_thinking: Option<String>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub usage: Option<TurnUsage>,
@@ -90,4 +93,38 @@ pub struct ActiveTurnSteeringState {
     pub turn_id: TurnId,
     pub turn_kind: TurnKind,
     pub pending_inputs: VecDeque<SteerInputRecord>,
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn turn_metadata_roundtrips_with_logical_and_request_fields() {
+        let metadata = TurnMetadata {
+            turn_id: TurnId::new(),
+            session_id: SessionId::new(),
+            sequence: 1,
+            status: TurnStatus::Completed,
+            model: "logical-model".to_string(),
+            thinking: Some("high".to_string()),
+            request_model: "provider-model".to_string(),
+            request_thinking: Some("medium".to_string()),
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            usage: Some(TurnUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            }),
+        };
+
+        let json = serde_json::to_string(&metadata).expect("serialize");
+        let restored: TurnMetadata = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, metadata);
+    }
 }

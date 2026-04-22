@@ -20,6 +20,8 @@ use devo_protocol::SessionForkParams;
 use devo_protocol::SessionForkResult;
 use devo_protocol::SessionListParams;
 use devo_protocol::SessionListResult;
+use devo_protocol::SessionMetadataUpdateParams;
+use devo_protocol::SessionMetadataUpdateResult;
 use devo_protocol::SessionResumeParams;
 use devo_protocol::SessionResumeResult;
 use devo_protocol::SessionStartParams;
@@ -165,6 +167,13 @@ impl StdioServerClient {
         params: SessionTitleUpdateParams,
     ) -> Result<SessionTitleUpdateResult> {
         self.request("session/title/update", params).await
+    }
+
+    pub async fn session_metadata_update(
+        &mut self,
+        params: SessionMetadataUpdateParams,
+    ) -> Result<SessionMetadataUpdateResult> {
+        self.request("session/metadata/update", params).await
     }
 
     pub async fn session_fork(&mut self, params: SessionForkParams) -> Result<SessionForkResult> {

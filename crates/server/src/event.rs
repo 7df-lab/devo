@@ -3,4 +3,5 @@ pub use devo_protocol::{
     ItemEventPayload, ItemKind, PendingServerRequestContext, RequestUserInputPayload, ServerEvent,
     ServerRequestKind, ServerRequestResolvedPayload, SessionEventPayload,
     SessionStatusChangedPayload, TurnEventPayload, TurnUsageUpdatedPayload,
+    ToolCallPayload, ToolResultPayload,
 };

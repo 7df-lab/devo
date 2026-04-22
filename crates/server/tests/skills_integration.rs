@@ -200,7 +200,7 @@ async fn start_session(
         .context("session/start response")?;
     let result: SuccessResponse<devo_server::SessionStartResult> =
         serde_json::from_value(response)?;
-    Ok(result.result.session_id)
+    Ok(result.result.session.session_id)
 }
 
 async fn wait_for_turn_completed(

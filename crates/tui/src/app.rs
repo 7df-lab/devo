@@ -15,7 +15,11 @@ pub struct AppExit {
     pub total_output_tokens: usize,
 }
 
-/// Initial session identity used to seed the interactive terminal UI.
+/// Public startup request passed from the CLI into the TUI crate.
+///
+/// This type intentionally carries config-shaped values: a model slug, provider fallback,
+/// thinking selection, and cwd. `host` resolves the model slug against the catalog before
+/// constructing the chat widget's runtime session state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialTuiSession {
     /// Model identifier used for the first requests and initial UI projection.
@@ -30,7 +34,7 @@ pub struct InitialTuiSession {
 
 /// Runtime wiring used to launch the interactive terminal UI.
 pub struct InteractiveTuiConfig {
-    /// Initial session identity projected into the UI and passed to the worker.
+    /// Initial session request resolved by the host before it reaches internal widgets.
     pub initial_session: InitialTuiSession,
     /// Optional CLI log-level override to forward to the spawned server process.
     pub server_log_level: Option<String>,

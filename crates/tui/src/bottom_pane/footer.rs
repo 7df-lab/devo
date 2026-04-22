@@ -41,6 +41,13 @@
 //! In short: `single_line_footer_layout` chooses *what* best fits, and the two
 //! render helpers choose whether to draw the chosen line or the default
 //! `FooterProps` mapping.
+use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+use crate::bottom_pane::footer_status_animation_prefix;
+use crate::exec_cell::spinner;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::render::line_utils::prefix_lines;
@@ -641,7 +648,10 @@ pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'st
     }
 
     let mut line = if props.status_line_enabled {
-        props.status_line_value.clone()
+        props
+            .status_line_value
+            .clone()
+            .map(extract_animated_status_line)
     } else {
         None
     };
@@ -656,6 +666,36 @@ pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'st
     }
 
     line
+}
+
+fn extract_animated_status_line(mut line: Line<'static>) -> Line<'static> {
+    let prefix = footer_status_animation_prefix();
+    let Some(first_span) = line.spans.first_mut() else {
+        return line;
+    };
+    let Some(stripped) = first_span.content.strip_prefix(prefix) else {
+        return line;
+    };
+
+    first_span.content = stripped.to_string().into();
+    if first_span.content.is_empty() {
+        line.spans.remove(0);
+    }
+    line.spans.insert(0, " ".into());
+    line.spans.insert(0, animated_status_spinner());
+    line
+}
+
+fn animated_status_spinner() -> Span<'static> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        % 1_200;
+    let start_time = Instant::now()
+        .checked_sub(Duration::from_millis(elapsed as u64))
+        .unwrap_or_else(Instant::now);
+    spinner(Some(start_time), /*animations_enabled*/ true)
 }
 
 /// Whether the current footer mode allows contextual information to replace instructional hints.
@@ -718,6 +758,45 @@ fn footer_hint_items_line(items: &[(String, String)]) -> Line<'static> {
         }
     }
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn extract_animated_status_line_prefixes_spinner_and_strips_marker() {
+        let line = Line::from(format!(
+            "{}Thinking  |  model",
+            footer_status_animation_prefix()
+        ))
+        .dim();
+
+        let rendered = extract_animated_status_line(line);
+        let text = line_text(&rendered);
+
+        assert!(
+            text == "• Thinking  |  model" || text == "◦ Thinking  |  model",
+            "unexpected animated footer text: {text}"
+        );
+    }
+
+    #[test]
+    fn extract_animated_status_line_leaves_plain_lines_unchanged() {
+        let line = Line::from("Ready  |  model").dim();
+
+        let rendered = extract_animated_status_line(line.clone());
+
+        assert_eq!(line_text(&rendered), line_text(&line));
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

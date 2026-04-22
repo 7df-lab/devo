@@ -28,8 +28,8 @@ pub struct SessionRecord {
     pub model_provider: String,
     /// The latest resolved model slug for the session.
     pub model: Option<String>,
-    /// The latest resolved reasoning effort for the session.
-    pub reasoning_effort: Option<String>,
+    /// The logical thinking selection used as the default for the next turn.
+    pub thinking: Option<String>,
     /// The working directory associated with the session.
     pub cwd: PathBuf,
     /// The CLI version that created the session.
@@ -75,8 +75,14 @@ pub struct TurnRecord {
     pub completed_at: Option<DateTime<Utc>>,
     /// The current lifecycle status of the turn.
     pub status: TurnStatus,
-    /// The resolved model slug used by the turn.
-    pub model_slug: String,
+    /// The logical model selection used for the turn.
+    pub model: String,
+    /// The logical thinking selection used for the turn.
+    pub thinking: Option<String>,
+    /// The concrete request model used to execute the turn.
+    pub request_model: String,
+    /// The concrete request thinking parameter used to execute the turn.
+    pub request_thinking: Option<String>,
     /// The estimated input-token count at turn start, when available.
     pub input_token_estimate: Option<u32>,
     /// The authoritative provider token usage, when available.
@@ -117,6 +123,8 @@ pub struct ToolProgressItem {
 pub struct ToolResultItem {
     /// The tool call this result belongs to.
     pub tool_call_id: String,
+    /// The runtime tool name when it is available at result time.
+    pub tool_name: Option<String>,
     /// The normalized structured output returned by the tool.
     pub output: serde_json::Value,
     /// Whether the result represents an error outcome.
@@ -319,7 +327,7 @@ mod tests {
             agent_path: None,
             model_provider: "test".into(),
             model: None,
-            reasoning_effort: None,
+            thinking: None,
             cwd: ".".into(),
             cli_version: "0.1.0".into(),
             title: None,
@@ -381,7 +389,10 @@ mod tests {
                 started_at: Utc::now(),
                 completed_at: None,
                 status: TurnStatus::Pending,
-                model_slug: "test-model".into(),
+                model: "test-model".into(),
+                thinking: None,
+                request_model: "test-model".into(),
+                request_thinking: None,
                 input_token_estimate: Some(42),
                 usage: None,
                 schema_version: 1,

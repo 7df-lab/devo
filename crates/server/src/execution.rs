@@ -15,8 +15,8 @@ use devo_tools::ToolRegistry;
 
 use crate::{
     InputItem, SkillRecord,
-    session::{SessionHistoryItem, SessionSummary},
-    turn::TurnSummary,
+    session::{SessionHistoryItem, SessionMetadata},
+    turn::TurnMetadata,
 };
 
 /// Shared server-owned runtime dependencies used by live turn execution.
@@ -175,14 +175,14 @@ fn render_resolved_skill(skill: &ResolvedSkill) -> String {
 pub(crate) struct RuntimeSession {
     /// Canonical persisted session metadata when the session is durable.
     pub(crate) record: Option<SessionRecord>,
-    /// Transport-facing summary exposed over the API.
-    pub(crate) summary: SessionSummary,
+    /// Transport-facing metadata exposed over the API.
+    pub(crate) summary: SessionMetadata,
     /// Canonical core session state used by the query loop.
     pub(crate) core_session: Arc<Mutex<SessionState>>,
     /// Currently active turn, if any.
-    pub(crate) active_turn: Option<TurnSummary>,
-    /// Latest terminal turn summary for the session.
-    pub(crate) latest_turn: Option<TurnSummary>,
+    pub(crate) active_turn: Option<TurnMetadata>,
+    /// Latest terminal turn metadata for the session.
+    pub(crate) latest_turn: Option<TurnMetadata>,
     /// Number of items loaded or appended for the session.
     pub(crate) loaded_item_count: u64,
     /// Replay-friendly ordered history used by interactive clients during session resume.

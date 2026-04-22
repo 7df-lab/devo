@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use crate::session::{SessionRuntimeStatus, SessionSummary};
-use crate::turn::TurnSummary;
+use crate::session::{SessionMetadata, SessionRuntimeStatus};
+use crate::turn::TurnMetadata;
 use crate::{ItemId, SessionId, TurnId, TurnUsage};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,6 +18,21 @@ pub struct ItemEnvelope {
     pub item_id: ItemId,
     pub item_kind: ItemKind,
     pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCallPayload {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultPayload {
+    pub tool_call_id: String,
+    pub tool_name: Option<String>,
+    pub content: serde_json::Value,
+    pub is_error: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,7 +52,7 @@ pub struct ItemDeltaPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnEventPayload {
     pub session_id: SessionId,
-    pub turn: TurnSummary,
+    pub turn: TurnMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +66,7 @@ pub struct TurnUsageUpdatedPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEventPayload {
-    pub session: SessionSummary,
+    pub session: SessionMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
