@@ -39,11 +39,11 @@ use devo_server::TurnEventPayload;
 use devo_server::TurnInterruptParams;
 use devo_server::TurnStartParams;
 
+use crate::app_command::InputHistoryDirection;
 use crate::events::SessionListEntry;
 use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
-use crate::v2::app_command::InputHistoryDirection;
 
 struct EnsureSessionOutcome {
     session_id: SessionId,
@@ -62,12 +62,17 @@ pub(crate) struct QueryWorkerConfig {
     pub(crate) thinking_selection: Option<String>,
 }
 
+/// TODO: Should we extract the OperationCommand to the `protocol` crate? Since it can be shareable.
 /// Commands accepted by the background query worker.
 enum OperationCommand {
     /// Submit a new user prompt to the session.
     SubmitPrompt(String),
     /// Update the model used for future turns.
+    /// TODO: Model should be bind at Session Metadata, not turn, indicate to the model utilized to generate
+    /// at next turn. However, we can still bind a model at turn, to indicate what model is utlized generated.
+    /// User can change session metadata model to decide what the next turn model is utlized.
     SetModel(String),
+    /// TODO: Same with model, should bind at session metadata.
     /// Update the thinking mode used for future turns.
     SetThinking(Option<String>),
     /// Replace the provider connection settings and restart the server client.
