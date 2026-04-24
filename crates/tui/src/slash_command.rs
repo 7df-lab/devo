@@ -8,6 +8,7 @@ pub enum SlashCommand {
     Status,
     Clear,
     Onboard,
+    Diff,
     Exit,
 }
 
@@ -21,6 +22,7 @@ impl SlashCommand {
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::Clear => "clear the current transcript",
             SlashCommand::Onboard => "configure model provider connection",
+            SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Exit => "exit Devo",
         }
     }
@@ -34,6 +36,7 @@ impl SlashCommand {
             SlashCommand::Status => "status",
             SlashCommand::Clear => "clear",
             SlashCommand::Onboard => "onboard",
+            SlashCommand::Diff => "diff",
             SlashCommand::Exit => "exit",
         }
     }
@@ -43,7 +46,7 @@ impl SlashCommand {
     }
 
     pub fn available_during_task(self) -> bool {
-        true
+        !matches!(self, SlashCommand::Diff)
     }
 }
 
@@ -59,6 +62,7 @@ impl std::str::FromStr for SlashCommand {
             "status" => Ok(Self::Status),
             "clear" => Ok(Self::Clear),
             "onboard" => Ok(Self::Onboard),
+            "diff" => Ok(Self::Diff),
             "exit" => Ok(Self::Exit),
             _ => Err(()),
         }
@@ -74,6 +78,7 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
         ("status", SlashCommand::Status),
         ("clear", SlashCommand::Clear),
         ("onboard", SlashCommand::Onboard),
+        ("diff", SlashCommand::Diff),
         ("exit", SlashCommand::Exit),
     ]
 }

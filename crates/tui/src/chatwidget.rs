@@ -57,6 +57,8 @@ use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::streaming::controller::StreamController;
 use crate::tui::frame_requester::FrameRequester;
+use devo_utils::ansi_escape::ansi_escape_line;
+use crate::get_git_diff::get_git_diff;
 
 /// Common initialization parameters shared by `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
@@ -555,6 +557,20 @@ impl ChatWidget {
             | AppEvent::TerminalTitleSetupCancelled => {
                 self.frame_requester.schedule_frame();
             }
+            AppEvent::DiffResult(text) => {
+                let lines: Vec<Line<'static>> = if text.trim().is_empty() {
+                    vec!["No changes detected.".italic().into()]
+                } else {
+                    text.lines().map(ansi_escape_line).collect()
+                };
+                let mut all_lines = vec![
+                    Line::from("Git Diff".bold()),
+                    Line::from(""),
+                ];
+                all_lines.extend(lines);
+                self.add_to_history(PlainHistoryCell::new(all_lines));
+                self.set_status_message("Diff shown");
+            }
         }
     }
 
@@ -937,6 +953,23 @@ impl ChatWidget {
                         command: "session list".to_string(),
                     }));
                 self.set_status_message("Loading sessions");
+            }
+            SlashCommand::Diff => {
+                self.set_status_message("Computing diff");
+                let tx = self.app_event_tx.clone();
+                tokio::spawn(async move {
+                    let text = match get_git_diff().await {
+                        Ok((is_git_repo, diff_text)) => {
+                            if is_git_repo {
+                                diff_text
+                            } else {
+                                "`/diff` — _not inside a git repository_".to_string()
+                            }
+                        }
+                        Err(e) => format!("Failed to compute diff: {e}"),
+                    };
+                    let _ = tx.send(AppEvent::DiffResult(text));
+                });
             }
         }
     }

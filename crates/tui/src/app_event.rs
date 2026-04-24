@@ -102,6 +102,9 @@ pub(crate) enum AppEvent {
     #[allow(dead_code)]
     /// Dismiss the terminal-title setup UI without changing config.
     TerminalTitleSetupCancelled,
+
+    /// Result of computing a `/diff` command (ANSI-colored diff text).
+    DiffResult(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
