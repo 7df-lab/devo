@@ -78,8 +78,16 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo build --release --target ${{ matrix.target }} -p devo-cli
 
-      - name: Strip symbols (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Strip symbols (x86_64 Linux)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: strip target/${{ matrix.target }}/release/devo${{ matrix.ext }}
+
+      - name: Strip symbols (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: aarch64-linux-gnu-strip target/${{ matrix.target }}/release/devo${{ matrix.ext }}
+
+      - name: Strip symbols (macOS)
+        if: runner.os == 'macOS'
         run: strip target/${{ matrix.target }}/release/devo${{ matrix.ext }}
 
       - name: Prepare staging directory
