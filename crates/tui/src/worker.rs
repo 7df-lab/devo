@@ -689,6 +689,22 @@ async fn run_worker_inner(
                                 }
                                 latest_completed_agent_message = None;
                             }
+                            "item/started" => {
+                                if let ServerEvent::ItemStarted(payload) = event {
+                                    if matches!(payload.item.item_kind, ItemKind::ToolCall) {
+                                        if let Ok(payload) = serde_json::from_value::<ToolCallPayload>(payload.item.payload) {
+                                            let summary = summarize_tool_call(&payload);
+                                            let detail = Some(render_json_preview(&payload.parameters))
+                                                .filter(|detail: &String| !detail.is_empty());
+                                            let _ = event_tx.send(WorkerEvent::ToolCall {
+                                                tool_use_id: payload.tool_call_id,
+                                                summary,
+                                                detail,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
                             "item/agentMessage/delta" => {
                                 if let ServerEvent::ItemDelta { payload, .. } = event {
                                     let _ = event_tx.send(WorkerEvent::TextDelta(payload.delta));
@@ -812,7 +828,9 @@ async fn ensure_session_started(
 
 async fn spawn_client(cwd: &Path, server_log_level: Option<String>) -> Result<StdioServerClient> {
     StdioServerClient::spawn(StdioServerClientConfig {
-        program: std::env::current_exe().context("resolve current executable for server launch")?,
+        // Use the argv[0] alias created by devo-arg0 so the child process enters
+        // server mode through single-binary dispatch instead of a CLI subcommand.
+        program: PathBuf::from("devo-server"),
         workspace_root: Some(cwd.to_path_buf()),
         args: server_log_level
             .into_iter()
@@ -904,17 +922,9 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
             payload,
             ..
         } => {
-            let Ok(payload) = serde_json::from_value::<ToolCallPayload>(payload) else {
-                return;
-            };
-            let summary = summarize_tool_call(&payload);
-            let detail =
-                Some(render_json_preview(&payload.parameters)).filter(|detail| !detail.is_empty());
-            let _ = event_tx.send(WorkerEvent::ToolCall {
-                tool_use_id: payload.tool_call_id,
-                summary,
-                detail,
-            });
+            // ToolCall is now handled via item/started; skip duplicate emission from
+            // item/completed since it arrives later (after the tool actually finishes).
+            let _ = payload;
         }
         ItemEnvelope {
             item_kind: ItemKind::ToolResult,

@@ -24,6 +24,7 @@ use crate::chatwidget::TuiSessionState;
 use crate::events::WorkerEvent;
 use crate::onboarding::save_last_used_model;
 use crate::onboarding::save_onboarding_config;
+use crate::onboarding::save_thinking_selection;
 use crate::render::renderable::Renderable;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
@@ -193,8 +194,8 @@ fn resolve_initial_model(
 fn clear_before_exit(tui: &mut Tui) -> Result<()> {
     if tui.is_alt_screen_active() {
         tui.leave_alt_screen()?;
+        tui.terminal.clear_managed_inline_area()?;
     }
-    tui.terminal.clear_managed_inline_area()?;
     Ok(())
 }
 
@@ -436,10 +437,15 @@ fn handle_app_command(
         } => {
             if let Some(model) = model {
                 worker.set_model(model.clone())?;
-                save_last_used_model(/*wire_api*/ None, default_provider, model)?;
+                let provider = model_catalog
+                    .get(model)
+                    .map(Model::provider_wire_api)
+                    .unwrap_or(default_provider);
+                save_last_used_model(/*wire_api*/ None, provider, model)?;
             }
             if let Some(thinking) = thinking {
                 worker.set_thinking(thinking.clone())?;
+                save_thinking_selection(thinking.as_deref())?;
             }
         }
         AppCommand::RunUserShellCommand { command } => {

@@ -347,7 +347,7 @@ fn onboarding_updates_placeholder_text_for_each_step() {
 }
 
 #[test]
-fn desired_height_grows_with_active_transcript_output() {
+fn streamed_lines_commit_to_history_without_growing_live_viewport_unbounded() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
         slug: "test-model".to_string(),
@@ -363,7 +363,16 @@ fn desired_height_grows_with_active_transcript_output() {
         )));
     }
 
-    assert!(widget.desired_height(80) > base_height);
+    assert_eq!(widget.desired_height(80), base_height);
+
+    let committed_lines = widget.drain_scrollback_lines(80);
+    let committed_text = committed_lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(committed_text.contains("line 0"));
+    assert!(committed_text.contains("line 11"));
 }
 
 #[test]
@@ -388,6 +397,36 @@ fn committed_history_drains_to_scrollback_lines() {
 
     let committed_lines = widget.drain_scrollback_lines(80);
     assert!(committed_lines.is_empty());
+}
+
+#[test]
+fn streamed_history_does_not_insert_blank_lines_between_commits() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    let _ = widget.drain_scrollback_lines(80);
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "first\nsecond\n".to_string(),
+    ));
+
+    let committed_lines = widget.drain_scrollback_lines(80);
+    let non_blank_lines = committed_lines
+        .iter()
+        .filter(|line| {
+            line.spans
+                .iter()
+                .any(|span| !span.content.trim().is_empty())
+        })
+        .count();
+    let blank_lines = committed_lines.len().saturating_sub(non_blank_lines);
+
+    assert_eq!(2, non_blank_lines);
+    assert_eq!(0, blank_lines);
 }
 
 #[test]

@@ -72,6 +72,28 @@ impl MarkdownStreamCollector {
         out
     }
 
+    /// Render the current buffer and return the still-pending logical lines that have not yet been
+    /// committed.
+    pub fn pending_lines(&self) -> Vec<Line<'static>> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+
+        let mut rendered: Vec<Line<'static>> = Vec::new();
+        markdown::append_markdown(
+            &self.buffer,
+            self.width,
+            Some(self.cwd.as_path()),
+            &mut rendered,
+        );
+
+        if self.committed_line_count >= rendered.len() {
+            return Vec::new();
+        }
+
+        rendered[self.committed_line_count..].to_vec()
+    }
+
     /// Finalize the stream: emit all remaining lines beyond the last commit.
     /// If the buffer does not end with a newline, a temporary one is appended
     /// for rendering. Optionally unwraps ```markdown language fences in

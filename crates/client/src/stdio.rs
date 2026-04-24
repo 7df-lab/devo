@@ -83,7 +83,6 @@ impl StdioServerClient {
             "spawning stdio server client"
         );
         let mut command = Command::new(&config.program);
-        command.arg("server");
         command.arg("--transport").arg("stdio");
         for arg in config.args {
             command.arg(arg);

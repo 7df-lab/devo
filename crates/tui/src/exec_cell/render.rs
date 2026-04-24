@@ -26,7 +26,7 @@ use ratatui::widgets::Wrap;
 use textwrap::WordSplitter;
 use unicode_width::UnicodeWidthStr;
 
-pub(crate) const TOOL_CALL_MAX_LINES: usize = 5;
+pub(crate) const TOOL_CALL_MAX_LINES: usize = 2;
 const USER_SHELL_TOOL_CALL_MAX_LINES: usize = 50;
 const MAX_INTERACTION_PREVIEW_CHARS: usize = 80;
 const TRANSCRIPT_HINT: &str = "ctrl + t to view transcript";

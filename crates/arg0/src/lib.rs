@@ -330,7 +330,11 @@ fn try_lock_dir(dir: &Path) -> std::io::Result<Option<std::fs::File>> {
     use fs2::FileExt;
 
     let lock_path = dir.join(LOCK_FILENAME);
-    let lock_file = match std::fs::File::options().read(true).write(true).open(&lock_path) {
+    let lock_file = match std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err),
@@ -359,8 +363,8 @@ mod tests {
     use fs2::FileExt;
     use pretty_assertions::assert_eq;
 
-    use super::janitor_cleanup;
     use super::LOCK_FILENAME;
+    use super::janitor_cleanup;
 
     fn create_lock(dir: &Path) -> std::io::Result<std::fs::File> {
         let lock_path = dir.join(LOCK_FILENAME);
@@ -390,7 +394,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "fs2 LockFileEx allows same-process locking differently on Windows")]
+    #[cfg_attr(
+        windows,
+        ignore = "fs2 LockFileEx allows same-process locking differently on Windows"
+    )]
     fn janitor_skips_dirs_with_held_lock() -> std::io::Result<()> {
         let root = tempfile::tempdir()?;
         let dir = root.path().join("locked");

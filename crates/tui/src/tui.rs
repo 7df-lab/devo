@@ -483,14 +483,8 @@ impl Tui {
         area.width = size.width;
         if area.bottom() > size.height {
             let scroll_by = area.bottom() - size.height;
-            if is_zellij {
-                Self::scroll_zellij_expanded_viewport(terminal, size, scroll_by)?;
-                needs_full_repaint = true;
-            } else {
-                terminal
-                    .backend_mut()
-                    .scroll_region_up(0..area.top(), scroll_by)?;
-            }
+            Self::append_expanded_viewport(terminal, size, scroll_by, is_zellij)?;
+            needs_full_repaint = true;
             area.y = size.height - area.height;
         }
         if area != terminal.viewport_area {
@@ -502,10 +496,34 @@ impl Tui {
         Ok(needs_full_repaint)
     }
 
+    /// Grow the live inline viewport by appending rows at the bottom of the terminal instead of
+    /// scrolling only the region above the viewport.
+    ///
+    /// This matches the append-only behavior used by Codex's inline TUI: when the live area needs
+    /// more height, we advance the terminal buffer downward so users who are currently viewing
+    /// scrollback do not see previously rendered rows get rewritten in place.
+    fn append_expanded_viewport(
+        terminal: &mut Terminal,
+        size: Size,
+        scroll_by: u16,
+        is_zellij: bool,
+    ) -> Result<()> {
+        if is_zellij {
+            return Self::scroll_zellij_expanded_viewport(terminal, size, scroll_by);
+        }
+
+        terminal
+            .backend_mut()
+            .set_cursor_position(ratatui::layout::Position {
+                x: 0,
+                y: size.height.saturating_sub(1),
+            })?;
+        terminal.backend_mut().append_lines(scroll_by)
+    }
+
     /// Push content above the viewport upward by `scroll_by` rows using raw
     /// newlines at the screen bottom. This is the Zellij-safe alternative to
-    /// `scroll_region_up`, which relies on DECSTBM sequences Zellij does not
-    /// support.
+    /// backend `append_lines`, which Zellij does not expose in a way ratatui can rely on.
     fn scroll_zellij_expanded_viewport(
         terminal: &mut Terminal,
         size: Size,
@@ -568,6 +586,7 @@ impl Tui {
             if let Some(new_area) = pending_viewport_area.take() {
                 terminal.set_viewport_area(new_area);
                 terminal.clear()?;
+                terminal.invalidate_viewport();
             }
 
             let mut needs_full_repaint =
@@ -604,30 +623,72 @@ impl Tui {
 
     fn pending_viewport_area(&mut self) -> Result<Option<Rect>> {
         let terminal = &mut self.terminal;
-        let screen_size = terminal.size()?;
-        let last_known_screen_size = terminal.last_known_screen_size;
-        if screen_size != last_known_screen_size
-            && let Ok(cursor_pos) = terminal.get_cursor_position()
-        {
-            let last_known_cursor_pos = terminal.last_known_cursor_pos;
-            // If we resized AND the cursor moved, we adjust the viewport area to keep the
-            // cursor in the same position. This is a heuristic that seems to work well
-            // at least in iTerm2.
-            if cursor_pos.y != last_known_cursor_pos.y {
-                let offset = Offset {
-                    x: 0,
-                    y: cursor_pos.y as i32 - last_known_cursor_pos.y as i32,
-                };
-                return Ok(Some(terminal.viewport_area.offset(offset)));
-            }
+        let _screen_size = terminal.size()?;
+        if let Ok(cursor_pos) = terminal.get_cursor_position() {
+            return Ok(inline_viewport_area_for_cursor(
+                terminal.viewport_area,
+                terminal.last_known_cursor_pos,
+                cursor_pos,
+            ));
         }
         Ok(None)
     }
+}
+
+fn inline_viewport_area_for_cursor(
+    viewport_area: Rect,
+    last_known_cursor_pos: ratatui::layout::Position,
+    cursor_pos: ratatui::layout::Position,
+) -> Option<Rect> {
+    // If the cursor row drifted since the last completed draw, the terminal likely moved the live
+    // viewport out from under us (for example after a native scrollback action or a resize that
+    // changed the cursor anchor). Realign the inline viewport to keep future absolute coordinates
+    // coherent with the terminal's live buffer.
+    if cursor_pos.y == last_known_cursor_pos.y {
+        return None;
+    }
+
+    let offset = Offset {
+        x: 0,
+        y: cursor_pos.y as i32 - last_known_cursor_pos.y as i32,
+    };
+    Some(viewport_area.offset(offset))
 }
 
 impl Drop for Tui {
     fn drop(&mut self) {
         let _ = self.leave_alt_screen();
         let _ = restore();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use ratatui::layout::Position;
+
+    use super::inline_viewport_area_for_cursor;
+    use super::*;
+
+    #[test]
+    fn inline_viewport_area_for_cursor_returns_none_without_drift() {
+        let viewport_area = Rect::new(0, 10, 80, 6);
+        let cursor = Position { x: 0, y: 15 };
+
+        let result = inline_viewport_area_for_cursor(viewport_area, cursor, cursor);
+
+        assert_eq!(None, result);
+    }
+
+    #[test]
+    fn inline_viewport_area_for_cursor_offsets_viewport_when_cursor_row_changes() {
+        let viewport_area = Rect::new(0, 10, 80, 6);
+        let last_known_cursor_pos = Position { x: 0, y: 15 };
+        let cursor_pos = Position { x: 0, y: 12 };
+
+        let result =
+            inline_viewport_area_for_cursor(viewport_area, last_known_cursor_pos, cursor_pos);
+
+        assert_eq!(Some(Rect::new(0, 7, 80, 6)), result);
     }
 }

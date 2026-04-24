@@ -572,7 +572,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                 }
                 let mut entry = json!({ "role": super::OpenAIRole::Assistant });
                 entry["content"] = if text_parts.is_empty() {
-                    Value::Null
+                    Value::String(String::new())
                 } else {
                     Value::String(text_parts.join(""))
                 };

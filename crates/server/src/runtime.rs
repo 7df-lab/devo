@@ -1213,6 +1213,8 @@ impl ServerRuntime {
             let mut reasoning_item_seq = None;
             let mut reasoning_text = String::new();
             let mut tool_names_by_id = HashMap::new();
+            let mut pending_tool_calls: HashMap<String, (ItemId, u64, serde_json::Value)> =
+                HashMap::new();
             let mut latest_usage: Option<TurnUsage> = None;
             let mut usage_base: Option<(usize, usize)> = None;
             while let Some(event) = event_rx.recv().await {
@@ -1335,24 +1337,20 @@ impl ServerRuntime {
                                 .await;
                             reasoning_text.clear();
                         }
-                        runtime
-                            .emit_turn_item(
+                        let (item_id, item_seq) = runtime
+                            .start_item(
                                 session_id,
                                 turn_for_events.turn_id,
                                 ItemKind::ToolCall,
-                                TurnItem::ToolCall(ToolCallItem {
+                                serde_json::to_value(ToolCallPayload {
                                     tool_call_id: id.clone(),
                                     tool_name: name.clone(),
-                                    input: input.clone(),
-                                }),
-                                serde_json::to_value(ToolCallPayload {
-                                    tool_call_id: id,
-                                    tool_name: name,
-                                    parameters: input,
+                                    parameters: input.clone(),
                                 })
                                 .expect("serialize tool call payload"),
                             )
                             .await;
+                        pending_tool_calls.insert(id, (item_id, item_seq, input));
                     }
                     QueryEvent::ToolResult {
                         tool_use_id,
@@ -1360,6 +1358,33 @@ impl ServerRuntime {
                         is_error,
                     } => {
                         let tool_name = tool_names_by_id.get(&tool_use_id).cloned();
+                        // First complete the pending ToolCall item so its item/completed
+                        // arrives before the ToolResult item/completed.
+                        if let Some((item_id, item_seq, tool_input)) =
+                            pending_tool_calls.remove(&tool_use_id)
+                        {
+                            let completed_payload = serde_json::to_value(ToolCallPayload {
+                                tool_call_id: tool_use_id.clone(),
+                                tool_name: tool_name.clone().unwrap_or_default(),
+                                parameters: tool_input.clone(),
+                            })
+                            .expect("serialize tool call payload");
+                            runtime
+                                .complete_item(
+                                    session_id,
+                                    turn_for_events.turn_id,
+                                    item_id,
+                                    item_seq,
+                                    ItemKind::ToolCall,
+                                    TurnItem::ToolCall(ToolCallItem {
+                                        tool_call_id: tool_use_id.clone(),
+                                        tool_name: tool_name.clone().unwrap_or_default(),
+                                        input: tool_input,
+                                    }),
+                                    completed_payload,
+                                )
+                                .await;
+                        }
                         runtime
                             .emit_turn_item(
                                 session_id,
@@ -1372,7 +1397,7 @@ impl ServerRuntime {
                                     is_error,
                                 }),
                                 serde_json::to_value(ToolResultPayload {
-                                    tool_call_id: tool_use_id,
+                                    tool_call_id: tool_use_id.clone(),
                                     tool_name,
                                     content: serde_json::Value::String(content),
                                     is_error,

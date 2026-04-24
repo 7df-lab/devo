@@ -466,9 +466,14 @@ fn apply_turn_item(
         TurnItem::UserMessage(TextItem { text }) | TurnItem::SteerInput(TextItem { text }) => {
             messages.push(Message::user(text));
         }
-        TurnItem::AgentMessage(TextItem { text }) => {
-            messages.push(Message::assistant_text(text));
-        }
+        TurnItem::AgentMessage(TextItem { text }) => match messages.last_mut() {
+            Some(message) if message.role == Role::Assistant => {
+                message.content.push(ContentBlock::Text { text });
+            }
+            _ => {
+                messages.push(Message::assistant_text(text));
+            }
+        },
         TurnItem::ToolCall(ToolCallItem {
             tool_call_id,
             tool_name,

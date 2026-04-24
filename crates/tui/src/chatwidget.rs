@@ -55,6 +55,7 @@ use crate::history_cell::PlainHistoryCell;
 use crate::markdown::append_markdown;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
+use crate::streaming::controller::StreamController;
 use crate::tui::frame_requester::FrameRequester;
 
 /// Common initialization parameters shared by `ChatWidget` constructors.
@@ -197,6 +198,7 @@ pub(crate) struct ChatWidget {
     active_cell: Option<Box<dyn HistoryCell>>,
     active_cell_revision: u64,
     active_tool_calls: HashMap<String, ActiveToolCall>,
+    pending_tool_calls: Vec<ActiveToolCall>,
     history: Vec<Box<dyn HistoryCell>>,
     next_history_flush_index: usize,
     queued_user_messages: VecDeque<UserMessage>,
@@ -204,6 +206,7 @@ pub(crate) struct ChatWidget {
     status_message: String,
     active_assistant_text: String,
     active_reasoning_text: String,
+    stream_controller: Option<StreamController>,
     available_models: Vec<Model>,
     onboarding_step: Option<OnboardingStep>,
     resume_browser: Option<ResumeBrowserState>,
@@ -367,6 +370,7 @@ impl ChatWidget {
         self.active_cell = None;
         self.active_cell_revision = 0;
         self.active_tool_calls.clear();
+        self.pending_tool_calls.clear();
         self.active_assistant_text.clear();
         self.active_reasoning_text.clear();
         self.bottom_pane.clear_composer();
@@ -440,6 +444,7 @@ impl ChatWidget {
             active_cell: None,
             active_cell_revision: 0,
             active_tool_calls: HashMap::new(),
+            pending_tool_calls: Vec::new(),
             history,
             next_history_flush_index: 0,
             queued_user_messages,
@@ -447,6 +452,7 @@ impl ChatWidget {
             status_message: "Ready".to_string(),
             active_assistant_text: String::new(),
             active_reasoning_text: String::new(),
+            stream_controller: None,
             available_models,
             onboarding_step: None,
             resume_browser: None,
@@ -560,10 +566,11 @@ impl ChatWidget {
                 self.busy = true;
                 self.active_assistant_text.clear();
                 self.active_reasoning_text.clear();
+                self.stream_controller = None;
                 self.set_status_message("Thinking");
             }
             WorkerEvent::TextDelta(text) => {
-                self.active_assistant_text.push_str(&text);
+                self.push_assistant_stream_delta(&text);
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningDelta(text) => {
@@ -571,7 +578,9 @@ impl ChatWidget {
                 self.set_status_message("Thinking");
             }
             WorkerEvent::AssistantMessageCompleted(text) => {
-                self.active_assistant_text = text;
+                if self.stream_controller.is_none() {
+                    self.active_assistant_text = text;
+                }
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningCompleted(text) => {
@@ -583,17 +592,18 @@ impl ChatWidget {
                 summary,
                 detail,
             } => {
-                self.commit_active_streams(DotStatus::Completed);
+                // Do not commit active streams here — pending tool calls share the
+                // active viewport alongside reasoning/assistant text.
                 let message = detail
                     .map(|detail| format!("{summary}\n{detail}"))
                     .unwrap_or(summary);
-                self.active_tool_calls.insert(
-                    tool_use_id.clone(),
-                    ActiveToolCall {
-                        tool_use_id,
-                        lines: vec![Line::from(message).patch_style(Self::tool_text_style())],
-                    },
-                );
+                let tool_call = ActiveToolCall {
+                    tool_use_id: tool_use_id.clone(),
+                    lines: vec![Line::from(message).patch_style(Self::tool_text_style())],
+                };
+                self.active_tool_calls
+                    .insert(tool_use_id.clone(), tool_call.clone());
+                self.pending_tool_calls.push(tool_call);
                 self.frame_requester.schedule_frame();
                 self.set_status_message("Tool started");
             }
@@ -605,6 +615,14 @@ impl ChatWidget {
                 truncated,
             } => {
                 self.commit_active_streams(DotStatus::Completed);
+                // Remove from pending viewport entries — it will be committed to history below.
+                if let Some(pos) = self
+                    .pending_tool_calls
+                    .iter()
+                    .position(|tc| tc.tool_use_id == tool_use_id)
+                {
+                    self.pending_tool_calls.remove(pos);
+                }
                 let dot_status = if is_error {
                     DotStatus::Failed
                 } else {
@@ -623,25 +641,22 @@ impl ChatWidget {
                     ));
                 } else if !title.is_empty() {
                     self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
-                        vec![Line::from(title).patch_style(Self::tool_text_style())],
+                        vec![Line::from(title.clone()).patch_style(Self::tool_text_style())],
                         Self::dot_prefix(dot_status),
                         "  ",
                         false,
                     ));
                 }
+
                 let mut lines = Vec::new();
-                let mut preview_lines = truncated_tool_output_preview(&preview, 80, 12);
+                let mut preview_lines = self.tool_preview_lines(&preview);
                 if truncated && preview_lines.is_empty() {
                     preview_lines.push(Line::from("…").patch_style(Self::tool_text_style()));
                 }
-                for mut line in preview_lines {
-                    line.spans = line
-                        .spans
-                        .into_iter()
-                        .map(|span| span.patch_style(Self::tool_text_style()))
-                        .collect();
-                    lines.push(line);
+                if !title.is_empty() {
+                    lines.push(Line::from(title).patch_style(Self::tool_text_style()));
                 }
+                lines.extend(preview_lines);
                 self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
                     lines,
                     Self::dot_prefix(dot_status),
@@ -671,6 +686,7 @@ impl ChatWidget {
             } => {
                 self.commit_active_streams(DotStatus::Completed);
                 self.active_tool_calls.clear();
+                self.pending_tool_calls.clear();
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -685,6 +701,7 @@ impl ChatWidget {
             } => {
                 self.commit_active_streams(DotStatus::Failed);
                 self.active_tool_calls.clear();
+                self.pending_tool_calls.clear();
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -737,6 +754,7 @@ impl ChatWidget {
                 self.thinking_selection = thinking;
                 self.active_assistant_text.clear();
                 self.active_reasoning_text.clear();
+                self.stream_controller = None;
                 self.history.clear();
                 self.next_history_flush_index = 0;
                 self.busy = false;
@@ -768,6 +786,7 @@ impl ChatWidget {
                 self.next_history_flush_index = 0;
                 self.active_assistant_text.clear();
                 self.active_reasoning_text.clear();
+                self.stream_controller = None;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.push_session_header(
@@ -1155,14 +1174,7 @@ impl ChatWidget {
             }
             TranscriptItemKind::ToolResult => {
                 let mut lines = vec![Line::from(item.title).patch_style(Self::tool_text_style())];
-                for mut line in truncated_tool_output_preview(&item.body, 80, 12) {
-                    line.spans = line
-                        .spans
-                        .into_iter()
-                        .map(|span| span.patch_style(Self::tool_text_style()))
-                        .collect();
-                    lines.push(line);
-                }
+                lines.extend(self.tool_preview_lines(&item.body));
                 self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
                     lines,
                     Self::tool_dot_prefix(),
@@ -1184,14 +1196,72 @@ impl ChatWidget {
             let reasoning_text = std::mem::take(&mut self.active_reasoning_text);
             self.add_markdown_history_with_status("Reasoning", &reasoning_text, status);
         }
+        self.finalize_assistant_stream();
         if !self.active_assistant_text.trim().is_empty() {
             let text = std::mem::take(&mut self.active_assistant_text);
             self.add_markdown_history_with_status("Assistant", &text, status);
         }
     }
 
+    fn push_assistant_stream_delta(&mut self, text: &str) {
+        if self.stream_controller.is_none() {
+            self.stream_controller = Some(StreamController::new(
+                Some(self.last_known_width().saturating_sub(2) as usize),
+                &self.session.cwd,
+            ));
+        }
+
+        if let Some(controller) = self.stream_controller.as_mut() {
+            controller.push(text);
+        }
+
+        self.flush_assistant_stream_commits();
+        self.frame_requester.schedule_frame();
+    }
+
+    fn flush_assistant_stream_commits(&mut self) {
+        let Some(controller) = self.stream_controller.as_mut() else {
+            return;
+        };
+
+        loop {
+            let (cell, idle) = controller.on_commit_tick();
+            let emitted = cell.is_some();
+            if let Some(cell) = cell {
+                self.history.push(cell);
+            }
+            if idle || !emitted {
+                break;
+            }
+        }
+    }
+
+    fn finalize_assistant_stream(&mut self) {
+        let Some(mut controller) = self.stream_controller.take() else {
+            return;
+        };
+
+        if let Some(cell) = controller.finalize() {
+            self.history.push(cell);
+        }
+    }
+
     fn last_known_width(&self) -> u16 {
         80
+    }
+
+    fn tool_preview_lines(&self, preview: &str) -> Vec<Line<'static>> {
+        let width = self.last_known_width().saturating_sub(2).max(1);
+        let mut preview_lines = truncated_tool_output_preview(preview, width, 2);
+        for line in &mut preview_lines {
+            line.spans = line
+                .spans
+                .clone()
+                .into_iter()
+                .map(|span| span.patch_style(Self::tool_text_style()))
+                .collect();
+        }
+        preview_lines
     }
 
     pub(crate) fn set_thinking_selection(&mut self, selection: Option<String>) {
@@ -1394,6 +1464,18 @@ impl ChatWidget {
                 .display_lines(width),
             );
         }
+        // Pending tool calls are shown with a pending (cyan) dot until their results arrive.
+        for pending in &self.pending_tool_calls {
+            lines.extend(
+                history_cell::AgentMessageCell::new_with_prefix(
+                    pending.lines.clone(),
+                    Self::pending_dot_prefix(),
+                    "  ",
+                    false,
+                )
+                .display_lines(width),
+            );
+        }
         if !self.active_assistant_text.trim().is_empty() {
             lines.extend(
                 self.bulleted_markdown_cell(
@@ -1403,6 +1485,20 @@ impl ChatWidget {
                 .display_lines(width),
             );
         }
+        if let Some(controller) = &self.stream_controller {
+            let pending_lines = controller.pending_lines();
+            if !pending_lines.is_empty() {
+                lines.extend(
+                    history_cell::AgentMessageCell::new_with_prefix(
+                        pending_lines,
+                        Self::pending_dot_prefix(),
+                        "  ",
+                        false,
+                    )
+                    .display_lines(width),
+                );
+            }
+        }
         Self::trim_trailing_blank_lines(&mut lines);
         lines
     }
@@ -1410,9 +1506,13 @@ impl ChatWidget {
     pub(crate) fn drain_scrollback_lines(&mut self, width: u16) -> Vec<Line<'static>> {
         let width = width.max(1);
         let mut lines = Vec::new();
+        let mut emitted_any = false;
         for cell in self.history.iter().skip(self.next_history_flush_index) {
+            if emitted_any && !cell.is_stream_continuation() {
+                lines.push(Line::from(""));
+            }
             lines.extend(cell.display_lines(width));
-            lines.push(Line::from(""));
+            emitted_any = true;
         }
         self.next_history_flush_index = self.history.len();
         lines

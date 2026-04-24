@@ -97,6 +97,11 @@ impl StreamController {
         self.state.oldest_queued_age(now)
     }
 
+    /// Render the current uncommitted tail that should remain in the live viewport.
+    pub(crate) fn pending_lines(&self) -> Vec<Line<'static>> {
+        self.state.collector.pending_lines()
+    }
+
     fn emit(&mut self, lines: Vec<Line<'static>>) -> Option<Box<dyn HistoryCell>> {
         if lines.is_empty() {
             return None;
