@@ -24,7 +24,7 @@ pub struct ProviderCapabilities {
     /// Whether the provider supports tool calls in the wire format.
     pub supports_tool_calls: bool,
     /// Whether the provider can surface reasoning content in responses.
-    pub supports_reasoning_content: bool,
+    pub require_reasoning_content: bool,
 }
 
 impl ProviderCapabilities {
@@ -44,7 +44,7 @@ impl ProviderCapabilities {
             supports_top_p: true,
             supports_top_k: false,
             supports_tool_calls: true,
-            supports_reasoning_content: false,
+            require_reasoning_content: false,
         }
     }
 
@@ -57,7 +57,7 @@ impl ProviderCapabilities {
             supports_top_p: true,
             supports_top_k: true,
             supports_tool_calls: true,
-            supports_reasoning_content: true,
+            require_reasoning_content: true,
         }
     }
 

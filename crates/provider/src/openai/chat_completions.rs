@@ -544,6 +544,17 @@ where
 
 fn build_request(request: &ModelRequest, stream: bool) -> Value {
     let profile = resolve_request_profile(&request.model, OpenAITransport::ChatCompletions);
+    let include_empty_reasoning_content = profile.require_reasoning_content
+        && !matches!(
+            request
+                .thinking
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str(),
+            "disabled" | "none"
+        );
     let mut messages = Vec::new();
     if let Some(system) = &request.system {
         messages.push(json!({ "role": super::OpenAIRole::System, "content": system }));
@@ -576,7 +587,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                 } else {
                     Value::String(text_parts.join(""))
                 };
-                if !reasoning_parts.is_empty() {
+                if include_empty_reasoning_content || !reasoning_parts.is_empty() {
                     entry["reasoning_content"] = Value::String(reasoning_parts.join(""));
                 }
                 if !tool_calls.is_empty() {
@@ -1114,7 +1125,7 @@ impl ProviderAdapter for OpenAIProvider {
             OpenAIReasoningMode::Effort | OpenAIReasoningMode::ThinkingWithEffort
         );
         capabilities.supports_top_k = profile.supports_top_k;
-        capabilities.supports_reasoning_content = profile.supports_reasoning_content;
+        capabilities.require_reasoning_content = profile.require_reasoning_content;
         capabilities.supported_roles = profile.supported_roles.to_vec();
         capabilities
     }
@@ -1517,5 +1528,34 @@ mod tests {
 
         assert_eq!(body["thinking"]["type"], json!("enabled"));
         assert_eq!(body["reasoning_effort"], json!("max"));
+    }
+
+    #[test]
+    fn debug_request_body_includes_empty_reasoning_content_for_deepseek_assistant_messages() {
+        let request = ModelRequest {
+            model: "deepseek-v4".to_string(),
+            system: None,
+            messages: vec![RequestMessage {
+                role: "assistant".to_string(),
+                content: vec![RequestContent::Text {
+                    text: "Prior assistant reply".to_string(),
+                }],
+            }],
+            max_tokens: 64,
+            tools: None,
+            sampling: SamplingControls::default(),
+            thinking: Some("enabled".to_string()),
+            reasoning_effort: Some(devo_protocol::ReasoningEffort::High),
+            extra_body: None,
+        };
+
+        let body = build_request(&request, false);
+
+        assert_eq!(body["messages"][0]["role"], json!("assistant"));
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!("Prior assistant reply")
+        );
+        assert_eq!(body["messages"][0]["reasoning_content"], json!(""));
     }
 }

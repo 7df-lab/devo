@@ -26,7 +26,7 @@ pub(crate) struct OpenAIRequestProfile {
     pub supports_temperature: bool,
     pub supports_top_p: bool,
     pub supports_top_k: bool,
-    pub supports_reasoning_content: bool,
+    pub require_reasoning_content: bool,
 }
 
 impl OpenAIRequestProfile {
@@ -36,7 +36,7 @@ impl OpenAIRequestProfile {
         supports_temperature: bool,
         supports_top_p: bool,
         supports_top_k: bool,
-        supports_reasoning_content: bool,
+        require_reasoning_content: bool,
     ) -> Self {
         Self {
             reasoning_mode,
@@ -44,7 +44,7 @@ impl OpenAIRequestProfile {
             supports_temperature,
             supports_top_p,
             supports_top_k,
-            supports_reasoning_content,
+            require_reasoning_content,
         }
     }
 }
@@ -189,7 +189,7 @@ mod tests {
         let profile = resolve_request_profile("glm-4.5", OpenAITransport::ChatCompletions);
         assert_eq!(profile.reasoning_mode, OpenAIReasoningMode::Thinking);
         assert!(profile.supports_top_k);
-        assert!(profile.supports_reasoning_content);
+        assert!(profile.require_reasoning_content);
     }
 
     #[test]
