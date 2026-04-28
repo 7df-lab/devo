@@ -1,15 +1,27 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
-use anyhow::{Context, Result};
-use devo_core::{
-    AgentsMdConfig, Message, Model, ProviderWireApi, QueryEvent, SessionConfig, SessionState,
-    ThinkingCapability, TokenBudget, TurnConfig, default_base_instructions, query,
-};
+use anyhow::Context;
+use anyhow::Result;
+use devo_core::AgentsMdConfig;
+use devo_core::Message;
+use devo_core::Model;
+use devo_core::ProviderWireApi;
+use devo_core::QueryEvent;
+use devo_core::SessionConfig;
+use devo_core::SessionState;
+use devo_core::ThinkingCapability;
+use devo_core::TokenBudget;
+use devo_core::TurnConfig;
+use devo_core::default_base_instructions;
+use devo_core::query;
 use devo_provider::ModelProviderSDK;
 use devo_provider::openai::OpenAIProvider;
-use devo_tools::{ToolOrchestrator, ToolRegistry};
+use devo_tools::ToolOrchestrator;
+use devo_tools::ToolRegistry;
 
 #[derive(Debug, Clone)]
 struct RealLlmConfig {
@@ -32,6 +44,7 @@ impl RealLlmConfig {
         })
     }
 
+    // default take openai chat completions SDK as provider.
     fn provider(&self) -> Arc<dyn ModelProviderSDK> {
         Arc::new(OpenAIProvider::new(self.base_url.clone()).with_api_key(self.api_key.clone()))
     }
@@ -219,7 +232,7 @@ async fn real_llm_context_diffs_and_agents_updates() -> Result<()> {
         session
             .latest_turn_context
             .as_ref()
-            .is_some_and(|context| context.environment.cwd == PathBuf::from(&nested)),
+            .is_some_and(|context| context.environment.cwd == nested),
         "expected latest turn context cwd to track the nested workspace"
     );
 
