@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-22
+last_updated: 2026-05-25
 ---
 
 # L2-DES-APP-003 — Client Server Protocol
@@ -232,7 +232,7 @@ Representative server-client event kinds:
 | `approval_resolved` | Report the final state of an approval request to all subscribed clients. | `session_id`, `turn_id`, `approval_id`, `decision`, `resolved_by_client_id`, `resolved_at`. |
 | `question_resolved` | Report the final state of a question request to all subscribed clients. | `session_id`, `turn_id`, `question_id`, `answer_summary`, `resolved_by_client_id`, `resolved_at`. |
 | `usage_updated` | Update token and cost-related display information. | `session_id`, `turn_id`, `invocation_id`, `usage_delta`, `usage_totals`. |
-| `context_updated` | Report active context changes, compaction, or token pressure. | `session_id`, `context_id`, `token_estimate`, `effective_context_limit`, `compaction_status`. |
+| `context_updated` | Report active context changes, compaction, or token pressure. | `session_id`, `context_id`, `token_estimate`, `effective_context_limit`, `compaction_status`, `compaction_trigger_source` where applicable. |
 | `session_deleted` | Report session deletion or tombstoning to subscribed or listing clients. | `session_id`, `delete_state`, `affected_forks`, `retained_records`, `timestamp`. |
 | `session_export_ready` | Report that an export request completed or failed. | `export_id`, `status`, `download_ref`, `error` where applicable. |
 | `error_reported` | Report recoverable or terminal errors tied to a session, turn, item, or server operation. | `scope`, `phase`, `session_id`, `turn_id`, `item_id`, `code`, `message`, `recoverable`, `retry_state`, `retry_after`, `provider_error_ref`, `partial_state`, `recovery_actions`, `details_ref`. |
@@ -434,6 +434,7 @@ If a client disconnects, the server continues owning active work subject to user
 | related-to | L2-DES-TOOL-001 | 1 | specs/L2/tool/L2-DES-TOOL-001-built-in-tool-system.md | The protocol exposes tool and plan state from the built-in tool system. |
 | related-to | L2-DES-GOAL-001 | 1 | specs/L2/goal/L2-DES-GOAL-001-ralph-loop-goals.md | The protocol exposes user-owned goal controls and canonical goal notifications. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Durable session events are distinct from live server-client protocol events. |
+| related-to | L2-DES-APP-005 | 1 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | `config.inspect` and `config.update` operate on safe projections and updates derived from the `config.toml` and `auth.json` schemas. |
 | specified-by | TBD | TBD | specs/L3/app/TBD.md | L3 behavior has not been authored yet. |
 
 ## References
@@ -449,6 +450,7 @@ If a client disconnects, the server continues owning active work subject to user
 | Revision | Date | Author | Change Type | Notes |
 |---:|---|---|---|---|
 | 1 | 2026-05-22 | Assistant | Initial | Initial client/server protocol, transport, provider-event boundary, and multi-client server ownership design. |
+| 1 | 2026-05-25 | Human | Refinement | Linked configuration protocol methods to the concrete `config.toml` and `auth.json` schemas. |
 | 1 | 2026-05-22 | Human | Refinement | Made WebSocket the concrete transport, removed the per-workspace caveat, expanded request and notification descriptions, and added cross-client broadcast behavior. |
 | 1 | 2026-05-22 | Human | Refinement | Added steer and queue protocol behavior, deletion/export, fork deletion policy, sequencing, approval races, Plan Mode guards, error recovery fields, and tool safety fields. |
 | 1 | 2026-05-22 | Human | Refinement | Added immediate previous message editing request, events, and branch-safe protocol rules. |
@@ -461,3 +463,4 @@ If a client disconnects, the server continues owning active work subject to user
 | 1 | 2026-05-22 | Human | Refinement | Added plan update events and tool protocol rules for the built-in tool system. |
 | 1 | 2026-05-22 | Human | Refinement | Added command descriptions and natural-language result summaries to tool protocol projections. |
 | 1 | 2026-05-23 | Human | Refinement | Added Ralph Loop goal requests, notifications, server-client events, and protocol rules. |
+| 1 | 2026-05-25 | Human | Refinement | Added compaction trigger source to context update events for transcript-area compaction notices. |

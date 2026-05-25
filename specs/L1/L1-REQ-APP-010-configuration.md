@@ -58,7 +58,7 @@ The program must provide persistent application-level configuration for core use
 - The user must be able to configure or inspect the default operating mode where mode defaults are supported.
 - Before the first user message is sent, changing the pending mode selection must automatically persist the selected mode as the default mode configuration.
 - After the first user message is sent, the user must not be able to change the active mode of that session through configuration.
-- The user must be able to configure default permission, sandbox, and approval behavior.
+- The user must be able to configure the default permission policy and sandbox behavior.
 - The user must be able to configure tools, skills, MCP sources, theme, keybindings, logging, and telemetry preferences.
 - The user must be able to configure tool execution options where tools require them, including the effective web search execution path.
 - The user must be able to inspect the currently effective configuration.
@@ -118,3 +118,4 @@ The program must provide persistent application-level configuration for core use
 | 1 | 2026-05-21 | Human | Refinement | Clarified that pre-first-message mode changes apply to pending mode selection because the session is created by the first user message. |
 | 1 | 2026-05-22 | Human | Refinement | Clarified model and reasoning default behavior: onboarding and model-selection workflows configure defaults, active-session changes are sticky, and graceful server exit persists the current active session reasoning effort. |
 | 1 | 2026-05-22 | Human | Refinement | Added onboarding configuration persistence and project-over-user configuration file precedence. |
+| 1 | 2026-05-25 | Human | Refinement | Renamed configurable approval posture to permission policy and kept sandbox behavior as a separate configuration concern. |

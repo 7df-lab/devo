@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-22
+last_updated: 2026-05-25
 ---
 
 # L2-DES-TUI-001 — Onboarding UI Flow
@@ -52,40 +52,35 @@ The flow order is:
 
 ## Interaction Sketch
 
-The following ASCII sketch defines the required interaction structure and visible control groups. It is not a final styling specification for dimensions, color, focus rings, or border characters.
+The following ASCII sketch defines the required interaction structure and visible control groups. It is not a final styling specification for dimensions, color, or focus rings.
+
+Onboarding controls should be visually unframed. Popup sections must not use outer ASCII box borders such as `+--------+` or full-frame side borders. The inline setup stack should use a single vertical rail to connect the configured fields from top to bottom.
 
 ```text
-+--------------------------------------+
-| Select Model Slug                    |
-+--------------------------------------+
-| Hint: Choose the model capability    |
-| profile the program should use.      |
-|                                      |
-| Search: gpt                          |
-|                                      |
-| > openai/gpt-5.5                     |
-|   openai/gpt-5.4                     |
-|   anthropic/claude-opus              |
-|   local/qwen3-coder                  |
-|                                      |
-| Enter: select and close popup        |
-| Esc: cancel                          |
-+--------------------------------------+
+Select Model Slug
+Hint: Choose the model capability profile the program should use.
 
-+--------------------------------------+
-| Select Provider                      |
-+--------------------------------------+
-| Hint: Choose a provider or add one.  |
-|                                      |
-| Search: open                         |
-|                                      |
-| > OpenAI                             |
-|   OpenRouter                         |
-|   Add provider...                    |
-|                                      |
-| Enter: select and close popup        |
-| Esc: back                            |
-+--------------------------------------+
+Search: gpt
+
+> openai/gpt-5.5
+  openai/gpt-5.4
+  anthropic/claude-opus
+  local/qwen3-coder
+
+Enter: select and close popup
+Esc: cancel
+
+Select Provider
+Hint: Choose a provider or add one.
+
+Search: open
+
+> OpenAI
+  OpenRouter
+  Add provider...
+
+Enter: select and close popup
+Esc: back
 
 Model: openai/gpt-5.5
 |
@@ -112,36 +107,29 @@ Model: openai/gpt-5.5
 * reasoning effort:
 | Hint: Choose the default reasoning effort for this binding.
 | [open popup if the model supports reasoning]
+|
 
-+--------------------------------------+
-| Invocation Method                    |
-+--------------------------------------+
-| Hint: Choose the API protocol used   |
-| to call this model.                  |
-|                                      |
-| Search: openai                       |
-|                                      |
-| > OpenAI Responses                   |
-|   OpenAI Chat Completions            |
-|   Anthropic Messages                 |
-|                                      |
-| Enter: select and close popup        |
-| Esc: back                            |
-+--------------------------------------+
+Invocation Method
+Hint: Choose the API protocol used to call this model.
 
-+--------------------------------------+
-| Reasoning Effort                     |
-+--------------------------------------+
-| Hint: Choose the default reasoning   |
-| effort for this binding.             |
-|                                      |
-| > medium                             |
-|   high                               |
-|   xhigh                              |
-|                                      |
-| Enter: select and close popup        |
-| Esc: back                            |
-+--------------------------------------+
+Search: openai
+
+> OpenAI Responses
+  OpenAI Chat Completions
+  Anthropic Messages
+
+Enter: select and close popup
+Esc: back
+
+Reasoning Effort
+Hint: Choose the default reasoning effort for this binding.
+
+> medium
+  high
+  xhigh
+
+Enter: select and close popup
+Esc: back
 ```
 
 ## Flow Behavior
@@ -157,7 +145,8 @@ Model: openai/gpt-5.5
 - Pressing Enter on a highlighted provider confirms the selection and closes the popup.
 - If the user chooses to add a provider, provider detail entry is inline rather than a boxed popup.
 - The inline setup view must display the selected model slug before editable provider fields.
-- The inline setup view must use visible vertical guide lines between model display, provider name entry, base URL entry, API key entry, model name entry, invocation method selection, and reasoning effort selection where applicable.
+- The inline setup view must use a single continuous vertical rail to connect model display, provider name entry, base URL entry, API key entry, model name entry, invocation method selection, and reasoning effort selection where applicable. The rail should appear under each field marker rather than before the `* field` label.
+- The inline setup rail is a guide for the setup sequence, not an outer frame; it must not wrap the content on both sides or draw top/bottom box borders.
 - Provider name entry must appear before base URL entry when adding a provider.
 - Provider name entry must show a hint that tells the user to enter a name for recognizing the provider later.
 - Base URL entry must show a hint that tells the user to enter the provider API base URL.
@@ -216,3 +205,4 @@ Model: openai/gpt-5.5
 | 1 | 2026-05-22 | Assistant | Initial | Initial L2 design extracted from the approved concrete TUI onboarding sketch. |
 | 1 | 2026-05-22 | Human | Refinement | Updated the flow to model-first, provider-select-or-add, provider name/base URL/API key, provider-specific model name, invocation method, reasoning effort, and per-field hints. |
 | 1 | 2026-05-22 | Human | Refinement | Added persistent configuration storage and default target behavior for successful onboarding. |
+| 1 | 2026-05-25 | Human | Refinement | Removed outer ASCII frames while keeping a continuous inline rail under the setup field markers. |

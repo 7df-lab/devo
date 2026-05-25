@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-22
+last_updated: 2026-05-25
 ---
 
 # L2-DES-CONTEXT-002 — Context Compaction
@@ -29,6 +29,7 @@ This document defines when compaction triggers, what eligible history looks like
 - `L2-DES-CONV-001` defines durable compaction records, context snapshots, and summary item references.
 - `L2-DES-AGENT-001` defines the execution engine phase where compaction occurs.
 - `L2-DES-CONTEXT-001` defines the immutable prefix and metadata-derived content that must remain valid after compaction.
+- `L2-DES-TUI-004` defines transcript-area rendering for compaction lifecycle notices.
 
 ## Design Requirement
 
@@ -47,7 +48,9 @@ Conceptual trigger fields:
 - `compaction_threshold`: a ratio or byte count at which compaction is triggered, such as 80 % of the effective limit.
 - `reserved_recent_turns`: the minimum number of most recent turns to preserve uncompressed, or a token budget reserved for recent uncompressed content.
 
-The trigger should evaluate before each model invocation where context assembly has produced a token estimate. If the estimate exceeds the threshold, compaction should run before the model call proceeds.
+The trigger should evaluate before each model invocation where context assembly has produced a token estimate. If the estimate exceeds the threshold, compaction should run before the model call proceeds. This threshold-driven path is **automatic compaction**.
+
+The user may also request compaction explicitly through a client command such as `/compact`. This user-requested path is **manual compaction**. Manual and automatic compaction share eligibility, summary, durable-recording, and context-snapshot behavior, but they differ in the user-visible started notice.
 
 Compaction may be skipped when:
 
@@ -110,11 +113,15 @@ Identify compaction-eligible turn range and preserved recent range
         ↓
 Record durable context_compaction_started
         ↓
+Emit transcript-area `Manual Compaction Started` or `Automatically Compaction Started` notice
+        ↓
 Extract summary content from eligible turns
         ↓
 Build summary record (objectives, decisions, changed files, blockers, verification, errors)
         ↓
 Record durable context_compaction_completed with summary reference
+        ↓
+Emit transcript-area `Compaction Done` notice
         ↓
 Create updated context snapshot referencing summary plus preserved recent turns
         ↓
@@ -127,7 +134,7 @@ Compaction must complete before the invocation that detected the threshold proce
 
 Compaction produces these durable records through `L2-DES-CONV-001`:
 
-- `context_compaction_started`: identifies the compaction event, the session, the triggering invocation, the eligible turn range, the preserved recent range, and the compaction strategy.
+- `context_compaction_started`: identifies the compaction event, the session, the trigger source (`manual` or `automatic`), the triggering invocation or command where applicable, the eligible turn range, the preserved recent range, and the compaction strategy.
 - `context_compaction_completed`: references the compaction event, the produced summary record, the compacted turn range, the token estimate before and after compaction, and the new context snapshot reference.
 
 The summary record itself is a durable context record, not a transcript item. It is stored as a content-addressable or identified record referenced by the context snapshot.
@@ -137,6 +144,7 @@ Conceptual summary record fields:
 - `summary_id`
 - `session_id`
 - `compaction_event_id`
+- `trigger_source`: manual or automatic.
 - `compacted_turn_range`: first and last turn id in the compacted range.
 - `preserved_recent_range`: first and last turn id in the preserved range, for traceability.
 - `objectives`
@@ -185,9 +193,14 @@ The full transcript remains available for user review regardless of compaction. 
 The program should make compaction visible to the user through:
 
 - A context status indicator showing the current token estimate relative to the effective limit.
-- A compaction event notice when older history has been summarized.
+- Transcript-area lifecycle notices with exact labels:
+  - `Manual Compaction Started` when compaction was requested by the user.
+  - `Automatically Compaction Started` when compaction was triggered by context pressure.
+  - `Compaction Done` when compaction completes successfully.
 - An indication of how many turns were compacted and how many remain uncompressed.
 - The ability to inspect a summary record to understand what was preserved from compacted history.
+
+The transcript-area notices are user-visible status cells. They are not user, assistant, or model-visible transcript messages, and they do not expose the summary content inline. Replay should be able to reconstruct the notices from durable compaction records.
 
 The user should not be required to approve compaction for it to proceed during normal operation. Compaction is a context-management operation, not a user-prompted workflow.
 
@@ -218,4 +231,5 @@ The user should not be required to approve compaction for it to proceed during n
 | Revision | Date | Author | Change Type | Notes |
 |---:|---|---|---|---|
 | 1 | 2026-05-22 | Assistant | Initial | Initial context compaction design covering triggers, eligibility, summary content, durable recording, active context update, and replay recovery. |
+| 1 | 2026-05-25 | Human | Refinement | Added exact transcript-area lifecycle notices for manual and automatic compaction. |
 

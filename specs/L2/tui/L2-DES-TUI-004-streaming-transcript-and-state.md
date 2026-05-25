@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-23
+last_updated: 2026-05-25
 ---
 
 # L2-DES-TUI-004 — Streaming Transcript And State
@@ -31,6 +31,7 @@ The TUI must show progress while work is happening and preserve a readable audit
 - `L2-DES-CONV-001` defines durable transcript records.
 - `L2-DES-TOOL-001` defines tool lifecycle and result summaries.
 - `L2-DES-APP-004` defines observability fields used by diagnostic display.
+- `L2-DES-CONTEXT-002` defines compaction lifecycle records and user-visible compaction notices.
 
 ## Design Requirement
 
@@ -301,6 +302,27 @@ Rules:
 - Pressing `Ctrl+T` enters full-screen alternate mode for reviewing the full transcript and full output.
 - The compressed output should show enough lines to explain the result and must indicate hidden line counts.
 
+### Context And Compaction Cells
+
+Context and compaction status cells render in the transcript area so the user can later review when context was compacted.
+
+Compaction lifecycle cells must use these exact visible labels:
+
+```text
+┃ Manual Compaction Started
+┃ Automatically Compaction Started
+┃ Compaction Done
+```
+
+Rules:
+
+- `Manual Compaction Started` appears when compaction starts because the user requested it, such as through `/compact`.
+- `Automatically Compaction Started` appears when compaction starts because context pressure crossed the configured threshold.
+- `Compaction Done` appears when a compaction event completes successfully and the active context snapshot has been updated.
+- These cells are transcript-area status cells, not assistant messages, user messages, or model-visible context content.
+- Inline rendering should preserve the exact label text. Counts, token estimates, or summary inspection affordances may be available in an expanded detail view, but must not change the inline label.
+- On replay, durable compaction records should project back into the same transcript-area status cells.
+
 ## Active Turn Working Indicator
 
 When the current turn has not completed, the TUI should show a live working indicator between the transcript area and the bottom composer.
@@ -392,7 +414,9 @@ The TUI should map canonical server events into visible state.
 | `question.requested` | Question prompt appears and bottom status shows waiting for answer. |
 | `background_process_updated` | Background process strip and transcript state update. |
 | `usage_updated` | Header/context or turn usage display updates. |
-| `context_updated` | Context pressure and compaction notices update. |
+| `context_updated` with compaction start | Transcript area shows `Manual Compaction Started` or `Automatically Compaction Started` based on compaction trigger source. |
+| `context_updated` with compaction completion | Transcript area shows `Compaction Done` and context pressure display updates. |
+| `context_updated` without lifecycle change | Context pressure display updates. |
 | `error_reported` | Error cell appears with phase and recovery action. |
 | `turn_status_changed` | Header/status and terminal turn cell update. |
 
@@ -494,6 +518,7 @@ Rules:
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Durable transcript records are the replay source. |
 | related-to | L2-DES-TOOL-001 | 1 | specs/L2/tool/L2-DES-TOOL-001-built-in-tool-system.md | Tool lifecycle, command descriptions, and result summaries feed tool cells. |
 | related-to | L2-DES-APP-004 | 1 | specs/L2/app/L2-DES-APP-004-observability-architecture.md | Diagnostic fields provide recovery and phase display. |
+| related-to | L2-DES-CONTEXT-002 | 1 | specs/L2/context/L2-DES-CONTEXT-002-context-compaction.md | Compaction lifecycle records render as transcript-area status cells. |
 | specified-by | TBD | TBD | specs/L3/tui/TBD.md | L3 behavior has not been authored yet. |
 
 ## Revision Notes
@@ -508,3 +533,4 @@ Rules:
 | 1 | 2026-05-23 | Human | Refinement | Updated live streaming examples to reuse the transcript cell visual grammar. |
 | 1 | 2026-05-23 | Human | Refinement | Clarified that multi-line user-message background bands may repeat `┃` on content lines while padding rows remain background-only. |
 | 1 | 2026-05-23 | Human | Refinement | Reconciled active work and interruption examples with the current transcript and working-indicator visual grammar. |
+| 1 | 2026-05-25 | Human | Refinement | Added exact transcript-area labels for manual compaction start, automatic compaction start, and compaction completion. |

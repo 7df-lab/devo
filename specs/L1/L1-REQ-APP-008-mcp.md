@@ -64,7 +64,7 @@ The program must support user-configured MCP integrations as discoverable and co
 
 | Relationship | Target ID | Target Revision | Target Path | Rationale |
 |---|---|---:|---|---|
-| refined-by | TBD | TBD | specs/L2/app/TBD.md | L2 design has not been authored yet. |
+| refined-by | L2-DES-MCP-001 | 1 | specs/L2/mcp/L2-DES-MCP-001-mcp-integration-architecture.md | Defines MCP configuration, lifecycle, capability discovery, status, safety, and failure behavior. |
 
 ## Revision Notes
 

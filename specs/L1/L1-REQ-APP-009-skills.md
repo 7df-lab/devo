@@ -64,7 +64,7 @@ The program must support skills as user-visible reusable capability packages.
 
 | Relationship | Target ID | Target Revision | Target Path | Rationale |
 |---|---|---:|---|---|
-| refined-by | TBD | TBD | specs/L2/app/TBD.md | L2 design has not been authored yet. |
+| refined-by | L2-DES-SKILLS-001 | 1 | specs/L2/skills/L2-DES-SKILLS-001-agent-skills-architecture.md | Defines skill package discovery, activation, context integration, trust, and visibility behavior. |
 
 ## Revision Notes
 

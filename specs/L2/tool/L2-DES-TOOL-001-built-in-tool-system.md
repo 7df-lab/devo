@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-22
+last_updated: 2026-05-25
 ---
 
 # L2-DES-TOOL-001 — Built-In Tool System
@@ -62,7 +62,7 @@ Conceptual `ToolDefinition` fields:
 - `availability`: available, disabled, needs_configuration, unsupported, or blocked_by_mode.
 - `configuration_refs`
 - `permission_profile`
-- `approval_policy`
+- `permission_policy`
 - `redaction_policy`
 - `output_limit_policy`
 - `supports_streaming_output`
@@ -70,6 +70,26 @@ Conceptual `ToolDefinition` fields:
 - `supports_parallel_execution`
 
 The registry should expose only tools available to the current session mode, permission posture, configuration, and model capability. A tool that is disabled or misconfigured should fail explicitly with a structured unavailable result rather than fabricating output.
+
+## Permission Policy And Sandbox
+
+Tool execution is governed by permission policy and sandbox policy as separate layers.
+
+`permission_policy` controls whether a tool call may proceed automatically, requires review, or requires user approval. The initial policy values are:
+
+- `default`: baseline permission behavior for normal sessions.
+- `auto_review`: review-oriented behavior that classifies tool calls before execution and requires user approval when risk or ambiguity remains.
+- `full_access`: broad permission behavior for trusted contexts, while still preserving validation, mode constraints, privacy rules, audit recording, and sandbox restrictions.
+
+Sandbox policy controls what the tool execution process can do at the host boundary. The durable sandbox configuration schema is not finalized, but the sandbox design target is to restrict system calls such as `open`, `read`, and `write`, with practical controls over:
+
+- Directory read access.
+- Directory write access.
+- File creation, mutation, rename, and deletion.
+- Process execution boundaries where supported.
+- Network access at the domain level.
+
+The permission policy must not be treated as the sandbox. `full_access` can reduce approval prompts only inside the limits still imposed by the sandbox and tool validation.
 
 ## Command Intent Inputs
 
@@ -336,6 +356,7 @@ Live server-client events may be more frequent than durable records, but replay 
 | related-to | L1-REQ-AGENT-005 | 1 | specs/L1/L1-REQ-AGENT-005-plan-mode.md | Applies Plan Mode restrictions to mutating tools and question-tool availability. |
 | related-to | L1-REQ-LLM-002 | 1 | specs/L1/L1-REQ-LLM-002-tools.md | Defines the controlled lifecycle for model-requested tools. |
 | related-to | L1-REQ-TOOL-001 | 1 | specs/L1/L1-REQ-TOOL-001-safety.md | Tool safety, approval, and redaction gates apply to all tool calls. |
+| related-to | L1-REQ-APP-003 | 1 | specs/L1/L1-REQ-APP-003-safety.md | Tool execution remains bounded by permissions, sandboxing, and user approval. |
 | related-to | L1-REQ-TOOL-003 | 1 | specs/L1/L1-REQ-TOOL-003-web-search-configuration.md | Web search is a configurable built-in tool category. |
 | related-to | L1-REQ-TOOL-004 | 1 | specs/L1/L1-REQ-TOOL-004-parallel-tool-orchestration.md | `multi_tool_use` is the explicit parallel orchestration tool. |
 | related-to | L1-REQ-TOOL-005 | 1 | specs/L1/L1-REQ-TOOL-005-background-process-management.md | Command tools can register background processes for inspection and stop control. |
@@ -355,3 +376,4 @@ Live server-client events may be more frequent than durable records, but replay 
 | 1 | 2026-05-22 | Assistant | Initial | Initial built-in tool system and plan tool design. |
 | 1 | 2026-05-22 | Human | Refinement | Added command intent inputs and natural-language tool status summaries. |
 | 1 | 2026-05-23 | Human | Refinement | Added the narrow model-facing goal update tool for Ralph Loop completion and blockers. |
+| 1 | 2026-05-25 | Human | Refinement | Renamed tool metadata from `approval_policy` to `permission_policy` and separated permission policy from sandbox enforcement direction. |

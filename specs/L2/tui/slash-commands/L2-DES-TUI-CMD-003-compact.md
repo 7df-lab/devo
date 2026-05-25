@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-23
+last_updated: 2026-05-25
 ---
 
 # L2-DES-TUI-CMD-003 — Slash Command: /compact
@@ -34,15 +34,23 @@ Define the TUI behavior for `/compact`, which asks the server to compact the cur
 During compaction:
 
 ```text
+┃ Manual Compaction Started
+
 ⠋ Working · 4s
-  context   compacting current session
+```
+
+After successful compaction:
+
+```text
+┃ Compaction Done
 ```
 
 ## State And Error Behavior
 
 - The command must not delete transcript items.
+- Starting manual compaction must add a transcript-area status cell with the exact text `Manual Compaction Started`.
 - Successful compaction creates durable context summary state and updates the active context snapshot.
-- The TUI should show `context_updated` when compaction completes.
+- The TUI should show `Compaction Done` in the transcript area when `context_updated` reports successful compaction completion.
 - If compaction fails, the prior context snapshot remains active and the TUI shows an error with a recovery hint.
 
 ## Traceability
@@ -61,3 +69,4 @@ During compaction:
 | Revision | Date | Author | Change Type | Notes |
 |---:|---|---|---|---|
 | 1 | 2026-05-23 | Assistant | Initial | Initial `/compact` command design. |
+| 1 | 2026-05-25 | Human | Refinement | Added transcript-area notices for manual compaction start and completion. |

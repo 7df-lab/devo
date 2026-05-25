@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-22
+last_updated: 2026-05-25
 ---
 
 # L2-DES-CONV-001 — Session JSONL Data Model
@@ -605,6 +605,8 @@ Conceptual context entry kinds:
 
 When context approaches the model's effective context limit, compaction creates a summary item or summary record and a later context snapshot references that summary instead of all older detailed transcript records. The full transcript remains available for user review.
 
+Compaction lifecycle records should preserve whether compaction was triggered manually by the user or automatically by context pressure. Clients use that trigger source to render transcript-area status cells with `Manual Compaction Started`, `Automatically Compaction Started`, and `Compaction Done` while keeping the compaction summary itself as context state rather than ordinary user or assistant transcript text.
+
 ## Token Usage
 
 Token usage should be recorded as per-invocation deltas and derived totals.
@@ -730,3 +732,4 @@ Clients also do not need persistent-memory internals. Persistent memory may affe
 | 1 | 2026-05-22 | Human | Refinement | Added durable plan records for plan-tool state and replay. |
 | 1 | 2026-05-22 | Human | Refinement | Added durable command descriptions and natural-language result summaries. |
 | 1 | 2026-05-23 | Human | Refinement | Added durable Ralph Loop goal records and active-goal projection fields. |
+| 1 | 2026-05-25 | Human | Refinement | Added manual versus automatic compaction trigger provenance for transcript-area compaction notices. |

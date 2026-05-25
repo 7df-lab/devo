@@ -156,7 +156,7 @@ Rules:
 
 - The command text is the composer content after the leading `!` prefix or the Shell Mode editor content.
 - Shell Mode command execution must use the program's terminal command capability, not an unmanaged client-local shell.
-- Shell Mode must respect workspace, permission, safety, privacy, and approval policy.
+- Shell Mode must respect workspace, permission policy, safety, privacy, and sandbox constraints.
 - Shell Mode results should appear in the transcript as command/tool output with bounded display.
 - If approval is required, the TUI should show the approval prompt and keep Shell Mode state understandable.
 - Command output should be summarized or folded when long.
