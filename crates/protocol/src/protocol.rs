@@ -69,6 +69,40 @@ pub enum ProtocolErrorCode {
     ActiveTurnNotSteerable,
     #[error("EmptyInput")]
     EmptyInput,
+    #[error("AlreadyResolved")]
+    AlreadyResolved,
+    #[error("ParentSessionNotFound")]
+    ParentSessionNotFound,
+    #[error("ForkTurnNotFound")]
+    ForkTurnNotFound,
+    #[error("ForkTurnNotStable")]
+    ForkTurnNotStable,
+    #[error("PermissionDenied")]
+    PermissionDenied,
+    #[error("WorkspaceUnavailable")]
+    WorkspaceUnavailable,
+    #[error("InheritedSegmentWriteFailed")]
+    InheritedSegmentWriteFailed,
+    #[error("ForkRetentionRequired")]
+    ForkRetentionRequired,
+    #[error("InvalidConfirmToken")]
+    InvalidConfirmToken,
+    #[error("UnsupportedDeletePolicy")]
+    UnsupportedDeletePolicy,
+    #[error("InheritedSegmentMaterializationFailed")]
+    InheritedSegmentMaterializationFailed,
+    #[error("ExpectedTargetMessageMismatch")]
+    ExpectedTargetMessageMismatch,
+    #[error("OlderMessageRequiresFork")]
+    OlderMessageRequiresFork,
+    #[error("ActiveTurnEditRejected")]
+    ActiveTurnEditRejected,
+    #[error("InvalidContentParts")]
+    InvalidContentParts,
+    #[error("InvalidMentions")]
+    InvalidMentions,
+    #[error("WorkspaceRestoreFailedToStart")]
+    WorkspaceRestoreFailedToStart,
     #[error("InternalError")]
     InternalError,
 }
@@ -236,5 +270,89 @@ impl TokenUsageInfo {
         };
         info.fill_to_context_window(context_window);
         info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_error_code_serialization() {
+        let codes = vec![
+            (ProtocolErrorCode::AlreadyResolved, "AlreadyResolved"),
+            (ProtocolErrorCode::ParentSessionNotFound, "ParentSessionNotFound"),
+            (ProtocolErrorCode::ForkTurnNotFound, "ForkTurnNotFound"),
+            (ProtocolErrorCode::ForkTurnNotStable, "ForkTurnNotStable"),
+            (ProtocolErrorCode::PermissionDenied, "PermissionDenied"),
+            (ProtocolErrorCode::WorkspaceUnavailable, "WorkspaceUnavailable"),
+            (
+                ProtocolErrorCode::InheritedSegmentWriteFailed,
+                "InheritedSegmentWriteFailed",
+            ),
+            (
+                ProtocolErrorCode::ForkRetentionRequired,
+                "ForkRetentionRequired",
+            ),
+            (ProtocolErrorCode::InvalidConfirmToken, "InvalidConfirmToken"),
+            (
+                ProtocolErrorCode::UnsupportedDeletePolicy,
+                "UnsupportedDeletePolicy",
+            ),
+            (
+                ProtocolErrorCode::InheritedSegmentMaterializationFailed,
+                "InheritedSegmentMaterializationFailed",
+            ),
+            (
+                ProtocolErrorCode::ExpectedTargetMessageMismatch,
+                "ExpectedTargetMessageMismatch",
+            ),
+            (
+                ProtocolErrorCode::OlderMessageRequiresFork,
+                "OlderMessageRequiresFork",
+            ),
+            (
+                ProtocolErrorCode::ActiveTurnEditRejected,
+                "ActiveTurnEditRejected",
+            ),
+            (ProtocolErrorCode::InvalidContentParts, "InvalidContentParts"),
+            (ProtocolErrorCode::InvalidMentions, "InvalidMentions"),
+            (
+                ProtocolErrorCode::WorkspaceRestoreFailedToStart,
+                "WorkspaceRestoreFailedToStart",
+            ),
+        ];
+
+        for (code, expected_str) in &codes {
+            let json =
+                serde_json::to_string(&code).unwrap_or_else(|e| panic!("serialize {expected_str}: {e}"));
+            let restored: ProtocolErrorCode =
+                serde_json::from_str(&json).unwrap_or_else(|e| panic!("deserialize {expected_str}: {e}"));
+            assert_eq!(restored, *code, "roundtrip failed for {expected_str}");
+        }
+    }
+
+    #[test]
+    fn protocol_error_roundtrips_with_new_codes() {
+        let error = ProtocolError {
+            code: ProtocolErrorCode::PermissionDenied,
+            message: "not authorized".into(),
+            data: serde_json::json!({"path": "/etc/shadow"}),
+        };
+        let json = serde_json::to_string(&error).expect("serialize");
+        let restored: ProtocolError = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, error);
+    }
+
+    #[test]
+    fn protocol_error_code_display() {
+        assert_eq!(
+            ProtocolErrorCode::AlreadyResolved.to_string(),
+            "AlreadyResolved"
+        );
+        assert_eq!(
+            ProtocolErrorCode::ForkRetentionRequired.to_string(),
+            "ForkRetentionRequired"
+        );
     }
 }
