@@ -115,57 +115,75 @@ overriding lower-priority ones:
 3. `<workspace>/.devo/config.toml` — project-level config
 4. CLI flags — command-line overrides
 
-Both config files are optional. A minimal config file only needs a provider
-section so devo knows which model to use. Run `devo onboard` for an interactive
-setup that writes this for you.
+Both config files are optional. A minimal config file needs a provider, an
+invocable model binding, and a default binding selection. Run `devo onboard` for
+an interactive setup that writes this for you.
 
 ### Minimal Config Example
 
 ```toml
 # ~/.devo/config.toml
-model = "deepseek-v4-flash"
-model_provider = "api.deepseek.com"
 model_thinking_selection = "high"
 
-[model_providers."api.deepseek.com"]
+[defaults]
+model_binding = "deepseek-v4-flash-api-deepseek-com"
+
+[providers."api.deepseek.com"]
+enabled = true
 name = "api.deepseek.com"
-api_key = "sk-..."
 base_url = "https://api.deepseek.com"
-wire_api = "openai_chat_completions"
+credential = "api_deepseek_com_api_key"
+wire_apis = ["openai_chat_completions"]
 
-[[model_providers."api.deepseek.com".models]]
-model = "deepseek-v4-pro"
-
-[[model_providers."api.deepseek.com".models]]
-model = "deepseek-v4-flash"
+[model_bindings.deepseek-v4-flash-api-deepseek-com]
+enabled = true
+model_slug = "deepseek-v4-flash"
+provider = "api.deepseek.com"
+model_name = "deepseek-v4-flash"
+display_name = "DeepSeek V4 Flash"
+invocation_method = "openai_chat_completions"
+default_reasoning_effort = "high"
 ```
 
 <details>
 <summary>Full Config Reference (click to expand)</summary>
 
 ```toml
-# ── Model Provider (required) ───────────────────────────────────
-model_provider = "api.deepseek.com"          # active provider id
-model = "deepseek-v4-flash"                   # active model slug
+# ── Active Model Defaults ───────────────────────────────────────
 model_thinking_selection = "high"   # optional: thinking/reasoning effort
 model_auto_compact_token_limit = 970000   # optional
 model_context_window = 128000      # optional
 disable_response_storage = false   # optional
 preferred_auth_method = "apikey"   # optional: "apikey"
 
-# ── Provider Profiles ───────────────────────────────────────────
-[model_providers."api.deepseek.com"]
+# ── Providers ───────────────────────────────────────────────────
+[defaults]
+model_binding = "deepseek-v4-flash-api-deepseek-com"
+
+[providers."api.deepseek.com"]
+enabled = true
 name = "api.deepseek.com"
 base_url = "https://api.deepseek.com"
-wire_api = "openai_chat_completions"   # openai_chat_completions | openai_responses | anthropic_messages
-api_key = "sk-..."
-default_model = "deepseek-v4-flash"  # optional
+credential = "api_deepseek_com_api_key" # credential id in auth.json
+wire_apis = ["openai_chat_completions"] # openai_chat_completions | openai_responses | anthropic_messages
 
-[[model_providers.openai.models]]
-model = "deepseek-v4-pro"
+# ── Model Bindings ──────────────────────────────────────────────
+[model_bindings.deepseek-v4-pro-api-deepseek-com]
+enabled = true
+model_slug = "deepseek-v4-pro"
+provider = "api.deepseek.com"
+model_name = "deepseek-v4-pro"
+display_name = "DeepSeek V4 Pro"
+invocation_method = "openai_chat_completions"
 
-[[model_providers.openai.models]]
-model = "deepseek-v4-flash"
+[model_bindings.deepseek-v4-flash-api-deepseek-com]
+enabled = true
+model_slug = "deepseek-v4-flash"
+provider = "api.deepseek.com"
+model_name = "deepseek-v4-flash"
+display_name = "DeepSeek V4 Flash"
+invocation_method = "openai_chat_completions"
+default_reasoning_effort = "high"
 
 # ── App Settings (optional) ─────────────────────────────────────
 enable_auxiliary_model = false     # optional, use a second model for safety/summaries

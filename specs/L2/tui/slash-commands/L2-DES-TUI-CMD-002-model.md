@@ -200,8 +200,8 @@ That stacked rail view belongs to onboarding. `/model` uses one active step at a
 
 ## State And Error Behavior
 
-- The TUI should use `model.list` to populate configured model-provider bindings for the first `/model` screen and supported model choices for the `Add model...` flow.
-- The final selection should use `model.select`.
+- The TUI should use `model/list` to populate configured model-provider bindings for the first `/model` screen and supported model choices for the `Add model...` flow.
+- The final selection should use `model/select`.
 - New or modified provider and model-provider binding data should follow the same validation and persistence expectations as onboarding and should be persisted before the command applies a newly created binding.
 - Persistence errors for newly created or modified configuration must keep `/model` in a recoverable command state rather than silently falling back to a session-only binding.
 - The command must show credential status but must not display plaintext API keys in routine lists.
@@ -217,8 +217,8 @@ That stacked rail view belongs to onboarding. `/model` uses one active step at a
 | refines | L1-REQ-TUI-006 | 1 | specs/L1/L1-REQ-TUI-006-command-discovery-control.md | Defines `/model`, the required post-onboarding model-selection command. |
 | related-to | L1-REQ-MODEL-001 | 1 | specs/L1/L1-REQ-MODEL-001-config.md | Model selection uses configured model-provider bindings. |
 | related-to | L1-REQ-APP-010 | 1 | specs/L1/L1-REQ-APP-010-configuration.md | Defines when model selection changes are persisted as defaults versus session state. |
-| related-to | L2-DES-MODEL-001 | 1 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | Defines supported models, user providers, and model-provider bindings. |
-| related-to | L2-DES-APP-002 | 1 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Defines configuration write scope, persistence target behavior, and distinction between session selection and durable records. |
+| related-to | L2-DES-MODEL-001 | 2 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | Defines supported models, user providers, and model-provider bindings. |
+| related-to | L2-DES-APP-002 | 2 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Defines configuration write scope, persistence target behavior, and distinction between session selection and durable records. |
 | related-to | L2-DES-TUI-001 | 1 | specs/L2/tui/L2-DES-TUI-001-onboarding-ui-flow.md | Reuses the onboarding model setup sequence while using a transient below-composer command surface instead of an inline history stack. |
 | related-to | L2-DES-TUI-003 | 1 | specs/L2/tui/L2-DES-TUI-003-composer-and-input-modes.md | Uses shared slash-command discovery, popup, and invocation behavior. |
 | specified-by | L3-BEH-TUI-004 | 2 | specs/L3/tui/L3-BEH-TUI-004-slash-commands.md | L3 defines consolidated slash command parsing, routing, and model command behavior. |

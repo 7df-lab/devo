@@ -16,7 +16,6 @@ devo-provider = { workspace = true }
 devo-safety = { workspace = true }
 devo-server = { workspace = true }
 devo-tasks = { workspace = true }
-devo-tools = { workspace = true }
 devo-tui = { workspace = true }
 devo-utils = { workspace = true }
 devo-arg0 = { workspace = true }

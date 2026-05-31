@@ -13,6 +13,9 @@ impl ToolSpec {
             capability_tags: vec![],
             supports_parallel: false,
             preparation_feedback: ToolPreparationFeedback::None,
+            display_name: None,
+            supports_cancellation: None,
+            supports_streaming: None,
         }
     }
 }
@@ -103,4 +106,22 @@ pub struct ToolSpec {
     pub capability_tags: Vec<ToolCapabilityTag>,
     pub supports_parallel: bool,
     pub preparation_feedback: ToolPreparationFeedback,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_cancellation: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_streaming: Option<bool>,
+}
+
+impl ToolSpec {
+    pub fn display_name(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.name)
+    }
+    pub fn supports_cancellation(&self) -> bool {
+        self.supports_cancellation.unwrap_or(false)
+    }
+    pub fn supports_streaming(&self) -> bool {
+        self.supports_streaming.unwrap_or(false)
+    }
 }

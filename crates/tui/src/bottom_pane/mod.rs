@@ -12,6 +12,7 @@ use ratatui::style::Color;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
@@ -23,12 +24,11 @@ mod command_popup;
 mod file_search_popup;
 mod footer;
 pub(crate) mod list_selection_view;
-mod onboarding_view;
 mod paste_burst;
 mod pending_thread_approvals;
-mod popup_consts;
+pub(crate) mod popup_consts;
 mod prompt_args;
-mod scroll_state;
+pub(crate) mod scroll_state;
 mod selection_popup_common;
 mod skill_popup;
 pub(crate) mod slash_commands;
@@ -41,8 +41,6 @@ pub(crate) use approval_overlay::ApprovalOverlayRequest;
 pub(crate) use chat_composer::ChatComposer;
 use chat_composer::ChatComposerConfig;
 use chat_composer::InputResult as ComposerInputResult;
-pub(crate) use onboarding_view::OnboardingResult;
-pub(crate) use onboarding_view::OnboardingView;
 
 use crate::app_command::AppCommand;
 use crate::app_command::InputHistoryDirection;
@@ -81,6 +79,14 @@ pub(crate) struct MentionBinding {
 
 #[derive(Debug, Default)]
 struct BlankLineSpacer;
+
+impl Renderable for BlankLineSpacer {
+    fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        1
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct SkillInterfaceMetadata {
@@ -147,97 +153,9 @@ pub(crate) struct BottomPaneParams {
     pub(crate) animations_enabled: bool,
 }
 
-/// Owns the lifecycle of a single onboarding flow.
-///
-/// Separated from the generic `view_stack` so that onboarding does not block
-/// task-interrupt routing (Esc) or pollute the `BottomPaneView` trait with
-/// onboarding-specific methods. The result is extracted and preserved here
-/// before the view is dropped so callers can retrieve it at any point.
-pub(crate) struct OnboardingHandle {
-    view: OnboardingView,
-    /// Result extracted from the view when it completes. Held here so callers
-    /// can retrieve it even after the handle has been reset.
-    completed_result: Option<OnboardingResult>,
-}
-
-impl OnboardingHandle {
-    pub(crate) fn new(
-        models: &[devo_protocol::Model],
-        app_event_tx: AppEventSender,
-        frame_requester: FrameRequester,
-        animations_enabled: bool,
-    ) -> Self {
-        Self {
-            view: OnboardingView::new(models, app_event_tx, frame_requester, animations_enabled),
-            completed_result: None,
-        }
-    }
-
-    pub(crate) fn handle_key_event(&mut self, key: KeyEvent) {
-        self.view.handle_key_event(key);
-        if self.view.is_complete() {
-            // Extract result before it's overwritten
-            self.completed_result = self.view.take_result();
-        }
-    }
-
-    pub(crate) fn render(&self, area: Rect, buf: &mut Buffer) {
-        self.view.render(area, buf);
-    }
-
-    pub(crate) fn desired_height(&self, width: u16) -> u16 {
-        self.view.desired_height(width)
-    }
-
-    pub(crate) fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        self.view.cursor_pos(area)
-    }
-
-    pub(crate) fn is_complete(&self) -> bool {
-        self.view.is_complete()
-    }
-
-    pub(crate) fn is_active(&self) -> bool {
-        !self.view.is_complete()
-    }
-
-    pub(crate) fn take_result(&mut self) -> Option<OnboardingResult> {
-        self.completed_result
-            .take()
-            .or_else(|| self.view.take_result())
-    }
-
-    pub(crate) fn on_validation_succeeded(&mut self, reply_preview: String) {
-        self.view.on_validation_succeeded(reply_preview);
-        if self.view.is_complete() {
-            self.completed_result = self.view.take_result();
-        }
-    }
-
-    pub(crate) fn on_validation_failed(&mut self, error_message: String) {
-        self.view.on_validation_failed(error_message);
-    }
-
-    pub(crate) fn cancel(&mut self) {
-        if !self.view.is_complete() {
-            self.view.cancel();
-            self.completed_result = self.view.take_result();
-        }
-    }
-}
-
-impl Renderable for BlankLineSpacer {
-    fn render(&self, _area: Rect, _buf: &mut Buffer) {}
-
-    fn desired_height(&self, _width: u16) -> u16 {
-        1
-    }
-}
-
 pub(crate) struct BottomPane {
     composer: ChatComposer,
     view_stack: Vec<Box<dyn BottomPaneView>>,
-    onboarding: Option<OnboardingHandle>,
     app_event_tx: AppEventSender,
     frame_requester: FrameRequester,
     unified_exec_footer: UnifiedExecFooter,
@@ -286,7 +204,6 @@ impl BottomPane {
         Self {
             composer,
             view_stack: Vec::new(),
-            onboarding: None,
             app_event_tx,
             frame_requester,
             unified_exec_footer: UnifiedExecFooter::new(),
@@ -312,13 +229,6 @@ impl BottomPane {
     }
 
     pub(crate) fn handle_key_event(&mut self, key: KeyEvent) -> InputResult {
-        // Route to onboarding first — it takes priority over views and composer.
-        if let Some(handle) = self.onboarding.as_mut() {
-            handle.handle_key_event(key);
-            self.request_redraw();
-            return InputResult::None;
-        }
-
         if !self.view_stack.is_empty() {
             return self.handle_view_key_event(key);
         }
@@ -444,42 +354,6 @@ impl BottomPane {
 
     pub(crate) fn set_allow_empty_submit(&mut self, enabled: bool) {
         self.allow_empty_submit = enabled;
-    }
-
-    pub(crate) fn start_onboarding(&mut self, models: &[devo_protocol::Model]) {
-        self.onboarding = Some(OnboardingHandle::new(
-            models,
-            self.app_event_tx.clone(),
-            self.frame_requester.clone(),
-            self.animations_enabled,
-        ));
-        self.request_redraw();
-    }
-
-    pub(crate) fn poll_onboarding_result(&mut self) -> Option<OnboardingResult> {
-        let result = self.onboarding.as_mut().and_then(|h| h.take_result());
-        if result.is_some() {
-            self.onboarding = None;
-        }
-        result
-    }
-
-    pub(crate) fn is_onboarding_active(&self) -> bool {
-        self.onboarding.as_ref().is_some_and(|h| h.is_active())
-    }
-
-    pub(crate) fn onboarding_on_validation_succeeded(&mut self, reply_preview: String) {
-        if let Some(handle) = &mut self.onboarding {
-            handle.on_validation_succeeded(reply_preview);
-            self.request_redraw();
-        }
-    }
-
-    pub(crate) fn onboarding_on_validation_failed(&mut self, error_message: String) {
-        if let Some(handle) = &mut self.onboarding {
-            handle.on_validation_failed(error_message);
-            self.request_redraw();
-        }
     }
 
     pub(crate) fn open_model_picker(&mut self, entries: Vec<ModelPickerEntry>) {
@@ -878,10 +752,6 @@ impl Renderable for BottomPane {
         if area.is_empty() {
             return;
         }
-        if let Some(handle) = &self.onboarding {
-            handle.render(area, buf);
-            return;
-        }
         if let Some(view) = self.active_view() {
             view.render(area, buf);
             return;
@@ -908,9 +778,6 @@ impl Renderable for BottomPane {
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        if let Some(handle) = &self.onboarding {
-            return handle.desired_height(width);
-        }
         if let Some(view) = self.active_view() {
             return view.desired_height(width);
         }
@@ -934,9 +801,6 @@ impl Renderable for BottomPane {
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        if let Some(handle) = &self.onboarding {
-            return handle.cursor_pos(area);
-        }
         if let Some(view) = self.active_view() {
             return view.cursor_pos(area);
         }
@@ -1003,15 +867,28 @@ impl ModelPickerView {
     fn render_lines(&self) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
         for (index, entry) in self.entries.iter().enumerate() {
-            let mut title = if index == self.selection {
-                Line::from(format!("  {}", entry.display_name))
-                    .style(Style::default().fg(self.accent_color).bold())
+            let is_selected = index == self.selection;
+            let marker = if entry.is_current {
+                "●"
+            } else if is_selected {
+                "›"
             } else {
-                Line::from(format!("  {}", entry.display_name)).dim()
+                " "
             };
-            if entry.is_current {
-                title.spans.push("  ".into());
-                title.spans.push("current".dark_gray());
+            let marker_style = if entry.is_current {
+                Style::default().fg(self.accent_color).bold()
+            } else {
+                Style::default()
+            };
+            let mut title = Line::from(vec![
+                Span::styled(marker.to_string(), marker_style),
+                Span::raw(" "),
+                Span::raw(entry.display_name.clone()),
+            ]);
+            if is_selected {
+                title = title.style(Style::default().fg(self.accent_color).bold());
+            } else if !entry.is_current {
+                title = title.dim();
             }
             lines.push(title);
             if let Some(description) = entry.description.as_deref()

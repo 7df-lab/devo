@@ -220,7 +220,7 @@ The `exit_messages` function is called after `run_agent()` returns, in every CLI
 | related-to | L2-DES-TUI-005 | 1 | specs/L2/tui/L2-DES-TUI-005-terminal-lifecycle-safety.md | TUI lifecycle defines safe exit and shell prompt handoff before CLI prints. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Session data model carries the token aggregates surfaced in exit display. |
 | related-to | L2-DES-LLM-003 | 1 | specs/L2/llm/L2-DES-LLM-003-model-usage-observability.md | Model usage observability design defines streaming token tracking that feeds the exit display. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Turn usage updates flow from server to TUI via the client-server protocol. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Turn usage updates flow from server to TUI via the client-server protocol. |
 | specified-by | L3-BEH-TUI-003 | 1 | specs/L3/tui/L3-BEH-TUI-003-terminal-lifecycle-safety.md | L3 defines safe terminal handoff before CLI exit display. |
 
 ## Revision Notes

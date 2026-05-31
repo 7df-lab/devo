@@ -1,6 +1,6 @@
 ---
 artifact_id: L2-DES-APP-003
-revision: 1
+revision: 2
 status: Draft
 active_baseline: no
 supersedes:
@@ -127,46 +127,57 @@ Rejected responses should use JSON-RPC error responses with:
 - `message`: concise user-facing explanation.
 - `data`: structured recovery context, such as missing permission, invalid session, stale sequence, invalid model, or unavailable provider.
 
+## JSON-RPC Method Naming
+
+JSON-RPC request and notification method names must use `/` path separators rather than `.` separators.
+
+Rules:
+
+- Use names such as `server/initialize`, `turn/submit`, and `config/update`.
+- Do not introduce dot-form aliases such as `server.initialize`, `turn.submit`, or `config.update`.
+- Existing notification names from `crates/protocol/src/event.rs::ServerEvent::method_name()` should be reused where the semantic event already exists. Examples include `session/started`, `turn/started`, `turn/usage/updated`, `item/started`, `item/agentMessage/delta`, `inputQueue/updated`, `steer/accepted`, and `serverRequest/resolved`.
+- Conceptual event-kind names such as `turn_started` or `item_content_update` may still be used inside projections or explanatory tables, but the JSON-RPC envelope `method` string uses the slash-separated method name.
+
 ## Client Requests
 
 Representative client-to-server JSON-RPC request methods and response results:
 
 | Method | Purpose | Important Params | Server Response Result |
 |---|---|---|---|
-| `server.initialize` | Register a client connection, authenticate it, and negotiate protocol compatibility. | `client_id`, `client_kind`, `protocol_version`, `auth_token`, `client_capabilities`, `workspace_root` where known. | `server_id`, `server_version`, `protocol_version`, `server_capabilities`, `latest_sequence`. |
-| `server.shutdown` | Request a graceful server shutdown when the caller is authorized to do so. | `reason`, `client_id`, optional `force_after_timeout`. | `accepted`, `shutdown_state`, optional `message`. |
-| `session.list` | Return session summaries for pickers, recent-session views, and restore flows. | `workspace_filter`, `include_archived`, `limit`, `cursor`, optional sort order. | `sessions`, `next_cursor`, `latest_sequence`. |
-| `session.open` | Load a session and return a current projection without necessarily subscribing to future events. | `session_id`, `projection`, optional `from_sequence`. | `session_snapshot`, `latest_sequence`. |
-| `session.create` | Create a new session record when the client explicitly starts a new session before submitting a turn. | `workspace_root`, `initial_metadata`, optional `client_generated_label`. | `session_id`, `session_snapshot`, `latest_sequence`. |
-| `session.fork` | Create a child session that inherits visible history from a parent session without deep-copying all parent records. | `parent_session_id`, `fork_turn_id`, `workspace_root`, optional `fork_label`. | `session_id`, `parent_session_id`, `fork_turn_id`, `inherited_segment_id`, `session_snapshot`. |
-| `session.archive` | Mark a session as archived so it leaves active-session views while remaining recoverable where policy allows. | `session_id`, `archive_reason`. | `session_id`, `archived`, `latest_sequence`. |
-| `session.delete` | Delete or request deletion of a session while preserving explicit policy for forks and retained shared records. | `session_id`, `delete_mode`, `fork_policy`, `confirm_token` when required. | `accepted`, `session_id`, `delete_state`, `affected_forks`, `inherited_segment_actions`, `retained_records`, `latest_sequence`. |
-| `session.export` | Export session history and allowed related data for user data portability. | `session_id`, `include_inherited_history`, `redaction_level`, `format`. | `export_id`, `accepted`, `status`, optional `download_ref`, `latest_sequence`. |
-| `session.subscribe` | Start receiving ordered events for a session from a given sequence or from the current state. | `session_id`, `from_sequence`, `event_filter`, `projection`. | `subscription_id`, optional `session_snapshot`, `next_sequence`. |
-| `session.unsubscribe` | Stop a previous session subscription. | `subscription_id`, `session_id`. | `subscription_id`, `closed`. |
-| `turn.submit` | Submit user input, content parts, and mentions for agent execution. If a turn is active, the client must state whether the message is normal, steer, or queue. | `session_id` or `new_session`, `submission_mode`, `active_turn_id` where applicable, `content_parts`, `mentions`, `client_message_id`, optional `mode_overrides`. | `session_id`, `turn_id` or `queue_item_id` or `steer_item_id`, `accepted`, `classification`, `latest_sequence`. |
-| `message.editPrevious` | Edit the immediately preceding eligible user-authored message in the current session branch. | `session_id`, `expected_target_message_id`, `edited_content_parts`, `edited_mentions`, `client_edit_id`, optional `edit_mode`, optional `workspace_restore_policy`. | `accepted`, `edit_id`, `target_message_id`, `replacement_message_id`, `superseded_turn_id` where applicable, `workspace_restore_state`, `new_turn_id` or `queue_item_id` where applicable, `edit_state`, `latest_sequence`. |
-| `turn.interrupt` | Request interruption of active execution, including model generation, tool execution, pending prompts, or the whole turn. | `session_id`, `turn_id`, `reason`, optional `target_kind`, optional `target_id`, optional `interrupt_mode`. | `turn_id`, `interrupt_id`, `interrupt_state`, `cleanup_state`, `latest_sequence`. |
-| `turn.resume` | Start a continuation turn linked to an interrupted or otherwise recoverable turn. | `session_id`, `interrupted_turn_id`, `client_resume_id`, optional `resume_content_parts`, optional `resume_mentions`, optional `resume_mode`. | `session_id`, `turn_id`, `resume_of_turn_id`, `accepted`, `resume_state`, `latest_sequence`. |
-| `execution.inspect` | Return active execution state so a client can show running work and let the user choose what to stop. | `session_id`, optional `include_background_processes`, optional `include_recent_output`, optional `redaction_level`. | `active_turn`, `running_tool_calls`, `pending_approvals`, `pending_questions`, `background_processes`, `latest_sequence`. |
-| `backgroundProcess.stop` | Request stop for a tracked background process started by the program. | `process_id`, optional `session_id`, optional `turn_id`, `reason`, optional `stop_mode`. | `process_id`, `stop_state`, `latest_sequence`. |
-| `queue.cancel` | Cancel a queued message before it starts execution. | `session_id`, `queue_item_id`, `reason`. | `queue_item_id`, `canceled`, `latest_sequence`. |
-| `goal.get` | Return the current Ralph Loop goal projection for a session. | `session_id`, optional `include_history`, optional `redaction_level`. | `goal`, `goal_history` where requested, `latest_sequence`. |
-| `goal.create` | Create the first goal for a session or explicitly replace a non-terminal goal. | `session_id`, `objective`, optional `token_budget`, optional `time_budget_seconds`, optional `turn_budget`, optional `replace_existing`, optional `expected_goal_id`. | `accepted`, `goal`, `replaced_goal_id` where applicable, `latest_sequence`. |
-| `goal.pause` | Pause autonomous continuation without discarding the goal. | `session_id`, `goal_id`, optional `expected_goal_id`, optional `reason`. | `accepted`, `goal`, `latest_sequence`. |
-| `goal.resume` | Resume a paused or blocked goal and allow continuation after eligibility checks. | `session_id`, `goal_id`, optional `expected_goal_id`, optional `resume_reason`. | `accepted`, `goal`, `continuation_eligible`, `latest_sequence`. |
-| `goal.complete` | Let the user mark the goal complete directly. | `session_id`, `goal_id`, optional `expected_goal_id`, `verification_summary`. | `accepted`, `goal`, `latest_sequence`. |
-| `goal.cancel` | End the goal without marking it complete. | `session_id`, `goal_id`, optional `expected_goal_id`, `reason`. | `accepted`, `goal`, `latest_sequence`. |
-| `goal.clear` | Remove the current goal from normal UI projections while preserving audit records. | `session_id`, `goal_id`, optional `expected_goal_id`. | `accepted`, `cleared_goal_id`, `latest_sequence`. |
-| `search.start` | Start a connection-local fuzzy-search session for one or more provider groups. | `session_id` where applicable, `client_search_id`, optional `providers`, `initial_query`, `limit`, optional `search_roots`, optional `include_indices`. | `search_id`, `providers`, `accepted`, `latest_sequence` where applicable. |
-| `search.update` | Update the query for an active fuzzy-search session. | `search_id`, `query`, optional `limit`, optional `include_indices`. | `search_id`, `accepted`, `query_revision`. |
-| `search.cancel` | Cancel or release an active fuzzy-search session. | `search_id`, optional `reason`. | `search_id`, `canceled`. |
-| `approval.respond` | Answer a pending tool or permission approval request. | `session_id`, `turn_id`, `approval_id`, `decision`, optional `note`. | `approval_id`, `accepted`, `latest_sequence`. |
-| `question.respond` | Answer a pending Plan Mode or question-tool prompt. | `session_id`, `turn_id`, `question_id`, `answers`, optional `freeform_text`. | `question_id`, `accepted`, `latest_sequence`. |
-| `model.list` | Return supported and configured model projections suitable for selection UI. | `include_supported`, `configured_only`, optional `capability_filter`. | `models`, `current_model`, credential status only. |
-| `model.select` | Change the session's active model binding and reasoning effort where allowed. | `session_id`, `model_binding_id`, optional `reasoning_effort`, optional `persist_default`. | `effective_model`, `metadata_update`, `latest_sequence`. |
-| `config.inspect` | Return effective configuration and source information safe for client display. | `scope`, `include_sources`, optional `redaction_level`. | `effective_config_projection`, `sources`, `latest_sequence`. |
-| `config.update` | Update supported configuration values where the client is authorized to do so. | `scope`, `updates`, `persistence_target`, `redaction_level`. | `accepted`, `changed_keys`, `effective_config_projection`, `latest_sequence`. |
+| `server/initialize` | Register a client connection, authenticate it, and negotiate protocol compatibility. | `client_id`, `client_kind`, `protocol_version`, `auth_token`, `client_capabilities`, `workspace_root` where known. | `server_id`, `server_version`, `protocol_version`, `server_capabilities`, `latest_sequence`. |
+| `server/shutdown` | Request a graceful server shutdown when the caller is authorized to do so. | `reason`, `client_id`, optional `force_after_timeout`. | `accepted`, `shutdown_state`, optional `message`. |
+| `session/list` | Return session summaries for pickers, recent-session views, and restore flows. | `workspace_filter`, `include_archived`, `limit`, `cursor`, optional sort order. | `sessions`, `next_cursor`, `latest_sequence`. |
+| `session/open` | Load a session and return a current projection without necessarily subscribing to future events. | `session_id`, `projection`, optional `from_sequence`. | `session_snapshot`, `latest_sequence`. |
+| `session/create` | Create a new session record when the client explicitly starts a new session before submitting a turn. | `workspace_root`, `initial_metadata`, optional `client_generated_label`. | `session_id`, `session_snapshot`, `latest_sequence`. |
+| `session/fork` | Create a child session that inherits visible history from a parent session without deep-copying all parent records. | `parent_session_id`, `fork_turn_id`, `workspace_root`, optional `fork_label`. | `session_id`, `parent_session_id`, `fork_turn_id`, `inherited_segment_id`, `session_snapshot`. |
+| `session/archive` | Mark a session as archived so it leaves active-session views while remaining recoverable where policy allows. | `session_id`, `archive_reason`. | `session_id`, `archived`, `latest_sequence`. |
+| `session/delete` | Delete or request deletion of a session while preserving explicit policy for forks and retained shared records. | `session_id`, `delete_mode`, `fork_policy`, `confirm_token` when required. | `accepted`, `session_id`, `delete_state`, `affected_forks`, `inherited_segment_actions`, `retained_records`, `latest_sequence`. |
+| `session/export` | Export session history and allowed related data for user data portability. | `session_id`, `include_inherited_history`, `redaction_level`, `format`. | `export_id`, `accepted`, `status`, optional `download_ref`, `latest_sequence`. |
+| `session/subscribe` | Start receiving ordered events for a session from a given sequence or from the current state. | `session_id`, `from_sequence`, `event_filter`, `projection`. | `subscription_id`, optional `session_snapshot`, `next_sequence`. |
+| `session/unsubscribe` | Stop a previous session subscription. | `subscription_id`, `session_id`. | `subscription_id`, `closed`. |
+| `turn/submit` | Submit user input, content parts, and mentions for agent execution. If a turn is active, the client must state whether the message is normal, steer, or queue. | `session_id` or `new_session`, `submission_mode`, `active_turn_id` where applicable, `content_parts`, `mentions`, `client_message_id`, optional `mode_overrides`. | `session_id`, `turn_id` or `queue_item_id` or `steer_item_id`, `accepted`, `classification`, `latest_sequence`. |
+| `message/editPrevious` | Edit the immediately preceding eligible user-authored message in the current session branch. | `session_id`, `expected_target_message_id`, `edited_content_parts`, `edited_mentions`, `client_edit_id`, optional `edit_mode`, optional `workspace_restore_policy`. | `accepted`, `edit_id`, `target_message_id`, `replacement_message_id`, `superseded_turn_id` where applicable, `workspace_restore_state`, `new_turn_id` or `queue_item_id` where applicable, `edit_state`, `latest_sequence`. |
+| `turn/interrupt` | Request interruption of active execution, including model generation, tool execution, pending prompts, or the whole turn. | `session_id`, `turn_id`, `reason`, optional `target_kind`, optional `target_id`, optional `interrupt_mode`. | `turn_id`, `interrupt_id`, `interrupt_state`, `cleanup_state`, `latest_sequence`. |
+| `turn/resume` | Start a continuation turn linked to an interrupted or otherwise recoverable turn. | `session_id`, `interrupted_turn_id`, `client_resume_id`, optional `resume_content_parts`, optional `resume_mentions`, optional `resume_mode`. | `session_id`, `turn_id`, `resume_of_turn_id`, `accepted`, `resume_state`, `latest_sequence`. |
+| `execution/inspect` | Return active execution state so a client can show running work and let the user choose what to stop. | `session_id`, optional `include_background_processes`, optional `include_recent_output`, optional `redaction_level`. | `active_turn`, `running_tool_calls`, `pending_approvals`, `pending_questions`, `background_processes`, `latest_sequence`. |
+| `backgroundProcess/stop` | Request stop for a tracked background process started by the program. | `process_id`, optional `session_id`, optional `turn_id`, `reason`, optional `stop_mode`. | `process_id`, `stop_state`, `latest_sequence`. |
+| `queue/cancel` | Cancel a queued message before it starts execution. | `session_id`, `queue_item_id`, `reason`. | `queue_item_id`, `canceled`, `latest_sequence`. |
+| `goal/get` | Return the current Ralph Loop goal projection for a session. | `session_id`, optional `include_history`, optional `redaction_level`. | `goal`, `goal_history` where requested, `latest_sequence`. |
+| `goal/create` | Create the first goal for a session or explicitly replace a non-terminal goal. | `session_id`, `objective`, optional `token_budget`, optional `time_budget_seconds`, optional `turn_budget`, optional `replace_existing`, optional `expected_goal_id`. | `accepted`, `goal`, `replaced_goal_id` where applicable, `latest_sequence`. |
+| `goal/pause` | Pause autonomous continuation without discarding the goal. | `session_id`, `goal_id`, optional `expected_goal_id`, optional `reason`. | `accepted`, `goal`, `latest_sequence`. |
+| `goal/resume` | Resume a paused or blocked goal and allow continuation after eligibility checks. | `session_id`, `goal_id`, optional `expected_goal_id`, optional `resume_reason`. | `accepted`, `goal`, `continuation_eligible`, `latest_sequence`. |
+| `goal/complete` | Let the user mark the goal complete directly. | `session_id`, `goal_id`, optional `expected_goal_id`, `verification_summary`. | `accepted`, `goal`, `latest_sequence`. |
+| `goal/cancel` | End the goal without marking it complete. | `session_id`, `goal_id`, optional `expected_goal_id`, `reason`. | `accepted`, `goal`, `latest_sequence`. |
+| `goal/clear` | Remove the current goal from normal UI projections while preserving audit records. | `session_id`, `goal_id`, optional `expected_goal_id`. | `accepted`, `cleared_goal_id`, `latest_sequence`. |
+| `search/start` | Start a connection-local fuzzy-search session for one or more provider groups. | `session_id` where applicable, `client_search_id`, optional `providers`, `initial_query`, `limit`, optional `search_roots`, optional `include_indices`. | `search_id`, `providers`, `accepted`, `latest_sequence` where applicable. |
+| `search/update` | Update the query for an active fuzzy-search session. | `search_id`, `query`, optional `limit`, optional `include_indices`. | `search_id`, `accepted`, `query_revision`. |
+| `search/cancel` | Cancel or release an active fuzzy-search session. | `search_id`, optional `reason`. | `search_id`, `canceled`. |
+| `approval/respond` | Answer a pending tool or permission approval request. | `session_id`, `turn_id`, `approval_id`, `decision`, optional `note`. | `approval_id`, `accepted`, `latest_sequence`. |
+| `question/respond` | Answer a pending Plan Mode or question-tool prompt. | `session_id`, `turn_id`, `question_id`, `answers`, optional `freeform_text`. | `question_id`, `accepted`, `latest_sequence`. |
+| `model/list` | Return supported and configured model projections suitable for selection UI. | `include_supported`, `configured_only`, optional `capability_filter`. | `models`, `current_model`, credential status only. |
+| `model/select` | Change the session's active model binding and reasoning effort where allowed. | `session_id`, `model_binding_id`, optional `reasoning_effort`, optional `persist_default`. | `effective_model`, `metadata_update`, `latest_sequence`. |
+| `config/inspect` | Return effective configuration and source information safe for client display. | `scope`, `include_sources`, optional `redaction_level`. | `effective_config_projection`, `sources`, `latest_sequence`. |
+| `config/update` | Update supported configuration values where the client is authorized to do so. | `scope`, `updates`, `persistence_target`, `redaction_level`. | `accepted`, `changed_keys`, `effective_config_projection`, `latest_sequence`. |
 
 Request methods should return explicit success or structured error results.
 
@@ -176,25 +187,31 @@ Representative server-to-client JSON-RPC notification methods:
 
 | Method | Purpose | Payload |
 |---|---|---|
-| `server.statusChanged` | Tell clients that server availability, lifecycle state, or capabilities changed. | `server_id`, `status`, `capabilities`, `latest_sequence`, optional `message`. |
-| `session.event` | Broadcast session-level changes to subscribed clients. | `sequence`, `session_id`, `event_kind`, `event_payload`, `source_client_id` where applicable. |
-| `session.subscriptionClosed` | Tell a client that a subscription ended or can no longer be continued. | `subscription_id`, `session_id`, `reason`, optional `resubscribe_hint`. |
-| `turn.event` | Broadcast turn and item changes to clients subscribed to the session. | `sequence`, `session_id`, `turn_id`, `event_kind`, `event_payload`, `source_client_id` where applicable. |
-| `approval.requested` | Ask connected clients to present an approval decision to the user. | `sequence`, `session_id`, `turn_id`, `approval_id`, `approval_kind`, `summary`, `details`, `expires_at` where applicable. |
-| `question.requested` | Ask connected clients to present a question prompt to the user. | `sequence`, `session_id`, `turn_id`, `question_id`, `prompt`, `options`, `allows_freeform`, `expires_at` where applicable. |
-| `config.changed` | Tell clients that effective configuration changed and dependent displays may need refresh. | `sequence`, `changed_scopes`, `changed_keys`, `source`, `safe_summary`. |
-| `goal.updated` | Tell clients that the session goal was created, replaced, paused, resumed, blocked, completed, canceled, budget-limited, cleared, or updated with progress. | `sequence`, `session_id`, `goal`, `change_kind`, `source`, `source_turn_id` where applicable, `source_client_id` where applicable. |
-| `goal.continuationStarted` | Tell clients that an autonomous continuation turn has started for an active goal. | `sequence`, `session_id`, `goal_id`, `turn_id`, `reason`, `budget_state`. |
-| `goal.budgetLimited` | Tell clients that the goal stopped because a configured budget was reached. | `sequence`, `session_id`, `goal_id`, `budget_kind`, `budget_state`, `progress_summary`. |
-| `search.updated` | Send a connection-local fuzzy-search result snapshot to the requesting client. | `search_id`, `query`, `query_revision`, `provider_groups`, `is_complete`, optional `degraded_state`. |
-| `search.completed` | Tell the requesting client all active providers completed for the current query. | `search_id`, `query`, `query_revision`, `provider_statuses`. |
-| `search.failed` | Tell the requesting client a search session or provider failed. | `search_id`, `query`, `provider`, `error`, `recoverable`. |
+| `server/status/changed` | Tell clients that server availability, lifecycle state, or capabilities changed. | `server_id`, `status`, `capabilities`, `latest_sequence`, optional `message`. |
+| `session/subscription/closed` | Tell a client that a subscription ended or can no longer be continued. | `subscription_id`, `session_id`, `reason`, optional `resubscribe_hint`. |
+| `approval/requested` | Ask connected clients to present an approval decision to the user. | `sequence`, `session_id`, `turn_id`, `approval_id`, `approval_kind`, `summary`, `details`, `expires_at` where applicable. |
+| `question/requested` | Ask connected clients to present a question prompt to the user. | `sequence`, `session_id`, `turn_id`, `question_id`, `prompt`, `options`, `allows_freeform`, `expires_at` where applicable. |
+| `config/changed` | Tell clients that effective configuration changed and dependent displays may need refresh. | `sequence`, `changed_scopes`, `changed_keys`, `source`, `safe_summary`. |
+| `goal/updated` | Tell clients that the session goal was created, replaced, paused, resumed, blocked, completed, canceled, budget-limited, cleared, or updated with progress. | `sequence`, `session_id`, `goal`, `change_kind`, `source`, `source_turn_id` where applicable, `source_client_id` where applicable. |
+| `goal/continuation/started` | Tell clients that an autonomous continuation turn has started for an active goal. | `sequence`, `session_id`, `goal_id`, `turn_id`, `reason`, `budget_state`. |
+| `goal/budget/limited` | Tell clients that the goal stopped because a configured budget was reached. | `sequence`, `session_id`, `goal_id`, `budget_kind`, `budget_state`, `progress_summary`. |
+| `search/updated` | Send a connection-local fuzzy-search result snapshot to the requesting client. | `search_id`, `query`, `query_revision`, `provider_groups`, `is_complete`, optional `degraded_state`. |
+| `search/completed` | Tell the requesting client all active providers completed for the current query. | `search_id`, `query`, `query_revision`, `provider_statuses`. |
+| `search/failed` | Tell the requesting client a search session or provider failed. | `search_id`, `query`, `provider`, `error`, `recoverable`. |
+| `session/started`, `session/title/updated`, `session/status/changed`, `session/archived`, `session/unarchived`, `session/closed` | Reuse existing concrete session lifecycle notification methods for subscribed clients. | Existing session payload plus sequence/session identity fields. |
+| `session/compaction/started`, `session/compaction/completed`, `session/compaction/failed` | Reuse existing concrete session compaction notification methods. | Existing compaction payload plus sequence/session identity fields. |
+| `turn/started`, `turn/completed`, `turn/interrupted`, `turn/failed` | Reuse existing concrete turn lifecycle notification methods. | Existing turn payload plus sequence/session/turn identity fields. |
+| `turn/plan/updated`, `turn/diff/updated`, `turn/usage/updated` | Reuse existing concrete turn projection notification methods. | Existing plan, diff, or usage payload. |
+| `inputQueue/updated`, `steer/accepted` | Reuse existing concrete active-turn input notification methods. | Existing queue or steer payload. |
+| `item/started`, `item/completed` | Reuse existing concrete item lifecycle notification methods. | Existing item payload plus item context. |
+| `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`, `item/commandExecution/outputDelta`, `item/fileChange/outputDelta`, `item/plan/delta` | Reuse existing concrete streaming delta notification methods. | Existing item delta payload plus item context. |
+| `serverRequest/resolved` | Reuse existing concrete pending server-request resolution notification method. | Existing request resolution payload. |
 
 Notifications should include sequence numbers sufficient for clients to order events and request catch-up after reconnect.
 
 ## Sequencing And Catch-Up
 
-The server should assign a monotonic `session_sequence` for each session. Every `session.event` and `turn.event` for that session should carry this sequence.
+The server should assign a monotonic `session_sequence` for each session. Every session-scoped or turn-scoped notification for that session should carry this sequence, including concrete methods such as `session/started`, `turn/started`, `item/started`, and `item/agentMessage/delta`.
 
 Rules:
 
@@ -261,7 +278,7 @@ All clients, including the client that initiated the request, should receive the
 
 Examples:
 
-- If the TUI submits `turn.submit`, desktop and IDE clients subscribed to the same session receive the new user item and turn state.
+- If the TUI submits `turn/submit`, desktop and IDE clients subscribed to the same session receive the new user item and turn state.
 - If the desktop client answers an approval request, the TUI and IDE clients receive the approval state update and any resumed turn events.
 - If the server streams assistant output, every subscribed client receives ordered `item_content_update` events for the same item.
 - If the agent updates the plan tool, every subscribed client receives `plan_updated` for the same active plan state.
@@ -278,7 +295,7 @@ The protocol supports editing only the immediately preceding eligible user-autho
 Eligibility rules:
 
 - The server is authoritative for identifying the current branch's immediately previous eligible message.
-- `message.editPrevious` must reject stale requests when `expected_target_message_id` is not the current eligible message.
+- `message/editPrevious` must reject stale requests when `expected_target_message_id` is not the current eligible message.
 - Direct editing of older historical messages must be rejected with a structured error that points the client toward session forking.
 - Accepted edits must be append-only from the protocol perspective: the server records an edit and broadcasts canonical replacement state instead of mutating earlier events in place.
 - The server/core is authoritative for workspace restoration. Clients may choose an allowed `workspace_restore_policy`, but clients must not be required to apply inverse patches or mutate the workspace to make message editing correct.
@@ -312,12 +329,12 @@ The server is authoritative for interrupt and resume state. Clients request cont
 
 Rules:
 
-- `turn.interrupt` must return promptly after the server accepts or rejects the request. It must not wait for every provider stream, tool call, or background process cleanup action to finish.
+- `turn/interrupt` must return promptly after the server accepts or rejects the request. It must not wait for every provider stream, tool call, or background process cleanup action to finish.
 - Accepted interruption should move the target into stopping, interrupted, completed-before-interrupt, failed, or cleanup-pending state.
 - If the target turn is already terminal, the server should return an idempotent terminal result or a structured stale-state error.
-- `execution.inspect` should return enough active work state for clients to show running model invocation, running tools, pending prompts, and tracked background processes without exposing secrets.
-- `backgroundProcess.stop` should only target processes started and tracked by the program.
-- `turn.resume` should create a linked continuation turn rather than mutating the interrupted turn in place.
+- `execution/inspect` should return enough active work state for clients to show running model invocation, running tools, pending prompts, and tracked background processes without exposing secrets.
+- `backgroundProcess/stop` should only target processes started and tracked by the program.
+- `turn/resume` should create a linked continuation turn rather than mutating the interrupted turn in place.
 - Resume requests should be rejected or degraded with a warning when required context, workspace state, or permission state is unavailable.
 - Resumed turns must use the normal execution engine and normal safety policy.
 
@@ -328,11 +345,11 @@ The server is authoritative for Ralph Loop goal state. Clients request user-owne
 Rules:
 
 - Goal requests must return promptly after acceptance or rejection. They must not wait for an autonomous continuation turn to complete.
-- `goal.create` should reject accidental replacement of an existing non-terminal goal unless `replace_existing` or an equivalent confirmation is explicit.
+- `goal/create` should reject accidental replacement of an existing non-terminal goal unless `replace_existing` or an equivalent confirmation is explicit.
 - Goal mutations should include `expected_goal_id` where the client has one. If the goal was replaced or reached a terminal state, stale mutations should fail safely or become no-ops with a structured stale-state result.
 - Model-originated goal updates must not use client-owned mutation methods. They should flow through the narrow model-facing goal tool defined by `L2-DES-GOAL-001` and then broadcast as `goal_updated`.
 - If a user pauses, cancels, clears, or replaces a goal while a turn is active, that mutation affects future continuation and future context assembly. It must not rewrite a model request that has already started.
-- If `goal.resume` makes a goal active, the server should report whether continuation is currently eligible. If it is not eligible, the reason should be visible in the response or later events.
+- If `goal/resume` makes a goal active, the server should report whether continuation is currently eligible. If it is not eligible, the reason should be visible in the response or later events.
 - If the server starts a continuation, it should emit `goal_continuation_started` before or alongside the normal `turn_started` event.
 - If budget is reached, the server should emit `goal_budget_limited` and `goal_updated` so clients can explain that the goal stopped without implying verified completion.
 - Plan Mode suppresses autonomous goal continuation. Goal state remains viewable and user-controllable while Plan Mode is active.
@@ -343,13 +360,13 @@ Fuzzy-search sessions are live client interaction state. They are not transcript
 
 Rules:
 
-- `search.start` must return promptly with a server-owned `search_id` or a structured rejection.
-- `search.updated`, `search.completed`, and `search.failed` are sent only to the requesting client connection unless a later requirement defines shared picker state.
-- `search.update` should supersede prior query work for the same `search_id`.
+- `search/start` must return promptly with a server-owned `search_id` or a structured rejection.
+- `search/updated`, `search/completed`, and `search/failed` are sent only to the requesting client connection unless a later requirement defines shared picker state.
+- `search/update` should supersede prior query work for the same `search_id`.
 - Search query text is the literal keyword after the client prefix. It must not require or encode provider selectors such as file, skill, or MCP.
 - If `providers` is omitted, the server should use the default provider set for prefixed input.
 - Search notifications must include enough query identity, such as `query_revision`, for clients to ignore stale snapshots.
-- `search.cancel` should release worker state and stop provider work where possible.
+- `search/cancel` should release worker state and stop provider work where possible.
 - Provider groups must preserve result type so clients can render skills, MCP entries, files, sessions, commands, or future providers distinctly.
 - File search results should use workspace-relative paths where possible and include explicit file or directory type.
 - Search results must respect workspace, permission, privacy, ignore, and exclude policy before being sent to clients.
@@ -368,7 +385,7 @@ Rules:
 - Plan tool updates should be reported through `plan_updated`, not only as assistant text.
 - `plan_updated` should carry the complete current plan projection or enough patch data for clients to reconstruct it from prior canonical plan state.
 - The plan tool must not expose private model reasoning. Plan item text should be concise, user-visible task state.
-- In Normal Mode, question-tool attempts must be rejected before `question.requested` is emitted.
+- In Normal Mode, question-tool attempts must be rejected before `question/requested` is emitted.
 - In Plan Mode, mutating tools must be blocked before execution and should produce a structured blocked result if requested.
 - `multi_tool_use` child calls must still produce per-tool events and must not bypass validation, approval, or mode gates.
 - `multi_tool_use` parent and child events should include `parallel_group_id`; child events should also include `parent_tool_call_id` and `child_index` so clients can render group-level and child-level activity independently.
@@ -381,11 +398,11 @@ Rules:
 
 - The server owns approval and question state.
 - Approval requests are the protocol surface for `L1-REQ-APP-003` safety escalation. A client may present and answer a prompt, but the server decides whether the answer satisfies the current permission, sandbox, mode, and safety policy.
-- A successful `approval.respond` or `question.respond` resolves the prompt and broadcasts `approval_resolved` or `question_resolved`.
+- A successful `approval/respond` or `question/respond` resolves the prompt and broadcasts `approval_resolved` or `question_resolved`.
 - If another client answers after the prompt has been resolved, the server must reject the request with a structured stale-state error such as `already_resolved`.
 - Approval responses must be scoped to the identified `approval_id` and must not be treated as an unlimited permission grant for later unrelated work.
-- `question.requested` must only be emitted when Plan Mode or another explicit requirement allows the question tool.
-- In Normal Mode, the server must reject question-tool attempts before emitting `question.requested`.
+- `question/requested` must only be emitted when Plan Mode or another explicit requirement allows the question tool.
+- In Normal Mode, the server must reject question-tool attempts before emitting `question/requested`.
 
 ## Session Deletion And Forks
 
@@ -393,12 +410,12 @@ Deleting a session must preserve user-visible consistency for forks.
 
 Rules:
 
-- `session.delete` must report fork descendants before destructive deletion when descendants exist.
+- `session/delete` must report fork descendants before destructive deletion when descendants exist.
 - Deleting a parent session must not make surviving forked sessions unusable.
 - If a fork survives parent deletion, inherited history required by that fork must remain available through a replayable inherited-history segment. That segment may be backed by protected shared records, materialized fork history, or another explicit retention mechanism.
 - The parent session link in a fork is provenance and navigation metadata. It must not be the sole content pointer required to replay inherited history.
 - After deletion, the parent session link may be non-dereferenceable. Clients must treat parent navigation failure as distinct from inherited-history loss.
-- Before a parent session is made inaccessible, `session.delete` must either preserve the inherited segment for each surviving fork, materialize the inherited segment into the fork, or reject deletion until the user chooses another policy.
+- Before a parent session is made inaccessible, `session/delete` must either preserve the inherited segment for each surviving fork, materialize the inherited segment into the fork, or reject deletion until the user chooses another policy.
 - Fork indicators should show parent deleted or unavailable when navigation to the parent can no longer work, while keeping origin metadata visible.
 - Hard deletion of records still referenced by surviving forks must be blocked unless those forks first receive replayable inherited-history segments or the user explicitly requests cascade deletion of the dependent forks where supported.
 
@@ -473,14 +490,14 @@ If a client disconnects, the server continues owning active work subject to user
 | related-to | L2-DES-TOOL-002 | 1 | specs/L2/tool/L2-DES-TOOL-002-parallel-tool-orchestration.md | Parallel tool groups require parent and child event identifiers for client rendering and replay. |
 | related-to | L2-DES-GOAL-001 | 1 | specs/L2/goal/L2-DES-GOAL-001-ralph-loop-goals.md | The protocol exposes user-owned goal controls and canonical goal notifications. |
 | related-to | L2-DES-APP-006 | 1 | specs/L2/app/L2-DES-APP-006-fuzzy-search-architecture.md | The protocol exposes fuzzy-search sessions and live result snapshots. |
-| specified-by | L3-BEH-CORE-011 | 1 | specs/L3/core/L3-BEH-CORE-011-session-forking-retention.md | L3 defines concrete behavior behind `session.fork`, `session.delete` fork-retention preflight, inherited segment actions, and parent-unavailable fork projection. |
-| specified-by | L3-BEH-CORE-012 | 1 | specs/L3/core/L3-BEH-CORE-012-message-edit-workspace-restore.md | L3 defines concrete behavior behind `message.editPrevious`, restore policy, workspace restore events, superseded turns, and replacement turn sequencing. |
+| specified-by | L3-BEH-CORE-011 | 1 | specs/L3/core/L3-BEH-CORE-011-session-forking-retention.md | L3 defines concrete behavior behind `session/fork`, `session/delete` fork-retention preflight, inherited segment actions, and parent-unavailable fork projection. |
+| specified-by | L3-BEH-CORE-012 | 1 | specs/L3/core/L3-BEH-CORE-012-message-edit-workspace-restore.md | L3 defines concrete behavior behind `message/editPrevious`, restore policy, workspace restore events, superseded turns, and replacement turn sequencing. |
 | related-to | L2-DES-CLIENT-002 | 1 | specs/L2/client/L2-DES-CLIENT-002-prefixed-input-actions.md | The protocol supports server-owned search providers used by prefixed input. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Durable session events are distinct from live server-client protocol events. |
-| related-to | L2-DES-APP-005 | 1 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | `config.inspect` and `config.update` operate on safe projections and updates derived from the `config.toml` and `auth.json` schemas. |
-| specified-by | L3-BEH-PROTOCOL-001 | 2 | specs/L3/protocol/L3-BEH-PROTOCOL-001-jsonrpc-protocol.md | L3 defines JSON-RPC envelope validation, session subscription, sequencing, broadcasting, turn submission, idempotency, approval races, fork/delete, and message edit requests. |
-| specified-by | L3-BEH-SERVER-001 | 1 | specs/L3/server/L3-BEH-SERVER-001-server-runtime-transport.md | L3 defines server runtime transport ownership and event broadcast behavior. |
-| specified-by | L3-BEH-CLIENT-001 | 1 | specs/L3/client/L3-BEH-CLIENT-001-connection-subscription.md | L3 defines client connection, subscription, reconnection, and catch-up behavior. |
+| related-to | L2-DES-APP-005 | 2 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | `config/inspect` and `config/update` operate on safe projections and updates derived from the `config.toml` and `auth.json` schemas. |
+| specified-by | L3-BEH-PROTOCOL-001 | 3 | specs/L3/protocol/L3-BEH-PROTOCOL-001-jsonrpc-protocol.md | L3 defines JSON-RPC envelope validation, session subscription, sequencing, broadcasting, turn submission, idempotency, approval races, fork/delete, and message edit requests. |
+| specified-by | L3-BEH-SERVER-001 | 4 | specs/L3/server/L3-BEH-SERVER-001-server-runtime-transport.md | L3 defines server runtime transport ownership and event broadcast behavior. |
+| specified-by | L3-BEH-CLIENT-001 | 2 | specs/L3/client/L3-BEH-CLIENT-001-connection-subscription.md | L3 defines client connection, subscription, reconnection, and catch-up behavior. |
 
 ## References
 
@@ -513,3 +530,4 @@ If a client disconnects, the server continues owning active work subject to user
 | 1 | 2026-05-25 | Human | Refinement | Added compaction trigger source to context update events for transcript-area compaction notices. |
 | 1 | 2026-05-25 | Assistant | Refinement | Linked approval protocol behavior to `L1-REQ-APP-003` application safety. |
 | 1 | 2026-05-26 | Assistant | Refinement | Added parallel tool parent/child event identity fields for `multi_tool_use`. |
+| 2 | 2026-05-27 | Human | Refinement | Changed JSON-RPC method names from dot separators to slash separators and aligned server notification method names with existing protocol event names where available. |

@@ -4,9 +4,7 @@ use devo_core::ModelCatalogResult;
 use devo_core::ModelSavedEntry;
 use devo_core::ModelSavedParams;
 use devo_core::ModelSavedResult;
-use devo_core::ProviderConfigFile;
 use devo_core::ProviderWireApi;
-use devo_core::parse_config_str;
 
 use crate::{ProtocolErrorCode, SuccessResponse};
 
@@ -53,26 +51,48 @@ impl ServerRuntime {
             );
         }
 
-        let config = if self.deps.config_file.exists() {
-            match std::fs::read_to_string(&self.deps.config_file) {
-                Ok(contents) => parse_config_str(&contents).unwrap_or_default(),
-                Err(_) => ProviderConfigFile::default(),
-            }
-        } else {
-            ProviderConfigFile::default()
-        };
+        let config = self
+            .deps
+            .config_store
+            .lock()
+            .expect("app config store mutex should not be poisoned")
+            .effective_config()
+            .provider
+            .clone();
 
         let catalog = &self.deps.model_catalog;
         let mut models = Vec::new();
+
+        for binding in config
+            .model_bindings
+            .values()
+            .filter(|binding| binding.enabled)
+        {
+            let slug = binding.model_slug.clone();
+            let catalog_model = catalog.get(&slug);
+            models.push(ModelSavedEntry {
+                slug: slug.clone(),
+                display_name: binding
+                    .display_name
+                    .clone()
+                    .or_else(|| catalog_model.map(|m| m.display_name.clone()))
+                    .unwrap_or_else(|| slug.clone()),
+                channel: catalog_model.and_then(|m| m.channel.clone()),
+                description: catalog_model.and_then(|m| m.description.clone()),
+                provider_id: binding.provider.clone(),
+                wire_api: binding.invocation_method,
+                context_window: catalog_model.map(|m| m.context_window).unwrap_or(200_000),
+            });
+        }
 
         for (provider_id, provider_config) in &config.model_providers {
             let wire_api = provider_config
                 .wire_api
                 .unwrap_or(ProviderWireApi::OpenAIChatCompletions);
-            for configured in &provider_config.models {
+            models.extend(provider_config.models.iter().map(|configured| {
                 let slug = configured.model.clone();
                 let catalog_model = catalog.get(&slug);
-                models.push(ModelSavedEntry {
+                ModelSavedEntry {
                     slug: slug.clone(),
                     display_name: catalog_model
                         .map(|m| m.display_name.clone())
@@ -82,8 +102,8 @@ impl ServerRuntime {
                     provider_id: provider_id.clone(),
                     wire_api,
                     context_window: catalog_model.map(|m| m.context_window).unwrap_or(200_000),
-                });
-            }
+                }
+            }));
         }
 
         serde_json::to_value(SuccessResponse {

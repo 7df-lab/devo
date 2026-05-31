@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
+// TODO: not sure whether it is enough `DEFAULT_PROJECT_DOC_MAX_BYTES`.
 const DEFAULT_PROJECT_DOC_MAX_BYTES: usize = 32 * 1024;
+
+// TODO: Current the prompt only contains "AGENTS.md", should write as prompt template.
 const HIERARCHICAL_AGENTS_MESSAGE: &str =
     include_str!("../../prompts/hierarchical_agents_message.md");
 

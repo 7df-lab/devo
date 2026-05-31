@@ -333,7 +333,6 @@ mod tests {
                 "status",
                 "permissions",
                 "clear",
-                "onboard",
                 "diff",
                 "btw",
                 "exit",

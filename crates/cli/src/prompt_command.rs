@@ -1,16 +1,12 @@
 use anyhow::Result;
+use devo_core::AppConfig;
+use devo_core::AppConfigLoader;
+use devo_core::FileSystemAppConfigLoader;
 use devo_core::ModelCatalog;
 use devo_core::PresetModelCatalog;
-use devo_core::load_config;
-use devo_core::resolve_provider_settings;
-use devo_core::{AppConfig, AppConfigLoader, FileSystemAppConfigLoader};
 use devo_utils::find_devo_home;
 
-pub(crate) async fn run_prompt(
-    input: &str,
-    model_override: Option<&str>,
-    log_level: Option<&str>,
-) -> Result<()> {
+pub(crate) async fn run_prompt(input: &str, log_level: Option<&str>) -> Result<()> {
     if let Some(level) = log_level {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::new(level))
@@ -19,23 +15,15 @@ pub(crate) async fn run_prompt(
     use devo_core::SessionConfig;
     use devo_core::SessionState;
     use devo_core::default_base_instructions;
-    use devo_tools::ToolRuntime;
+    use devo_core::tools::ToolRuntime;
 
     let cwd = std::env::current_dir()?;
-    let _stored_config = load_config().unwrap_or_default();
-    let mut resolved = resolve_provider_settings()
-        .map_err(|e| anyhow::anyhow!("failed to resolve provider: {e}"))?;
-
-    if let Some(model) = model_override {
-        resolved.model = model.to_string();
-    }
-
     let home_dir = find_devo_home()?;
     let app_config = FileSystemAppConfigLoader::new(home_dir.clone())
         .load(Some(cwd.as_path()))
         .unwrap_or_else(|_| AppConfig::default());
-    let provider =
-        devo_server::load_server_provider(&home_dir.join("config.toml"), Some(&resolved.model))?;
+    let provider = devo_server::load_server_provider(&app_config, None, &home_dir)?;
+    let selected_model = provider.default_model.clone();
 
     let mut session_state = SessionState::new(
         SessionConfig {
@@ -47,7 +35,7 @@ pub(crate) async fn run_prompt(
     session_state.push_message(devo_core::Message::user(input.to_string()));
 
     let registry = {
-        let reg = devo_tools::create_default_tool_registry();
+        let reg = devo_core::tools::create_default_tool_registry();
         std::sync::Arc::new(reg)
     };
     let runtime = ToolRuntime::new_without_permissions(std::sync::Arc::clone(&registry));
@@ -55,17 +43,17 @@ pub(crate) async fn run_prompt(
 
     let turn_config = devo_core::TurnConfig {
         model: model_catalog
-            .get(&resolved.model)
+            .get(&selected_model)
             .cloned()
             .unwrap_or_else(|| devo_core::Model {
-                slug: resolved.model.clone(),
+                slug: selected_model.clone(),
                 base_instructions: default_base_instructions().to_string(),
                 ..Default::default()
             }),
         thinking_selection: None,
     };
 
-    eprintln!("devo [prompt] model={} sending...", resolved.model);
+    eprintln!("devo [prompt] model={selected_model} sending...");
 
     let result = devo_core::query(
         &mut session_state,

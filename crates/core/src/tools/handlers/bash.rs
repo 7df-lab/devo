@@ -1,0 +1,122 @@
+use async_trait::async_trait;
+
+use crate::contracts::{
+    ToolCallError, ToolContext, ToolProgressSender, ToolResult, ToolResultContent,
+};
+use crate::json_schema::JsonSchema;
+use crate::shell_exec::{
+    ShellExecRequest, default_max_output_tokens, default_timeout_ms, default_yield_time_ms,
+    execute_shell_command,
+};
+use crate::tool_handler::ToolHandler;
+use crate::tool_spec::{ToolCapabilityTag, ToolExecutionMode, ToolOutputMode, ToolSpec};
+
+pub struct BashHandler {
+    spec: ToolSpec,
+}
+
+impl Default for BashHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BashHandler {
+    pub fn new() -> Self {
+        Self {
+            spec: ToolSpec {
+                name: "bash".into(),
+                description: "Executes a given PowerShell (7+) command with optional timeout, ensuring proper handling and security measures.".into(),
+                input_schema: JsonSchema::object(
+                    std::collections::BTreeMap::from([
+                        ("command".to_string(), JsonSchema::string(Some("The command to execute"))),
+                        ("timeout".to_string(), JsonSchema::integer(Some("Optional timeout in milliseconds"))),
+                        ("workdir".to_string(), JsonSchema::string(Some("The working directory to run the command in"))),
+                        ("description".to_string(), JsonSchema::string(Some("Clear, concise description of what this command does"))),
+                    ]),
+                    Some(vec!["command".to_string(), "description".to_string()]),
+                    None,
+                ),
+                output_mode: ToolOutputMode::Text,
+                execution_mode: ToolExecutionMode::Mutating,
+                capability_tags: vec![ToolCapabilityTag::ExecuteProcess],
+                supports_parallel: false,
+                preparation_feedback: crate::tool_spec::ToolPreparationFeedback::None,
+                display_name: None,
+                supports_cancellation: None,
+                supports_streaming: None,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl ToolHandler for BashHandler {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+
+    async fn handle(
+        &self,
+        ctx: ToolContext,
+        input: serde_json::Value,
+        _progress: Option<ToolProgressSender>,
+    ) -> Result<ToolResult, ToolCallError> {
+        let command = input
+            .get("command")
+            .or_else(|| input.get("cmd"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolCallError::InvalidInput("missing 'command' field".into()))?;
+
+        let timeout_ms = input["timeout"].as_u64().unwrap_or(default_timeout_ms());
+        let workdir = input["workdir"]
+            .as_str()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| ctx.workspace_root.clone());
+        let description = input["description"]
+            .as_str()
+            .unwrap_or("shell command")
+            .to_string();
+        let shell_override = input["shell"].as_str().map(ToOwned::to_owned);
+        let tty = input["tty"].as_bool().unwrap_or(false);
+        let login = input["login"].as_bool().unwrap_or(true);
+        let yield_time_ms = input["yield_time_ms"]
+            .as_u64()
+            .unwrap_or(default_yield_time_ms());
+        let max_output_tokens = input["max_output_tokens"]
+            .as_u64()
+            .map(|v| v as usize)
+            .unwrap_or(default_max_output_tokens());
+
+        let output = execute_shell_command(
+            ShellExecRequest {
+                command: command.to_string(),
+                workdir,
+                description,
+                shell_override,
+                tty,
+                login,
+                timeout_ms,
+                yield_time_ms,
+                max_output_tokens,
+            },
+            None,
+        )
+        .await
+        .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
+
+        let text = output.content.into_string();
+        let display = output.display_content.clone();
+        let mut result = if output.is_error {
+            ToolResult::error(
+                ToolResultContent::Text(text.clone()),
+                "Command failed",
+                ToolCallError::ExecutionFailed(text),
+            )
+        } else {
+            ToolResult::success(ToolResultContent::Text(text), "Command executed")
+        };
+        result.display_content = display;
+        Ok(result)
+    }
+}

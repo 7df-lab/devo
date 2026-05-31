@@ -288,7 +288,7 @@ Rules:
 | related-to | L2-DES-APP-004 | 1 | specs/L2/app/L2-DES-APP-004-observability-architecture.md | Provides the cross-system observability architecture used by model-specific observability. |
 | related-to | L2-DES-AGENT-001 | 1 | specs/L2/agent/L2-DES-AGENT-001-execution-engine.md | Model invocations occur inside the execution engine. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Durable usage records are stored with session data. |
-| related-to | L2-DES-MODEL-001 | 1 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | Usage records reference model bindings and resolved provider profiles. |
+| related-to | L2-DES-MODEL-001 | 2 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | Usage records reference model bindings and resolved provider profiles. |
 | specified-by | L3-BEH-PROVIDER-003 | 1 | specs/L3/provider/L3-BEH-PROVIDER-003-model-usage-observability.md | Defines invocation identity, usage normalization, context pressure, durable usage records, safe client projections, and trace-mode model stream records. |
 
 ## Revision Notes

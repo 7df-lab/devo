@@ -586,8 +586,8 @@ The TUI should map canonical server events into visible state.
 | `tool_call_updated` | Tool progress/output preview updates. |
 | `tool_call_completed` | Tool result summary and status become durable review content. |
 | `plan_updated` | Pinned plan surface and/or inline plan update cell refreshes. |
-| `approval.requested` | Approval prompt appears and bottom status shows waiting reason. |
-| `question.requested` | Question prompt appears and bottom status shows waiting for answer. |
+| `approval/requested` | Approval prompt appears and bottom status shows waiting reason. |
+| `question/requested` | Question prompt appears and bottom status shows waiting for answer. |
 | `background_process_updated` | Background process strip and transcript state update. |
 | `usage_updated` | Header/context or turn usage display updates. |
 | `context_updated` with compaction start | Transcript area shows `Manual Compaction Started` or `Automatic Compaction Started` based on compaction trigger source. |
@@ -692,7 +692,7 @@ Rules:
 | related-to | L1-REQ-CLIENT-002 | 1 | specs/L1/L1-REQ-CLIENT-002-session-rendering-consistency.md | Live transcript cells and restored transcript cells must share the same projection and renderer boundary. |
 | related-to | L1-REQ-TOOL-005 | 1 | specs/L1/L1-REQ-TOOL-005-background-process-management.md | Background process state and stop controls are rendered in the TUI. |
 | related-to | L1-REQ-APP-004 | 1 | specs/L1/L1-REQ-APP-004-observability.md | User-facing diagnostics and waiting reasons inform state display. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Server-client events drive live rendering. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Server-client events drive live rendering. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Durable transcript records are the replay source. |
 | related-to | L2-DES-TOOL-001 | 1 | specs/L2/tool/L2-DES-TOOL-001-built-in-tool-system.md | Tool lifecycle, command descriptions, and result summaries feed tool cells. |
 | related-to | L2-DES-APP-004 | 1 | specs/L2/app/L2-DES-APP-004-observability-architecture.md | Diagnostic fields provide recovery and phase display. |

@@ -1,0 +1,21 @@
+model = "deepseek-v4-flash"
+model_provider = "deepseek"
+
+[defaults]
+model_binding = "deepseek-v4-flash-deepseek"
+
+[model_bindings.deepseek-v4-flash-deepseek]
+default_reasoning_effort = "high"
+display_name = "Deepseek V4 Flash"
+enabled = true
+invocation_method = "openai_chat_completions"
+model_name = "deepseek-v4-flash"
+model_slug = "deepseek-v4-flash"
+provider = "deepseek"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+credential = "deepseek_api_key"
+enabled = true
+name = "deepseek"
+wire_apis = ["openai_chat_completions"]

@@ -136,7 +136,7 @@ pub enum DurableRecord {
 | `workspace_root` | String (canonical path) | yes | must be absolute |
 | `created_at` | DateTime<Utc> | yes | |
 
-**Write timing**: Immediately on `session.create` acceptance, before returning to client.
+**Write timing**: Immediately on `session/create` acceptance, before returning to client.
 
 ### SessionForkedRecord
 
@@ -339,13 +339,13 @@ Replay must not infer restoration from client-visible `turn_diff_updated` events
 
 | From | To | Condition |
 |---|---|---|
-| (none) | `Admitted` | `turn.submit` accepted |
+| (none) | `Admitted` | `turn/submit` accepted |
 | `Admitted` | `Running` | Context assembly begins |
 | `Admitted` | `Failed` | Context assembly or model resolution fails |
 | `Running` | `Failed` | Any unrecoverable phase error |
 | `Running` | `Interrupted` | Interrupt requested, execution yields |
 | `Running` | `Completed` | Model produces terminal response, all tools done, finalization succeeds |
-| `Interrupted` | `Admitted` (new turn) | `turn.resume` creates linked continuation |
+| `Interrupted` | `Admitted` (new turn) | `turn/resume` creates linked continuation |
 | `Completed` | `Completed` | Idempotent — no-op |
 
 ### Illegal Transitions (MUST be rejected)

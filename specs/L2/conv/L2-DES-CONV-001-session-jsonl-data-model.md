@@ -710,11 +710,11 @@ Clients also do not need persistent-memory internals. Persistent memory may affe
 | related-to | L1-REQ-INPUT-001 | 1 | specs/L1/L1-REQ-INPUT-001-attachments-and-multimodal.md | Defines content parts and mentions for attachments and multimodal input. |
 | related-to | L1-REQ-TUI-003 | 1 | specs/L1/L1-REQ-TUI-003-transcript.md | Defines transcript structures that clients render. |
 | related-to | L1-REQ-LLM-001 | 1 | specs/L1/L1-REQ-LLM-001-token-efficiency.md | Preserves immutable context prefixes through append-only storage and context references. |
-| related-to | L2-DES-MODEL-001 | 1 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | Session metadata references configured model bindings. |
+| related-to | L2-DES-MODEL-001 | 2 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | Session metadata references configured model bindings. |
 | related-to | L2-DES-TOOL-001 | 1 | specs/L2/tool/L2-DES-TOOL-001-built-in-tool-system.md | Defines tool and plan records persisted by the session data model. |
 | related-to | L2-DES-GOAL-001 | 1 | specs/L2/goal/L2-DES-GOAL-001-ralph-loop-goals.md | Defines the goal records and projection semantics persisted by the session data model. |
 | specified-by | L3-BEH-CORE-001 | 6 | specs/L3/core/L3-BEH-CORE-001-session-jsonl-data-model.md | L3 defines durable JSONL records, append timing, replay, and crash recovery. |
-| specified-by | L3-BEH-CORE-006 | 2 | specs/L3/core/L3-BEH-CORE-006-turn-item-data-structures.md | L3 defines turn, item, content part, mention, plan, goal, and file-change structures. |
+| specified-by | L3-BEH-CORE-006 | 3 | specs/L3/core/L3-BEH-CORE-006-turn-item-data-structures.md | L3 defines turn, item, content part, mention, plan, goal, and file-change structures. |
 | specified-by | L3-BEH-CORE-011 | 1 | specs/L3/core/L3-BEH-CORE-011-session-forking-retention.md | L3 defines session fork admission, inherited-history segment creation, replay, and parent-deletion retention behavior. |
 | specified-by | L3-BEH-CORE-012 | 1 | specs/L3/core/L3-BEH-CORE-012-message-edit-workspace-restore.md | L3 defines immediate previous message editing, workspace restoration, turn supersession, branch projection, and restore replay behavior. |
 

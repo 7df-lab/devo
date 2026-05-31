@@ -167,7 +167,7 @@ L3 and implementation should include targeted tests for:
 | related-to | L2-DES-TUI-002 | 1 | specs/L2/tui/L2-DES-TUI-002-modern-tui-shell-layout.md | The shell layout must account for Unicode and localized text expansion. |
 | related-to | L2-DES-TUI-003 | 1 | specs/L2/tui/L2-DES-TUI-003-composer-and-input-modes.md | Composer and input modes rely on Unicode-safe editing. |
 | related-to | L2-DES-TUI-004 | 1 | specs/L2/tui/L2-DES-TUI-004-streaming-transcript-and-state.md | Transcript and streaming cells rely on Unicode-safe rendering. |
-| specified-by | L3-BEH-CLIENT-001 | 1 | specs/L3/client/L3-BEH-CLIENT-001-connection-subscription.md | L3 defines UTF-8, wide-character, IME, and grapheme handling requirements for clients. |
+| specified-by | L3-BEH-CLIENT-001 | 2 | specs/L3/client/L3-BEH-CLIENT-001-connection-subscription.md | L3 defines UTF-8, wide-character, IME, and grapheme handling requirements for clients. |
 
 ## Revision Notes
 

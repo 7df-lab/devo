@@ -422,7 +422,7 @@ impl TurnProjector for DefaultProjection {
 
 fn summarize_tool_call(tool_name: &str, input: &serde_json::Value) -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
-    devo_tools::tool_summary::tool_summary(tool_name, input, &cwd).replacen(": ", " ", 1)
+    devo_core::tools::tool_summary::tool_summary(tool_name, input, &cwd).replacen(": ", " ", 1)
 }
 
 fn glob_display_from_input(input: &serde_json::Value) -> Option<String> {

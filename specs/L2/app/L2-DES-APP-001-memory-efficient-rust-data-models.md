@@ -74,7 +74,7 @@ Memory optimizations must be measurable when they are introduced for performance
 | Relationship | Target ID | Target Revision | Target Path | Rationale |
 |---|---|---:|---|---|
 | refines | L1-REQ-APP-005 | 1 | specs/L1/L1-REQ-APP-005-lightweight.md | Provides technical design guidance for avoiding unnecessary memory growth. |
-| specified-by | L3-DES-ARCH-001 | 1 | specs/L3/L3-DES-ARCH-001-crate-architecture.md | L3 defines crate ownership and efficient data boundary placement. |
+| specified-by | L3-DES-ARCH-001 | 4 | specs/L3/L3-DES-ARCH-001-crate-architecture.md | L3 defines crate ownership and efficient data boundary placement. |
 
 ## References
 

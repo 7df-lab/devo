@@ -1,13 +1,117 @@
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
-use futures::{SinkExt, StreamExt};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use anyhow::Result;
+use anyhow::anyhow;
+use async_trait::async_trait;
+use devo_protocol::ErrorResponse;
+use devo_protocol::NotificationEnvelope;
+use devo_protocol::SuccessResponse;
+use futures::SinkExt;
+use futures::StreamExt;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Message;
 
-use crate::{ClientTransportKind, ServerRuntime};
+use crate::ClientTransportKind;
+use crate::ServerRuntime;
+
+/// Transport trait per L3-BEH-SERVER-001.
+///
+/// Abstracts the connection to a client, allowing different transport
+/// implementations (stdio, WebSocket, etc.) to be used interchangeably.
+#[async_trait]
+pub trait Transport: Send + Sync {
+    /// Send a success response to the client.
+    async fn send_response(&self, response: SuccessResponse<serde_json::Value>);
+
+    /// Send an error response to the client.
+    async fn send_error(&self, error: ErrorResponse);
+
+    /// Send a notification to the client.
+    async fn send_notification(&self, notification: NotificationEnvelope<serde_json::Value>);
+
+    /// Close the transport connection.
+    async fn close(&self);
+}
+
+/// EventBroadcaster per L3-BEH-SERVER-001.
+///
+/// Manages event delivery to connected clients with monotonic per-session
+/// sequence numbering and subscription filtering.
+pub struct EventBroadcaster {
+    /// Per-connection senders, keyed by connection_id.
+    connections: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<u64, mpsc::UnboundedSender<serde_json::Value>>,
+        >,
+    >,
+    /// Per-session monotonic sequence counters.
+    sequence_counters: Arc<tokio::sync::RwLock<std::collections::HashMap<String, u64>>>,
+}
+
+impl EventBroadcaster {
+    pub fn new() -> Self {
+        Self {
+            connections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            sequence_counters: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// Register a connection's event sender.
+    pub async fn register(
+        &self,
+        connection_id: u64,
+        sender: mpsc::UnboundedSender<serde_json::Value>,
+    ) {
+        self.connections.write().await.insert(connection_id, sender);
+    }
+
+    /// Unregister a connection.
+    pub async fn unregister(&self, connection_id: u64) {
+        self.connections.write().await.remove(&connection_id);
+    }
+
+    /// Broadcast an event to all connected clients.
+    /// Returns the next sequence number for the session.
+    pub async fn broadcast(&self, session_id: &str, event: serde_json::Value) -> u64 {
+        let mut counters = self.sequence_counters.write().await;
+        let seq = counters.entry(session_id.to_string()).or_insert(0);
+        *seq += 1;
+        let current_seq = *seq;
+        drop(counters);
+
+        let connections = self.connections.read().await;
+        for sender in connections.values() {
+            let _ = sender.send(event.clone());
+        }
+        current_seq
+    }
+
+    /// Get the current sequence number for a session.
+    pub async fn current_sequence(&self, session_id: &str) -> u64 {
+        self.sequence_counters
+            .read()
+            .await
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Get the number of active connections.
+    pub async fn connection_count(&self) -> usize {
+        self.connections.read().await.len()
+    }
+}
+
+impl Default for EventBroadcaster {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Default bind address used when the WebSocket transport is selected without
 /// an explicit host-and-port suffix.
@@ -91,10 +195,6 @@ async fn run_stdio(runtime: Arc<ServerRuntime>) -> Result<()> {
     // Normal channel for event notifications (TextDelta, TurnStarted, …).
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let sender_clone = sender.clone();
-    // High-priority channel for RPC responses that must not be blocked by
-    // a backlog of event notifications on the normal channel.
-    let (high_pri_sender, mut high_pri_receiver) = mpsc::unbounded_channel();
-    runtime.set_high_pri_sender(high_pri_sender).await;
     let connection_id = runtime
         .register_connection(ClientTransportKind::Stdio, sender)
         .await;
@@ -126,11 +226,7 @@ async fn run_stdio(runtime: Arc<ServerRuntime>) -> Result<()> {
         loop {
             let line: Vec<u8>;
             tokio::select! {
-                Some(message) = high_pri_receiver.recv() => {
-                    line = serde_json::to_vec(&message)
-                        .expect("serialize high-priority response");
-                }
-                Some(message) = receiver.recv(), if high_pri_receiver.is_empty() => {
+                Some(message) = receiver.recv() => {
                     line = serde_json::to_vec(&message)
                         .expect("serialize stdio response");
                 }
@@ -226,9 +322,10 @@ async fn handle_websocket_connection(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DEFAULT_WEBSOCKET_BIND_ADDRESS, ListenTarget, parse_listen_target, resolve_listen_targets,
-    };
+    use super::DEFAULT_WEBSOCKET_BIND_ADDRESS;
+    use super::ListenTarget;
+    use super::parse_listen_target;
+    use super::resolve_listen_targets;
 
     #[test]
     fn parse_stdio_target() {

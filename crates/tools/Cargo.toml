@@ -1,5 +1,5 @@
 [package]
-description = "Tool trait, registry, execution orchestration, and built-in tools"
+description = "Tool contracts shared by core, server, and clients"
 edition.workspace = true
 license.workspace = true
 name = "devo-tools"
@@ -7,45 +7,14 @@ version.workspace = true
 
 [dependencies]
 devo-protocol = { workspace = true }
-devo-provider = { workspace = true }
-devo-safety = { workspace = true }
 
-anyhow = { workspace = true }
 async-trait = { workspace = true }
-base64 = "0.22"
-chrono = { workspace = true }
-diffy = { workspace = true }
-futures = { workspace = true }
-glob = { workspace = true }
-portable-pty = "0.9"
-rand = { workspace = true }
-regex = { workspace = true }
-reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-shlex = { workspace = true }
 smol_str = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
-uuid = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-filedescriptor = "0.8.3"
-lazy_static = { workspace = true }
-shared_library = "0.1.9"
-winapi = { version = "0.3.9", features = [
-    "handleapi",
-    "minwinbase",
-    "ntdef",
-    "ntstatus",
-    "processthreadsapi",
-    "synchapi",
-    "winbase",
-    "wincon",
-    "winerror",
-    "winnt",
-] }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

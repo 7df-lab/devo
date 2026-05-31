@@ -306,13 +306,14 @@ Errors should be actionable. For example, a missing explicitly requested skill s
 | related-to | L1-REQ-LLM-001 | 1 | specs/L1/L1-REQ-LLM-001-token-efficiency.md | Progressive disclosure avoids injecting every skill body into every request. |
 | related-to | L1-REQ-LLM-004 | 1 | specs/L1/L1-REQ-LLM-004-persona.md | Skill instructions must not override configured persona and communication behavior. |
 | related-to | L1-REQ-TOOL-001 | 1 | specs/L1/L1-REQ-TOOL-001-safety.md | Scripts and tool use triggered by skills remain subject to safety and approval. |
-| related-to | L2-DES-APP-002 | 1 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Configuration precedence resolves skill roots and enablement. |
-| related-to | L2-DES-APP-005 | 1 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Defines concrete TOML fields for skill enablement and discovery roots. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Clients inspect and receive events for skill discovery and activation state. |
+| related-to | L2-DES-APP-002 | 2 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Configuration precedence resolves skill roots and enablement. |
+| related-to | L2-DES-APP-005 | 2 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Defines concrete TOML fields for skill enablement and discovery roots. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Clients inspect and receive events for skill discovery and activation state. |
 | related-to | L2-DES-CONTEXT-001 | 1 | specs/L2/context/L2-DES-CONTEXT-001-context-assembly.md | Activated skills are task-scoped metadata-derived context. |
 | related-to | L2-DES-TOOL-001 | 1 | specs/L2/tool/L2-DES-TOOL-001-built-in-tool-system.md | Skill activation and supporting file/script use flow through controlled tools. |
 | related-to | L2-DES-WORKSPACE-001 | 1 | specs/L2/workspace/L2-DES-WORKSPACE-001-project-instruction-discovery.md | Project instruction files and workspace skills are separate context sources. |
-| specified-by | L3-BEH-SERVER-005 | 1 | specs/L3/server/L3-BEH-SERVER-005-skills-discovery-activation.md | L3 defines skill discovery, catalog construction, activation, instruction injection, supporting file access, and refresh. |
+| specified-by | L3-BEH-SKILLS-001 | 1 | specs/L3/skills/L3-BEH-SKILLS-001-skill-package-default-installation.md | L3 defines skill package data structures, `SKILL.md` parsing, package validation, bundled default skills, and default-skill installation. |
+| specified-by | L3-BEH-SERVER-005 | 3 | specs/L3/server/L3-BEH-SERVER-005-skills-discovery-activation.md | L3 defines runtime skill discovery, catalog construction, activation, instruction injection, supporting file access, and refresh. |
 
 ## References
 

@@ -151,7 +151,7 @@ Layer 3 — Hooks → Cache → Auto-Reviewer
      - Update circuit breaker counters.
 
 Layer 4 — User prompt
-  Create PendingApproval, emit approval.requested to clients, return Ask.
+  Create PendingApproval, emit approval/requested to clients, return Ask.
 ```
 
 ## 5. Approval Cache

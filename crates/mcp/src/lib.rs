@@ -3,8 +3,12 @@ use std::fmt;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+
+pub mod manager;
+use chrono::DateTime;
+use chrono::Utc;
+use serde::Deserialize;
+use serde::Serialize;
 use smol_str::SmolStr;
 
 /// Strongly typed identifier for one configured MCP server.
@@ -34,6 +38,65 @@ pub struct McpServerRecord {
     pub startup_policy: McpStartupPolicy,
     /// Whether the server is enabled for runtime use.
     pub enabled: bool,
+    /// Trust policy for this MCP server.
+    #[serde(default)]
+    pub trust_policy: McpTrustPolicy,
+    /// Allowed capabilities (tools, resources, prompts).
+    #[serde(default)]
+    pub allowed_capabilities: Vec<McpCapability>,
+    /// Filesystem roots policy for resource access.
+    #[serde(default)]
+    pub roots_policy: McpRootsPolicy,
+    /// Output limits for tool invocations.
+    #[serde(default)]
+    pub output_limits: McpOutputLimits,
+    /// Optional auth credential reference (auth.json key).
+    #[serde(default)]
+    pub auth_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTrustPolicy {
+    #[default]
+    User,
+    Workspace,
+    Untrusted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpCapability {
+    Tools,
+    Resources,
+    Prompts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum McpRootsPolicy {
+    #[default]
+    None,
+    Workspace,
+    Custom(Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpOutputLimits {
+    #[serde(default)]
+    pub max_tool_output_bytes: Option<u64>,
+    #[serde(default)]
+    pub max_resource_bytes: Option<u64>,
+}
+
+/// TODO: Let the MCP output limit indentical with tool call output limit.
+impl Default for McpOutputLimits {
+    fn default() -> Self {
+        Self {
+            max_tool_output_bytes: Some(1_048_576), // 1MB
+            max_resource_bytes: Some(10_485_760),   // 10MB
+        }
+    }
 }
 
 /// Describes how the runtime connects to an MCP server.
@@ -111,14 +174,22 @@ pub struct McpServerStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpStartupState {
+    /// The server is disabled in configuration.
+    Disabled,
     /// The server has not been started yet.
-    Stopped,
+    NotStarted,
     /// The server is currently starting.
     Starting,
     /// The server is ready to serve MCP requests.
     Ready,
     /// The server failed to start.
     Failed,
+    /// The server requires authentication before use.
+    AuthRequired,
+    /// The server is running in a degraded state.
+    Degraded,
+    /// The server was previously stopped.
+    Stopped,
 }
 
 /// Tracks the authentication state of an MCP server.
@@ -265,10 +336,19 @@ pub enum McpError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        McpAuthState, McpConfig, McpResourceDescriptor, McpServerId, McpServerRecord,
-        McpServerStatus, McpStartupPolicy, McpStartupState, McpToolDescriptor, McpTransportConfig,
-    };
+    use super::McpAuthState;
+    use super::McpConfig;
+    use super::McpOutputLimits;
+    use super::McpResourceDescriptor;
+    use super::McpRootsPolicy;
+    use super::McpServerId;
+    use super::McpServerRecord;
+    use super::McpServerStatus;
+    use super::McpStartupPolicy;
+    use super::McpStartupState;
+    use super::McpToolDescriptor;
+    use super::McpTransportConfig;
+    use super::McpTrustPolicy;
 
     #[test]
     fn server_status_roundtrip() {
@@ -310,6 +390,11 @@ mod tests {
                 },
                 startup_policy: McpStartupPolicy::Lazy,
                 enabled: true,
+                trust_policy: McpTrustPolicy::User,
+                allowed_capabilities: vec![],
+                roots_policy: McpRootsPolicy::None,
+                output_limits: McpOutputLimits::default(),
+                auth_ref: None,
             }],
             auto_start: true,
             refresh_on_config_reload: true,

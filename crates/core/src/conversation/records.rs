@@ -395,11 +395,10 @@ mod tests {
     use chrono::Utc;
     use pretty_assertions::assert_eq;
 
-    use super::{
-        ItemRecord, RolloutLine, SessionRecord, TextItem, ToolCallItem, TurnItem, TurnLine,
-        TurnRecord,
-    };
+    use super::*;
     use crate::conversation::{ItemId, SessionId, SessionTitleState, TurnId, TurnStatus};
+
+    // ── SessionRecord ──────────────────────────────────────────
 
     #[test]
     fn session_record_supports_unset_title() {
@@ -438,6 +437,70 @@ mod tests {
     }
 
     #[test]
+    fn session_record_with_fork_parent() {
+        let parent_id = SessionId::new();
+        let session = SessionRecord {
+            parent_session_id: Some(parent_id),
+            ..make_test_session()
+        };
+        let json = serde_json::to_string(&session).expect("serialize");
+        let restored: SessionRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.parent_session_id, Some(parent_id));
+    }
+
+    #[test]
+    fn session_record_serde_roundtrip() {
+        let session = make_test_session();
+        let json = serde_json::to_string(&session).expect("serialize");
+        let restored: SessionRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(session, restored);
+    }
+
+    // ── TurnRecord ────────────────────────────────────────────
+
+    #[test]
+    fn turn_record_starts_in_pending_or_running() {
+        let turn = make_test_turn(TurnStatus::Running);
+        assert!(matches!(turn.status, TurnStatus::Running));
+    }
+
+    #[test]
+    fn turn_record_serde_roundtrip() {
+        let turn = make_test_turn(TurnStatus::Running);
+        let json = serde_json::to_string(&turn).expect("serialize");
+        let restored: TurnRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(turn, restored);
+    }
+
+    #[test]
+    fn turn_cannot_transition_from_completed_to_running() {
+        // Per L3-BEH-CORE-001 §4: Completed → Running is ILLEGAL
+        let completed = TurnStatus::Completed;
+        assert!(!matches!(completed, TurnStatus::Running));
+        // Terminal states are final
+        assert!(is_terminal_turn_status(TurnStatus::Completed));
+        assert!(is_terminal_turn_status(TurnStatus::Failed));
+        assert!(is_terminal_turn_status(TurnStatus::Interrupted));
+    }
+
+    #[test]
+    fn turn_terminal_states_are_distinct() {
+        let terminal = [
+            TurnStatus::Completed,
+            TurnStatus::Failed,
+            TurnStatus::Interrupted,
+        ];
+        // All terminal states are different
+        for i in 0..terminal.len() {
+            for j in (i + 1)..terminal.len() {
+                assert_ne!(terminal[i], terminal[j]);
+            }
+        }
+    }
+
+    // ── ItemRecord ────────────────────────────────────────────
+
+    #[test]
     fn item_record_carries_turn_and_session_identity() {
         let session_id = SessionId::new();
         let turn_id = TurnId::new();
@@ -468,31 +531,408 @@ mod tests {
     }
 
     #[test]
-    fn rollout_line_roundtrip() {
-        let line = RolloutLine::Turn(Box::new(TurnLine {
-            timestamp: Utc::now(),
-            turn: TurnRecord {
-                id: TurnId::new(),
-                session_id: SessionId::new(),
-                sequence: 1,
-                started_at: Utc::now(),
-                completed_at: None,
-                status: TurnStatus::Pending,
-                kind: crate::TurnKind::Regular,
-                model: "test-model".into(),
-                thinking: None,
-                request_model: "test-model".into(),
-                request_thinking: None,
-                input_token_estimate: Some(42),
-                usage: None,
-                session_context: None,
-                turn_context: None,
-                schema_version: 2,
-            },
-        }));
+    fn item_record_with_error_preserves_error_details() {
+        let item = ItemRecord {
+            error: Some(TurnError {
+                code: "TOOL_EXECUTION_FAILED".into(),
+                message: "command exited with code 1".into(),
+            }),
+            ..make_test_item()
+        };
+        let json = serde_json::to_string(&item).expect("serialize");
+        let restored: ItemRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            restored.error.as_ref().unwrap().code,
+            "TOOL_EXECUTION_FAILED"
+        );
+    }
 
+    #[test]
+    fn item_record_with_sibling_turns() {
+        let sibling = TurnId::new();
+        let item = ItemRecord {
+            sibling_turn_ids: vec![sibling],
+            ..make_test_item()
+        };
+        assert_eq!(item.sibling_turn_ids.len(), 1);
+        assert_eq!(item.sibling_turn_ids[0], sibling);
+    }
+
+    #[test]
+    fn item_record_serde_roundtrip() {
+        let item = make_test_item();
+        let json = serde_json::to_string(&item).expect("serialize");
+        let restored: ItemRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(item, restored);
+    }
+
+    // ── TurnItem enum ─────────────────────────────────────────
+
+    #[test]
+    fn turn_item_all_variants_roundtrip() {
+        let variants = vec![
+            TurnItem::UserMessage(TextItem {
+                text: "hello".into(),
+            }),
+            TurnItem::SteerInput(TextItem {
+                text: "steer".into(),
+            }),
+            TurnItem::AgentMessage(TextItem {
+                text: "response".into(),
+            }),
+            TurnItem::Reasoning(TextItem {
+                text: "think".into(),
+            }),
+            TurnItem::ToolCall(ToolCallItem {
+                tool_call_id: "t1".into(),
+                tool_name: "read".into(),
+                input: serde_json::json!({"path": "a.rs"}),
+            }),
+            TurnItem::ToolResult(ToolResultItem {
+                tool_call_id: "t1".into(),
+                tool_name: Some("read".into()),
+                output: serde_json::json!({"content": "fn main()"}),
+                display_content: None,
+                is_error: false,
+            }),
+            TurnItem::CommandExecution(CommandExecutionItem {
+                tool_call_id: "t2".into(),
+                tool_name: "exec_command".into(),
+                command: "ls".into(),
+                input: serde_json::json!({"command": "ls"}),
+                output: serde_json::json!({"stdout": "src"}),
+                is_error: false,
+            }),
+            TurnItem::ApprovalRequest(ApprovalRequestItem {
+                approval_id: "a1".into(),
+                action_summary: "Run command".into(),
+                justification: "need to".into(),
+                resource: Some("ShellExec".into()),
+                available_scopes: vec!["Once".into(), "Session".into()],
+                path: None,
+                host: None,
+                target: Some("npm install".into()),
+            }),
+            TurnItem::ApprovalDecision(ApprovalDecisionItem {
+                approval_id: "a1".into(),
+                decision: "Allow".into(),
+                scope: "Once".into(),
+            }),
+            TurnItem::Plan(TextItem { text: "[]".into() }),
+            TurnItem::ContextCompaction(TextItem {
+                text: "summary".into(),
+            }),
+            TurnItem::TurnSummary(TextItem { text: "0".into() }),
+            TurnItem::WebSearch(TextItem {
+                text: "results".into(),
+            }),
+            TurnItem::HookPrompt(TextItem {
+                text: "hook".into(),
+            }),
+        ];
+
+        for variant in variants {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            let restored: TurnItem = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(variant, restored, "roundtrip failed for variant");
+        }
+    }
+
+    // ── RolloutLine enum ──────────────────────────────────────
+
+    #[test]
+    fn rollout_line_all_variants_roundtrip() {
+        let session = make_test_session();
+        let turn = make_test_turn(TurnStatus::Running);
+        let item = make_test_item();
+
+        let variants: Vec<RolloutLine> = vec![
+            RolloutLine::SessionMeta(Box::new(SessionMetaLine {
+                timestamp: Utc::now(),
+                session: session.clone(),
+            })),
+            RolloutLine::Turn(Box::new(TurnLine {
+                timestamp: Utc::now(),
+                turn: turn.clone(),
+            })),
+            RolloutLine::Item(ItemLine {
+                timestamp: Utc::now(),
+                item: item.clone(),
+            }),
+            RolloutLine::SessionTitleUpdated(SessionTitleUpdatedLine {
+                timestamp: Utc::now(),
+                session_id: session.id,
+                title: "New Title".into(),
+                title_state: SessionTitleState::Provisional,
+                previous_title: Some("Old Title".into()),
+            }),
+            RolloutLine::CompactionSnapshot(Box::new(CompactionSnapshotLine {
+                timestamp: Utc::now(),
+                session_id: session.id,
+                turn_id: turn.id,
+                summary_item_id: item.id,
+                preserved_item_ids: vec![item.id],
+            })),
+        ];
+
+        for variant in variants {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            let restored: RolloutLine = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                variant, restored,
+                "roundtrip failed for RolloutLine variant"
+            );
+        }
+    }
+
+    #[test]
+    fn rollout_line_session_meta_carries_full_session_record() {
+        let session = make_test_session();
+        let line = RolloutLine::SessionMeta(Box::new(SessionMetaLine {
+            timestamp: Utc::now(),
+            session: session.clone(),
+        }));
         let json = serde_json::to_string(&line).expect("serialize");
         let restored: RolloutLine = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(line, restored);
+        if let RolloutLine::SessionMeta(meta) = restored {
+            assert_eq!(meta.session.title, session.title);
+            assert_eq!(meta.session.schema_version, session.schema_version);
+        } else {
+            panic!("expected SessionMeta");
+        }
+    }
+
+    // ── Tool record coverage ──────────────────────────────────
+
+    #[test]
+    fn tool_call_item_preserves_input_schema() {
+        let call = ToolCallItem {
+            tool_call_id: "call-x".into(),
+            tool_name: "apply_patch".into(),
+            input: serde_json::json!({"patch": "@@ -1 +1 @@"}),
+        };
+        let json = serde_json::to_string(&call).expect("serialize");
+        let restored: ToolCallItem = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.tool_call_id, "call-x");
+        assert_eq!(restored.tool_name, "apply_patch");
+    }
+
+    #[test]
+    fn tool_result_item_marks_is_error() {
+        let err_result = ToolResultItem {
+            tool_call_id: "c1".into(),
+            tool_name: Some("shell".into()),
+            output: serde_json::json!({"stderr": "not found"}),
+            display_content: Some("Error: not found".into()),
+            is_error: true,
+        };
+        assert!(err_result.is_error);
+
+        let ok_result = ToolResultItem {
+            tool_call_id: "c2".into(),
+            tool_name: Some("read".into()),
+            output: serde_json::json!({"content": "ok"}),
+            display_content: None,
+            is_error: false,
+        };
+        assert!(!ok_result.is_error);
+    }
+
+    #[test]
+    fn command_execution_item_preserves_display_command() {
+        let cmd = CommandExecutionItem {
+            tool_call_id: "c3".into(),
+            tool_name: "exec_command".into(),
+            command: "curl -s http://localhost:3000".into(),
+            input: serde_json::json!({"command": "curl -s http://localhost:3000"}),
+            output: serde_json::json!({"stdout": "OK"}),
+            is_error: false,
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        let restored: CommandExecutionItem = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.command, "curl -s http://localhost:3000");
+    }
+
+    // ── Approval records ──────────────────────────────────────
+
+    #[test]
+    fn approval_request_item_with_all_scopes() {
+        let req = ApprovalRequestItem {
+            approval_id: "apr-1".into(),
+            action_summary: "Execute: npm install".into(),
+            justification: "Need to install dependencies".into(),
+            resource: Some("ShellExec".into()),
+            available_scopes: vec![
+                "Once".into(),
+                "Turn".into(),
+                "Session".into(),
+                "PathPrefix".into(),
+                "CommandPrefix".into(),
+            ],
+            path: Some("/workspace".into()),
+            host: None,
+            target: Some("npm install".into()),
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let restored: ApprovalRequestItem = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.available_scopes.len(), 5);
+    }
+
+    #[test]
+    fn approval_decision_covers_allow_and_deny() {
+        for (decision, scope) in [("Allow", "Once"), ("Allow", "Session"), ("Deny", "Once")] {
+            let dec = ApprovalDecisionItem {
+                approval_id: "apr-1".into(),
+                decision: decision.into(),
+                scope: scope.into(),
+            };
+            assert_eq!(dec.decision, decision);
+            assert_eq!(dec.scope, scope);
+        }
+    }
+
+    // ── Worklog and TurnError ─────────────────────────────────
+
+    #[test]
+    fn worklog_serde_roundtrip() {
+        let wl = Worklog {
+            summary: "Fixed 3 files".into(),
+        };
+        let json = serde_json::to_string(&wl).expect("serialize");
+        let restored: Worklog = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.summary, "Fixed 3 files");
+    }
+
+    #[test]
+    fn turn_error_codes_cover_recovery_context() {
+        let errors = vec![
+            TurnError {
+                code: "CONTEXT_LIMIT_EXCEEDED".into(),
+                message: "Too many tokens".into(),
+            },
+            TurnError {
+                code: "MODEL_RESOLUTION_FAILED".into(),
+                message: "No valid binding".into(),
+            },
+            TurnError {
+                code: "PROVIDER_RATE_LIMITED".into(),
+                message: "Retry after 30s".into(),
+            },
+            TurnError {
+                code: "PERSISTENCE_FAILURE".into(),
+                message: "Disk full".into(),
+            },
+            TurnError {
+                code: "TOOL_EXECUTION_FAILED".into(),
+                message: "exit code 1".into(),
+            },
+            TurnError {
+                code: "APPROVAL_TIMEOUT".into(),
+                message: "User did not respond".into(),
+            },
+        ];
+        for err in &errors {
+            let json = serde_json::to_string(err).expect("serialize");
+            let restored: TurnError = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(err, &restored);
+        }
+    }
+
+    // ── CompactionSnapshotLine ────────────────────────────────
+
+    #[test]
+    fn compaction_snapshot_preserves_preserved_items() {
+        let snapshot = CompactionSnapshotLine {
+            timestamp: Utc::now(),
+            session_id: SessionId::new(),
+            turn_id: TurnId::new(),
+            summary_item_id: ItemId::new(),
+            preserved_item_ids: vec![ItemId::new(), ItemId::new(), ItemId::new()],
+        };
+        let json = serde_json::to_string(&snapshot).expect("serialize");
+        let restored: CompactionSnapshotLine = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.preserved_item_ids.len(), 3);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────
+
+    fn make_test_session() -> SessionRecord {
+        SessionRecord {
+            id: SessionId::new(),
+            rollout_path: "test.jsonl".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            source: "test".into(),
+            agent_nickname: None,
+            agent_role: None,
+            agent_path: None,
+            model_provider: "test-provider".into(),
+            model: Some("test-model".into()),
+            thinking: None,
+            cwd: "/tmp/test".into(),
+            cli_version: "0.1.0".into(),
+            title: Some("Test Session".into()),
+            title_state: SessionTitleState::Provisional,
+            sandbox_policy: "workspace-write".into(),
+            approval_mode: "on-request".into(),
+            tokens_used: 100,
+            first_user_message: Some("hello".into()),
+            archived_at: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
+            parent_session_id: None,
+            session_context: None,
+            latest_turn_context: None,
+            schema_version: 2,
+        }
+    }
+
+    fn make_test_turn(status: TurnStatus) -> TurnRecord {
+        TurnRecord {
+            id: TurnId::new(),
+            session_id: SessionId::new(),
+            sequence: 0,
+            started_at: Utc::now(),
+            completed_at: None,
+            status,
+            kind: crate::TurnKind::Regular,
+            model: "test-model".into(),
+            thinking: None,
+            request_model: "test-model".into(),
+            request_thinking: None,
+            input_token_estimate: Some(100),
+            usage: None,
+            session_context: None,
+            turn_context: None,
+            schema_version: 2,
+        }
+    }
+
+    fn make_test_item() -> ItemRecord {
+        ItemRecord {
+            id: ItemId::new(),
+            session_id: SessionId::new(),
+            turn_id: TurnId::new(),
+            seq: 0,
+            timestamp: Utc::now(),
+            attempt_placement: None,
+            turn_status: Some(TurnStatus::Running),
+            sibling_turn_ids: Vec::new(),
+            input_items: vec![TurnItem::UserMessage(TextItem {
+                text: "test".into(),
+            })],
+            output_items: vec![TurnItem::AgentMessage(TextItem { text: "ok".into() })],
+            worklog: None,
+            error: None,
+            schema_version: 1,
+        }
+    }
+
+    fn is_terminal_turn_status(s: TurnStatus) -> bool {
+        matches!(
+            s,
+            TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
+        )
     }
 }

@@ -36,12 +36,12 @@ L2-DES-TUI-CMD-001 through L2-DES-TUI-CMD-012 (Slash Commands), L2-DES-TUI-002 (
 - **Trigger**: User submits `/model`.
 - **Preconditions**: The client is connected and initialized.
 - **Algorithm / Flow**:
-  1. Send `model.list` request to server. Receive configured bindings and current model.
+  1. Send `model/list` request to server. Receive configured bindings and current model.
   2. Render a selection popup: each row shows binding display name, provider name (muted), model slug (muted). Last row: `Add model...`.
   3. User selects a binding with Enter:
      a. If model supports reasoning: show reasoning effort picker (low, medium, high, xhigh, max, adaptive). User selects or confirms default.
      b. If model does not support reasoning: apply immediately.
-     c. Send `model.select` to server with `binding_id` and `reasoning_effort`.
+     c. Send `model/select` to server with `binding_id` and `reasoning_effort`.
   4. If user selects `Add model...`: enter add-model flow (provider selection → API key → model name → display name → invocation method).
   5. On success: popup dismisses. Top bar shows new model name.
 - **Postconditions**: Session model is updated. Next turn uses the new model.
@@ -56,7 +56,7 @@ L2-DES-TUI-CMD-001 through L2-DES-TUI-CMD-012 (Slash Commands), L2-DES-TUI-002 (
      - `Workspace` — Full disk read, write within workspace, no network.
      - `Danger Full Access` — Full disk read/write, network enabled.
   2. Show current selection highlighted.
-  3. User selects profile: send `config.update` (or dedicated permission change) to server.
+  3. User selects profile: send `config/update` (or dedicated permission change) to server.
   4. Server updates session `permission_profile`. Future tool calls use the new profile.
   5. Active turn is NOT affected (existing tool calls continue under old profile).
 - **Postconditions**: Session permission profile is updated for subsequent turns.
@@ -66,8 +66,8 @@ L2-DES-TUI-CMD-001 through L2-DES-TUI-CMD-012 (Slash Commands), L2-DES-TUI-002 (
 - **Trigger**: User submits `/goal [objective]`.
 - **Preconditions**: Session exists.
 - **Algorithm / Flow**:
-  1. If no objective text (just `/goal`): send `goal.get` to server. Render current goal panel showing status, objective, progress, budgets.
-  2. If objective text provided: send `goal.create` with the objective as the goal text. Server creates the goal.
+  1. If no objective text (just `/goal`): send `goal/get` to server. Render current goal panel showing status, objective, progress, budgets.
+  2. If objective text provided: send `goal/create` with the objective as the goal text. Server creates the goal.
   3. If a goal exists, panel shows action buttons: `[Pause] [Complete] [Cancel] [Clear]`.
   4. User selects action → send corresponding goal mutation to server.
   5. Panel updates on `goal_updated` event.
@@ -78,7 +78,7 @@ L2-DES-TUI-CMD-001 through L2-DES-TUI-CMD-012 (Slash Commands), L2-DES-TUI-002 (
 - **Trigger**: User submits `/compact`.
 - **Preconditions**: Session has sufficient history to compact.
 - **Algorithm / Flow**:
-  1. Send a compaction request to the server (or a dedicated protocol method, or via `turn.submit` with compaction intent).
+  1. Send a compaction request to the server (or a dedicated protocol method, or via `turn/submit` with compaction intent).
   2. Server runs manual compaction through the context pipeline (`L3-BEH-CORE-005`). Transcript shows `Manual Compaction Started` notice.
   3. On completion: transcript shows `Compaction Done` with summary.
 - **Postconditions**: Older transcript turns are summarized. Context pressure is reduced.
@@ -87,9 +87,9 @@ L2-DES-TUI-CMD-001 through L2-DES-TUI-CMD-012 (Slash Commands), L2-DES-TUI-002 (
 
 | Command | Behavior |
 |---|---|
-| `/status` | Send `execution.inspect` to server. Render active work panel: active turn phase, running tools, pending approvals, background processes. |
-| `/resume` | Prompt for session selection. Send `session.list` with `include_archived: false`. Render recent sessions picker. On selection: open and subscribe to the session. |
-| `/new` | Confirm dialog: "Start a new session? Current session will remain available." On confirm: create new session via `session.create`. |
+| `/status` | Send `execution/inspect` to server. Render active work panel: active turn phase, running tools, pending approvals, background processes. |
+| `/resume` | Prompt for session selection. Send `session/list` with `include_archived: false`. Render recent sessions picker. On selection: open and subscribe to the session. |
+| `/new` | Confirm dialog: "Start a new session? Current session will remain available." On confirm: create new session via `session/create`. |
 | `/clear` | Clear the local transcript display (visual only — does not delete durable history). Re-render from current server state. |
 | `/btw` | Start a side conversation in an ephemeral fork of the current session context. The side conversation is runtime-only and must not write session, turn, item, queue, steer, or fork records to durable storage. |
 | `/exit` | Graceful disconnect from server (L3-BEH-CLIENT-001 B6). Restore terminal. Exit process. |
@@ -120,7 +120,7 @@ L2-DES-TUI-CMD-001 through L2-DES-TUI-CMD-012 (Slash Commands), L2-DES-TUI-002 (
 - Slash command handlers are registered in a `HashMap<&str, SlashCommandHandler>` at client startup.
 - Popup rendering uses Ratatui `Clear` and `Paragraph` widgets with centered `Rect` layout.
 - Commands that mutate server state send protocol requests and await responses asynchronously. The TUI remains responsive during the wait.
-- `/btw` must use an ephemeral fork execution path. It is not lowered into a normal durable `turn.submit` call unless a future explicit promote/copy command is approved.
+- `/btw` must use an ephemeral fork execution path. It is not lowered into a normal durable `turn/submit` call unless a future explicit promote/copy command is approved.
 
 ## Revision Notes
 

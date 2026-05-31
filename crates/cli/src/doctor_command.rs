@@ -1,5 +1,6 @@
 use anyhow::Result;
-use devo_core::resolve_provider_settings;
+use devo_core::AppConfigLoader;
+use devo_core::FileSystemAppConfigLoader;
 use devo_utils::find_devo_home;
 
 pub(crate) async fn run_doctor() -> Result<()> {
@@ -67,20 +68,30 @@ pub(crate) async fn run_doctor() -> Result<()> {
     println!();
 
     println!("{} Provider resolution:", "✓".green().bold());
-    match resolve_provider_settings() {
-        Ok(resolved) => {
-            println!("  provider:   {}", resolved.provider_id);
-            println!("  model:      {}", resolved.model);
-            println!(
-                "  base_url:   {}",
-                resolved.base_url.unwrap_or("default".into())
-            );
-            println!("  wire_api:   {:?}", resolved.wire_api);
-            if resolved.api_key.is_some() {
-                println!("  api_key:    {} (set)", "✓".green());
-            } else {
-                println!("  api_key:    {} (not set)", "✗".red());
-                all_ok = false;
+    match find_devo_home() {
+        Ok(home) => {
+            let cwd = std::env::current_dir()?;
+            let app_config = FileSystemAppConfigLoader::new(home.clone()).load(Some(&cwd))?;
+            match app_config.resolve_provider_settings(&home) {
+                Ok(resolved) => {
+                    println!("  provider:   {}", resolved.provider_id);
+                    println!("  model:      {}", resolved.model);
+                    println!(
+                        "  base_url:   {}",
+                        resolved.base_url.unwrap_or("default".into())
+                    );
+                    println!("  wire_api:   {:?}", resolved.wire_api);
+                    if resolved.api_key.is_some() {
+                        println!("  api_key:    {} (set)", "✓".green());
+                    } else {
+                        println!("  api_key:    {} (not set)", "✗".red());
+                        all_ok = false;
+                    }
+                }
+                Err(e) => {
+                    println!("  {} {}", "✗".red(), e);
+                    all_ok = false;
+                }
             }
         }
         Err(e) => {

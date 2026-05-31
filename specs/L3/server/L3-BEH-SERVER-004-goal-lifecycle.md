@@ -19,7 +19,7 @@ L2-DES-GOAL-001 (Ralph Loop Goals), L2-DES-AGENT-001 (Execution Engine), L2-DES-
 
 ### B1. Goal Creation
 
-- **Trigger**: User sends `goal.create` or the `/goal` command with an objective.
+- **Trigger**: User sends `goal/create` or the `/goal` command with an objective.
 - **Preconditions**: Session exists. No non-terminal goal is active, or `replace_existing` is true.
 - **Algorithm / Flow**:
   1. If a non-terminal goal exists and `replace_existing` is false: error with `GoalAlreadyExists` and the existing goal_id.
@@ -33,7 +33,7 @@ L2-DES-GOAL-001 (Ralph Loop Goals), L2-DES-AGENT-001 (Execution Engine), L2-DES-
 
 ### B2. Goal Mutation (Pause, Resume, Complete, Cancel, Clear)
 
-- **Trigger**: User sends `goal.pause`, `goal.resume`, `goal.complete`, `goal.cancel`, or `goal.clear`.
+- **Trigger**: User sends `goal/pause`, `goal/resume`, `goal/complete`, `goal/cancel`, or `goal/clear`.
 - **Preconditions**: The goal exists. `expected_goal_id` matches current goal (stale-check).
 - **Algorithm / Flow**:
   1. Validate `expected_goal_id` if provided. If mismatched → stale-state error with current goal_id.
@@ -45,7 +45,7 @@ L2-DES-GOAL-001 (Ralph Loop Goals), L2-DES-AGENT-001 (Execution Engine), L2-DES-
      - `clear`: terminal or canceled goal → remove from normal active projection. Keep audit records. Append `goal_cleared`.
   3. Persist `goal_status_changed` record.
   4. Broadcast `goal_updated` event.
-  5. If pausing/canceling while a goal continuation turn is active: the turn may finish naturally, but no NEW continuation turns will start. If the user explicitly wants to stop the active turn, they must use `turn.interrupt`.
+  5. If pausing/canceling while a goal continuation turn is active: the turn may finish naturally, but no NEW continuation turns will start. If the user explicitly wants to stop the active turn, they must use `turn/interrupt`.
 - **Postconditions**: Goal state is updated. Future continuation eligibility reflects the new state.
 
 ### B3. Model-Facing Goal Update Tool
@@ -78,7 +78,7 @@ L2-DES-GOAL-001 (Ralph Loop Goals), L2-DES-AGENT-001 (Execution Engine), L2-DES-
   4. Apply the same event to the live projection atomically with any status transition:
      - If a configured token, time, or turn budget is reached from `active`, append `goal_status_changed` with status `budget_limited`.
      - If no explicit budget exists, continue recording usage without transitioning to `budget_limited`.
-  5. If the status becomes `budget_limited`, broadcast `goal.budgetLimited` and `goal.updated`. No more autonomous continuation turns may start.
+  5. If the status becomes `budget_limited`, broadcast `goal/budget/limited` and `goal/updated`. No more autonomous continuation turns may start.
 - **Postconditions**: Budget counters are accurate. Budget-exhausted goals stop continuation.
 
 ### B5. Autonomous Continuation
@@ -103,7 +103,7 @@ L2-DES-GOAL-001 (Ralph Loop Goals), L2-DES-AGENT-001 (Execution Engine), L2-DES-
      - Instruction: continue working toward the goal. If complete, use the goal update tool to mark verified completion.
   5. Record `goal_context_snapshot_recorded` before the model invocation or store a stable content reference to the exact hidden context.
   6. Submit as a `GoalContinuation` turn through the normal execution engine.
-  7. Broadcast `goal.continuationStarted` alongside `turn_started`.
+  7. Broadcast `goal/continuation/started` alongside `turn_started`.
   8. If the continuation completes without tool calls, verification, progress update, or useful assistant output, set the runtime suppression flag and report that the goal needs user input or review.
 - **Postconditions**: The agent continues working autonomously. Clients can see the continuation turn in the transcript.
 - **Edge Cases**: User submits input during continuation → the continuation completes (or is interrupted), then the user's turn runs. Multiple rapid continuations → rate-limited by a cooldown (default 1 second between continuations). Plan Mode active → suppress continuation entirely.

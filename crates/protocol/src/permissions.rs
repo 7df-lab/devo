@@ -7,10 +7,16 @@ use crate::SessionId;
 #[serde(rename_all = "kebab-case")]
 #[derive(Default)]
 pub enum PermissionPreset {
+    /// Read workspace files without approval; edits, commands, and network ask.
     ReadOnly,
+    /// Read and edit workspace files and run shell commands; network and
+    /// outside-workspace writes ask.
     #[default]
     Default,
+    /// Same base policy as default, but eligible approvals may be routed
+    /// through an automatic reviewer before the user is interrupted.
     AutoReview,
+    /// Allow all tool requests without approval.
     FullAccess,
 }
 

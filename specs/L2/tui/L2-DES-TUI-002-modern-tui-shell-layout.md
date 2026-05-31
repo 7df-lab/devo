@@ -214,12 +214,12 @@ Example shell composition with transcript content:
 
 The TUI shell should render from server-confirmed state whenever possible:
 
-- Session snapshots from `session.open` or `session.subscribe`.
-- Turn events from `turn.event`.
-- Usage updates from `usage_updated`.
-- Context pressure from `context_updated`.
-- Tool and background process events from `tool_call_*` and `background_process_updated`.
-- Error diagnostics from `error_reported`.
+- Session snapshots from `session/open` or `session/subscribe`.
+- Turn-scoped notifications such as `turn/started`, `turn/completed`, `item/started`, and `item/agentMessage/delta`.
+- Usage updates from `turn/usage/updated`.
+- Context pressure from session compaction notifications and context projection updates.
+- Tool and background process events from item lifecycle and item delta notifications.
+- Error diagnostics from `turn/failed` or session error projections.
 
 Clients may optimistically render local input, but canonical state comes from the server protocol.
 
@@ -233,7 +233,7 @@ Clients may optimistically render local input, but canonical state comes from th
 | related-to | L1-REQ-TUI-004 | 1 | specs/L1/L1-REQ-TUI-004-state-visibility.md | Defines shell regions that expose execution state. |
 | related-to | L1-REQ-CLIENT-001 | 1 | specs/L1/L1-REQ-CLIENT-001-localization-readiness.md | Responsive layout must account for Unicode and localized display width. |
 | related-to | L1-REQ-CLIENT-002 | 1 | specs/L1/L1-REQ-CLIENT-002-session-rendering-consistency.md | The shell places the same transcript projection for live and restored sessions. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Protocol events provide canonical state for the shell. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Protocol events provide canonical state for the shell. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Durable transcript records are rendered in the viewport. |
 | related-to | L2-DES-TUI-003 | 1 | specs/L2/tui/L2-DES-TUI-003-composer-and-input-modes.md | Composer and input mode behavior fills the shell's bottom regions. |
 | related-to | L2-DES-TUI-004 | 1 | specs/L2/tui/L2-DES-TUI-004-streaming-transcript-and-state.md | Streaming transcript cells and state indicators populate the shell. |

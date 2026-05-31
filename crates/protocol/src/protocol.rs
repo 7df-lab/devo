@@ -43,6 +43,104 @@ pub struct ServerRequestEnvelope<T> {
     pub params: T,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientMethod {
+    SessionStart,
+    SessionList,
+    SessionMetadataUpdate,
+    SessionPermissionsUpdate,
+    SessionTitleUpdate,
+    SessionResume,
+    SessionFork,
+    SessionRollback,
+    SessionCompact,
+    SkillsList,
+    SkillsChanged,
+    ModelCatalog,
+    ModelSaved,
+    TurnStart,
+    TurnInterrupt,
+    TurnSteer,
+    ApprovalRespond,
+    EventsSubscribe,
+    GoalCreate,
+    GoalResume,
+    GoalCancel,
+    GoalStatus,
+    AgentList,
+    AgentStatus,
+    ProviderVendorList,
+    ProviderValidate,
+    ProviderVendorUpsert,
+}
+
+impl ClientMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionStart => "session/start",
+            Self::SessionList => "session/list",
+            Self::SessionMetadataUpdate => "session/metadata/update",
+            Self::SessionPermissionsUpdate => "session/permissions/update",
+            Self::SessionTitleUpdate => "session/title/update",
+            Self::SessionResume => "session/resume",
+            Self::SessionFork => "session/fork",
+            Self::SessionRollback => "session/rollback",
+            Self::SessionCompact => "session/compact",
+            Self::SkillsList => "skills/list",
+            Self::SkillsChanged => "skills/changed",
+            Self::ModelCatalog => "model/catalog",
+            Self::ModelSaved => "model/saved",
+            Self::TurnStart => "turn/start",
+            Self::TurnInterrupt => "turn/interrupt",
+            Self::TurnSteer => "turn/steer",
+            Self::ApprovalRespond => "approval/respond",
+            Self::EventsSubscribe => "events/subscribe",
+            Self::GoalCreate => "goal/create",
+            Self::GoalResume => "goal/resume",
+            Self::GoalCancel => "goal/cancel",
+            Self::GoalStatus => "goal/status",
+            Self::AgentList => "agent/list",
+            Self::AgentStatus => "agent/status",
+            Self::ProviderVendorList => "provider/list",
+            Self::ProviderValidate => "provider/validate",
+            Self::ProviderVendorUpsert => "provider/upsert",
+        }
+    }
+
+    pub fn parse(method: &str) -> Option<Self> {
+        Some(match method {
+            "session/start" => Self::SessionStart,
+            "session/list" => Self::SessionList,
+            "session/metadata/update" => Self::SessionMetadataUpdate,
+            "session/permissions/update" => Self::SessionPermissionsUpdate,
+            "session/title/update" => Self::SessionTitleUpdate,
+            "session/resume" => Self::SessionResume,
+            "session/fork" => Self::SessionFork,
+            "session/rollback" => Self::SessionRollback,
+            "session/compact" => Self::SessionCompact,
+            "skills/list" => Self::SkillsList,
+            "skills/changed" => Self::SkillsChanged,
+            "model/catalog" => Self::ModelCatalog,
+            "model/saved" => Self::ModelSaved,
+            "turn/start" => Self::TurnStart,
+            "turn/interrupt" => Self::TurnInterrupt,
+            "turn/steer" => Self::TurnSteer,
+            "approval/respond" => Self::ApprovalRespond,
+            "events/subscribe" => Self::EventsSubscribe,
+            "goal/create" => Self::GoalCreate,
+            "goal/resume" => Self::GoalResume,
+            "goal/cancel" => Self::GoalCancel,
+            "goal/status" => Self::GoalStatus,
+            "agent/list" => Self::AgentList,
+            "agent/status" => Self::AgentStatus,
+            "provider/list" => Self::ProviderVendorList,
+            "provider/validate" => Self::ProviderValidate,
+            "provider/upsert" => Self::ProviderVendorUpsert,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum ProtocolErrorCode {
     #[error("NotInitialized")]
@@ -69,6 +167,40 @@ pub enum ProtocolErrorCode {
     ActiveTurnNotSteerable,
     #[error("EmptyInput")]
     EmptyInput,
+    #[error("AlreadyResolved")]
+    AlreadyResolved,
+    #[error("ParentSessionNotFound")]
+    ParentSessionNotFound,
+    #[error("ForkTurnNotFound")]
+    ForkTurnNotFound,
+    #[error("ForkTurnNotStable")]
+    ForkTurnNotStable,
+    #[error("PermissionDenied")]
+    PermissionDenied,
+    #[error("WorkspaceUnavailable")]
+    WorkspaceUnavailable,
+    #[error("InheritedSegmentWriteFailed")]
+    InheritedSegmentWriteFailed,
+    #[error("ForkRetentionRequired")]
+    ForkRetentionRequired,
+    #[error("InvalidConfirmToken")]
+    InvalidConfirmToken,
+    #[error("UnsupportedDeletePolicy")]
+    UnsupportedDeletePolicy,
+    #[error("InheritedSegmentMaterializationFailed")]
+    InheritedSegmentMaterializationFailed,
+    #[error("ExpectedTargetMessageMismatch")]
+    ExpectedTargetMessageMismatch,
+    #[error("OlderMessageRequiresFork")]
+    OlderMessageRequiresFork,
+    #[error("ActiveTurnEditRejected")]
+    ActiveTurnEditRejected,
+    #[error("InvalidContentParts")]
+    InvalidContentParts,
+    #[error("InvalidMentions")]
+    InvalidMentions,
+    #[error("WorkspaceRestoreFailedToStart")]
+    WorkspaceRestoreFailedToStart,
     #[error("InternalError")]
     InternalError,
 }
@@ -236,5 +368,101 @@ impl TokenUsageInfo {
         };
         info.fill_to_context_window(context_window);
         info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_error_code_serialization() {
+        let codes = vec![
+            (ProtocolErrorCode::AlreadyResolved, "AlreadyResolved"),
+            (
+                ProtocolErrorCode::ParentSessionNotFound,
+                "ParentSessionNotFound",
+            ),
+            (ProtocolErrorCode::ForkTurnNotFound, "ForkTurnNotFound"),
+            (ProtocolErrorCode::ForkTurnNotStable, "ForkTurnNotStable"),
+            (ProtocolErrorCode::PermissionDenied, "PermissionDenied"),
+            (
+                ProtocolErrorCode::WorkspaceUnavailable,
+                "WorkspaceUnavailable",
+            ),
+            (
+                ProtocolErrorCode::InheritedSegmentWriteFailed,
+                "InheritedSegmentWriteFailed",
+            ),
+            (
+                ProtocolErrorCode::ForkRetentionRequired,
+                "ForkRetentionRequired",
+            ),
+            (
+                ProtocolErrorCode::InvalidConfirmToken,
+                "InvalidConfirmToken",
+            ),
+            (
+                ProtocolErrorCode::UnsupportedDeletePolicy,
+                "UnsupportedDeletePolicy",
+            ),
+            (
+                ProtocolErrorCode::InheritedSegmentMaterializationFailed,
+                "InheritedSegmentMaterializationFailed",
+            ),
+            (
+                ProtocolErrorCode::ExpectedTargetMessageMismatch,
+                "ExpectedTargetMessageMismatch",
+            ),
+            (
+                ProtocolErrorCode::OlderMessageRequiresFork,
+                "OlderMessageRequiresFork",
+            ),
+            (
+                ProtocolErrorCode::ActiveTurnEditRejected,
+                "ActiveTurnEditRejected",
+            ),
+            (
+                ProtocolErrorCode::InvalidContentParts,
+                "InvalidContentParts",
+            ),
+            (ProtocolErrorCode::InvalidMentions, "InvalidMentions"),
+            (
+                ProtocolErrorCode::WorkspaceRestoreFailedToStart,
+                "WorkspaceRestoreFailedToStart",
+            ),
+        ];
+
+        for (code, expected_str) in &codes {
+            let json = serde_json::to_string(&code)
+                .unwrap_or_else(|e| panic!("serialize {expected_str}: {e}"));
+            let restored: ProtocolErrorCode = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("deserialize {expected_str}: {e}"));
+            assert_eq!(restored, *code, "roundtrip failed for {expected_str}");
+        }
+    }
+
+    #[test]
+    fn protocol_error_roundtrips_with_new_codes() {
+        let error = ProtocolError {
+            code: ProtocolErrorCode::PermissionDenied,
+            message: "not authorized".into(),
+            data: serde_json::json!({"path": "/etc/shadow"}),
+        };
+        let json = serde_json::to_string(&error).expect("serialize");
+        let restored: ProtocolError = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, error);
+    }
+
+    #[test]
+    fn protocol_error_code_display() {
+        assert_eq!(
+            ProtocolErrorCode::AlreadyResolved.to_string(),
+            "AlreadyResolved"
+        );
+        assert_eq!(
+            ProtocolErrorCode::ForkRetentionRequired.to_string(),
+            "ForkRetentionRequired"
+        );
     }
 }

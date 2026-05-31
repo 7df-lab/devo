@@ -18,10 +18,10 @@ use devo_core::TokenBudget;
 use devo_core::TurnConfig;
 use devo_core::default_base_instructions;
 use devo_core::query;
+use devo_core::tools::ToolRegistry;
+use devo_core::tools::ToolRuntime;
 use devo_provider::ModelProviderSDK;
 use devo_provider::openai::OpenAIProvider;
-use devo_tools::ToolRegistry;
-use devo_tools::ToolRuntime;
 
 #[derive(Debug, Clone)]
 struct RealLlmConfig {

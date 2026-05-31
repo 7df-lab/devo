@@ -9,7 +9,7 @@ active_baseline: no
 
 ## Purpose
 
-Define concrete behavior for `session.fork`, inherited-history segment creation, fork replay, parent deletion, cascade deletion, and client fork projections so forked sessions remain usable even when their parent session is later deleted or unavailable.
+Define concrete behavior for `session/fork`, inherited-history segment creation, fork replay, parent deletion, cascade deletion, and client fork projections so forked sessions remain usable even when their parent session is later deleted or unavailable.
 
 ## Source Design
 
@@ -81,7 +81,7 @@ Default strategy should be `protected_shared_segment`. `protected_retained_sourc
 
 ### B1. Fork Admission
 
-- **Trigger**: Client sends `session.fork`.
+- **Trigger**: Client sends `session/fork`.
 - **Preconditions**: Parent session exists and the requester is allowed to read it.
 - **Algorithm / Flow**:
   1. Validate `parent_session_id`.
@@ -138,12 +138,12 @@ Default strategy should be `protected_shared_segment`. `protected_retained_sourc
      - `fork_label`,
      - `created_by`: user, subagent, or system.
   4. Update the session index or projection to include the child and fork relation.
-  5. Return `session.fork` response: `session_id`, `parent_session_id`, `fork_turn_id`, `inherited_segment_id`, and `session_snapshot`.
+  5. Return `session/fork` response: `session_id`, `parent_session_id`, `fork_turn_id`, `inherited_segment_id`, and `session_snapshot`.
 - **Postconditions**: The child session is durable and visible. Future turns in the child do not mutate the parent.
 
 ### B4. Fork Replay
 
-- **Trigger**: `session.open`, `session.subscribe`, context assembly, export, or server restart loads a forked session.
+- **Trigger**: `session/open`, `session/subscribe`, context assembly, export, or server restart loads a forked session.
 - **Preconditions**: Child session file is readable.
 - **Algorithm / Flow**:
   1. Replay child records normally.
@@ -162,7 +162,7 @@ Default strategy should be `protected_shared_segment`. `protected_retained_sourc
 
 ### B5. Parent Deletion Preflight
 
-- **Trigger**: Client sends `session.delete` for a session that may have fork descendants.
+- **Trigger**: Client sends `session/delete` for a session that may have fork descendants.
 - **Preconditions**: Session index can find direct and transitive fork descendants.
 - **Algorithm / Flow**:
   1. Discover affected forks where `ForkOrigin.parent_session_id` equals the target session or where protected retained source records depend on the target session.
@@ -177,7 +177,7 @@ Default strategy should be `protected_shared_segment`. `protected_retained_sourc
 
 ### B6. Parent Deletion Commit
 
-- **Trigger**: Client confirms `session.delete`.
+- **Trigger**: Client confirms `session/delete`.
 - **Preconditions**: Preflight result is still valid or has been recomputed.
 - **Algorithm / Flow**:
   1. Recompute affected forks to avoid stale confirmation.
@@ -241,7 +241,7 @@ Default strategy should be `protected_shared_segment`. `protected_retained_sourc
 ## Implementation Placement Guidance
 
 - Core owns inherited segment construction, hashing, replay, and parent-deletion retention checks.
-- Server owns the JSON-RPC request handling and confirmation flow for `session.fork` and `session.delete`.
+- Server owns the JSON-RPC request handling and confirmation flow for `session/fork` and `session/delete`.
 - A session index or SQLite projection may accelerate descendant lookup, but the forked child session and inherited segment remain the replay authority.
 - The inherited segment store should use content-addressed or reference-counted storage so multiple forks can share the same segment without duplicating the full parent history.
 

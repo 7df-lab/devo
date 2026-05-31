@@ -13,14 +13,20 @@ use crate::exec_command::relativize_to_home;
 
 pub(crate) const STARTUP_HEADER_ANIMATION_INTERVAL: Duration = Duration::from_millis(400);
 
-const STARTUP_HEADER_MAX_TOTAL_WIDTH: usize = 60;
+const STARTUP_HEADER_MAX_TOTAL_WIDTH: usize = 62;
 const STARTUP_HEADER_MIN_FULL_WIDTH: usize = 44;
-const MASCOT_WIDTH: usize = 11;
-const MASCOT_GAP: usize = 3;
 const META_GAP: usize = 2;
 const MODEL_LABEL: &str = "Model      ";
 const REASONING_LABEL: &str = "Reasoning   ";
-const DIRECTORY_LABEL: &str = "Directory  ";
+const DIRECTORY_LABEL: &str = "Workspace  ";
+const DEVO_LOGO: [&str; 6] = [
+    "██████╗  ███████╗██╗   ██╗ ██████╗",
+    "██╔══██╗ ██╔════╝██║   ██║██╔═══██╗",
+    "██║  ██║ █████╗  ██║   ██║██║   ██║",
+    "██║  ██║ ██╔══╝  ╚██╗ ██╔╝██║   ██║",
+    "██████╔╝ ███████╗ ╚████╔╝ ╚██████╔╝",
+    "╚═════╝  ╚══════╝  ╚═══╝   ╚═════╝",
+];
 
 pub(crate) struct StartupHeaderData<'a> {
     pub(crate) version: &'static str,
@@ -29,15 +35,6 @@ pub(crate) struct StartupHeaderData<'a> {
     pub(crate) directory: &'a Path,
     pub(crate) accent_color: Color,
     pub(crate) mascot_frame_index: usize,
-}
-
-pub(crate) fn mascot_frame(frame_index: usize) -> [&'static str; 4] {
-    const FRAMES: [[&str; 4]; 3] = [
-        ["     .----.", "    | >_ |", "    |____|", "     /||\\  "],
-        ["     .----.", "    | >_ |", "    |____|", "     \\||/  "],
-        ["     .----.", "    | >_ |", "    |____|", "     -||-  "],
-    ];
-    FRAMES[frame_index % FRAMES.len()]
 }
 
 pub(crate) fn build_startup_header(data: StartupHeaderData<'_>, width: u16) -> Vec<Line<'static>> {
@@ -62,60 +59,44 @@ pub(crate) fn build_startup_header(data: StartupHeaderData<'_>, width: u16) -> V
 fn build_full_header(data: StartupHeaderData<'_>, inner_width: usize) -> Vec<Line<'static>> {
     let border_style = Style::default().dim();
     let muted_style = Style::default().dim();
-    let accent_style = Style::default().fg(data.accent_color).bold();
-    let mascot_style = Style::default().fg(data.accent_color);
-    let mascot = mascot_frame(data.mascot_frame_index);
+    let logo_style = Style::default().fg(data.accent_color).bold();
     let version = format!("v{}", data.version);
     let reasoning = sanitize_reasoning(data.reasoning);
+    let mut lines = Vec::with_capacity(11);
 
-    vec![
-        border_line('┏', '━', '┓', inner_width, border_style),
-        content_line(
-            vec![Span::styled(mascot[0].to_string(), mascot_style)],
-            inner_width,
-            border_style,
-        ),
-        content_line(
-            build_title_row(
-                mascot[1],
-                &version,
+    lines.push(border_line('┏', '━', '┓', inner_width, border_style));
+    for (idx, logo_line) in DEVO_LOGO.iter().enumerate() {
+        lines.push(content_line(
+            build_logo_row(
+                logo_line,
+                (idx == 2).then_some(version.as_str()),
                 inner_width,
-                mascot_style,
-                accent_style,
+                logo_style,
                 muted_style,
             ),
             inner_width,
             border_style,
-        ),
-        content_line(
-            vec![Span::styled(mascot[2].to_string(), mascot_style)],
+        ));
+    }
+    lines.push(border_line('┣', '━', '┫', inner_width, border_style));
+    lines.push(content_line(
+        build_model_reasoning_row(
+            data.model,
+            &reasoning,
             inner_width,
-            border_style,
+            muted_style,
+            Style::default(),
         ),
-        content_line(
-            vec![Span::styled(mascot[3].to_string(), mascot_style)],
-            inner_width,
-            border_style,
-        ),
-        border_line('┣', '━', '┫', inner_width, border_style),
-        content_line(
-            build_model_reasoning_row(
-                data.model,
-                &reasoning,
-                inner_width,
-                muted_style,
-                Style::default(),
-            ),
-            inner_width,
-            border_style,
-        ),
-        content_line(
-            build_directory_row(data.directory, inner_width, muted_style),
-            inner_width,
-            border_style,
-        ),
-        border_line('┗', '━', '┛', inner_width, border_style),
-    ]
+        inner_width,
+        border_style,
+    ));
+    lines.push(content_line(
+        build_directory_row(data.directory, inner_width, muted_style),
+        inner_width,
+        border_style,
+    ));
+    lines.push(border_line('┗', '━', '┛', inner_width, border_style));
+    lines
 }
 
 fn build_compact_header(data: StartupHeaderData<'_>, inner_width: usize) -> Vec<Line<'static>> {
@@ -153,39 +134,25 @@ fn build_compact_header(data: StartupHeaderData<'_>, inner_width: usize) -> Vec<
     ]
 }
 
-fn build_title_row(
-    mascot_line: &str,
-    version: &str,
+fn build_logo_row(
+    logo_line: &str,
+    version: Option<&str>,
     inner_width: usize,
-    mascot_style: Style,
-    title_style: Style,
+    logo_style: Style,
     version_style: Style,
 ) -> Vec<Span<'static>> {
-    let secondary_width = inner_width.saturating_sub(MASCOT_WIDTH + MASCOT_GAP);
-    let version_width = UnicodeWidthStr::width(version);
-    let title = "Devo";
-    let title_width = UnicodeWidthStr::width(title);
+    let logo = truncate_right(logo_line, inner_width);
+    let logo_width = UnicodeWidthStr::width(logo.as_str());
+    let mut spans = vec![Span::styled(logo, logo_style)];
 
-    let mut spans = vec![Span::styled(mascot_line.to_string(), mascot_style)];
-    if secondary_width == 0 {
-        return spans;
+    if let Some(version) = version {
+        let version_width = UnicodeWidthStr::width(version);
+        if inner_width > logo_width + version_width {
+            push_spaces(&mut spans, inner_width - logo_width - version_width);
+            spans.push(Span::styled(version.to_string(), version_style));
+        }
     }
 
-    push_spaces(&mut spans, MASCOT_GAP);
-    if secondary_width > title_width + version_width {
-        spans.push(Span::styled(title.to_string(), title_style));
-        push_spaces(
-            &mut spans,
-            secondary_width.saturating_sub(title_width + version_width),
-        );
-        spans.push(Span::styled(version.to_string(), version_style));
-        return spans;
-    }
-
-    spans.push(Span::styled(
-        truncate_right(&format!("{title} {version}"), secondary_width),
-        title_style,
-    ));
     spans
 }
 
@@ -402,7 +369,6 @@ mod tests {
 
     use super::StartupHeaderData;
     use super::build_startup_header;
-    use super::mascot_frame;
 
     fn rendered_strings(width: u16, model: &str, reasoning: &str, directory: &Path) -> Vec<String> {
         build_startup_header(
@@ -427,15 +393,6 @@ mod tests {
     }
 
     #[test]
-    fn mascot_frames_keep_the_same_width() {
-        let widths = (0..3)
-            .map(|idx| mascot_frame(idx).map(UnicodeWidthStr::width))
-            .collect::<Vec<_>>();
-        assert_eq!(widths[0], widths[1]);
-        assert_eq!(widths[1], widths[2]);
-    }
-
-    #[test]
     fn full_header_renders_at_wide_widths() {
         let rows = rendered_strings(
             80,
@@ -443,14 +400,13 @@ mod tests {
             "medium",
             Path::new("/Users/tester/Desktop/devo"),
         );
-        assert_eq!(9, rows.len());
+        assert_eq!(11, rows.len());
         assert!(rows[0].starts_with('┏'));
-        assert!(rows[1].contains(".----."));
-        assert!(rows[2].contains("Devo"));
-        assert!(rows[2].contains("v0.1.3"));
-        assert!(rows[6].contains("Model"));
-        assert!(rows[6].contains("Reasoning"));
-        assert!(rows[7].contains("Directory"));
+        assert!(rows[1].contains("██████"));
+        assert!(rows[3].contains("v0.1.3"));
+        assert!(rows[8].contains("Model"));
+        assert!(rows[8].contains("Reasoning"));
+        assert!(rows[9].contains("Workspace"));
     }
 
     #[test]
@@ -474,9 +430,9 @@ mod tests {
             "medium",
             Path::new("/Users/tester/Desktop/projects/devo/some/really/long/path"),
         );
-        assert!(rows[6].contains('…'));
-        assert!(rows[7].contains('…'));
-        assert!(rows[7].contains("long/path"));
+        assert!(rows[8].contains('…'));
+        assert!(rows[9].contains('…'));
+        assert!(rows[9].contains("long/path"));
         assert!(
             rows.iter()
                 .all(|row| UnicodeWidthStr::width(row.as_str()) <= 60)
@@ -491,8 +447,8 @@ mod tests {
             "",
             Path::new(r"C:\Users\tester\Desktop\devo\long\workspace"),
         );
-        assert!(rows[6].contains("unknown"));
-        assert!(rows[7].contains("workspace"));
+        assert!(rows[8].contains("unknown"));
+        assert!(rows[9].contains("workspace"));
         assert!(
             rows.iter()
                 .all(|row| UnicodeWidthStr::width(row.as_str()) <= 60)

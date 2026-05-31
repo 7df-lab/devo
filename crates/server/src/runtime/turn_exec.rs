@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::{FileChangePayload, TurnPlanStepPayload, TurnPlanUpdatedPayload};
-use devo_tools::tool_spec::ToolPreparationFeedback;
+use devo_core::tools::tool_spec::ToolPreparationFeedback;
 use devo_utils::git_op::extract_paths_from_patch;
 use tokio::sync::mpsc;
 
@@ -604,11 +604,11 @@ impl ServerRuntime {
                                 && is_plan_tool(&tool_name)
                             {
                                 let output_json = match content.clone() {
-                                    devo_tools::ToolContent::Text(text) => {
+                                    devo_core::tools::ToolContent::Text(text) => {
                                         serde_json::Value::String(text)
                                     }
-                                    devo_tools::ToolContent::Json(json) => json,
-                                    devo_tools::ToolContent::Mixed { text, json } => json
+                                    devo_core::tools::ToolContent::Json(json) => json,
+                                    devo_core::tools::ToolContent::Mixed { text, json } => json
                                         .unwrap_or_else(|| {
                                             serde_json::Value::String(text.unwrap_or_default())
                                         }),
@@ -671,11 +671,11 @@ impl ServerRuntime {
                                 && is_file_change_tool(&tool_name)
                             {
                                 let output_json = match content.clone() {
-                                    devo_tools::ToolContent::Text(text) => {
+                                    devo_core::tools::ToolContent::Text(text) => {
                                         serde_json::Value::String(text)
                                     }
-                                    devo_tools::ToolContent::Json(json) => json,
-                                    devo_tools::ToolContent::Mixed { text, json } => json
+                                    devo_core::tools::ToolContent::Json(json) => json,
+                                    devo_core::tools::ToolContent::Mixed { text, json } => json
                                         .unwrap_or_else(|| {
                                             serde_json::Value::String(text.unwrap_or_default())
                                         }),
@@ -794,11 +794,11 @@ impl ServerRuntime {
                             if pending.is_command_execution {
                                 let tool_name = tool_name.clone().unwrap_or_default();
                                 let output = match content.clone() {
-                                    devo_tools::ToolContent::Text(text) => {
+                                    devo_core::tools::ToolContent::Text(text) => {
                                         serde_json::Value::String(text)
                                     }
-                                    devo_tools::ToolContent::Json(json) => json,
-                                    devo_tools::ToolContent::Mixed { text, json } => json
+                                    devo_core::tools::ToolContent::Json(json) => json,
+                                    devo_core::tools::ToolContent::Mixed { text, json } => json
                                         .unwrap_or_else(|| {
                                             serde_json::Value::String(text.unwrap_or_default())
                                         }),
@@ -876,11 +876,11 @@ impl ServerRuntime {
                                     tool_call_id: tool_use_id.clone(),
                                     tool_name: tool_name.clone(),
                                     output: match content.clone() {
-                                        devo_tools::ToolContent::Text(text) => {
+                                        devo_core::tools::ToolContent::Text(text) => {
                                             serde_json::Value::String(text)
                                         }
-                                        devo_tools::ToolContent::Json(json) => json,
-                                        devo_tools::ToolContent::Mixed { text, json } => json
+                                        devo_core::tools::ToolContent::Json(json) => json,
+                                        devo_core::tools::ToolContent::Mixed { text, json } => json
                                             .unwrap_or_else(|| {
                                                 serde_json::Value::String(text.unwrap_or_default())
                                             }),
@@ -892,11 +892,11 @@ impl ServerRuntime {
                                     tool_call_id: tool_use_id.clone(),
                                     tool_name,
                                     content: match content {
-                                        devo_tools::ToolContent::Text(text) => {
+                                        devo_core::tools::ToolContent::Text(text) => {
                                             serde_json::Value::String(text)
                                         }
-                                        devo_tools::ToolContent::Json(json) => json,
-                                        devo_tools::ToolContent::Mixed { text, json } => json
+                                        devo_core::tools::ToolContent::Json(json) => json,
+                                        devo_core::tools::ToolContent::Mixed { text, json } => json
                                             .unwrap_or_else(|| {
                                                 serde_json::Value::String(text.unwrap_or_default())
                                             }),

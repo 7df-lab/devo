@@ -415,7 +415,7 @@ Memory state itself is not displayed in the TUI beyond the current feature toggl
 | related-to | L2-DES-SAFETY-002 | 1 | specs/L2/safety/L2-DES-SAFETY-002-approval-mechanism.md | Consolidation agent uses Never approval to run autonomously. |
 | related-to | L2-DES-AGENT-003 | 1 | specs/L2/agent/L2-DES-AGENT-003-subagent-architecture.md | Phase 2 spawns a consolidation subagent with locked-down config. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Rollout transcripts are the source data for Phase 1 extraction. |
-| related-to | L2-DES-APP-002 | 1 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Memory configuration participates in config layering. |
+| related-to | L2-DES-APP-002 | 2 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Memory configuration participates in config layering. |
 | related-to | L2-DES-LLM-003 | 1 | specs/L2/llm/L2-DES-LLM-003-model-usage-observability.md | Memory pipeline usage contributes to model usage observability metrics. |
 | specified-by | L3-BEH-CORE-007 | 2 | specs/L3/core/L3-BEH-CORE-007-persistent-memory.md | L3 defines extraction, consolidation, job concurrency, read-path context injection, ad-hoc updates, safety, and retention. |
 

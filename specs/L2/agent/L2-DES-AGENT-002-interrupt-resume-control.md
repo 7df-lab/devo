@@ -240,9 +240,9 @@ Clients should:
 | related-to | L1-REQ-TOOL-005 | 1 | specs/L1/L1-REQ-TOOL-005-background-process-management.md | Background process inspection and stopping are part of interrupt control. |
 | related-to | L1-REQ-CONV-002 | 1 | specs/L1/L1-REQ-CONV-002-turn-lifecycle.md | Interrupt and resume update visible turn lifecycle state. |
 | related-to | L2-DES-AGENT-001 | 1 | specs/L2/agent/L2-DES-AGENT-001-execution-engine.md | Defines the execution runtime being interrupted and resumed. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Protocol methods and events expose interrupt and resume control to clients. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Protocol methods and events expose interrupt and resume control to clients. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Durable records preserve interrupted and resumed state. |
-| specified-by | L3-BEH-SERVER-001 | 1 | specs/L3/server/L3-BEH-SERVER-001-server-runtime-transport.md | L3 defines server cancellation token wiring and active work ownership. |
+| specified-by | L3-BEH-SERVER-001 | 4 | specs/L3/server/L3-BEH-SERVER-001-server-runtime-transport.md | L3 defines server cancellation token wiring and active work ownership. |
 | specified-by | L3-BEH-SERVER-002 | 2 | specs/L3/server/L3-BEH-SERVER-002-interrupt-resume.md | L3 defines interruption targets, resume turns, active work inspection, and crash recovery. |
 
 ## Revision Notes

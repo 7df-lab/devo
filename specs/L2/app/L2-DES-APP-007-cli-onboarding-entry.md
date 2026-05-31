@@ -44,7 +44,7 @@ Behavior:
 - Completing onboarding writes configuration through the precedence and persistence rules defined by `L2-DES-APP-002` and `L2-DES-APP-005`.
 - Canceling onboarding exits onboarding mode and should return to a safe startup outcome: either normal startup if required configuration exists, or a clear message that required configuration is still missing.
 
-Optional future CLI arguments may select the persistence target, such as user-scoped or project-scoped configuration. Until such an argument is specified, default target behavior remains owned by `L2-DES-APP-002`.
+Optional future CLI arguments may select the non-secret configuration persistence target, such as user-scoped or workspace-scoped configuration. Until such an argument is specified, default target behavior remains owned by `L2-DES-APP-002`. Credential material still writes only to user-scoped `auth.json`.
 
 ## Automatic Onboarding
 
@@ -88,9 +88,9 @@ If the user is already inside an active TUI session and needs to repair or add m
 | related-to | L1-REQ-TUI-006 | 1 | specs/L1/L1-REQ-TUI-006-command-discovery-control.md | Removes onboarding from runtime slash-command discovery. |
 | related-to | L1-REQ-APP-010 | 1 | specs/L1/L1-REQ-APP-010-configuration.md | Onboarding writes durable configuration through application configuration rules. |
 | related-to | L2-DES-TUI-001 | 1 | specs/L2/tui/L2-DES-TUI-001-onboarding-ui-flow.md | The CLI entry starts the TUI onboarding flow defined there. |
-| related-to | L2-DES-APP-002 | 1 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Defines persistence target and source precedence for onboarding output. |
-| related-to | L2-DES-APP-005 | 1 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Defines persisted config and credential schema written by onboarding. |
-| specified-by | L3-BEH-CLI-001 | 2 | specs/L3/cli/L3-BEH-CLI-001-entry-onboarding.md | L3 defines CLI argument parsing, onboarding entry, server lifecycle, signal handling, and exit behavior. |
+| related-to | L2-DES-APP-002 | 2 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Defines persistence target and source precedence for onboarding output. |
+| related-to | L2-DES-APP-005 | 2 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Defines persisted config and credential schema written by onboarding. |
+| specified-by | L3-BEH-CLI-001 | 3 | specs/L3/cli/L3-BEH-CLI-001-entry-onboarding.md | L3 defines CLI argument parsing, onboarding entry, server lifecycle, signal handling, and exit behavior. |
 
 ## Revision Notes
 

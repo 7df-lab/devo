@@ -1,6 +1,6 @@
 ---
 artifact_id: L3-BEH-PROVIDER-001
-revision: 2
+revision: 3
 status: Draft
 active_baseline: no
 ---
@@ -45,7 +45,7 @@ L2-DES-MODEL-001 (Model Provider Binding), L2-DES-APP-005 (Config TOML Schema), 
      - `provider_name`: user-entered display name (non-empty, max 100 chars).
      - `base_url`: valid URL (must parse as `url::Url`, scheme http or https).
      - `credential_ref`: references a credential id in `auth.json`.
-  2. Resolve credential status against the effective auth view from `L3-BEH-APP-001`. If not found -> `availability_status: needs_configuration`.
+  2. Resolve credential status against the user auth store from `L3-BEH-APP-001`. If not found -> `availability_status: needs_configuration`.
   3. If optional provider validation is configured: send a minimal API request to verify connectivity and credential validity. Set `availability_status: available` or `unavailable`.
   4. Provider must NOT contain: canonical model slug, model name, invocation method, reasoning effort.
 - **Postconditions**: Valid providers are available for binding.
@@ -74,7 +74,7 @@ L2-DES-MODEL-001 (Model Provider Binding), L2-DES-APP-005 (Config TOML Schema), 
 
 ### B4. Session Model Selection
 
-- **Trigger**: Client sends `model.select` or `turn.submit` with model overrides.
+- **Trigger**: Client sends `model/select` or `turn/submit` with model overrides.
 - **Preconditions**: The session is loaded. The selected binding is valid.
 - **Algorithm / Flow**:
   1. Client may select a `binding_id` from the invocable list.
@@ -146,3 +146,4 @@ L2-DES-MODEL-001 (Model Provider Binding), L2-DES-APP-005 (Config TOML Schema), 
 |---:|---|---|---|---|
 | 1 | 2026-05-27 | Assistant | Initial | Initial model resolution and provider binding behavior. |
 | 2 | 2026-05-27 | Assistant | Correction | Aligned display-name validation, reasoning-effort errors, default selection, and persistence writes with `L3-BEH-APP-001`. |
+| 3 | 2026-05-27 | Assistant | Correction | Clarified that provider credential checks use the user-scoped auth store rather than a merged auth view. |

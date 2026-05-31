@@ -88,34 +88,28 @@ Esc: back
 
 Model: openai/gpt-5.5
 |
-* provider name:
-| Hint: Enter a name to recognize this provider later.
-| OpenRouter
+● Provider Name: Enter a name to recognize this provider later.
 |
-* base url:
-| Hint: Enter the provider API base URL.
-| https://api.example
 |
-* api key:
-| Hint: Enter the API key for this provider.
-| [hidden input]
+● Base URL: Enter the provider API base URL
 |
-* model name:
-| Hint: Enter the model name this provider expects.
-| openai/gpt-5.5
 |
-* display name:
-| Hint: Enter the name clients should show for this model.
-| GPT 5.5
+● APIKEY: the API key for this provider 
 |
-* invocation method:
-| Hint: Choose the API protocol used for this binding.
+|
+● Model Name: the model name this provider expects.
+|
+|
+● Display Name: Enter the name should show for this model
+|
+|
+● Invocation Method: Choose the API protocol
 | [open popup]
 |
-* reasoning effort:
-| Hint: Choose the default reasoning effort for this binding.
+● Reason Effort: Choose the default reasoning effort for mode, could be change with '/model'
 | [open popup if the model supports reasoning]
 |
+● Validation Done
 
 Invocation Method
 Hint: Choose the API protocol used to call this model.
@@ -177,8 +171,9 @@ Esc: back
 - Pressing Enter on the focused reasoning effort marked by `>` confirms the selection, closes the popup, and returns to the inline setup view.
 - If the selected model does not support reasoning, the inline setup view omits the reasoning effort selection step.
 - Successful setup submits the selected values for persistent configuration storage before normal model invocation begins.
-- If onboarding runs with an active project directory and no explicit target selection is available, the default persistence target is the project-scoped configuration file.
-- If onboarding runs without an active project directory and no explicit target selection is available, the default persistence target is the user-scoped configuration file.
+- If onboarding runs with an active workspace directory and no explicit target selection is available, the default non-secret persistence target is `<workspace>/.devo/config.toml`.
+- If onboarding runs without an active workspace directory and no explicit target selection is available, the default non-secret persistence target is the user-scoped configuration file.
+- Credential material always persists to user-scoped `auth.json`.
 - Validation failures should preserve the selected model slug and safe completed fields where useful.
 
 ## Choice List Marker Semantics
@@ -216,9 +211,9 @@ Onboarding selection popups use the shared navigable-list markers from `L2-DES-T
 | related-to | L1-REQ-APP-010 | 1 | specs/L1/L1-REQ-APP-010-configuration.md | Uses persistent configuration and project-over-user precedence requirements. |
 | related-to | L1-REQ-APP-012 | 1 | specs/L1/L1-REQ-APP-012-privacy-data-ownership.md | Carries credential-handling constraints into UI design. |
 | related-to | L2-DES-APP-007 | 1 | specs/L2/app/L2-DES-APP-007-cli-onboarding-entry.md | Defines the CLI entry point that starts this onboarding UI. |
-| related-to | L2-DES-MODEL-001 | 1 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | The flow creates user provider and model-provider binding records. |
-| related-to | L2-DES-APP-002 | 1 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Defines where successful onboarding results are persisted and how they are resolved. |
-| specified-by | L3-BEH-TUI-005 | 2 | specs/L3/tui/L3-BEH-TUI-005-onboarding-ui.md | L3 defines onboarding UI steps, validation, persistence targets, and credential safety. |
+| related-to | L2-DES-MODEL-001 | 2 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | The flow creates user provider and model-provider binding records. |
+| related-to | L2-DES-APP-002 | 2 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Defines where successful onboarding results are persisted and how they are resolved. |
+| specified-by | L3-BEH-TUI-005 | 3 | specs/L3/tui/L3-BEH-TUI-005-onboarding-ui.md | L3 defines onboarding UI steps, validation, persistence targets, and credential safety. |
 
 ## Revision Notes
 

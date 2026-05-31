@@ -1,0 +1,1003 @@
+//! Hosts the interactive TUI event loop and connects app events, worker events, and
+//! terminal rendering into one session.
+
+use anyhow::Result;
+use crossterm::event::KeyCode;
+use crossterm::event::KeyModifiers;
+use devo_protocol::Model;
+use devo_protocol::ModelCatalog;
+use devo_protocol::ProviderWireApi;
+use futures::StreamExt;
+use std::time::Duration;
+use std::time::Instant;
+use tokio::sync::mpsc;
+
+use crate::app::AppExit;
+use crate::app::InitialTuiSession;
+use crate::app::InteractiveTuiConfig;
+use crate::app_command::AppCommand;
+use crate::app_event::AppEvent;
+use crate::app_event_sender::AppEventSender;
+use crate::chatwidget::ChatWidget;
+use crate::chatwidget::ChatWidgetInit;
+use crate::chatwidget::TuiSessionState;
+use crate::events::WorkerEvent;
+use crate::host_overlay::OverlayState;
+use crate::onboarding::OnboardingModelBinding;
+use crate::onboarding::onboarding_provider_model_binding;
+use crate::onboarding::onboarding_provider_vendor;
+use crate::onboarding::save_last_used_model;
+use crate::onboarding::save_project_permission_preset;
+use crate::onboarding::save_thinking_selection;
+use crate::render::renderable::Renderable;
+use crate::tui::Tui;
+use crate::tui::TuiEvent;
+use crate::worker::QueryWorkerConfig;
+use crate::worker::QueryWorkerHandle;
+
+const APP_EVENT_CHANNEL_CAPACITY: usize = 1024;
+
+#[derive(Debug, Clone)]
+struct PendingOnboarding {
+    binding: OnboardingModelBinding,
+    base_url: Option<String>,
+    api_key: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OnboardingCommandPayload {
+    model_slug: String,
+    model_name: String,
+    display_name: String,
+    provider_id: String,
+    provider_name: String,
+    invocation_method: ProviderWireApi,
+    default_reasoning_effort: Option<String>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+}
+
+fn parse_onboarding_command(command: &str) -> Option<OnboardingCommandPayload> {
+    let payload = command.strip_prefix("onboard ")?;
+    serde_json::from_str(payload).ok()
+}
+
+fn normalized_display_name(
+    model_catalog: &impl ModelCatalog,
+    model_slug: &str,
+    selected_display_name: &str,
+) -> String {
+    let selected = selected_display_name.trim();
+    if !selected.is_empty() && selected != model_slug {
+        return selected.to_string();
+    }
+    model_catalog
+        .get(model_slug)
+        .map(|model| model.display_name.clone())
+        .unwrap_or_else(|| model_slug.to_string())
+}
+
+#[derive(Debug, Default)]
+struct InteractiveLoopState {
+    session_id: Option<devo_core::SessionId>,
+    turn_count: usize,
+    total_input_tokens: usize,
+    total_output_tokens: usize,
+    total_cache_read_tokens: usize,
+    pending_onboarding: Option<PendingOnboarding>,
+    // True while the resume browser is waiting for the worker's session list.
+    resume_browser_pending: bool,
+    // indicate whther LLM worker is working, is started by TurnStarted,
+    // it ended by TurnFailed/TurnFinished
+    busy: bool,
+    // True after clearing the inline UI for a session switch and before the
+    // replacement session has been restored into widget state.
+    session_switch_pending: bool,
+    last_ctrl_c_at: Option<Instant>,
+    esc_backtrack_primed: bool,
+    overlay: OverlayState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopAction {
+    Continue,
+    ClearAndExit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CtrlCKeyAction {
+    PromptInterruptWithEsc,
+    PromptExitConfirmation,
+    Exit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscBacktrackAction {
+    Noop,
+    PrimeHint,
+    OpenOverlay,
+    ClearHint,
+}
+
+struct AppCommandContext<'a, M: ModelCatalog> {
+    model_catalog: &'a M,
+    default_provider: ProviderWireApi,
+    project_config_key: &'a str,
+}
+
+/// RAII guard that restores terminal modes exactly once after the TUI loop ends.
+///
+/// The restore is owned by the outer host instead of `Tui::drop()`:
+///
+/// ```text
+/// app loop exits
+///    |
+///    v
+/// clear live TUI area
+///    |
+///    v
+/// drop Tui wrapper
+///    |
+///    v
+/// restore terminal modes once
+///    |
+///    v
+/// shell prints the next prompt
+/// ```
+///
+/// This avoids the older pattern where the `Tui` drop path emitted extra terminal
+/// control sequences after the clear, which could cause prompt drift in Terminal.app.
+struct TerminalRestoreGuard {
+    active: bool,
+}
+
+impl TerminalRestoreGuard {
+    fn new() -> Self {
+        Self { active: true }
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if self.active {
+            crate::tui::restore()?;
+            self.active = false;
+        }
+        Ok(())
+    }
+
+    fn restore_silently(&mut self) {
+        if self.active {
+            if let Err(err) = crate::tui::restore() {
+                eprintln!(
+                    "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
+                );
+            }
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        self.restore_silently();
+    }
+}
+
+/// Runs the interactive terminal UI until the user exits or the worker stops.
+pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit> {
+    // Build the initial terminal, session, and background worker state.
+    let initial_session = config.initial_session.clone();
+    let terminal = crate::tui::init()?;
+    let mut tui = crate::tui::Tui::new(terminal);
+    let mut terminal_restore_guard = TerminalRestoreGuard::new();
+
+    // spawn a worker with stdio transport with server, it'll emit events
+    // such as `[WorkerEvent::TurnStarted]`, `[WorkerEvent::UsageUpdated]` etc.
+    let mut worker = QueryWorkerHandle::spawn(QueryWorkerConfig {
+        initial_session_id: initial_session.session_id,
+        model: initial_session.model.clone(),
+        cwd: initial_session.cwd.clone(),
+        server_log_level: config.server_log_level,
+        thinking_selection: initial_session.thinking_selection.clone(),
+        permission_preset: initial_session.permission_preset,
+    });
+
+    // App events come from widgets and request host-level actions such as commands or exit.
+    let (app_event_tx, mut app_event_rx) = mpsc::channel(APP_EVENT_CHANNEL_CAPACITY);
+    let app_event_sender = AppEventSender::new_bounded(app_event_tx);
+
+    // Resolve model metadata for the chat widget, falling back to the session slug.
+    let available_models = config
+        .model_catalog
+        .list_visible()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let saved_model_slugs: Vec<String> = config
+        .saved_models
+        .iter()
+        .map(|entry| entry.model.clone())
+        .collect();
+
+    let cwd = initial_session.cwd.clone();
+    let project_config_key = devo_core::project_config_key(&cwd);
+
+    let model = resolve_initial_model(&initial_session, &config.model_catalog);
+    let initial_provider = model.provider_wire_api();
+    let initial_reasoning_effort = model
+        .resolve_thinking_selection(initial_session.thinking_selection.as_deref())
+        .effective_reasoning_effort;
+
+    let mut loop_state = InteractiveLoopState::default();
+
+    let initial_theme_name = crate::onboarding::load_theme_selection();
+
+    // Create the root chat widget that owns visible TUI state and input handling.
+    let mut chat_widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: tui.frame_requester(),
+        app_event_tx: app_event_sender,
+        initial_session: TuiSessionState {
+            cwd: cwd.clone(),
+            model: Some(model),
+            provider: Some(initial_provider),
+            reasoning_effort: initial_reasoning_effort,
+        },
+        initial_thinking_selection: initial_session.thinking_selection.clone(),
+        initial_permission_preset: initial_session.permission_preset,
+        initial_user_message: None,
+        enhanced_keys_supported: tui.enhanced_keys_supported(),
+        is_first_run: config.saved_models.is_empty(),
+        available_models,
+        saved_model_slugs,
+        show_model_onboarding: config.show_model_onboarding,
+        startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
+        initial_theme_name,
+    });
+    // tui events, such as `[TuiEvent::Draw]`, `[TuiEvent::Key]`, `TuiEvent::Paste`
+    let events = tui.event_stream();
+    tokio::pin!(events);
+
+    tui.frame_requester().schedule_frame();
+
+    // Drive the TUI by racing terminal input, app commands, and worker events.
+    loop {
+        tokio::select! {
+            tui_event = events.next() => {
+                match handle_tui_event(
+                    tui_event,
+                    &mut tui,
+                    &worker,
+                    &mut chat_widget,
+                    &mut loop_state,
+                )? {
+                    LoopAction::Continue => {}
+                    LoopAction::ClearAndExit => {
+                        clear_before_exit(&mut tui)?;
+                        break;
+                    }
+                }
+            }
+            app_event = app_event_rx.recv() => {
+                match handle_app_event(
+                    app_event,
+                    &worker,
+                    &mut chat_widget,
+                    &mut tui,
+                    &mut loop_state,
+                    &AppCommandContext {
+                        model_catalog: &config.model_catalog,
+                        default_provider: initial_session.provider,
+                        project_config_key: &project_config_key,
+                    },
+                )? {
+                    LoopAction::Continue => {}
+                    LoopAction::ClearAndExit => {
+                        clear_before_exit(&mut tui)?;
+                        break;
+                    }
+                }
+            }
+            worker_event = worker.event_rx.recv() => {
+                match handle_worker_event(
+                    worker_event,
+                    &worker,
+                    &mut chat_widget,
+                    &mut loop_state,
+                )? {
+                    LoopAction::Continue => {}
+                    LoopAction::ClearAndExit => {
+                        clear_before_exit(&mut tui)?;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Tear down the terminal wrapper before awaiting worker shutdown.
+    drop(tui);
+    terminal_restore_guard.restore()?;
+    worker.shutdown().await?;
+    Ok(AppExit {
+        session_id: loop_state.session_id,
+        turn_count: loop_state.turn_count,
+        total_input_tokens: loop_state.total_input_tokens,
+        total_output_tokens: loop_state.total_output_tokens,
+        total_cache_read_tokens: loop_state.total_cache_read_tokens,
+    })
+}
+
+fn resolve_initial_model(
+    initial_session: &InitialTuiSession,
+    model_catalog: &impl ModelCatalog,
+) -> Model {
+    model_catalog
+        .get(&initial_session.model)
+        .cloned()
+        .unwrap_or_else(|| Model {
+            slug: initial_session.model.clone(),
+            display_name: initial_session.model.clone(),
+            provider: initial_session.provider,
+            ..Model::default()
+        })
+}
+
+fn clear_before_exit(tui: &mut Tui) -> Result<()> {
+    Ok(tui.shutdown_terminal_safe()?)
+}
+
+fn handle_tui_event(
+    tui_event: Option<TuiEvent>,
+    tui: &mut Tui,
+    _worker: &QueryWorkerHandle,
+    chat_widget: &mut ChatWidget,
+    loop_state: &mut InteractiveLoopState,
+) -> Result<LoopAction> {
+    let Some(tui_event) = tui_event else {
+        return Ok(LoopAction::ClearAndExit);
+    };
+
+    if loop_state.overlay.is_active() {
+        if let TuiEvent::Key(key_event) = tui_event
+            && matches!(
+                key_event.kind,
+                crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+            )
+            && key_event.code == KeyCode::Enter
+            && let Some(transcript) = loop_state.overlay.transcript_mut()
+            && let Some(user_message) = transcript.selected_user_message()
+        {
+            if let Some(selected_history_position) = transcript.selected_user_history_position() {
+                chat_widget.truncate_history_to_user_turn_count(
+                    selected_history_position.saturating_add(1),
+                );
+            }
+            chat_widget.restore_user_message_to_composer(user_message);
+            loop_state.overlay.close(tui)?;
+            return Ok(LoopAction::Continue);
+        }
+        if matches!(tui_event, TuiEvent::Draw) {
+            chat_widget.pre_draw_tick();
+        }
+        loop_state
+            .overlay
+            .handle_tui_event(tui_event, tui, chat_widget)?;
+        return Ok(LoopAction::Continue);
+    }
+
+    match tui_event {
+        TuiEvent::Draw => {
+            if loop_state.session_switch_pending {
+                return Ok(LoopAction::Continue);
+            }
+
+            // Update time-sensitive widget state before measuring or rendering.
+            chat_widget.pre_draw_tick();
+
+            if !chat_widget.is_resume_browser_open()
+                && !loop_state.resume_browser_pending
+                && !loop_state.overlay.is_active()
+                && tui.is_alt_screen_active()
+            {
+                tui.leave_alt_screen()?;
+            }
+
+            // Wrap pending scrollback using the current terminal width.
+            let width = tui.terminal.size()?.width.max(1);
+            // Completed transcript lines are written directly above the live inline viewport.
+            let scrollback_lines = chat_widget.drain_scrollback_lines(width);
+            if !scrollback_lines.is_empty() {
+                tui.insert_history_lines(scrollback_lines);
+            }
+
+            // Size the chat area within the visible terminal and render the frame.
+            let height = chat_widget
+                .desired_height(width)
+                .min(tui.terminal.size()?.height.saturating_sub(1))
+                .max(3);
+            tui.draw(height, |frame| {
+                let area = frame.area();
+                chat_widget.render(area, frame.buffer_mut());
+                // Restore the terminal cursor to the widget-provided input position.
+                if let Some((x, y)) = chat_widget.cursor_pos(area) {
+                    frame.set_cursor_position((x, y));
+                }
+            })?;
+        }
+        TuiEvent::Key(key) => {
+            if chat_widget.handle_onboarding_key_event(key) {
+                return Ok(LoopAction::Continue);
+            }
+            if chat_widget.is_onboarding_active() && ChatWidget::is_copy_shortcut(key) {
+                return Ok(LoopAction::Continue);
+            }
+
+            if matches!(
+                key.code,
+                KeyCode::Enter | KeyCode::Char('\n' | '\r') | KeyCode::Modifier(_)
+            ) || (matches!(key.code, KeyCode::Char('j' | 'm'))
+                && key.modifiers.contains(KeyModifiers::CONTROL))
+            {
+                tracing::debug!(
+                    code = ?key.code,
+                    modifiers = ?key.modifiers,
+                    kind = ?key.kind,
+                    state = ?key.state,
+                    "received enter-like key event"
+                );
+            }
+            // Keep Ctrl-C available for terminal copy workflows while work is
+            // active. Cancellation is owned by the bottom pane's Esc flow.
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                match handle_ctrl_c_key(loop_state, Instant::now()) {
+                    CtrlCKeyAction::PromptInterruptWithEsc => {
+                        chat_widget.set_status_message("Press Esc twice to interrupt");
+                    }
+                    CtrlCKeyAction::PromptExitConfirmation => {
+                        chat_widget.set_status_message("Press Ctrl-C again to exit");
+                    }
+                    CtrlCKeyAction::Exit => {
+                        return Ok(LoopAction::ClearAndExit);
+                    }
+                }
+                return Ok(LoopAction::Continue);
+            }
+
+            if key.code == KeyCode::Char('t')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && !chat_widget.is_resume_browser_open()
+            {
+                loop_state.overlay.open_transcript(tui, chat_widget)?;
+                return Ok(LoopAction::Continue);
+            }
+
+            loop_state.last_ctrl_c_at = None;
+            match determine_esc_backtrack_action(
+                key,
+                loop_state.esc_backtrack_primed,
+                chat_widget.is_normal_backtrack_mode(),
+                chat_widget.composer_is_empty(),
+            ) {
+                EscBacktrackAction::PrimeHint => {
+                    loop_state.esc_backtrack_primed = true;
+                    chat_widget.show_esc_backtrack_hint();
+                    return Ok(LoopAction::Continue);
+                }
+                EscBacktrackAction::OpenOverlay => {
+                    loop_state.esc_backtrack_primed = false;
+                    chat_widget.clear_esc_backtrack_hint();
+                    loop_state.overlay.open_transcript(tui, chat_widget)?;
+                    if let Some(transcript) = loop_state.overlay.transcript_mut() {
+                        transcript.begin_backtrack_preview();
+                    }
+                    return Ok(LoopAction::Continue);
+                }
+                EscBacktrackAction::ClearHint => {
+                    loop_state.esc_backtrack_primed = false;
+                    chat_widget.clear_esc_backtrack_hint();
+                }
+                EscBacktrackAction::Noop => {}
+            }
+            chat_widget.handle_key_event(key);
+        }
+        TuiEvent::Paste(pasted) => {
+            // Many terminals convert newlines to \r when pasting (e.g., iTerm2),
+            // but tui-textarea expects \n. Normalize CR to LF.
+            // [tui-textarea]: <https://github.com/rhysd/tui-textarea/blob/4d18622eeac13b309e0ff6a55a46ac6706da68cf/src/textarea.rs#L782-L783>
+            // [iTerm2]: <https://github.com/gnachman/iTerm2/blob/5d0c0d9f68523cbd0494dad5422998964a2ecd8d/sources/iTermPasteHelper.m#L206-L216>
+            let pasted = pasted.replace("\r", "\n");
+            chat_widget.handle_paste(pasted);
+        }
+    }
+
+    Ok(LoopAction::Continue)
+}
+
+fn handle_ctrl_c_key(loop_state: &mut InteractiveLoopState, now: Instant) -> CtrlCKeyAction {
+    if loop_state.busy {
+        loop_state.last_ctrl_c_at = None;
+        return CtrlCKeyAction::PromptInterruptWithEsc;
+    }
+
+    if loop_state
+        .last_ctrl_c_at
+        .is_some_and(|last| now.duration_since(last) <= Duration::from_secs(2))
+    {
+        return CtrlCKeyAction::Exit;
+    }
+
+    loop_state.last_ctrl_c_at = Some(now);
+    CtrlCKeyAction::PromptExitConfirmation
+}
+
+fn determine_esc_backtrack_action(
+    key: crossterm::event::KeyEvent,
+    esc_backtrack_primed: bool,
+    is_normal_backtrack_mode: bool,
+    composer_is_empty: bool,
+) -> EscBacktrackAction {
+    if !matches!(
+        key.kind,
+        crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+    ) {
+        return EscBacktrackAction::Noop;
+    }
+    if key.code == KeyCode::Esc && is_normal_backtrack_mode && composer_is_empty {
+        return if esc_backtrack_primed {
+            EscBacktrackAction::OpenOverlay
+        } else {
+            EscBacktrackAction::PrimeHint
+        };
+    }
+    if key.code != KeyCode::Esc && esc_backtrack_primed {
+        return EscBacktrackAction::ClearHint;
+    }
+    EscBacktrackAction::Noop
+}
+
+fn handle_app_event(
+    app_event: Option<AppEvent>,
+    worker: &QueryWorkerHandle,
+    chat_widget: &mut ChatWidget,
+    tui: &mut Tui,
+    loop_state: &mut InteractiveLoopState,
+    context: &AppCommandContext<'_, impl ModelCatalog>,
+) -> Result<LoopAction> {
+    let Some(app_event) = app_event else {
+        return Ok(LoopAction::ClearAndExit);
+    };
+
+    if let AppEvent::Exit(_) = &app_event {
+        return Ok(LoopAction::ClearAndExit);
+    }
+
+    if matches!(&app_event, AppEvent::Interrupt) {
+        if loop_state.busy {
+            worker.interrupt_turn()?;
+        }
+        chat_widget.handle_app_event(app_event);
+        return Ok(LoopAction::Continue);
+    }
+
+    if let AppEvent::Command(command) = &app_event {
+        chat_widget.handle_app_event(app_event.clone());
+        // Commands that affect sessions, providers, or turns are forwarded to the worker.
+        handle_app_command(command, worker, chat_widget, tui, loop_state, context)?;
+        return Ok(LoopAction::Continue);
+    }
+
+    if let AppEvent::DiffResult(text) = app_event {
+        loop_state.overlay.open_diff(tui, chat_widget, text)?;
+        return Ok(LoopAction::Continue);
+    }
+
+    chat_widget.handle_app_event(app_event);
+
+    Ok(LoopAction::Continue)
+}
+
+fn handle_worker_event(
+    worker_event: Option<WorkerEvent>,
+    worker: &QueryWorkerHandle,
+    chat_widget: &mut ChatWidget,
+    loop_state: &mut InteractiveLoopState,
+) -> Result<LoopAction> {
+    let Some(worker_event) = worker_event else {
+        chat_widget.set_status_message("Background worker stopped");
+        return Ok(LoopAction::ClearAndExit);
+    };
+
+    match &worker_event {
+        WorkerEvent::TurnFinished {
+            turn_count: next_turn_count,
+            total_input_tokens: next_total_input_tokens,
+            total_output_tokens: next_total_output_tokens,
+            total_cache_read_tokens: next_total_cache_read_tokens,
+            ..
+        }
+        | WorkerEvent::TurnFailed {
+            turn_count: next_turn_count,
+            total_input_tokens: next_total_input_tokens,
+            total_output_tokens: next_total_output_tokens,
+            total_cache_read_tokens: next_total_cache_read_tokens,
+            ..
+        } => {
+            loop_state.busy = false;
+            loop_state.turn_count = *next_turn_count;
+            loop_state.total_input_tokens = *next_total_input_tokens;
+            loop_state.total_output_tokens = *next_total_output_tokens;
+            loop_state.total_cache_read_tokens = *next_total_cache_read_tokens;
+            loop_state.session_switch_pending = false;
+        }
+        WorkerEvent::TurnStarted { .. } => {
+            loop_state.busy = true;
+        }
+        WorkerEvent::SessionActivated { session_id } => {
+            loop_state.session_id = Some(*session_id);
+        }
+        // Streaming deltas are handled entirely within the ChatWidget
+        WorkerEvent::ToolOutputDelta { .. } => {}
+        WorkerEvent::UsageUpdated {
+            total_input_tokens: next_total_input_tokens,
+            total_output_tokens: next_total_output_tokens,
+            total_cache_read_tokens: next_total_cache_read_tokens,
+            ..
+        } => {
+            loop_state.total_input_tokens = *next_total_input_tokens;
+            loop_state.total_output_tokens = *next_total_output_tokens;
+            loop_state.total_cache_read_tokens = *next_total_cache_read_tokens;
+        }
+        WorkerEvent::ProviderValidationSucceeded { .. } => {
+            if let Some(pending) = loop_state.pending_onboarding.as_ref() {
+                let provider_vendor = onboarding_provider_vendor(
+                    &pending.binding,
+                    pending.base_url.as_deref(),
+                    pending.api_key.as_deref(),
+                );
+                let model_binding = onboarding_provider_model_binding(
+                    &pending.binding,
+                    pending.base_url.as_deref(),
+                );
+                worker.upsert_provider_vendor(
+                    provider_vendor,
+                    Some(model_binding.clone()),
+                    Some(model_binding.binding_id),
+                    pending.api_key.clone(),
+                )?;
+            }
+        }
+        WorkerEvent::ProviderVendorUpserted { .. } => {
+            if let Some(pending) = loop_state.pending_onboarding.take() {
+                worker.reconfigure_provider(
+                    pending.binding.invocation_method,
+                    pending.binding.model_name,
+                    pending.base_url,
+                    pending.api_key,
+                )?;
+            }
+        }
+        WorkerEvent::ProviderValidationFailed { .. } => {
+            loop_state.pending_onboarding = None;
+        }
+        WorkerEvent::SessionCompactionStarted => {
+            loop_state.busy = true;
+        }
+        WorkerEvent::SessionCompacted {
+            total_input_tokens: next_total_input_tokens,
+            total_output_tokens: next_total_output_tokens,
+            prompt_token_estimate: _,
+        } => {
+            loop_state.busy = false;
+            loop_state.total_input_tokens = *next_total_input_tokens;
+            loop_state.total_output_tokens = *next_total_output_tokens;
+        }
+        WorkerEvent::SessionCompactionFailed { .. } => {
+            loop_state.busy = false;
+        }
+        WorkerEvent::SessionSwitched {
+            session_id,
+            total_input_tokens,
+            total_output_tokens,
+            total_cache_read_tokens,
+            ..
+        } => {
+            loop_state.session_switch_pending = false;
+            loop_state.session_id = devo_core::SessionId::try_from(session_id.as_str()).ok();
+            loop_state.total_input_tokens = *total_input_tokens;
+            loop_state.total_output_tokens = *total_output_tokens;
+            loop_state.total_cache_read_tokens = *total_cache_read_tokens;
+        }
+        WorkerEvent::TextDelta(_)
+        | WorkerEvent::TextItemStarted { .. }
+        | WorkerEvent::TextItemDelta { .. }
+        | WorkerEvent::TextItemCompleted { .. }
+        | WorkerEvent::ReasoningDelta(_)
+        | WorkerEvent::AssistantMessageCompleted(_)
+        | WorkerEvent::ReasoningCompleted(_)
+        | WorkerEvent::ToolCall { .. }
+        | WorkerEvent::ToolCallUpdated { .. }
+        | WorkerEvent::ToolResult { .. }
+        | WorkerEvent::PatchApplied { .. }
+        | WorkerEvent::PlanUpdated { .. }
+        | WorkerEvent::ProviderVendorsListed { .. }
+        | WorkerEvent::SessionsListed { .. }
+        | WorkerEvent::SkillsListed { .. }
+        | WorkerEvent::NewSessionPrepared { .. }
+        | WorkerEvent::SessionRenamed { .. }
+        | WorkerEvent::SessionTitleUpdated { .. }
+        | WorkerEvent::InputHistoryLoaded { .. }
+        | WorkerEvent::InputQueueUpdated { .. }
+        | WorkerEvent::ApprovalRequest { .. }
+        | WorkerEvent::ApprovalDecision { .. }
+        | WorkerEvent::SteerAccepted { .. } => {}
+    }
+    if matches!(&worker_event, WorkerEvent::SessionsListed { .. }) {
+        loop_state.resume_browser_pending = false;
+    }
+    if loop_state.resume_browser_pending && matches!(&worker_event, WorkerEvent::TurnFailed { .. })
+    {
+        loop_state.resume_browser_pending = false;
+    }
+    chat_widget.handle_worker_event(worker_event);
+
+    Ok(LoopAction::Continue)
+}
+
+fn handle_app_command(
+    command: &AppCommand,
+    worker: &QueryWorkerHandle,
+    chat_widget: &mut ChatWidget,
+    tui: &mut Tui,
+    loop_state: &mut InteractiveLoopState,
+    context: &AppCommandContext<'_, impl ModelCatalog>,
+) -> Result<()> {
+    match command {
+        AppCommand::UserTurn {
+            input,
+            model,
+            thinking,
+            approval_policy,
+            ..
+        } => {
+            if let Some(model) = model {
+                worker.set_model(model.clone())?;
+            }
+            worker.set_thinking(thinking.clone())?;
+            let prompt = input
+                .iter()
+                .filter_map(|item| match item {
+                    devo_protocol::InputItem::Text { text } => Some(text.as_str()),
+                    devo_protocol::InputItem::Skill { .. }
+                    | devo_protocol::InputItem::LocalImage { .. }
+                    | devo_protocol::InputItem::Mention { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            worker.submit_prompt(prompt, approval_policy.clone())?;
+        }
+        AppCommand::SteerTurn {
+            input,
+            expected_turn_id,
+        } => {
+            let prompt = input
+                .iter()
+                .filter_map(|item| match item {
+                    devo_protocol::InputItem::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            worker.submit_steer(prompt, *expected_turn_id)?;
+        }
+        AppCommand::ApprovalRespond {
+            session_id,
+            turn_id,
+            approval_id,
+            decision,
+            scope,
+        } => {
+            worker.approval_respond(
+                *session_id,
+                *turn_id,
+                approval_id.clone(),
+                decision.clone(),
+                scope.clone(),
+            )?;
+        }
+        AppCommand::UpdatePermissions { preset } => {
+            worker.update_permissions(*preset)?;
+            save_project_permission_preset(context.project_config_key, *preset)?;
+            chat_widget.note_permissions_updated(*preset);
+        }
+        AppCommand::OverrideTurnContext {
+            model, thinking, ..
+        } => {
+            if let Some(model) = model {
+                worker.set_model(model.clone())?;
+                let provider = context
+                    .model_catalog
+                    .get(model)
+                    .map(Model::provider_wire_api)
+                    .unwrap_or(context.default_provider);
+                save_last_used_model(/*wire_api*/ None, provider, model)?;
+            }
+            if let Some(thinking) = thinking {
+                worker.set_thinking(thinking.clone())?;
+                save_thinking_selection(thinking.as_deref())?;
+            }
+        }
+        AppCommand::RunUserShellCommand { command } => {
+            if command == "session list" {
+                tui.enter_alt_screen()?;
+                if let Err(error) = worker.list_sessions() {
+                    let _ = tui.leave_alt_screen();
+                    return Err(error);
+                }
+                loop_state.resume_browser_pending = true;
+                chat_widget.set_status_message("Loading sessions");
+            } else if command == "provider list" {
+                worker.list_provider_vendors()?;
+            } else if command == "session new" {
+                worker.start_new_session()?;
+            } else if let Some(payload) = parse_onboarding_command(command) {
+                if context.model_catalog.get(&payload.model_slug).is_none() {
+                    chat_widget.set_status_message(format!(
+                        "Unsupported model slug: {}",
+                        payload.model_slug
+                    ));
+                    return Ok(());
+                }
+                let display_name = normalized_display_name(
+                    context.model_catalog,
+                    &payload.model_slug,
+                    &payload.display_name,
+                );
+                let binding = OnboardingModelBinding {
+                    model_slug: payload.model_slug,
+                    model_name: payload.model_name,
+                    display_name,
+                    provider_id: payload.provider_id,
+                    provider_name: payload.provider_name,
+                    invocation_method: payload.invocation_method,
+                    default_reasoning_effort: payload.default_reasoning_effort,
+                };
+                worker.list_provider_vendors()?;
+                let provider_vendor = onboarding_provider_vendor(
+                    &binding,
+                    payload.base_url.as_deref(),
+                    payload.api_key.as_deref(),
+                );
+                let model_binding =
+                    onboarding_provider_model_binding(&binding, payload.base_url.as_deref());
+                worker.validate_provider(
+                    provider_vendor,
+                    model_binding,
+                    payload.api_key.clone(),
+                )?;
+                loop_state.pending_onboarding = Some(PendingOnboarding {
+                    binding,
+                    base_url: payload.base_url,
+                    api_key: payload.api_key,
+                });
+                chat_widget.set_status_message("Validating provider");
+            } else {
+                chat_widget.set_status_message(format!("Unsupported command: {}", command));
+            }
+        }
+        AppCommand::Compact => {
+            worker.compact_session()?;
+        }
+        AppCommand::BrowseInputHistory { direction } => {
+            worker.browse_input_history(*direction)?;
+        }
+        AppCommand::SwitchSession { session_id } => {
+            if tui.is_alt_screen_active() {
+                tui.leave_alt_screen()?;
+            }
+            tracing::trace!(session_id = ?session_id, "switch session requested");
+            loop_state.session_switch_pending = true;
+            tui.replace_inline_session_ui()?;
+            worker.switch_session(*session_id)?;
+        }
+        AppCommand::RollbackToUserTurn { user_turn_index } => {
+            loop_state.session_switch_pending = true;
+            tui.replace_inline_session_ui()?;
+            worker.rollback_to_user_turn(*user_turn_index)?;
+        }
+        AppCommand::ForkAtUserTurn { user_turn_index } => {
+            loop_state.session_switch_pending = true;
+            tui.replace_inline_session_ui()?;
+            worker.fork_at_user_turn(*user_turn_index)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn ctrl_c_while_busy_prompts_for_esc_without_arming_exit() {
+        let mut loop_state = InteractiveLoopState {
+            busy: true,
+            last_ctrl_c_at: Some(Instant::now()),
+            ..InteractiveLoopState::default()
+        };
+
+        let action = handle_ctrl_c_key(&mut loop_state, Instant::now());
+
+        assert_eq!(CtrlCKeyAction::PromptInterruptWithEsc, action);
+        assert_eq!(None, loop_state.last_ctrl_c_at);
+    }
+
+    #[test]
+    fn ctrl_c_when_idle_requires_second_press_to_exit() {
+        let now = Instant::now();
+        let mut loop_state = InteractiveLoopState::default();
+
+        let first = handle_ctrl_c_key(&mut loop_state, now);
+        let second = handle_ctrl_c_key(&mut loop_state, now + Duration::from_secs(1));
+
+        assert_eq!(CtrlCKeyAction::PromptExitConfirmation, first);
+        assert_eq!(CtrlCKeyAction::Exit, second);
+    }
+
+    #[test]
+    fn esc_backtrack_requires_second_press_to_open_overlay() {
+        let esc_press = crossterm::event::KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        let esc_release = crossterm::event::KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Release,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+
+        assert_eq!(
+            determine_esc_backtrack_action(
+                esc_press, false, /*is_normal_backtrack_mode*/ true,
+                /*composer_is_empty*/ true,
+            ),
+            EscBacktrackAction::PrimeHint
+        );
+        assert_eq!(
+            determine_esc_backtrack_action(
+                esc_release,
+                true,
+                /*is_normal_backtrack_mode*/ true,
+                /*composer_is_empty*/ true,
+            ),
+            EscBacktrackAction::Noop
+        );
+        assert_eq!(
+            determine_esc_backtrack_action(
+                esc_press, true, /*is_normal_backtrack_mode*/ true,
+                /*composer_is_empty*/ true,
+            ),
+            EscBacktrackAction::OpenOverlay
+        );
+    }
+
+    #[test]
+    fn session_activated_updates_loop_state_session_id() {
+        let session_id = devo_core::SessionId::new();
+        let mut loop_state = InteractiveLoopState::default();
+        let worker_event = WorkerEvent::SessionActivated { session_id };
+
+        match &worker_event {
+            WorkerEvent::SessionActivated { session_id } => {
+                loop_state.session_id = Some(*session_id);
+            }
+            _ => unreachable!(),
+        }
+
+        assert_eq!(loop_state.session_id, Some(session_id));
+    }
+}

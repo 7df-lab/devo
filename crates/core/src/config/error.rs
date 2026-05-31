@@ -18,4 +18,42 @@ pub enum AppConfigError {
     /// Cross-field validation rejected the normalized config.
     #[error("invalid app config: {message}")]
     Validation { message: String },
+    /// Provider config loading or persistence failed.
+    #[error("provider config failed: {source}")]
+    Provider {
+        /// The underlying provider config error.
+        #[source]
+        source: ProviderConfigError,
+    },
+}
+
+/// Enumerates failures that can occur while loading, validating, or persisting provider config.
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderConfigError {
+    /// The config path could not be determined.
+    #[error("{message}")]
+    ConfigPath { message: String },
+    /// Reading or writing a provider config file failed.
+    #[error("failed to {action} {path}: {source}")]
+    Io {
+        /// The failed filesystem action.
+        action: &'static str,
+        /// The path being accessed.
+        path: PathBuf,
+        /// The underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Parsing provider TOML from a file failed.
+    #[error("failed to parse {path}: {message}")]
+    ParseTomlFile { path: PathBuf, message: String },
+    /// Parsing user-scoped auth JSON failed.
+    #[error("failed to parse {path}: {message}")]
+    ParseAuth { path: PathBuf, message: String },
+    /// Serializing provider config failed.
+    #[error("failed to serialize provider config: {message}")]
+    Serialize { message: String },
+    /// Provider config validation failed.
+    #[error("{message}")]
+    Validation { message: String },
 }

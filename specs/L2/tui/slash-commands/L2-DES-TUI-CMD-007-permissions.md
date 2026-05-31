@@ -77,7 +77,7 @@ Rules:
 | refines | L1-REQ-TUI-006 | 1 | specs/L1/L1-REQ-TUI-006-command-discovery-control.md | Defines command-specific behavior for a discoverable TUI command. |
 | related-to | L1-REQ-APP-003 | 1 | specs/L1/L1-REQ-APP-003-safety.md | `/permissions` is the user-facing command for session permission posture and must not bypass approval boundaries. |
 | related-to | L1-REQ-TOOL-001 | 1 | specs/L1/L1-REQ-TOOL-001-safety.md | Permissions constrain tool safety and approval behavior. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Permission changes and approval responses are server-owned protocol operations. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Permission changes and approval responses are server-owned protocol operations. |
 | related-to | L2-DES-TOOL-001 | 1 | specs/L2/tool/L2-DES-TOOL-001-built-in-tool-system.md | Tool permission policy and approval gates define the effect of each permission mode. |
 | related-to | L2-DES-TUI-004 | 1 | specs/L2/tui/L2-DES-TUI-004-streaming-transcript-and-state.md | Approval and waiting states must remain visible. |
 | related-to | L2-DES-TUI-003 | 1 | specs/L2/tui/L2-DES-TUI-003-composer-and-input-modes.md | Uses shared slash-command discovery and invocation behavior. |

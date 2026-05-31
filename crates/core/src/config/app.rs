@@ -1,42 +1,56 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 use devo_protocol::PermissionPreset;
-use serde::{Deserialize, Serialize};
+use devo_protocol::ProviderModelBinding;
+use devo_protocol::ProviderVendor;
+use serde::Deserialize;
+use serde::Serialize;
 
 use devo_utils::FileSystemConfigPathResolver;
 use devo_utils::git_op::get_git_repo_root;
 
 use crate::AgentsMdConfig;
 use crate::SkillsConfig;
-use crate::config::{
-    AppConfigError, ContextManageConfig, LogRotation, LoggingConfig, LoggingFileConfig,
-    SafetyPolicyModelSelection, ServerConfig,
-};
+use crate::config::AUTH_CONFIG_FILE_NAME;
+use crate::config::AppConfigError;
+use crate::config::LogRotation;
+use crate::config::LoggingConfig;
+use crate::config::LoggingFileConfig;
+use crate::config::ModelBindingConfig;
+use crate::config::ProviderConfigError;
+use crate::config::ProviderConfigSection;
+use crate::config::ResolvedProviderSettings;
+use crate::config::ServerConfig;
+use crate::config::non_empty_string;
+use crate::config::provider_vendor_from_config;
+use crate::config::read_provider_config;
+use crate::config::read_user_auth_config;
+use crate::config::resolve_provider_settings_from_config_and_auth;
+use crate::config::upsert_user_auth_api_key;
+use crate::config::write_provider_config;
 
 /// Stores the fully normalized runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
-    /// Whether enable auxiliary model.
-    pub enable_auxiliary_model: bool,
     /// The policy that selects which model should generate context summaries.
     pub summary_model: SummaryModelSelection,
-    /// Safety and policy-model defaults.
-    pub safety_policy_model: SafetyPolicyModelSelection,
-    /// Policy that Context-window management and compaction defaults.
-    pub context: ContextManageConfig,
     /// Transport and server runtime defaults.
     pub server: ServerConfig,
     /// Logging and redaction behavior for diagnostics.
     pub logging: LoggingConfig,
     /// Skill discovery roots and behavior.
     pub skills: SkillsConfig,
+    /// Provider, model, and active model defaults.
+    #[serde(flatten)]
+    pub provider: ProviderConfigSection,
     /// Startup update-check defaults.
     pub updates: UpdatesConfig,
-    /// TODO: Not sure what's purpose of `project_root_markers`?
-    /// Marker names used when discovering a project root.
+    /// Marker names used to discover the project root for instruction discovery.
+    /// These values map to `InstructionDiscoveryConfig::root_markers`, such as ['.git'].
     pub project_root_markers: Vec<String>,
     /// User-level settings remembered per project key.
     pub projects: BTreeMap<String, ProjectConfig>,
@@ -92,14 +106,7 @@ pub trait AppConfigLoader {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            enable_auxiliary_model: false,
-            context: ContextManageConfig {
-                preserve_recent_turns: 3,
-                auto_compact_percent: Some(90),
-                manual_compaction_enabled: true,
-            },
             summary_model: SummaryModelSelection::UseTurnModel,
-            safety_policy_model: SafetyPolicyModelSelection::UseAxiliaryModel,
             server: ServerConfig {
                 listen: Vec::new(),
                 max_connections: 32,
@@ -124,6 +131,7 @@ impl Default for AppConfig {
                 workspace_roots: vec![PathBuf::from("skills")],
                 watch_for_changes: true,
             },
+            provider: ProviderConfigSection::default(),
             updates: UpdatesConfig {
                 enabled: true,
                 check_on_startup: true,
@@ -135,7 +143,205 @@ impl Default for AppConfig {
     }
 }
 
+/// Shared runtime view of the effective app configuration.
+///
+/// Server code should depend on this store instead of carrying separate paths
+/// or provider-only stores. Domain-specific mutation helpers update the durable
+/// file-backed config and refresh the effective app config afterward.
+#[derive(Debug, Clone)]
+pub struct AppConfigStore {
+    loader: FileSystemAppConfigLoader,
+    workspace_root: Option<PathBuf>,
+    user_config_file: PathBuf,
+    config: AppConfig,
+}
+
+impl AppConfigStore {
+    /// Loads user/workspace config into a single effective app config store.
+    pub fn load(
+        user_config_dir: PathBuf,
+        workspace_root: Option<&Path>,
+    ) -> Result<Self, AppConfigError> {
+        let resolver = FileSystemConfigPathResolver::new(user_config_dir.clone());
+        let user_config_file = resolver.user_config_file();
+        let loader = FileSystemAppConfigLoader::new(user_config_dir);
+        let config = loader.load(workspace_root)?;
+
+        Ok(Self {
+            loader,
+            workspace_root: workspace_root.map(Path::to_path_buf),
+            user_config_file,
+            config,
+        })
+    }
+
+    /// Returns the effective app config currently visible to the runtime.
+    pub fn effective_config(&self) -> &AppConfig {
+        &self.config
+    }
+
+    /// Returns the configured provider vendors from the effective config.
+    pub fn provider_vendors(&self) -> Vec<ProviderVendor> {
+        self.config
+            .provider
+            .providers
+            .iter()
+            .map(|(provider_id, provider_config)| {
+                provider_vendor_from_config(provider_id, provider_config)
+            })
+            .collect()
+    }
+
+    /// Upserts a provider vendor and refreshes the shared effective app config.
+    pub fn upsert_provider_vendor(
+        &mut self,
+        provider_id: String,
+        provider_vendor: ProviderVendor,
+        model_binding: Option<ProviderModelBinding>,
+        default_model_binding: Option<String>,
+        api_key: Option<String>,
+    ) -> anyhow::Result<ProviderVendor> {
+        if provider_vendor.wire_apis.is_empty() {
+            anyhow::bail!("wire_apis must contain at least one wire API");
+        }
+        if let Some(binding) = &model_binding {
+            validate_provider_model_binding(&provider_id, &provider_vendor, binding)?;
+        }
+
+        let target_config_file = self.user_config_file.as_path();
+        let mut config = read_provider_config(target_config_file)?;
+        let credential_id = if let Some(api_key) = api_key.as_deref().and_then(non_empty_string) {
+            let credential_id = provider_vendor
+                .credential
+                .as_deref()
+                .and_then(non_empty_string)
+                .unwrap_or_else(|| credential_id_for_provider(&provider_id));
+            let user_config_dir = self
+                .user_config_file
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("user config file has no parent directory"))?;
+            upsert_user_auth_api_key(user_config_dir, &credential_id, &api_key)?;
+            Some(credential_id)
+        } else {
+            provider_vendor
+                .credential
+                .as_deref()
+                .and_then(non_empty_string)
+        };
+        let entry = config.providers.entry(provider_id.clone()).or_default();
+        entry.name = provider_vendor.name.trim().to_string();
+        entry.base_url = provider_vendor
+            .base_url
+            .as_deref()
+            .and_then(non_empty_string);
+        entry.credential = credential_id;
+        entry.wire_apis = provider_vendor.wire_apis.clone();
+        entry.enabled = provider_vendor.enabled;
+
+        if let Some(binding) = &model_binding {
+            config.model_bindings.insert(
+                binding.binding_id.clone(),
+                ModelBindingConfig {
+                    model_slug: binding.model_slug.trim().to_string(),
+                    provider: binding.provider.trim().to_string(),
+                    model_name: binding.model_name.trim().to_string(),
+                    display_name: binding.display_name.as_deref().and_then(non_empty_string),
+                    invocation_method: binding.invocation_method,
+                    default_reasoning_effort: binding
+                        .default_reasoning_effort
+                        .as_deref()
+                        .and_then(non_empty_string),
+                    enabled: binding.enabled,
+                },
+            );
+        }
+        if let Some(binding_id) = default_model_binding.as_deref().and_then(non_empty_string) {
+            if !config.model_bindings.contains_key(&binding_id) {
+                anyhow::bail!("default model binding `{binding_id}` does not exist");
+            }
+            if let Some(binding) = config.model_bindings.get(&binding_id) {
+                config.model_provider = Some(binding.provider.clone());
+                config.model = Some(binding.model_slug.clone());
+            }
+            config.defaults.model_binding = Some(binding_id);
+        }
+
+        write_provider_config(target_config_file, &config)?;
+
+        self.config = self
+            .loader
+            .load(self.workspace_root.as_deref())
+            .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(provider_vendor_from_config(
+            &provider_id,
+            self.config
+                .provider
+                .providers
+                .get(&provider_id)
+                .expect("provider entry should exist after upsert"),
+        ))
+    }
+}
+
+fn validate_provider_model_binding(
+    provider_id: &str,
+    provider_vendor: &ProviderVendor,
+    binding: &ProviderModelBinding,
+) -> anyhow::Result<()> {
+    if binding.binding_id.trim().is_empty() {
+        anyhow::bail!("model binding id cannot be empty");
+    }
+    if binding.model_slug.trim().is_empty() {
+        anyhow::bail!("model binding model_slug cannot be empty");
+    }
+    if binding.model_name.trim().is_empty() {
+        anyhow::bail!("model binding model_name cannot be empty");
+    }
+    if binding.provider.trim() != provider_id {
+        anyhow::bail!("model binding provider must match provider vendor");
+    }
+    if !provider_vendor
+        .wire_apis
+        .contains(&binding.invocation_method)
+    {
+        anyhow::bail!("model binding invocation_method must be supported by provider vendor");
+    }
+    Ok(())
+}
+
+fn credential_id_for_provider(provider_id: &str) -> String {
+    let mut out = String::new();
+    for ch in provider_id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    format!("{}_api_key", out.trim_matches('_'))
+}
+
 impl AppConfig {
+    /// Resolves the active provider settings from this already-merged config.
+    ///
+    /// `user_config_dir` is used only for user-scoped auth material such as
+    /// `auth.json`; provider selection itself comes from this `AppConfig`.
+    pub fn resolve_provider_settings(
+        &self,
+        user_config_dir: &Path,
+    ) -> Result<ResolvedProviderSettings, ProviderConfigError> {
+        let auth = read_user_auth_config(&user_config_dir.join(AUTH_CONFIG_FILE_NAME))?;
+        resolve_provider_settings_from_config_and_auth(&self.provider, &auth)
+    }
+
+    /// Returns true when the merged config contains any provider-era setup.
+    pub fn has_provider_configuration(&self) -> bool {
+        !self.provider.providers.is_empty()
+            || !self.provider.model_bindings.is_empty()
+            || !self.provider.model_providers.is_empty()
+    }
+
     pub fn agents_md_config(&self) -> AgentsMdConfig {
         AgentsMdConfig {
             project_root_markers: self.project_root_markers.clone(),
@@ -178,6 +384,19 @@ fn read_config_value(path: &Path) -> Result<toml::Value, AppConfigError> {
             message: source.to_string(),
         }
     })
+}
+
+fn provider_section_from_value(
+    path: &Path,
+    value: &toml::Value,
+) -> Result<ProviderConfigSection, AppConfigError> {
+    value
+        .clone()
+        .try_into()
+        .map_err(|source: toml::de::Error| AppConfigError::Parse {
+            path: path.to_path_buf(),
+            message: source.to_string(),
+        })
 }
 
 /// Filesystem-backed loader for project and user config files, plus CLI overrides.
@@ -224,28 +443,35 @@ impl AppConfigLoader for FileSystemAppConfigLoader {
         // wins for any overlapping field.
         let mut merged = toml::Value::try_from(AppConfig::default())
             .expect("default app config must serialize to TOML");
+        let mut provider_config = ProviderConfigSection::default();
 
         let user_path = self.user_config_path();
         if user_path.exists() {
-            merge_toml_values(&mut merged, read_config_value(&user_path)?);
+            let user_config = read_config_value(&user_path)?;
+            provider_config.merge_overlay(provider_section_from_value(&user_path, &user_config)?);
+            merge_toml_values(&mut merged, user_config);
         }
 
         if let Some(workspace_root) = workspace_root {
             let project_path = self.project_config_path(workspace_root);
             if project_path.exists() {
-                merge_toml_values(&mut merged, read_config_value(&project_path)?);
+                let project_config = read_config_value(&project_path)?;
+                provider_config
+                    .merge_overlay(provider_section_from_value(&project_path, &project_config)?);
+                merge_toml_values(&mut merged, project_config);
             }
         }
 
         merge_toml_values(&mut merged, self.cli_overrides.clone());
 
-        let config =
+        let mut config: AppConfig =
             merged
                 .try_into()
                 .map_err(|source: toml::de::Error| AppConfigError::Parse {
                     path: PathBuf::from("<merged config>"),
                     message: source.to_string(),
                 })?;
+        config.provider = provider_config;
         validate_app_config(&config)?;
         Ok(config)
     }
@@ -267,20 +493,6 @@ fn merge_toml_values(base: &mut toml::Value, overlay: toml::Value) {
 }
 
 fn validate_app_config(config: &AppConfig) -> Result<(), AppConfigError> {
-    if let Some(percent) = config.context.auto_compact_percent
-        && !(1..=99).contains(&percent)
-    {
-        return Err(AppConfigError::Validation {
-            message: "context.auto_compact_percent must be between 1 and 99".into(),
-        });
-    }
-
-    if config.context.preserve_recent_turns < 1 {
-        return Err(AppConfigError::Validation {
-            message: "context.preserve_recent_turns must be at least 1".into(),
-        });
-    }
-
     let mut seen = HashSet::new();
     if config.server.listen.iter().any(|addr| !seen.insert(addr)) {
         return Err(AppConfigError::Validation {

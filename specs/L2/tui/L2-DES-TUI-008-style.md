@@ -231,7 +231,7 @@ terminal:
 
 ## Theme Management
 
-The default built-in themes are `devo-dark` and `devo-light`. `devo-dark` should be the default unless user or project configuration selects another theme.
+The default built-in themes are `devo-dark` and `devo-light`. `devo-dark` should be the default unless user or workspace configuration selects another theme.
 
 Theme selection is user-facing through `/theme` and durable through the `[tui]` section of `config.toml`.
 
@@ -497,7 +497,7 @@ Rules:
 | related-to | L2-DES-TUI-005 | 1 | specs/L2/tui/L2-DES-TUI-005-terminal-lifecycle-safety.md | Terminal color override and restoration are constrained by lifecycle safety. |
 | related-to | L2-DES-TUI-006 | 1 | specs/L2/tui/L2-DES-TUI-006-full-transcript-alternate-screen.md | Full transcript review uses the same style tokens at expanded output limits. |
 | related-to | L2-DES-TUI-007 | 1 | specs/L2/tui/L2-DES-TUI-007-session-rendering-consistency.md | Shared projections must render through the same style system. |
-| related-to | L2-DES-APP-005 | 1 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Theme selection and TUI preferences are persisted in `config.toml`. |
+| related-to | L2-DES-APP-005 | 2 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Theme selection and TUI preferences are persisted in `config.toml`. |
 | related-to | L2-DES-CLIENT-001 | 1 | specs/L2/client/L2-DES-CLIENT-001-localization-readiness.md | Unicode display-width rules constrain all styled rendering. |
 | specified-by | L3-BEH-TUI-007 | 1 | specs/L3/tui/L3-BEH-TUI-007-style-system.md | L3 defines theme tokens, symbols, spinner frames, popup markers, component styles, and style tests. |
 

@@ -7,6 +7,7 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -371,22 +372,34 @@ impl ListSelectionView {
             .filter_map(|(visible_idx, actual_idx)| {
                 self.items.get(*actual_idx).map(|item| {
                     let is_selected = self.state.selected_idx == Some(visible_idx);
-                    let prefix = if is_selected { '›' } else { ' ' };
+                    let marker = if item.is_current {
+                        '●'
+                    } else if is_selected {
+                        '›'
+                    } else {
+                        ' '
+                    };
                     let name = item.name.as_str();
                     let is_disabled = item.is_disabled || item.disabled_reason.is_some();
                     let n = visible_idx + 1;
                     let wrap_prefix = if self.is_searchable {
                         // The number keys don't work when search is enabled (since we let the
                         // numbers be used for the search query).
-                        format!("{prefix} ")
+                        format!("{marker} ")
                     } else if is_disabled {
-                        format!("{prefix} {}", " ".repeat(n.to_string().len() + 2))
+                        format!("{marker} {}", " ".repeat(n.to_string().len() + 2))
                     } else {
-                        format!("{prefix} {n}. ")
+                        format!("{marker} {n}. ")
                     };
                     let wrap_prefix_width = UnicodeWidthStr::width(wrap_prefix.as_str());
                     let mut name_prefix_spans = Vec::new();
-                    name_prefix_spans.push(wrap_prefix.into());
+                    let marker_style = if item.is_current {
+                        Style::default().fg(self.accent_color).bold()
+                    } else {
+                        Style::default()
+                    };
+                    name_prefix_spans.push(Span::styled(marker.to_string(), marker_style));
+                    name_prefix_spans.push(wrap_prefix[marker.len_utf8()..].to_string().into());
                     name_prefix_spans.extend(item.name_prefix_spans.clone());
                     let description = is_selected
                         .then(|| item.selected_description.clone())

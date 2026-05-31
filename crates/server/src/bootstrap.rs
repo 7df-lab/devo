@@ -4,18 +4,24 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use clap::ValueEnum;
-use devo_core::{
-    AppConfigLoader, FileSystemAppConfigLoader, FileSystemSkillCatalog, ModelCatalog,
-    PresetModelCatalog, SkillsConfig,
-};
-use devo_tools::ToolPlanConfig;
-use devo_tools::handlers;
+use devo_core::AppConfigStore;
+use devo_core::FileSystemSkillCatalog;
+use devo_core::ModelCatalog;
+use devo_core::PresetModelCatalog;
+use devo_core::ProviderVendorCatalog;
+use devo_core::SkillsConfig;
+use devo_core::tools::ToolPlanConfig;
+use devo_core::tools::handlers;
+use devo_provider::SingleProviderRouter;
 use devo_utils::FileSystemConfigPathResolver;
 
-use crate::{
-    ListenTarget, ServerRuntime, db::Database, execution::ServerRuntimeDependencies,
-    load_server_provider, resolve_listen_targets, run_listeners,
-};
+use crate::ListenTarget;
+use crate::ServerRuntime;
+use crate::db::Database;
+use crate::execution::ServerRuntimeDependencies;
+use crate::load_server_provider;
+use crate::resolve_listen_targets;
+use crate::run_listeners;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ServerTransportMode {
@@ -40,8 +46,15 @@ pub struct ServerProcessArgs {
 /// configuration and listener set.
 pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     let resolver = FileSystemConfigPathResolver::from_env()?;
-    let loader = FileSystemAppConfigLoader::new(resolver.user_config_dir());
-    let config = loader.load(args.working_root.as_deref())?;
+    let config_store = Arc::new(std::sync::Mutex::new(AppConfigStore::load(
+        resolver.user_config_dir(),
+        args.working_root.as_deref(),
+    )?));
+    let config = config_store
+        .lock()
+        .expect("app config store mutex should not be poisoned")
+        .effective_config()
+        .clone();
     let effective_listen = match args.transport {
         ServerTransportMode::Config => config.server.listen.clone(),
         ServerTransportMode::Stdio => vec!["stdio://".to_string()],
@@ -69,7 +82,7 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     );
 
     let registry = handlers::build_registry_from_plan(&ToolPlanConfig::default());
-    let provider = load_server_provider(&resolver.user_config_file(), None)?;
+    let provider = load_server_provider(&config, None, &resolver.user_config_dir())?;
     let model_catalog: Arc<dyn ModelCatalog> = Arc::new(PresetModelCatalog::load_from_config(
         &resolver.user_config_dir(),
         args.working_root.as_deref(),
@@ -110,25 +123,27 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
         workspace_roots: workspace_skill_roots,
         watch_for_changes: config.skills.watch_for_changes,
     }));
-
     // Initialize SQLite database
     let db_path = resolver.user_config_dir().join("devo.db");
     tracing::info!(db_path = %db_path.display(), "opening database");
     let db = Arc::new(Database::open(db_path)?);
 
     let registry = Arc::new(registry);
+    let provider_router = Arc::new(SingleProviderRouter::new(provider.provider.clone()));
     let runtime = ServerRuntime::new(
         resolver.user_config_dir(),
         ServerRuntimeDependencies::new(
             provider.provider,
+            provider_router,
             Arc::clone(&registry),
             provider.default_model,
             model_catalog,
+            Arc::new(ProviderVendorCatalog::default()),
             skill_workspace_root,
             skill_catalog,
             config.agents_md_config(),
             db,
-            resolver.user_config_file(),
+            config_store,
         ),
     );
     tracing::info!("starting persisted session restore");

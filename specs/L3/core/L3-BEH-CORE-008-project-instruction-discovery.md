@@ -91,7 +91,7 @@ L2-DES-WORKSPACE-001 (Project Instruction File Discovery)
      - Each discovered file: path, priority level, size, whether truncated.
      - Directories that contributed no file.
      - Global instruction file path (if configured).
-  2. Expose through `config.inspect` with `scope: workspace_instructions`.
+  2. Expose through `config/inspect` with `scope: workspace_instructions`.
   3. If no instruction files found anywhere: this is normal, not an error. The session proceeds with only base instructions.
 - **Postconditions**: Users can understand which instruction files are active.
 

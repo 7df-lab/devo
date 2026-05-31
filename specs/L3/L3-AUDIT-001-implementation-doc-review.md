@@ -1,6 +1,6 @@
 ---
 artifact_id: L3-AUDIT-001
-revision: 9
+revision: 18
 status: Draft
 active_baseline: no
 ---
@@ -27,9 +27,9 @@ L3 implementation documentation must:
 
 **Issue**: The CLI and TUI onboarding L3 documents still referred to `devo onboard`, provider-first setup, `.devo` project config paths, and `~/.config/devo/config.toml`.
 
-**Why unreasonable**: L2 requires manual onboarding through `devo --onboard`, model-first onboarding, project config at `project_directory/.dev/config.toml`, and user config at `~/.devo/config.toml` or `C:\Users\username\.devo\config.toml`.
+**Why unreasonable**: Current configuration rules require manual onboarding through `devo --onboard`, model-first onboarding, workspace config at `<workspace>/.devo/config.toml`, user config at `~/.devo/config.toml` or `C:\Users\username\.devo\config.toml`, and user-only `auth.json`.
 
-**Correction**: `L3-BEH-CLI-001` and `L3-BEH-TUI-005` now use `--onboard`, delegate the model-first flow to onboarding UI L3, and use the L2-defined config/auth locations.
+**Correction**: `L3-BEH-CLI-001` and `L3-BEH-TUI-005` now use `--onboard`, delegate the model-first flow to onboarding UI L3, write workspace non-secret config to `<workspace>/.devo/config.toml`, and write credentials only to user-scoped `auth.json`.
 
 ### F2. `/btw` Persistence Semantics Were Wrong
 
@@ -37,7 +37,7 @@ L3 implementation documentation must:
 
 **Why unreasonable**: L2 changed `/btw` into a side conversation inside an ephemeral fork. It must not persist session, turn, item, queue, steer, or fork records.
 
-**Correction**: `L3-BEH-TUI-004` now requires an ephemeral fork execution path and forbids lowering `/btw` into normal durable `turn.submit`.
+**Correction**: `L3-BEH-TUI-004` now requires an ephemeral fork execution path and forbids lowering `/btw` into normal durable `turn/submit`.
 
 ### F3. Goal Lifecycle L3 Weakened L2 Accounting And Continuation Guarantees
 
@@ -169,11 +169,75 @@ L3 implementation documentation must:
 
 ### F19. Protocol L3 Omitted Fork/Delete/Edit Request Semantics
 
-**Issue**: The JSON-RPC L3 defined envelope handling, subscriptions, turn submission, and approval races, but did not define concrete request behavior for `session.fork`, `session.delete`, or `message.editPrevious`.
+**Issue**: The JSON-RPC L3 defined envelope handling, subscriptions, turn submission, and approval races, but did not define concrete request behavior for `session/fork`, `session/delete`, or `message/editPrevious`.
 
 **Why unreasonable**: L2 gives these methods specific safety-critical response fields and semantics. Without L3 request handling, implementation could return a fork before inherited segments are durable, delete a parent before fork retention is protected, or let clients infer edit/restore ordering from optimistic UI state.
 
 **Correction**: `L3-BEH-PROTOCOL-001` now defines request params, response results, error codes, and delegation points for fork, delete with fork retention, and immediate previous message editing.
+
+### F20. Crate Architecture L3 Treated Stale Crate Shape As Normative
+
+**Issue**: The crate architecture L3 evaluated the current `crates/` directory by file counts and used "too thin" / "too heavy" migration language as if present module shape were authoritative.
+
+**Why unreasonable**: The current implementation is stale reference material. Architecture L3 must define responsibility boundaries from L2, not require developers to preserve or react to current file counts. The same document also claimed core contains no I/O while other L3 docs require core-owned built-in handlers, including local file and process effects.
+
+**Correction**: `L3-DES-ARCH-001` now defines normative crate boundaries, dependency direction, effect ownership, core/tool/server/provider/safety responsibilities, and separates local tool effects from provider/client/UI transport I/O.
+
+### F21. Configuration L3 Used The Wrong Workspace Path And Merge Granularity
+
+**Issue**: Configuration L3 still used workspace `.dev/config.toml` in places, described project-scoped `auth.json` behavior in related onboarding docs, and treated keyed records as whole-record replacements.
+
+**Why unreasonable**: The current configuration decision is that `auth.json` exists only in the user configuration directory, workspace config lives at `<workspace>/.devo/config.toml`, and user/workspace `config.toml` files merge field by field. Whole-record replacement would discard valid user fields merely because a workspace file sets one field.
+
+**Correction**: `L3-BEH-APP-001`, `L3-BEH-CLI-001`, and `L3-BEH-TUI-005` now use user-only `auth.json`, workspace `<workspace>/.devo/config.toml`, and field-level workspace-over-user merge semantics. `L3-BEH-APP-001` core types now model user config/auth and optional workspace config as separate inputs, with no workspace auth path. The directly related L2 configuration docs were aligned for consistency.
+
+### F22. Skill Package Mechanics Were Folded Into Core Runtime Behavior
+
+**Issue**: The architecture and runtime skills L3 treated skill parsing, package data structures, default bundled skills, default-skill installation, runtime catalog construction, and activation policy as one core/server concern.
+
+**Why unreasonable**: Skill packages are reusable data assets with their own parsing and installation lifecycle. Runtime activation is a session policy decision. Combining them would make default-skill installation depend on server runtime behavior and blur the boundary between package metadata and active model context.
+
+**Correction**: `L3-DES-ARCH-001` now defines a dedicated `skills` crate. `L3-BEH-SKILLS-001` defines package parsing and default-skill installation. `L3-BEH-SERVER-005` now consumes those package mechanics while retaining runtime catalog and activation behavior.
+
+### F23. Server Runtime Still Modeled `turn/submit` As A Blocking Execution Call
+
+**Issue**: The server runtime L3 awaited the full turn outcome inside `handle_turn_submit`, still named `core::query()` as the server/core boundary, and did not match the revised core/provider split.
+
+**Why unreasonable**: L2 and protocol L3 define JSON-RPC request/response behavior where the client receives an immediate `turn/submit` response after durable admission, while assistant output and tool activity arrive through subscribed events. Blocking the request until turn completion would make the protocol harder to use from multiple clients and contradict the event-driven design. Keeping `core::query()` as the boundary also hid provider HTTP transport inside the wrong abstraction.
+
+**Correction**: `L3-BEH-SERVER-001` now returns `turn/submit` after durable core admission, spawns the turn loop separately, calls provider transport through a server-owned `ProviderRouter`, and delegates provider-event reduction/finalization to `L3-BEH-CORE-002`. `L3-DES-ARCH-001` now exposes `ProviderRouter` as the server-facing provider facade.
+
+### F24. Mention L3 Still Required Typed `@` Syntax
+
+**Issue**: The turn/item L3 parsed mentions from raw patterns such as `@skill:<name>`, `@file:<path>`, and `@mcp:<server>/<resource>`. The skills activation L3 also used `@skill:code-reviewer` as the explicit user activation path.
+
+**Why unreasonable**: The approved prefixed-input design says the text immediately after `@` is the fuzzy-search keyword. Users do not type a result type after `@`; result type is returned as structured metadata when the user confirms a search result. Server-side L3 should validate submitted mention objects, not require a parallel typed mention grammar.
+
+**Correction**: `L3-BEH-CORE-006` now treats raw `@` text as literal unless accompanied by a structured mention selected by the client, validates `Mention` objects with typed target metadata, and forbids requiring syntax like `@skill:`/`@file:`/`@mcp:`. `L3-BEH-SERVER-005` now activates user-explicit skills from structured `Mention(kind = Skill)` records.
+
+### F25. Protocol Docs Used Dot Method Names Despite Slash Event Names In Code
+
+**Issue**: The L2/L3 client-server protocol documents used JSON-RPC method names such as `server.initialize`, `turn.submit`, and `config.update`, while `crates/protocol/src/event.rs::ServerEvent::method_name()` already exposed slash-separated notification names such as `session/started`, `turn/started`, and `item/agentMessage/delta`.
+
+**Why unreasonable**: Keeping dot-form request names in design while code-facing event names use slash separators would force adapters or aliases that add compatibility burden before implementation even starts. It also obscures which existing server notification names should be reused.
+
+**Correction**: `L2-DES-APP-003`, `L3-BEH-PROTOCOL-001`, `L3-BEH-CLIENT-001`, and `L3-BEH-SERVER-001` now use slash-separated JSON-RPC method names and explicitly require reusing existing `ServerEvent::method_name()` notification names when the semantic event already exists.
+
+### F26. Traceability L3 Artifact Was Missing While Still Referenced
+
+**Issue**: `L2-DES-TRACE-001` and the central `l2_to_l3.md` matrix referenced `L3-BEH-APP-003`, but the corresponding L3 file was absent from the current worktree.
+
+**Why unreasonable**: The traceability system is used to decide whether L2 designs have implementation guidance. A matrix row pointing to a missing L3 artifact creates false coverage and makes validation tooling impossible to implement from the documented chain.
+
+**Correction**: `L3-BEH-APP-003` has been restored at revision 2 and now defines concrete repository-root resolution, artifact parsing, matrix parsing, L2-L3 coverage classification, stale target/path detection, embedded trace drift checks, stable JSON output, exit codes, and fixture-test requirements.
+
+### F27. Configuration Consumer Designs Kept Project-Scoped Override Semantics
+
+**Issue**: Model binding, deferred-tool loading, MCP, onboarding, style, and workspace-instruction designs still described user plus project configuration, project-level whole-record precedence, or project-provided trust values after the configuration design moved to workspace-scoped `config.toml`, field-level merge, and user-only `auth.json`.
+
+**Why unreasonable**: L3 implementation of providers, MCP, tool loading, and onboarding consumes effective configuration. If upstream L2 consumer designs still describe project records replacing user records or project credential scopes, L3 implementers could build behavior that contradicts `L3-BEH-APP-001` and loses user-only fields during workspace overlays.
+
+**Correction**: The related L2 consumer documents now use workspace-scoped configuration terminology, field-level workspace-over-user merge semantics, user-scoped credential resolution, workspace trust policy names, and updated trace target revisions for `L2-DES-APP-002`, `L2-DES-APP-005`, and `L2-DES-MODEL-001`.
 
 ## Remaining Known Gaps
 
@@ -201,3 +265,12 @@ L3 implementation documentation must:
 | 7 | 2026-05-27 | Assistant | Correction | Added session-forking retention finding after specifying inherited-history segments, parent-deletion preflight, replay, and tests. |
 | 8 | 2026-05-27 | Assistant | Correction | Added immediate-message-edit restore finding after specifying safe workspace restoration, superseded branch replay, and durable record schemas. |
 | 9 | 2026-05-27 | Assistant | Correction | Added protocol request-semantics finding after specifying fork, delete, and message edit JSON-RPC behavior. |
+| 10 | 2026-05-27 | Assistant | Correction | Added architecture boundary finding after removing stale current-crate evaluation and clarifying core effect ownership. |
+| 11 | 2026-05-27 | Assistant | Correction | Added configuration path/auth/merge finding after aligning L3 and related L2 docs to workspace `.devo`, user-only auth, and field-level merge. |
+| 12 | 2026-05-27 | Assistant | Correction | Added skills crate finding after separating skill package parsing/default installation from runtime activation policy. |
+| 13 | 2026-05-27 | Assistant | Correction | Clarified configuration core type correction after removing generic optional source auth modeling. |
+| 14 | 2026-05-27 | Assistant | Correction | Added server turn-submit/provider-router finding after aligning server runtime with immediate JSON-RPC responses and the core/provider execution boundary. |
+| 15 | 2026-05-27 | Assistant | Correction | Added mention syntax finding after replacing typed `@` parsing with structured mentions from direct-keyword fuzzy search. |
+| 16 | 2026-05-27 | Assistant | Correction | Added protocol method separator finding after changing JSON-RPC method names to slash separators and reusing existing server event names. |
+| 17 | 2026-05-27 | Assistant | Correction | Added missing traceability L3 finding after restoring and strengthening `L3-BEH-APP-003`. |
+| 18 | 2026-05-27 | Assistant | Correction | Added configuration consumer drift finding after aligning model, MCP, tool loading, onboarding, style, and workspace-instruction designs with workspace/user config semantics. |

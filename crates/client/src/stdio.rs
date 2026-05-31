@@ -20,6 +20,12 @@ use devo_protocol::ModelSavedParams;
 use devo_protocol::ModelSavedResult;
 use devo_protocol::NotificationEnvelope;
 use devo_protocol::ProtocolErrorCode;
+use devo_protocol::ProviderValidateParams;
+use devo_protocol::ProviderValidateResult;
+use devo_protocol::ProviderVendorListParams;
+use devo_protocol::ProviderVendorListResult;
+use devo_protocol::ProviderVendorUpsertParams;
+use devo_protocol::ProviderVendorUpsertResult;
 use devo_protocol::ServerEvent;
 use devo_protocol::SessionCompactParams;
 use devo_protocol::SessionCompactResult;
@@ -234,6 +240,27 @@ impl StdioServerClient {
         self.request("model/saved", params).await
     }
 
+    pub async fn provider_vendor_list(
+        &mut self,
+        params: ProviderVendorListParams,
+    ) -> Result<ProviderVendorListResult> {
+        self.request("provider/list", params).await
+    }
+
+    pub async fn provider_vendor_upsert(
+        &mut self,
+        params: ProviderVendorUpsertParams,
+    ) -> Result<ProviderVendorUpsertResult> {
+        self.request("provider/upsert", params).await
+    }
+
+    pub async fn provider_validate(
+        &mut self,
+        params: ProviderValidateParams,
+    ) -> Result<ProviderValidateResult> {
+        self.request("provider/validate", params).await
+    }
+
     pub async fn turn_start(&mut self, params: TurnStartParams) -> Result<TurnStartResult> {
         self.request("turn/start", params).await
     }
@@ -400,6 +427,25 @@ fn format_protocol_error_code(code: &ProtocolErrorCode) -> &'static str {
         ProtocolErrorCode::ExpectedTurnMismatch => "expected_turn_mismatch",
         ProtocolErrorCode::ActiveTurnNotSteerable => "active_turn_not_steerable",
         ProtocolErrorCode::EmptyInput => "empty_input",
+        ProtocolErrorCode::AlreadyResolved => "already_resolved",
+        ProtocolErrorCode::ParentSessionNotFound => "parent_session_not_found",
+        ProtocolErrorCode::ForkTurnNotFound => "fork_turn_not_found",
+        ProtocolErrorCode::ForkTurnNotStable => "fork_turn_not_stable",
+        ProtocolErrorCode::PermissionDenied => "permission_denied",
+        ProtocolErrorCode::WorkspaceUnavailable => "workspace_unavailable",
+        ProtocolErrorCode::InheritedSegmentWriteFailed => "inherited_segment_write_failed",
+        ProtocolErrorCode::ForkRetentionRequired => "fork_retention_required",
+        ProtocolErrorCode::InvalidConfirmToken => "invalid_confirm_token",
+        ProtocolErrorCode::UnsupportedDeletePolicy => "unsupported_delete_policy",
+        ProtocolErrorCode::InheritedSegmentMaterializationFailed => {
+            "inherited_segment_materialization_failed"
+        }
+        ProtocolErrorCode::ExpectedTargetMessageMismatch => "expected_target_message_mismatch",
+        ProtocolErrorCode::OlderMessageRequiresFork => "older_message_requires_fork",
+        ProtocolErrorCode::ActiveTurnEditRejected => "active_turn_edit_rejected",
+        ProtocolErrorCode::InvalidContentParts => "invalid_content_parts",
+        ProtocolErrorCode::InvalidMentions => "invalid_mentions",
+        ProtocolErrorCode::WorkspaceRestoreFailedToStart => "workspace_restore_failed_to_start",
         ProtocolErrorCode::InternalError => "internal_error",
     }
 }

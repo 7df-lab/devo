@@ -41,7 +41,7 @@ The deferred set is dynamic per effective Devo configuration, MCP server availab
 - `L2-DES-TOOL-002` defines explicit `multi_tool_use` parallel orchestration.
 - `L2-DES-AGENT-001` defines the execution engine that dispatches tools.
 - `L2-DES-CONV-001` defines durable session records.
-- `L2-DES-APP-005` defines user-scoped and project-scoped `config.toml` shape.
+- `L2-DES-APP-005` defines user-scoped and workspace-scoped `config.toml` shape.
 
 ## Design Requirement
 
@@ -371,7 +371,7 @@ The alias map is server-side only. The model is still instructed to use exact na
 
 ### Effective Devo Configuration
 
-The set of deferred tools is determined from the effective Devo configuration after merging the user-scoped and project-scoped `config.toml` files described by `L2-DES-APP-005`.
+The set of deferred tools is determined from the effective configuration after merging the user-scoped and workspace-scoped `config.toml` files described by `L2-DES-APP-005`.
 
 Configuration may choose a conservative default and then override individual tools:
 
@@ -431,7 +431,7 @@ The exact TOML keys should be reflected in `L2-DES-APP-005` when this design bec
 | related-to | L2-DES-TOOL-002 | 1 | specs/L2/tool/L2-DES-TOOL-002-parallel-tool-orchestration.md | Parallel orchestration interacts with deferred loading. |
 | related-to | L2-DES-AGENT-001 | 1 | specs/L2/agent/L2-DES-AGENT-001-execution-engine.md | The execution engine dispatches ToolSearch like any other tool. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Session data model stores loaded deferred state per session. |
-| related-to | L2-DES-APP-005 | 1 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Deferred loading policy is durable Devo configuration. |
+| related-to | L2-DES-APP-005 | 2 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Deferred loading policy is durable Devo configuration. |
 | specified-by | L3-BEH-TOOLS-004 | 2 | specs/L3/tools/L3-BEH-TOOLS-004-deferred-tool-loading.md | L3 defines ToolSearch classification, executor behavior, loaded-tool tracking, prompt integration, aliases, and metrics. |
 
 ## Revision Notes

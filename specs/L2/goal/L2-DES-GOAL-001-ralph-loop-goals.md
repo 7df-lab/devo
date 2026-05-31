@@ -341,21 +341,21 @@ Client requests should expose user-owned controls:
 
 | Method | Purpose |
 |---|---|
-| `goal.get` | Return the current goal projection for a session. |
-| `goal.create` | Create or explicitly replace the current goal. |
-| `goal.pause` | Pause autonomous continuation. |
-| `goal.resume` | Resume a paused or blocked goal. |
-| `goal.complete` | Let the user mark the goal complete. |
-| `goal.cancel` | End the goal without completion. |
-| `goal.clear` | Remove the current goal from normal UI views while retaining audit records. |
+| `goal/get` | Return the current goal projection for a session. |
+| `goal/create` | Create or explicitly replace the current goal. |
+| `goal/pause` | Pause autonomous continuation. |
+| `goal/resume` | Resume a paused or blocked goal. |
+| `goal/complete` | Let the user mark the goal complete. |
+| `goal/cancel` | End the goal without completion. |
+| `goal/clear` | Remove the current goal from normal UI views while retaining audit records. |
 
 Server notifications should include:
 
 | Notification/Event | Purpose |
 |---|---|
-| `goal.updated` | Broadcast canonical status, budget, progress, or blocker changes to subscribed clients. |
-| `goal.continuationStarted` | Tell clients an autonomous continuation turn has started. |
-| `goal.budgetLimited` | Tell clients the goal stopped because a configured budget was reached. |
+| `goal/updated` | Broadcast canonical status, budget, progress, or blocker changes to subscribed clients. |
+| `goal/continuation/started` | Tell clients an autonomous continuation turn has started. |
+| `goal/budget/limited` | Tell clients the goal stopped because a configured budget was reached. |
 
 Goal protocol responses should be immediate. Long-running work caused by a resumed active goal should be reported through subsequent turn and goal events.
 
@@ -414,7 +414,7 @@ After restart, the server must not blindly continue just because the last durabl
 | related-to | L1-REQ-TUI-006 | 1 | specs/L1/L1-REQ-TUI-006-command-discovery-control.md | The `/goal` command is the TUI control surface. |
 | related-to | L1-REQ-LLM-003 | 1 | specs/L1/L1-REQ-LLM-003-observability.md | Goal budgets depend on normalized model usage. |
 | related-to | L2-DES-AGENT-001 | 1 | specs/L2/agent/L2-DES-AGENT-001-execution-engine.md | Defines the execution engine used by autonomous continuations. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Defines client requests and notifications for goal control and broadcast. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Defines client requests and notifications for goal control and broadcast. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Defines durable JSONL event and replay principles used by goal records. |
 | related-to | L2-DES-TUI-003 | 1 | specs/L2/tui/L2-DES-TUI-003-composer-and-input-modes.md | Defines slash command discovery and invocation behavior. |
 | specified-by | L3-BEH-SERVER-004 | 2 | specs/L3/server/L3-BEH-SERVER-004-goal-lifecycle.md | L3 defines goal creation, mutation, accounting, continuation, and hidden goal context behavior. |

@@ -9,7 +9,7 @@ active_baseline: no
 
 ## Purpose
 
-Define concrete behavior for `message.editPrevious`: eligibility, append-only edit records, queued-message edits, superseded turn projection, workspace restoration, replacement turn creation, replay, and client events.
+Define concrete behavior for `message/editPrevious`: eligibility, append-only edit records, queued-message edits, superseded turn projection, workspace restoration, replacement turn creation, replay, and client events.
 
 ## Source Design
 
@@ -130,15 +130,15 @@ L1-REQ-CONV-005 (Immediate Message Editing), L1-REQ-CHANGE-001 (Rollback and Rec
 
 ### B1. Edit Eligibility
 
-- **Trigger**: Client sends `message.editPrevious`.
+- **Trigger**: Client sends `message/editPrevious`.
 - **Preconditions**: Session exists and client is authorized.
 - **Algorithm / Flow**:
   1. Load current branch projection.
   2. Identify the immediately preceding eligible user-authored message.
   3. Compare it to `expected_target_message_id`.
   4. Reject direct edits of older historical messages with `OlderMessageRequiresFork` and include the relevant fork suggestion.
-  5. Reject active running turn edits by default with `ActiveTurnEditRejected`; the response may suggest `turn.interrupt` or steer.
-  6. Validate replacement content parts and mentions using normal `turn.submit` validation.
+  5. Reject active running turn edits by default with `ActiveTurnEditRejected`; the response may suggest `turn/interrupt` or steer.
+  6. Validate replacement content parts and mentions using normal `turn/submit` validation.
 - **Postconditions**: The request is either rejected or classified as queued edit or superseded-turn edit.
 
 ### B2. Queued Message Edit

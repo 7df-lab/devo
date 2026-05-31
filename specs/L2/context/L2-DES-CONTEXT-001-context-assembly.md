@@ -242,7 +242,7 @@ This design treats persona, interaction mode, and review behavior as metadata-de
 | related-to | L2-DES-AGENT-001 | 1 | specs/L2/agent/L2-DES-AGENT-001-execution-engine.md | Refines the context assembly phase of the execution engine. |
 | related-to | L2-DES-AGENT-002 | 1 | specs/L2/agent/L2-DES-AGENT-002-interrupt-resume-control.md | Interrupt state feeds the consolidated change-signal when resuming after interruption. |
 | related-to | L2-DES-GOAL-001 | 1 | specs/L2/goal/L2-DES-GOAL-001-ralph-loop-goals.md | Defines goal context content, eligibility, and persistence expectations. |
-| specified-by | L3-BEH-CORE-005 | 1 | specs/L3/core/L3-BEH-CORE-005-context-pipeline.md | L3 defines context assembly ordering, immutable prefix handling, metadata instructions, hidden goal context, and change signals. |
+| specified-by | L3-BEH-CORE-005 | 2 | specs/L3/core/L3-BEH-CORE-005-context-pipeline.md | L3 defines context assembly ordering, immutable prefix handling, metadata instructions, hidden goal context, and change signals. |
 
 ## Revision Notes
 

@@ -13,7 +13,7 @@ last_updated: 2026-05-22
 
 ## Purpose
 
-Define the server-side execution engine that carries an accepted `turn.submit` request through context assembly, model invocation, tool orchestration, durable recording, and terminal turn status.
+Define the server-side execution engine that carries an accepted `turn/submit` request through context assembly, model invocation, tool orchestration, durable recording, and terminal turn status.
 
 ## Background / Context
 
@@ -23,7 +23,7 @@ Existing L2 designs define important boundaries around the execution engine:
 - `L2-DES-CONV-001` defines the durable session JSONL data model and replay records.
 - `L2-DES-MODEL-001` defines model-provider binding and `ResolvedModelProfile` construction.
 
-Those designs do not define what actually happens inside the server after `turn.submit` is accepted and before `turn_completed`, `turn_failed`, or `turn_interrupted` is emitted. This document fills that gap.
+Those designs do not define what actually happens inside the server after `turn/submit` is accepted and before `turn_completed`, `turn_failed`, or `turn_interrupted` is emitted. This document fills that gap.
 
 ## Source Requirements
 
@@ -284,13 +284,13 @@ The final user-facing response should summarize the outcome, changed files where
 | related-to | L1-REQ-APP-003 | 1 | specs/L1/L1-REQ-APP-003-safety.md | Execution applies permission, sandbox, and approval checks before risky tool execution. |
 | related-to | L1-REQ-TOOL-002 | 1 | specs/L1/L1-REQ-TOOL-002-tools.md | Execution dispatches built-in tools through the tool supervisor. |
 | related-to | L1-REQ-GOAL-001 | 1 | specs/L1/L1-REQ-GOAL-001-ralph-loop.md | Goal-driven continuation turns execute through the normal engine and provide budget accounting signals. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Protocol requests and events expose execution state to clients. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Protocol requests and events expose execution state to clients. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Durable records persist execution state. |
-| related-to | L2-DES-MODEL-001 | 1 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | Model resolution provides runtime invocation profiles. |
+| related-to | L2-DES-MODEL-001 | 2 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | Model resolution provides runtime invocation profiles. |
 | related-to | L2-DES-TOOL-001 | 1 | specs/L2/tool/L2-DES-TOOL-001-built-in-tool-system.md | Defines tool registry, lifecycle, and plan tool behavior used by dispatch. |
 | related-to | L2-DES-GOAL-001 | 1 | specs/L2/goal/L2-DES-GOAL-001-ralph-loop-goals.md | Defines autonomous goal continuation and model-facing goal update behavior layered on the engine. |
-| specified-by | L3-BEH-CORE-002 | 1 | specs/L3/core/L3-BEH-CORE-002-turn-execution-engine.md | L3 defines the core turn execution state machine and decision boundaries. |
-| specified-by | L3-BEH-SERVER-001 | 1 | specs/L3/server/L3-BEH-SERVER-001-server-runtime-transport.md | L3 defines server orchestration around core turn execution. |
+| specified-by | L3-BEH-CORE-002 | 3 | specs/L3/core/L3-BEH-CORE-002-turn-execution-engine.md | L3 defines the core turn execution state machine and decision boundaries. |
+| specified-by | L3-BEH-SERVER-001 | 4 | specs/L3/server/L3-BEH-SERVER-001-server-runtime-transport.md | L3 defines server orchestration around core turn execution. |
 
 ## Revision Notes
 

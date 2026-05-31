@@ -25,7 +25,7 @@ The assembled instruction content feeds into `L2-DES-CONTEXT-001` as part of the
 
 - `L1-REQ-WORKSPACE-002` requires linear ancestor-chain discovery, per-directory filename priority, configurable fallback filenames, global instruction files, size bounding, and no artificial depth limit.
 - `L1-REQ-WORKSPACE-001` requires workspace context that respects local project instructions.
-- `L1-REQ-APP-010` requires persistent configuration for user-scoped and project-scoped settings.
+- `L1-REQ-APP-010` requires persistent configuration for user-scoped and workspace-scoped settings.
 - `L2-DES-CONTEXT-001` defines the context assembly step that consumes the assembled instruction content.
 - `L2-DES-APP-002` defines configuration source precedence for the settings that control discovery.
 
@@ -138,7 +138,7 @@ Discovery behavior is controlled through persistent configuration following `L2-
 | `project_doc_fallback_filenames` | `Vec<String>` | sensible default set | Additional filenames to check per directory after `AGENTS.override.md` and `AGENTS.md`. |
 | `project_root_markers` | `Vec<String>` | `[".git"]` | Directory entry names that identify project roots during upward traversal. Empty list disables parent traversal. |
 
-Project-scoped configuration overrides user-scoped configuration for all three keys. A project may specify an empty `project_root_markers` list to scope instruction-file discovery to the cwd only, or a custom marker set to identify roots in non-git workspaces.
+Workspace-scoped configuration overrides user-scoped configuration for any of these fields when present. User-scoped fields remain effective when the workspace config omits them. A workspace may specify an empty `project_root_markers` list to scope instruction-file discovery to the cwd only, or a custom marker set to identify roots in non-git workspaces.
 
 ## Refresh
 
@@ -179,9 +179,9 @@ This information should be available through a configuration-inspection or debug
 |---|---:|---|---|---|
 | refines | L1-REQ-WORKSPACE-002 | 1 | specs/L1/L1-REQ-WORKSPACE-002-project-instruction-files.md | Defines the concrete discovery algorithm, filename resolution, global-instruction support, size bounding, configuration surface, and refresh behavior. |
 | related-to | L1-REQ-WORKSPACE-001 | 1 | specs/L1/L1-REQ-WORKSPACE-001-project-context.md | Instruction file discovery provides the local project instructions required by workspace context. |
-| related-to | L1-REQ-APP-010 | 1 | specs/L1/L1-REQ-APP-010-configuration.md | Discovery behavior is controlled through persistent configuration with project-over-user precedence. |
+| related-to | L1-REQ-APP-010 | 1 | specs/L1/L1-REQ-APP-010-configuration.md | Discovery behavior is controlled through persistent configuration with workspace-over-user field precedence. |
 | related-to | L2-DES-CONTEXT-001 | 1 | specs/L2/context/L2-DES-CONTEXT-001-context-assembly.md | Assembled instruction content feeds into the instruction hierarchy during context assembly. |
-| related-to | L2-DES-APP-002 | 1 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Configuration precedence resolves discovery settings from user-scoped and project-scoped sources. |
+| related-to | L2-DES-APP-002 | 2 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Configuration precedence resolves discovery settings from user-scoped and workspace-scoped sources. |
 | specified-by | L3-BEH-CORE-008 | 2 | specs/L3/core/L3-BEH-CORE-008-project-instruction-discovery.md | L3 defines project root detection, instruction discovery, global instruction inclusion, size bounding, refresh, and diagnostics. |
 
 ## Revision Notes

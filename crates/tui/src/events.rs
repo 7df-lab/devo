@@ -5,6 +5,7 @@ use std::time::Instant;
 use crate::app_command::InputHistoryDirection;
 use devo_core::ItemId;
 use devo_core::SessionId;
+use devo_protocol::ProviderVendor;
 use devo_protocol::ProviderWireApi;
 use devo_protocol::ReasoningEffort;
 use devo_protocol::SessionHistoryItem;
@@ -223,6 +224,16 @@ pub(crate) enum WorkerEvent {
     ProviderValidationFailed {
         /// Human-readable failure reason from the probe request.
         message: String,
+    },
+    /// Current provider vendors were listed from the server.
+    ProviderVendorsListed {
+        /// Structured provider vendors returned by `provider/list`.
+        provider_vendors: Vec<ProviderVendor>,
+    },
+    /// A provider vendor was upserted through the server.
+    ProviderVendorUpserted {
+        /// The provider vendor returned by `provider/upsert`.
+        provider_vendor: ProviderVendor,
     },
     /// Current known sessions were listed from the server.
     SessionsListed {

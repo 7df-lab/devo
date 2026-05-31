@@ -335,7 +335,7 @@ Tests for the traceability system itself:
 
 | Relationship | Target ID | Target Revision | Target Path | Rationale |
 |---|---:|---|---|---|
-| specified-by | L3-BEH-APP-003 | 1 | specs/L3/app/L3-BEH-APP-003-traceability-maintenance.md | L3 defines matrix parsing, L2-L3 gap detection, stale link detection, embedded trace drift checks, and validation exit semantics. |
+| specified-by | L3-BEH-APP-003 | 2 | specs/L3/app/L3-BEH-APP-003-traceability-maintenance.md | L3 defines matrix parsing, L2-L3 gap detection, stale link detection, embedded trace drift checks, and validation exit semantics. |
 
 ## Open Questions
 

@@ -466,6 +466,7 @@ pub trait ModelCatalog: Send + Sync {
     fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&Model, ModelError>;
 }
 
+/// TODO: Do we really need a In memory model catalog? let's remove it.
 #[derive(Debug, Clone)]
 pub struct InMemoryModelCatalog {
     models: Vec<Model>,

@@ -88,7 +88,7 @@ pub struct ActiveDiagnostics {
   3. Initialize local log writer.
   4. Initialize trace writer only when trace mode is enabled.
   5. Initialize telemetry exporter only when telemetry is enabled.
-  6. Publish a startup `server.statusChanged` diagnostic event.
+  6. Publish a startup `server/status/changed` diagnostic event.
 - **Postconditions**: Observability sinks are ready before accepting turns.
 - **Errors**: If log initialization fails, continue with stderr diagnostics and emit a startup warning when possible. Telemetry initialization failure must not block local operation.
 
@@ -146,16 +146,20 @@ Required capture points:
   1. Maintain one active diagnostic projection per server and per active session.
   2. Update fields from accepted events only.
   3. Broadcast safe changes through existing protocol notifications:
-     - `server.statusChanged`
-     - `session.event`
-     - `turn.event`
-     - `usage_updated`
-     - `context_updated`
-     - `tool_call_updated`
-     - `error_reported`
-     - `config.changed`
+     - `server/status/changed`
+     - `session/status/changed`
+     - `turn/usage/updated`
+     - `turn/plan/updated`
+     - `turn/diff/updated`
+     - `turn/failed`
+     - `item/started`
+     - `item/completed`
+     - `item/agentMessage/delta`
+     - `item/commandExecution/outputDelta`
+     - `item/fileChange/outputDelta`
+     - `config/changed`
   4. Include sequence numbers through the protocol layer.
-  5. Allow `execution.inspect` or equivalent status requests to return the latest projection.
+  5. Allow `execution/inspect` or equivalent status requests to return the latest projection.
 - **Postconditions**: Clients do not infer server state from partial UI state.
 
 ## B5. Trace-Mode Records
@@ -241,7 +245,7 @@ Required capture points:
 |---|---|---:|---|---|
 | specifies | L2-DES-APP-004 | 1 | specs/L2/app/L2-DES-APP-004-observability-architecture.md | Implements structured logs, active diagnostics, trace mode, redaction, retention, and telemetry boundaries. |
 | related-to | L2-DES-LLM-003 | 1 | specs/L2/llm/L2-DES-LLM-003-model-usage-observability.md | Provides the observability sinks used by model usage and stream records. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Emits safe diagnostic projections through the client/server protocol. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Emits safe diagnostic projections through the client/server protocol. |
 | related-to | L2-DES-AGENT-001 | 1 | specs/L2/agent/L2-DES-AGENT-001-execution-engine.md | Captures execution phase transitions. |
 | related-to | L2-DES-TOOL-001 | 1 | specs/L2/tool/L2-DES-TOOL-001-built-in-tool-system.md | Captures tool lifecycle diagnostics. |
 

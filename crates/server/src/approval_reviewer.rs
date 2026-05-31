@@ -1,7 +1,7 @@
+use devo_core::tools::ToolPermissionRequest;
 use devo_protocol::{
     ModelRequest, RequestContent, RequestMessage, ResponseContent, SamplingControls,
 };
-use devo_tools::ToolPermissionRequest;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReviewerDecision {

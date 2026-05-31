@@ -64,7 +64,7 @@ pub struct TranscriptCellModel {
 
 ### B3. Live Event Normalization
 
-- **Trigger**: `session.event`, `turn.event`, approval, question, search, or config notifications arrive.
+- **Trigger**: Concrete session-scoped or turn-scoped notifications arrive, such as `session/started`, `turn/started`, `item/started`, `item/agentMessage/delta`, approval, question, search, or config notifications.
 - **Preconditions**: The client is subscribed and initialized.
 - **Algorithm / Flow**:
   1. Apply events by increasing session sequence.

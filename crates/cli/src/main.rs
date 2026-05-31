@@ -35,10 +35,6 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Override the model used for this session.
-    #[arg(long, global = true)]
-    model: Option<String>,
-
     /// Override the logging level for this process.
     #[arg(
         long = "log-level",
@@ -139,7 +135,6 @@ async fn run_cli() -> Result<()> {
 
     match &cli.command {
         Some(Command::Onboard) => {
-            maybe_print_startup_update(&cli).await;
             // Resolve logging config early, install the process-wide file subscriber,
             // and keep its non-blocking writer guard alive for the command lifetime.
             let _logging = install_logging(&cli)?;
@@ -152,7 +147,7 @@ async fn run_cli() -> Result<()> {
         Some(Command::Prompt { input }) => {
             maybe_print_startup_update(&cli).await;
             let _logging = install_logging(&cli)?;
-            run_prompt(input, cli.model.as_deref(), log_level.as_deref()).await
+            run_prompt(input, log_level.as_deref()).await
         }
         Some(Command::Doctor) => {
             let _logging = install_logging(&cli)?;
@@ -323,7 +318,6 @@ mod tests {
             let cli = Cli::try_parse_from(["devo", "--log-level", level]).expect("parse log level");
 
             assert!(cli.command.is_none());
-            assert_eq!(cli.model, None);
             assert_eq!(cli.log_level, Some(expected));
         }
     }
@@ -333,20 +327,6 @@ mod tests {
         let err = Cli::try_parse_from(["devo", "--log-level", "off"]).expect_err("reject off");
 
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
-    }
-
-    #[test]
-    fn cli_logging_overrides_is_empty_without_log_level() {
-        let cli = Cli {
-            command: None,
-            model: None,
-            log_level: None,
-        };
-
-        assert_eq!(
-            cli_logging_overrides(&cli),
-            toml::Value::Table(Default::default())
-        );
     }
 
     #[test]
@@ -360,7 +340,6 @@ mod tests {
         ] {
             let cli = Cli {
                 command: None,
-                model: None,
                 log_level: Some(level),
             };
 
@@ -382,19 +361,16 @@ mod tests {
         for cli in [
             Cli {
                 command: None,
-                model: None,
                 log_level: None,
             },
             Cli {
                 command: Some(Command::Onboard),
-                model: None,
                 log_level: None,
             },
             Cli {
                 command: Some(Command::Prompt {
                     input: "hello".to_string(),
                 }),
-                model: None,
                 log_level: None,
             },
         ] {
@@ -412,7 +388,6 @@ mod tests {
     fn startup_update_check_scope_skips_server_and_doctor() {
         let doctor = Cli {
             command: Some(Command::Doctor),
-            model: None,
             log_level: None,
         };
         let server = Cli {
@@ -420,7 +395,6 @@ mod tests {
                 working_root: None,
                 transport: devo_server::ServerTransportMode::Config,
             }),
-            model: None,
             log_level: None,
         };
 

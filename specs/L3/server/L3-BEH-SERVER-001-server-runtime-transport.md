@@ -1,6 +1,6 @@
 ---
 artifact_id: L3-BEH-SERVER-001
-revision: 2
+revision: 4
 status: Draft
 active_baseline: no
 ---
@@ -22,11 +22,12 @@ pub struct ServerRuntime {
     config: ServerConfig,
     store: Arc<dyn SessionStore>,          // from core
     tool_registry: Arc<dyn ToolRegistry>,   // from core (built by core::ToolRegistryBuilder)
-    model_provider: Arc<dyn ModelProviderSDK>, // from provider
+    provider_router: Arc<dyn ProviderRouter>, // from provider
     sandbox: Arc<dyn Sandbox>,              // from safety
     client_registry: ClientRegistry,
     event_broadcaster: EventBroadcaster,
     session_cache: SessionCache,
+    active_turns: ActiveTurnRegistry,
 }
 
 pub struct ServerConfig {
@@ -43,7 +44,7 @@ pub struct ServerConfig {
 ```
 1. Load effective config (calls core::resolve_config)
 2. Build ToolRegistry (calls core::ToolRegistryBuilder::build)
-3. Initialize ModelProviderSDK (from provider crate)
+3. Initialize ProviderRouter (from provider crate)
 4. Initialize Sandbox (from safety crate)
 5. Open SessionStore (calls core)
 6. Bind WebSocket listener
@@ -73,7 +74,7 @@ pub struct WebSocketTransport {
 ## 4. Client Connection Lifecycle
 
 ```
-Connect ──► Handshake (server.initialize) ──► Registered
+Connect ──► Handshake (server/initialize) ──► Registered
                                               │
                               ┌───────────────┤
                               ▼               ▼
@@ -127,12 +128,14 @@ pub struct SessionEvent {
 - Clients treat events as idempotent by (seq, event_kind, item_id).
 
 **Broadcast rules:**
-- `session.event` and `turn.event` → all subscribers of that session.
-- `server.statusChanged`, `config.changed` → all connected clients.
-- `approval.requested`, `question.requested` → all subscribers (first response wins).
-- `search.updated` → requesting client only (connection-local).
+- Session-scoped and turn-scoped concrete notifications, such as `session/started`, `turn/started`, `item/started`, and `item/agentMessage/delta`, go to all subscribers of that session.
+- `server/status/changed`, `config/changed` → all connected clients.
+- `approval/requested`, `question/requested` → all subscribers (first response wins).
+- `search/updated` → requesting client only (connection-local).
 
 ## 6. Turn Execution Loop (Server Side)
+
+`turn/submit` is a request/response command, not a long-polling model invocation. The server must return the JSON-RPC response after core accepts and persists the submitted input. The assistant response, tool activity, approvals, usage updates, and terminal turn status are delivered later as server notifications to subscribed clients.
 
 ```rust
 async fn handle_turn_submit(
@@ -141,34 +144,53 @@ async fn handle_turn_submit(
     params: TurnSubmitParams,
     client_id: ClientId,
 ) -> Result<TurnSubmitResult, ProtocolError> {
-    // 1. Load session via core
-    let mut session = self.store.load(session_id).await?;
+    // 1. Delegate validation, idempotency, and durable input persistence to core.
+    let admitted = core::admit_turn(
+        self.store.as_ref(),
+        session_id,
+        params.into_turn_input(),
+        TurnAdmissionOptions::from_client(client_id),
+    ).await?;
 
-    // 2. Admit turn — core validates and persists
-    let turn = core::admit_turn(&self.store, &session, params).await?;
+    // 2. Broadcast the canonical admission records/events before returning.
+    self.append_and_broadcast(
+        &admitted.admitted_input_records,
+        &admitted.initial_client_events,
+    ).await?;
 
-    // 3. Acquire session execution lock (serializes turns per session)
-    let lock = self.acquire_turn_lock(session_id).await;
+    // 3. If this admission creates executable work, reserve one active turn slot
+    //    and spawn the turn loop. Steer and queue submissions may not start a
+    //    new loop immediately.
+    if admitted.starts_executable_turn() {
+        let cancel_token = CancellationToken::new();
+        self.active_turns.register(admitted.turn_id, cancel_token.clone())?;
+        self.spawn_turn_loop(admitted.session_id, admitted.turn_id, cancel_token);
+    }
 
-    // 4. Run execution loop
-    let cancel_token = CancellationToken::new();
-    self.register_cancel_token(turn.turn_id, cancel_token.clone());
-
-    let outcome = self.execute_turn_loop(
-        &session, &turn, cancel_token,
-    ).await;
-
-    // 5. Release lock, clean up
-    drop(lock);
-    self.unregister_cancel_token(turn.turn_id);
-
-    outcome
+    // 4. Return immediately. Completion is observed through subscribed events.
+    Ok(TurnSubmitResult {
+        session_id: admitted.session_id,
+        turn_id: Some(admitted.turn_id),
+        accepted: true,
+        classification: admitted.turn_kind.into(),
+        latest_sequence: self.event_broadcaster.latest_sequence(admitted.session_id),
+    })
 }
 ```
 
-**Server does NOT:** assemble context, compact context, normalize context, evaluate permissions, make approval decisions, execute tool logic, decide persistence format.
+The spawned turn loop follows `L3-BEH-CORE-002`:
 
-**Server DOES:** load/save via store, call `core::query()`, call `core::execute_tool()`, call `core::authorize_tool_request()`, broadcast events, manage connections, propagate interrupts.
+1. Load the latest session projection.
+2. Ask core to prepare a provider-neutral model invocation plan.
+3. Invoke the provider router with the resolved model profile and provider-neutral input.
+4. Feed normalized provider events back into core with `consume_provider_event`.
+5. Append and broadcast core-authored durable records and client events.
+6. Dispatch tool calls through core tool execution entry points.
+7. Finalize through core when the model response completes, fails, or is interrupted.
+
+**Server does NOT:** assemble context, compact context, normalize context, evaluate permissions, make approval decisions, interpret provider-native stream payloads, execute tool business logic, or decide durable persistence format.
+
+**Server DOES:** load projections through the store, call core turn-engine entry points, call provider router stream entry points, append core-authored durable records, broadcast sequenced notifications, manage connections, spawn turn tasks, reserve active turn slots, and propagate interrupts.
 
 ## 7. Interrupt Propagation
 
@@ -181,8 +203,8 @@ async fn handle_interrupt(&self, session_id: SessionId, turn_id: TurnId) -> Resu
     // 2. Signal cancellation
     token.cancel();
 
-    // 3. Core's query() and execute_tool() check the token
-    //    at cooperative yield points and return QueryErrorCode::Cancelled
+    // 3. The provider router and core turn-engine entry points check the token
+    //    at cooperative yield points and return interrupted reductions/outcomes.
 
     // 4. Do NOT wait for cleanup — return immediately
     Ok(InterruptResult {
@@ -218,3 +240,12 @@ async fn handle_interrupt(&self, session_id: SessionId, turn_id: TurnId) -> Resu
 - Business decisions remain in core: context assembly, permission decisions, approval decisions, model resolution, persistence decisions, and tool dispatch policy.
 - Existing server runtime modules may be split or retained as needed, but they must not continue owning decisions assigned to core by this L3 set.
 - Use `tokio::sync::broadcast` for event fan-out to multiple subscribers per session.
+
+## Revision Notes
+
+| Revision | Date | Author | Change Type | Notes |
+|---:|---|---|---|---|
+| 1 | 2026-05-27 | Assistant | Initial | Initial server runtime, transport, event broadcast, and interrupt behavior. |
+| 2 | 2026-05-27 | Assistant | Correction | Refined server responsibilities around transport and core delegation. |
+| 3 | 2026-05-27 | Assistant | Correction | Made `turn/submit` return immediately after durable admission and replaced the stale `core::query()` boundary with provider-router plus core turn-engine entry points. |
+| 4 | 2026-05-27 | Assistant | Correction | Changed JSON-RPC method examples to slash-separated names and aligned broadcast rules with concrete `ServerEvent::method_name()` notifications. |

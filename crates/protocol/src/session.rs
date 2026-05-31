@@ -6,9 +6,11 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::ItemId;
 use crate::ReasoningEffort;
 use crate::SessionId;
 use crate::SessionTitleState;
+use crate::TurnId;
 use crate::parse_command::ParsedCommand;
 use crate::protocol::FileChange;
 use crate::turn::TurnMetadata;
@@ -226,6 +228,93 @@ pub struct SessionRollbackResult {
     pub loaded_item_count: u64,
     pub history_items: Vec<SessionHistoryItem>,
     pub pending_texts: Vec<String>,
+}
+
+// ── Session Subscribe (L3-BEH-PROTOCOL-001 B3) ───────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSubscribeParams {
+    pub session_id: SessionId,
+    #[serde(default)]
+    pub from_sequence: Option<u64>,
+    #[serde(default)]
+    pub event_filter: Option<Vec<String>>,
+    #[serde(default)]
+    pub projection: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSubscribeResult {
+    pub subscription_id: String,
+    pub session_id: SessionId,
+    pub next_sequence: u64,
+    pub session_snapshot: Option<serde_json::Value>,
+}
+
+// ── Session Delete (L3-BEH-PROTOCOL-001 B10) ──────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDeleteParams {
+    pub session_id: SessionId,
+    #[serde(default)]
+    pub delete_mode: DeleteMode,
+    #[serde(default)]
+    pub fork_policy: Option<ForkRetentionPolicy>,
+    #[serde(default)]
+    pub confirm_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteMode {
+    #[default]
+    Soft,
+    Hard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkRetentionPolicy {
+    pub retain_forks: bool,
+    pub materialize_inherited_segments: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDeleteResult {
+    pub session_id: SessionId,
+    pub deleted: bool,
+    pub affected_forks: Vec<SessionId>,
+    pub warnings: Vec<String>,
+}
+
+// ── Message Edit Previous (L3-BEH-PROTOCOL-001 B11) ──────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageEditPreviousParams {
+    pub session_id: SessionId,
+    pub target_message_id: ItemId,
+    pub expected_target_message_id: Option<ItemId>,
+    pub replacement_content_parts: Vec<serde_json::Value>,
+    pub replacement_mentions: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub edit_mode: EditMode,
+    #[serde(default)]
+    pub client_edit_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EditMode {
+    #[default]
+    Normal,
+    QueuedOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageEditPreviousResult {
+    pub edit_id: String,
+    pub replacement_message_id: ItemId,
+    pub replacement_turn_id: Option<TurnId>,
+    pub edit_state: String,
 }
 
 #[cfg(test)]

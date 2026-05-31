@@ -158,7 +158,7 @@ Conceptual active diagnostic fields:
 - `last_error`
 - `recovery_actions`
 
-This projection should be exposed to clients through existing protocol surfaces such as session snapshots, turn events, `execution.inspect`, `usage_updated`, `context_updated`, `tool_call_updated`, and `error_reported`.
+This projection should be exposed to clients through existing protocol surfaces such as session snapshots, turn events, `execution/inspect`, `usage_updated`, `context_updated`, `tool_call_updated`, and `error_reported`.
 
 ## Event Capture Points
 
@@ -261,7 +261,7 @@ Telemetry must not include model prompts, model responses, tool outputs, credent
 | related-to | L1-REQ-LLM-003 | 1 | specs/L1/L1-REQ-LLM-003-observability.md | Model usage and stream observability are specialized observability concerns. |
 | related-to | L1-REQ-APP-011 | 1 | specs/L1/L1-REQ-APP-011-error-recovery.md | Actionable diagnostics drive recovery guidance. |
 | related-to | L1-REQ-APP-012 | 1 | specs/L1/L1-REQ-APP-012-privacy-data-ownership.md | Observability records must obey privacy and redaction constraints. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Client/server events and snapshots expose safe diagnostics to clients. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Client/server events and snapshots expose safe diagnostics to clients. |
 | related-to | L2-DES-AGENT-001 | 1 | specs/L2/agent/L2-DES-AGENT-001-execution-engine.md | Execution phases provide the event capture points for observability. |
 | related-to | L2-DES-LLM-003 | 1 | specs/L2/llm/L2-DES-LLM-003-model-usage-observability.md | Defines the model-specific usage and streaming trace data used by this architecture. |
 | related-to | L2-DES-TOOL-001 | 1 | specs/L2/tool/L2-DES-TOOL-001-built-in-tool-system.md | Tool lifecycle events and result summaries feed user-facing diagnostics. |

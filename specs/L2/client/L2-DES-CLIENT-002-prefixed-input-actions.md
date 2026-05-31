@@ -185,17 +185,17 @@ Conceptual client-server methods:
 
 | Method | Purpose |
 |---|---|
-| `search.start` | Create a search session for one or more provider groups. |
-| `search.update` | Update the query for an active search session. |
-| `search.cancel` | Cancel or release an active search session. |
+| `search/start` | Create a search session for one or more provider groups. |
+| `search/update` | Update the query for an active search session. |
+| `search/cancel` | Cancel or release an active search session. |
 
 Conceptual server events:
 
 | Event | Purpose |
 |---|---|
-| `search.updated` | Send a result snapshot for the active query. |
-| `search.completed` | Tell the client all active providers have completed for the current query. |
-| `search.failed` | Tell the client the search is unavailable or degraded. |
+| `search/updated` | Send a result snapshot for the active query. |
+| `search/completed` | Tell the client all active providers have completed for the current query. |
+| `search/failed` | Tell the client the search is unavailable or degraded. |
 
 Search events are live UI projections. They are not transcript records.
 

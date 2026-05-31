@@ -194,7 +194,7 @@ pub struct ContextPressure {
      - context pressure
      - source labels
      - unavailable/redacted markers
-  2. Send through `usage_updated` or `turn.event` according to the protocol design.
+  2. Send through `turn/usage/updated` or another concrete turn-scoped notification according to the protocol design.
   3. Keep provider-specific raw fields out of the projection unless they are safe diagnostic metadata.
 - **Postconditions**: TUI and other clients do not need provider-specific token parsing.
 
@@ -252,7 +252,7 @@ Adapter behavior:
 | specifies | L2-DES-LLM-003 | 1 | specs/L2/llm/L2-DES-LLM-003-model-usage-observability.md | Implements invocation identity, normalized usage metrics, context pressure, durable usage, client projections, and trace-mode stream records. |
 | related-to | L2-DES-APP-004 | 1 | specs/L2/app/L2-DES-APP-004-observability-architecture.md | Uses observability sinks, redaction, trace mode, and telemetry boundaries. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Writes durable usage records to session JSONL. |
-| related-to | L2-DES-MODEL-001 | 1 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | References resolved model and provider identity. |
+| related-to | L2-DES-MODEL-001 | 2 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | References resolved model and provider identity. |
 | related-to | L3-BEH-PROVIDER-002 | 1 | specs/L3/provider/L3-BEH-PROVIDER-002-stream-normalization.md | Consumes normalized provider stream events. |
 | related-to | L3-BEH-APP-002 | 1 | specs/L3/app/L3-BEH-APP-002-observability-runtime.md | Emits logs, traces, and client diagnostics through the observability runtime. |
 

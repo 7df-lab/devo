@@ -610,7 +610,7 @@ These are injected as developer messages at child session start and are stripped
 | related-to | L2-DES-SAFETY-001 | 1 | specs/L2/safety/L2-DES-SAFETY-001-permission-system.md | Subagents inherit permission profiles. |
 | related-to | L2-DES-SAFETY-002 | 1 | specs/L2/safety/L2-DES-SAFETY-002-approval-mechanism.md | Subagents route through the same approval flow. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Session data model includes fork references and subagent metadata. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Protocol events expose subagent spawn, status, and completion. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Protocol events expose subagent spawn, status, and completion. |
 | specified-by | L3-BEH-SERVER-003 | 2 | specs/L3/server/L3-BEH-SERVER-003-subagent-coordination.md | L3 defines spawn lifecycle, agent tree registry, mailbox, completion watching, and session resumption. |
 
 ## Revision Notes

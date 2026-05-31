@@ -1,6 +1,6 @@
 ---
 artifact_id: L2-DES-APP-005
-revision: 1
+revision: 2
 status: Draft
 active_baseline: no
 supersedes:
@@ -13,13 +13,13 @@ last_updated: 2026-05-26
 
 ## Purpose
 
-Define the durable `config.toml` file shape used by user-scoped and project-scoped configuration, and the companion `auth.json` file shape used for credentials.
+Define the durable `config.toml` file shape used by user-scoped and workspace-scoped configuration, and the user-scoped `auth.json` file shape used for credentials.
 
 This design makes model/provider persistence, `/model` selection defaults, MCP server setup, skill discovery roots, and routine application preferences inspectable and mergeable without requiring clients to understand implementation-specific runtime state. It also keeps API keys and other credential material out of `config.toml`.
 
 ## Background / Context
 
-`L2-DES-APP-002` defines where configuration files live and how project-scoped configuration takes precedence over user-scoped configuration. This document defines the TOML schema stored at those locations.
+`L2-DES-APP-002` defines where configuration files live and how workspace-scoped configuration overlays user-scoped configuration field by field. This document defines the TOML schema stored at those locations.
 
 The same schema is used for:
 
@@ -28,13 +28,12 @@ The same schema is used for:
   - Windows auth file: `C:\Users\username\.devo\auth.json`
   - macOS and Linux: `~/.devo/config.toml`
   - macOS and Linux auth file: `~/.devo/auth.json`
-- Project-scoped configuration:
-  - `project_directory/.dev/config.toml`
-  - Project auth file: `project_directory/.dev/auth.json`
+- Workspace-scoped configuration:
+  - `<workspace>/.devo/config.toml`
 
 The TOML schema stores durable preferences and durable setup records. It must not store transient session state, resolved runtime profiles, provider request payloads, routine client projections, API keys, or other secret values.
 
-The JSON auth schema stores credential material for the same source scopes. `config.toml` refers to auth entries by stable credential id.
+The JSON auth schema stores credential material only in the user configuration directory. `config.toml` files refer to auth entries by stable credential id.
 
 ## Source Requirements
 
@@ -50,9 +49,9 @@ The JSON auth schema stores credential material for the same source scopes. `con
 
 ## Design Requirement
 
-Configuration should use a single TOML schema version with stable, keyed records. Credential material should use a companion `auth.json` schema version with stable credential ids.
+Configuration should use a single TOML schema version with stable, keyed records. Credential material should use a user-scoped `auth.json` schema version with stable credential ids.
 
-Keyed TOML tables are preferred for mergeable records because project-scoped configuration can replace, disable, or add individual records by stable identifier:
+Keyed TOML tables are preferred for mergeable records because workspace-scoped configuration can override fields, disable records, or add records by stable identifier:
 
 - `[providers.<provider_id>]`
 - `[model_bindings.<binding_id>]`
@@ -335,8 +334,8 @@ Rules:
 - `config.toml` writes must not insert plaintext credential values.
 - `auth.json` writes must update only the intended credential entries.
 - Errors may name the provider, MCP server, and credential id, but must not print credential values by default.
-- Project-scoped `auth.json` is valid only as an explicit user choice because the file may be shared with the project directory.
-- When creating project-scoped `auth.json`, the program should make the persistence target visible and should recommend or apply project-local ignore behavior where supported by later implementation design.
+- Workspace-scoped `auth.json` is not part of the durable credential design. Credential material must remain in user-scoped `auth.json`.
+- Workspace-scoped `config.toml` may reference credential ids from user-scoped `auth.json`, but it must not store plaintext credential material.
 
 Auth records:
 
@@ -393,7 +392,7 @@ Common fields:
 - `display_name`: user-facing server name.
 - `transport`: `stdio` or `http`.
 - `startup_policy`: `eager`, `lazy`, or `manual`.
-- `trust_policy`: `user`, `project`, or `untrusted`.
+- `trust_policy`: `user`, `workspace`, or `untrusted`.
 - `allowed_capabilities`: optional list containing `tools`, `resources`, `resource_templates`, `prompts`, `sampling`, or `elicitation`.
 - `roots_policy`: `none`, `workspace`, or `configured`.
 
@@ -430,7 +429,7 @@ Rules:
 - Enabled HTTP servers require `base_url`.
 - Secret-bearing process environment variables and HTTP auth values must reference `auth.json` credential ids.
 - The runtime may inject an `auth.json` credential into a child process environment only for the configured server operation that requires it. That runtime injection does not make OS environment variables a credential persistence mechanism.
-- Project-scoped MCP servers must be visible to the user before first use because they may start local processes or send workspace data to external services.
+- Workspace-scoped MCP servers must be visible to the user before first use because they may start local processes or send workspace data to external services.
 
 ## Skills
 
@@ -495,29 +494,30 @@ Rules:
 
 ## Record Merge Semantics
 
-The effective configuration is built from user config, then project config.
+The effective configuration is built from user config, then workspace config.
 
 For scalar settings:
 
-- Project value replaces user value.
-- Missing project value leaves user value in effect.
+- Workspace value replaces user value when the same scalar field is present.
+- Missing workspace value leaves user value in effect.
 
 For keyed record collections:
 
 - Record identity is the TOML table key.
-- A project record with the same key replaces the entire user record.
-- A project record may disable a user record by setting only `enabled = false`.
-- Other enabled replacement records must include all required fields for that record type.
-- Project records with new keys are added to the effective set.
-- User records with keys not mentioned by project config remain in the effective set.
+- A workspace record with the same key merges with the user record field by field.
+- A workspace field with the same field name replaces the user field.
+- User fields not mentioned by the workspace record remain in effect.
+- A workspace record may disable a user record by setting only `enabled = false`.
+- Workspace records with new keys are added to the effective set.
+- User records with keys not mentioned by workspace config remain in the effective set.
 
-This avoids mixing a project provider endpoint with a user invocation method or model name by accident.
+Every effective leaf field must retain provenance so inspection can explain mixed user/workspace records.
 
-Credential references resolve against effective auth data:
+Credential references resolve against user-scoped auth data:
 
-- User `auth.json` provides the base credential set.
-- Project `auth.json` overlays user `auth.json` by credential id.
-- A project-scoped configuration record that references a user-scoped credential id is allowed only after the project-scoped configuration is visible to the user.
+- User `auth.json` provides the complete credential set.
+- Workspace config may reference user-scoped credential ids.
+- The workspace directory must not contain a durable `auth.json`.
 - Invalid or missing credential references produce actionable errors and must not silently fall back to another credential id.
 
 ## Validation
@@ -529,7 +529,7 @@ The program should validate configuration in two phases:
 
 Source validation catches malformed TOML, unsupported schema versions, wrong value types, missing required fields in enabled records, and unknown keys that cannot be preserved safely.
 
-Auth validation catches malformed JSON, unsupported auth schema versions, wrong value types, missing credential values, duplicate credential ids after source precedence, and credential kinds unsupported by the referring config field.
+Auth validation catches malformed JSON, unsupported auth schema versions, wrong value types, missing credential values, duplicate credential ids inside the user auth file, and credential kinds unsupported by the referring config field.
 
 Effective validation catches references to missing providers, disabled providers, missing model bindings, missing credentials, invalid supported model slugs, invalid model display names, invalid invocation methods, unsupported reasoning efforts, invalid MCP transport combinations, and unavailable skill roots.
 
@@ -570,11 +570,11 @@ When a setup flow writes both `config.toml` and `auth.json`, the program should 
 | related-to | L1-REQ-APP-009 | 1 | specs/L1/L1-REQ-APP-009-skills.md | Skill roots and enablement are configured through `config.toml`. |
 | related-to | L1-REQ-APP-003 | 1 | specs/L1/L1-REQ-APP-003-safety.md | `[defaults].permission_policy` persists the default permission posture without replacing runtime approval or sandbox enforcement. |
 | related-to | L1-REQ-APP-012 | 1 | specs/L1/L1-REQ-APP-012-privacy-data-ownership.md | `auth.json` credential storage and redaction behavior protect secrets. |
-| related-to | L2-DES-APP-002 | 1 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Source precedence resolves this schema across user and project files. |
-| related-to | L2-DES-MODEL-001 | 1 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | Provides concrete persistence fields for providers and model bindings. |
+| related-to | L2-DES-APP-002 | 2 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Source precedence resolves this schema across user and workspace files. |
+| related-to | L2-DES-MODEL-001 | 2 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | Provides concrete persistence fields for providers and model bindings. |
 | related-to | L2-DES-MCP-001 | 1 | specs/L2/mcp/L2-DES-MCP-001-mcp-integration-architecture.md | Provides concrete persistence fields for MCP servers. |
 | related-to | L2-DES-SKILLS-001 | 1 | specs/L2/skills/L2-DES-SKILLS-001-agent-skills-architecture.md | Provides concrete persistence fields for skill roots and enablement. |
-| specified-by | L3-BEH-APP-001 | 1 | specs/L3/app/L3-BEH-APP-001-configuration-resolution.md | Defines schema validation, merge behavior, safe inspection, and atomic per-file write behavior for `config.toml` and `auth.json`. |
+| specified-by | L3-BEH-APP-001 | 3 | specs/L3/app/L3-BEH-APP-001-configuration-resolution.md | Defines schema validation, field-level merge behavior, safe inspection, and atomic per-file write behavior for `config.toml` and user-scoped `auth.json`. |
 
 ## Revision Notes
 
@@ -582,5 +582,6 @@ When a setup flow writes both `config.toml` and `auth.json`, the program should 
 |---:|---|---|---|---|
 | 1 | 2026-05-25 | Assistant | Initial | Initial TOML schema design for durable user and project configuration. |
 | 1 | 2026-05-25 | Human | Refinement | Moved API keys and other credential material into dedicated `auth.json` files and removed environment variables or external stores as the recommended credential persistence mechanism. |
+| 2 | 2026-05-27 | Human | Refinement | Moved workspace config to `<workspace>/.devo/config.toml`, made `auth.json` user-scoped only, and changed record precedence to field-level merge. |
 | 1 | 2026-05-25 | Assistant | Refinement | Linked persisted `permission_policy` defaults to application safety requirements. |
 | 1 | 2026-05-26 | Human | Refinement | Added explicit model binding `display_name` examples and clarified display-name fallback and identifier rules. |

@@ -9,100 +9,13 @@ active_baseline: no
 
 ## Purpose
 
-Define the `ToolHandler` trait, `ToolRegistry` interface, `ToolSpec`, `ToolContext`, and `ToolOutput`/`ToolError` types that form the contract between `core` (implementations) and `server` (consumers).
+Define the `ToolHandler` trait, `ToolRegistry` struct, `ToolSpec`, `ToolContext`, and `ToolOutput`/`ToolError` types that form the contract between `core` (implementations) and `server` (consumers).
 
 ## Source Design
 
 L2-DES-TOOL-001, L3-DES-ARCH-001
 
-## 1. Trait and Type Definitions (all in `tools` crate)
-
-```rust
-// === tool_handler.rs ===
-
-#[async_trait]
-pub trait ToolHandler: Send + Sync {
-    fn spec(&self) -> &ToolSpec;
-
-    async fn handle(
-        &self,
-        ctx: ToolContext,
-        input: serde_json::Value,
-        progress: Option<ToolProgressSender>,
-    ) -> Result<ToolOutput, ToolError>;
-}
-
-pub struct ToolContext {
-    pub session_id: SessionId,
-    pub turn_id: TurnId,
-    pub tool_call_id: String,
-    pub workspace_root: PathBuf,
-    pub permission_profile: RuntimePermissionProfile,  // from protocol
-    pub tool_registry: Arc<dyn ToolRegistry>,
-    pub output_limit_bytes: usize,
-    pub cancel_token: CancellationToken,
-}
-
-// === tool_spec.rs ===
-
-pub struct ToolSpec {
-    pub name: String,
-    pub display_name: String,
-    pub description: String,
-    pub input_schema: JsonSchema,
-    pub output_mode: ToolOutputMode,
-    pub execution_mode: ToolExecutionMode,
-    pub capability_tags: Vec<ToolCapabilityTag>,
-    pub supports_parallel: bool,
-    pub supports_cancellation: bool,
-    pub supports_streaming: bool,
-    pub preparation_feedback: ToolPreparationFeedback,
-}
-
-pub enum ToolOutputMode { Text, Json, Mixed }
-
-pub enum ToolPreparationFeedback { None, Spinner, ProgressBar }
-
-// === registry.rs ===
-
-pub trait ToolRegistry: Send + Sync {
-    fn get(&self, name: &str) -> Option<&Arc<dyn ToolHandler>>;
-    fn spec(&self, name: &str) -> Option<&ToolSpec>;
-    fn list_available(&self, mode: &SessionMode, permission: &PermissionProfile) -> Vec<&ToolSpec>;
-    fn list_all_specs(&self) -> &[ToolSpec];
-}
-
-// === output.rs ===
-
-pub struct ToolOutput {
-    pub content: serde_json::Value,
-    pub display_content: Option<String>,
-    pub structured_status: StructuredStatus,
-    pub result_summary: String,
-    pub redaction_state: RedactionState,
-    pub safety_notice: Option<String>,
-}
-
-pub struct ToolError {
-    pub code: ToolErrorCode,
-    pub message: String,
-    pub recoverable: bool,
-}
-
-pub enum ToolErrorCode {
-    InvalidInput { field_errors: Vec<FieldError> },
-    BlockedByMode { mode: String },
-    NeedsConfiguration { missing: Vec<String> },
-    Denied { reason: String },
-    ApprovalRequired { approval_id: String },
-    TimedOut { limit_ms: u64 },
-    ExecutionFailed { reason: String },
-    Cancelled,
-    InternalError,
-}
-```
-
-## 2. Dependency Contract
+## 1. Dependency Contract
 
 ```
 tools crate:
@@ -118,7 +31,7 @@ server crate:
   calls: registry.get(name).handle(ctx, input, progress)
 ```
 
-## 3. ToolSpec Validation Rules
+## 2. ToolSpec Validation Rules
 
 ```rust
 impl ToolSpec {
@@ -135,7 +48,7 @@ impl ToolSpec {
 }
 ```
 
-## 4. ToolProgressSender
+## 3. ToolProgressSender
 
 ```rust
 pub struct ToolProgressSender {

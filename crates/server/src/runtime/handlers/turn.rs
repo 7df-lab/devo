@@ -80,7 +80,7 @@ impl ServerRuntime {
             let mut session = session_arc.lock().await;
             if let Some(active_turn) = session.active_turn.as_ref() {
                 let pending_turn_queue = Arc::clone(&session.pending_turn_queue);
-                let active_turn_id = active_turn.turn_id;
+                let _active_turn_id = active_turn.turn_id;
                 let is_ephemeral = session.summary.ephemeral;
                 drop(session);
 
@@ -109,18 +109,6 @@ impl ServerRuntime {
                             "failed to persist pending turn message to database"
                         );
                     }
-                }
-                if let Some(tx) = self.high_pri_tx.lock().await.as_ref() {
-                    let response = serde_json::to_value(SuccessResponse {
-                        id: request_id,
-                        result: TurnStartResult {
-                            turn_id: active_turn_id,
-                            status: TurnStatus::Running,
-                            accepted_at: now,
-                        },
-                    })
-                    .expect("serialize turn/start response");
-                    let _ = tx.send(response);
                 }
                 let sid = params.session_id;
                 let runtime = Arc::clone(self);

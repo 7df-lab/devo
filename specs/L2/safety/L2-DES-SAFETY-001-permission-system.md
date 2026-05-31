@@ -273,10 +273,10 @@ The permission system exposes these primitives to the runtime:
 | refines | L1-REQ-SEC-001 | 1 | specs/L1/L1-REQ-SEC-001-security-mode.md | Security Mode must preserve normal permission and approval behavior. |
 | related-to | L2-DES-SAFETY-002 | 1 | specs/L2/safety/L2-DES-SAFETY-002-approval-mechanism.md | Approval mechanism references and enforces permission profiles. |
 | related-to | L2-DES-TUI-CMD-007 | 1 | specs/L2/tui/slash-commands/L2-DES-TUI-CMD-007-permissions.md | /permissions command controls which profile is active. |
-| related-to | L2-DES-APP-002 | 1 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Permission config participates in config layering. |
-| related-to | L2-DES-APP-005 | 1 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Config TOML schema includes `[permissions]` table. |
-| specified-by | L3-BEH-CORE-004 | 1 | specs/L3/core/L3-BEH-CORE-004-permission-approval.md | L3 defines permission profile resolution, access evaluation, network enforcement, and additional per-call permissions. |
-| specified-by | L3-BEH-SAFETY-001 | 1 | specs/L3/safety/L3-BEH-SAFETY-001-sandbox-enforcement.md | L3 defines OS/process-boundary sandbox enforcement. |
+| related-to | L2-DES-APP-002 | 2 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Permission config participates in config layering. |
+| related-to | L2-DES-APP-005 | 2 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Config TOML schema includes `[permissions]` table. |
+| specified-by | L3-BEH-CORE-004 | 2 | specs/L3/core/L3-BEH-CORE-004-permission-approval.md | L3 defines permission profile resolution, access evaluation, network enforcement, and additional per-call permissions. |
+| specified-by | L3-BEH-SAFETY-001 | 2 | specs/L3/safety/L3-BEH-SAFETY-001-sandbox-enforcement.md | L3 defines OS/process-boundary sandbox enforcement. |
 
 ## Revision Notes
 

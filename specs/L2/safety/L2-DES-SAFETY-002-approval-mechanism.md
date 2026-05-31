@@ -350,9 +350,9 @@ The approval policy influences what instructions the agent receives about how to
 | related-to | L2-DES-SAFETY-001 | 1 | specs/L2/safety/L2-DES-SAFETY-001-permission-system.md | Approval references permission profiles for boundary checks. |
 | related-to | L2-DES-TUI-CMD-007 | 1 | specs/L2/tui/slash-commands/L2-DES-TUI-CMD-007-permissions.md | /permissions command changes the active policy mode. |
 | related-to | L2-DES-TUI-004 | 1 | specs/L2/tui/L2-DES-TUI-004-streaming-transcript-and-state.md | Approval states are visible in the transcript. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Approval events travel over the client-server protocol. |
-| related-to | L2-DES-APP-005 | 1 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Approval policy is part of the config schema. |
-| specified-by | L3-BEH-CORE-004 | 1 | specs/L3/core/L3-BEH-CORE-004-permission-approval.md | L3 defines approval decision pipeline, approval cache, auto-reviewer, escalation tiers, and prefix rules. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Approval events travel over the client-server protocol. |
+| related-to | L2-DES-APP-005 | 2 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Approval policy is part of the config schema. |
+| specified-by | L3-BEH-CORE-004 | 2 | specs/L3/core/L3-BEH-CORE-004-permission-approval.md | L3 defines approval decision pipeline, approval cache, auto-reviewer, escalation tiers, and prefix rules. |
 | related-to | L3-BEH-SAFETY-002 | 2 | specs/L3/safety/L3-BEH-SAFETY-002-approval-pipeline.md | L3 defines approved grant application at sandbox and process-boundary enforcement. |
 
 ## Revision Notes

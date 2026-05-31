@@ -1,0 +1,1913 @@
+//! Standalone onboarding widget for first-run model setup.
+//!
+//! This widget renders inline in the TUI bottom area. It handles all keyboard
+//! input directly during onboarding, and is owned by `ChatWidget` — not by
+//! `BottomPane` — keeping it decoupled from the composer and popup system.
+//!
+//! Follows L2-DES-TUI-001 flow:
+//! 1. Model slug selection (searchable popup)
+//! 2. Provider selection (existing or "Add provider...")
+//! 3. Inline setup with vertical rail (* / | markers)
+//! 4. Invocation method popup
+//! 5. Reasoning effort popup (if model supports reasoning)
+//! 6. Validation
+
+use std::time::Instant;
+
+use crossterm::event::KeyCode;
+use crossterm::event::KeyEvent;
+use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::style::Stylize;
+use ratatui::text::Line;
+use ratatui::text::Span;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Widget;
+use ratatui::widgets::Wrap;
+
+use devo_protocol::Model;
+use devo_protocol::ProviderVendor;
+use devo_protocol::ProviderWireApi;
+
+use crate::app_command::AppCommand;
+use crate::app_event::AppEvent;
+use crate::app_event_sender::AppEventSender;
+use crate::bottom_pane::popup_consts::MAX_POPUP_ROWS;
+use crate::bottom_pane::scroll_state::ScrollState;
+use crate::exec_cell::spinner;
+use crate::render::renderable::Renderable;
+use crate::tui::frame_requester::FrameRequester;
+
+const SPINNER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// Simple content area with padding, no background styling.
+fn onboarding_content_area(area: Rect) -> Rect {
+    if area.height < 2 || area.width < 2 {
+        return area;
+    }
+    Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OnboardingResult {
+    /// Validation succeeded, config should be saved.
+    ValidationSucceeded {
+        model_slug: String,
+        model_name: String,
+    },
+    /// User cancelled onboarding.
+    Cancelled,
+}
+
+/// Which field is active in the inline setup view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InlineField {
+    ProviderName,
+    BaseUrl,
+    ApiKey,
+    ModelName,
+    DisplayName,
+}
+
+/// Onboarding state machine following L2-DES-TUI-001.
+#[derive(Debug)]
+enum OnboardingState {
+    /// Step 1: Select a model from catalog or enter custom.
+    ModelSelection {
+        items: Vec<ModelSelectionItem>,
+        state: ScrollState,
+        search_query: String,
+        filtered_indices: Vec<usize>,
+    },
+    /// Step 1b: Enter custom model name.
+    CustomModelName { input: String, cursor_pos: usize },
+    /// Step 2: Select an existing provider or add one.
+    ProviderSelection {
+        model: String,
+        items: Vec<ProviderSelectionItem>,
+        selected_idx: usize,
+    },
+    /// Steps 3-8: Inline setup for provider vendor and model binding fields.
+    InlineSetup {
+        model: String,
+        provider: ProviderWireApi,
+        provider_name: String,
+        base_url: String,
+        api_key: String,
+        model_name: String,
+        display_name: String,
+        active_field: InlineField,
+        input: String,
+        cursor_pos: usize,
+    },
+    /// Step 9: Select provider wire API type.
+    InvocationMethod {
+        model: String,
+        provider: ProviderWireApi,
+        provider_name: String,
+        base_url: String,
+        api_key: String,
+        model_name: String,
+        display_name: String,
+        items: Vec<InvocationMethodItem>,
+        selected_idx: usize,
+    },
+    /// Step 10: Select reasoning effort.
+    ReasoningEffort {
+        model: String,
+        provider: ProviderWireApi,
+        provider_name: String,
+        base_url: String,
+        api_key: String,
+        model_name: String,
+        display_name: String,
+        invocation_method: ProviderWireApi,
+        items: Vec<ReasoningEffortItem>,
+        selected_idx: usize,
+    },
+    /// Validating connection.
+    Validating {
+        model_slug: String,
+        model_name: String,
+        display_name: String,
+        provider_id: String,
+        provider_name: String,
+        invocation_method: ProviderWireApi,
+        default_reasoning_effort: Option<String>,
+        base_url: Option<String>,
+        api_key: Option<String>,
+        started_at: Instant,
+    },
+    /// Validation failed, show error and retry options.
+    ValidationFailed {
+        model: String,
+        provider: ProviderWireApi,
+        provider_name: String,
+        base_url: Option<String>,
+        api_key: Option<String>,
+        error_message: String,
+        selected_action: usize,
+    },
+}
+
+#[derive(Debug)]
+struct ModelSelectionItem {
+    slug: String,
+    display_name: String,
+    is_custom: bool,
+}
+
+#[derive(Debug)]
+struct ProviderSelectionItem {
+    label: String,
+    description: String,
+    kind: ProviderSelectionKind,
+}
+
+#[derive(Debug, Clone)]
+enum ProviderSelectionKind {
+    Vendor(ProviderVendor),
+    AddProvider,
+}
+
+#[derive(Debug)]
+struct InvocationMethodItem {
+    label: String,
+    description: String,
+    provider: ProviderWireApi,
+}
+
+/// TODO: It should be selected from model preset.
+#[derive(Debug)]
+struct ReasoningEffortItem {
+    label: String,
+}
+
+pub(crate) struct OnboardingWidget {
+    state: OnboardingState,
+    complete: bool,
+    result: Option<OnboardingResult>,
+    /// Models from the catalog, stored so `go_back_to_model_selection` can restore them.
+    original_models: Vec<Model>,
+    provider_vendors: Vec<ProviderVendor>,
+    app_event_tx: AppEventSender,
+    frame_requester: FrameRequester,
+    animations_enabled: bool,
+}
+
+impl OnboardingWidget {
+    pub(crate) fn new(
+        models: &[Model],
+        app_event_tx: AppEventSender,
+        frame_requester: FrameRequester,
+        animations_enabled: bool,
+    ) -> Self {
+        let items = Self::build_model_items(models);
+        let filtered_indices = (0..items.len()).collect();
+        let mut state = ScrollState::new();
+        state.selected_idx = Some(0);
+
+        let this = Self {
+            state: OnboardingState::ModelSelection {
+                items,
+                state,
+                search_query: String::new(),
+                filtered_indices,
+            },
+            complete: false,
+            result: None,
+            original_models: models.to_vec(),
+            provider_vendors: Vec::new(),
+            app_event_tx,
+            frame_requester,
+            animations_enabled,
+        };
+        this.app_event_tx
+            .send(AppEvent::Command(AppCommand::RunUserShellCommand {
+                command: "provider list".to_string(),
+            }));
+        this
+    }
+
+    /// Build `ModelSelectionItem` list from the catalog models.
+    fn build_model_items(models: &[Model]) -> Vec<ModelSelectionItem> {
+        models
+            .iter()
+            .map(|m| ModelSelectionItem {
+                slug: m.slug.clone(),
+                display_name: m.display_name.clone(),
+                is_custom: false,
+            })
+            .collect()
+    }
+
+    pub(crate) fn take_result(&mut self) -> Option<OnboardingResult> {
+        self.result.take()
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    pub(crate) fn cancel(&mut self) {
+        self.complete = true;
+        self.result = Some(OnboardingResult::Cancelled);
+    }
+
+    pub(crate) fn on_provider_vendors_listed(&mut self, provider_vendors: Vec<ProviderVendor>) {
+        self.provider_vendors = provider_vendors;
+        if let OnboardingState::ProviderSelection { items, .. } = &mut self.state {
+            *items = Self::provider_selection_items(&self.provider_vendors);
+        }
+        self.frame_requester.schedule_frame();
+    }
+
+    /// Called when validation succeeds.
+    pub(crate) fn on_validation_succeeded(&mut self, _reply_preview: String) {
+        if let OnboardingState::Validating {
+            model_slug,
+            model_name,
+            ..
+        } = &self.state
+        {
+            self.result = Some(OnboardingResult::ValidationSucceeded {
+                model_slug: model_slug.clone(),
+                model_name: model_name.clone(),
+            });
+            self.complete = true;
+        }
+    }
+
+    /// Called when validation fails.
+    pub(crate) fn on_validation_failed(&mut self, error_message: String) {
+        if let OnboardingState::Validating {
+            model_slug,
+            invocation_method,
+            provider_name,
+            base_url,
+            api_key,
+            ..
+        } = &self.state
+        {
+            self.state = OnboardingState::ValidationFailed {
+                model: model_slug.clone(),
+                provider: *invocation_method,
+                provider_name: provider_name.clone(),
+                base_url: base_url.clone(),
+                api_key: api_key.clone(),
+                error_message,
+                selected_action: 0,
+            };
+        }
+    }
+
+    pub(crate) fn handle_paste(&mut self, text: String) {
+        match &mut self.state {
+            OnboardingState::ModelSelection {
+                items,
+                state,
+                search_query,
+                filtered_indices,
+            } => {
+                search_query.push_str(&text);
+                Self::model_apply_filter(items, search_query, filtered_indices, state);
+            }
+            OnboardingState::CustomModelName { input, cursor_pos }
+            | OnboardingState::InlineSetup {
+                input, cursor_pos, ..
+            } => {
+                Self::insert_at_cursor(input, cursor_pos, &text);
+            }
+            OnboardingState::ProviderSelection { .. }
+            | OnboardingState::InvocationMethod { .. }
+            | OnboardingState::ReasoningEffort { .. }
+            | OnboardingState::Validating { .. }
+            | OnboardingState::ValidationFailed { .. } => {}
+        }
+    }
+
+    fn insert_at_cursor(input: &mut String, cursor_pos: &mut usize, text: &str) {
+        let byte_pos = input
+            .char_indices()
+            .nth((*cursor_pos).min(input.chars().count()))
+            .map(|(idx, _)| idx)
+            .unwrap_or(input.len());
+        input.insert_str(byte_pos, text);
+        *cursor_pos += text.chars().count();
+    }
+
+    // ── Helpers ──
+
+    fn infer_provider(slug: &str) -> ProviderWireApi {
+        let slug_lower = slug.to_lowercase();
+        if slug_lower.contains("claude") || slug_lower.contains("anthropic") {
+            ProviderWireApi::AnthropicMessages
+        } else {
+            ProviderWireApi::OpenAIChatCompletions
+        }
+    }
+
+    fn provider_display_name(provider: ProviderWireApi) -> &'static str {
+        match provider {
+            ProviderWireApi::AnthropicMessages => "Anthropic",
+            ProviderWireApi::OpenAIChatCompletions => "OpenAI Chat Completions",
+            ProviderWireApi::OpenAIResponses => "OpenAI Responses",
+        }
+    }
+
+    fn catalog_display_name(&self, slug: &str) -> String {
+        self.original_models
+            .iter()
+            .find(|model| model.slug == slug)
+            .map(|model| model.display_name.clone())
+            .unwrap_or_else(|| slug.to_string())
+    }
+
+    fn model_supports_reasoning(&self, slug: &str) -> bool {
+        self.original_models.iter().any(|model| {
+            model.slug == slug
+                && !matches!(
+                    model.thinking_capability,
+                    devo_protocol::ThinkingCapability::Unsupported
+                )
+        })
+    }
+
+    fn go_back_to_model_selection(&mut self) {
+        let items = Self::build_model_items(&self.original_models);
+        let filtered_indices = (0..items.len()).collect();
+        let mut state = ScrollState::new();
+        state.selected_idx = Some(0);
+        self.state = OnboardingState::ModelSelection {
+            items,
+            state,
+            search_query: String::new(),
+            filtered_indices,
+        };
+    }
+}
+
+struct ValidationParams {
+    model_slug: String,
+    model_name: String,
+    display_name: String,
+    provider_id: String,
+    provider_name: String,
+    invocation_method: ProviderWireApi,
+    default_reasoning_effort: Option<String>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+}
+
+impl OnboardingWidget {
+    fn start_validation(&mut self, params: ValidationParams) {
+        let display_name =
+            if params.display_name.trim().is_empty() || params.display_name == params.model_name {
+                self.catalog_display_name(&params.model_slug)
+            } else {
+                params.display_name.clone()
+            };
+
+        self.state = OnboardingState::Validating {
+            model_slug: params.model_slug.clone(),
+            model_name: params.model_name.clone(),
+            display_name: display_name.clone(),
+            provider_id: params.provider_id.clone(),
+            provider_name: params.provider_name.clone(),
+            invocation_method: params.invocation_method,
+            default_reasoning_effort: params.default_reasoning_effort.clone(),
+            base_url: params.base_url.clone(),
+            api_key: params.api_key.clone(),
+            started_at: Instant::now(),
+        };
+        let payload = serde_json::json!({
+            "model_slug": params.model_slug,
+            "model_name": params.model_name,
+            "display_name": display_name,
+            "provider_id": params.provider_id,
+            "provider_name": params.provider_name,
+            "invocation_method": params.invocation_method,
+            "default_reasoning_effort": params.default_reasoning_effort,
+            "base_url": params.base_url,
+            "api_key": params.api_key,
+        });
+        self.app_event_tx
+            .send(AppEvent::Command(AppCommand::RunUserShellCommand {
+                command: format!("onboard {payload}"),
+            }));
+    }
+
+    // ── Key Handling ──
+
+    fn model_selection_handle_key(&mut self, key: KeyEvent) {
+        let OnboardingState::ModelSelection {
+            items,
+            state,
+            search_query,
+            filtered_indices,
+        } = &mut self.state
+        else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Up | KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Self::model_move_up(state, filtered_indices);
+            }
+            KeyCode::Up => {
+                Self::model_move_up(state, filtered_indices);
+            }
+            KeyCode::Char('k') if key.modifiers.is_empty() => {
+                Self::model_move_up(state, filtered_indices);
+            }
+            KeyCode::Down | KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Self::model_move_down(state, filtered_indices);
+            }
+            KeyCode::Down => {
+                Self::model_move_down(state, filtered_indices);
+            }
+            KeyCode::Char('j') if key.modifiers.is_empty() => {
+                Self::model_move_down(state, filtered_indices);
+            }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                search_query.push(c);
+                Self::model_apply_filter(items, search_query, filtered_indices, state);
+            }
+            KeyCode::Backspace => {
+                search_query.pop();
+                Self::model_apply_filter(items, search_query, filtered_indices, state);
+            }
+            KeyCode::Enter => {
+                if let Some(visible_idx) = state.selected_idx
+                    && let Some(&actual_idx) = filtered_indices.get(visible_idx)
+                    && let Some(item) = items.get(actual_idx)
+                {
+                    if item.is_custom {
+                        self.state = OnboardingState::CustomModelName {
+                            input: String::new(),
+                            cursor_pos: 0,
+                        };
+                    } else {
+                        let slug = item.slug.clone();
+                        self.state = OnboardingState::ProviderSelection {
+                            model: slug,
+                            items: Self::provider_selection_items(&self.provider_vendors),
+                            selected_idx: 0,
+                        };
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.complete = true;
+                self.result = Some(OnboardingResult::Cancelled);
+            }
+            _ => {}
+        }
+    }
+
+    fn model_move_up(state: &mut ScrollState, filtered_indices: &[usize]) {
+        let len = filtered_indices.len();
+        if len == 0 {
+            return;
+        }
+        let current = state.selected_idx.unwrap_or(0);
+        state.selected_idx = Some(if current == 0 { len - 1 } else { current - 1 });
+    }
+
+    fn model_move_down(state: &mut ScrollState, filtered_indices: &[usize]) {
+        let len = filtered_indices.len();
+        if len == 0 {
+            return;
+        }
+        let current = state.selected_idx.unwrap_or(0);
+        state.selected_idx = Some((current + 1) % len);
+    }
+
+    fn model_apply_filter(
+        items: &[ModelSelectionItem],
+        query: &str,
+        filtered_indices: &mut Vec<usize>,
+        state: &mut ScrollState,
+    ) {
+        let query_lower = query.to_lowercase();
+        if query.is_empty() {
+            *filtered_indices = (0..items.len()).collect();
+        } else {
+            *filtered_indices = items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    item.slug.to_lowercase().contains(&query_lower)
+                        || item.display_name.to_lowercase().contains(&query_lower)
+                })
+                .map(|(idx, _)| idx)
+                .collect();
+        }
+        state.selected_idx = if filtered_indices.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+    }
+
+    fn custom_model_name_handle_key(&mut self, key: KeyEvent) {
+        let OnboardingState::CustomModelName { input, cursor_pos } = &mut self.state else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                input.insert(*cursor_pos, c);
+                *cursor_pos += 1;
+            }
+            KeyCode::Backspace => {
+                if *cursor_pos > 0 {
+                    input.remove(*cursor_pos - 1);
+                    *cursor_pos -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                if *cursor_pos < input.len() {
+                    input.remove(*cursor_pos);
+                }
+            }
+            KeyCode::Left => {
+                if *cursor_pos > 0 {
+                    *cursor_pos -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if *cursor_pos < input.len() {
+                    *cursor_pos += 1;
+                }
+            }
+            KeyCode::Home => {
+                *cursor_pos = 0;
+            }
+            KeyCode::End => {
+                *cursor_pos = input.len();
+            }
+            KeyCode::Enter => {
+                let model = input.trim().to_string();
+                if model.is_empty() {
+                    return;
+                }
+                self.state = OnboardingState::ProviderSelection {
+                    model,
+                    items: Self::provider_selection_items(&self.provider_vendors),
+                    selected_idx: 0,
+                };
+            }
+            KeyCode::Esc => {
+                self.go_back_to_model_selection();
+            }
+            _ => {}
+        }
+    }
+
+    fn provider_selection_items(provider_vendors: &[ProviderVendor]) -> Vec<ProviderSelectionItem> {
+        let mut items = provider_vendors
+            .iter()
+            .cloned()
+            .map(|provider_vendor| {
+                let description = provider_vendor
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "Configured provider vendor".to_string());
+                ProviderSelectionItem {
+                    label: provider_vendor.name.clone(),
+                    description,
+                    kind: ProviderSelectionKind::Vendor(provider_vendor),
+                }
+            })
+            .collect::<Vec<_>>();
+        items.push(ProviderSelectionItem {
+            label: "Add provider...".to_string(),
+            description: "Enter custom provider settings".to_string(),
+            kind: ProviderSelectionKind::AddProvider,
+        });
+        items
+    }
+
+    fn provider_selection_handle_key(&mut self, key: KeyEvent) {
+        let OnboardingState::ProviderSelection {
+            model,
+            items,
+            selected_idx,
+        } = &mut self.state
+        else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Up => {
+                *selected_idx = if *selected_idx == 0 {
+                    items.len() - 1
+                } else {
+                    *selected_idx - 1
+                };
+            }
+            KeyCode::Down => {
+                *selected_idx = (*selected_idx + 1) % items.len();
+            }
+            KeyCode::Enter => {
+                if let Some(item) = items.get(*selected_idx) {
+                    let model_slug = model.clone();
+                    match &item.kind {
+                        ProviderSelectionKind::Vendor(provider_vendor) => {
+                            let provider = provider_vendor
+                                .wire_apis
+                                .first()
+                                .copied()
+                                .unwrap_or_else(|| Self::infer_provider(&model_slug));
+                            self.state = OnboardingState::InlineSetup {
+                                model: model_slug.clone(),
+                                provider,
+                                provider_name: provider_vendor.name.clone(),
+                                base_url: provider_vendor.base_url.clone().unwrap_or_default(),
+                                api_key: String::new(),
+                                model_name: model_slug.clone(),
+                                display_name: String::new(),
+                                active_field: InlineField::ModelName,
+                                input: model_slug.clone(),
+                                cursor_pos: model_slug.len(),
+                            };
+                        }
+                        ProviderSelectionKind::AddProvider => {
+                            self.state = OnboardingState::InlineSetup {
+                                model: model_slug.clone(),
+                                provider: ProviderWireApi::OpenAIChatCompletions,
+                                provider_name: String::new(),
+                                base_url: String::new(),
+                                api_key: String::new(),
+                                model_name: model_slug.clone(),
+                                display_name: String::new(),
+                                active_field: InlineField::ProviderName,
+                                input: String::new(),
+                                cursor_pos: 0,
+                            };
+                        }
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.go_back_to_model_selection();
+            }
+            _ => {}
+        }
+    }
+
+    // ── Inline Setup ──
+
+    fn inline_setup_handle_key(&mut self, key: KeyEvent) {
+        let OnboardingState::InlineSetup {
+            model,
+            provider,
+            provider_name,
+            base_url,
+            api_key,
+            model_name,
+            display_name,
+            active_field,
+            input,
+            cursor_pos,
+        } = &mut self.state
+        else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                input.insert(*cursor_pos, c);
+                *cursor_pos += 1;
+            }
+            KeyCode::Backspace => {
+                if *cursor_pos > 0 {
+                    input.remove(*cursor_pos - 1);
+                    *cursor_pos -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                if *cursor_pos < input.len() {
+                    input.remove(*cursor_pos);
+                }
+            }
+            KeyCode::Left => {
+                if *cursor_pos > 0 {
+                    *cursor_pos -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if *cursor_pos < input.len() {
+                    *cursor_pos += 1;
+                }
+            }
+            KeyCode::Home => {
+                *cursor_pos = 0;
+            }
+            KeyCode::End => {
+                *cursor_pos = input.len();
+            }
+            KeyCode::Enter => {
+                // Save current field and advance.
+                match active_field {
+                    InlineField::ProviderName => {
+                        *provider_name = input.trim().to_string();
+                        *active_field = InlineField::BaseUrl;
+                        input.clear();
+                        *cursor_pos = 0;
+                    }
+                    InlineField::BaseUrl => {
+                        *base_url = input.trim().to_string();
+                        *active_field = InlineField::ApiKey;
+                        *input = String::new();
+                        *cursor_pos = 0;
+                    }
+                    InlineField::ApiKey => {
+                        *api_key = input.trim().to_string();
+                        *active_field = InlineField::ModelName;
+                        *input = model_name.clone();
+                        *cursor_pos = input.len();
+                    }
+                    InlineField::ModelName => {
+                        *model_name = input.trim().to_string();
+                        *active_field = InlineField::DisplayName;
+                        // Prefill display name from model slug.
+                        let suggestion = model_name.clone();
+                        *input = suggestion.clone();
+                        *cursor_pos = suggestion.len();
+                    }
+                    InlineField::DisplayName => {
+                        *display_name = input.trim().to_string();
+                        // Move to invocation method selection.
+                        let model = model.clone();
+                        let provider = *provider;
+                        let provider_name = provider_name.clone();
+                        let base_url = base_url.clone();
+                        let api_key = api_key.clone();
+                        let model_name = model_name.clone();
+                        let display_name = display_name.clone();
+                        self.state = OnboardingState::InvocationMethod {
+                            model,
+                            provider,
+                            provider_name,
+                            base_url,
+                            api_key,
+                            model_name,
+                            display_name,
+                            items: Self::invocation_method_items(),
+                            selected_idx: 0,
+                        };
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                // Go back to previous field or provider selection.
+                match active_field {
+                    InlineField::ProviderName => {
+                        // Go back to provider selection.
+                        let model = model.clone();
+                        self.state = OnboardingState::ProviderSelection {
+                            model,
+                            items: Self::provider_selection_items(&self.provider_vendors),
+                            selected_idx: 0,
+                        };
+                    }
+                    InlineField::BaseUrl => {
+                        *active_field = InlineField::ProviderName;
+                        *input = provider_name.clone();
+                        *cursor_pos = input.len();
+                    }
+                    InlineField::ApiKey => {
+                        *active_field = InlineField::BaseUrl;
+                        *input = base_url.clone();
+                        *cursor_pos = input.len();
+                    }
+                    InlineField::ModelName => {
+                        *active_field = InlineField::ApiKey;
+                        *input = api_key.clone();
+                        *cursor_pos = input.len();
+                    }
+                    InlineField::DisplayName => {
+                        *active_field = InlineField::ModelName;
+                        *input = model_name.clone();
+                        *cursor_pos = input.len();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn invocation_method_items() -> Vec<InvocationMethodItem> {
+        vec![
+            InvocationMethodItem {
+                label: "OpenAI Chat Completions".to_string(),
+                description: "Most providers (OpenAI, Together, Groq, ...)".to_string(),
+                provider: ProviderWireApi::OpenAIChatCompletions,
+            },
+            InvocationMethodItem {
+                label: "OpenAI Responses".to_string(),
+                description: "OpenAI native Responses API".to_string(),
+                provider: ProviderWireApi::OpenAIResponses,
+            },
+            InvocationMethodItem {
+                label: "Anthropic Messages".to_string(),
+                description: "Claude models via Anthropic API".to_string(),
+                provider: ProviderWireApi::AnthropicMessages,
+            },
+        ]
+    }
+
+    fn invocation_method_handle_key(&mut self, key: KeyEvent) {
+        let OnboardingState::InvocationMethod {
+            model,
+            provider,
+            provider_name,
+            base_url,
+            api_key,
+            model_name,
+            display_name,
+            items,
+            selected_idx,
+            ..
+        } = &mut self.state
+        else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Up => {
+                *selected_idx = if *selected_idx == 0 {
+                    items.len() - 1
+                } else {
+                    *selected_idx - 1
+                };
+            }
+            KeyCode::Down => {
+                *selected_idx = (*selected_idx + 1) % items.len();
+            }
+            KeyCode::Enter => {
+                if let Some(item) = items.get(*selected_idx) {
+                    let invocation = item.provider;
+                    let model = model.clone();
+                    let provider = *provider;
+                    let provider_name = provider_name.clone();
+                    let base_url = base_url.clone();
+                    let api_key = api_key.clone();
+                    let model_name = model_name.clone();
+                    let display_name = display_name.clone();
+
+                    // Check if model supports reasoning — if so, show reasoning effort picker.
+                    let original = self.original_models.iter().find(|m| m.slug == model);
+                    let supports_reasoning = original.is_some_and(|m| {
+                        !matches!(
+                            m.thinking_capability,
+                            devo_protocol::ThinkingCapability::Unsupported
+                        )
+                    });
+
+                    if supports_reasoning {
+                        self.state = OnboardingState::ReasoningEffort {
+                            model,
+                            provider,
+                            provider_name,
+                            base_url,
+                            api_key,
+                            model_name,
+                            display_name,
+                            invocation_method: invocation,
+                            items: Self::reasoning_effort_items(),
+                            selected_idx: 0,
+                        };
+                    } else {
+                        // No reasoning — go straight to validation.
+                        let base_url_opt = if base_url.is_empty() {
+                            None
+                        } else {
+                            Some(base_url)
+                        };
+                        let api_key_opt = if api_key.is_empty() {
+                            None
+                        } else {
+                            Some(api_key)
+                        };
+                        self.start_validation(ValidationParams {
+                            model_slug: model,
+                            model_name,
+                            display_name,
+                            provider_id: provider_name.clone(),
+                            provider_name,
+                            invocation_method: invocation,
+                            default_reasoning_effort: None,
+                            base_url: base_url_opt,
+                            api_key: api_key_opt,
+                        });
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                // Go back to inline setup, display name field.
+                let model = model.clone();
+                let provider = *provider;
+                let provider_name = provider_name.clone();
+                let base_url = base_url.clone();
+                let api_key = api_key.clone();
+                let model_name_val = model_name.clone();
+                let display_name_val = display_name.clone();
+                self.state = OnboardingState::InlineSetup {
+                    model,
+                    provider,
+                    provider_name,
+                    base_url,
+                    api_key,
+                    model_name: model_name_val.clone(),
+                    display_name: display_name_val.clone(),
+                    active_field: InlineField::DisplayName,
+                    input: display_name_val,
+                    cursor_pos: display_name.len(),
+                };
+            }
+            _ => {}
+        }
+    }
+
+    fn reasoning_effort_items() -> Vec<ReasoningEffortItem> {
+        vec![
+            ReasoningEffortItem {
+                label: "medium".to_string(),
+            },
+            ReasoningEffortItem {
+                label: "high".to_string(),
+            },
+            ReasoningEffortItem {
+                label: "xhigh".to_string(),
+            },
+        ]
+    }
+
+    fn reasoning_effort_handle_key(&mut self, key: KeyEvent) {
+        let OnboardingState::ReasoningEffort {
+            model,
+            base_url,
+            api_key,
+            model_name,
+            display_name,
+            provider_name,
+            invocation_method,
+            items,
+            selected_idx,
+            ..
+        } = &mut self.state
+        else {
+            return;
+        };
+
+        match key.code {
+            KeyCode::Up => {
+                *selected_idx = if *selected_idx == 0 {
+                    items.len() - 1
+                } else {
+                    *selected_idx - 1
+                };
+            }
+            KeyCode::Down => {
+                *selected_idx = (*selected_idx + 1) % items.len();
+            }
+            KeyCode::Enter => {
+                let model = model.clone();
+                let invocation_method = *invocation_method;
+                let model_name = model_name.clone();
+                let display_name = display_name.clone();
+                let provider_name = provider_name.clone();
+                let default_reasoning_effort =
+                    items.get(*selected_idx).map(|item| item.label.clone());
+                let base_url = base_url.clone();
+                let api_key = api_key.clone();
+                let base_url_opt = if base_url.is_empty() {
+                    None
+                } else {
+                    Some(base_url)
+                };
+                let api_key_opt = if api_key.is_empty() {
+                    None
+                } else {
+                    Some(api_key)
+                };
+                self.start_validation(ValidationParams {
+                    model_slug: model,
+                    model_name,
+                    display_name,
+                    provider_id: provider_name.clone(),
+                    provider_name,
+                    invocation_method,
+                    default_reasoning_effort,
+                    base_url: base_url_opt,
+                    api_key: api_key_opt,
+                });
+            }
+            KeyCode::Esc => {
+                // Go back to invocation method selection.
+                // Extract values before reassigning self.state.
+                let (m, prov, pn, bu, ak, mn, dn) = match &self.state {
+                    OnboardingState::ReasoningEffort {
+                        model,
+                        provider,
+                        provider_name,
+                        base_url,
+                        api_key,
+                        model_name,
+                        display_name,
+                        ..
+                    } => (
+                        model.clone(),
+                        *provider,
+                        provider_name.clone(),
+                        base_url.clone(),
+                        api_key.clone(),
+                        model_name.clone(),
+                        display_name.clone(),
+                    ),
+                    _ => return,
+                };
+                self.state = OnboardingState::InvocationMethod {
+                    model: m,
+                    provider: prov,
+                    provider_name: pn,
+                    base_url: bu,
+                    api_key: ak,
+                    model_name: mn,
+                    display_name: dn,
+                    items: Self::invocation_method_items(),
+                    selected_idx: 0,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    // ── Validation Failed ──
+
+    fn validation_failed_handle_key(&mut self, key: KeyEvent) {
+        let OnboardingState::ValidationFailed {
+            model,
+            provider,
+            provider_name,
+            base_url,
+            api_key,
+            error_message: _,
+            selected_action,
+        } = &mut self.state
+        else {
+            return;
+        };
+
+        let actions = [
+            "Retry with current settings",
+            "Edit settings",
+            "Choose different model",
+        ];
+
+        match key.code {
+            KeyCode::Up => {
+                *selected_action = if *selected_action == 0 {
+                    actions.len() - 1
+                } else {
+                    *selected_action - 1
+                };
+            }
+            KeyCode::Down => {
+                *selected_action = (*selected_action + 1) % actions.len();
+            }
+            KeyCode::Enter => match *selected_action {
+                0 => {
+                    // Retry.
+                    let model = model.clone();
+                    let provider = *provider;
+                    let provider_name = provider_name.clone();
+                    let base_url = base_url.clone();
+                    let api_key = api_key.clone();
+                    self.start_validation(ValidationParams {
+                        model_slug: model.clone(),
+                        model_name: model.clone(),
+                        display_name: model,
+                        provider_id: provider_name.clone(),
+                        provider_name,
+                        invocation_method: provider,
+                        default_reasoning_effort: None,
+                        base_url,
+                        api_key,
+                    });
+                }
+                1 => {
+                    // Edit settings — go back to inline setup API key field.
+                    let model_slug = model.clone();
+                    let provider = *provider;
+                    let provider_name = provider_name.clone();
+                    let base_url = base_url.clone().unwrap_or_default();
+                    let api_key = api_key.clone().unwrap_or_default();
+                    self.state = OnboardingState::InlineSetup {
+                        model: model_slug.clone(),
+                        provider,
+                        provider_name,
+                        base_url,
+                        api_key: api_key.clone(),
+                        model_name: model_slug,
+                        display_name: String::new(),
+                        active_field: InlineField::ApiKey,
+                        input: api_key.clone(),
+                        cursor_pos: api_key.len(),
+                    };
+                }
+                2 => {
+                    self.go_back_to_model_selection();
+                }
+                _ => {}
+            },
+            KeyCode::Esc => {
+                self.complete = true;
+                self.result = Some(OnboardingResult::Cancelled);
+            }
+            _ => {}
+        }
+    }
+
+    // ── Rendering: Inline Setup with Vertical Rail ──
+}
+
+struct InlineSetupRenderParams<'a> {
+    model: &'a str,
+    supports_reasoning: bool,
+    provider_name: &'a str,
+    base_url: &'a str,
+    api_key: &'a str,
+    model_name: &'a str,
+    display_name: &'a str,
+    active_field: &'a InlineField,
+    input: &'a str,
+    cursor_pos: usize,
+}
+
+impl OnboardingWidget {
+    fn render_footer(lines: &mut Vec<Line<'static>>, primary: &str, secondary: &str) {
+        lines.push(Line::from(""));
+        if secondary.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                primary.to_string(),
+                Style::default().dim(),
+            )]));
+            return;
+        }
+        lines.push(Line::from(vec![
+            Span::styled(primary.to_string(), Style::default().dim()),
+            Span::styled("  ·  ", Style::default().dim()),
+            Span::styled(secondary.to_string(), Style::default().dim()),
+        ]));
+    }
+
+    fn render_option_row(
+        lines: &mut Vec<Line<'static>>,
+        label: String,
+        description: Option<String>,
+        is_selected: bool,
+    ) {
+        let marker = if is_selected { ">" } else { " " };
+        let marker_style = if is_selected {
+            Style::default().cyan().bold()
+        } else {
+            Style::default().dim()
+        };
+        let label_style = if is_selected {
+            Style::default().bold()
+        } else {
+            Style::default()
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(marker.to_string(), marker_style),
+            Span::raw(" "),
+            Span::styled(label, label_style),
+        ]));
+
+        if let Some(description) = description {
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default().dim()),
+                Span::styled(description, Style::default().dim()),
+            ]));
+        }
+    }
+
+    fn render_inline_setup(params: &InlineSetupRenderParams, area: Rect, buf: &mut Buffer) {
+        if area.height < 3 {
+            return;
+        }
+        let content_area = onboarding_content_area(area);
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        lines.push(Line::from(vec![Span::styled(
+            "Configure provider binding",
+            Style::default().bold(),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("Model profile: {}", params.model),
+            Style::default().dim(),
+        )]));
+        lines.push(Line::from(""));
+
+        Self::render_inline_field(
+            &mut lines,
+            params,
+            InlineField::ProviderName,
+            "Provider Name",
+            "Enter a name to recognize this provider later.",
+            params.provider_name,
+            false,
+        );
+        Self::render_inline_field(
+            &mut lines,
+            params,
+            InlineField::BaseUrl,
+            "Base URL",
+            "Enter the provider API base URL.",
+            params.base_url,
+            false,
+        );
+        Self::render_inline_field(
+            &mut lines,
+            params,
+            InlineField::ApiKey,
+            "API Key",
+            "Enter the API key for this provider.",
+            params.api_key,
+            true,
+        );
+        Self::render_inline_field(
+            &mut lines,
+            params,
+            InlineField::ModelName,
+            "Model Name",
+            "Enter the model name this provider expects.",
+            params.model_name,
+            false,
+        );
+        Self::render_inline_field(
+            &mut lines,
+            params,
+            InlineField::DisplayName,
+            "Display Name",
+            "Enter the name clients should show for this model.",
+            params.display_name,
+            false,
+        );
+        Self::render_pending_workflow_step(
+            &mut lines,
+            "Invocation Method",
+            "Choose the API protocol.",
+            "[open popup]",
+        );
+        if params.supports_reasoning {
+            Self::render_pending_workflow_step(
+                &mut lines,
+                "Reason Effort",
+                "Choose the default reasoning effort for this model. It can be changed with /model.",
+                "[open popup]",
+            );
+        }
+        Self::render_pending_workflow_step(&mut lines, "Validation Done", "", "");
+
+        Self::render_footer(&mut lines, "Enter next field", "Esc back");
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(content_area, buf);
+    }
+
+    fn render_inline_field(
+        lines: &mut Vec<Line<'static>>,
+        params: &InlineSetupRenderParams,
+        field: InlineField,
+        label: &str,
+        hint: &str,
+        value: &str,
+        secret: bool,
+    ) {
+        let active_index = Self::inline_field_index(*params.active_field);
+        let field_index = Self::inline_field_index(field);
+        let is_active = field == *params.active_field;
+        let is_done = field_index < active_index;
+        let rail_style = if is_active {
+            Style::default().cyan().bold()
+        } else if is_done {
+            Style::default().green()
+        } else {
+            Style::default().dim()
+        };
+        let label_style = if is_active {
+            Style::default().bold()
+        } else {
+            Style::default().dim()
+        };
+        let shown_value = if is_active {
+            Self::input_with_cursor(params.input, params.cursor_pos)
+        } else if secret && !value.is_empty() {
+            "••••••••".to_string()
+        } else if value.is_empty() && is_done {
+            "(skip)".to_string()
+        } else if value.is_empty() {
+            "...".to_string()
+        } else {
+            value.to_string()
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled("● ", rail_style),
+            Span::raw(" "),
+            Span::styled(format!("{label}: "), label_style),
+            Span::styled(hint.to_string(), Style::default().dim()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("| ", rail_style),
+            Span::styled(
+                shown_value,
+                if is_active {
+                    Style::default()
+                } else {
+                    Style::default().dim()
+                },
+            ),
+        ]));
+        lines.push(Line::from(vec![Span::styled("|", rail_style)]));
+    }
+
+    fn render_pending_workflow_step(
+        lines: &mut Vec<Line<'static>>,
+        label: &str,
+        hint: &str,
+        value: &str,
+    ) {
+        lines.push(Line::from(vec![
+            Span::styled("●  ", Style::default().dim()),
+            Span::styled(format!("{label}: "), Style::default().dim()),
+            Span::styled(hint.to_string(), Style::default().dim()),
+        ]));
+        if !value.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("| ", Style::default().dim()),
+                Span::styled(value.to_string(), Style::default().dim()),
+            ]));
+        }
+        lines.push(Line::from(vec![Span::styled("|", Style::default().dim())]));
+    }
+
+    fn input_with_cursor(input: &str, cursor_pos: usize) -> String {
+        let byte_pos = input
+            .char_indices()
+            .nth(cursor_pos.min(input.chars().count()))
+            .map(|(i, _)| i)
+            .unwrap_or(input.len());
+        format!("{}▌{}", &input[..byte_pos], &input[byte_pos..])
+    }
+
+    fn inline_field_index(field: InlineField) -> usize {
+        match field {
+            InlineField::ProviderName => 0,
+            InlineField::BaseUrl => 1,
+            InlineField::ApiKey => 2,
+            InlineField::ModelName => 3,
+            InlineField::DisplayName => 4,
+        }
+    }
+
+    // ── Rendering: Popup Lists ──
+
+    fn render_model_selection(
+        items: &[ModelSelectionItem],
+        state: &ScrollState,
+        search_query: &str,
+        filtered_indices: &[usize],
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        if area.height < 3 {
+            return;
+        }
+        let content_area = onboarding_content_area(area);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        lines.push(Line::from(vec![Span::styled(
+            "Choose model profile",
+            Style::default().bold(),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "Type to filter built-in model capabilities.",
+            Style::default().dim(),
+        )]));
+        lines.push(Line::from(""));
+
+        if search_query.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                "filter: all",
+                Style::default().dim(),
+            )]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("filter: ", Style::default().dim()),
+                Span::styled(search_query.to_string(), Style::default()),
+            ]));
+        }
+        lines.push(Line::from(""));
+
+        let max_visible = MAX_POPUP_ROWS.min(filtered_indices.len().max(1));
+        let scroll_offset = state
+            .selected_idx
+            .map(|sel| {
+                if sel >= max_visible.saturating_sub(2) {
+                    sel.saturating_sub(max_visible.saturating_sub(3))
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
+
+        for (vis_idx, &actual_idx) in filtered_indices
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(max_visible)
+        {
+            if let Some(item) = items.get(actual_idx) {
+                let is_selected = state.selected_idx == Some(vis_idx);
+                let description = if item.display_name == item.slug {
+                    None
+                } else {
+                    Some(item.display_name.clone())
+                };
+                Self::render_option_row(&mut lines, item.slug.clone(), description, is_selected);
+            }
+        }
+
+        Self::render_footer(&mut lines, "Enter select", "Esc cancel");
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(content_area, buf);
+    }
+
+    fn render_custom_model_name(input: &str, cursor_pos: usize, area: Rect, buf: &mut Buffer) {
+        if area.height < 3 {
+            return;
+        }
+        let content_area = onboarding_content_area(area);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        lines.push(Line::from(vec![Span::styled(
+            "Custom model profile",
+            Style::default().bold(),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "Enter the model slug to use as the local capability profile.",
+            Style::default().dim(),
+        )]));
+        lines.push(Line::from(""));
+
+        let byte_pos = input
+            .char_indices()
+            .nth(cursor_pos.min(input.chars().count()))
+            .map(|(i, _)| i)
+            .unwrap_or(input.len());
+        lines.push(Line::from(vec![
+            Span::styled("> ", Style::default().cyan()),
+            Span::styled(
+                format!("{}▌{}", &input[..byte_pos], &input[byte_pos..]),
+                Style::default(),
+            ),
+        ]));
+        Self::render_footer(&mut lines, "Enter confirm", "Esc back");
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(content_area, buf);
+    }
+
+    fn render_provider_selection(
+        _model: &str,
+        items: &[ProviderSelectionItem],
+        selected_idx: usize,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        if area.height < 3 {
+            return;
+        }
+        let content_area = onboarding_content_area(area);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        lines.push(Line::from(vec![Span::styled(
+            "Choose provider vendor",
+            Style::default().bold(),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "Select a configured endpoint, or add a new vendor. Wire API comes next.",
+            Style::default().dim(),
+        )]));
+        lines.push(Line::from(""));
+
+        for (idx, item) in items.iter().enumerate() {
+            let is_selected = idx == selected_idx;
+            Self::render_option_row(
+                &mut lines,
+                item.label.clone(),
+                Some(item.description.clone()),
+                is_selected,
+            );
+        }
+
+        Self::render_footer(&mut lines, "Enter select", "Esc back");
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(content_area, buf);
+    }
+
+    fn render_invocation_method(
+        items: &[InvocationMethodItem],
+        selected_idx: usize,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        if area.height < 3 {
+            return;
+        }
+        let content_area = onboarding_content_area(area);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        lines.push(Line::from(vec![Span::styled(
+            "Choose wire API",
+            Style::default().bold(),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "This is the provider protocol, not the provider vendor.",
+            Style::default().dim(),
+        )]));
+        lines.push(Line::from(""));
+
+        for (idx, item) in items.iter().enumerate() {
+            let is_selected = idx == selected_idx;
+            Self::render_option_row(
+                &mut lines,
+                item.label.clone(),
+                Some(item.description.clone()),
+                is_selected,
+            );
+        }
+
+        Self::render_footer(&mut lines, "Enter select", "Esc back");
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(content_area, buf);
+    }
+
+    fn render_reasoning_effort(
+        items: &[ReasoningEffortItem],
+        selected_idx: usize,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        if area.height < 3 {
+            return;
+        }
+        let content_area = onboarding_content_area(area);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        lines.push(Line::from(vec![Span::styled(
+            "Default reasoning",
+            Style::default().bold(),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "Choose the effort stored on this model binding.",
+            Style::default().dim(),
+        )]));
+        lines.push(Line::from(""));
+
+        for (idx, item) in items.iter().enumerate() {
+            let is_selected = idx == selected_idx;
+            Self::render_option_row(&mut lines, item.label.clone(), None, is_selected);
+        }
+
+        Self::render_footer(&mut lines, "Enter select", "Esc back");
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(content_area, buf);
+    }
+
+    fn render_validating(
+        model: &str,
+        provider: ProviderWireApi,
+        started_at: Instant,
+        animations_enabled: bool,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        if area.height < 3 {
+            return;
+        }
+        let content_area = onboarding_content_area(area);
+        let provider_name = Self::provider_display_name(provider);
+        let elapsed = started_at.elapsed().as_secs();
+        let remaining = 20u64.saturating_sub(elapsed);
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(vec![Span::styled(
+            "Testing provider binding",
+            Style::default().bold(),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("model: {model}  ·  wire API: {provider_name}"),
+            Style::default().dim(),
+        )]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().cyan()),
+            spinner(Some(started_at), animations_enabled),
+            Span::raw("  server validation in progress"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("│   ", Style::default().cyan()),
+            Span::styled(
+                "resolving config, auth, provider SDK, and model name",
+                Style::default().dim(),
+            ),
+        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("│   timeout: {remaining}s remaining"),
+            Style::default().dim(),
+        )]));
+        Self::render_footer(&mut lines, "Esc cancel", "");
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(content_area, buf);
+    }
+
+    fn render_validation_failed(
+        error_message: &str,
+        selected_action: usize,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        if area.height < 3 {
+            return;
+        }
+        let content_area = onboarding_content_area(area);
+        let actions = [
+            "Retry with current settings",
+            "Edit settings",
+            "Choose different model",
+        ];
+
+        let mut lines: Vec<Line<'static>> = vec![
+            Line::from(vec![Span::styled(
+                "Validation failed",
+                Style::default().bold().red(),
+            )]),
+            Line::from(vec![Span::styled(
+                "The server could not build or probe this provider binding.",
+                Style::default().dim(),
+            )]),
+            Line::from(vec![Span::styled(
+                error_message.to_string(),
+                Style::default().red(),
+            )]),
+            Line::from(""),
+        ];
+
+        for (idx, action) in actions.iter().enumerate() {
+            let is_selected = idx == selected_action;
+            Self::render_option_row(&mut lines, action.to_string(), None, is_selected);
+        }
+
+        Self::render_footer(&mut lines, "Enter select", "Esc exit onboarding");
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(content_area, buf);
+    }
+}
+
+// ── Key event entry point ──
+
+impl OnboardingWidget {
+    pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if matches!(key_event.kind, KeyEventKind::Release) {
+            return;
+        }
+        match &self.state {
+            OnboardingState::ModelSelection { .. } => self.model_selection_handle_key(key_event),
+            OnboardingState::CustomModelName { .. } => self.custom_model_name_handle_key(key_event),
+            OnboardingState::ProviderSelection { .. } => {
+                self.provider_selection_handle_key(key_event)
+            }
+            OnboardingState::InlineSetup { .. } => self.inline_setup_handle_key(key_event),
+            OnboardingState::InvocationMethod { .. } => {
+                self.invocation_method_handle_key(key_event)
+            }
+            OnboardingState::ReasoningEffort { .. } => self.reasoning_effort_handle_key(key_event),
+            OnboardingState::Validating { .. } => {
+                if key_event.code == KeyCode::Esc {
+                    self.complete = true;
+                    self.result = Some(OnboardingResult::Cancelled);
+                }
+            }
+            OnboardingState::ValidationFailed { .. } => {
+                self.validation_failed_handle_key(key_event)
+            }
+        }
+    }
+}
+
+// ── Renderable ──
+
+impl Renderable for OnboardingWidget {
+    fn desired_height(&self, _width: u16) -> u16 {
+        match &self.state {
+            OnboardingState::ModelSelection {
+                filtered_indices, ..
+            } => {
+                let items = MAX_POPUP_ROWS.min(filtered_indices.len().max(1)) as u16;
+                items + 8
+            }
+            OnboardingState::CustomModelName { .. } => 8,
+            OnboardingState::ProviderSelection { items, .. } => items.len() as u16 * 2 + 6,
+            OnboardingState::InlineSetup { model, .. } => {
+                if self.model_supports_reasoning(model) {
+                    31
+                } else {
+                    28
+                }
+            }
+            OnboardingState::InvocationMethod { items, .. } => items.len() as u16 * 2 + 6,
+            OnboardingState::ReasoningEffort { items, .. } => items.len() as u16 + 6,
+            OnboardingState::Validating { .. } => 10,
+            OnboardingState::ValidationFailed { .. } => 12,
+        }
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        match &self.state {
+            OnboardingState::ModelSelection {
+                items,
+                state,
+                search_query,
+                filtered_indices,
+            } => {
+                Self::render_model_selection(
+                    items,
+                    state,
+                    search_query,
+                    filtered_indices,
+                    area,
+                    buf,
+                );
+            }
+            OnboardingState::CustomModelName { input, cursor_pos } => {
+                Self::render_custom_model_name(input, *cursor_pos, area, buf);
+            }
+            OnboardingState::ProviderSelection {
+                model: _,
+                items,
+                selected_idx,
+            } => {
+                Self::render_provider_selection("", items, *selected_idx, area, buf);
+            }
+            OnboardingState::InlineSetup {
+                model,
+                provider_name,
+                base_url,
+                api_key,
+                model_name,
+                display_name,
+                active_field,
+                input,
+                cursor_pos,
+                ..
+            } => {
+                Self::render_inline_setup(
+                    &InlineSetupRenderParams {
+                        model,
+                        supports_reasoning: self.model_supports_reasoning(model),
+                        provider_name,
+                        base_url,
+                        api_key,
+                        model_name,
+                        display_name,
+                        active_field,
+                        input,
+                        cursor_pos: *cursor_pos,
+                    },
+                    area,
+                    buf,
+                );
+            }
+            OnboardingState::InvocationMethod {
+                items,
+                selected_idx,
+                ..
+            } => {
+                Self::render_invocation_method(items, *selected_idx, area, buf);
+            }
+            OnboardingState::ReasoningEffort {
+                items,
+                selected_idx,
+                ..
+            } => {
+                Self::render_reasoning_effort(items, *selected_idx, area, buf);
+            }
+            OnboardingState::Validating {
+                model_slug,
+                invocation_method,
+                started_at,
+                ..
+            } => {
+                if self.animations_enabled {
+                    self.frame_requester.schedule_frame_in(SPINNER_INTERVAL);
+                }
+                Self::render_validating(
+                    model_slug,
+                    *invocation_method,
+                    *started_at,
+                    self.animations_enabled,
+                    area,
+                    buf,
+                );
+            }
+            OnboardingState::ValidationFailed {
+                error_message,
+                selected_action,
+                ..
+            } => {
+                Self::render_validation_failed(error_message, *selected_action, area, buf);
+            }
+        }
+    }
+
+    fn cursor_pos(&self, _area: Rect) -> Option<(u16, u16)> {
+        None
+    }
+}

@@ -1,6 +1,6 @@
 ---
 artifact_id: L3-BEH-CLI-001
-revision: 2
+revision: 3
 status: Draft
 active_baseline: no
 ---
@@ -61,7 +61,7 @@ L2-DES-APP-007 (CLI Onboarding Entry), L3-BEH-APP-001 (Configuration Resolution 
   2. The onboarding UI must run the model-first flow from `L2-DES-TUI-001`: model slug selection, provider selection or provider creation, provider name/base URL/API key, provider model name, display name, invocation method, and reasoning effort where supported.
   3. On confirmation:
      a. Persist non-secret configuration to the selected `config.toml` source through `L3-BEH-APP-001`.
-     b. Persist credential material to the companion `auth.json` source through `L3-BEH-APP-001`.
+     b. Persist credential material to the user-scoped `auth.json` source through `L3-BEH-APP-001`.
      c. Create or update the provider and model binding records.
      d. Set the binding and reasoning defaults required by onboarding.
   4. After onboarding completes: proceed to server lifecycle (B4).
@@ -88,7 +88,7 @@ L2-DES-APP-007 (CLI Onboarding Entry), L3-BEH-APP-001 (Configuration Resolution 
 - **Preconditions**: Server and/or TUI are running.
 - **Algorithm / Flow**:
   1. On SIGINT (first press):
-     - If TUI is connected: send `turn.interrupt` for the active turn (if any). Do NOT exit.
+     - If TUI is connected: send `turn/interrupt` for the active turn (if any). Do NOT exit.
      - If TUI is not connected (server only): initiate graceful shutdown.
   2. On SIGINT (second press within 2 seconds): force quit. Terminate server process, restore terminal.
   3. On SIGTERM: initiate graceful shutdown:
@@ -127,7 +127,7 @@ L2-DES-APP-007 (CLI Onboarding Entry), L3-BEH-APP-001 (Configuration Resolution 
 
 - The CLI entry point belongs in the CLI crate; `crates/cli/src/main.rs` is a conventional placement. Argument parsing may use `clap`.
 - Server process management: on Unix, use `fork()` + `exec()` or `std::process::Command::spawn`. On Windows, use `CreateProcess` via `std::process::Command`.
-- API key storage: store in the selected-scope `auth.json` with user-only file permissions where the platform supports them. The designed durable credential storage path is `auth.json`, not environment variables, keychains, or external secret stores.
+- API key storage: store only in the user-scoped `auth.json` with user-only file permissions where the platform supports them. The designed durable credential storage path is `~/.devo/auth.json` or the Windows equivalent, not workspace files, environment variables, keychains, or external secret stores.
 
 ## Revision Notes
 
@@ -135,3 +135,4 @@ L2-DES-APP-007 (CLI Onboarding Entry), L3-BEH-APP-001 (Configuration Resolution 
 |---:|---|---|---|---|
 | 1 | 2026-05-27 | Assistant | Initial | Initial CLI entry and onboarding behavior. |
 | 2 | 2026-05-27 | Assistant | Correction | Aligned manual onboarding with `devo --onboard`, delegated the model-first onboarding flow to the TUI L3, and corrected configuration/credential persistence references. |
+| 3 | 2026-05-27 | Assistant | Correction | Clarified that onboarding credentials are persisted only to user-scoped `auth.json`, even when non-secret config is written to workspace scope. |

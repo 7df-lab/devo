@@ -19,7 +19,7 @@ L2-DES-AGENT-002 (Interrupt And Resume Control), L2-DES-AGENT-001 (Execution Eng
 
 ### B1. Interrupt Request Handling
 
-- **Trigger**: Client sends `turn.interrupt` for an active turn.
+- **Trigger**: Client sends `turn/interrupt` for an active turn.
 - **Preconditions**: The session exists. The target turn is active or recently active.
 - **Algorithm / Flow**:
   1. Validate session and turn. If turn is not active: return idempotent success with existing terminal status, or `NoActiveTurn` error.
@@ -49,7 +49,7 @@ L2-DES-AGENT-002 (Interrupt And Resume Control), L2-DES-AGENT-001 (Execution Eng
 
 ### B3. Background Process Stop
 
-- **Trigger**: Client sends `backgroundProcess.stop` for a tracked background process.
+- **Trigger**: Client sends `backgroundProcess/stop` for a tracked background process.
 - **Preconditions**: The process was registered by a tool execution. `process_id` is valid.
 - **Algorithm / Flow**:
   1. Look up the process in the background process registry.
@@ -63,7 +63,7 @@ L2-DES-AGENT-002 (Interrupt And Resume Control), L2-DES-AGENT-001 (Execution Eng
 
 ### B4. Active Work Inspection
 
-- **Trigger**: Client sends `execution.inspect`.
+- **Trigger**: Client sends `execution/inspect`.
 - **Preconditions**: A session is active. The client is authorized.
 - **Algorithm / Flow**:
   1. Read the current turn execution state.
@@ -81,7 +81,7 @@ L2-DES-AGENT-002 (Interrupt And Resume Control), L2-DES-AGENT-001 (Execution Eng
 
 ### B5. Resume Turn
 
-- **Trigger**: Client sends `turn.resume` for an interrupted or recoverable turn.
+- **Trigger**: Client sends `turn/resume` for an interrupted or recoverable turn.
 - **Preconditions**: The target turn is `Interrupted` or otherwise recoverable. The session is loaded. No conflicting active turn.
 - **Algorithm / Flow**:
   1. Validate the target turn is in a recoverable state. Reject if not.
@@ -139,14 +139,14 @@ Durable record schemas:
 
 ### B8. Required Tests
 
-- `turn.interrupt` appends `turn_interrupt_requested` before signaling cancellation.
+- `turn/interrupt` appends `turn_interrupt_requested` before signaling cancellation.
 - Failed durable append prevents runtime cancellation and returns a structured error.
 - Interrupt response returns promptly while cleanup is still pending.
 - Provider interruption preserves partial assistant/reasoning content already accepted.
 - Tool cancellation preserves completed tool results and terminal states for interrupted tools.
-- `backgroundProcess.stop` records stopped, force-stopped, already-exited, and failed-to-stop outcomes.
-- `execution.inspect` redacts secrets and does not expose unbounded command output.
-- `turn.resume` writes `turn_resume_started` and then `TurnStarted(kind = Resume, resume_of_turn_id = ...)`.
+- `backgroundProcess/stop` records stopped, force-stopped, already-exited, and failed-to-stop outcomes.
+- `execution/inspect` redacts secrets and does not expose unbounded command output.
+- `turn/resume` writes `turn_resume_started` and then `TurnStarted(kind = Resume, resume_of_turn_id = ...)`.
 - Crash recovery appends terminal interrupted/item-failed records for unterminated turns and items.
 - Replay rebuilds background process projection and linked resume turns.
 
@@ -163,7 +163,7 @@ Durable record schemas:
 
 - Use `tokio::sync::CancellationToken` for interrupt signaling — checked at cooperative yield points in the execution engine.
 - Background process registry is a `HashMap<ProcessId, ProcessHandle>` behind an `Arc<RwLock<>>`.
-- The `execution.inspect` projection must never include raw API keys, unredacted tool output, or credential material.
+- The `execution/inspect` projection must never include raw API keys, unredacted tool output, or credential material.
 
 ## Revision Notes
 

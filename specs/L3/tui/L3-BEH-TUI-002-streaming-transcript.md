@@ -55,7 +55,7 @@ L2-DES-TUI-004 (Streaming Transcript And State), L2-DES-TUI-002 (Modern TUI Shel
 
 ### B3. Approval Modal Overlay
 
-- **Trigger**: `approval.requested` event.
+- **Trigger**: `approval/requested` event.
 - **Preconditions**: The TUI is connected and subscribed.
 - **Algorithm / Flow**:
   1. Render a modal overlay on top of the transcript area (lower half of screen).
@@ -67,7 +67,7 @@ L2-DES-TUI-004 (Streaming Transcript And State), L2-DES-TUI-002 (Modern TUI Shel
      - Available scopes: `[y] Approve Once  [s] Approve for Session  [n] Deny  [Esc] Cancel`.
   3. Keyboard input is captured by the modal (composer is blocked).
   4. On user keypress:
-     - `y` → send `approval.respond` with `decision: Allow`, `scope: Once`.
+     - `y` → send `approval/respond` with `decision: Allow`, `scope: Once`.
      - `s` → send with `decision: Allow`, `scope: Session`.
      - `n` → send with `decision: Deny`.
      - `Esc` → send with `decision: Deny` (or cancel for MCP elicitation).

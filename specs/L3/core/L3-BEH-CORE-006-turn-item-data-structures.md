@@ -1,6 +1,6 @@
 ---
 artifact_id: L3-BEH-CORE-006
-revision: 2
+revision: 3
 status: Draft
 active_baseline: no
 ---
@@ -42,17 +42,26 @@ L2-DES-CONV-001 (Session JSONL Data Model), L2-DES-AGENT-001 (Execution Engine)
 - **Postconditions**: Each item is independently replayable. Content parts are referenceable by index.
 - **Error Handling**: An item with no content parts after completion is valid (tool calls with no arguments). An item with unknown content part kind in replay logs a warning and preserves the raw data.
 
-### B3. Mentions Extraction
+### B3. Mention Validation And Attachment
 
-- **Trigger**: Client submits user input containing `@` references, file paths, skill names, or image attachments.
-- **Preconditions**: The input has been parsed. The mention targets are resolvable or preservable as unresolved.
+- **Trigger**: Client submits user input with content parts and a structured `mentions` array, usually after the user selected a result from the `@` fuzzy-search popup.
+- **Preconditions**: The client has already treated text after leading `@` as a fuzzy-search keyword, not as a typed provider selector.
 - **Algorithm / Flow**:
-  1. Parse the input text for mention patterns: `@skill:<name>`, `@file:<path>`, `@mcp:<server>/<resource>`, inline `@agent:<path>`, pasted image paths.
-  2. For each detected mention, create a `Mention` record: `mention_id`, `kind` (Skill, File, McpResource, Session, Image), `display_text`, `target` (canonical identifier or path), `source_range` (byte range in input text), `resolution_status` (Resolved, Unresolved, Ambiguous), `visibility` (Visible, Hidden).
-  3. Attach mentions to the user input item's `mentions` field.
-  4. Unresolved mentions are preserved as-is; resolution may be deferred to context assembly.
-- **Postconditions**: Each mention is traceable to its source text range and target entity.
-- **Error Handling**: Ambiguous matches produce `resolution_status: Ambiguous` with multiple candidate targets. Invalid mention syntax is treated as literal text.
+  1. Treat raw text beginning with `@` as ordinary submitted text unless it is accompanied by a structured mention selected by the client.
+  2. Validate each client-supplied `Mention` record:
+     - `mention_id`: stable within the submitted item.
+     - `kind`: `Skill`, `File`, `Directory`, `McpResource`, `McpTemplate`, `ToolOrConnector`, `Session`, `Turn`, `Transcript`, or `Image`.
+     - `display_text`: the text rendered in the composer or transcript.
+     - `target`: canonical target reference, such as a workspace-relative path, skill id, MCP resource id, or artifact id.
+     - `source_range`: byte or grapheme range occupied by the displayed mention token in the submitted text.
+     - `resolution_status`: `Resolved`, `Unresolved`, `Stale`, `PermissionBlocked`, or `Ambiguous`.
+     - `visibility`: `Visible` or `Hidden`.
+  3. Verify that `source_range` is valid for the submitted text and does not split a Unicode scalar or grapheme cluster.
+  4. Preserve unresolved, stale, permission-blocked, and ambiguous mentions rather than dropping them; context assembly decides whether they can contribute model context.
+  5. Attach validated mentions to the user input item's `mentions` field.
+  6. For pasted images or attachments, store the binary/media reference as a `ContentPart` and optionally attach a mention that records how that artifact was resolved or referenced.
+- **Postconditions**: Each mention is traceable to client selection state, source text range, and target entity. No server-side parser requires syntax such as `@skill:`, `@file:`, or `@mcp:`.
+- **Error Handling**: Invalid mention objects produce field-level validation errors for the submitted item. Raw `@` text without a structured mention is accepted as literal text.
 
 ### B4. Plan State Serialization
 
@@ -88,7 +97,7 @@ L2-DES-CONV-001 (Session JSONL Data Model), L2-DES-AGENT-001 (Execution Engine)
 
 ### B7. Immediate Previous Message Editing
 
-- **Trigger**: Client sends `message.editPrevious` for the immediately preceding eligible user-authored message.
+- **Trigger**: Client sends `message/editPrevious` for the immediately preceding eligible user-authored message.
 - **Preconditions**: The target message is the current branch's immediately preceding eligible user message. The edit is from an authorized client.
 - **Algorithm / Flow**:
   1. Follow the eligibility, queued edit, superseded-turn edit, restore ordering, and replacement-turn rules in `L3-BEH-CORE-012`.
@@ -99,7 +108,7 @@ L2-DES-CONV-001 (Session JSONL Data Model), L2-DES-AGENT-001 (Execution Engine)
 
 ### B8. Workspace Restoration for Superseded Turns
 
-- **Trigger**: `message.editPrevious` is accepted for a completed/failed/interrupted turn.
+- **Trigger**: `message/editPrevious` is accepted for a completed/failed/interrupted turn.
 - **Preconditions**: The superseded turn has a `WorkspaceChangeSet`. The workspace is accessible.
 - **Algorithm / Flow**:
   1. Use the candidate selection, safe predicate, per-file restore actions, checkpoint handling, and record ordering defined by `L3-BEH-CORE-012`.
@@ -130,3 +139,4 @@ L2-DES-CONV-001 (Session JSONL Data Model), L2-DES-AGENT-001 (Execution Engine)
 |---:|---|---|---|---|
 | 1 | 2026-05-27 | Assistant | Initial | Initial turn, item, plan, goal, workspace change, and edit data structure behavior. |
 | 2 | 2026-05-27 | Assistant | Correction | Delegated immediate-message-edit and workspace-restore details to L3-BEH-CORE-012 and aligned durable restore record names. |
+| 3 | 2026-05-27 | Assistant | Correction | Replaced typed `@skill:`/`@file:` mention parsing with structured mention validation produced by direct-keyword fuzzy search selection. |

@@ -2,8 +2,11 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
@@ -56,14 +59,27 @@ impl ThemePickerView {
             .iter()
             .enumerate()
             .map(|(index, name)| {
-                let mut line: Line<'static> = if name == &self.current_name {
-                    format!("  {name}  current").into()
+                let is_selected = index == self.selection;
+                let marker = if name == &self.current_name {
+                    "●"
+                } else if is_selected {
+                    "›"
                 } else {
-                    format!("  {name}").into()
+                    " "
                 };
-                if index == self.selection {
+                let marker_style = if name == &self.current_name {
+                    Style::default().fg(Color::Cyan).bold()
+                } else {
+                    Style::default()
+                };
+                let mut line = Line::from(vec![
+                    Span::styled(marker.to_string(), marker_style),
+                    Span::raw(" "),
+                    Span::raw(name.clone()),
+                ]);
+                if is_selected {
                     line = line.bold();
-                }
+                };
                 line
             })
             .collect()

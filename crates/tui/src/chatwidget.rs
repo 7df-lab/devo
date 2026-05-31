@@ -74,6 +74,8 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::ScrollbackLine;
 use crate::markdown::append_markdown;
+use crate::onboarding_widget::OnboardingResult;
+use crate::onboarding_widget::OnboardingWidget;
 use crate::render::line_utils::prefix_lines;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
@@ -299,13 +301,8 @@ fn permission_preset_items(current: devo_protocol::PermissionPreset) -> Vec<Sele
     ]
     .into_iter()
     .map(|(preset, label, description)| {
-        let name = if preset == current {
-            format!("{label} (current)")
-        } else {
-            label.to_string()
-        };
         SelectionItem {
-            name,
+            name: label.to_string(),
             description: Some(description.to_string()),
             is_current: preset == current,
             dismiss_on_select: true,
@@ -353,7 +350,7 @@ pub(crate) struct ChatWidget {
     stream_chunking_policy: AdaptiveChunkingPolicy,
     available_models: Vec<Model>,
     saved_model_slugs: Vec<String>,
-    onboarding_step: Option<OnboardingStep>,
+    onboarding: Option<OnboardingWidget>,
     resume_browser: Option<ResumeBrowserState>,
     resume_browser_loading: bool,
     picker_mode: Option<PickerMode>,
@@ -417,14 +414,17 @@ impl ChatWidget {
     fn add_busy_configuration_message(&mut self, command: SlashCommand) {
         let noun = match command {
             SlashCommand::Model => "model",
-            SlashCommand::Onboard => "provider",
             SlashCommand::Theme => "theme",
             SlashCommand::Compact => "session",
             SlashCommand::New => "session",
             SlashCommand::Resume => "session",
             SlashCommand::Permissions => "permissions",
             SlashCommand::Diff => "diff",
-            SlashCommand::Exit | SlashCommand::Status | SlashCommand::Clear | SlashCommand::Btw => {
+            SlashCommand::Goal
+            | SlashCommand::Exit
+            | SlashCommand::Status
+            | SlashCommand::Clear
+            | SlashCommand::Btw => {
                 return;
             }
         };
@@ -1045,11 +1045,6 @@ impl ChatWidget {
             .set_placeholder_text("Ask Devo".to_string());
     }
 
-    fn set_onboarding_placeholder(&mut self, prompt: &str) {
-        self.bottom_pane
-            .set_placeholder_text(format!("Onboarding: enter {prompt}"));
-    }
-
     pub(crate) fn new_with_app_event(common: ChatWidgetInit) -> Self {
         // Pull the constructor inputs apart up front so the setup below reads in stages.
         let ChatWidgetInit {
@@ -1134,7 +1129,7 @@ impl ChatWidget {
             stream_chunking_policy: AdaptiveChunkingPolicy::default(),
             available_models,
             saved_model_slugs,
-            onboarding_step: None,
+            onboarding: None,
             resume_browser: None,
             resume_browser_loading: false,
             picker_mode: None,
@@ -1165,7 +1160,15 @@ impl ChatWidget {
 
         // Model onboarding can inject additional startup UI before the first frame is drawn.
         if show_model_onboarding {
-            widget.begin_onboarding();
+            widget.onboarding = Some(OnboardingWidget::new(
+                &widget.available_models,
+                widget.app_event_tx.clone(),
+                widget.frame_requester.clone(),
+                true, /* animations_enabled */
+            ));
+            widget.history.clear();
+            widget.next_history_flush_index = 0;
+            widget.set_status_message("Onboarding");
         }
 
         // Keep the bottom pane summary in sync with the assembled widget state.
@@ -1193,8 +1196,16 @@ impl ChatWidget {
             self.handle_resume_browser_key_event(key);
             return;
         }
-        if let Some(result) = self.bottom_pane.poll_onboarding_result() {
-            self.handle_onboarding_result(result);
+        if self.onboarding.is_some() && Self::is_copy_shortcut(key) {
+            return;
+        }
+        if let Some(onboarding) = self.onboarding.as_mut() {
+            onboarding.handle_key_event(key);
+            if let Some(result) = onboarding.take_result() {
+                self.handle_onboarding_result(result);
+            }
+            self.frame_requester.schedule_frame();
+            return;
         }
         if self.handle_selection_mode_key(key) {
             return;
@@ -1243,6 +1254,30 @@ impl ChatWidget {
             }
             InputResult::None => {}
         }
+    }
+
+    pub(crate) fn handle_onboarding_key_event(&mut self, key: KeyEvent) -> bool {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return self.onboarding.is_some();
+        }
+        if self.onboarding.is_some() && Self::is_copy_shortcut(key) {
+            return false;
+        }
+        let Some(onboarding) = self.onboarding.as_mut() else {
+            return false;
+        };
+        onboarding.handle_key_event(key);
+        if let Some(result) = onboarding.take_result() {
+            self.handle_onboarding_result(result);
+        }
+        self.frame_requester.schedule_frame();
+        true
+    }
+
+    pub(crate) fn is_copy_shortcut(key: KeyEvent) -> bool {
+        matches!(key.code, KeyCode::Char('c' | 'C'))
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::SUPER))
     }
 
     fn handle_selection_mode_key(&mut self, key: KeyEvent) -> bool {
@@ -1456,6 +1491,11 @@ impl ChatWidget {
 
     pub(crate) fn handle_paste(&mut self, text: String) {
         if self.resume_browser.is_some() {
+            return;
+        }
+        if let Some(onboarding) = self.onboarding.as_mut() {
+            onboarding.handle_paste(text);
+            self.frame_requester.schedule_frame();
             return;
         }
         self.bottom_pane.handle_paste(text);
@@ -2078,28 +2118,40 @@ impl ChatWidget {
                 self.set_status_message("Query failed; see error above");
             }
             WorkerEvent::ProviderValidationSucceeded { reply_preview } => {
-                self.bottom_pane
-                    .onboarding_on_validation_succeeded(reply_preview.clone());
-                if let Some(result) = self.bottom_pane.poll_onboarding_result() {
-                    self.handle_onboarding_result(result);
+                if let Some(onboarding) = self.onboarding.as_mut() {
+                    onboarding.on_validation_succeeded(reply_preview.clone());
+                    if let Some(result) = onboarding.take_result() {
+                        self.handle_onboarding_result(result);
+                    }
                 }
                 self.add_to_history(history_cell::new_info_event(
                     format!("Validation reply: {reply_preview}"),
                     Some("provider validation succeeded".to_string()),
                 ));
                 self.busy = false;
-                self.set_default_placeholder();
                 self.set_status_message("Onboarding complete");
             }
             WorkerEvent::ProviderValidationFailed { message } => {
-                self.bottom_pane
-                    .onboarding_on_validation_failed(message.clone());
+                if let Some(onboarding) = self.onboarding.as_mut() {
+                    onboarding.on_validation_failed(message.clone());
+                }
                 self.busy = false;
                 self.add_to_history(history_cell::new_error_event_with_hint(
                     message,
                     Some("provider validation failed".to_string()),
                 ));
                 self.set_status_message("Provider validation failed");
+            }
+            WorkerEvent::ProviderVendorsListed { provider_vendors } => {
+                if let Some(onboarding) = self.onboarding.as_mut() {
+                    onboarding.on_provider_vendors_listed(provider_vendors);
+                }
+            }
+            WorkerEvent::ProviderVendorUpserted { provider_vendor } => {
+                self.add_to_history(history_cell::new_info_event(
+                    format!("Provider saved: {}", provider_vendor.name),
+                    Some("provider upserted".to_string()),
+                ));
             }
             WorkerEvent::SessionsListed { sessions } => {
                 self.resume_browser_loading = false;
@@ -2345,9 +2397,6 @@ impl ChatWidget {
     }
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
-        if let Some(result) = self.bottom_pane.poll_onboarding_result() {
-            self.handle_onboarding_result(result);
-        }
         if user_message.text.trim().is_empty() {
             return;
         }
@@ -2396,9 +2445,6 @@ impl ChatWidget {
                 self.active_text_items.clear();
                 self.stream_chunking_policy.reset();
                 self.set_status_message("Transcript cleared");
-            }
-            SlashCommand::Onboard => {
-                self.begin_onboarding();
             }
             SlashCommand::Status => {
                 let model = self
@@ -2478,6 +2524,12 @@ impl ChatWidget {
                     self.set_status_message("No active turn to steer");
                 }
             }
+            SlashCommand::Goal => {
+                self.set_status_message("Goal management");
+                self.add_to_history(PlainHistoryCell::new(vec![Line::from(
+                    "Use /goal to view or manage the active goal. See goal/create, goal/pause, goal/resume in the protocol.",
+                )]));
+            }
             SlashCommand::Diff => {
                 self.set_status_message("Computing diff");
                 let tx = self.app_event_tx.clone();
@@ -2489,59 +2541,26 @@ impl ChatWidget {
         }
     }
 
-    fn begin_onboarding(&mut self) {
-        self.onboarding_step = None;
-        self.history.clear();
-        self.next_history_flush_index = 0;
-        self.bottom_pane.start_onboarding(&self.available_models);
-        self.set_status_message("Onboarding");
-    }
-
-    fn handle_onboarding_result(&mut self, result: crate::bottom_pane::OnboardingResult) {
-        use crate::bottom_pane::OnboardingResult;
+    fn handle_onboarding_result(&mut self, result: OnboardingResult) {
         match result {
             OnboardingResult::ValidationSucceeded {
-                model,
-                provider: _,
-                base_url: _,
-                api_key: _,
+                model_slug,
+                model_name: _,
             } => {
-                self.update_session_request_model(model);
+                self.update_session_request_model(model_slug);
                 self.add_to_history(history_cell::new_info_event(
                     "Provider configured successfully".to_string(),
                     Some("onboarding complete".to_string()),
                 ));
+                self.onboarding = None;
                 self.set_default_placeholder();
                 self.set_status_message("Onboarding complete");
             }
-            OnboardingResult::Validate {
-                model,
-                provider: _,
-                base_url,
-                api_key,
-            } => {
-                self.onboarding_step = Some(OnboardingStep::Validating {
-                    model: model.clone(),
-                    base_url: base_url.clone(),
-                    api_key: api_key.clone(),
-                });
-                let payload = serde_json::json!({
-                    "model": model,
-                    "base_url": base_url,
-                    "api_key": api_key,
-                });
-                self.app_event_tx
-                    .send(AppEvent::Command(AppCommand::RunUserShellCommand {
-                        command: format!("onboard {payload}"),
-                    }));
-                self.set_status_message("Validating provider connection");
-            }
             OnboardingResult::Cancelled => {
-                self.onboarding_step = None;
-                self.set_default_placeholder();
-                self.set_status_message("Ready");
+                self.onboarding = None;
+                self.app_event_tx
+                    .send(AppEvent::Exit(crate::app_event::ExitMode::ShutdownFirst));
             }
-            _ => {}
         }
     }
 
@@ -2552,9 +2571,7 @@ impl ChatWidget {
             .effective_reasoning_effort;
         self.session.provider = Some(model.provider_wire_api());
         self.session.model = Some(model);
-        if self.onboarding_step.is_none() {
-            self.set_default_placeholder();
-        }
+        self.set_default_placeholder();
         self.frame_requester.schedule_frame();
     }
 
@@ -3575,7 +3592,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn is_normal_backtrack_mode(&self) -> bool {
-        self.bottom_pane.is_normal_backtrack_mode()
+        self.onboarding.is_none() && self.bottom_pane.is_normal_backtrack_mode()
     }
 
     pub(crate) fn show_esc_backtrack_hint(&mut self) {
@@ -4029,6 +4046,10 @@ impl ChatWidget {
         self.resume_browser_loading || self.resume_browser.is_some()
     }
 
+    pub(crate) fn is_onboarding_active(&self) -> bool {
+        self.onboarding.is_some()
+    }
+
     fn resume_browser_entry_height() -> usize {
         1
     }
@@ -4245,18 +4266,26 @@ impl Renderable for ChatWidget {
                     .skip(scroll_offset)
                     .take(end.saturating_sub(scroll_offset))
                 {
-                    let marker = if index == browser.selection { ">" } else { " " };
-                    let current = if session.is_active { "  current" } else { "" };
+                    let is_selected = index == browser.selection;
+                    let marker = if session.is_active {
+                        "●"
+                    } else if is_selected {
+                        ">"
+                    } else {
+                        " "
+                    };
                     let display_title = Self::pad_display_text(
                         &Self::truncate_display_text(&session.title, title_width),
                         title_width,
                     );
                     let line = format!(
-                        "{marker} {}  {:<16}  {}{}",
-                        display_title, session.session_id, session.updated_at, current
+                        "{marker} {}  {:<16}  {}",
+                        display_title, session.session_id, session.updated_at
                     );
-                    lines.push(if index == browser.selection {
+                    lines.push(if is_selected {
                         Line::from(line).bold()
+                    } else if session.is_active {
+                        Line::from(line).style(Style::default().fg(self.active_accent_color()))
                     } else {
                         Line::from(line)
                     });
@@ -4272,6 +4301,11 @@ impl Renderable for ChatWidget {
                 .block(Block::default().title("Devo Sessions"))
                 .wrap(Wrap { trim: false })
                 .render(area, buf);
+            return;
+        }
+
+        if let Some(onboarding) = &self.onboarding {
+            onboarding.render(area, buf);
             return;
         }
 
@@ -4291,6 +4325,9 @@ impl Renderable for ChatWidget {
     }
 
     fn desired_height(&self, width: u16) -> u16 {
+        if self.onboarding.is_some() {
+            return u16::MAX;
+        }
         if self.resume_browser.is_some() {
             return u16::MAX;
         }
@@ -4302,6 +4339,9 @@ impl Renderable for ChatWidget {
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if let Some(onboarding) = &self.onboarding {
+            return onboarding.cursor_pos(area);
+        }
         if self.resume_browser.is_some() {
             return None;
         }

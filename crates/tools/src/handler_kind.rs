@@ -17,4 +17,5 @@ pub enum ToolHandlerKind {
     Invalid,
     ExecCommand,
     WriteStdin,
+    ToolSearch,
 }

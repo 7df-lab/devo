@@ -8,22 +8,19 @@ use tokio::sync::mpsc;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
-use devo_core::Model;
-use devo_core::ModelCatalog;
 use devo_core::PermissionPreset;
-use devo_core::PresetModelCatalog;
 use devo_core::ProviderWireApi;
 use devo_core::ReasoningEffort;
 use devo_core::SessionId;
 use devo_core::TurnId;
 use devo_core::TurnStatus;
-use devo_core::test_model_connection;
+use devo_protocol::ProviderModelBinding;
+use devo_protocol::ProviderValidateParams;
+use devo_protocol::ProviderVendor;
+use devo_protocol::ProviderVendorListParams;
+use devo_protocol::ProviderVendorUpsertParams;
 use devo_protocol::SessionHistoryMetadata;
 use devo_protocol::SessionPlanStepStatus;
-use devo_provider::ModelProviderSDK;
-use devo_provider::anthropic::AnthropicProvider;
-use devo_provider::openai::OpenAIProvider;
-use devo_provider::openai::OpenAIResponsesProvider;
 use devo_server::ApprovalDecisionPayload;
 use devo_server::ApprovalRequestPayload;
 use devo_server::ApprovalRespondParams;
@@ -114,9 +111,17 @@ enum OperationCommand {
     },
     /// Validates provider settings with a temporary probe request.
     ValidateProvider {
-        provider: ProviderWireApi,
-        model: String,
-        base_url: Option<String>,
+        provider_vendor: ProviderVendor,
+        model_binding: ProviderModelBinding,
+        api_key: Option<String>,
+    },
+    /// Request configured provider vendors from the server.
+    ListProviderVendors,
+    /// Add or update one provider vendor through the server.
+    UpsertProviderVendor {
+        provider_vendor: ProviderVendor,
+        model_binding: Option<ProviderModelBinding>,
+        default_model_binding: Option<String>,
         api_key: Option<String>,
     },
     /// Request a session list from the server.
@@ -230,16 +235,39 @@ impl QueryWorkerHandle {
     /// Validates provider settings with a temporary probe request.
     pub(crate) fn validate_provider(
         &self,
-        provider: ProviderWireApi,
-        model: String,
-        base_url: Option<String>,
+        provider_vendor: ProviderVendor,
+        model_binding: ProviderModelBinding,
         api_key: Option<String>,
     ) -> Result<()> {
         self.command_tx
             .send(OperationCommand::ValidateProvider {
-                provider,
-                model,
-                base_url,
+                provider_vendor,
+                model_binding,
+                api_key,
+            })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    /// Requests the current configured provider vendors from the background worker.
+    pub(crate) fn list_provider_vendors(&self) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::ListProviderVendors)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    /// Adds or updates a provider vendor through the background worker.
+    pub(crate) fn upsert_provider_vendor(
+        &self,
+        provider_vendor: ProviderVendor,
+        model_binding: Option<ProviderModelBinding>,
+        default_model_binding: Option<String>,
+        api_key: Option<String>,
+    ) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::UpsertProviderVendor {
+                provider_vendor,
+                model_binding,
+                default_model_binding,
                 api_key,
             })
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
@@ -569,25 +597,115 @@ async fn run_worker_inner(
                         }
                     }
                     Some(OperationCommand::ValidateProvider {
-                        provider,
-                        model: next_model,
-                        base_url,
+                        provider_vendor,
+                        model_binding,
                         api_key,
                     }) => {
-                        match validate_provider_connection(
-                            provider,
-                            &next_model,
-                            base_url,
-                            api_key,
-                        ).await {
-                            Ok(reply_preview) => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(25),
+                            client.provider_validate(ProviderValidateParams {
+                                provider_vendor,
+                                model_binding,
+                                api_key,
+                            }),
+                        )
+                        .await
+                        {
+                            Ok(Ok(result)) => {
                                 let _ = event_tx.send(WorkerEvent::ProviderValidationSucceeded {
-                                    reply_preview,
+                                    reply_preview: result.reply_preview,
                                 });
                             }
-                            Err(error) => {
+                            Ok(Err(error)) => {
                                 let _ = event_tx.send(WorkerEvent::ProviderValidationFailed {
                                     message: error.to_string(),
+                                });
+                            }
+                            Err(_) => {
+                                let _ = event_tx.send(WorkerEvent::ProviderValidationFailed {
+                                    message: "provider validation request timed out".to_string(),
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::ListProviderVendors) => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(5),
+                            client.provider_vendor_list(ProviderVendorListParams::default()),
+                        )
+                        .await
+                        {
+                            Ok(Ok(result)) => {
+                                let _ = event_tx.send(WorkerEvent::ProviderVendorsListed {
+                                    provider_vendors: result.provider_vendors,
+                                });
+                            }
+                            Ok(Err(error)) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cache_read_tokens,
+                                    prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
+                                });
+                            }
+                            Err(_) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: "provider list request timed out".to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cache_read_tokens,
+                                    prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::UpsertProviderVendor {
+                        provider_vendor,
+                        model_binding,
+                        default_model_binding,
+                        api_key,
+                    }) => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(5),
+                            client.provider_vendor_upsert(ProviderVendorUpsertParams {
+                                provider_vendor,
+                                model_binding,
+                                default_model_binding,
+                                api_key,
+                            }),
+                        )
+                        .await
+                        {
+                            Ok(Ok(result)) => {
+                                let _ = event_tx.send(WorkerEvent::ProviderVendorUpserted {
+                                    provider_vendor: result.provider_vendor,
+                                });
+                            }
+                            Ok(Err(error)) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cache_read_tokens,
+                                    prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
+                                });
+                            }
+                            Err(_) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: "provider upsert request timed out".to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cache_read_tokens,
+                                    prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -2361,90 +2479,6 @@ fn truncate_tool_output(content: &str) -> String {
         "… ".to_string()
     } else {
         format!("{preview}\n… ")
-    }
-}
-
-async fn validate_provider_connection(
-    provider: ProviderWireApi,
-    model: &str,
-    base_url: Option<String>,
-    api_key: Option<String>,
-) -> Result<String> {
-    let validation_model = resolve_validation_model(provider, model)?;
-    let validation_provider = build_validation_provider(provider, base_url, api_key)?;
-    tokio::time::timeout(
-        Duration::from_secs(20),
-        test_model_connection(
-            validation_provider.as_ref(),
-            &validation_model,
-            "Reply with OK only.",
-        ),
-    )
-    .await
-    .context("provider validation timed out after 20s")?
-    .map_err(Into::into)
-}
-
-fn resolve_validation_model(provider: ProviderWireApi, model: &str) -> Result<Model> {
-    let catalog = PresetModelCatalog::load()?;
-    if let Some(entry) = catalog.get(model) {
-        return Ok(entry.clone());
-    }
-    Ok(Model {
-        slug: model.to_string(),
-        provider,
-        ..Model::default()
-    })
-}
-
-fn build_validation_provider(
-    provider: ProviderWireApi,
-    base_url: Option<String>,
-    api_key: Option<String>,
-) -> Result<std::sync::Arc<dyn ModelProviderSDK>> {
-    match provider {
-        ProviderWireApi::AnthropicMessages => {
-            let api_key = api_key.context("anthropic provider requires an API key")?;
-            let base_url = base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string());
-            Ok(std::sync::Arc::new(
-                AnthropicProvider::new(base_url).with_api_key(api_key),
-            ))
-        }
-        ProviderWireApi::OpenAIChatCompletions => {
-            let base_url = normalize_openai_base_url(
-                &base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
-            );
-            let provider = if let Some(api_key) = api_key {
-                OpenAIProvider::new(base_url).with_api_key(api_key)
-            } else {
-                OpenAIProvider::new(base_url)
-            };
-            Ok(std::sync::Arc::new(provider))
-        }
-        ProviderWireApi::OpenAIResponses => {
-            let base_url = normalize_openai_base_url(
-                &base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
-            );
-            let provider = if let Some(api_key) = api_key {
-                OpenAIResponsesProvider::new(base_url).with_api_key(api_key)
-            } else {
-                OpenAIResponsesProvider::new(base_url)
-            };
-            Ok(std::sync::Arc::new(provider))
-        }
-    }
-}
-
-fn normalize_openai_base_url(url: &str) -> String {
-    let trimmed = url.trim_end_matches('/');
-    let Some(scheme_sep) = trimmed.find("://") else {
-        return trimmed.to_string();
-    };
-    let has_explicit_path = trimmed[scheme_sep + 3..].contains('/');
-    if has_explicit_path {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/v1")
     }
 }
 

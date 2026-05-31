@@ -253,9 +253,9 @@ External factors such as provider-reported token counts from prior invocations m
 | related-to | L1-REQ-INPUT-001 | 1 | specs/L1/L1-REQ-INPUT-001-attachments-and-multimodal.md | Multimodal content parts are subject to modality filtering. |
 | related-to | L2-DES-CONTEXT-001 | 1 | specs/L2/context/L2-DES-CONTEXT-001-context-assembly.md | Normalization receives the assembled context as input. |
 | related-to | L2-DES-CONTEXT-002 | 1 | specs/L2/context/L2-DES-CONTEXT-002-context-compaction.md | Normalization runs after compaction and handles items that survive compaction. |
-| related-to | L2-DES-MODEL-001 | 1 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | The resolved model profile provides modality capabilities and context-window limits. |
+| related-to | L2-DES-MODEL-001 | 2 | specs/L2/model/L2-DES-MODEL-001-model-provider-binding.md | The resolved model profile provides modality capabilities and context-window limits. |
 | related-to | L2-DES-AGENT-001 | 1 | specs/L2/agent/L2-DES-AGENT-001-execution-engine.md | Normalization runs as a phase of the execution engine between compaction and provider serialization. |
-| specified-by | L3-BEH-CORE-005 | 1 | specs/L3/core/L3-BEH-CORE-005-context-pipeline.md | L3 defines modality filtering, item size bounding, and token-budget enforcement. |
+| specified-by | L3-BEH-CORE-005 | 2 | specs/L3/core/L3-BEH-CORE-005-context-pipeline.md | L3 defines modality filtering, item size bounding, and token-budget enforcement. |
 
 ## Revision Notes
 

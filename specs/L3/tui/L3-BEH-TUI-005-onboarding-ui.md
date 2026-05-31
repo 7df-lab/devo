@@ -1,6 +1,6 @@
 ---
 artifact_id: L3-BEH-TUI-005
-revision: 2
+revision: 3
 status: Draft
 active_baseline: no
 ---
@@ -100,8 +100,8 @@ L2-DES-TUI-001 (Onboarding UI Flow), L2-DES-MODEL-001 (Model Provider Binding), 
 - **Preconditions**: All required values are present.
 - **Algorithm / Flow**:
   1. Determine persistence target:
-     - If a project workspace is active → persist to project-scoped config (`<workspace>/.dev/config.toml`) and project-scoped credentials (`<workspace>/.dev/auth.json`).
-     - If no project workspace is active → persist to the user-scoped config (`~/.devo/config.toml` on macOS/Linux, `C:\Users\username\.devo\config.toml` on Windows) and companion `auth.json`.
+     - If a workspace is active → persist non-secret configuration to workspace config (`<workspace>/.devo/config.toml`) and persist credential material to user-scoped `auth.json`.
+     - If no workspace is active → persist non-secret configuration to the user-scoped config (`~/.devo/config.toml` on macOS/Linux, `C:\Users\username\.devo\config.toml` on Windows) and persist credential material to user-scoped `auth.json`.
   2. Create `UserProvider` record (if new provider was added): generate `provider_id`, store `provider_name`, `base_url`, `credential_ref`.
   3. Store API key in `auth.json` under the generated credential id.
   4. Create `ModelProviderBinding`: generate `binding_id`, store `canonical_model_slug`, `provider_id`, `model_name`, `display_name`, `invocation_method`, `reasoning_effort`, `is_default: true`.
@@ -146,12 +146,13 @@ L2-DES-TUI-001 (Onboarding UI Flow), L2-DES-MODEL-001 (Model Provider Binding), 
 
 - Onboarding uses the same TUI infrastructure (Ratatui, crossterm) as the main TUI but in a dedicated "onboarding mode" with no transcript or composer.
 - Popup search uses the same fuzzy matching as `@` file search (nucleo) for the model slug filter.
-- API key storage: write to `auth.json` with file mode `0600`. Use atomic write (write to `.auth.json.tmp`, `rename` to `auth.json`).
-- Persistence target precedence: CLI `--config` flag > project workspace > user config dir.
+- API key storage: write only to user-scoped `auth.json` with file mode `0600`. Use atomic write (write to `.auth.json.tmp`, `rename` to `auth.json`). The onboarding UI must never write `<workspace>/.devo/auth.json`.
+- Persistence target precedence: CLI `--config` flag > active workspace > user config dir.
 
 ## Revision Notes
 
 | Revision | Date | Author | Change Type | Notes |
 |---:|---|---|---|---|
 | 1 | 2026-05-27 | Assistant | Initial | Initial onboarding UI flow. |
-| 2 | 2026-05-27 | Assistant | Correction | Replaced stale `devo onboard` and `.devo`/`.config/devo` config paths with the L2-defined `--onboard`, `.dev`, and `~/.devo` paths. |
+| 2 | 2026-05-27 | Assistant | Correction | Replaced stale `devo onboard` and `.config/devo` config paths with the L2-defined `--onboard` and `~/.devo` paths. |
+| 3 | 2026-05-27 | Assistant | Correction | Aligned onboarding persistence with user-only `auth.json` and workspace `<workspace>/.devo/config.toml`. |

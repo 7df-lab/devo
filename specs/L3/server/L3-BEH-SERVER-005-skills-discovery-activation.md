@@ -1,6 +1,6 @@
 ---
 artifact_id: L3-BEH-SERVER-005
-revision: 1
+revision: 3
 status: Draft
 active_baseline: no
 ---
@@ -9,11 +9,11 @@ active_baseline: no
 
 ## Purpose
 
-Define the concrete behavior for discovering skill packages from configured roots, maintaining the skill catalog, handling user-explicit and model-selected activation, loading skill instructions into context, and enforcing skill trust/safety boundaries.
+Define the runtime behavior for discovering skill packages from configured roots, maintaining the effective skill catalog, handling user-explicit and model-selected activation, loading skill instructions into context, and enforcing skill trust/safety boundaries. Skill package definitions, `SKILL.md` parsing, bundled default skills, and default-skill installation are defined by `L3-BEH-SKILLS-001`.
 
 ## Source Design
 
-L2-DES-SKILLS-001 (Agent Skills Architecture)
+L2-DES-SKILLS-001 (Agent Skills Architecture), L3-BEH-SKILLS-001 (Skill Package Definitions and Default Installation)
 
 ## Behavior Specification
 
@@ -22,26 +22,27 @@ L2-DES-SKILLS-001 (Agent Skills Architecture)
 - **Trigger**: Server starts, configuration changes, or explicit `skills.refresh` request.
 - **Preconditions**: Skill feature is enabled. Discovery roots are configured.
 - **Algorithm / Flow**:
-  1. Collect discovery roots from config (defaults and user-configured):
+  1. Ensure bundled default skills have been installed or checked by calling the `skills` crate default-skill installer. Installation failures become catalog diagnostics and must not abort server startup.
+  2. Collect discovery roots from config (defaults and user-configured):
      - `~/.devo/skills/` (user native)
      - `~/.agents/skills/` (user interoperability)
      - `<workspace>/.devo/skills/` (workspace native)
      - `<workspace>/.agents/skills/` (workspace interoperability)
      - Plugin-provided roots from installed plugins.
-  2. For each root, scan immediate subdirectories (depth 1).
-  3. For each subdirectory: check for `SKILL.md`. If present and readable → valid skill package.
-  4. Parse frontmatter from `SKILL.md`: extract `name`, `description`, `version`, `tags`, `compatibility`. Only `name` and `description` are required.
-  5. Build `SkillCatalogEntry`: `skill_id` (generated from source+name), `name`, `description`, `source` (builtin/user/workspace/plugin), `package_root`, `entrypoint_path`, `enabled`, `trust_state` (trusted for builtin/user, untrusted for workspace by default), `version`, `tags`, `diagnostics`.
-  6. Handle duplicates: if same `name` appears in multiple sources, higher-precedence source wins (user > workspace > builtin). Lower-precedence entry is marked as `shadowed`.
-  7. Bound total discovered skills and metadata bytes for context efficiency.
+  3. For each root, scan immediate subdirectories (depth 1).
+  4. For each subdirectory: check for `SKILL.md`. If present and readable, pass it to the `skills` crate parser.
+  5. Convert parsed `SkillPackage` values into runtime `SkillCatalogEntry`: `skill_id` (generated from source+name), `name`, `description`, `source` (builtin/user/workspace/plugin), `package_root`, `entrypoint_path`, `enabled`, `trust_state` (trusted for builtin/user, untrusted for workspace by default), `version`, `tags`, `diagnostics`.
+  6. Preserve package parser diagnostics from `L3-BEH-SKILLS-001`.
+  7. Handle duplicates: if same `name` appears in multiple sources, higher-precedence source wins (user > workspace > builtin). Lower-precedence entry is marked as `shadowed`.
+  8. Bound total discovered skills and metadata bytes for context efficiency.
 - **Postconditions**: The skill catalog is populated with all discoverable skills. Diagnostics are attached for invalid entries.
 
 ### B2. Skill Activation — User-Explicit
 
-- **Trigger**: User mentions a skill explicitly (e.g., `@skill:code-reviewer` or `/skill code-reviewer`).
+- **Trigger**: User submits a structured `Mention(kind = Skill)` selected from the `@` fuzzy-search popup, or a future explicit skill-activation protocol method is approved.
 - **Preconditions**: The skill exists in the catalog. It is enabled.
 - **Algorithm / Flow**:
-  1. Resolve the skill by name from the catalog. If not found → error "Skill '<name>' not found. Available: <list>".
+  1. Resolve the skill by the mention target skill id or canonical skill name. If not found → error "Skill '<name>' not found. Available: <list>".
   2. If disabled: error "Skill '<name>' is disabled."
   3. If workspace-provided and `trust_state: untrusted`: warn user with source and trust info. Require explicit confirmation before activation (one-time per session).
   4. Load the full `SKILL.md` content. Apply size bounding (max 65536 bytes).
@@ -107,10 +108,19 @@ L2-DES-SKILLS-001 (Agent Skills Architecture)
 | L2 Source | Relationship |
 |---|---|
 | L2-DES-SKILLS-001 | specified-by |
+| L3-BEH-SKILLS-001 | related-to |
 
 ## Implementation Placement Guidance
 
-- Skill catalog ownership belongs to core; `crates/core/src/skills.rs` is a conventional placement if it follows this L3 contract. Activation orchestration is server runtime behavior.
-- `SKILL.md` frontmatter parsing uses a simple YAML/TOML parser for the `---` delimited block.
+- Skill package data types, `SKILL.md` frontmatter parsing, package validation, bundled default skills, and default installation belong to the `skills` crate.
+- Runtime skill catalog ownership belongs to core; `crates/core/src/skills.rs` is a conventional placement if it follows this L3 contract. Activation orchestration is server runtime behavior.
 - Duplicate resolution: a `HashMap<SkillName, SkillCatalogEntry>` with source precedence ordering. Lower-priority duplicates are kept in a `shadowed` list for diagnostics.
 - Skill activation records are durable JSONL records: `skill_activated { skill_id, name, source, requested_by, turn_id, activated_at }`.
+
+## Revision Notes
+
+| Revision | Date | Author | Change Type | Notes |
+|---:|---|---|---|---|
+| 1 | 2026-05-27 | Assistant | Initial | Initial skills discovery and activation behavior. |
+| 2 | 2026-05-27 | Assistant | Correction | Split package parsing and default-skill installation into `L3-BEH-SKILLS-001`; runtime catalog and activation policy remain here. |
+| 3 | 2026-05-27 | Assistant | Correction | Replaced typed `@skill:` activation examples with structured Skill mentions from the direct-keyword `@` fuzzy-search flow. |

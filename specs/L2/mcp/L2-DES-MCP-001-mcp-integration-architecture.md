@@ -34,7 +34,7 @@ MCP servers are useful because they let users connect the agent to external syst
 - `L1-REQ-APP-010` requires persistent configuration and unavailable-state behavior.
 - `L1-REQ-APP-011` requires actionable error recovery.
 - `L1-REQ-APP-012` requires privacy, credential safety, and user data ownership.
-- `L2-DES-APP-002` defines configuration precedence for user-scoped and project-scoped settings.
+- `L2-DES-APP-002` defines configuration precedence for user-scoped and workspace-scoped settings.
 - `L2-DES-APP-003` defines client/server protocol events and request behavior.
 - `L2-DES-AGENT-001` defines the execution engine that dispatches tools.
 - `L2-DES-CONTEXT-001` defines context assembly.
@@ -84,12 +84,12 @@ Conceptual `McpServerConfig` fields:
 - `base_url`: endpoint for HTTP servers.
 - `auth_ref`: `auth.json` credential id for HTTP authorization, not routine plaintext.
 - `startup_policy`: eager, lazy, or manual.
-- `trust_policy`: user, project, or untrusted workspace source.
+- `trust_policy`: user, workspace, or untrusted workspace source.
 - `allowed_capabilities`: optional allowlist for tools, resources, templates, prompts, sampling, and elicitation.
 - `roots_policy`: which workspace roots may be shared with the server.
 - `output_limits`: per-server output and diagnostic limits where configured.
 
-Project-scoped MCP configuration can start local processes or route data to external services. Therefore project-scoped MCP servers must be visible to the user before first use. A project may suggest MCP servers, but the runtime should not silently grant broad trust to an unreviewed project configuration.
+Workspace-scoped MCP configuration can start local processes or route data to external services. Therefore workspace-scoped MCP servers must be visible to the user before first use. A workspace may suggest MCP servers, but the runtime should not silently grant broad trust to an unreviewed workspace configuration.
 
 ## Server Lifecycle
 
@@ -211,7 +211,7 @@ Rules:
 
 When the runtime shares roots with an MCP server, roots are advisory context about the user's workspace. They are not a sandbox. The program must continue enforcing its own filesystem, command, permission, and approval checks for every tool call.
 
-Project-scoped roots should be minimized to the active workspace and only shared with servers allowed by configuration and trust policy.
+Workspace-scoped roots should be minimized to the active workspace and only shared with servers allowed by configuration and trust policy.
 
 ### Sampling
 
@@ -306,7 +306,7 @@ MCP servers are external capability providers and must be treated as untrusted u
 
 Security rules:
 
-- Project-provided MCP servers require trust-aware visibility before first use.
+- Workspace-provided MCP servers require trust-aware visibility before first use.
 - MCP tools use the same approval and safety model as built-in tools.
 - MCP server-provided descriptions and schemas do not grant permission.
 - Secrets are read from `auth.json` credential references and passed only to the specific configured server operation that requires them.
@@ -335,12 +335,12 @@ Security rules:
 | related-to | L1-REQ-TOOL-001 | 1 | specs/L1/L1-REQ-TOOL-001-safety.md | MCP tool calls follow the same safety, approval, redaction, and output limits as built-in tools. |
 | related-to | L1-REQ-TOOL-002 | 1 | specs/L1/L1-REQ-TOOL-002-tools.md | MCP tools are normalized into the server-owned tool registry. |
 | related-to | L1-REQ-LLM-002 | 1 | specs/L1/L1-REQ-LLM-002-tools.md | Model-requested MCP tool use is controlled by the execution engine and tool supervisor. |
-| related-to | L1-REQ-APP-010 | 1 | specs/L1/L1-REQ-APP-010-configuration.md | MCP servers are configured through user-scoped and project-scoped configuration. |
+| related-to | L1-REQ-APP-010 | 1 | specs/L1/L1-REQ-APP-010-configuration.md | MCP servers are configured through user-scoped and workspace-scoped configuration. |
 | related-to | L1-REQ-APP-011 | 1 | specs/L1/L1-REQ-APP-011-error-recovery.md | MCP startup, authentication, protocol, and tool errors require actionable recovery context. |
 | related-to | L1-REQ-APP-012 | 1 | specs/L1/L1-REQ-APP-012-privacy-data-ownership.md | MCP credential and external-resource handling must preserve privacy boundaries. |
-| related-to | L2-DES-APP-002 | 1 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Configuration precedence resolves MCP server records. |
-| related-to | L2-DES-APP-005 | 1 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Defines concrete TOML fields for persisted MCP server records and `auth.json` credential references. |
-| related-to | L2-DES-APP-003 | 1 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Clients inspect MCP state and receive MCP-related status events through the server protocol. |
+| related-to | L2-DES-APP-002 | 2 | specs/L2/app/L2-DES-APP-002-configuration-precedence.md | Configuration precedence resolves MCP server records. |
+| related-to | L2-DES-APP-005 | 2 | specs/L2/app/L2-DES-APP-005-config-toml-schema.md | Defines concrete TOML fields for persisted MCP server records and `auth.json` credential references. |
+| related-to | L2-DES-APP-003 | 2 | specs/L2/app/L2-DES-APP-003-client-server-protocol.md | Clients inspect MCP state and receive MCP-related status events through the server protocol. |
 | related-to | L2-DES-AGENT-001 | 1 | specs/L2/agent/L2-DES-AGENT-001-execution-engine.md | The execution engine dispatches normalized MCP tool calls. |
 | related-to | L2-DES-CONTEXT-001 | 1 | specs/L2/context/L2-DES-CONTEXT-001-context-assembly.md | MCP tool schemas and selected resources participate in context assembly. |
 | related-to | L2-DES-TOOL-001 | 1 | specs/L2/tool/L2-DES-TOOL-001-built-in-tool-system.md | MCP tools are external tool definitions governed by the built-in tool lifecycle. |

@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "devo-arg0"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "devo-cli"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -618,7 +618,6 @@ dependencies = [
  "devo-safety",
  "devo-server",
  "devo-tasks",
- "devo-tools",
  "devo-tui",
  "devo-utils",
  "futures",
@@ -633,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "devo-client"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "devo-protocol",
@@ -645,37 +644,49 @@ dependencies = [
 
 [[package]]
 name = "devo-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "devo-protocol",
  "devo-provider",
  "devo-safety",
  "devo-tools",
  "devo-utils",
+ "diffy",
+ "filedescriptor",
  "futures",
+ "glob",
  "iana-time-zone",
+ "lazy_static",
+ "portable-pty",
  "pretty_assertions",
+ "rand",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "shared_library",
+ "shlex",
  "smol_str",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "winapi",
 ]
 
 [[package]]
 name = "devo-file-search"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -691,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "devo-mcp"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -705,7 +716,7 @@ dependencies = [
 
 [[package]]
 name = "devo-protocol"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "chrono",
  "pretty_assertions",
@@ -721,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "devo-provider"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -741,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "devo-safety"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "regex",
@@ -754,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "devo-server"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -765,7 +776,6 @@ dependencies = [
  "devo-protocol",
  "devo-provider",
  "devo-safety",
- "devo-tools",
  "devo-utils",
  "futures",
  "pretty_assertions",
@@ -783,8 +793,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "devo-skills"
+version = "0.1.10"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
 name = "devo-tasks"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -799,40 +821,22 @@ dependencies = [
 
 [[package]]
 name = "devo-tools"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
- "anyhow",
  "async-trait",
- "base64",
- "chrono",
  "devo-protocol",
- "devo-provider",
- "devo-safety",
- "diffy",
- "filedescriptor",
- "futures",
- "glob",
- "lazy_static",
- "portable-pty",
  "pretty_assertions",
- "rand",
- "regex",
- "reqwest",
  "serde",
  "serde_json",
- "shared_library",
- "shlex",
  "smol_str",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
- "uuid",
- "winapi",
+ "tokio-util",
 ]
 
 [[package]]
 name = "devo-tui"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "arboard",
@@ -888,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "devo-utils"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "ansi-to-tui",
  "anyhow",

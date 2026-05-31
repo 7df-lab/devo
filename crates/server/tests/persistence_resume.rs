@@ -3,22 +3,38 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::task;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
-use futures::stream::{self, Stream};
+use devo_core::AppConfigStore;
+use devo_core::ProviderVendorCatalog;
+use futures::stream::Stream;
+use futures::stream::{self};
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::{Duration, timeout};
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::time::Duration;
+use tokio::time::timeout;
 
-use devo_core::{FileSystemSkillCatalog, PresetModelCatalog, SkillsConfig};
-use devo_protocol::{
-    ModelRequest, ModelResponse, ResponseContent, ResponseMetadata, SessionHistoryItemKind,
-    StopReason, StreamEvent, TurnStatus, Usage,
-};
+use devo_core::FileSystemSkillCatalog;
+use devo_core::PresetModelCatalog;
+use devo_core::SkillsConfig;
+use devo_core::tools::ToolRegistry;
+use devo_protocol::ModelRequest;
+use devo_protocol::ModelResponse;
+use devo_protocol::ResponseContent;
+use devo_protocol::ResponseMetadata;
+use devo_protocol::SessionHistoryItemKind;
+use devo_protocol::StopReason;
+use devo_protocol::StreamEvent;
+use devo_protocol::TurnStatus;
+use devo_protocol::Usage;
 use devo_provider::ModelProviderSDK;
-use devo_server::{ClientTransportKind, ServerRuntime, ServerRuntimeDependencies};
-use devo_tools::ToolRegistry;
+use devo_provider::SingleProviderRouter;
+use devo_server::ClientTransportKind;
+use devo_server::ServerRuntime;
+use devo_server::ServerRuntimeDependencies;
 
 struct SingleReplyProvider;
 
@@ -1043,15 +1059,19 @@ fn build_runtime_with_provider(
     Ok(ServerRuntime::new(
         data_root.to_path_buf(),
         ServerRuntimeDependencies::new(
-            provider,
+            Arc::clone(&provider),
+            Arc::new(SingleProviderRouter::new(provider)),
             Arc::new(ToolRegistry::new()),
             "test-model".to_string(),
             Arc::new(PresetModelCatalog::default()),
+            Arc::new(ProviderVendorCatalog::default()),
             None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig::default())),
             devo_core::AgentsMdConfig::default(),
             db,
-            data_root.join("config.toml"),
+            Arc::new(std::sync::Mutex::new(
+                AppConfigStore::load(data_root.to_path_buf(), None).expect("load app config store"),
+            )),
         ),
     ))
 }

@@ -14,7 +14,7 @@
 //!   handling, and temporary restoration for external interactive programs;
 //! - host the `event_stream`, `frame_requester`, and `frame_rate_limiter` submodules, which work
 //!   together like an input pipeline plus a render scheduler;
-//! - keep terminal-specific concerns isolated from `host.rs`, `chatwidget.rs`, and the rest of
+//! - keep terminal-specific concerns isolated from `interactive.rs`, `chatwidget.rs`, and the rest of
 //!   the UI so higher-level code can reason in terms of events, frames, and state transitions
 //!   instead of escape codes.
 //!

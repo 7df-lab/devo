@@ -61,7 +61,7 @@ L2-DES-TUI-005 (Terminal Lifecycle Safety)
 - **Preconditions**: Signal handlers are registered via `tokio::signal`.
 - **Algorithm / Flow**:
   1. **SIGINT** (Ctrl+C):
-     a. First press: send `turn.interrupt` for the active turn (if any). Do NOT exit.
+     a. First press: send `turn/interrupt` for the active turn (if any). Do NOT exit.
      b. Second press within 2 seconds: force quit. Exit the TUI with cleanup.
   2. **SIGTERM**: initiate graceful shutdown: disconnect from server, restore terminal, exit with code 0.
   3. **SIGWINCH** (terminal resize): trigger a re-render with new dimensions. Do not exit. See L3-BEH-TUI-001 B2.

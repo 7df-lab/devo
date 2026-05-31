@@ -69,7 +69,7 @@ L2-DES-TUI-002 (Modern TUI Shell Layout), L2-DES-TUI-003 (Composer And Input Mod
 - **Preconditions**: Composer text is non-empty (or empty submission is configured to send).
 - **Algorithm / Flow**:
   1. Read the current session-local input mode:
-     - **Default Mode** (`Build`): Normal agent input. Text is submitted as `turn.submit` with `submission_mode: Normal`.
+     - **Default Mode** (`Build`): Normal agent input. Text is submitted as `turn/submit` with `submission_mode: Normal`.
      - **Shell Mode** (`Shell`): Text is routed through the program's terminal command capability.
      - **Plan Mode** (`Plan`): Client marks the submission so the server applies Plan Mode rules.
   2. Detect command prefixes:

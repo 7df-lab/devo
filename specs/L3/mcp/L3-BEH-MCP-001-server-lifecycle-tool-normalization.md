@@ -23,9 +23,9 @@ L2-DES-MCP-001 (MCP Integration Architecture)
 - **Preconditions**: `config.toml` may contain `[mcp.servers.<server_id>]` entries. `auth.json` may contain MCP credentials.
 - **Algorithm / Flow**:
   1. Load each `McpServerRecord` from effective config:
-     - `id` (McpServerId), `display_name`, `enabled`, `transport` (Stdio or StreamableHttp), `startup_policy` (Eager, Lazy, Manual), `trust_policy` (User, Project, Untrusted), `allowed_capabilities`, `roots_policy`, `output_limits`.
-  2. For project-scoped servers with `trust_policy: Untrusted`: mark as `disabled` until user explicitly approves. Show warning in status.
-  3. Resolve credential references from `auth.json` for servers with `auth_ref`.
+     - `id` (McpServerId), `display_name`, `enabled`, `transport` (Stdio or StreamableHttp), `startup_policy` (Eager, Lazy, Manual), `trust_policy` (User, Workspace, Untrusted), `allowed_capabilities`, `roots_policy`, `output_limits`.
+  2. For workspace-scoped servers with `trust_policy: Untrusted`: mark as `disabled` until user explicitly approves. Show warning in status.
+  3. Resolve credential references from user-scoped `auth.json` for servers with `auth_ref`.
   4. Register each server in the `McpManager` with initial state `not_started` (eager) or `disabled` (if not enabled).
 - **Postconditions**: All configured servers are registered with initial state.
 
@@ -118,7 +118,7 @@ L2-DES-MCP-001 (MCP Integration Architecture)
 - **Algorithm / Flow**:
   1. Classify errors: `ConfigurationInvalid`, `ServerDisabled`, `ServerNotTrusted`, `StartupFailed`, `TransportFailed`, `ProtocolNegotiationFailed`, `AuthenticationRequired`, `CapabilityUnavailable`, `InputInvalid`, `ToolInvocationFailed`, `ResourceReadFailed`, `OutputRejectedByPolicy`, `OperationCanceled`.
   2. Each error carries: `server_id`, `error_code`, `message` (safe for user), `recovery_context`.
-  3. Broadcast MCP status changes via `server.statusChanged` event with MCP-specific payload.
+  3. Broadcast MCP status changes via `server/status/changed` event with MCP-specific payload.
   4. Client projections (via `mcp.listServers`): server id, display name, enabled state, lifecycle state, auth state, last refresh, safe error summary, capability counts, disabled reasons.
 - **Postconditions**: Users can see MCP server status and understand failures.
 

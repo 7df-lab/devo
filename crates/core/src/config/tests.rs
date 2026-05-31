@@ -1,15 +1,28 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use devo_protocol::PermissionPreset;
 use pretty_assertions::assert_eq;
 
-use super::{
-    AppConfig, AppConfigLoader, ContextManageConfig, FileSystemAppConfigLoader, LogRotation,
-    LoggingConfig, ProjectConfig, SafetyPolicyModelSelection, SummaryModelSelection, UpdatesConfig,
-};
+use super::AppConfig;
+use super::AppConfigLoader;
+use super::AppConfigStore;
+use super::FileSystemAppConfigLoader;
+use super::LogRotation;
+use super::LoggingConfig;
+use super::ModelBindingConfig;
+use super::ProjectConfig;
+use super::ProviderConfigSection;
+use super::ProviderDefaultsConfig;
+use super::ProviderVendorConfig;
+use super::SummaryModelSelection;
+use super::UpdatesConfig;
 use crate::SkillsConfig;
+use devo_protocol::ProviderModelBinding;
+use devo_protocol::ProviderVendor;
+use devo_protocol::ProviderWireApi;
 
 fn unique_temp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -41,9 +54,7 @@ fn loader_merges_user_project_and_cli_layers() {
     .expect("write project config");
 
     let cli_overrides: toml::Value = r#"
-enable_auxiliary_model = false
 summary_model = "UseAxiliaryModel"
-safety_policy_model = "UseTurnModel"
 project_root_markers = [".workspace"]
 
 [server]
@@ -74,14 +85,7 @@ check_interval_hours = 48
     assert_eq!(
         config,
         AppConfig {
-            enable_auxiliary_model: false,
             summary_model: SummaryModelSelection::UseAxiliaryModel,
-            safety_policy_model: SafetyPolicyModelSelection::UseTurnModel,
-            context: ContextManageConfig {
-                preserve_recent_turns: 5,
-                auto_compact_percent: Some(80),
-                manual_compaction_enabled: true,
-            },
             server: super::ServerConfig {
                 listen: vec!["stdio://".into()],
                 max_connections: 32,
@@ -106,6 +110,7 @@ check_interval_hours = 48
                 workspace_roots: vec![PathBuf::from("project-skills")],
                 watch_for_changes: false,
             },
+            provider: ProviderConfigSection::default(),
             updates: UpdatesConfig {
                 enabled: false,
                 check_on_startup: true,
@@ -120,13 +125,137 @@ check_interval_hours = 48
 }
 
 #[test]
-fn loader_rejects_invalid_context_thresholds() {
+fn loader_merges_provider_sections_with_provider_overlay_rules() {
+    let root = unique_temp_dir("config-provider-merge");
+    let home = root.join("home").join(".devo");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::create_dir_all(workspace.join(".devo")).expect("workspace config dir");
+
+    std::fs::write(
+        home.join("config.toml"),
+        r#"
+[defaults]
+model_binding = "main"
+
+[providers.main]
+name = "User Provider"
+base_url = "https://user.example/v1"
+credential = "user_api_key"
+wire_apis = ["openai_responses"]
+
+[model_bindings.main]
+model_slug = "user-model"
+provider = "main"
+model_name = "user/model"
+invocation_method = "openai_responses"
+"#,
+    )
+    .expect("write user config");
+    std::fs::write(
+        workspace.join(".devo").join("config.toml"),
+        r#"
+[providers.main]
+name = "Project Provider"
+
+[model_bindings.main]
+model_slug = "project-model"
+provider = "main"
+model_name = "project/model"
+invocation_method = "openai_responses"
+"#,
+    )
+    .expect("write project config");
+
+    let loader = FileSystemAppConfigLoader::new(home);
+    let config = loader.load(Some(&workspace)).expect("load config");
+
+    assert_eq!(
+        config.provider,
+        ProviderConfigSection {
+            defaults: ProviderDefaultsConfig {
+                model_binding: Some("main".to_string()),
+            },
+            providers: BTreeMap::from([(
+                "main".to_string(),
+                ProviderVendorConfig {
+                    name: "Project Provider".to_string(),
+                    base_url: Some("https://user.example/v1".to_string()),
+                    credential: Some("user_api_key".to_string()),
+                    wire_apis: vec![ProviderWireApi::OpenAIResponses],
+                    enabled: true,
+                },
+            )]),
+            model_bindings: BTreeMap::from([(
+                "main".to_string(),
+                ModelBindingConfig {
+                    model_slug: "project-model".to_string(),
+                    provider: "main".to_string(),
+                    model_name: "project/model".to_string(),
+                    invocation_method: ProviderWireApi::OpenAIResponses,
+                    ..ModelBindingConfig::default()
+                },
+            )]),
+            ..ProviderConfigSection::default()
+        }
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn provider_upsert_writes_user_config_when_workspace_is_active() {
+    let root = unique_temp_dir("provider-upsert-user");
+    let home = root.join("home").join(".devo");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::create_dir_all(workspace.join(".devo")).expect("workspace config dir");
+
+    let mut store = AppConfigStore::load(home.clone(), Some(&workspace)).expect("load store");
+    store
+        .upsert_provider_vendor(
+            "openrouter".to_string(),
+            ProviderVendor {
+                name: "openrouter".to_string(),
+                base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                credential: None,
+                wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
+                enabled: true,
+            },
+            Some(ProviderModelBinding {
+                binding_id: "qwen-openrouter".to_string(),
+                model_slug: "qwen".to_string(),
+                provider: "openrouter".to_string(),
+                model_name: "qwen/qwen3".to_string(),
+                display_name: Some("Qwen".to_string()),
+                invocation_method: ProviderWireApi::OpenAIChatCompletions,
+                default_reasoning_effort: Some("medium".to_string()),
+                enabled: true,
+            }),
+            Some("qwen-openrouter".to_string()),
+            Some("sk-test".to_string()),
+        )
+        .expect("upsert provider");
+
+    let user_config = std::fs::read_to_string(home.join("config.toml")).expect("user config");
+    let workspace_config = workspace.join(".devo").join("config.toml");
+
+    assert!(user_config.contains("[providers.openrouter]"));
+    assert!(user_config.contains("[model_bindings.qwen-openrouter]"));
+    assert!(user_config.contains("model_binding = \"qwen-openrouter\""));
+    assert!(!workspace_config.exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_rejects_invalid_logging_file_prefix() {
     let root = unique_temp_dir("config-validation");
     let home = root.join("home").join(".devo");
     std::fs::create_dir_all(&home).expect("home config dir");
     std::fs::write(
         home.join("config.toml"),
-        "[context]\npreserve_recent_turns = 0\n",
+        "[logging.file]\nfilename_prefix = '   '\n",
     )
     .expect("write user config");
 

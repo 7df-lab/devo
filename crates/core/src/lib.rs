@@ -1,31 +1,87 @@
 mod config;
+#[allow(dead_code)]
+mod config_resolution;
 mod context;
+mod context_pipeline;
 mod conversation;
+mod durable_record;
 mod error;
+pub mod execution;
+pub mod fork;
+pub mod fuzzy_search;
 pub mod history;
+mod instruction_discovery;
+mod jsonl_store;
 mod logging;
+pub mod memory;
+mod message_edit;
+mod model_binding;
 mod model_catalog;
 mod model_preset;
+mod permission;
 mod query;
+mod replay;
 mod response_item;
 mod session;
+mod session_store;
 mod skills;
 mod state;
+mod tool_prompt;
+pub mod tools;
 mod update_check;
 
+#[cfg(test)]
+pub(crate) use tools::ToolContent;
+pub(crate) use tools::apply_patch;
+pub(crate) use tools::contracts;
+pub(crate) use tools::deferred_loading;
+pub(crate) use tools::errors;
+pub(crate) use tools::events;
+pub(crate) use tools::handler_kind;
+pub(crate) use tools::invocation;
+pub(crate) use tools::json_schema;
+pub(crate) use tools::read;
+pub(crate) use tools::registry;
+pub(crate) use tools::registry_plan;
+pub(crate) use tools::shell_exec;
+pub(crate) use tools::tool_handler;
+pub(crate) use tools::tool_spec;
+pub(crate) use tools::tool_summary;
+pub(crate) use tools::unified_exec;
+
+#[allow(ambiguous_glob_reexports)]
 pub use config::*;
+#[allow(ambiguous_glob_reexports)]
 pub use context::*;
+#[allow(ambiguous_glob_reexports)]
+pub use context_pipeline::*;
 pub use conversation::*;
 #[allow(ambiguous_glob_reexports)]
 pub use devo_protocol::*;
 pub use devo_protocol::{ContentBlock, Message, Role};
+pub use durable_record::*;
 pub use error::*;
+#[allow(ambiguous_glob_reexports)]
+pub use execution::*;
+pub use fork::*;
+pub use fuzzy_search::*;
 pub use history::*;
+pub use instruction_discovery::*;
+pub use jsonl_store::*;
 pub use logging::*;
+pub use memory::*;
+pub use message_edit::*;
+#[allow(ambiguous_glob_reexports)]
+pub use model_binding::*;
 pub use model_catalog::*;
 pub use model_preset::*;
+pub use permission::*;
 pub use query::*;
+#[allow(ambiguous_glob_reexports)]
+pub use replay::*;
 pub use response_item::*;
 pub use session::*;
+pub use session_store::*;
 pub use skills::*;
+pub use tool_prompt::*;
 pub use update_check::*;

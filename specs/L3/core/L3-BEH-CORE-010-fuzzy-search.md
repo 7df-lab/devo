@@ -19,7 +19,7 @@ L2-DES-APP-006 (Fuzzy Search Architecture)
 
 ### B1. Search Session Lifecycle
 
-- **Trigger**: Client sends `search.start` or a client-side popup opens (e.g., user types `@` in composer).
+- **Trigger**: Client sends `search/start` or a client-side popup opens (e.g., user types `@` in composer).
 - **Preconditions**: The workspace is accessible. Search roots are configured.
 - **Algorithm / Flow**:
   1. Create a `FileSearchSession` with a unique `search_id`.
@@ -27,7 +27,7 @@ L2-DES-APP-006 (Fuzzy Search Architecture)
   3. Spawn two background worker tasks (tokio):
      - **Walker**: recursively walks search roots, applies ignore/exclude rules, pushes discovered relative paths to the matcher.
      - **Matcher**: holds the fuzzy matcher instance (`nucleo`), receives paths from walker, applies current query.
-  4. The session remains live until the client sends `search.cancel`, the popup closes, or the session is dropped.
+  4. The session remains live until the client sends `search/cancel`, the popup closes, or the session is dropped.
 - **Postconditions**: A live search session exists with background workers indexing the workspace.
 
 ### B2. Incremental Walk and Indexing
@@ -50,7 +50,7 @@ L2-DES-APP-006 (Fuzzy Search Architecture)
 
 ### B3. Fuzzy Matching and Snapshots
 
-- **Trigger**: Client sends `search.update` with a new query, or walker pushes new paths.
+- **Trigger**: Client sends `search/update` with a new query, or walker pushes new paths.
 - **Preconditions**: Matcher is initialized with `nucleo::Matcher` configured for path-aware matching.
 - **Algorithm / Flow**:
   1. On query update:
@@ -66,17 +66,17 @@ L2-DES-APP-006 (Fuzzy Search Architecture)
 
 ### B4. Query Cancellation and Superseding
 
-- **Trigger**: Client sends `search.update` with a new query while a previous query is still being processed.
+- **Trigger**: Client sends `search/update` with a new query while a previous query is still being processed.
 - **Preconditions**: A prior `QueryUpdated` signal was sent.
 - **Algorithm / Flow**:
   1. The new query supersedes the prior query. The matcher applies the new pattern.
   2. If the prior query's snapshot was not yet emitted: skip it. Only emit snapshots for the latest query.
-  3. A `query_revision` counter increments on each `search.update`. Snapshots carry the revision so clients can ignore stale results.
+  3. A `query_revision` counter increments on each `search/update`. Snapshots carry the revision so clients can ignore stale results.
 - **Postconditions**: Only results for the current query are shown. Stale snapshots are discarded.
 
 ### B5. Shutdown and Resource Cleanup
 
-- **Trigger**: Client sends `search.cancel`, popup closes, or the search session is dropped.
+- **Trigger**: Client sends `search/cancel`, popup closes, or the search session is dropped.
 - **Preconditions**: A search session is active.
 - **Algorithm / Flow**:
   1. Set the cancellation flag. Walker checks the flag and exits at the next yield point.
@@ -97,7 +97,7 @@ L2-DES-APP-006 (Fuzzy Search Architecture)
      - `SessionSearchProvider`: recent session search.
      - `CommandSearchProvider`: slash command search.
   2. Each provider implements: `search(query, limit) → Vec<SearchResult>`.
-  3. `search.start` may specify `providers` to restrict which providers are active. Default: all configured providers.
+  3. `search/start` may specify `providers` to restrict which providers are active. Default: all configured providers.
   4. Each provider result carries a `provider_group` type so clients render results distinctly (file icon for files, skill icon for skills, etc.).
 - **Postconditions**: Fuzzy search works across multiple entity types with consistent API.
 

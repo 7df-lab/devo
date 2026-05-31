@@ -1,6 +1,6 @@
 ---
 artifact_id: L3-BEH-CLIENT-001
-revision: 1
+revision: 2
 status: Draft
 active_baseline: no
 ---
@@ -40,7 +40,7 @@ L2-DES-APP-003 (Client Server Protocol), L2-DES-CLIENT-001 (Localization Readine
 - **Trigger**: WebSocket connection is established.
 - **Preconditions**: The socket is open. The client has a unique `client_id` (persisted across restarts).
 - **Algorithm / Flow**:
-  1. Send `server.initialize` JSON-RPC request:
+  1. Send `server/initialize` JSON-RPC request:
      - `client_id`: stable UUID v4 generated on first client launch, persisted.
      - `client_kind`: "tui", "desktop", "ide", "browser".
      - `protocol_version`: "1.0" (semver compatible).
@@ -57,7 +57,7 @@ L2-DES-APP-003 (Client Server Protocol), L2-DES-CLIENT-001 (Localization Readine
 - **Trigger**: Client needs to display a session (new session created or existing session selected).
 - **Preconditions**: The client is initialized.
 - **Algorithm / Flow**:
-  1. Send `session.subscribe`:
+  1. Send `session/subscribe`:
      - `session_id`: the target session.
      - `from_sequence`: the last known sequence number (0 for new subscriptions).
      - `event_filter`: optional set of event kinds to receive. Default: all.
@@ -66,7 +66,7 @@ L2-DES-APP-003 (Client Server Protocol), L2-DES-CLIENT-001 (Localization Readine
   3. If `session_snapshot` is provided: populate the local UI state with the snapshot data.
   4. Enter event loop:
      a. Read JSON-RPC notifications from the WebSocket.
-     b. For `session.event` and `turn.event` notifications: extract `seq`, validate monotonic (if out of order, buffer and reorder or request catch-up).
+     b. For session-scoped and turn-scoped concrete notifications such as `session/started`, `turn/started`, `item/started`, and `item/agentMessage/delta`: extract `seq`, validate monotonic (if out of order, buffer and reorder or request catch-up).
      c. Dispatch to the appropriate UI handler: transcript renderer, tool status, approval modal, plan/goal view, config display.
      d. Update the local `last_sequence` to the highest received `seq`.
   5. Track `subscription_id` for later unsubscribe.
@@ -81,8 +81,8 @@ L2-DES-APP-003 (Client Server Protocol), L2-DES-CLIENT-001 (Localization Readine
   2. Display a reconnection indicator in the UI state area, such as the working indicator row or bottom status line: "Reconnecting...".
   3. Retry connection with exponential backoff: 100ms, 200ms, 400ms, 800ms, 1.6s, 3.2s, 5s (max). Max retries: 20 (~60 seconds total).
   4. On reconnection:
-     a. Re-send `server.initialize` (the server may have restarted).
-     b. Re-send `session.subscribe` with `from_sequence: last_sequence + 1`.
+     a. Re-send `server/initialize` (the server may have restarted).
+     b. Re-send `session/subscribe` with `from_sequence: last_sequence + 1`.
      c. Receive either:
         - Missed events starting from `from_sequence` (if the server's event buffer still has them).
         - A fresh `session_loaded` snapshot with `latest_sequence` (if buffer was too old).
@@ -106,8 +106,8 @@ L2-DES-APP-003 (Client Server Protocol), L2-DES-CLIENT-001 (Localization Readine
 - **Trigger**: Client exits normally (user presses Ctrl+D on empty composer, or the approved `/exit` command).
 - **Preconditions**: The client is connected.
 - **Algorithm / Flow**:
-  1. Send `session.unsubscribe` for any active subscriptions.
-  2. Send `server.shutdown` only if the client is the server owner and user requested server shutdown.
+  1. Send `session/unsubscribe` for any active subscriptions.
+  2. Send `server/shutdown` only if the client is the server owner and user requested server shutdown.
   3. Close the WebSocket connection gracefully (send close frame, wait for close frame).
   4. Persist client state: `last_sequence` per session, `client_id`, recent session list.
   5. Restore terminal to normal mode (disable raw mode, show cursor).
@@ -125,3 +125,10 @@ L2-DES-APP-003 (Client Server Protocol), L2-DES-CLIENT-001 (Localization Readine
 - WebSocket client uses `tokio-tungstenite` with `tokio` runtime.
 - Reconnection logic belongs in the client connection layer; a conventional placement is `crates/client/src/connection.rs` or the equivalent client transport module.
 - The endpoint descriptor file is a JSON file at `<runtime_dir>/server.json` containing `{ "pid": 12345, "websocket_url": "ws://127.0.0.1:PORT/ws", "auth_token": "...", "version": "0.1.0", "started_at": "..." }`.
+
+## Revision Notes
+
+| Revision | Date | Author | Change Type | Notes |
+|---:|---|---|---|---|
+| 1 | 2026-05-27 | Assistant | Initial | Initial client connection, authentication, subscription, reconnection, and event catch-up behavior. |
+| 2 | 2026-05-27 | Assistant | Correction | Changed JSON-RPC request examples to slash-separated method names and aligned notification handling with concrete server event method names. |
