@@ -18,6 +18,7 @@
 //! ```
 
 use std::future::Future;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -315,11 +316,32 @@ fn janitor_cleanup(temp_root: &Path) -> std::io::Result<()> {
             Ok(()) => {}
             // Expected TOCTOU race: directory can disappear after read_dir/lock checks.
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            // Windows can report active locks while removing nested files even
+            // after the arg0 lock was acquired. Treat those as still-live dirs.
+            Err(err) if is_lock_temporarily_unavailable(&err) => continue,
             Err(err) => return Err(err),
         }
     }
 
     Ok(())
+}
+
+fn is_lock_temporarily_unavailable(err: &std::io::Error) -> bool {
+    if err.kind() == ErrorKind::WouldBlock {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        // ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION are both normal
+        // outcomes when another Windows process still owns an arg0 temp dir.
+        matches!(err.raw_os_error(), Some(32 | 33))
+    }
+
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 /// Attempt to acquire an exclusive lock on a directory's lock file.
@@ -337,12 +359,13 @@ fn try_lock_dir(dir: &Path) -> std::io::Result<Option<std::fs::File>> {
     {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if is_lock_temporarily_unavailable(&err) => return Ok(None),
         Err(err) => return Err(err),
     };
 
     match lock_file.try_lock_exclusive() {
         Ok(()) => Ok(Some(lock_file)),
-        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(err) if is_lock_temporarily_unavailable(&err) => Ok(None),
         Err(err) => Err(err),
     }
 }
@@ -358,6 +381,7 @@ struct PathGuard {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::ErrorKind;
     use std::path::Path;
 
     use fs2::FileExt;
@@ -379,6 +403,30 @@ mod tests {
     #[test]
     fn argv0_alias_returns_none_for_normal_invocation() {
         assert_eq!(super::argv0_alias(), None);
+    }
+
+    #[test]
+    fn lock_unavailable_detection_handles_would_block() {
+        assert_eq!(
+            [super::is_lock_temporarily_unavailable(
+                &std::io::Error::new(ErrorKind::WouldBlock, "lock held"),
+            )],
+            [true]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lock_unavailable_detection_handles_windows_lock_errors() {
+        assert_eq!(
+            [32, 33]
+                .into_iter()
+                .map(|code| {
+                    super::is_lock_temporarily_unavailable(&std::io::Error::from_raw_os_error(code))
+                })
+                .collect::<Vec<_>>(),
+            vec![true, true]
+        );
     }
 
     #[test]
