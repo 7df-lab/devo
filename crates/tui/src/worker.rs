@@ -61,6 +61,9 @@ use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
 
+const WORKER_SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
+const WORKER_ABORT_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
+
 struct EnsureSessionOutcome {
     session_id: SessionId,
     model: Option<String>,
@@ -405,18 +408,13 @@ impl QueryWorkerHandle {
         let mut join_handle = self.join_handle;
         tokio::select! {
             result = &mut join_handle => {
-                match result {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.is_cancelled() => Ok(()),
-                    Err(error) => Err(map_join_error(error)),
-                }
+                map_worker_join_result(result)
             }
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+            _ = tokio::time::sleep(WORKER_SHUTDOWN_GRACE) => {
                 join_handle.abort();
-                match join_handle.await {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.is_cancelled() => Ok(()),
-                    Err(error) => Err(map_join_error(error)),
+                match tokio::time::timeout(WORKER_ABORT_JOIN_TIMEOUT, &mut join_handle).await {
+                    Ok(result) => map_worker_join_result(result),
+                    Err(_) => Ok(()),
                 }
             }
         }
@@ -2584,11 +2582,21 @@ fn map_join_error(error: JoinError) -> anyhow::Error {
     }
 }
 
+fn map_worker_join_result(result: std::result::Result<(), JoinError>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.is_cancelled() => Ok(()),
+        Err(error) => Err(map_join_error(error)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
     use pretty_assertions::assert_eq;
+    use std::future::pending;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use devo_core::SessionId;
     use devo_core::SessionTitleState;
@@ -2599,6 +2607,7 @@ mod tests {
     use devo_server::SkillScope;
     use devo_server::SkillSource;
 
+    use super::QueryWorkerHandle;
     use super::handle_completed_item;
     use super::normalize_display_output;
     use super::project_history_items;
@@ -2623,6 +2632,26 @@ mod tests {
     use devo_server::SessionHistoryItemKind;
     use devo_server::ToolCallPayload;
     use devo_server::ToolResultPayload;
+
+    #[tokio::test]
+    async fn worker_shutdown_aborts_unresponsive_task() {
+        let (command_tx, _command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker = QueryWorkerHandle {
+            command_tx,
+            event_rx,
+            join_handle: tokio::spawn(async {
+                pending::<()>().await;
+            }),
+        };
+
+        let completed = tokio::time::timeout(Duration::from_secs(1), worker.shutdown())
+            .await
+            .map(|result| result.is_ok())
+            .unwrap_or(false);
+
+        assert_eq!([completed], [true]);
+    }
 
     #[test]
     fn bash_tool_summary_uses_command_text() {

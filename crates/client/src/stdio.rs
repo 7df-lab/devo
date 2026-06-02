@@ -73,6 +73,9 @@ use tokio::sync::oneshot;
 use tokio::time::Duration;
 use tokio::time::timeout;
 
+const SERVER_CHILD_STDIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
+const SERVER_CHILD_EXIT_TIMEOUT: Duration = Duration::from_millis(500);
+
 #[derive(Debug, Clone)]
 pub struct StdioServerClientConfig {
     pub program: PathBuf,
@@ -308,9 +311,19 @@ impl StdioServerClient {
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
-        let _ = self.stdin.shutdown().await;
-        self.child.kill().await.ok();
-        let _ = self.child.wait().await;
+        let _ = timeout(SERVER_CHILD_STDIN_SHUTDOWN_TIMEOUT, self.stdin.shutdown()).await;
+        if let Err(error) = self.child.start_kill() {
+            tracing::debug!(%error, "failed to start stdio server child kill");
+        }
+        match timeout(SERVER_CHILD_EXIT_TIMEOUT, self.child.wait()).await {
+            Ok(Ok(_status)) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "failed to wait for stdio server child exit");
+            }
+            Err(_elapsed) => {
+                tracing::debug!("timed out waiting for stdio server child exit");
+            }
+        }
         Ok(())
     }
 
