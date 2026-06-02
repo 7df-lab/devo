@@ -1288,7 +1288,7 @@ impl ServerRuntime {
         .await;
 
         // After the turn completes, check for queued inputs and start the next turn.
-        let input_text = {
+        let (display_input, input_text) = {
             let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
                 Some(s) => s,
                 None => return,
@@ -1307,11 +1307,19 @@ impl ServerRuntime {
                 Some(devo_core::PendingInputItem {
                     kind: devo_core::PendingInputKind::UserText { text },
                     ..
-                }) => text,
+                }) => (text.clone(), text),
+                Some(devo_core::PendingInputItem {
+                    kind:
+                        devo_core::PendingInputKind::UserInput {
+                            display_text,
+                            prompt_text,
+                            ..
+                        },
+                    ..
+                }) => (display_text, prompt_text),
                 _ => return,
             }
         };
-        let display_input = input_text.clone();
         // Update clients before starting the next turn so dequeued input is
         // removed from any pending queue display.
         self.broadcast_updated_queue(session_id).await;
@@ -1407,6 +1415,15 @@ impl ServerRuntime {
                     kind: devo_core::PendingInputKind::UserText { text },
                     ..
                 }) => (text.clone(), text),
+                Some(devo_core::PendingInputItem {
+                    kind:
+                        devo_core::PendingInputKind::UserInput {
+                            display_text,
+                            prompt_text,
+                            ..
+                        },
+                    ..
+                }) => (display_text, prompt_text),
                 _ => return,
             }
         };
@@ -1500,6 +1517,9 @@ impl ServerRuntime {
                 .iter()
                 .filter_map(|item| match &item.kind {
                     devo_core::PendingInputKind::UserText { text } => Some(text.clone()),
+                    devo_core::PendingInputKind::UserInput { display_text, .. } => {
+                        Some(display_text.clone())
+                    }
                     _ => None,
                 })
                 .collect();

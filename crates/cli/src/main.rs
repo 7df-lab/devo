@@ -46,7 +46,11 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    devo_arg0::run_as(|_paths| async { run_cli().await })
+    devo_arg0::run_as(|_paths| async {
+        let result = run_cli().await;
+        tracing::info!(success = result.is_ok(), "run_cli future completed");
+        result
+    })
 }
 
 fn format_with_separators(value: usize) -> String {
@@ -181,10 +185,17 @@ async fn run_cli() -> Result<()> {
         None => {
             maybe_print_startup_update(&cli).await;
             let _logging = install_logging(&cli)?;
+            tracing::info!("default interactive command starting");
             let exit = run_agent(/*force_onboarding*/ false, log_level.as_deref(), None).await?;
-            for line in exit_messages(&exit, /*color_enabled*/ true) {
+            let exit_lines = exit_messages(&exit, /*color_enabled*/ true);
+            tracing::info!(
+                line_count = exit_lines.len(),
+                "printing default interactive exit messages"
+            );
+            for line in exit_lines {
                 println!("{line}");
             }
+            tracing::info!("default interactive command completed");
             Ok(())
         }
     }

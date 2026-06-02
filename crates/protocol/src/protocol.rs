@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::PathBuf;
 
 use schemars::JsonSchema;
@@ -56,6 +57,7 @@ pub enum ClientMethod {
     SessionCompact,
     SkillsList,
     SkillsChanged,
+    SkillsSetEnabled,
     ModelCatalog,
     ModelSaved,
     TurnStart,
@@ -88,6 +90,7 @@ impl ClientMethod {
             Self::SessionCompact => "session/compact",
             Self::SkillsList => "skills/list",
             Self::SkillsChanged => "skills/changed",
+            Self::SkillsSetEnabled => "skills/set_enabled",
             Self::ModelCatalog => "model/catalog",
             Self::ModelSaved => "model/saved",
             Self::TurnStart => "turn/start",
@@ -120,6 +123,7 @@ impl ClientMethod {
             "session/compact" => Self::SessionCompact,
             "skills/list" => Self::SkillsList,
             "skills/changed" => Self::SkillsChanged,
+            "skills/set_enabled" => Self::SkillsSetEnabled,
             "model/catalog" => Self::ModelCatalog,
             "model/saved" => Self::ModelSaved,
             "turn/start" => Self::TurnStart,
@@ -368,6 +372,57 @@ impl TokenUsageInfo {
         };
         info.fill_to_context_window(context_window);
         info
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct McpStartupUpdateEvent {
+    /// Server name being started.
+    pub server: String,
+    /// Current startup status.
+    pub status: McpStartupStatus,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum McpStartupStatus {
+    Starting,
+    Ready,
+    Failed { error: String },
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
+pub struct McpStartupCompleteEvent {
+    pub ready: Vec<String>,
+    pub failed: Vec<McpStartupFailure>,
+    pub cancelled: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct McpStartupFailure {
+    pub server: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAuthStatus {
+    Unsupported,
+    NotLoggedIn,
+    BearerToken,
+    OAuth,
+}
+
+impl fmt::Display for McpAuthStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            McpAuthStatus::Unsupported => "Unsupported",
+            McpAuthStatus::NotLoggedIn => "Not logged in",
+            McpAuthStatus::BearerToken => "Bearer token",
+            McpAuthStatus::OAuth => "OAuth",
+        };
+        f.write_str(text)
     }
 }
 

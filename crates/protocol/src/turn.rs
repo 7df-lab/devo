@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{ItemId, ReasoningEffort, SessionId, TurnId, TurnStatus, TurnUsage};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,13 +22,55 @@ pub struct TurnMetadata {
     pub usage: Option<TurnUsage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputItem {
     Text { text: String },
-    Skill { id: String },
+    Skill { name: String, path: PathBuf },
     LocalImage { path: PathBuf },
     Mention { path: String, name: Option<String> },
+}
+
+impl<'de> Deserialize<'de> for InputItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum WireInputItem {
+            Text {
+                text: String,
+            },
+            Skill {
+                name: Option<String>,
+                path: Option<PathBuf>,
+                id: Option<String>,
+            },
+            LocalImage {
+                path: PathBuf,
+            },
+            Mention {
+                path: String,
+                name: Option<String>,
+            },
+        }
+
+        match WireInputItem::deserialize(deserializer)? {
+            WireInputItem::Text { text } => Ok(Self::Text { text }),
+            WireInputItem::Skill { name, path, id } => {
+                let name = name
+                    .or(id)
+                    .ok_or_else(|| serde::de::Error::missing_field("name"))?;
+                Ok(Self::Skill {
+                    name,
+                    path: path.unwrap_or_default(),
+                })
+            }
+            WireInputItem::LocalImage { path } => Ok(Self::LocalImage { path }),
+            WireInputItem::Mention { path, name } => Ok(Self::Mention { path, name }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,8 +150,18 @@ pub struct PendingInputItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PendingInputKind {
-    UserText { text: String },
-    ToolCallBlockedByHook { tool_use_id: String, reason: String },
+    UserText {
+        text: String,
+    },
+    UserInput {
+        input: Vec<InputItem>,
+        display_text: String,
+        prompt_text: String,
+    },
+    ToolCallBlockedByHook {
+        tool_use_id: String,
+        reason: String,
+    },
     BudgetLimitSteering,
 }
 

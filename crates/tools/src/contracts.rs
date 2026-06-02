@@ -27,6 +27,8 @@ pub struct ToolBudgets {
 #[derive(Clone)]
 pub struct ToolContext {
     pub tool_call_id: ToolCallId,
+    pub session_id: String,
+    pub turn_id: Option<String>,
     pub workspace_root: PathBuf,
     pub budgets: ToolBudgets,
     pub cancel_token: CancellationToken,
@@ -36,6 +38,8 @@ impl std::fmt::Debug for ToolContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolContext")
             .field("tool_call_id", &self.tool_call_id)
+            .field("session_id", &self.session_id)
+            .field("turn_id", &self.turn_id)
             .field("workspace_root", &self.workspace_root)
             .field("budgets", &self.budgets)
             .field("cancel_token", &self.cancel_token)

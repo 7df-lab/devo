@@ -353,6 +353,18 @@ impl Database {
         let conn = self.conn.lock().expect("database mutex poisoned");
         let (kind_str, content) = match &item.kind {
             PendingInputKind::UserText { text } => ("user_text", text.clone()),
+            PendingInputKind::UserInput {
+                input,
+                display_text,
+                prompt_text,
+            } => {
+                let content = serde_json::json!({
+                    "input": input,
+                    "display_text": display_text,
+                    "prompt_text": prompt_text,
+                });
+                ("user_input", content.to_string())
+            }
             PendingInputKind::ToolCallBlockedByHook {
                 tool_use_id,
                 reason,
@@ -412,6 +424,25 @@ impl Database {
 
                     let kind = match kind_str.as_str() {
                         "user_text" => PendingInputKind::UserText { text: content },
+                        "user_input" => serde_json::from_str::<serde_json::Value>(&content)
+                            .ok()
+                            .and_then(|value| {
+                                Some(PendingInputKind::UserInput {
+                                    input: serde_json::from_value(value.get("input")?.clone())
+                                        .ok()?,
+                                    display_text: value
+                                        .get("display_text")?
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    prompt_text: value
+                                        .get("prompt_text")?
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                })
+                            })
+                            .unwrap_or(PendingInputKind::UserText { text: content }),
                         "tool_call_blocked" => {
                             let parsed: serde_json::Value =
                                 serde_json::from_str(&content).unwrap_or_default();

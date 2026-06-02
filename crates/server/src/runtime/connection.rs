@@ -126,6 +126,9 @@ impl ServerRuntime {
             Some(ClientMethod::SkillsChanged) => {
                 Some(self.handle_skills_changed(id?, params).await)
             }
+            Some(ClientMethod::SkillsSetEnabled) => {
+                Some(self.handle_skills_set_enabled(id?, params).await)
+            }
             // get the model catalog, aka the configured models list
             Some(ClientMethod::ModelCatalog) => Some(self.handle_model_catalog(id?, params).await),
             // TODO: not sure, config model from client should be deprecated

@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio::time::timeout;
 
+use devo_core::BundledSkillsConfig;
 use devo_core::FileSystemSkillCatalog;
 use devo_core::PresetModelCatalog;
 use devo_core::SkillsConfig;
@@ -49,6 +50,7 @@ use devo_server::ServerRuntimeDependencies;
 use devo_server::SkillChangedResult;
 use devo_server::SkillListResult;
 use devo_server::SkillRecord;
+use devo_server::SkillScope;
 use devo_server::SkillSource;
 use devo_server::SuccessResponse;
 
@@ -163,6 +165,9 @@ fn build_runtime_with_registry(
                 user_roots: vec![user_skill_root],
                 workspace_roots: workspace_skill_roots,
                 watch_for_changes: false,
+                bundled: Some(BundledSkillsConfig { enabled: false }),
+                include_instructions: Some(true),
+                config: Vec::new(),
             })),
             devo_core::AgentsMdConfig::default(),
             db,
@@ -656,22 +661,32 @@ async fn skills_list_returns_user_and_workspace_skills() -> Result<()> {
         SkillListResult {
             skills: vec![
                 SkillRecord {
-                    id: "rust-docs".into(),
-                    name: "rust-docs".into(),
-                    description: format!("Skill discovered at {}", rust_skill_path.display()),
-                    path: canonical_rust_skill_path,
-                    enabled: true,
-                    source: SkillSource::User,
-                },
-                SkillRecord {
                     id: "team-style".into(),
                     name: "team-style".into(),
                     description: format!("Skill discovered at {}", team_skill_path.display()),
+                    short_description: None,
+                    interface: None,
+                    dependencies: None,
                     path: canonical_team_skill_path,
                     enabled: true,
                     source: SkillSource::Workspace {
                         cwd: workspace_root,
                     },
+                    scope: SkillScope::Repo,
+                    plugin_id: None,
+                },
+                SkillRecord {
+                    id: "rust-docs".into(),
+                    name: "rust-docs".into(),
+                    description: format!("Skill discovered at {}", rust_skill_path.display()),
+                    short_description: None,
+                    interface: None,
+                    dependencies: None,
+                    path: canonical_rust_skill_path,
+                    enabled: true,
+                    source: SkillSource::User,
+                    scope: SkillScope::User,
+                    plugin_id: None,
                 },
             ],
         }
@@ -718,11 +733,16 @@ async fn skills_changed_rediscovers_new_workspace_skill() -> Result<()> {
                 id: "alpha".into(),
                 name: "alpha".into(),
                 description: format!("Skill discovered at {}", alpha_skill_path.display()),
+                short_description: None,
+                interface: None,
+                dependencies: None,
                 path: canonical_alpha_skill_path.clone(),
                 enabled: true,
                 source: SkillSource::Workspace {
                     cwd: workspace_root.clone(),
                 },
+                scope: SkillScope::Repo,
+                plugin_id: None,
             }],
         }
     );
@@ -752,21 +772,31 @@ async fn skills_changed_rediscovers_new_workspace_skill() -> Result<()> {
                     id: "alpha".into(),
                     name: "alpha".into(),
                     description: format!("Skill discovered at {}", alpha_skill_path.display()),
+                    short_description: None,
+                    interface: None,
+                    dependencies: None,
                     path: canonical_alpha_skill_path,
                     enabled: true,
                     source: SkillSource::Workspace {
                         cwd: workspace_root.clone(),
                     },
+                    scope: SkillScope::Repo,
+                    plugin_id: None,
                 },
                 SkillRecord {
                     id: "bravo".into(),
                     name: "bravo".into(),
                     description: format!("Skill discovered at {}", bravo_skill_path.display()),
+                    short_description: None,
+                    interface: None,
+                    dependencies: None,
                     path: canonical_bravo_skill_path,
                     enabled: true,
                     source: SkillSource::Workspace {
                         cwd: workspace_root,
                     },
+                    scope: SkillScope::Repo,
+                    plugin_id: None,
                 },
             ],
         }

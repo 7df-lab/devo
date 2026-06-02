@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 devo-core = { workspace = true }
+devo-mcp = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }
 devo-safety = { workspace = true }

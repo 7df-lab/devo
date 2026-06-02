@@ -1,9 +1,13 @@
 use anyhow::Result;
+use devo_core::AgentsMdConfig;
 use devo_core::AppConfig;
 use devo_core::AppConfigLoader;
 use devo_core::FileSystemAppConfigLoader;
 use devo_core::ModelCatalog;
 use devo_core::PresetModelCatalog;
+use devo_core::tools::ToolPlanConfig;
+use devo_core::tools::handlers;
+use devo_mcp::manager::RmcpMcpManager;
 use devo_utils::find_devo_home;
 
 pub(crate) async fn run_prompt(input: &str, log_level: Option<&str>) -> Result<()> {
@@ -27,7 +31,10 @@ pub(crate) async fn run_prompt(input: &str, log_level: Option<&str>) -> Result<(
 
     let mut session_state = SessionState::new(
         SessionConfig {
-            agents_md: app_config.agents_md_config(),
+            agents_md: AgentsMdConfig {
+                project_root_markers: app_config.project_root_markers.clone(),
+                ..AgentsMdConfig::default()
+            },
             ..SessionConfig::default()
         },
         cwd.clone(),
@@ -35,10 +42,24 @@ pub(crate) async fn run_prompt(input: &str, log_level: Option<&str>) -> Result<(
     session_state.push_message(devo_core::Message::user(input.to_string()));
 
     let registry = {
-        let reg = devo_core::tools::create_default_tool_registry();
+        let mcp_manager = std::sync::Arc::new(RmcpMcpManager::new(
+            app_config.mcp.clone(),
+            app_config.mcp_oauth_credentials_store.unwrap_or_default(),
+        ));
+        let reg =
+            handlers::build_registry_from_plan_with_mcp(&ToolPlanConfig::default(), mcp_manager)
+                .await;
         std::sync::Arc::new(reg)
     };
-    let runtime = ToolRuntime::new_without_permissions(std::sync::Arc::clone(&registry));
+    let runtime = ToolRuntime::new_with_context(
+        std::sync::Arc::clone(&registry),
+        devo_core::tools::PermissionChecker::always_allow(),
+        devo_core::tools::ToolRuntimeContext {
+            session_id: session_state.id.clone(),
+            turn_id: None,
+            cwd: cwd.clone(),
+        },
+    );
     let model_catalog = PresetModelCatalog::load_from_config(&home_dir, Some(&cwd))?;
 
     let turn_config = devo_core::TurnConfig {

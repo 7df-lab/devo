@@ -34,7 +34,10 @@ fn initialize_params_roundtrip() {
 
 #[test]
 fn skill_list_params_roundtrip() {
-    let params = SkillListParams { cwd: None };
+    let params = SkillListParams {
+        cwd: None,
+        force_reload: false,
+    };
     let json = serde_json::to_string(&params).expect("serialize");
     let restored: SkillListParams = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(params, restored);
@@ -42,7 +45,10 @@ fn skill_list_params_roundtrip() {
 
 #[test]
 fn skill_changed_params_roundtrip() {
-    let params = SkillChangedParams { cwd: None };
+    let params = SkillChangedParams {
+        cwd: None,
+        force_reload: false,
+    };
     let json = serde_json::to_string(&params).expect("serialize");
     let restored: SkillChangedParams = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(params, restored);
@@ -56,19 +62,29 @@ fn skill_list_result_serializes_expected_shape() {
                 id: "rust-docs".into(),
                 name: "Rust Documentation".into(),
                 description: "Official Rust docs skill".into(),
+                short_description: None,
+                interface: None,
+                dependencies: None,
                 path: std::path::PathBuf::from("/skills/rust/SKILL.md"),
                 enabled: true,
                 source: devo_protocol::SkillSource::User,
+                scope: devo_protocol::SkillScope::User,
+                plugin_id: None,
             },
             devo_protocol::SkillRecord {
                 id: "python-guide".into(),
                 name: "Python Guide".into(),
                 description: "Python programming skill".into(),
+                short_description: None,
+                interface: None,
+                dependencies: None,
                 path: std::path::PathBuf::from("/skills/python/SKILL.md"),
                 enabled: false,
                 source: devo_protocol::SkillSource::Workspace {
                     cwd: std::path::PathBuf::from("/workspace"),
                 },
+                scope: devo_protocol::SkillScope::Repo,
+                plugin_id: None,
             },
         ],
     };
@@ -109,7 +125,8 @@ fn event_context_keeps_correlation_ids() {
 #[test]
 fn input_item_serializes_tagged_shape() {
     let input = InputItem::Skill {
-        id: "rust-docs".into(),
+        name: "rust-docs".into(),
+        path: std::path::PathBuf::from("/skills/rust/SKILL.md"),
     };
 
     let json = serde_json::to_string(&input).expect("serialize");

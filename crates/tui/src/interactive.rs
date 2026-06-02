@@ -4,10 +4,14 @@
 use anyhow::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyModifiers;
+use devo_core::AppConfigLoader;
+use devo_core::FileSystemAppConfigLoader;
 use devo_protocol::Model;
 use devo_protocol::ModelCatalog;
 use devo_protocol::ProviderWireApi;
+use devo_utils::find_devo_home;
 use futures::StreamExt;
+use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -20,6 +24,7 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetInit;
+use crate::chatwidget::MCP_SERVERS_TRANSCRIPT_TITLE;
 use crate::chatwidget::TuiSessionState;
 use crate::events::WorkerEvent;
 use crate::host_overlay::OverlayState;
@@ -42,6 +47,7 @@ struct PendingOnboarding {
     binding: OnboardingModelBinding,
     base_url: Option<String>,
     api_key: Option<String>,
+    provider_credential_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -51,6 +57,7 @@ struct OnboardingCommandPayload {
     display_name: String,
     provider_id: String,
     provider_name: String,
+    provider_credential_id: Option<String>,
     invocation_method: ProviderWireApi,
     default_reasoning_effort: Option<String>,
     base_url: Option<String>,
@@ -122,6 +129,7 @@ enum EscBacktrackAction {
 struct AppCommandContext<'a, M: ModelCatalog> {
     model_catalog: &'a M,
     default_provider: ProviderWireApi,
+    cwd: &'a Path,
     project_config_key: &'a str,
 }
 
@@ -272,6 +280,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
                 )? {
                     LoopAction::Continue => {}
                     LoopAction::ClearAndExit => {
+                        tracing::info!("interactive loop exiting from tui event");
                         clear_before_exit(&mut tui)?;
                         break;
                     }
@@ -287,11 +296,13 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
                     &AppCommandContext {
                         model_catalog: &config.model_catalog,
                         default_provider: initial_session.provider,
+                        cwd: &cwd,
                         project_config_key: &project_config_key,
                     },
                 )? {
                     LoopAction::Continue => {}
                     LoopAction::ClearAndExit => {
+                        tracing::info!("interactive loop exiting from app event");
                         clear_before_exit(&mut tui)?;
                         break;
                     }
@@ -306,6 +317,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
                 )? {
                     LoopAction::Continue => {}
                     LoopAction::ClearAndExit => {
+                        tracing::info!("interactive loop exiting from worker event");
                         clear_before_exit(&mut tui)?;
                         break;
                     }
@@ -315,9 +327,13 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
     }
 
     // Tear down the terminal wrapper before awaiting worker shutdown.
+    tracing::info!("dropping tui before terminal restore");
     drop(tui);
+    tracing::info!("restoring terminal before worker shutdown");
     terminal_restore_guard.restore()?;
+    tracing::info!("terminal restored; starting worker shutdown");
     worker.shutdown().await?;
+    tracing::info!("worker shutdown completed; returning app exit");
     Ok(AppExit {
         session_id: loop_state.session_id,
         turn_count: loop_state.turn_count,
@@ -343,7 +359,13 @@ fn resolve_initial_model(
 }
 
 fn clear_before_exit(tui: &mut Tui) -> Result<()> {
-    Ok(tui.shutdown_terminal_safe()?)
+    tracing::info!("clearing tui before exit");
+    let result = tui.shutdown_terminal_safe();
+    tracing::info!(
+        success = result.is_ok(),
+        "finished clearing tui before exit"
+    );
+    Ok(result?)
 }
 
 fn handle_tui_event(
@@ -567,7 +589,8 @@ fn handle_app_event(
         return Ok(LoopAction::ClearAndExit);
     };
 
-    if let AppEvent::Exit(_) = &app_event {
+    if let AppEvent::Exit(mode) = &app_event {
+        tracing::info!(?mode, "host received app exit event");
         return Ok(LoopAction::ClearAndExit);
     }
 
@@ -649,11 +672,14 @@ fn handle_worker_event(
         }
         WorkerEvent::ProviderValidationSucceeded { .. } => {
             if let Some(pending) = loop_state.pending_onboarding.as_ref() {
-                let provider_vendor = onboarding_provider_vendor(
+                let mut provider_vendor = onboarding_provider_vendor(
                     &pending.binding,
                     pending.base_url.as_deref(),
                     pending.api_key.as_deref(),
                 );
+                if pending.api_key.as_deref().is_none() {
+                    provider_vendor.credential = pending.provider_credential_id.clone();
+                }
                 let model_binding = onboarding_provider_model_binding(
                     &pending.binding,
                     pending.base_url.as_deref(),
@@ -763,31 +789,13 @@ fn handle_app_command(
                 worker.set_model(model.clone())?;
             }
             worker.set_thinking(thinking.clone())?;
-            let prompt = input
-                .iter()
-                .filter_map(|item| match item {
-                    devo_protocol::InputItem::Text { text } => Some(text.as_str()),
-                    devo_protocol::InputItem::Skill { .. }
-                    | devo_protocol::InputItem::LocalImage { .. }
-                    | devo_protocol::InputItem::Mention { .. } => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            worker.submit_prompt(prompt, approval_policy.clone())?;
+            worker.submit_input(input.clone(), approval_policy.clone())?;
         }
         AppCommand::SteerTurn {
             input,
             expected_turn_id,
         } => {
-            let prompt = input
-                .iter()
-                .filter_map(|item| match item {
-                    devo_protocol::InputItem::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            worker.submit_steer(prompt, *expected_turn_id)?;
+            worker.submit_steer(input.clone(), *expected_turn_id)?;
         }
         AppCommand::ApprovalRespond {
             session_id,
@@ -837,6 +845,31 @@ fn handle_app_command(
                 chat_widget.set_status_message("Loading sessions");
             } else if command == "provider list" {
                 worker.list_provider_vendors()?;
+            } else if command == "skills list" {
+                worker.list_skills()?;
+                chat_widget.set_status_message("Loading skills");
+            } else if command == "mcp list" {
+                match find_devo_home()
+                    .map_err(anyhow::Error::from)
+                    .and_then(|config_home| {
+                        FileSystemAppConfigLoader::new(config_home)
+                            .load(Some(context.cwd))
+                            .map_err(anyhow::Error::from)
+                    }) {
+                    Ok(app_config) => {
+                        let body = crate::mcp_servers::render_mcp_servers_markdown(&app_config.mcp);
+                        chat_widget
+                            .add_padded_markdown_history(MCP_SERVERS_TRANSCRIPT_TITLE, &body);
+                        chat_widget.set_status_message("MCP servers loaded");
+                    }
+                    Err(error) => {
+                        chat_widget.add_to_history(crate::history_cell::new_error_event_with_hint(
+                            format!("Failed to load MCP server list: {error}"),
+                            Some("mcp list failed".to_string()),
+                        ));
+                        chat_widget.set_status_message("Failed to load MCP servers");
+                    }
+                }
             } else if command == "session new" {
                 worker.start_new_session()?;
             } else if let Some(payload) = parse_onboarding_command(command) {
@@ -862,11 +895,14 @@ fn handle_app_command(
                     default_reasoning_effort: payload.default_reasoning_effort,
                 };
                 worker.list_provider_vendors()?;
-                let provider_vendor = onboarding_provider_vendor(
+                let mut provider_vendor = onboarding_provider_vendor(
                     &binding,
                     payload.base_url.as_deref(),
                     payload.api_key.as_deref(),
                 );
+                if payload.api_key.as_deref().is_none() {
+                    provider_vendor.credential = payload.provider_credential_id.clone();
+                }
                 let model_binding =
                     onboarding_provider_model_binding(&binding, payload.base_url.as_deref());
                 worker.validate_provider(
@@ -878,6 +914,7 @@ fn handle_app_command(
                     binding,
                     base_url: payload.base_url,
                     api_key: payload.api_key,
+                    provider_credential_id: payload.provider_credential_id,
                 });
                 chat_widget.set_status_message("Validating provider");
             } else {

@@ -1,0 +1,331 @@
+//! Transcript and restored-session history handling for `ChatWidget`.
+//!
+//! This module converts protocol/session items into history cells and owns the
+//! bookkeeping for active cells, scrollback flushes, and restored transcripts.
+
+use ratatui::style::Color;
+use ratatui::style::Style;
+use ratatui::style::Stylize;
+use ratatui::text::Line;
+use ratatui::text::Span;
+
+use crate::events::PlanStep;
+use crate::events::PlanStepStatus;
+use crate::events::TranscriptItem;
+use crate::events::TranscriptItemKind;
+use crate::exec_cell::truncated_tool_output_preview;
+use crate::history_cell;
+use crate::history_cell::HistoryCell;
+use crate::history_cell::PlainHistoryCell;
+use crate::markdown::append_markdown;
+use crate::render::line_utils::prefix_lines;
+use crate::tool_result_cell::ToolResultCell;
+
+use super::ChatWidget;
+use super::DotStatus;
+
+impl ChatWidget {
+    pub(super) fn clear_for_session_switch(&mut self) {
+        self.history.clear();
+        self.next_history_flush_index = 0;
+        self.active_cell = None;
+        self.active_cell_revision = 0;
+        self.active_tool_calls.clear();
+        self.pending_tool_calls.clear();
+        self.active_text_items.clear();
+        self.bottom_pane.clear_composer();
+        self.set_status_message("Resuming session");
+    }
+
+    pub(super) fn set_default_placeholder(&mut self) {
+        self.bottom_pane
+            .set_placeholder_text("Ask Devo".to_string());
+    }
+
+    pub(super) fn on_plan_updated(&mut self, explanation: Option<String>, steps: Vec<PlanStep>) {
+        let total = steps.len();
+        let completed = steps
+            .iter()
+            .filter(|step| matches!(step.status, PlanStepStatus::Completed))
+            .count();
+        self.last_plan_progress = (total > 0).then_some((completed, total));
+
+        let mut lines = vec![Line::from(vec![
+            Span::styled("▌", Style::default().fg(Color::Rgb(120, 220, 160))),
+            " ".into(),
+            "Updated Plan".bold(),
+        ])];
+        if let Some(explanation) = explanation
+            && !explanation.trim().is_empty()
+        {
+            lines.push(Line::from(""));
+            lines.push(Line::from(explanation.italic()));
+            lines.push(Line::from(""));
+        }
+        for step in steps {
+            let (prefix, style) = match step.status {
+                PlanStepStatus::Completed => ("✔ ", Style::default().green()),
+                PlanStepStatus::InProgress => ("→ ", Style::default().cyan()),
+                PlanStepStatus::Pending => ("□ ", Style::default().dim()),
+                PlanStepStatus::Cancelled => ("✗ ", Style::default().red()),
+            };
+            lines.extend(prefix_lines(
+                vec![Line::from(Span::styled(step.text, style))],
+                Span::styled(format!("  {prefix}"), style),
+                Span::from("    "),
+            ));
+        }
+        if !lines.is_empty() {
+            self.add_to_history(PlainHistoryCell::new(lines));
+        }
+        self.frame_requester.schedule_frame();
+    }
+
+    pub(crate) fn add_markdown_history(&mut self, title: &str, body: &str) {
+        self.add_markdown_history_with_status(title, body, DotStatus::Completed);
+    }
+
+    pub(crate) fn add_padded_markdown_history(&mut self, title: &str, body: &str) {
+        let mut lines = vec![Line::from(title.to_string()).bold()];
+        append_markdown(
+            body,
+            /*width*/ None,
+            Some(&self.session.cwd),
+            &mut lines,
+        );
+        let lines = prefix_lines(lines, Span::raw("  "), Span::raw("  "));
+        self.add_to_history(PlainHistoryCell::new(lines));
+    }
+
+    pub(super) fn add_markdown_history_with_status(
+        &mut self,
+        title: &str,
+        body: &str,
+        status: DotStatus,
+    ) {
+        self.add_markdown_history_with_status_without_redraw(title, body, status);
+        self.frame_requester.schedule_frame();
+    }
+
+    pub(super) fn add_markdown_history_without_redraw(&mut self, title: &str, body: &str) {
+        self.add_markdown_history_with_status_without_redraw(title, body, DotStatus::Completed);
+    }
+
+    pub(super) fn add_markdown_history_with_status_without_redraw(
+        &mut self,
+        title: &str,
+        body: &str,
+        status: DotStatus,
+    ) {
+        let is_ai_message = title == "Assistant" || title == "Reasoning";
+        let mut lines = if is_ai_message {
+            Vec::new()
+        } else {
+            vec![Line::from(title.to_string()).bold()]
+        };
+        if title == "Reasoning" {
+            let mut body_lines = Vec::new();
+            append_markdown(
+                body,
+                /*width*/ None,
+                Some(&self.session.cwd),
+                &mut body_lines,
+            );
+            Self::patch_lines_style(&mut body_lines, Self::reasoning_text_style());
+            if let Some(first_line) = body_lines.first_mut() {
+                first_line.spans.insert(
+                    0,
+                    Span::styled("Thinking: ", Self::reasoning_heading_style()),
+                );
+            }
+            lines.extend(body_lines);
+        } else {
+            append_markdown(body, None, Some(&self.session.cwd), &mut lines);
+        }
+        if is_ai_message {
+            self.add_history_entry_without_redraw(Box::new(
+                history_cell::AgentMessageCell::new_ai_response_with_prefix(
+                    lines,
+                    self.dot_prefix(status),
+                    "  ",
+                    false,
+                ),
+            ));
+        } else {
+            self.add_history_entry_without_redraw(Box::new(PlainHistoryCell::new(lines)));
+        }
+    }
+
+    pub(super) fn bulleted_markdown_lines(
+        &self,
+        body: &str,
+        width: u16,
+        prefix: Line<'static>,
+    ) -> Vec<Line<'static>> {
+        self.bulleted_markdown_cell(body, prefix)
+            .display_lines(width.max(1))
+    }
+
+    pub(super) fn bulleted_markdown_cell(
+        &self,
+        body: &str,
+        prefix: Line<'static>,
+    ) -> history_cell::AgentMessageCell {
+        self.bulleted_markdown_cell_with_style(body, prefix, Style::default())
+    }
+
+    pub(super) fn bulleted_markdown_cell_with_style(
+        &self,
+        body: &str,
+        prefix: Line<'static>,
+        style: Style,
+    ) -> history_cell::AgentMessageCell {
+        let mut lines = Vec::new();
+        append_markdown(
+            body,
+            /*width*/ None,
+            Some(&self.session.cwd),
+            &mut lines,
+        );
+        Self::patch_lines_style(&mut lines, style);
+        history_cell::AgentMessageCell::new_ai_response_with_prefix(lines, prefix, "  ", false)
+    }
+
+    pub(super) fn add_transcript_item(&mut self, item: TranscriptItem) {
+        self.add_transcript_item_without_redraw(item);
+        self.frame_requester.schedule_frame();
+    }
+
+    pub(super) fn add_transcript_item_without_redraw(&mut self, item: TranscriptItem) {
+        match item.kind {
+            TranscriptItemKind::User => {
+                self.add_history_entry_without_redraw(Box::new(history_cell::new_user_prompt(
+                    item.body,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    self.active_accent_color(),
+                )));
+            }
+            TranscriptItemKind::Assistant => {
+                self.add_markdown_history_without_redraw("Assistant", &item.body)
+            }
+            TranscriptItemKind::Reasoning => {
+                self.add_markdown_history_without_redraw("Reasoning", &item.body);
+            }
+            TranscriptItemKind::ToolCall => {
+                self.add_history_entry_without_redraw(Box::new(
+                    history_cell::AgentMessageCell::new_with_prefix(
+                        vec![Self::running_tool_line(&item.title)],
+                        self.dot_prefix(DotStatus::Pending),
+                        "  ",
+                        false,
+                    ),
+                ));
+            }
+            TranscriptItemKind::ToolResult => {
+                self.add_history_entry_without_redraw(Box::new(ToolResultCell::new(
+                    (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title)),
+                    item.body,
+                    Self::tool_dot_prefix(),
+                    Line::from("  "),
+                    Self::tool_text_style(),
+                    false,
+                )));
+            }
+            TranscriptItemKind::Error => self.add_history_entry_without_redraw(Box::new(
+                history_cell::new_error_event_with_hint(item.body, Some(item.title)),
+            )),
+            TranscriptItemKind::Approval => {}
+            TranscriptItemKind::System => {
+                self.add_history_entry_without_redraw(Box::new(history_cell::new_info_event(
+                    item.title,
+                    Some(item.body),
+                )));
+            }
+            TranscriptItemKind::TurnSummary => {
+                // item.title contains model name, item.duration_ms contains seconds
+                self.add_history_entry_without_redraw(Box::new(
+                    history_cell::TurnSummaryCell::new(
+                        item.title.clone(),
+                        item.duration_ms,
+                        self.active_accent_color(),
+                    ),
+                ));
+            }
+        }
+    }
+
+    pub(super) fn tool_preview_lines(&self, preview: &str) -> Vec<Line<'static>> {
+        let width = self.last_known_width().saturating_sub(2).max(1);
+        let mut preview_lines =
+            truncated_tool_output_preview(preview, width, 2, crate::exec_cell::TOOL_CALL_MAX_LINES);
+        for line in &mut preview_lines {
+            line.spans = line
+                .spans
+                .clone()
+                .into_iter()
+                .map(|span| span.patch_style(Self::tool_text_style()))
+                .collect();
+        }
+        preview_lines
+    }
+
+    pub(crate) fn add_to_history(&mut self, cell: impl HistoryCell + 'static) {
+        self.add_history_entry_without_redraw(Box::new(cell));
+        self.frame_requester.schedule_frame();
+    }
+
+    pub(super) fn flush_active_cell(&mut self) {
+        if let Some(active) = self.active_cell.take() {
+            self.add_history_entry_without_redraw(active);
+        }
+    }
+
+    pub(super) fn bump_active_cell_revision(&mut self) {
+        self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+    }
+
+    /// Pop the oldest pending cell from the bottom pane and add it to history
+    /// as a normal user input cell.
+    pub(super) fn unqueue_oldest_pending(&mut self) {
+        if let Some(text) = self.bottom_pane.pop_oldest_pending_cell() {
+            self.add_to_history(history_cell::new_user_prompt(
+                text,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                self.active_accent_color(),
+            ));
+        }
+        self.queued_count = self.queued_count.saturating_sub(1);
+    }
+
+    pub(super) fn add_history_entry_without_redraw(&mut self, cell: Box<dyn HistoryCell>) {
+        self.history.push(cell);
+    }
+
+    pub(crate) fn truncate_history_to_user_turn_count(&mut self, user_turn_count: usize) {
+        let mut remaining_users = user_turn_count;
+        let mut new_len = 0usize;
+        for (idx, cell) in self.history.iter().enumerate() {
+            let is_user = cell
+                .as_ref()
+                .as_any()
+                .downcast_ref::<history_cell::UserHistoryCell>()
+                .is_some();
+            if is_user {
+                if remaining_users == 0 {
+                    break;
+                }
+                remaining_users -= 1;
+            }
+            new_len = idx + 1;
+        }
+        self.history.truncate(new_len);
+        self.next_history_flush_index = self.next_history_flush_index.min(self.history.len());
+        self.refresh_user_cell_indices();
+        self.exit_selection_mode();
+        self.frame_requester.schedule_frame();
+    }
+}

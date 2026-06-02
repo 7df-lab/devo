@@ -3,13 +3,22 @@ use anyhow::Result;
 
 use devo_core::AppConfig;
 use devo_core::LegacyModelProviderConfig;
+use devo_core::ModelCatalog;
+use devo_core::PresetModelCatalog;
 use devo_core::ProviderConfigSection;
 use devo_core::ProviderWireApi;
+use devo_protocol::ModelRequest;
+use devo_protocol::ModelResponse;
+use devo_protocol::StreamEvent;
 use devo_provider::ModelProviderSDK;
 use devo_provider::anthropic::AnthropicProvider;
 use devo_provider::openai::OpenAIProvider;
 use devo_provider::openai::OpenAIResponsesProvider;
 use std::path::Path;
+use std::pin::Pin;
+
+const NO_PROVIDER_CONFIGURED_MESSAGE: &str =
+    "No provider configured. Run `devo onboard` to complete setup.";
 
 /// Resolved provider bootstrap owned by the server runtime.
 pub struct ResolvedServerProvider {
@@ -25,6 +34,20 @@ pub fn load_server_provider(
     default_model: Option<&str>,
     user_config_dir: &Path,
 ) -> Result<ResolvedServerProvider> {
+    if !app_config.has_provider_configuration() {
+        let default_model = match default_model {
+            Some(default_model) => default_model.to_string(),
+            None => PresetModelCatalog::load()?
+                .resolve_for_turn(None)?
+                .slug
+                .clone(),
+        };
+        return Ok(ResolvedServerProvider {
+            provider: std::sync::Arc::new(MissingProvider),
+            default_model,
+        });
+    }
+
     if app_config.provider.model_providers.is_empty() {
         let resolved = app_config.resolve_provider_settings(user_config_dir)?;
         return build_server_provider(
@@ -36,6 +59,26 @@ pub fn load_server_provider(
     }
 
     load_legacy_server_provider(app_config, default_model)
+}
+
+struct MissingProvider;
+
+#[async_trait::async_trait]
+impl ModelProviderSDK for MissingProvider {
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        anyhow::bail!(NO_PROVIDER_CONFIGURED_MESSAGE)
+    }
+
+    async fn completion_stream(
+        &self,
+        _request: ModelRequest,
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
+        anyhow::bail!(NO_PROVIDER_CONFIGURED_MESSAGE)
+    }
+
+    fn name(&self) -> &str {
+        "missing-provider"
+    }
 }
 
 fn load_legacy_server_provider(
@@ -278,6 +321,7 @@ mod tests {
     use devo_core::UserAuthConfigFile;
     use pretty_assertions::assert_eq;
 
+    use super::load_server_provider;
     use super::normalize_openai_base_url;
     use super::resolve_server_provider_settings;
     use devo_protocol::ProviderWireApi;
@@ -295,6 +339,38 @@ mod tests {
         assert_eq!(
             normalize_openai_base_url("https://api.openai.com"),
             "https://api.openai.com/v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_provider_config_loads_missing_provider_for_onboarding() {
+        let config = devo_core::AppConfig::default();
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let actual = load_server_provider(&config, Some("onboard-model"), dir.path())
+            .expect("load missing provider");
+
+        assert_eq!(actual.default_model, "onboard-model");
+        assert_eq!(actual.provider.name(), "missing-provider");
+        let error = actual
+            .provider
+            .completion(devo_protocol::ModelRequest {
+                model: "onboard-model".to_string(),
+                system: None,
+                messages: Vec::new(),
+                max_tokens: 1,
+                tools: None,
+                sampling: devo_protocol::SamplingControls::default(),
+                thinking: None,
+                reasoning_effort: None,
+                extra_body: None,
+            })
+            .await
+            .expect_err("missing provider should reject model requests");
+
+        assert_eq!(
+            error.to_string(),
+            "No provider configured. Run `devo onboard` to complete setup."
         );
     }
 

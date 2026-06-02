@@ -31,8 +31,13 @@ mod live_wrap;
 mod markdown;
 pub mod markdown_render;
 mod markdown_stream;
+#[cfg(test)]
+mod mcp_command_tests;
+mod mcp_servers;
 mod onboarding;
 mod onboarding_widget;
+#[cfg(test)]
+mod onboarding_widget_tests;
 mod pager_overlay;
 mod render;
 mod shimmer;

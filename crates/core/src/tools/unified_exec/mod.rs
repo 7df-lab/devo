@@ -1,8 +1,6 @@
 pub mod buffer;
 pub mod process;
 pub mod store;
-#[cfg(windows)]
-pub mod windows_pty;
 
 pub const MAX_PROCESSES: usize = 64;
 pub const WARNING_PROCESSES: usize = 60;

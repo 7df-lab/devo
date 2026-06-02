@@ -21,7 +21,7 @@ use devo_core::SessionRecord;
 use devo_core::SessionState;
 use devo_core::SkillCatalog;
 use devo_core::SkillError;
-use devo_core::SkillId;
+use devo_core::SkillSelector;
 use devo_core::TurnConfig;
 use devo_core::TurnId;
 use devo_core::default_base_instructions;
@@ -29,6 +29,10 @@ use devo_core::normalize_canonical_path;
 use devo_core::tools::ToolRegistry;
 use devo_protocol::ApprovalDecisionValue;
 use devo_protocol::PendingInputItem;
+use devo_protocol::SkillDependencies as ProtocolSkillDependencies;
+use devo_protocol::SkillInterface as ProtocolSkillInterface;
+use devo_protocol::SkillScope as ProtocolSkillScope;
+use devo_protocol::SkillToolDependency as ProtocolSkillToolDependency;
 use devo_provider::ModelProviderSDK;
 use devo_provider::ProviderRouter;
 
@@ -186,29 +190,52 @@ impl ServerRuntimeDependencies {
     pub(crate) fn discover_skills(
         &self,
         workspace_root: Option<&Path>,
+        force_reload: bool,
     ) -> Result<Vec<SkillRecord>, SkillError> {
         let workspace_root = workspace_root.or(self.skill_workspace_root.as_deref());
         let mut skill_catalog = self
             .skill_catalog
             .lock()
             .expect("skill catalog mutex should not be poisoned");
-        skill_catalog.discover(workspace_root).map(|skills| {
-            skills
-                .into_iter()
-                .map(|record| SkillRecord {
-                    id: record.id.0.to_string(),
-                    name: record.name,
-                    description: record.description,
-                    path: normalize_canonical_path(record.path),
-                    enabled: record.enabled,
-                    source: serde_json::from_value(
-                        serde_json::to_value(record.source)
-                            .expect("core skill source should serialize"),
-                    )
-                    .expect("protocol skill source should deserialize"),
-                })
-                .collect()
-        })
+        skill_catalog
+            .discover(workspace_root, force_reload)
+            .map(|skills| {
+                skills
+                    .into_iter()
+                    .map(core_skill_record_to_protocol)
+                    .collect()
+            })
+    }
+
+    pub(crate) fn set_skill_enabled(
+        &self,
+        path: PathBuf,
+        enabled: bool,
+        workspace_root: Option<&Path>,
+    ) -> anyhow::Result<Vec<SkillRecord>> {
+        let (skills_config, project_root_markers) = {
+            let mut config_store = self
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned");
+            config_store.set_skill_enabled(path, enabled)?;
+            let effective = config_store.effective_config();
+            (
+                effective.skills.clone(),
+                effective.project_root_markers.clone(),
+            )
+        };
+
+        {
+            let mut skill_catalog = self
+                .skill_catalog
+                .lock()
+                .expect("skill catalog mutex should not be poisoned");
+            skill_catalog.set_config(skills_config, project_root_markers);
+        }
+
+        self.discover_skills(workspace_root, true)
+            .map_err(|error| anyhow::anyhow!(error))
     }
 
     /// Renders turn input items and resolves any referenced skills into prompt-visible text.
@@ -222,19 +249,83 @@ impl ServerRuntimeDependencies {
             .skill_catalog
             .lock()
             .expect("skill catalog mutex should not be poisoned");
-        if input
-            .iter()
-            .any(|item| matches!(item, InputItem::Skill { .. }))
+        let discovered_skills = skill_catalog.discover(workspace_root, false)?;
+
+        let mut parts = Vec::new();
+        if let Some(instructions) =
+            skill_catalog.available_skills_instructions(workspace_root, None)?
         {
-            skill_catalog.discover(workspace_root)?;
+            parts.push(instructions.trim().to_string());
         }
 
-        let parts = input
+        let structured_skill_names = input
+            .iter()
+            .filter_map(|item| match item {
+                InputItem::Skill { name, .. } => Some(name.clone()),
+                InputItem::Text { .. }
+                | InputItem::LocalImage { .. }
+                | InputItem::Mention { .. } => None,
+            })
+            .collect::<HashSet<_>>();
+        let mut injected_plain_skill_paths = HashSet::new();
+        for text in input.iter().filter_map(|item| match item {
+            InputItem::Text { text } => Some(text),
+            InputItem::Skill { .. } | InputItem::LocalImage { .. } | InputItem::Mention { .. } => {
+                None
+            }
+        }) {
+            for name in plain_skill_mentions(text) {
+                if structured_skill_names.contains(&name) {
+                    continue;
+                }
+                let matches = discovered_skills
+                    .iter()
+                    .filter(|skill| skill.name == name)
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [skill] if skill.enabled => {
+                        if injected_plain_skill_paths.insert(skill.path.clone()) {
+                            let rendered = skill_catalog
+                                .load(
+                                    &SkillSelector {
+                                        name: skill.name.clone(),
+                                        path: Some(skill.path.clone()),
+                                    },
+                                    workspace_root,
+                                )
+                                .map(|skill| render_resolved_skill(&skill))?;
+                            parts.push(rendered);
+                        }
+                    }
+                    [skill] => {
+                        return Err(SkillError::SkillDisabled {
+                            name: skill.name.clone(),
+                            path: skill.path.clone(),
+                        });
+                    }
+                    [] => {}
+                    _ => {
+                        return Err(SkillError::AmbiguousSkillName {
+                            name,
+                            paths: matches.iter().map(|skill| skill.path.clone()).collect(),
+                        });
+                    }
+                }
+            }
+        }
+
+        let item_parts = input
             .iter()
             .map(|item| match item {
                 InputItem::Text { text } => Ok(text.trim().to_string()),
-                InputItem::Skill { id } => skill_catalog
-                    .load(&SkillId(id.clone().into()))
+                InputItem::Skill { name, path } => skill_catalog
+                    .load(
+                        &SkillSelector {
+                            name: name.clone(),
+                            path: (!path.as_os_str().is_empty()).then(|| path.clone()),
+                        },
+                        workspace_root,
+                    )
                     .map(|skill| render_resolved_skill(&skill)),
                 InputItem::LocalImage { path } => Ok(format!("[image:{}]", path.display())),
                 InputItem::Mention { path, name } => Ok(format!(
@@ -246,7 +337,68 @@ impl ServerRuntimeDependencies {
             .into_iter()
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>();
+        parts.extend(item_parts);
         Ok((!parts.is_empty()).then(|| parts.join("\n")))
+    }
+}
+
+fn core_skill_record_to_protocol(record: devo_core::CoreSkillRecord) -> SkillRecord {
+    SkillRecord {
+        id: record.id.0.to_string(),
+        name: record.name,
+        description: record.description,
+        short_description: record.short_description,
+        interface: record.interface.map(|interface| ProtocolSkillInterface {
+            display_name: interface.display_name,
+            short_description: interface.short_description,
+            icon_small: interface.icon_small,
+            icon_large: interface.icon_large,
+            brand_color: interface.brand_color,
+            default_prompt: interface.default_prompt,
+        }),
+        dependencies: record
+            .dependencies
+            .map(|dependencies| ProtocolSkillDependencies {
+                tools: dependencies
+                    .tools
+                    .into_iter()
+                    .map(|tool| ProtocolSkillToolDependency {
+                        r#type: tool.r#type,
+                        value: tool.value,
+                        description: tool.description,
+                        transport: tool.transport,
+                        command: tool.command,
+                        url: tool.url,
+                    })
+                    .collect(),
+            }),
+        path: normalize_canonical_path(record.path),
+        enabled: record.enabled,
+        source: core_skill_source_to_protocol(record.source),
+        scope: core_skill_scope_to_protocol(record.scope),
+        plugin_id: record.plugin_id,
+    }
+}
+
+fn core_skill_source_to_protocol(source: devo_core::CoreSkillSource) -> crate::SkillSource {
+    match source {
+        devo_core::CoreSkillSource::User => crate::SkillSource::User,
+        devo_core::CoreSkillSource::Workspace { cwd } => crate::SkillSource::Workspace { cwd },
+        devo_core::CoreSkillSource::Plugin { plugin_id } => {
+            crate::SkillSource::Plugin { plugin_id }
+        }
+        devo_core::CoreSkillSource::System => crate::SkillSource::System,
+        devo_core::CoreSkillSource::Admin => crate::SkillSource::Admin,
+    }
+}
+
+fn core_skill_scope_to_protocol(scope: devo_core::CoreSkillScope) -> ProtocolSkillScope {
+    match scope {
+        devo_core::CoreSkillScope::Repo => ProtocolSkillScope::Repo,
+        devo_core::CoreSkillScope::User => ProtocolSkillScope::User,
+        devo_core::CoreSkillScope::System => ProtocolSkillScope::System,
+        devo_core::CoreSkillScope::Admin => ProtocolSkillScope::Admin,
+        devo_core::CoreSkillScope::Plugin => ProtocolSkillScope::Plugin,
     }
 }
 
@@ -266,6 +418,48 @@ fn render_resolved_skill(skill: &ResolvedSkill) -> String {
         skill.content.trim_end(),
         base_dir.display()
     )
+}
+
+fn plain_skill_mentions(text: &str) -> HashSet<String> {
+    let bytes = text.as_bytes();
+    let mut mentions = HashSet::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        let start = index + 1;
+        let Some(first) = bytes.get(start) else {
+            index += 1;
+            continue;
+        };
+        if !is_skill_mention_name_byte(*first) {
+            index += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while let Some(next) = bytes.get(end)
+            && is_skill_mention_name_byte(*next)
+        {
+            end += 1;
+        }
+        let name = &text[start..end];
+        if !is_common_env_var(name) {
+            mentions.insert(name.to_string());
+        }
+        index = end;
+    }
+    mentions
+}
+
+fn is_skill_mention_name_byte(byte: u8) -> bool {
+    matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b':')
+}
+
+fn is_common_env_var(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    matches!(upper.as_str(), "PATH" | "HOME" | "USER" | "SHELL" | "PWD")
 }
 
 /// Mutable per-session runtime state owned by the server.

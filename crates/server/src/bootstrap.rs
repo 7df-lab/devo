@@ -4,14 +4,15 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use clap::ValueEnum;
+use devo_core::AgentsMdConfig;
 use devo_core::AppConfigStore;
 use devo_core::FileSystemSkillCatalog;
 use devo_core::ModelCatalog;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderVendorCatalog;
-use devo_core::SkillsConfig;
 use devo_core::tools::ToolPlanConfig;
 use devo_core::tools::handlers;
+use devo_mcp::manager::RmcpMcpManager;
 use devo_provider::SingleProviderRouter;
 use devo_utils::FileSystemConfigPathResolver;
 
@@ -81,48 +82,36 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
         "loaded server config"
     );
 
-    let registry = handlers::build_registry_from_plan(&ToolPlanConfig::default());
-    let provider = load_server_provider(&config, None, &resolver.user_config_dir())?;
+    let mcp_manager = Arc::new(RmcpMcpManager::new(
+        config.mcp.clone(),
+        config.mcp_oauth_credentials_store.unwrap_or_default(),
+    ));
+    let registry =
+        handlers::build_registry_from_plan_with_mcp(&ToolPlanConfig::default(), mcp_manager).await;
     let model_catalog: Arc<dyn ModelCatalog> = Arc::new(PresetModelCatalog::load_from_config(
         &resolver.user_config_dir(),
         args.working_root.as_deref(),
     )?);
+    let default_model = model_catalog.resolve_for_turn(None)?.slug.clone();
+    if !config.has_provider_configuration() {
+        tracing::warn!(
+            "No provider configured. Run `devo onboard` to complete setup; continuing with onboarding-capable server"
+        );
+    }
+    let provider = load_server_provider(
+        &config,
+        Some(default_model.as_str()),
+        &resolver.user_config_dir(),
+    )?;
     let skill_workspace_root = args.working_root.clone();
-    let project_skill_base = skill_workspace_root
-        .as_deref()
-        .map(|root| resolver.project_config_dir(root));
-    let user_skill_roots = config
-        .skills
-        .user_roots
-        .iter()
-        .cloned()
-        .map(|root| {
-            if root.is_absolute() {
-                root
-            } else {
-                resolver.user_config_dir().join(root)
-            }
-        })
-        .collect();
-    let workspace_skill_roots = config
-        .skills
-        .workspace_roots
-        .iter()
-        .cloned()
-        .filter_map(|root| {
-            if root.is_absolute() {
-                Some(root)
-            } else {
-                project_skill_base.as_ref().map(|base| base.join(root))
-            }
-        })
-        .collect();
-    let skill_catalog = Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-        enabled: config.skills.enabled,
-        user_roots: user_skill_roots,
-        workspace_roots: workspace_skill_roots,
-        watch_for_changes: config.skills.watch_for_changes,
-    }));
+    let skill_catalog = Box::new(FileSystemSkillCatalog::with_devo_home(
+        config.skills.clone(),
+        resolver.user_config_dir(),
+        skill_workspace_root
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        config.project_root_markers.clone(),
+    ));
     // Initialize SQLite database
     let db_path = resolver.user_config_dir().join("devo.db");
     tracing::info!(db_path = %db_path.display(), "opening database");
@@ -141,7 +130,10 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
             Arc::new(ProviderVendorCatalog::default()),
             skill_workspace_root,
             skill_catalog,
-            config.agents_md_config(),
+            AgentsMdConfig {
+                project_root_markers: config.project_root_markers.clone(),
+                ..AgentsMdConfig::default()
+            },
             db,
             config_store,
         ),

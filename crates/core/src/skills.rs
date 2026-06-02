@@ -1,590 +1,337 @@
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+//! Core-facing skill catalog wrapper backed by `devo-skills`.
+
+use std::path::Path;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
+pub use devo_skills::SkillDependencies;
+pub use devo_skills::SkillInterface;
+pub use devo_skills::SkillScope;
+pub use devo_skills::SkillsManager;
+pub use devo_skills::SkillsRuntimeConfig;
+pub use devo_skills::build_available_skills;
+pub use devo_skills::build_skill_injections;
+pub use devo_skills::collect_explicit_skill_mentions;
+pub use devo_skills::default_skill_metadata_budget;
+pub use devo_skills::normalize_canonical_path;
+pub use devo_skills::render_available_skills_body;
+
 use crate::SkillsConfig;
 
-/// Strongly typed identifier for a discovered skill.
+/// Strongly typed legacy name identifier for a discovered skill.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct SkillId(
-    /// The stable identifier value for the skill.
-    pub SmolStr,
-);
+pub struct SkillId(pub SmolStr);
 
 /// Stores metadata for one discovered skill.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillRecord {
-    /// The stable unique identifier of the skill.
     pub id: SkillId,
-    /// The human-readable skill name.
     pub name: String,
-    /// A short description of what the skill provides.
     pub description: String,
-    /// The canonical path to the skill document.
+    pub short_description: Option<String>,
+    pub interface: Option<SkillInterface>,
+    pub dependencies: Option<SkillDependencies>,
     pub path: PathBuf,
-    /// Whether the skill is enabled for use.
     pub enabled: bool,
-    /// The origin of the discovered skill.
     pub source: SkillSource,
+    pub scope: SkillScope,
+    pub plugin_id: Option<String>,
 }
 
 /// Identifies where a discovered skill came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillSource {
-    /// The skill was discovered from a user-level root.
     User,
-    /// The skill was discovered from a workspace root.
-    Workspace {
-        /// The workspace used during discovery.
-        cwd: PathBuf,
-    },
-    /// The skill was discovered from a plugin-owned root.
-    Plugin {
-        /// The originating plugin identifier.
-        plugin_id: String,
-    },
+    Workspace { cwd: PathBuf },
+    Plugin { plugin_id: String },
+    System,
+    Admin,
 }
 
 /// Carries the skill content injected into a turn after resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedSkill {
-    /// The skill metadata record.
     pub record: SkillRecord,
-    /// The canonical textual content loaded from disk.
     pub content: String,
+}
+
+/// Selects a skill by exact path or by legacy unambiguous name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSelector {
+    pub name: String,
+    pub path: Option<PathBuf>,
 }
 
 /// Provides discovery and lookup operations for skills.
 pub trait SkillCatalog {
     /// Discovers skills for an optional workspace root.
-    fn discover(&mut self, workspace_root: Option<&Path>) -> Result<Vec<SkillRecord>, SkillError>;
-
-    /// Returns one discovered skill by identifier.
-    fn get(&self, id: &SkillId) -> Option<&SkillRecord>;
+    fn discover(
+        &mut self,
+        workspace_root: Option<&Path>,
+        force_reload: bool,
+    ) -> Result<Vec<SkillRecord>, SkillError>;
 
     /// Loads the content for one discovered skill.
-    fn load(&self, id: &SkillId) -> Result<ResolvedSkill, SkillError>;
+    fn load(
+        &mut self,
+        selector: &SkillSelector,
+        workspace_root: Option<&Path>,
+    ) -> Result<ResolvedSkill, SkillError>;
+
+    /// Returns whether model-visible available-skills instructions are enabled.
+    fn include_instructions(&self) -> bool;
+
+    /// Renders the available skills instructions block for one workspace.
+    fn available_skills_instructions(
+        &mut self,
+        workspace_root: Option<&Path>,
+        context_window: Option<i64>,
+    ) -> Result<Option<String>, SkillError>;
+
+    /// Refreshes skill runtime configuration and clears cached discovery results.
+    fn set_config(&mut self, config: SkillsConfig, project_root_markers: Vec<String>);
 }
 
 /// Filesystem-backed implementation of `SkillCatalog`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FileSystemSkillCatalog {
-    /// The configured roots and discovery behavior.
-    pub config: SkillsConfig,
-    /// The in-memory cache of discovered skills keyed by id.
-    cache: HashMap<SkillId, SkillRecord>,
+    manager: SkillsManager,
+    default_workspace_root: PathBuf,
 }
 
 impl FileSystemSkillCatalog {
-    /// Creates a new filesystem-backed skill catalog.
     pub fn new(config: SkillsConfig) -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::with_devo_home(config, cwd.clone(), cwd, vec![".git".to_string()])
+    }
+
+    pub fn with_devo_home(
+        config: SkillsConfig,
+        devo_home: PathBuf,
+        default_workspace_root: PathBuf,
+        project_root_markers: Vec<String>,
+    ) -> Self {
+        let runtime_config = skills_runtime_config(config, project_root_markers);
         Self {
-            config,
-            cache: HashMap::new(),
+            manager: SkillsManager::new(devo_home, runtime_config),
+            default_workspace_root,
         }
     }
 
-    fn parse_skill_document(
+    fn outcome(
         &self,
-        skill_doc: &Path,
-        fallback_name: &str,
-    ) -> Result<ParsedSkillDocument, SkillError> {
-        let content =
-            fs::read_to_string(skill_doc).map_err(|source| SkillError::SkillParseFailed {
-                path: skill_doc.to_path_buf(),
-                message: source.to_string(),
-            })?;
-        let (frontmatter, body) = parse_skill_frontmatter(skill_doc, &content)?;
-        let name = frontmatter
-            .name
-            .unwrap_or_else(|| fallback_name.to_string())
-            .trim()
-            .to_string();
-        if name.is_empty() {
-            return Err(SkillError::SkillParseFailed {
-                path: skill_doc.to_path_buf(),
-                message: "skill name must not be empty".into(),
-            });
-        }
-
-        Ok(ParsedSkillDocument {
-            id: SkillId(name.clone().into()),
-            name,
-            description: frontmatter
-                .description
-                .unwrap_or_else(|| format!("Skill discovered at {}", skill_doc.display())),
-            enabled: frontmatter.enabled.unwrap_or(true),
-            content: body.trim_start_matches(['\r', '\n']).to_string(),
-        })
+        workspace_root: Option<&Path>,
+        force_reload: bool,
+    ) -> devo_skills::SkillLoadOutcome {
+        let root = workspace_root.unwrap_or(self.default_workspace_root.as_path());
+        self.manager.skills_for_cwd(root, force_reload)
     }
 
-    fn roots<'a>(&'a self, workspace_root: Option<&'a Path>) -> Vec<(SkillSource, PathBuf)> {
-        let mut roots = self
-            .config
-            .user_roots
+    fn record_from_skill(
+        skill: &devo_skills::SkillMetadata,
+        enabled: bool,
+        workspace_root: Option<&Path>,
+    ) -> SkillRecord {
+        SkillRecord {
+            id: SkillId(skill.name.clone().into()),
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            short_description: skill.short_description.clone(),
+            interface: skill.interface.clone(),
+            dependencies: skill.dependencies.clone(),
+            path: normalize_canonical_path(skill.path_to_skills_md.clone()),
+            enabled,
+            source: skill_source(skill, workspace_root),
+            scope: skill.scope,
+            plugin_id: skill.plugin_id.clone(),
+        }
+    }
+
+    fn find_skill(
+        outcome: &devo_skills::SkillLoadOutcome,
+        selector: &SkillSelector,
+    ) -> Result<devo_skills::SkillMetadata, SkillError> {
+        if let Some(path) = selector
+            .path
+            .as_ref()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            let path = devo_skills::model::canonicalize_for_identity(path);
+            return outcome
+                .skills
+                .iter()
+                .find(|skill| skill.path_to_skills_md == path)
+                .cloned()
+                .ok_or_else(|| SkillError::SkillNotFound {
+                    name: selector.name.clone(),
+                    path: Some(path),
+                });
+        }
+
+        let matches = outcome
+            .skills
             .iter()
+            .filter(|skill| skill.name == selector.name)
             .cloned()
-            .map(|root| (SkillSource::User, root))
             .collect::<Vec<_>>();
-
-        roots.extend(self.config.workspace_roots.iter().cloned().map(|root| {
-            let cwd = workspace_root
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| root.clone());
-            (SkillSource::Workspace { cwd }, root)
-        }));
-
-        roots
-    }
-
-    fn discover_from_root(
-        &self,
-        root: &Path,
-        source: SkillSource,
-    ) -> Result<Vec<SkillRecord>, SkillError> {
-        if !root.exists() {
-            return Err(SkillError::SkillRootUnavailable {
-                root: root.to_path_buf(),
-            });
+        match matches.as_slice() {
+            [skill] => Ok(skill.clone()),
+            [] => Err(SkillError::SkillNotFound {
+                name: selector.name.clone(),
+                path: None,
+            }),
+            _ => Err(SkillError::AmbiguousSkillName {
+                name: selector.name.clone(),
+                paths: matches
+                    .iter()
+                    .map(|skill| skill.path_to_skills_md.clone())
+                    .collect(),
+            }),
         }
-
-        let mut skill_dirs = fs::read_dir(root)
-            .map_err(|_| SkillError::SkillRootUnavailable {
-                root: root.to_path_buf(),
-            })?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.path())
-                    .map_err(|_| SkillError::SkillRootUnavailable {
-                        root: root.to_path_buf(),
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        skill_dirs.sort();
-
-        let mut discovered = Vec::new();
-        for path in skill_dirs {
-            if path.is_dir() {
-                let skill_doc = path.join("SKILL.md");
-                if skill_doc.exists() {
-                    let fallback_name = path
-                        .file_name()
-                        .and_then(|segment| segment.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let parsed = self.parse_skill_document(&skill_doc, &fallback_name)?;
-                    discovered.push(SkillRecord {
-                        id: parsed.id,
-                        name: parsed.name,
-                        description: parsed.description,
-                        path: normalize_canonical_path(fs::canonicalize(&skill_doc).map_err(
-                            |source| SkillError::SkillParseFailed {
-                                path: skill_doc.clone(),
-                                message: source.to_string(),
-                            },
-                        )?),
-                        enabled: parsed.enabled,
-                        source: source.clone(),
-                    });
-                }
-            }
-        }
-
-        Ok(discovered)
     }
 }
 
 impl SkillCatalog for FileSystemSkillCatalog {
-    fn discover(&mut self, workspace_root: Option<&Path>) -> Result<Vec<SkillRecord>, SkillError> {
-        if !self.config.enabled {
-            self.cache.clear();
-            return Ok(Vec::new());
+    fn discover(
+        &mut self,
+        workspace_root: Option<&Path>,
+        force_reload: bool,
+    ) -> Result<Vec<SkillRecord>, SkillError> {
+        let outcome = self.outcome(workspace_root, force_reload);
+        if let Some(error) = outcome.errors.first() {
+            tracing::warn!(
+                path = %error.path.display(),
+                message = %error.message,
+                "skill discovery warning"
+            );
         }
+        Ok(outcome
+            .skills_with_enabled()
+            .map(|(skill, enabled)| Self::record_from_skill(skill, enabled, workspace_root))
+            .collect())
+    }
 
-        self.cache.clear();
-        for (source, root) in self.roots(workspace_root) {
-            if root.exists() {
-                for skill in self.discover_from_root(&root, source)? {
-                    if let Some(existing) = self.cache.insert(skill.id.clone(), skill.clone()) {
-                        return Err(SkillError::DuplicateSkillId {
-                            id: skill.id,
-                            first_path: existing.path,
-                            second_path: skill.path,
-                        });
-                    }
-                }
+    fn load(
+        &mut self,
+        selector: &SkillSelector,
+        workspace_root: Option<&Path>,
+    ) -> Result<ResolvedSkill, SkillError> {
+        let outcome = self.outcome(workspace_root, false);
+        let skill = Self::find_skill(&outcome, selector)?;
+        if !outcome.is_skill_enabled(&skill) {
+            return Err(SkillError::SkillDisabled {
+                name: skill.name,
+                path: skill.path_to_skills_md,
+            });
+        }
+        let content = std::fs::read_to_string(&skill.path_to_skills_md).map_err(|source| {
+            SkillError::SkillParseFailed {
+                path: skill.path_to_skills_md.clone(),
+                message: source.to_string(),
             }
-        }
-
-        let mut all = self.cache.values().cloned().collect::<Vec<_>>();
-        all.sort_by(|left, right| left.name.cmp(&right.name));
-        Ok(all)
-    }
-
-    fn get(&self, id: &SkillId) -> Option<&SkillRecord> {
-        self.cache.get(id)
-    }
-
-    fn load(&self, id: &SkillId) -> Result<ResolvedSkill, SkillError> {
-        let record = self
-            .cache
-            .get(id)
-            .ok_or_else(|| SkillError::SkillNotFound { id: id.clone() })?;
-
-        if !record.enabled {
-            return Err(SkillError::SkillDisabled { id: id.clone() });
-        }
-
-        let parsed = self.parse_skill_document(&record.path, &record.name)?;
-
+        })?;
         Ok(ResolvedSkill {
-            record: record.clone(),
-            content: parsed.content,
+            record: Self::record_from_skill(&skill, true, workspace_root),
+            content: strip_frontmatter(&content)
+                .trim_start_matches(['\r', '\n'])
+                .to_string(),
         })
     }
-}
 
-#[derive(Debug, Default)]
-struct SkillFrontmatter {
-    name: Option<String>,
-    description: Option<String>,
-    enabled: Option<bool>,
-}
-
-#[derive(Debug)]
-struct ParsedSkillDocument {
-    id: SkillId,
-    name: String,
-    description: String,
-    enabled: bool,
-    content: String,
-}
-
-fn parse_skill_frontmatter<'a>(
-    skill_doc: &Path,
-    content: &'a str,
-) -> Result<(SkillFrontmatter, &'a str), SkillError> {
-    let mut lines = content.split_inclusive('\n');
-    let Some(first_line) = lines.next() else {
-        return Ok((SkillFrontmatter::default(), content));
-    };
-    if first_line.trim() != "---" {
-        return Ok((SkillFrontmatter::default(), content));
+    fn include_instructions(&self) -> bool {
+        self.manager.include_instructions()
     }
 
-    let mut consumed = first_line.len();
-    let mut frontmatter = SkillFrontmatter::default();
-    let mut found_end = false;
-    for line in lines {
-        consumed += line.len();
-        if line.trim() == "---" {
-            found_end = true;
-            break;
+    fn available_skills_instructions(
+        &mut self,
+        workspace_root: Option<&Path>,
+        context_window: Option<i64>,
+    ) -> Result<Option<String>, SkillError> {
+        if !self.include_instructions() {
+            return Ok(None);
         }
-        parse_frontmatter_line(skill_doc, &mut frontmatter, line)?;
+        let outcome = self.outcome(workspace_root, false);
+        let Some(available) =
+            build_available_skills(&outcome, default_skill_metadata_budget(context_window))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(render_available_skills_body(
+            &available.skill_root_lines,
+            &available.skill_lines,
+        )))
     }
 
-    if !found_end {
-        return Err(SkillError::SkillParseFailed {
-            path: skill_doc.to_path_buf(),
-            message: "unterminated skill frontmatter".into(),
-        });
+    fn set_config(&mut self, config: SkillsConfig, project_root_markers: Vec<String>) {
+        self.manager
+            .set_config(skills_runtime_config(config, project_root_markers));
     }
-
-    Ok((frontmatter, &content[consumed..]))
 }
 
-fn parse_frontmatter_line(
-    skill_doc: &Path,
-    frontmatter: &mut SkillFrontmatter,
-    line: &str,
-) -> Result<(), SkillError> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-        return Ok(());
+fn skills_runtime_config(
+    config: SkillsConfig,
+    project_root_markers: Vec<String>,
+) -> SkillsRuntimeConfig {
+    SkillsRuntimeConfig {
+        enabled: config.enabled,
+        user_roots: config.user_roots,
+        workspace_roots: config.workspace_roots,
+        include_instructions: config.include_instructions.unwrap_or(true),
+        bundled_enabled: config.bundled.unwrap_or_default().enabled,
+        config_rules: devo_skills::config_rules::SkillConfigRules::from_entries(
+            config
+                .config
+                .into_iter()
+                .map(|entry| (entry.path, entry.name, entry.enabled)),
+        ),
+        project_root_markers,
     }
-    let Some((key, value)) = trimmed.split_once(':') else {
-        return Err(SkillError::SkillParseFailed {
-            path: skill_doc.to_path_buf(),
-            message: format!("invalid skill frontmatter line: {trimmed}"),
-        });
+}
+
+fn skill_source(skill: &devo_skills::SkillMetadata, workspace_root: Option<&Path>) -> SkillSource {
+    match skill.scope {
+        SkillScope::Repo => SkillSource::Workspace {
+            cwd: workspace_root.map(Path::to_path_buf).unwrap_or_default(),
+        },
+        SkillScope::User => SkillSource::User,
+        SkillScope::System => SkillSource::System,
+        SkillScope::Admin => SkillSource::Admin,
+        SkillScope::Plugin => SkillSource::Plugin {
+            plugin_id: skill.plugin_id.clone().unwrap_or_default(),
+        },
+    }
+}
+
+fn strip_frontmatter(content: &str) -> &str {
+    let Some(stripped) = content.strip_prefix("---") else {
+        return content;
     };
-    let key = key.trim();
-    let value = value.trim();
-    match key {
-        "name" => frontmatter.name = Some(parse_frontmatter_string(value)),
-        "description" => frontmatter.description = Some(parse_frontmatter_string(value)),
-        "enabled" => {
-            frontmatter.enabled =
-                Some(
-                    value
-                        .parse::<bool>()
-                        .map_err(|_| SkillError::SkillParseFailed {
-                            path: skill_doc.to_path_buf(),
-                            message: format!("invalid boolean in skill frontmatter: {value}"),
-                        })?,
-                )
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn parse_frontmatter_string(value: &str) -> String {
-    let trimmed = value.trim();
-    let quoted = trimmed
-        .strip_prefix('"')
-        .and_then(|text| text.strip_suffix('"'))
-        .or_else(|| {
-            trimmed
-                .strip_prefix('\'')
-                .and_then(|text| text.strip_suffix('\''))
-        });
-    quoted.unwrap_or(trimmed).trim().to_string()
-}
-
-pub fn normalize_canonical_path(path: PathBuf) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let normalized = path
-            .to_string_lossy()
-            .strip_prefix(r"\\?\")
-            .map_or_else(|| path.to_string_lossy().into_owned(), ToOwned::to_owned);
-        PathBuf::from(normalized)
-    }
-
-    #[cfg(not(windows))]
-    {
-        path
-    }
+    let Some(end_index) = stripped.find("\n---") else {
+        return content;
+    };
+    &stripped[end_index + 4..]
 }
 
 /// Enumerates the normalized failures exposed by the skill subsystem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum SkillError {
-    /// The requested skill identifier was not discovered.
-    #[error("skill not found: {id:?}")]
-    SkillNotFound {
-        /// The missing skill identifier.
-        id: SkillId,
-    },
-    /// The requested skill exists but is disabled.
-    #[error("skill disabled: {id:?}")]
-    SkillDisabled {
-        /// The disabled skill identifier.
-        id: SkillId,
-    },
-    /// The skill document could not be read or parsed.
+    #[error("skill not found: {name}")]
+    SkillNotFound { name: String, path: Option<PathBuf> },
+    #[error("skill name is ambiguous: {name}")]
+    AmbiguousSkillName { name: String, paths: Vec<PathBuf> },
+    #[error("skill disabled: {name} at {path}")]
+    SkillDisabled { name: String, path: PathBuf },
     #[error("skill parse failed at {path}: {message}")]
-    SkillParseFailed {
-        /// The skill document path that failed.
-        path: PathBuf,
-        /// The human-readable failure message.
-        message: String,
-    },
-    /// A configured discovery root could not be accessed.
+    SkillParseFailed { path: PathBuf, message: String },
     #[error("skill root unavailable: {root}")]
-    SkillRootUnavailable {
-        /// The inaccessible root path.
-        root: PathBuf,
-    },
-    /// Two discovered skills resolved to the same id.
+    SkillRootUnavailable { root: PathBuf },
     #[error("duplicate skill id {id:?} discovered at {first_path} and {second_path}")]
     DuplicateSkillId {
-        /// The conflicting stable skill identifier.
         id: SkillId,
-        /// The first discovered skill document path.
         first_path: PathBuf,
-        /// The second discovered skill document path.
         second_path: PathBuf,
     },
-}
-
-#[cfg(test)]
-mod tests {
-    use pretty_assertions::assert_eq;
-
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use super::{
-        FileSystemSkillCatalog, SkillCatalog, SkillError, SkillId, normalize_canonical_path,
-    };
-    use crate::SkillsConfig;
-
-    fn temp_root(name: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("devo-skill-{name}-{nanos}"));
-        std::fs::create_dir_all(&root).expect("create root");
-        root
-    }
-
-    #[test]
-    fn discover_finds_skill_documents() {
-        let root = temp_root("discover");
-        let skill_dir = root.join("rust");
-        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: rust-docs\ndescription: Official Rust docs\nenabled: true\n---\n# Rust\n\nSkill body",
-        )
-        .expect("write skill");
-
-        let mut catalog = FileSystemSkillCatalog::new(SkillsConfig {
-            enabled: true,
-            user_roots: vec![root.clone()],
-            workspace_roots: Vec::new(),
-            watch_for_changes: false,
-        });
-
-        let discovered = catalog.discover(None).expect("discover");
-        assert_eq!(discovered.len(), 1);
-        assert_eq!(discovered[0].id, SkillId("rust-docs".into()));
-        assert_eq!(discovered[0].name, "rust-docs");
-        assert_eq!(discovered[0].description, "Official Rust docs");
-        assert!(discovered[0].enabled);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn load_reads_skill_content() {
-        let root = temp_root("load");
-        let skill_dir = root.join("docs");
-        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: docs\ndescription: Documentation skill\n---\nbody",
-        )
-        .expect("write skill");
-
-        let mut catalog = FileSystemSkillCatalog::new(SkillsConfig {
-            enabled: true,
-            user_roots: vec![root.clone()],
-            workspace_roots: Vec::new(),
-            watch_for_changes: false,
-        });
-        let _ = catalog.discover(None).expect("discover");
-        let resolved = catalog
-            .load(&SkillId("docs".into()))
-            .expect("load resolved skill");
-
-        assert_eq!(resolved.content, "body");
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn load_rejects_disabled_skill() {
-        let root = temp_root("disabled");
-        let skill_dir = root.join("disabled-skill");
-        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: disabled-skill\nenabled: false\ndescription: Disabled skill\n---\nbody",
-        )
-        .expect("write skill");
-
-        let mut catalog = FileSystemSkillCatalog::new(SkillsConfig {
-            enabled: true,
-            user_roots: vec![root.clone()],
-            workspace_roots: Vec::new(),
-            watch_for_changes: false,
-        });
-        let discovered = catalog.discover(None).expect("discover");
-
-        assert_eq!(discovered[0].enabled, false);
-        assert_eq!(
-            catalog.load(&SkillId("disabled-skill".into())),
-            Err(SkillError::SkillDisabled {
-                id: SkillId("disabled-skill".into()),
-            })
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn discover_rediscovers_updated_skill_metadata() {
-        let root = temp_root("rediscovers");
-        let skill_dir = root.join("skill");
-        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
-        let skill_path = skill_dir.join("SKILL.md");
-        std::fs::write(
-            &skill_path,
-            "---\nname: original\ndescription: Original description\n---\nbody",
-        )
-        .expect("write original skill");
-
-        let mut catalog = FileSystemSkillCatalog::new(SkillsConfig {
-            enabled: true,
-            user_roots: vec![root.clone()],
-            workspace_roots: Vec::new(),
-            watch_for_changes: false,
-        });
-        let first = catalog.discover(None).expect("first discover");
-        assert_eq!(first[0].id, SkillId("original".into()));
-
-        std::fs::write(
-            &skill_path,
-            "---\nname: updated\ndescription: Updated description\nenabled: false\n---\nbody",
-        )
-        .expect("write updated skill");
-
-        let second = catalog.discover(None).expect("second discover");
-        assert_eq!(second[0].id, SkillId("updated".into()));
-        assert_eq!(second[0].description, "Updated description");
-        assert_eq!(second[0].enabled, false);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn discover_rejects_duplicate_skill_ids() {
-        let root = temp_root("duplicate");
-        let alpha_dir = root.join("alpha");
-        let bravo_dir = root.join("bravo");
-        std::fs::create_dir_all(&alpha_dir).expect("create alpha dir");
-        std::fs::create_dir_all(&bravo_dir).expect("create bravo dir");
-        let alpha_path = alpha_dir.join("SKILL.md");
-        let bravo_path = bravo_dir.join("SKILL.md");
-        std::fs::write(
-            &alpha_path,
-            "---\nname: shared\ndescription: First\n---\nalpha",
-        )
-        .expect("write alpha skill");
-        std::fs::write(
-            &bravo_path,
-            "---\nname: shared\ndescription: Second\n---\nbravo",
-        )
-        .expect("write bravo skill");
-
-        let mut catalog = FileSystemSkillCatalog::new(SkillsConfig {
-            enabled: true,
-            user_roots: vec![root.clone()],
-            workspace_roots: Vec::new(),
-            watch_for_changes: false,
-        });
-
-        assert_eq!(
-            catalog.discover(None),
-            Err(SkillError::DuplicateSkillId {
-                id: SkillId("shared".into()),
-                first_path: normalize_canonical_path(
-                    std::fs::canonicalize(alpha_path).expect("canonicalize alpha"),
-                ),
-                second_path: normalize_canonical_path(
-                    std::fs::canonicalize(bravo_path).expect("canonicalize bravo"),
-                ),
-            })
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
 }

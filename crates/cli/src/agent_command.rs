@@ -58,7 +58,8 @@ pub(crate) async fn run_agent(
         ..
     } = resolved;
 
-    run_interactive_tui(InteractiveTuiConfig {
+    tracing::info!("starting interactive tui");
+    let exit = run_interactive_tui(InteractiveTuiConfig {
         // initial_session corresponding fields at top of `config.toml`.
         initial_session: InitialTuiSession {
             session_id: initial_session_id,
@@ -74,7 +75,9 @@ pub(crate) async fn run_agent(
         saved_models,
         show_model_onboarding: onboarding_mode,
     })
-    .await
+    .await?;
+    tracing::info!("interactive tui returned to cli agent command");
+    Ok(exit)
 }
 
 /// Resolves the initial provider settings and whether onboarding should be shown.

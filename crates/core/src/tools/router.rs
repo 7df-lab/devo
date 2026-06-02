@@ -213,6 +213,8 @@ impl ToolRuntime {
         // TODO: The budgets should take as a parameter, pass from outside of execute_single
         let ctx = crate::contracts::ToolContext {
             tool_call_id: crate::invocation::ToolCallId(call.id.clone()),
+            session_id: self.context.session_id.clone(),
+            turn_id: self.context.turn_id.clone(),
             workspace_root: self.context.cwd.clone(),
             budgets: ToolBudgets {
                 output_limit_bytes: 32 * 1024,

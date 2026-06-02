@@ -31,6 +31,7 @@ use ratatui::widgets::Wrap;
 use devo_protocol::Model;
 use devo_protocol::ProviderVendor;
 use devo_protocol::ProviderWireApi;
+use devo_protocol::ReasoningEffortPreset;
 
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
@@ -100,6 +101,7 @@ enum OnboardingState {
         model: String,
         provider: ProviderWireApi,
         provider_name: String,
+        provider_credential_id: Option<String>,
         base_url: String,
         api_key: String,
         model_name: String,
@@ -113,6 +115,7 @@ enum OnboardingState {
         model: String,
         provider: ProviderWireApi,
         provider_name: String,
+        provider_credential_id: Option<String>,
         base_url: String,
         api_key: String,
         model_name: String,
@@ -125,6 +128,7 @@ enum OnboardingState {
         model: String,
         provider: ProviderWireApi,
         provider_name: String,
+        provider_credential_id: Option<String>,
         base_url: String,
         api_key: String,
         model_name: String,
@@ -140,6 +144,7 @@ enum OnboardingState {
         display_name: String,
         provider_id: String,
         provider_name: String,
+        provider_credential_id: Option<String>,
         invocation_method: ProviderWireApi,
         default_reasoning_effort: Option<String>,
         base_url: Option<String>,
@@ -149,8 +154,12 @@ enum OnboardingState {
     /// Validation failed, show error and retry options.
     ValidationFailed {
         model: String,
+        model_name: String,
+        display_name: String,
         provider: ProviderWireApi,
         provider_name: String,
+        provider_credential_id: Option<String>,
+        default_reasoning_effort: Option<String>,
         base_url: Option<String>,
         api_key: Option<String>,
         error_message: String,
@@ -185,10 +194,11 @@ struct InvocationMethodItem {
     provider: ProviderWireApi,
 }
 
-/// TODO: It should be selected from model preset.
 #[derive(Debug)]
 struct ReasoningEffortItem {
     label: String,
+    value: String,
+    description: String,
 }
 
 pub(crate) struct OnboardingWidget {
@@ -290,8 +300,12 @@ impl OnboardingWidget {
     pub(crate) fn on_validation_failed(&mut self, error_message: String) {
         if let OnboardingState::Validating {
             model_slug,
+            model_name,
+            display_name,
             invocation_method,
             provider_name,
+            provider_credential_id,
+            default_reasoning_effort,
             base_url,
             api_key,
             ..
@@ -299,8 +313,12 @@ impl OnboardingWidget {
         {
             self.state = OnboardingState::ValidationFailed {
                 model: model_slug.clone(),
+                model_name: model_name.clone(),
+                display_name: display_name.clone(),
                 provider: *invocation_method,
                 provider_name: provider_name.clone(),
+                provider_credential_id: provider_credential_id.clone(),
+                default_reasoning_effort: default_reasoning_effort.clone(),
                 base_url: base_url.clone(),
                 api_key: api_key.clone(),
                 error_message,
@@ -371,14 +389,60 @@ impl OnboardingWidget {
             .unwrap_or_else(|| slug.to_string())
     }
 
+    fn model_by_slug(&self, slug: &str) -> Option<&Model> {
+        self.original_models.iter().find(|model| model.slug == slug)
+    }
+
     fn model_supports_reasoning(&self, slug: &str) -> bool {
-        self.original_models.iter().any(|model| {
-            model.slug == slug
-                && !matches!(
-                    model.thinking_capability,
-                    devo_protocol::ThinkingCapability::Unsupported
-                )
+        self.model_by_slug(slug).is_some_and(|model| {
+            !matches!(
+                model.thinking_capability,
+                devo_protocol::ThinkingCapability::Unsupported
+            )
         })
+    }
+
+    fn reasoning_effort_items(&self, slug: &str) -> Vec<ReasoningEffortItem> {
+        self.model_by_slug(slug)
+            .map(Model::reasoning_effort_options)
+            .unwrap_or_default()
+            .into_iter()
+            .map(Self::reasoning_effort_item)
+            .collect()
+    }
+
+    fn reasoning_effort_item(preset: ReasoningEffortPreset) -> ReasoningEffortItem {
+        ReasoningEffortItem {
+            label: preset.effort.label().to_string(),
+            value: preset.effort.label().to_ascii_lowercase(),
+            description: preset.description,
+        }
+    }
+
+    fn default_reasoning_effort_index(&self, slug: &str, items: &[ReasoningEffortItem]) -> usize {
+        self.model_by_slug(slug)
+            .and_then(|model| model.default_reasoning_effort)
+            .map(|effort| effort.label().to_ascii_lowercase())
+            .and_then(|value| items.iter().position(|item| item.value == value))
+            .unwrap_or(0)
+    }
+
+    fn invocation_method_selection_index(
+        provider: ProviderWireApi,
+        items: &[InvocationMethodItem],
+    ) -> usize {
+        items
+            .iter()
+            .position(|item| item.provider == provider)
+            .unwrap_or(0)
+    }
+
+    fn invocation_method_label(provider: ProviderWireApi) -> String {
+        Self::invocation_method_items()
+            .into_iter()
+            .find(|item| item.provider == provider)
+            .map(|item| item.label)
+            .unwrap_or_else(|| provider.as_str().to_string())
     }
 
     fn go_back_to_model_selection(&mut self) {
@@ -401,6 +465,7 @@ struct ValidationParams {
     display_name: String,
     provider_id: String,
     provider_name: String,
+    provider_credential_id: Option<String>,
     invocation_method: ProviderWireApi,
     default_reasoning_effort: Option<String>,
     base_url: Option<String>,
@@ -422,6 +487,7 @@ impl OnboardingWidget {
             display_name: display_name.clone(),
             provider_id: params.provider_id.clone(),
             provider_name: params.provider_name.clone(),
+            provider_credential_id: params.provider_credential_id.clone(),
             invocation_method: params.invocation_method,
             default_reasoning_effort: params.default_reasoning_effort.clone(),
             base_url: params.base_url.clone(),
@@ -434,6 +500,7 @@ impl OnboardingWidget {
             "display_name": display_name,
             "provider_id": params.provider_id,
             "provider_name": params.provider_name,
+            "provider_credential_id": params.provider_credential_id,
             "invocation_method": params.invocation_method,
             "default_reasoning_effort": params.default_reasoning_effort,
             "base_url": params.base_url,
@@ -672,17 +739,24 @@ impl OnboardingWidget {
                                 .first()
                                 .copied()
                                 .unwrap_or_else(|| Self::infer_provider(&model_slug));
+                            let base_url = provider_vendor.base_url.clone().unwrap_or_default();
+                            let (active_field, input, cursor_pos) = if base_url.trim().is_empty() {
+                                (InlineField::BaseUrl, base_url.clone(), base_url.len())
+                            } else {
+                                (InlineField::ModelName, model_slug.clone(), model_slug.len())
+                            };
                             self.state = OnboardingState::InlineSetup {
                                 model: model_slug.clone(),
                                 provider,
                                 provider_name: provider_vendor.name.clone(),
-                                base_url: provider_vendor.base_url.clone().unwrap_or_default(),
+                                provider_credential_id: provider_vendor.credential.clone(),
+                                base_url,
                                 api_key: String::new(),
                                 model_name: model_slug.clone(),
                                 display_name: String::new(),
-                                active_field: InlineField::ModelName,
-                                input: model_slug.clone(),
-                                cursor_pos: model_slug.len(),
+                                active_field,
+                                input,
+                                cursor_pos,
                             };
                         }
                         ProviderSelectionKind::AddProvider => {
@@ -690,6 +764,7 @@ impl OnboardingWidget {
                                 model: model_slug.clone(),
                                 provider: ProviderWireApi::OpenAIChatCompletions,
                                 provider_name: String::new(),
+                                provider_credential_id: None,
                                 base_url: String::new(),
                                 api_key: String::new(),
                                 model_name: model_slug.clone(),
@@ -716,6 +791,7 @@ impl OnboardingWidget {
             model,
             provider,
             provider_name,
+            provider_credential_id,
             base_url,
             api_key,
             model_name,
@@ -766,12 +842,18 @@ impl OnboardingWidget {
                 // Save current field and advance.
                 match active_field {
                     InlineField::ProviderName => {
+                        if input.trim().is_empty() {
+                            return;
+                        }
                         *provider_name = input.trim().to_string();
                         *active_field = InlineField::BaseUrl;
                         input.clear();
                         *cursor_pos = 0;
                     }
                     InlineField::BaseUrl => {
+                        if input.trim().is_empty() {
+                            return;
+                        }
                         *base_url = input.trim().to_string();
                         *active_field = InlineField::ApiKey;
                         *input = String::new();
@@ -797,20 +879,25 @@ impl OnboardingWidget {
                         let model = model.clone();
                         let provider = *provider;
                         let provider_name = provider_name.clone();
+                        let provider_credential_id = provider_credential_id.clone();
                         let base_url = base_url.clone();
                         let api_key = api_key.clone();
                         let model_name = model_name.clone();
                         let display_name = display_name.clone();
+                        let items = Self::invocation_method_items();
+                        let selected_idx =
+                            Self::invocation_method_selection_index(provider, &items);
                         self.state = OnboardingState::InvocationMethod {
                             model,
                             provider,
                             provider_name,
+                            provider_credential_id,
                             base_url,
                             api_key,
                             model_name,
                             display_name,
-                            items: Self::invocation_method_items(),
-                            selected_idx: 0,
+                            items,
+                            selected_idx,
                         };
                     }
                 }
@@ -878,6 +965,7 @@ impl OnboardingWidget {
             model,
             provider,
             provider_name,
+            provider_credential_id,
             base_url,
             api_key,
             model_name,
@@ -907,32 +995,28 @@ impl OnboardingWidget {
                     let model = model.clone();
                     let provider = *provider;
                     let provider_name = provider_name.clone();
+                    let provider_credential_id = provider_credential_id.clone();
                     let base_url = base_url.clone();
                     let api_key = api_key.clone();
                     let model_name = model_name.clone();
                     let display_name = display_name.clone();
 
-                    // Check if model supports reasoning — if so, show reasoning effort picker.
-                    let original = self.original_models.iter().find(|m| m.slug == model);
-                    let supports_reasoning = original.is_some_and(|m| {
-                        !matches!(
-                            m.thinking_capability,
-                            devo_protocol::ThinkingCapability::Unsupported
-                        )
-                    });
-
-                    if supports_reasoning {
+                    if self.model_supports_reasoning(&model) {
+                        let reasoning_items = self.reasoning_effort_items(&model);
+                        let selected_reasoning_idx =
+                            self.default_reasoning_effort_index(&model, &reasoning_items);
                         self.state = OnboardingState::ReasoningEffort {
                             model,
                             provider,
                             provider_name,
+                            provider_credential_id,
                             base_url,
                             api_key,
                             model_name,
                             display_name,
                             invocation_method: invocation,
-                            items: Self::reasoning_effort_items(),
-                            selected_idx: 0,
+                            items: reasoning_items,
+                            selected_idx: selected_reasoning_idx,
                         };
                     } else {
                         // No reasoning — go straight to validation.
@@ -952,6 +1036,7 @@ impl OnboardingWidget {
                             display_name,
                             provider_id: provider_name.clone(),
                             provider_name,
+                            provider_credential_id,
                             invocation_method: invocation,
                             default_reasoning_effort: None,
                             base_url: base_url_opt,
@@ -965,6 +1050,7 @@ impl OnboardingWidget {
                 let model = model.clone();
                 let provider = *provider;
                 let provider_name = provider_name.clone();
+                let provider_credential_id = provider_credential_id.clone();
                 let base_url = base_url.clone();
                 let api_key = api_key.clone();
                 let model_name_val = model_name.clone();
@@ -973,6 +1059,7 @@ impl OnboardingWidget {
                     model,
                     provider,
                     provider_name,
+                    provider_credential_id,
                     base_url,
                     api_key,
                     model_name: model_name_val.clone(),
@@ -986,23 +1073,10 @@ impl OnboardingWidget {
         }
     }
 
-    fn reasoning_effort_items() -> Vec<ReasoningEffortItem> {
-        vec![
-            ReasoningEffortItem {
-                label: "medium".to_string(),
-            },
-            ReasoningEffortItem {
-                label: "high".to_string(),
-            },
-            ReasoningEffortItem {
-                label: "xhigh".to_string(),
-            },
-        ]
-    }
-
     fn reasoning_effort_handle_key(&mut self, key: KeyEvent) {
         let OnboardingState::ReasoningEffort {
             model,
+            provider_credential_id,
             base_url,
             api_key,
             model_name,
@@ -1034,8 +1108,9 @@ impl OnboardingWidget {
                 let model_name = model_name.clone();
                 let display_name = display_name.clone();
                 let provider_name = provider_name.clone();
+                let provider_credential_id = provider_credential_id.clone();
                 let default_reasoning_effort =
-                    items.get(*selected_idx).map(|item| item.label.clone());
+                    items.get(*selected_idx).map(|item| item.value.clone());
                 let base_url = base_url.clone();
                 let api_key = api_key.clone();
                 let base_url_opt = if base_url.is_empty() {
@@ -1054,6 +1129,7 @@ impl OnboardingWidget {
                     display_name,
                     provider_id: provider_name.clone(),
                     provider_name,
+                    provider_credential_id,
                     invocation_method,
                     default_reasoning_effort,
                     base_url: base_url_opt,
@@ -1063,37 +1139,44 @@ impl OnboardingWidget {
             KeyCode::Esc => {
                 // Go back to invocation method selection.
                 // Extract values before reassigning self.state.
-                let (m, prov, pn, bu, ak, mn, dn) = match &self.state {
+                let (m, prov, pn, pc, bu, ak, mn, dn, invocation) = match &self.state {
                     OnboardingState::ReasoningEffort {
                         model,
                         provider,
                         provider_name,
+                        provider_credential_id,
                         base_url,
                         api_key,
                         model_name,
                         display_name,
+                        invocation_method,
                         ..
                     } => (
                         model.clone(),
                         *provider,
                         provider_name.clone(),
+                        provider_credential_id.clone(),
                         base_url.clone(),
                         api_key.clone(),
                         model_name.clone(),
                         display_name.clone(),
+                        *invocation_method,
                     ),
                     _ => return,
                 };
+                let items = Self::invocation_method_items();
+                let selected_idx = Self::invocation_method_selection_index(invocation, &items);
                 self.state = OnboardingState::InvocationMethod {
                     model: m,
                     provider: prov,
                     provider_name: pn,
+                    provider_credential_id: pc,
                     base_url: bu,
                     api_key: ak,
                     model_name: mn,
                     display_name: dn,
-                    items: Self::invocation_method_items(),
-                    selected_idx: 0,
+                    items,
+                    selected_idx,
                 };
             }
             _ => {}
@@ -1105,8 +1188,12 @@ impl OnboardingWidget {
     fn validation_failed_handle_key(&mut self, key: KeyEvent) {
         let OnboardingState::ValidationFailed {
             model,
+            model_name,
+            display_name,
             provider,
             provider_name,
+            provider_credential_id,
+            default_reasoning_effort,
             base_url,
             api_key,
             error_message: _,
@@ -1137,18 +1224,23 @@ impl OnboardingWidget {
                 0 => {
                     // Retry.
                     let model = model.clone();
+                    let model_name = model_name.clone();
+                    let display_name = display_name.clone();
                     let provider = *provider;
                     let provider_name = provider_name.clone();
+                    let provider_credential_id = provider_credential_id.clone();
+                    let default_reasoning_effort = default_reasoning_effort.clone();
                     let base_url = base_url.clone();
                     let api_key = api_key.clone();
                     self.start_validation(ValidationParams {
-                        model_slug: model.clone(),
-                        model_name: model.clone(),
-                        display_name: model,
+                        model_slug: model,
+                        model_name,
+                        display_name,
                         provider_id: provider_name.clone(),
                         provider_name,
+                        provider_credential_id,
                         invocation_method: provider,
-                        default_reasoning_effort: None,
+                        default_reasoning_effort,
                         base_url,
                         api_key,
                     });
@@ -1156,18 +1248,22 @@ impl OnboardingWidget {
                 1 => {
                     // Edit settings — go back to inline setup API key field.
                     let model_slug = model.clone();
+                    let model_name = model_name.clone();
+                    let display_name = display_name.clone();
                     let provider = *provider;
                     let provider_name = provider_name.clone();
+                    let provider_credential_id = provider_credential_id.clone();
                     let base_url = base_url.clone().unwrap_or_default();
                     let api_key = api_key.clone().unwrap_or_default();
                     self.state = OnboardingState::InlineSetup {
                         model: model_slug.clone(),
                         provider,
                         provider_name,
+                        provider_credential_id,
                         base_url,
                         api_key: api_key.clone(),
-                        model_name: model_slug,
-                        display_name: String::new(),
+                        model_name,
+                        display_name,
                         active_field: InlineField::ApiKey,
                         input: api_key.clone(),
                         cursor_pos: api_key.len(),
@@ -1193,16 +1289,26 @@ struct InlineSetupRenderParams<'a> {
     model: &'a str,
     supports_reasoning: bool,
     provider_name: &'a str,
+    provider_credential_id: Option<&'a str>,
     base_url: &'a str,
     api_key: &'a str,
     model_name: &'a str,
     display_name: &'a str,
-    active_field: &'a InlineField,
+    active_field: Option<InlineField>,
     input: &'a str,
     cursor_pos: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowStepState {
+    Pending,
+    Active,
+    Completed,
+}
+
 impl OnboardingWidget {
+    const SAVED_SECRET_MASK: &'static str = "****...***";
+
     fn render_footer(lines: &mut Vec<Line<'static>>, primary: &str, secondary: &str) {
         lines.push(Line::from(""));
         if secondary.is_empty() {
@@ -1251,26 +1357,24 @@ impl OnboardingWidget {
         }
     }
 
-    fn render_inline_setup(params: &InlineSetupRenderParams, area: Rect, buf: &mut Buffer) {
-        if area.height < 3 {
-            return;
-        }
-        let content_area = onboarding_content_area(area);
-
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
+    fn render_inline_setup_header(lines: &mut Vec<Line<'static>>, model: &str) {
         lines.push(Line::from(vec![Span::styled(
             "Configure provider binding",
             Style::default().bold(),
         )]));
         lines.push(Line::from(vec![Span::styled(
-            format!("Model profile: {}", params.model),
+            format!("Model profile: {model}"),
             Style::default().dim(),
         )]));
         lines.push(Line::from(""));
+    }
 
+    fn render_inline_setup_fields(
+        lines: &mut Vec<Line<'static>>,
+        params: &InlineSetupRenderParams,
+    ) {
         Self::render_inline_field(
-            &mut lines,
+            lines,
             params,
             InlineField::ProviderName,
             "Provider Name",
@@ -1279,7 +1383,7 @@ impl OnboardingWidget {
             false,
         );
         Self::render_inline_field(
-            &mut lines,
+            lines,
             params,
             InlineField::BaseUrl,
             "Base URL",
@@ -1288,7 +1392,7 @@ impl OnboardingWidget {
             false,
         );
         Self::render_inline_field(
-            &mut lines,
+            lines,
             params,
             InlineField::ApiKey,
             "API Key",
@@ -1297,7 +1401,7 @@ impl OnboardingWidget {
             true,
         );
         Self::render_inline_field(
-            &mut lines,
+            lines,
             params,
             InlineField::ModelName,
             "Model Name",
@@ -1306,7 +1410,7 @@ impl OnboardingWidget {
             false,
         );
         Self::render_inline_field(
-            &mut lines,
+            lines,
             params,
             InlineField::DisplayName,
             "Display Name",
@@ -1314,21 +1418,41 @@ impl OnboardingWidget {
             params.display_name,
             false,
         );
-        Self::render_pending_workflow_step(
+    }
+
+    fn render_inline_setup(params: &InlineSetupRenderParams, area: Rect, buf: &mut Buffer) {
+        if area.height < 3 {
+            return;
+        }
+        let content_area = onboarding_content_area(area);
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        Self::render_inline_setup_header(&mut lines, params.model);
+        Self::render_inline_setup_fields(&mut lines, params);
+        Self::render_workflow_step(
             &mut lines,
             "Invocation Method",
             "Choose the API protocol.",
             "[open popup]",
+            WorkflowStepState::Pending,
         );
         if params.supports_reasoning {
-            Self::render_pending_workflow_step(
+            Self::render_workflow_step(
                 &mut lines,
                 "Reason Effort",
                 "Choose the default reasoning effort for this model. It can be changed with /model.",
                 "[open popup]",
+                WorkflowStepState::Pending,
             );
         }
-        Self::render_pending_workflow_step(&mut lines, "Validation Done", "", "");
+        Self::render_workflow_step(
+            &mut lines,
+            "Validation Done",
+            "",
+            "",
+            WorkflowStepState::Pending,
+        );
 
         Self::render_footer(&mut lines, "Enter next field", "Esc back");
 
@@ -1346,10 +1470,13 @@ impl OnboardingWidget {
         value: &str,
         secret: bool,
     ) {
-        let active_index = Self::inline_field_index(*params.active_field);
+        let active_index = params
+            .active_field
+            .map(Self::inline_field_index)
+            .unwrap_or(usize::MAX);
         let field_index = Self::inline_field_index(field);
-        let is_active = field == *params.active_field;
-        let is_done = field_index < active_index;
+        let is_active = params.active_field == Some(field);
+        let is_done = params.active_field.is_none() || field_index < active_index;
         let rail_style = if is_active {
             Style::default().cyan().bold()
         } else if is_done {
@@ -1362,10 +1489,11 @@ impl OnboardingWidget {
         } else {
             Style::default().dim()
         };
+        let has_saved_secret = secret && params.provider_credential_id.is_some();
         let shown_value = if is_active {
             Self::input_with_cursor(params.input, params.cursor_pos)
-        } else if secret && !value.is_empty() {
-            "••••••••".to_string()
+        } else if secret && (!value.is_empty() || has_saved_secret) {
+            Self::SAVED_SECRET_MASK.to_string()
         } else if value.is_empty() && is_done {
             "(skip)".to_string()
         } else if value.is_empty() {
@@ -1378,10 +1506,6 @@ impl OnboardingWidget {
             Span::styled("● ", rail_style),
             Span::raw(" "),
             Span::styled(format!("{label}: "), label_style),
-            Span::styled(hint.to_string(), Style::default().dim()),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("| ", rail_style),
             Span::styled(
                 shown_value,
                 if is_active {
@@ -1391,27 +1515,193 @@ impl OnboardingWidget {
                 },
             ),
         ]));
+        lines.push(Line::from(vec![
+            Span::styled("| ", rail_style),
+            Span::styled(hint.to_string(), Style::default().dim()),
+        ]));
         lines.push(Line::from(vec![Span::styled("|", rail_style)]));
     }
 
-    fn render_pending_workflow_step(
+    fn render_workflow_step(
         lines: &mut Vec<Line<'static>>,
         label: &str,
         hint: &str,
         value: &str,
+        step_state: WorkflowStepState,
     ) {
+        let rail_style = match step_state {
+            WorkflowStepState::Pending => Style::default().dim(),
+            WorkflowStepState::Active => Style::default().cyan().bold(),
+            WorkflowStepState::Completed => Style::default().green(),
+        };
+        let label_style = match step_state {
+            WorkflowStepState::Pending => Style::default().dim(),
+            WorkflowStepState::Active => Style::default().bold(),
+            WorkflowStepState::Completed => Style::default(),
+        };
         lines.push(Line::from(vec![
-            Span::styled("●  ", Style::default().dim()),
-            Span::styled(format!("{label}: "), Style::default().dim()),
-            Span::styled(hint.to_string(), Style::default().dim()),
+            Span::styled("● ", rail_style),
+            Span::raw(" "),
+            Span::styled(format!("{label}: "), label_style),
+            Span::styled(
+                value.to_string(),
+                match step_state {
+                    WorkflowStepState::Pending => Style::default().dim(),
+                    WorkflowStepState::Active => Style::default(),
+                    WorkflowStepState::Completed => Style::default().green(),
+                },
+            ),
         ]));
-        if !value.is_empty() {
+        if !hint.is_empty() {
             lines.push(Line::from(vec![
-                Span::styled("| ", Style::default().dim()),
-                Span::styled(value.to_string(), Style::default().dim()),
+                Span::styled("| ", rail_style),
+                Span::styled(hint.to_string(), Style::default().dim()),
             ]));
         }
-        lines.push(Line::from(vec![Span::styled("|", Style::default().dim())]));
+        lines.push(Line::from(vec![Span::styled("|", rail_style)]));
+    }
+
+    fn render_inline_popup_option(
+        lines: &mut Vec<Line<'static>>,
+        label: &str,
+        description: &str,
+        is_selected: bool,
+    ) {
+        let marker_style = if is_selected {
+            Style::default().cyan().bold()
+        } else {
+            Style::default().dim()
+        };
+        let label_style = if is_selected {
+            Style::default().bold()
+        } else {
+            Style::default()
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled("| ", Style::default().cyan().bold()),
+            Span::styled(if is_selected { ">" } else { " " }, marker_style),
+            Span::raw(" "),
+            Span::styled(label.to_string(), label_style),
+        ]));
+        if !description.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("| ", Style::default().cyan().bold()),
+                Span::styled("  ", Style::default().dim()),
+                Span::styled(description.to_string(), Style::default().dim()),
+            ]));
+        }
+    }
+
+    fn render_invocation_method_inline(
+        params: &InlineSetupRenderParams,
+        items: &[InvocationMethodItem],
+        selected_idx: usize,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        if area.height < 3 {
+            return;
+        }
+        let content_area = onboarding_content_area(area);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        Self::render_inline_setup_header(&mut lines, params.model);
+        Self::render_inline_setup_fields(&mut lines, params);
+        Self::render_workflow_step(
+            &mut lines,
+            "Invocation Method",
+            "Choose the API protocol.",
+            items
+                .get(selected_idx)
+                .map(|item| item.label.as_str())
+                .unwrap_or("[open popup]"),
+            WorkflowStepState::Active,
+        );
+        for (idx, item) in items.iter().enumerate() {
+            Self::render_inline_popup_option(
+                &mut lines,
+                &item.label,
+                &item.description,
+                idx == selected_idx,
+            );
+        }
+        if params.supports_reasoning {
+            Self::render_workflow_step(
+                &mut lines,
+                "Reason Effort",
+                "Choose the default reasoning effort for this model. It can be changed with /model.",
+                "[open popup]",
+                WorkflowStepState::Pending,
+            );
+        }
+        Self::render_workflow_step(
+            &mut lines,
+            "Validation Done",
+            "",
+            "",
+            WorkflowStepState::Pending,
+        );
+        Self::render_footer(&mut lines, "Enter select", "Esc back");
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(content_area, buf);
+    }
+
+    fn render_reasoning_effort_inline(
+        params: &InlineSetupRenderParams,
+        invocation_method: ProviderWireApi,
+        items: &[ReasoningEffortItem],
+        selected_idx: usize,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        if area.height < 3 {
+            return;
+        }
+        let content_area = onboarding_content_area(area);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        Self::render_inline_setup_header(&mut lines, params.model);
+        Self::render_inline_setup_fields(&mut lines, params);
+        Self::render_workflow_step(
+            &mut lines,
+            "Invocation Method",
+            "Choose the API protocol.",
+            &Self::invocation_method_label(invocation_method),
+            WorkflowStepState::Completed,
+        );
+        Self::render_workflow_step(
+            &mut lines,
+            "Reason Effort",
+            "Choose the default reasoning effort for this model. It can be changed with /model.",
+            items
+                .get(selected_idx)
+                .map(|item| item.label.as_str())
+                .unwrap_or("[open popup]"),
+            WorkflowStepState::Active,
+        );
+        for (idx, item) in items.iter().enumerate() {
+            Self::render_inline_popup_option(
+                &mut lines,
+                &item.label,
+                &item.description,
+                idx == selected_idx,
+            );
+        }
+        Self::render_workflow_step(
+            &mut lines,
+            "Validation Done",
+            "",
+            "",
+            WorkflowStepState::Pending,
+        );
+        Self::render_footer(&mut lines, "Enter select", "Esc back");
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .render(content_area, buf);
     }
 
     fn input_with_cursor(input: &str, cursor_pos: usize) -> String {
@@ -1802,8 +2092,22 @@ impl Renderable for OnboardingWidget {
                     28
                 }
             }
-            OnboardingState::InvocationMethod { items, .. } => items.len() as u16 * 2 + 6,
-            OnboardingState::ReasoningEffort { items, .. } => items.len() as u16 + 6,
+            OnboardingState::InvocationMethod { model, items, .. } => {
+                let base_height = if self.model_supports_reasoning(model) {
+                    31
+                } else {
+                    28
+                };
+                base_height + items.len() as u16 * 2
+            }
+            OnboardingState::ReasoningEffort { model, items, .. } => {
+                let base_height = if self.model_supports_reasoning(model) {
+                    31
+                } else {
+                    28
+                };
+                base_height + items.len() as u16 * 2
+            }
             OnboardingState::Validating { .. } => 10,
             OnboardingState::ValidationFailed { .. } => 12,
         }
@@ -1839,6 +2143,7 @@ impl Renderable for OnboardingWidget {
             OnboardingState::InlineSetup {
                 model,
                 provider_name,
+                provider_credential_id,
                 base_url,
                 api_key,
                 model_name,
@@ -1853,11 +2158,12 @@ impl Renderable for OnboardingWidget {
                         model,
                         supports_reasoning: self.model_supports_reasoning(model),
                         provider_name,
+                        provider_credential_id: provider_credential_id.as_deref(),
                         base_url,
                         api_key,
                         model_name,
                         display_name,
-                        active_field,
+                        active_field: Some(*active_field),
                         input,
                         cursor_pos: *cursor_pos,
                     },
@@ -1866,18 +2172,70 @@ impl Renderable for OnboardingWidget {
                 );
             }
             OnboardingState::InvocationMethod {
+                model,
+                provider_name,
+                provider_credential_id,
+                base_url,
+                api_key,
+                model_name,
+                display_name,
                 items,
                 selected_idx,
                 ..
             } => {
-                Self::render_invocation_method(items, *selected_idx, area, buf);
+                Self::render_invocation_method_inline(
+                    &InlineSetupRenderParams {
+                        model,
+                        supports_reasoning: self.model_supports_reasoning(model),
+                        provider_name,
+                        provider_credential_id: provider_credential_id.as_deref(),
+                        base_url,
+                        api_key,
+                        model_name,
+                        display_name,
+                        active_field: None,
+                        input: "",
+                        cursor_pos: 0,
+                    },
+                    items,
+                    *selected_idx,
+                    area,
+                    buf,
+                );
             }
             OnboardingState::ReasoningEffort {
+                model,
+                provider_name,
+                provider_credential_id,
+                base_url,
+                api_key,
+                model_name,
+                display_name,
+                invocation_method,
                 items,
                 selected_idx,
                 ..
             } => {
-                Self::render_reasoning_effort(items, *selected_idx, area, buf);
+                Self::render_reasoning_effort_inline(
+                    &InlineSetupRenderParams {
+                        model,
+                        supports_reasoning: self.model_supports_reasoning(model),
+                        provider_name,
+                        provider_credential_id: provider_credential_id.as_deref(),
+                        base_url,
+                        api_key,
+                        model_name,
+                        display_name,
+                        active_field: None,
+                        input: "",
+                        cursor_pos: 0,
+                    },
+                    *invocation_method,
+                    items,
+                    *selected_idx,
+                    area,
+                    buf,
+                );
             }
             OnboardingState::Validating {
                 model_slug,

@@ -3,6 +3,8 @@
 pub enum SlashCommand {
     Theme,
     Model,
+    Skills,
+    Mcp,
     Compact,
     Resume,
     New,
@@ -20,6 +22,8 @@ impl SlashCommand {
         match self {
             SlashCommand::Theme => "switch the UI theme",
             SlashCommand::Model => "choose the active model",
+            SlashCommand::Skills => "show available skills",
+            SlashCommand::Mcp => "show configured MCP servers",
             SlashCommand::Compact => "compact the current session context",
             SlashCommand::Resume => "resume a saved chat",
             SlashCommand::New => "start a new chat",
@@ -37,6 +41,8 @@ impl SlashCommand {
         match self {
             SlashCommand::Theme => "theme",
             SlashCommand::Model => "model",
+            SlashCommand::Skills => "skills",
+            SlashCommand::Mcp => "mcp",
             SlashCommand::Compact => "compact",
             SlashCommand::Resume => "resume",
             SlashCommand::New => "new",
@@ -75,6 +81,8 @@ impl std::str::FromStr for SlashCommand {
         match value {
             "theme" => Ok(Self::Theme),
             "model" => Ok(Self::Model),
+            "skills" => Ok(Self::Skills),
+            "mcp" => Ok(Self::Mcp),
             "compact" => Ok(Self::Compact),
             "resume" => Ok(Self::Resume),
             "new" => Ok(Self::New),
@@ -94,6 +102,8 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
     vec![
         ("theme", SlashCommand::Theme),
         ("model", SlashCommand::Model),
+        ("skills", SlashCommand::Skills),
+        ("mcp", SlashCommand::Mcp),
         ("compact", SlashCommand::Compact),
         ("resume", SlashCommand::Resume),
         ("new", SlashCommand::New),
@@ -105,4 +115,21 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
         ("btw", SlashCommand::Btw),
         ("exit", SlashCommand::Exit),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn mcp_slash_command_parses_and_is_listed() {
+        assert_eq!("mcp".parse::<SlashCommand>(), Ok(SlashCommand::Mcp));
+        assert!(
+            built_in_slash_commands()
+                .iter()
+                .any(|(name, command)| *name == "mcp" && *command == SlashCommand::Mcp)
+        );
+    }
 }

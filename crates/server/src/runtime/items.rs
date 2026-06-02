@@ -319,7 +319,9 @@ pub(crate) fn render_input_items(input: &[crate::InputItem]) -> Option<String> {
         .iter()
         .map(|item| match item {
             crate::InputItem::Text { text } => text.trim().to_string(),
-            crate::InputItem::Skill { id } => format!("[skill:{id}]"),
+            crate::InputItem::Skill { name, path } => {
+                format!("[skill:{name} @ {}]", path.display())
+            }
             crate::InputItem::LocalImage { path } => format!("[image:{}]", path.display()),
             crate::InputItem::Mention { path, name } => {
                 format!("[mention:{}]", name.as_deref().unwrap_or(path.as_str()))

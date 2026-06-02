@@ -5,7 +5,8 @@ mod config_paths;
 pub mod elapsed;
 pub mod fuzzy_match;
 pub mod git_op;
-mod home_dir;
+pub mod home_dir;
+pub mod pty;
 pub mod shell_command;
 pub mod terminal_detection;
 

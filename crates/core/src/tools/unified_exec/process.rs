@@ -1,21 +1,23 @@
-use std::io::Write;
+use std::collections::HashMap;
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Instant;
 
-use portable_pty::{CommandBuilder, PtySize};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use devo_utils::pty::SpawnedProcess;
+use devo_utils::pty::TerminalSize;
+use devo_utils::pty::combine_output_receivers;
+use devo_utils::pty::spawn_pipe_process_no_stdin;
+use devo_utils::pty::spawn_pty_process;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 
 use super::ProcessOutput;
 use super::buffer::HeadTailBuffer;
 
-const PTY_READ_BUF: usize = 4096;
 const PTY_ROWS: u16 = 24;
 const PTY_COLS: u16 = 120;
 const PTY_TRAILING_OUTPUT_GRACE_MS: u64 = 150;
@@ -33,6 +35,9 @@ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
     ("GH_PAGER", "cat"),
     ("CODEX_CI", "1"),
 ];
+
+/// Max time (in seconds) a PTY process can live without any write_stdin interaction.
+const IDLE_TIMEOUT_SECS: u64 = 1800;
 
 #[derive(Debug, PartialEq, Eq)]
 struct ShellSpec {
@@ -113,41 +118,20 @@ fn command_for_shell(cmd: &str, shell_spec: &ShellSpec) -> String {
     }
 }
 
-/// Max time (in seconds) a process can live without any write_stdin interaction.
-const IDLE_TIMEOUT_SECS: u64 = 1800;
-
-fn unified_exec_pty_system() -> Box<dyn portable_pty::PtySystem + Send> {
-    #[cfg(windows)]
-    {
-        Box::new(super::windows_pty::ConPtySystem)
-    }
-
-    #[cfg(not(windows))]
-    {
-        portable_pty::native_pty_system()
-    }
-}
-
-struct PtyKeepAlive {
-    _master: Box<dyn portable_pty::MasterPty + Send>,
-    #[cfg(windows)]
-    _slave: Box<dyn portable_pty::SlavePty + Send>,
-}
-
 pub struct UnifiedExecProcess {
-    exit_code: Arc<std::sync::atomic::AtomicI32>,
+    session: Arc<devo_utils::pty::ProcessHandle>,
+    exit_code: Arc<AtomicI32>,
     terminated_flag: Arc<AtomicBool>,
-    stdin_writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    stdin_writer: Option<mpsc::Sender<Vec<u8>>>,
     output_tx: broadcast::Sender<Vec<u8>>,
     output_buffer: Arc<AsyncMutex<HeadTailBuffer>>,
     last_stdin_interaction: Arc<Mutex<Instant>>,
     process_id: i32,
     tty: bool,
-    _pty_keep_alive: Mutex<Option<PtyKeepAlive>>,
 }
 
 impl UnifiedExecProcess {
-    pub fn spawn(
+    pub async fn spawn(
         process_id: i32,
         cmd: &str,
         cwd: &Path,
@@ -155,279 +139,117 @@ impl UnifiedExecProcess {
         login: bool,
         tty: bool,
     ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
-        if tty {
-            Self::spawn_pty(process_id, cmd, cwd, shell, login)
-        } else {
-            Self::spawn_piped(process_id, cmd, cwd, shell, login)
-        }
-    }
-
-    fn spawn_pty(
-        process_id: i32,
-        cmd: &str,
-        cwd: &Path,
-        shell: Option<&str>,
-        login: bool,
-    ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
-        let (output_tx, _output_rx) = broadcast::channel(256);
-        let output_buffer = Arc::new(AsyncMutex::new(HeadTailBuffer::new()));
-        let terminated_flag = Arc::new(AtomicBool::new(false));
-        let terminated_flag_clone = Arc::clone(&terminated_flag);
-        let last_stdin_interaction = Arc::new(Mutex::new(Instant::now()));
-        let last_stdin_interaction_clone = Arc::clone(&last_stdin_interaction);
-
-        let pty_system = unified_exec_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: PTY_ROWS,
-                cols: PTY_COLS,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| format!("failed to open PTY: {e}"))?;
-
         let shell_spec = resolve_shell(shell, login);
-        let mut builder = CommandBuilder::new(&shell_spec.program);
-        builder.args(&shell_spec.args);
-        builder.arg(command_for_shell(cmd, &shell_spec));
-        builder.cwd(cwd);
-        for (key, value) in UNIFIED_EXEC_ENV {
-            builder.env(key, value);
-        }
-        if cfg!(windows) {
-            builder.env("PYTHONUTF8", "1");
-        }
+        let command = command_for_shell(cmd, &shell_spec);
+        let mut args = shell_spec.args.clone();
+        args.push(command);
+        let env = unified_exec_env();
 
-        let mut child = pair
-            .slave
-            .spawn_command(builder)
-            .map_err(|e| format!("failed to spawn PTY command: {e}"))?;
-
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| format!("failed to clone PTY reader: {e}"))?;
-
-        let writer: Box<dyn Write + Send> = pair
-            .master
-            .take_writer()
-            .map_err(|e| format!("failed to take PTY writer: {e}"))?;
-        let keep_alive = PtyKeepAlive {
-            _master: pair.master,
-            #[cfg(windows)]
-            _slave: pair.slave,
+        let spawned = if tty {
+            spawn_pty_process(
+                &shell_spec.program,
+                &args,
+                cwd,
+                &env,
+                /*arg0*/ &None,
+                TerminalSize {
+                    rows: PTY_ROWS,
+                    cols: PTY_COLS,
+                },
+            )
+            .await
+            .map_err(|error| format!("failed to spawn PTY command: {error}"))?
+        } else {
+            spawn_pipe_process_no_stdin(&shell_spec.program, &args, cwd, &env, /*arg0*/ &None)
+                .await
+                .map_err(|error| format!("failed to spawn command: {error}"))?
         };
 
-        let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        Ok(Self::from_spawned_process(process_id, tty, spawned))
+    }
 
-        // Reader thread: blocking PTY read -> tokio::mpsc, with panic protection
-        std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut buf = [0u8; PTY_READ_BUF];
-                loop {
-                    match std::io::Read::read(&mut reader, &mut buf) {
-                        Ok(0) => break,
-                        Ok(size) => {
-                            if tokio_tx.send(buf[..size].to_vec()).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            }));
-            if result.is_err() {
-                // Reader thread panicked - log and continue (process will be detected as exited)
-            }
-        });
+    fn from_spawned_process(
+        process_id: i32,
+        tty: bool,
+        spawned: SpawnedProcess,
+    ) -> (Self, broadcast::Receiver<Vec<u8>>) {
+        let SpawnedProcess {
+            session,
+            stdout_rx,
+            stderr_rx,
+            exit_rx,
+        } = spawned;
+        let session = Arc::new(session);
+        let stdin_writer = tty.then(|| session.writer_sender());
+        let output_buffer = Arc::new(AsyncMutex::new(HeadTailBuffer::new()));
+        let (output_tx, proc_output_rx) = broadcast::channel(256);
+        let combined_rx = combine_output_receivers(stdout_rx, stderr_rx);
+        forward_output(combined_rx, output_tx.clone(), Arc::clone(&output_buffer));
 
-        let exit_code = Arc::new(std::sync::atomic::AtomicI32::new(-1));
-        let exit_code_clone = Arc::clone(&exit_code);
-        let output_tx_clone = output_tx.clone();
-        let output_buffer_clone = Arc::clone(&output_buffer);
+        let exit_code = Arc::new(AtomicI32::new(-1));
+        let terminated_flag = Arc::new(AtomicBool::new(false));
+        let last_stdin_interaction = Arc::new(Mutex::new(Instant::now()));
 
-        let idle_timeout = Duration::from_secs(IDLE_TIMEOUT_SECS);
-        // Background task: forward tokio::mpsc -> broadcast, handle shutdown/exit/idle timeout
-        tokio::spawn(async move {
-            let (wait_tx, mut wait_rx) = tokio::sync::oneshot::channel();
-            let mut child_killer = child.clone_killer();
-            let _wait_thread = std::thread::spawn(move || {
-                let code = child.wait().ok().map(|status| status.exit_code() as i32);
-                let _ = wait_tx.send(code);
-            });
+        monitor_exit(
+            exit_rx,
+            Arc::clone(&exit_code),
+            Arc::clone(&terminated_flag),
+        );
+        if tty {
+            monitor_idle_timeout(
+                Arc::clone(&session),
+                Arc::clone(&terminated_flag),
+                Arc::clone(&last_stdin_interaction),
+            );
+        }
 
-            loop {
-                tokio::select! {
-                    _ = async {
-                        while !terminated_flag_clone.load(Ordering::SeqCst) {
-                            let idle_for = last_stdin_interaction_clone
-                                .lock()
-                                .map(|last| last.elapsed())
-                                .unwrap_or(idle_timeout);
-                            if idle_for >= idle_timeout {
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    } => {
-                        break;
-                    }
-                    Some(bytes) = tokio_rx.recv() => {
-                        output_buffer_clone.lock().await.push(&bytes);
-                        let _ = output_tx_clone.send(bytes);
-                    }
-                    result = &mut wait_rx => {
-                        let code = result.ok().flatten().unwrap_or(-1);
-                        sleep(Duration::from_millis(PTY_TRAILING_OUTPUT_GRACE_MS)).await;
-                        while let Ok(bytes) = tokio_rx.try_recv() {
-                            output_buffer_clone.lock().await.push(&bytes);
-                            let _ = output_tx_clone.send(bytes);
-                        }
-                        exit_code_clone.store(code, std::sync::atomic::Ordering::SeqCst);
-                        break;
-                    }
-                    else => break,
-                }
-            }
-
-            if exit_code_clone.load(std::sync::atomic::Ordering::SeqCst) < 0 {
-                let _ = child_killer.kill();
-            }
-            // Mark as no longer running (both normal exit and forced kill)
-            terminated_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
-
-        let proc_output_rx = output_tx.subscribe();
-
-        Ok((
+        (
             UnifiedExecProcess {
+                session,
                 exit_code,
                 terminated_flag,
-                stdin_writer: Arc::new(Mutex::new(Some(writer))),
+                stdin_writer,
                 output_tx,
                 output_buffer,
                 last_stdin_interaction,
                 process_id,
-                tty: true,
-                _pty_keep_alive: Mutex::new(Some(keep_alive)),
+                tty,
             },
             proc_output_rx,
-        ))
-    }
-
-    fn spawn_piped(
-        process_id: i32,
-        cmd: &str,
-        cwd: &Path,
-        shell: Option<&str>,
-        login: bool,
-    ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
-        let (output_tx, _output_rx) = broadcast::channel(256);
-        let output_buffer = Arc::new(AsyncMutex::new(HeadTailBuffer::new()));
-        let terminated_flag = Arc::new(AtomicBool::new(false));
-        let exit_code = Arc::new(std::sync::atomic::AtomicI32::new(-1));
-
-        let shell_spec = resolve_shell(shell, login);
-        let mut command = tokio::process::Command::new(&shell_spec.program);
-        command.args(&shell_spec.args);
-        command.arg(command_for_shell(cmd, &shell_spec));
-        command.current_dir(cwd);
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
-        for (key, value) in UNIFIED_EXEC_ENV {
-            command.env(key, value);
-        }
-        if cfg!(windows) {
-            command.env("PYTHONUTF8", "1");
-        }
-
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("failed to spawn command: {e}"))?;
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        if let Some(stdout) = stdout {
-            spawn_pipe_reader(stdout, output_tx.clone(), Arc::clone(&output_buffer));
-        }
-        if let Some(stderr) = stderr {
-            spawn_pipe_reader(stderr, output_tx.clone(), Arc::clone(&output_buffer));
-        }
-
-        let terminated_flag_clone = Arc::clone(&terminated_flag);
-        let exit_code_clone = Arc::clone(&exit_code);
-        tokio::spawn(async move {
-            let code = tokio::select! {
-                status = child.wait() => status.ok().and_then(|status| status.code()),
-                _ = async {
-                    while !terminated_flag_clone.load(Ordering::SeqCst) {
-                        sleep(Duration::from_millis(100)).await;
-                    }
-                } => {
-                    let _ = child.kill().await;
-                    child.wait().await.ok().and_then(|status| status.code())
-                }
-            };
-
-            exit_code_clone.store(code.unwrap_or(-1), Ordering::SeqCst);
-            terminated_flag_clone.store(true, Ordering::SeqCst);
-        });
-
-        let proc_output_rx = output_tx.subscribe();
-
-        Ok((
-            UnifiedExecProcess {
-                exit_code,
-                terminated_flag,
-                stdin_writer: Arc::new(Mutex::new(None)),
-                output_tx,
-                output_buffer,
-                last_stdin_interaction: Arc::new(Mutex::new(Instant::now())),
-                process_id,
-                tty: false,
-                _pty_keep_alive: Mutex::new(None),
-            },
-            proc_output_rx,
-        ))
+        )
     }
 
     pub fn write_stdin(&self, chars: &str) -> Result<(), String> {
-        let bytes = stdin_bytes_for_pty(chars);
-        let mut guard = self
-            .stdin_writer
+        let Some(writer) = self.stdin_writer.as_ref() else {
+            return Err("stdin is closed for this session".to_string());
+        };
+
+        writer
+            .try_send(stdin_bytes_for_pty(chars))
+            .map_err(|error| format!("failed to write to stdin: {error}"))?;
+        *self
+            .last_stdin_interaction
             .lock()
-            .map_err(|e| format!("lock error: {e}"))?;
-        if let Some(writer) = guard.as_mut() {
-            writer
-                .write_all(&bytes)
-                .map_err(|e| format!("failed to write to stdin: {e}"))?;
-            writer
-                .flush()
-                .map_err(|e| format!("failed to flush stdin: {e}"))?;
-            *self
-                .last_stdin_interaction
-                .lock()
-                .map_err(|e| format!("lock error: {e}"))? = Instant::now();
-            Ok(())
-        } else {
-            Err("stdin is closed for this session".to_string())
-        }
+            .map_err(|error| format!("lock error: {error}"))? = Instant::now();
+        Ok(())
     }
 
     pub fn terminate(&self) {
         self.terminated_flag.store(true, Ordering::SeqCst);
+        self.session.request_terminate();
     }
 
     pub fn exit_code(&self) -> Option<i32> {
-        let code = self.exit_code.load(std::sync::atomic::Ordering::SeqCst);
-        if code >= 0 { Some(code) } else { None }
+        let code = self.exit_code.load(Ordering::SeqCst);
+        if code >= 0 {
+            Some(code)
+        } else {
+            self.session.exit_code().filter(|code| *code >= 0)
+        }
     }
 
     pub fn is_running(&self) -> bool {
-        !self
-            .terminated_flag
-            .load(std::sync::atomic::Ordering::SeqCst)
+        !self.terminated_flag.load(Ordering::SeqCst)
     }
 
     pub fn process_id(&self) -> i32 {
@@ -441,6 +263,76 @@ impl UnifiedExecProcess {
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
         self.output_tx.subscribe()
     }
+}
+
+fn unified_exec_env() -> HashMap<String, String> {
+    let mut env = std::env::vars().collect::<HashMap<_, _>>();
+    for (key, value) in UNIFIED_EXEC_ENV {
+        env.insert(key.to_string(), value.to_string());
+    }
+    if cfg!(windows) {
+        env.insert("PYTHONUTF8".to_string(), "1".to_string());
+    }
+    env
+}
+
+fn forward_output(
+    mut output_rx: broadcast::Receiver<Vec<u8>>,
+    output_tx: broadcast::Sender<Vec<u8>>,
+    output_buffer: Arc<AsyncMutex<HeadTailBuffer>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match output_rx.recv().await {
+                Ok(bytes) => {
+                    output_buffer.lock().await.push(&bytes);
+                    let _ = output_tx.send(bytes);
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+fn monitor_exit(
+    mut exit_rx: tokio::sync::oneshot::Receiver<i32>,
+    exit_code: Arc<AtomicI32>,
+    terminated_flag: Arc<AtomicBool>,
+) {
+    tokio::spawn(async move {
+        let code = (&mut exit_rx).await.unwrap_or(-1);
+        sleep(Duration::from_millis(PTY_TRAILING_OUTPUT_GRACE_MS)).await;
+        exit_code.store(code, Ordering::SeqCst);
+        terminated_flag.store(true, Ordering::SeqCst);
+    });
+}
+
+fn monitor_idle_timeout(
+    session: Arc<devo_utils::pty::ProcessHandle>,
+    terminated_flag: Arc<AtomicBool>,
+    last_stdin_interaction: Arc<Mutex<Instant>>,
+) {
+    tokio::spawn(async move {
+        let idle_timeout = Duration::from_secs(IDLE_TIMEOUT_SECS);
+        loop {
+            if terminated_flag.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let idle_for = last_stdin_interaction
+                .lock()
+                .map(|last| last.elapsed())
+                .unwrap_or(idle_timeout);
+            if idle_for >= idle_timeout {
+                session.request_terminate();
+                terminated_flag.store(true, Ordering::SeqCst);
+                break;
+            }
+
+            sleep(Duration::from_millis(100)).await;
+        }
+    });
 }
 
 fn stdin_bytes_for_pty(chars: &str) -> Vec<u8> {
@@ -596,29 +488,6 @@ fn ceil_char_boundary(value: &str, mut index: usize) -> usize {
     index
 }
 
-fn spawn_pipe_reader<R>(
-    mut stream: R,
-    output_tx: broadcast::Sender<Vec<u8>>,
-    output_buffer: Arc<AsyncMutex<HeadTailBuffer>>,
-) where
-    R: AsyncRead + Unpin + Send + 'static,
-{
-    tokio::spawn(async move {
-        let mut buf = [0u8; PTY_READ_BUF];
-        loop {
-            match stream.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(size) => {
-                    let bytes = buf[..size].to_vec();
-                    output_buffer.lock().await.push(&bytes);
-                    let _ = output_tx.send(bytes);
-                }
-                Err(_) => break,
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,9 +505,9 @@ mod tests {
             /*login*/ false,
             /*tty*/ false,
         )
+        .await
         .expect("spawn should succeed");
 
-        // Wait for process to finish
         let mut waited = 0u64;
         while proc.is_running() && waited < 3000 {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -646,8 +515,6 @@ mod tests {
         }
 
         let _output = collect_output(&mut rx, &proc, 1000, 1000).await;
-        // Process should have exited (echo is a short command)
-        // On all platforms, echo finishes quickly
         if !proc.is_running() {
             assert!(
                 proc.exit_code().is_some(),
@@ -667,6 +534,7 @@ mod tests {
             /*login*/ false,
             /*tty*/ false,
         )
+        .await
         .expect("spawn should succeed");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -687,6 +555,7 @@ mod tests {
             /*login*/ false,
             /*tty*/ false,
         )
+        .await
         .expect("spawn should succeed");
 
         assert_eq!(
@@ -706,6 +575,7 @@ mod tests {
             /*login*/ false,
             /*tty*/ false,
         )
+        .await
         .expect("spawn should succeed");
 
         let output = collect_output(&mut rx, &proc, 1000, 1000).await;
@@ -764,7 +634,7 @@ mod tests {
             resolve_shell_with_default(
                 /*shell_override*/ Some("pwsh"),
                 /*login*/ true,
-                "/bin/zsh"
+                "/bin/zsh",
             ),
             ShellSpec {
                 program: "pwsh".to_string(),
@@ -798,7 +668,7 @@ mod tests {
         assert_eq!(
             command_for_shell(
                 &format!("{POWERSHELL_UTF8_OUTPUT_PREFIX}Write-Output hi"),
-                &shell_spec
+                &shell_spec,
             ),
             format!("{POWERSHELL_UTF8_OUTPUT_PREFIX}Write-Output hi")
         );
@@ -823,7 +693,6 @@ mod tests {
 
     #[tokio::test]
     async fn process_terminate_works() {
-        // Only run on platforms where we have reliable PTY support
         if cfg!(target_os = "linux") {
             let (proc, _rx) = UnifiedExecProcess::spawn(
                 2,
@@ -833,11 +702,11 @@ mod tests {
                 /*login*/ false,
                 /*tty*/ true,
             )
+            .await
             .expect("spawn should succeed");
             assert!(proc.is_running());
 
             proc.terminate();
-            // Poll up to 5s for termination (CI can be slow).
             let mut waited = 0u64;
             while proc.is_running() && waited < 5000 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -850,7 +719,6 @@ mod tests {
 
     #[tokio::test]
     async fn process_write_stdin_before_exit() {
-        // Only run on Unix where cat + PTY stdin works reliably
         if cfg!(target_os = "linux") {
             let (proc, _rx) = UnifiedExecProcess::spawn(
                 3,
@@ -860,6 +728,7 @@ mod tests {
                 /*login*/ false,
                 /*tty*/ true,
             )
+            .await
             .expect("spawn should succeed");
 
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -870,7 +739,7 @@ mod tests {
                 .expect("last stdin interaction lock should not be poisoned") =
                 Instant::now() - Duration::from_secs(60);
             let result = proc.write_stdin("test data\n");
-            assert!(result.is_ok(), "write_stdin failed: {:?}", result);
+            assert!(result.is_ok(), "write_stdin failed: {result:?}");
             let idle_for = proc
                 .last_stdin_interaction
                 .lock()
@@ -891,6 +760,7 @@ mod tests {
             /*login*/ false,
             /*tty*/ true,
         )
+        .await
         .expect("spawn should succeed");
 
         let output = collect_output(&mut rx, &proc, 5_000, 1_000).await;
@@ -910,6 +780,7 @@ mod tests {
             /*login*/ false,
             /*tty*/ true,
         )
+        .await
         .expect("spawn should succeed");
 
         let initial = collect_output(&mut rx, &proc, 2_000, 1_000).await;

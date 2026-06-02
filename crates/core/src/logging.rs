@@ -72,7 +72,7 @@ impl LoggingBootstrap {
 
         let filename_prefix = format!("{}-{}", self.config.file.filename_prefix, self.process_name);
         let file_appender = RollingFileAppenderBuilder::new()
-            .rotation(self.config.file.rotation.into())
+            .rotation(rotation_from_config(self.config.file.rotation))
             .filename_prefix(filename_prefix.as_str())
             .filename_suffix("log")
             .max_log_files(self.config.file.max_files)
@@ -185,15 +185,13 @@ fn install_panic_hook() {
     });
 }
 
-impl From<LogRotation> for Rotation {
-    /// Converts the configuration-facing rotation enum into the appender rotation type.
-    fn from(value: LogRotation) -> Self {
-        match value {
-            LogRotation::Never => Rotation::NEVER,
-            LogRotation::Minutely => Rotation::MINUTELY,
-            LogRotation::Hourly => Rotation::HOURLY,
-            LogRotation::Daily => Rotation::DAILY,
-        }
+/// Converts the configuration-facing rotation enum into the appender rotation type.
+fn rotation_from_config(value: LogRotation) -> Rotation {
+    match value {
+        LogRotation::Never => Rotation::NEVER,
+        LogRotation::Minutely => Rotation::MINUTELY,
+        LogRotation::Hourly => Rotation::HOURLY,
+        LogRotation::Daily => Rotation::DAILY,
     }
 }
 
@@ -210,6 +208,7 @@ mod tests {
 
     use super::file_level;
     use super::resolve_log_directory;
+    use super::rotation_from_config;
 
     #[test]
     /// Verifies that recognized log levels are parsed into tracing level filters.
@@ -238,7 +237,7 @@ mod tests {
             LogRotation::Daily,
         ]
         .into_iter()
-        .map(Rotation::from)
+        .map(rotation_from_config)
         .collect();
 
         assert_eq!(

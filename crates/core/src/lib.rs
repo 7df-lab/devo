@@ -1,4 +1,3 @@
-mod config;
 #[allow(dead_code)]
 mod config_resolution;
 mod context;
@@ -13,6 +12,7 @@ pub mod history;
 mod instruction_discovery;
 mod jsonl_store;
 mod logging;
+pub mod mcp;
 pub mod memory;
 mod message_edit;
 mod model_binding;
@@ -50,12 +50,12 @@ pub(crate) use tools::tool_summary;
 pub(crate) use tools::unified_exec;
 
 #[allow(ambiguous_glob_reexports)]
-pub use config::*;
-#[allow(ambiguous_glob_reexports)]
 pub use context::*;
 #[allow(ambiguous_glob_reexports)]
 pub use context_pipeline::*;
 pub use conversation::*;
+#[allow(ambiguous_glob_reexports)]
+pub use devo_config::*;
 #[allow(ambiguous_glob_reexports)]
 pub use devo_protocol::*;
 pub use devo_protocol::{ContentBlock, Message, Role};
@@ -69,6 +69,7 @@ pub use history::*;
 pub use instruction_discovery::*;
 pub use jsonl_store::*;
 pub use logging::*;
+pub use mcp::*;
 pub use memory::*;
 pub use message_edit::*;
 #[allow(ambiguous_glob_reexports)]
@@ -82,6 +83,9 @@ pub use replay::*;
 pub use response_item::*;
 pub use session::*;
 pub use session_store::*;
+pub use skills::SkillRecord as CoreSkillRecord;
+pub use skills::SkillScope as CoreSkillScope;
+pub use skills::SkillSource as CoreSkillSource;
 pub use skills::*;
 pub use tool_prompt::*;
 pub use update_check::*;

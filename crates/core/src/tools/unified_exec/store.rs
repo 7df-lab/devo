@@ -211,7 +211,7 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
 
-    fn spawn_echo() -> UnifiedExecProcess {
+    async fn spawn_echo() -> UnifiedExecProcess {
         let (proc, _rx) = UnifiedExecProcess::spawn(
             1,
             "echo test",
@@ -220,6 +220,7 @@ mod tests {
             /*login*/ false,
             /*tty*/ false,
         )
+        .await
         .expect("spawn should succeed");
         proc
     }
@@ -227,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn store_allocate_and_get() {
         let store = ProcessStore::new();
-        let proc = spawn_echo();
+        let proc = spawn_echo().await;
         let id = store.allocate(Arc::new(proc)).await;
         assert!(store.get(id).await.is_some());
         assert!(store.get(9999).await.is_none());
@@ -245,6 +246,7 @@ mod tests {
             /*login*/ false,
             /*tty*/ false,
         )
+        .await
         .expect("spawn should succeed");
 
         store.insert_reserved(id, Arc::new(proc)).await;
@@ -256,7 +258,7 @@ mod tests {
     #[tokio::test]
     async fn store_remove_terminates() {
         let store = ProcessStore::new();
-        let proc = spawn_echo();
+        let proc = spawn_echo().await;
         let id = store.allocate(Arc::new(proc)).await;
         store.remove(id).await;
         assert!(store.get(id).await.is_none());
@@ -266,7 +268,7 @@ mod tests {
     async fn store_terminate_all_drains_processes_and_reservations() {
         let store = ProcessStore::new();
         let reserved_id = store.reserve_process_id().await.expect("reserve id");
-        let proc = Arc::new(spawn_echo());
+        let proc = Arc::new(spawn_echo().await);
         let id = store.allocate(Arc::clone(&proc)).await;
 
         store.terminate_all().await;
@@ -283,11 +285,11 @@ mod tests {
         let store = ProcessStore::new();
         assert_eq!(store.len().await, 0);
 
-        let proc = spawn_echo();
+        let proc = spawn_echo().await;
         store.allocate(Arc::new(proc)).await;
         assert_eq!(store.len().await, 1);
 
-        let proc = spawn_echo();
+        let proc = spawn_echo().await;
         store.allocate(Arc::new(proc)).await;
         assert_eq!(store.len().await, 2);
     }
@@ -306,7 +308,7 @@ mod tests {
         for _i in 0..10 {
             let s = Arc::clone(&store);
             handles.push(tokio::spawn(async move {
-                let proc = spawn_echo();
+                let proc = spawn_echo().await;
                 let id = s.allocate(Arc::new(proc)).await;
                 assert!(s.get(id).await.is_some());
                 id
@@ -332,7 +334,7 @@ mod tests {
     async fn store_prune_exited_removes_nothing_for_running() {
         // This test is best-effort since processes might exit quickly
         let store = ProcessStore::new();
-        let proc = spawn_echo();
+        let proc = spawn_echo().await;
         let _id = store.allocate(Arc::new(proc)).await;
 
         // Don't prune immediately — allow process to potentially still be running

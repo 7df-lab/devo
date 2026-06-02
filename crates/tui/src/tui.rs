@@ -98,6 +98,23 @@ pub(crate) const TARGET_FRAME_INTERVAL: Duration =
 /// A type alias for the terminal type used in this application
 pub type Terminal = CustomTerminal<CrosstermBackend<Stdout>>;
 
+fn apply_inline_viewport_area_change<B>(
+    terminal: &mut CustomTerminal<B>,
+    area: ratatui::layout::Rect,
+) -> Result<()>
+where
+    B: Backend + std::io::Write,
+{
+    let previous_area = terminal.viewport_area;
+    if previous_area != area && !previous_area.is_empty() {
+        terminal.clear_screen_area(previous_area)?;
+    }
+    terminal.set_viewport_area(area);
+    terminal.clear()?;
+    terminal.invalidate_viewport();
+    Ok(())
+}
+
 fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
@@ -590,9 +607,7 @@ impl Tui {
             area.y = size.height - area.height;
         }
         if area != terminal.viewport_area {
-            // TODO(nornagon): probably this could be collapsed with the clear + set_viewport_area above.
-            terminal.clear()?;
-            terminal.set_viewport_area(area);
+            apply_inline_viewport_area_change(terminal, area)?;
         }
 
         Ok(needs_full_repaint)
@@ -686,13 +701,7 @@ impl Tui {
 
             let terminal = &mut self.terminal;
             if let Some(new_area) = pending_viewport_area.take() {
-                let previous_area = terminal.viewport_area;
-                if previous_area != new_area {
-                    terminal.clear_screen_area(previous_area)?;
-                }
-                terminal.set_viewport_area(new_area);
-                terminal.clear()?;
-                terminal.invalidate_viewport();
+                apply_inline_viewport_area_change(terminal, new_area)?;
             }
 
             if self.needs_full_repaint.swap(false, Ordering::Relaxed) {
@@ -734,12 +743,15 @@ impl Tui {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use crossterm::event::KeyboardEnhancementFlags;
     use pretty_assertions::assert_eq;
     use ratatui::layout::Rect;
     use ratatui::text::Line;
 
     use super::Tui;
+    use super::apply_inline_viewport_area_change;
     use super::keyboard_enhancement_flags;
     use crate::custom_terminal::Terminal as CustomTerminal;
     use crate::history_cell::ScrollbackLine;
@@ -753,6 +765,63 @@ mod tests {
         assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
         assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
         assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+    }
+
+    #[test]
+    fn apply_inline_viewport_area_change_clears_from_new_viewport_when_old_area_is_empty() {
+        let width: u16 = 24;
+        let height: u16 = 6;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
+        write!(
+            terminal.backend_mut(),
+            "shell line\r\nstale viewport\r\nmore stale"
+        )
+        .expect("prefill terminal");
+
+        apply_inline_viewport_area_change(&mut terminal, Rect::new(0, 1, width, height - 1))
+            .expect("apply viewport change");
+
+        let rows_after: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+        assert!(
+            rows_after[0].contains("shell line"),
+            "expected content above viewport to remain visible, rows: {rows_after:?}"
+        );
+        assert!(
+            rows_after.iter().skip(1).all(|row| !row.contains("stale")),
+            "expected stale cells in new viewport to be cleared, rows: {rows_after:?}"
+        );
+    }
+
+    #[test]
+    fn apply_inline_viewport_area_change_clears_previous_viewport_rows() {
+        let width: u16 = 24;
+        let height: u16 = 6;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
+        write!(
+            terminal.backend_mut(),
+            "history\r\nkeep\r\nold viewport\r\nold tail\r\nnew stale"
+        )
+        .expect("prefill terminal");
+        terminal.set_viewport_area(Rect::new(0, 2, width, 2));
+
+        apply_inline_viewport_area_change(&mut terminal, Rect::new(0, 3, width, 2))
+            .expect("apply viewport change");
+
+        let rows_after: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+        assert!(
+            rows_after[0].contains("history") && rows_after[1].contains("keep"),
+            "expected content above previous viewport to remain visible, rows: {rows_after:?}"
+        );
+        assert!(
+            rows_after
+                .iter()
+                .skip(2)
+                .all(|row| !row.contains("old") && !row.contains("stale")),
+            "expected previous and new viewport rows to be cleared, rows: {rows_after:?}"
+        );
+        assert_eq!(Rect::new(0, 3, width, 2), terminal.viewport_area);
     }
 
     #[test]

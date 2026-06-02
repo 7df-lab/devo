@@ -177,7 +177,7 @@ pub fn assemble_deferred_tool_prompt(
     let mut deferred = Vec::new();
 
     for tool in all_tools {
-        match resolve_policy(&tool.name, config) {
+        match resolve_tool_policy(&tool.name, config) {
             PromptLoadingPolicy::Preloaded => {
                 core.push(tool.name.clone());
                 exposed.push(tool.clone());
@@ -223,7 +223,7 @@ pub fn assemble_deferred_tool_prompt(
             exposed_tool_count: all_tools
                 .iter()
                 .filter(|tool| {
-                    let policy = resolve_policy(&tool.name, config);
+                    let policy = resolve_tool_policy(&tool.name, config);
                     policy == PromptLoadingPolicy::Preloaded
                         || (policy == PromptLoadingPolicy::Deferred && loaded.contains(&tool.name))
                 })
@@ -235,9 +235,10 @@ pub fn assemble_deferred_tool_prompt(
 }
 
 pub fn execute_tool_search(
+    session_id: &str,
     query: &str,
     all_tools: &[ToolDefinition],
-    _loaded: &mut LoadedDeferredTools,
+    loaded: &mut LoadedDeferredTools,
     config: &DeferredLoadingConfig,
 ) -> Result<ToolSearchResult, String> {
     let Some(selection) = query
@@ -268,16 +269,15 @@ pub fn execute_tool_search(
             continue;
         }
 
-        match resolve_policy(&canonical_name, config) {
+        match resolve_tool_policy(&canonical_name, config) {
             PromptLoadingPolicy::Preloaded => result.already_available.push(canonical_name),
             PromptLoadingPolicy::Deferred => {
-                // TODO: Should solve the session id dependancy, should add session id at tool context.
-                // if loaded.is_loaded(session_id, &canonical_name) {
-                //     result.already_loaded.push(canonical_name);
-                // } else {
-                //     loaded.mark_loaded(session_id, &canonical_name);
-                //     result.loaded.push(canonical_name);
-                // }
+                if loaded.is_loaded(session_id, &canonical_name) {
+                    result.already_loaded.push(canonical_name);
+                } else {
+                    loaded.mark_loaded(session_id, &canonical_name);
+                    result.loaded.push(canonical_name);
+                }
             }
             PromptLoadingPolicy::Hidden => result.not_found.push(requested_name.to_string()),
         }
@@ -291,10 +291,10 @@ pub fn execute_tool_search(
 }
 
 pub fn resolve_spec_policy(spec: &ToolSpec, config: &DeferredLoadingConfig) -> PromptLoadingPolicy {
-    resolve_policy(&spec.name, config)
+    resolve_tool_policy(&spec.name, config)
 }
 
-fn resolve_policy(name: &str, config: &DeferredLoadingConfig) -> PromptLoadingPolicy {
+pub fn resolve_tool_policy(name: &str, config: &DeferredLoadingConfig) -> PromptLoadingPolicy {
     if config.hidden.contains(name) {
         return PromptLoadingPolicy::Hidden;
     }
@@ -418,7 +418,6 @@ fn default_deferred_tools() -> BTreeSet<String> {
         "websearch",
         "fetch_url",
         "webfetch",
-        "skill",
         "task",
         "multi_tool_use",
         "goal_update",
@@ -530,6 +529,7 @@ mod tests {
         let mut loaded = LoadedDeferredTools::default();
 
         let result = execute_tool_search(
+            "session-1",
             "select:WebSearch,fetch-url,read",
             &tools(),
             &mut loaded,
@@ -551,14 +551,32 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tools_are_deferred_by_default() {
+        let config = DeferredLoadingConfig {
+            default_policy: PromptLoadingPolicy::Preloaded,
+            ..DeferredLoadingConfig::default()
+        };
+
+        assert_eq!(
+            resolve_tool_policy("mcp__docs__search", &config),
+            PromptLoadingPolicy::Deferred
+        );
+    }
+
+    #[test]
     fn tool_search_reports_already_loaded_and_not_found() {
         let config = DeferredLoadingConfig::default();
         let mut loaded = LoadedDeferredTools::default();
         loaded.mark_loaded("session-1", "web_search");
 
-        let result =
-            execute_tool_search("select:web_search,missing", &tools(), &mut loaded, &config)
-                .expect("partial success should return summary");
+        let result = execute_tool_search(
+            "session-1",
+            "select:web_search,missing",
+            &tools(),
+            &mut loaded,
+            &config,
+        )
+        .expect("partial success should return summary");
 
         assert_eq!(
             result,
@@ -581,6 +599,7 @@ mod tests {
     fn tool_search_errors_when_all_requested_tools_are_unknown() {
         let mut loaded = LoadedDeferredTools::default();
         let err = execute_tool_search(
+            "session-1",
             "select:imaginary",
             &tools(),
             &mut loaded,

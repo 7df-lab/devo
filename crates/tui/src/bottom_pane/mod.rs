@@ -228,6 +228,11 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_skill_mentions(&mut self, skills: Option<Vec<SkillMetadata>>) {
+        self.composer.set_skill_mentions(skills);
+        self.request_redraw();
+    }
+
     pub(crate) fn handle_key_event(&mut self, key: KeyEvent) -> InputResult {
         if !self.view_stack.is_empty() {
             return self.handle_view_key_event(key);

@@ -1,0 +1,25 @@
+[package]
+description = "Shared serializable configuration contract types"
+edition.workspace = true
+license.workspace = true
+name = "devo-config"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+devo-protocol = { workspace = true }
+devo-utils = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+
+[lib]
+doctest = false

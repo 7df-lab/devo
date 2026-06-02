@@ -367,23 +367,6 @@ fn websearch_schema() -> JsonSchema {
     )
 }
 
-fn skill_schema() -> JsonSchema {
-    JsonSchema::object(
-        BTreeMap::from([
-            (
-                "name".to_string(),
-                JsonSchema::string(Some("The skill name to load")),
-            ),
-            (
-                "args".to_string(),
-                JsonSchema::string(Some("Optional arguments for the skill")),
-            ),
-        ]),
-        Some(vec!["name".to_string()]),
-        Some(false),
-    )
-}
-
 fn lsp_schema() -> JsonSchema {
     JsonSchema::object(
         BTreeMap::from([
@@ -705,23 +688,6 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
             supports_streaming: None,
         },
         ToolHandlerKind::WebSearch,
-    );
-
-    plan.push(
-        ToolSpec {
-            name: "skill".to_string(),
-            description: "Load a specialized skill when the task at hand matches one of the available skills.".to_string(),
-            input_schema: skill_schema(),
-            output_mode: ToolOutputMode::Text,
-            execution_mode: ToolExecutionMode::ReadOnly,
-            capability_tags: vec![],
-            supports_parallel: true,
-            preparation_feedback: ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        },
-        ToolHandlerKind::Skill,
     );
 
     plan.push(

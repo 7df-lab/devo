@@ -49,6 +49,8 @@ use devo_protocol::SkillChangedParams;
 use devo_protocol::SkillChangedResult;
 use devo_protocol::SkillListParams;
 use devo_protocol::SkillListResult;
+use devo_protocol::SkillSetEnabledParams;
+use devo_protocol::SkillSetEnabledResult;
 use devo_protocol::SuccessResponse;
 use devo_protocol::TurnInterruptParams;
 use devo_protocol::TurnInterruptResult;
@@ -70,6 +72,9 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::Duration;
 use tokio::time::timeout;
+
+const SERVER_CHILD_STDIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
+const SERVER_CHILD_EXIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub struct StdioServerClientConfig {
@@ -229,6 +234,13 @@ impl StdioServerClient {
         self.request("skills/changed", params).await
     }
 
+    pub async fn skills_set_enabled(
+        &mut self,
+        params: SkillSetEnabledParams,
+    ) -> Result<SkillSetEnabledResult> {
+        self.request("skills/set_enabled", params).await
+    }
+
     pub async fn model_catalog(
         &mut self,
         params: ModelCatalogParams,
@@ -299,9 +311,25 @@ impl StdioServerClient {
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
-        let _ = self.stdin.shutdown().await;
-        self.child.kill().await.ok();
-        let _ = self.child.wait().await;
+        tracing::info!("stdio server client shutdown requested");
+        let _ = timeout(SERVER_CHILD_STDIN_SHUTDOWN_TIMEOUT, self.stdin.shutdown()).await;
+        tracing::info!("stdio server stdin shutdown attempted");
+        if let Err(error) = self.child.start_kill() {
+            tracing::debug!(%error, "failed to start stdio server child kill");
+        } else {
+            tracing::info!("stdio server child kill requested");
+        }
+        match timeout(SERVER_CHILD_EXIT_TIMEOUT, self.child.wait()).await {
+            Ok(Ok(status)) => {
+                tracing::info!(?status, "stdio server child exited during shutdown");
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "failed to wait for stdio server child exit");
+            }
+            Err(_elapsed) => {
+                tracing::debug!("timed out waiting for stdio server child exit");
+            }
+        }
         Ok(())
     }
 

@@ -23,8 +23,17 @@ pub struct ToolRegistry {
     pub(crate) handlers: HashMap<String, Arc<dyn ToolHandler>>,
     pub(crate) specs: Vec<ToolSpec>,
     pub(crate) spec_index: HashMap<String, usize>,
+    pub(crate) spec_exposure: HashMap<String, ToolExposure>,
+    pub(crate) spec_search_text: HashMap<String, String>,
     pub(crate) unified_exec_store: Option<Arc<ProcessStore>>,
     pub(crate) loaded_deferred_tools: Arc<Mutex<LoadedDeferredTools>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExposure {
+    Direct,
+    Deferred,
+    Hidden,
 }
 
 impl ToolRegistry {
@@ -33,6 +42,8 @@ impl ToolRegistry {
             handlers: HashMap::new(),
             specs: Vec::new(),
             spec_index: HashMap::new(),
+            spec_exposure: HashMap::new(),
+            spec_search_text: HashMap::new(),
             unified_exec_store: None,
             loaded_deferred_tools: Arc::new(Mutex::new(LoadedDeferredTools::default())),
         }
@@ -103,13 +114,13 @@ impl ToolRegistry {
         assemble_deferred_tool_prompt(
             &self.tool_definitions(),
             &loaded_tools.list_loaded(session_id),
-            config,
+            &self.effective_deferred_loading_config(config),
         )
     }
 
     pub fn load_deferred_tools(
         &self,
-        _session_id: &str,
+        session_id: &str,
         config: &DeferredLoadingConfig,
         query: &str,
     ) -> Result<String, String> {
@@ -117,16 +128,33 @@ impl ToolRegistry {
             .loaded_deferred_tools
             .lock()
             .map_err(|_| "loaded deferred tool state lock poisoned".to_string())?;
-        execute_tool_search(query, &self.tool_definitions(), &mut loaded_tools, config)
-            .map(|result| result.summary())
+        execute_tool_search(
+            session_id,
+            query,
+            &self.tool_definitions(),
+            &mut loaded_tools,
+            config,
+        )
+        .map(|result| result.summary())
     }
 
     pub fn loaded_deferred_tools(&self) -> Arc<Mutex<LoadedDeferredTools>> {
         Arc::clone(&self.loaded_deferred_tools)
     }
 
+    pub fn effective_deferred_loading_config(
+        &self,
+        base: &DeferredLoadingConfig,
+    ) -> DeferredLoadingConfig {
+        apply_exposure_overrides(base, &self.spec_exposure)
+    }
+
     pub fn all_handlers(&self) -> impl Iterator<Item = (&String, &Arc<dyn ToolHandler>)> {
         self.handlers.iter()
+    }
+
+    pub fn search_text_for(&self, name: &str) -> Option<&str> {
+        self.spec_search_text.get(name).map(String::as_str)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -270,6 +298,8 @@ pub struct ToolRegistryBuilder {
     handlers: HashMap<String, Arc<dyn ToolHandler>>,
     specs: Vec<ToolSpec>,
     spec_index: HashMap<String, usize>,
+    spec_exposure: HashMap<String, ToolExposure>,
+    spec_search_text: HashMap<String, String>,
     unified_exec_store: Option<Arc<ProcessStore>>,
     loaded_deferred_tools: Arc<Mutex<LoadedDeferredTools>>,
 }
@@ -280,6 +310,8 @@ impl ToolRegistryBuilder {
             handlers: HashMap::new(),
             specs: Vec::new(),
             spec_index: HashMap::new(),
+            spec_exposure: HashMap::new(),
+            spec_search_text: HashMap::new(),
             unified_exec_store: None,
             loaded_deferred_tools: Arc::new(Mutex::new(LoadedDeferredTools::default())),
         }
@@ -289,6 +321,17 @@ impl ToolRegistryBuilder {
         let name = spec.name.clone();
         self.spec_index.insert(name, self.specs.len());
         self.specs.push(spec);
+    }
+
+    pub fn push_spec_with_exposure(&mut self, spec: ToolSpec, exposure: ToolExposure) {
+        let name = spec.name.clone();
+        self.spec_index.insert(name, self.specs.len());
+        self.spec_exposure.insert(spec.name.clone(), exposure);
+        self.specs.push(spec);
+    }
+
+    pub fn set_search_text(&mut self, name: &str, search_text: String) {
+        self.spec_search_text.insert(name.to_string(), search_text);
     }
 
     pub fn register_handler(&mut self, name: &str, handler: Arc<dyn ToolHandler>) {
@@ -318,11 +361,30 @@ impl ToolRegistryBuilder {
             .collect()
     }
 
+    pub fn tool_search_entries(&self) -> Vec<(ToolDefinition, Option<String>)> {
+        self.tool_definitions()
+            .into_iter()
+            .map(|definition| {
+                let search_text = self.spec_search_text.get(&definition.name).cloned();
+                (definition, search_text)
+            })
+            .collect()
+    }
+
+    pub fn effective_deferred_loading_config(
+        &self,
+        base: &DeferredLoadingConfig,
+    ) -> DeferredLoadingConfig {
+        apply_exposure_overrides(base, &self.spec_exposure)
+    }
+
     pub fn build(self) -> ToolRegistry {
         ToolRegistry {
             handlers: self.handlers,
             specs: self.specs,
             spec_index: self.spec_index,
+            spec_exposure: self.spec_exposure,
+            spec_search_text: self.spec_search_text,
             unified_exec_store: self.unified_exec_store,
             loaded_deferred_tools: self.loaded_deferred_tools,
         }
@@ -333,6 +395,30 @@ impl Default for ToolRegistryBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn apply_exposure_overrides(
+    base: &DeferredLoadingConfig,
+    exposure: &HashMap<String, ToolExposure>,
+) -> DeferredLoadingConfig {
+    let mut config = base.clone();
+    for (name, exposure) in exposure {
+        config.preloaded.remove(name);
+        config.deferred.remove(name);
+        config.hidden.remove(name);
+        match exposure {
+            ToolExposure::Direct => {
+                config.preloaded.insert(name.clone());
+            }
+            ToolExposure::Deferred => {
+                config.deferred.insert(name.clone());
+            }
+            ToolExposure::Hidden => {
+                config.hidden.insert(name.clone());
+            }
+        }
+    }
+    config
 }
 
 #[cfg(test)]
@@ -372,6 +458,8 @@ mod tests {
     fn test_ctx() -> ToolContext {
         ToolContext {
             tool_call_id: devo_tools::ToolCallId("test-id".to_string()),
+            session_id: "test-session".to_string(),
+            turn_id: Some("test-turn".to_string()),
             workspace_root: PathBuf::from("~/user/devo"),
             budgets: ToolBudgets {
                 wall_time_limit_ms: Some(6_000),

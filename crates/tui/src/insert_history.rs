@@ -243,7 +243,8 @@ impl Command for SetScrollRegion {
 
     #[cfg(windows)]
     fn is_ansi_code_supported(&self) -> bool {
-        // TODO(nornagon): is this supported on Windows?
+        // Windows Virtual Terminal supports DECSTBM (`CSI top;bottom r`).
+        // Keep this ANSI-only so crossterm does not fall back to WinAPI.
         true
     }
 }
@@ -263,7 +264,8 @@ impl Command for ResetScrollRegion {
 
     #[cfg(windows)]
     fn is_ansi_code_supported(&self) -> bool {
-        // TODO(nornagon): is this supported on Windows?
+        // Resetting DECSTBM uses the same Virtual Terminal scroll-margin
+        // sequence family as SetScrollRegion.
         true
     }
 }
@@ -381,6 +383,7 @@ mod tests {
     use super::*;
     use crate::markdown_render::render_markdown_text;
     use crate::test_backend::VT100Backend;
+    use pretty_assertions::assert_eq;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
 
@@ -410,6 +413,23 @@ mod tests {
             String::from_utf8(actual).unwrap(),
             String::from_utf8(expected).unwrap()
         );
+    }
+
+    #[test]
+    fn scroll_region_commands_write_ansi_sequences() {
+        let mut actual = String::new();
+
+        SetScrollRegion(2..8).write_ansi(&mut actual).unwrap();
+        ResetScrollRegion.write_ansi(&mut actual).unwrap();
+
+        assert_eq!(actual, "\x1b[2;8r\x1b[r");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scroll_region_commands_force_ansi_on_windows() {
+        assert!(SetScrollRegion(1..2).is_ansi_code_supported());
+        assert!(ResetScrollRegion.is_ansi_code_supported());
     }
 
     #[test]

@@ -39,6 +39,7 @@ use devo_server::SessionRollbackParams;
 use devo_server::SessionStartParams;
 use devo_server::SessionTitleUpdateParams;
 use devo_server::SkillListParams;
+use devo_server::SkillSetEnabledParams;
 use devo_server::SkillSource;
 use devo_server::StdioServerClient;
 use devo_server::StdioServerClientConfig;
@@ -50,6 +51,8 @@ use devo_server::TurnStartParams;
 use devo_server::TurnSteerParams;
 
 use crate::app_command::InputHistoryDirection;
+use crate::bottom_pane::SkillInterfaceMetadata;
+use crate::bottom_pane::SkillMetadata;
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
 use crate::events::SessionListEntry;
@@ -57,6 +60,9 @@ use crate::events::TextItemKind;
 use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
+
+const WORKER_SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
+const WORKER_ABORT_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 struct EnsureSessionOutcome {
     session_id: SessionId,
@@ -86,8 +92,8 @@ pub(crate) struct QueryWorkerConfig {
 /// Commands accepted by the background query worker.
 enum OperationCommand {
     /// Submit a new user prompt to the session.
-    SubmitPrompt {
-        prompt: String,
+    SubmitInput {
+        input: Vec<InputItem>,
         approval_policy: Option<String>,
     },
     /// Update the model used for future turns.
@@ -128,6 +134,8 @@ enum OperationCommand {
     ListSessions,
     /// Request a skills list from the server.
     ListSkills,
+    /// Persistently enable or disable one skill by canonical `SKILL.md` path.
+    SetSkillEnabled { path: PathBuf, enabled: bool },
     /// Request proactive compaction for the active session.
     CompactSession,
     /// Clear the active session so the next prompt starts a fresh one lazily.
@@ -192,9 +200,17 @@ impl QueryWorkerHandle {
         prompt: String,
         approval_policy: Option<String>,
     ) -> Result<()> {
+        self.submit_input(vec![InputItem::Text { text: prompt }], approval_policy)
+    }
+
+    pub(crate) fn submit_input(
+        &self,
+        input: Vec<InputItem>,
+        approval_policy: Option<String>,
+    ) -> Result<()> {
         self.command_tx
-            .send(OperationCommand::SubmitPrompt {
-                prompt,
+            .send(OperationCommand::SubmitInput {
+                input,
                 approval_policy,
             })
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
@@ -287,6 +303,13 @@ impl QueryWorkerHandle {
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn set_skill_enabled(&self, path: PathBuf, enabled: bool) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::SetSkillEnabled { path, enabled })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
     /// Requests proactive compaction for the current active session.
     pub(crate) fn compact_session(&self) -> Result<()> {
         self.command_tx
@@ -334,11 +357,15 @@ impl QueryWorkerHandle {
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
-    /// Steer text into the currently active turn.
-    pub(crate) fn submit_steer(&self, text: String, expected_turn_id: TurnId) -> Result<()> {
+    /// Steer input into the currently active turn.
+    pub(crate) fn submit_steer(
+        &self,
+        input: Vec<InputItem>,
+        expected_turn_id: TurnId,
+    ) -> Result<()> {
         self.command_tx
             .send(OperationCommand::SteerTurn {
-                input: vec![devo_server::InputItem::Text { text }],
+                input,
                 expected_turn_id,
             })
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
@@ -377,22 +404,26 @@ impl QueryWorkerHandle {
 
     /// Stops the worker task and waits briefly for it to finish.
     pub(crate) async fn shutdown(self) -> Result<()> {
+        tracing::info!("query worker shutdown requested");
         let _ = self.command_tx.send(OperationCommand::Shutdown);
         let mut join_handle = self.join_handle;
         tokio::select! {
             result = &mut join_handle => {
-                match result {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.is_cancelled() => Ok(()),
-                    Err(error) => Err(map_join_error(error)),
-                }
+                tracing::info!("query worker joined during graceful shutdown");
+                map_worker_join_result(result)
             }
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+            _ = tokio::time::sleep(WORKER_SHUTDOWN_GRACE) => {
+                tracing::warn!("query worker did not stop during grace period; aborting task");
                 join_handle.abort();
-                match join_handle.await {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.is_cancelled() => Ok(()),
-                    Err(error) => Err(map_join_error(error)),
+                match tokio::time::timeout(WORKER_ABORT_JOIN_TIMEOUT, &mut join_handle).await {
+                    Ok(result) => {
+                        tracing::info!("query worker abort join completed");
+                        map_worker_join_result(result)
+                    }
+                    Err(_) => {
+                        tracing::warn!("timed out waiting for aborted query worker task");
+                        Ok(())
+                    }
                 }
             }
         }
@@ -510,13 +541,14 @@ async fn run_worker_inner(
             }
         }
     }
+    let _ = emit_skills_list(&mut client, &session_cwd, event_tx, false).await;
 
     loop {
         tokio::select! {
             maybe_command = command_rx.recv() => {
                 match maybe_command {
-                    Some(OperationCommand::SubmitPrompt {
-                        prompt,
+                    Some(OperationCommand::SubmitInput {
+                        input,
                         approval_policy,
                     }) => {
                         let session_start = ensure_session_started(
@@ -547,7 +579,7 @@ async fn run_worker_inner(
                         }
                         let start_result = client.turn_start(TurnStartParams {
                             session_id: active_session_id,
-                            input: vec![InputItem::Text { text: prompt }],
+                            input,
                             model: Some(model.clone()),
                             thinking: thinking_selection.clone(),
                             sandbox: None,
@@ -781,40 +813,18 @@ async fn run_worker_inner(
                         }
                     }
                     Some(OperationCommand::ListSkills) => {
-                        match tokio::time::timeout(
-                            Duration::from_secs(5),
-                            client.skills_list(SkillListParams {
-                                cwd: Some(session_cwd.clone()),
-                            }),
-                        )
-                        .await
+                        if let Err(error) =
+                            emit_skills_list(&mut client, &session_cwd, event_tx, true).await
                         {
-                            Ok(Ok(result)) => {
-                                let body = render_skill_list_body(&result.skills);
-                                let _ = event_tx.send(WorkerEvent::SkillsListed { body });
-                            }
-                            Ok(Err(error)) => {
-                                let _ = event_tx.send(WorkerEvent::TurnFailed {
-                                    message: error.to_string(),
-                                    turn_count,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    total_cache_read_tokens,
-                                    prompt_token_estimate: total_input_tokens,
-                                    last_query_input_tokens,
-                                });
-                            }
-                            Err(_) => {
-                                let _ = event_tx.send(WorkerEvent::TurnFailed {
-                                    message: "skills list request timed out".to_string(),
-                                    turn_count,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    total_cache_read_tokens,
-                                    prompt_token_estimate: total_input_tokens,
-                                    last_query_input_tokens,
-                                });
-                            }
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: error.to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cache_read_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
+                            });
                         }
                     }
                     Some(OperationCommand::CompactSession) => {
@@ -870,6 +880,27 @@ async fn run_worker_inner(
                             }
                         }
                     }
+                    Some(OperationCommand::SetSkillEnabled { path, enabled }) => {
+                        match client
+                            .skills_set_enabled(SkillSetEnabledParams { path, enabled })
+                            .await
+                        {
+                            Ok(result) => {
+                                emit_skills_list_result(result.skills, event_tx, false);
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cache_read_tokens,
+                                    prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
+                                });
+                            }
+                        }
+                    }
                     Some(OperationCommand::StartNewSession) => {
                         active_turn_id = None;
                         session_id = None;
@@ -890,6 +921,7 @@ async fn run_worker_inner(
                             last_query_input_tokens,
                             total_cache_read_tokens,
                         });
+                        let _ = emit_skills_list(&mut client, &session_cwd, event_tx, false).await;
                     }
                     Some(OperationCommand::SwitchSession(next_session_id)) => {
                         match client
@@ -937,6 +969,9 @@ async fn run_worker_inner(
                                 thinking_selection = result.session.thinking.clone();
                                 total_input_tokens = result.session.total_input_tokens;
                                 total_output_tokens = result.session.total_output_tokens;
+                                let _ =
+                                    emit_skills_list(&mut client, &session_cwd, event_tx, false)
+                                        .await;
                                 last_query_total_tokens =
                                     result.session.last_query_total_tokens;
                             }
@@ -1321,6 +1356,7 @@ async fn run_worker_inner(
                         let _ = event_tx.send(WorkerEvent::InputHistoryLoaded { direction, text });
                     }
                     Some(OperationCommand::Shutdown) | None => {
+                        tracing::info!("query worker received shutdown command");
                         break;
                     }
                 }
@@ -1639,7 +1675,9 @@ async fn run_worker_inner(
         }
     }
 
+    tracing::info!("query worker shutting down stdio client");
     client.shutdown().await?;
+    tracing::info!("query worker stdio client shutdown completed");
     Ok(())
 }
 
@@ -1709,19 +1747,57 @@ async fn spawn_client(cwd: &Path, server_log_level: Option<String>) -> Result<St
     .await
 }
 
+async fn emit_skills_list(
+    client: &mut StdioServerClient,
+    cwd: &Path,
+    event_tx: &mpsc::UnboundedSender<WorkerEvent>,
+    show_in_transcript: bool,
+) -> Result<()> {
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.skills_list(SkillListParams {
+            cwd: Some(cwd.to_path_buf()),
+            force_reload: false,
+        }),
+    )
+    .await
+    .context("skills list request timed out")??;
+    emit_skills_list_result(result.skills, event_tx, show_in_transcript);
+    Ok(())
+}
+
+fn emit_skills_list_result(
+    skills: Vec<devo_server::SkillRecord>,
+    event_tx: &mpsc::UnboundedSender<WorkerEvent>,
+    show_in_transcript: bool,
+) {
+    let body = render_skill_list_body(&skills);
+    let skills = skills
+        .iter()
+        .filter(|skill| skill.enabled)
+        .map(skill_metadata_from_record)
+        .collect();
+    let _ = event_tx.send(WorkerEvent::SkillsListed {
+        body,
+        skills,
+        show_in_transcript,
+    });
+}
+
 fn render_skill_list_body(skills: &[devo_server::SkillRecord]) -> String {
     if skills.is_empty() {
-        return "No skills found".to_string();
+        return "_No skills found._".to_string();
     }
 
     skills
         .iter()
         .map(|skill| {
-            let status = if skill.enabled { "enabled" } else { "disabled" };
+            let enabled = if skill.enabled { "yes" } else { "no" };
             format!(
-                "{} ({status})\n{}\nsource: {}\npath: {}",
+                "- `{}` - {}\n  enabled: {}\n  source: {}\n  path: `{}`",
                 skill.name,
                 skill.description,
+                enabled,
                 render_skill_source(&skill.source),
                 skill.path.display()
             )
@@ -1730,11 +1806,29 @@ fn render_skill_list_body(skills: &[devo_server::SkillRecord]) -> String {
         .join("\n\n")
 }
 
+fn skill_metadata_from_record(skill: &devo_server::SkillRecord) -> SkillMetadata {
+    SkillMetadata {
+        name: skill.name.clone(),
+        description: skill.description.clone(),
+        short_description: skill.short_description.clone(),
+        interface: skill
+            .interface
+            .as_ref()
+            .map(|interface| SkillInterfaceMetadata {
+                display_name: interface.display_name.clone(),
+                short_description: interface.short_description.clone(),
+            }),
+        path_to_skills_md: skill.path.clone(),
+    }
+}
+
 fn render_skill_source(source: &SkillSource) -> String {
     match source {
         SkillSource::User => "user".to_string(),
         SkillSource::Workspace { cwd } => format!("workspace ({})", cwd.display()),
         SkillSource::Plugin { plugin_id } => format!("plugin ({plugin_id})"),
+        SkillSource::System => "system".to_string(),
+        SkillSource::Admin => "admin".to_string(),
     }
 }
 
@@ -2500,21 +2594,36 @@ fn map_join_error(error: JoinError) -> anyhow::Error {
     }
 }
 
+fn map_worker_join_result(result: std::result::Result<(), JoinError>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.is_cancelled() => Ok(()),
+        Err(error) => Err(map_join_error(error)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
     use pretty_assertions::assert_eq;
+    use std::future::pending;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use devo_core::SessionId;
     use devo_core::SessionTitleState;
     use devo_server::CommandExecutionPayload;
     use devo_server::SessionMetadata;
     use devo_server::SessionRuntimeStatus;
+    use devo_server::SkillRecord;
+    use devo_server::SkillScope;
+    use devo_server::SkillSource;
 
+    use super::QueryWorkerHandle;
     use super::handle_completed_item;
     use super::normalize_display_output;
     use super::project_history_items;
+    use super::render_skill_list_body;
     use super::summarize_tool_call;
     use super::tool_call_started_actions;
     use super::truncate_tool_output;
@@ -2524,6 +2633,7 @@ mod tests {
     use crate::events::TranscriptItem;
     use crate::events::TranscriptItemKind;
     use crate::events::WorkerEvent;
+    use crate::markdown_render::render_markdown_text;
     use devo_core::ItemId;
     use devo_protocol::SessionHistoryMetadata;
     use devo_protocol::SessionPlanStepStatus;
@@ -2534,6 +2644,26 @@ mod tests {
     use devo_server::SessionHistoryItemKind;
     use devo_server::ToolCallPayload;
     use devo_server::ToolResultPayload;
+
+    #[tokio::test]
+    async fn worker_shutdown_aborts_unresponsive_task() {
+        let (command_tx, _command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker = QueryWorkerHandle {
+            command_tx,
+            event_rx,
+            join_handle: tokio::spawn(async {
+                pending::<()>().await;
+            }),
+        };
+
+        let completed = tokio::time::timeout(Duration::from_secs(1), worker.shutdown())
+            .await
+            .map(|result| result.is_ok())
+            .unwrap_or(false);
+
+        assert_eq!([completed], [true]);
+    }
 
     #[test]
     fn bash_tool_summary_uses_command_text() {
@@ -2562,6 +2692,78 @@ mod tests {
         assert_eq!(
             truncate_tool_output(&content),
             "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n… "
+        );
+    }
+
+    #[test]
+    fn render_skill_list_body_handles_empty_list() {
+        assert_eq!(render_skill_list_body(&[]), "_No skills found._");
+    }
+
+    #[test]
+    fn render_skill_list_body_uses_markdown_for_names_and_paths() {
+        let skill_path = PathBuf::from("skills").join("writer").join("SKILL.md");
+
+        assert_eq!(
+            render_skill_list_body(&[SkillRecord {
+                id: skill_path.display().to_string(),
+                name: "writer".to_string(),
+                description: "Draft polished docs".to_string(),
+                short_description: None,
+                interface: None,
+                dependencies: None,
+                path: skill_path.clone(),
+                enabled: true,
+                source: SkillSource::User,
+                scope: SkillScope::User,
+                plugin_id: None,
+            }]),
+            format!(
+                "- `writer` - Draft polished docs\n  enabled: yes\n  source: user\n  path: `{}`",
+                skill_path.display()
+            )
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn render_skill_list_body_preserves_windows_dot_directory_separators() {
+        let skill_path =
+            PathBuf::from(r"C:\Users\lenovo\.devo\skills\.system\skill-installer\SKILL.md");
+        let body = render_skill_list_body(&[SkillRecord {
+            id: skill_path.display().to_string(),
+            name: "skill-installer".to_string(),
+            description: "Install Codex skills".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            path: skill_path,
+            enabled: true,
+            source: SkillSource::System,
+            scope: SkillScope::System,
+            plugin_id: None,
+        }]);
+
+        let lines = render_markdown_text(&body)
+            .lines
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            vec![
+                "- skill-installer - Install Codex skills".to_string(),
+                "  enabled: yes".to_string(),
+                "  source: system".to_string(),
+                r"  path: C:\Users\lenovo\.devo\skills\.system\skill-installer\SKILL.md"
+                    .to_string(),
+            ]
         );
     }
 

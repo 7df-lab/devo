@@ -50,7 +50,8 @@ The endpoint should return the discovered skills in the response:
       "description": "Skill discovered at /tmp/test-skill/SKILL.md",
       "path": "/tmp/test-skill/SKILL.md",
       "enabled": true,
-      "source": "Workspace"
+      "source": { "Workspace": { "cwd": "/tmp/project" } },
+      "scope": "repo"
     }
   ]
 }
@@ -69,19 +70,30 @@ Similar to skills/list, this returns skills when they change:
       "description": "Skill discovered at /tmp/test-skill/SKILL.md",
       "path": "/tmp/test-skill/SKILL.md",
       "enabled": true,
-      "source": "Workspace"
+      "source": { "Workspace": { "cwd": "/tmp/project" } },
+      "scope": "repo"
     }
   ]
 }
 ```
 
+5. Call the skills/set_enabled endpoint to persist a path-based toggle:
+
+```json
+{
+  "path": "/tmp/test-skill/SKILL.md",
+  "enabled": false
+}
+```
+
 ## Expected Behaviors
 
-- skills/list returns all discovered skills
-- skills/changed returns skills after workspace changes
+- skills/list returns all discovered skills and honors `force_reload`
+- skills/changed forces a refreshed list after workspace changes
+- skills/set_enabled persists path-based enablement overrides
 - Skills without SKILL.md are not discovered
 - Disabled skills (enabled: false) are still listed but not usable
-- Skill source indicates whether it came from User, Workspace, or Plugin
+- Skill source and scope indicate whether it came from User, Workspace, System, Admin, or Plugin
 
 ## Troubleshooting
 

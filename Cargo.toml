@@ -8,14 +8,19 @@ members = [
     "crates/mcp",
     "crates/protocol",
     "crates/client",
+    "crates/config",
     "crates/server",
     "crates/tui",
     "crates/utils",
     "crates/cli",
     "crates/arg0",
     "crates/skills",
+    "crates/rmcp-client",
+    "crates/keyring-store",
 ]
 resolver = "3"
+
+[workspace.lints]
 
 [workspace.package]
 edition = "2024"
@@ -30,7 +35,9 @@ arboard = { version = "3", features = ["wayland-data-control"] }
 assert_matches = "1.5.0"
 async-stream = "0.3"
 async-trait = "0.1"
+axum = { version = "0.8", default-features = false }
 base64 = "0.22.1"
+bm25 = "2.3.2"
 bytes = "1"
 chrono = "0.4.43"
 clap = { version = "4", features = ["derive"] }
@@ -40,11 +47,14 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 derive_more = "2"
 devo-arg0 = { path = "crates/arg0" }
 devo-client = { path = "crates/client" }
+devo-config = { path = "crates/config" }
 devo-core = { path = "crates/core" }
 devo-file-search = { path = "crates/file-search" }
+devo-keyring-store = { path = "crates/keyring-store" }
 devo-mcp = { path = "crates/mcp" }
 devo-protocol = { path = "crates/protocol" }
 devo-provider = { path = "crates/provider" }
+devo-rmcp-client = { path = "crates/rmcp-client" }
 devo-safety = { path = "crates/safety" }
 devo-server = { path = "crates/server" }
 devo-skills = { path = "crates/skills" }
@@ -60,6 +70,7 @@ glob = "0.3"
 iana-time-zone = "0.1.65"
 ignore = "0.4.23"
 image = { version = "^0.25.9", default-features = false }
+include_dir = "0.7"
 insta = "1.46.3"
 itertools = "0.14.0"
 keyring = { version = "3.6", default-features = false }
@@ -81,10 +92,14 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
 ] }
 reqwest-eventsource = "0.6"
+rmcp = { version = "0.15.0", default-features = false }
 rusqlite = { version = "0.33", features = ["bundled"] }
 schemars = "0.8.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
+serial_test = "3.2.0"
+sha2 = "0.10"
 shlex = "1.3.0"
 smol_str = { version = "0.3", features = ["serde"] }
 strum = "0.27.2"
@@ -93,6 +108,7 @@ supports-color = "3.0.2"
 tempfile = "3.23.0"
 textwrap = "0.16"
 thiserror = "2"
+tiny_http = "0.12"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = "0.7.18"
@@ -113,6 +129,7 @@ urlencoding = "2.1"
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 vt100 = "0.16.2"
 walkdir = "2.5.0"
+webbrowser = "1.0"
 which = "8"
 
 [patch.crates-io]

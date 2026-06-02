@@ -184,14 +184,16 @@ impl ToolHandler for ExecCommandHandler {
             ));
         };
 
-        let (proc, _broadcast_rx) = match UnifiedExecProcess::spawn(
+        let spawned_process = UnifiedExecProcess::spawn(
             session_id,
             &args.cmd,
             &cwd,
             args.shell.as_deref(),
             args.login,
             args.tty,
-        ) {
+        )
+        .await;
+        let (proc, _broadcast_rx) = match spawned_process {
             Ok(spawned) => spawned,
             Err(error) => {
                 self.store.release_reserved(session_id).await;
@@ -510,9 +512,9 @@ mod tests {
 
     fn test_ctx(cwd: std::path::PathBuf) -> crate::contracts::ToolContext {
         crate::contracts::ToolContext {
-            // session_id: devo_protocol::SessionId::new(),
-            // turn_id: devo_protocol::TurnId::new(),
             tool_call_id: crate::invocation::ToolCallId("test".into()),
+            session_id: "test-session".into(),
+            turn_id: Some("test-turn".into()),
             workspace_root: cwd,
             // permission_profile: crate::contracts::ToolPermissionProfile {
             //     can_read_workspace: true,

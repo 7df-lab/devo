@@ -1,5 +1,5 @@
 [package]
-description = "MCP client, connection, discovery, and reconnect"
+description = "RMCP-backed MCP runtime adapter"
 edition.workspace = true
 license.workspace = true
 name = "devo-mcp"
@@ -8,9 +8,19 @@ version.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
-serde = { workspace = true }
+devo-config = { workspace = true }
+devo-core = { workspace = true }
+devo-rmcp-client = { workspace = true }
+rmcp = { workspace = true, features = [
+    "client",
+    "macros",
+    "schemars",
+    "server",
+    "transport-child-process",
+] }
 serde_json = { workspace = true }
-smol_str = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

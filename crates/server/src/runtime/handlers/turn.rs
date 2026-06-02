@@ -52,6 +52,7 @@ impl ServerRuntime {
             Err(error) => {
                 let code = match error {
                     devo_core::SkillError::SkillNotFound { .. }
+                    | devo_core::SkillError::AmbiguousSkillName { .. }
                     | devo_core::SkillError::SkillDisabled { .. } => {
                         ProtocolErrorCode::InvalidParams
                     }
@@ -89,8 +90,10 @@ impl ServerRuntime {
                         .lock()
                         .expect("pending turn queue mutex should not be poisoned");
                     let item = devo_core::PendingInputItem {
-                        kind: devo_core::PendingInputKind::UserText {
-                            text: input_text.clone(),
+                        kind: devo_core::PendingInputKind::UserInput {
+                            input: params.input.clone(),
+                            display_text: display_input.clone(),
+                            prompt_text: input_text.clone(),
                         },
                         metadata: None,
                         created_at: chrono::Utc::now(),
@@ -531,6 +534,7 @@ impl ServerRuntime {
             Err(error) => {
                 let code = match error {
                     devo_core::SkillError::SkillNotFound { .. }
+                    | devo_core::SkillError::AmbiguousSkillName { .. }
                     | devo_core::SkillError::SkillDisabled { .. } => {
                         ProtocolErrorCode::InvalidParams
                     }
@@ -555,11 +559,15 @@ impl ServerRuntime {
             TurnItem::SteerInput(TextItem {
                 text: display_input.clone(),
             }),
-            serde_json::json!({ "title": "You", "text": display_input }),
+            serde_json::json!({ "title": "You", "text": display_input.clone() }),
         )
         .await;
         let item = devo_core::PendingInputItem {
-            kind: devo_core::PendingInputKind::UserText { text: prompt_text },
+            kind: devo_core::PendingInputKind::UserInput {
+                input: params.input.clone(),
+                display_text: display_input,
+                prompt_text,
+            },
             metadata: None,
             created_at: chrono::Utc::now(),
         };

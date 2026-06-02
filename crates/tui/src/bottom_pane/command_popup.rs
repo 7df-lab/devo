@@ -278,7 +278,7 @@ mod tests {
                 CommandItem::Builtin(cmd) => cmd.command(),
             })
             .collect();
-        assert_eq!(cmds, vec!["model"]);
+        assert_eq!(cmds, vec!["model", "mcp"]);
     }
 
     #[test]
@@ -327,6 +327,8 @@ mod tests {
             vec![
                 "theme",
                 "model",
+                "skills",
+                "mcp",
                 "compact",
                 "resume",
                 "new",
@@ -334,6 +336,7 @@ mod tests {
                 "permissions",
                 "clear",
                 "diff",
+                "goal",
                 "btw",
                 "exit",
             ]

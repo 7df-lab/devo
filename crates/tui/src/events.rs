@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::app_command::InputHistoryDirection;
+use crate::bottom_pane::SkillMetadata;
 use devo_core::ItemId;
 use devo_core::SessionId;
 use devo_protocol::ProviderVendor;
@@ -244,6 +245,10 @@ pub(crate) enum WorkerEvent {
     SkillsListed {
         /// Pre-rendered skill summary shown in the bottom panel.
         body: String,
+        /// Structured skill metadata used by the composer `$skill` popup.
+        skills: Vec<SkillMetadata>,
+        /// Whether this list should be rendered into the transcript.
+        show_in_transcript: bool,
     },
     /// The interactive client cleared its active session and is waiting for the next prompt.
     NewSessionPrepared {

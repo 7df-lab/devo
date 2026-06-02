@@ -431,6 +431,9 @@ impl ServerRuntime {
             .iter()
             .filter_map(|item| match &item.kind {
                 devo_core::PendingInputKind::UserText { text } => Some(text.clone()),
+                devo_core::PendingInputKind::UserInput { display_text, .. } => {
+                    Some(display_text.clone())
+                }
                 _ => None,
             })
             .collect();

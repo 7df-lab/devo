@@ -1082,6 +1082,24 @@ fn slash_command_list_does_not_include_thinking() {
 }
 
 #[test]
+fn trailing_space_exit_slash_command_exits() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_paste("/exit ".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app_event_rx.try_recv().ok(),
+        Some(AppEvent::Exit(crate::app_event::ExitMode::ShutdownFirst))
+    );
+}
+
+#[test]
 fn busy_widget_blocks_model_change_with_transcript_message() {
     let model = Model {
         slug: "test-model".to_string(),
@@ -3447,8 +3465,8 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
     assert!(transcript_text.contains("old session line"));
     let old_line_index = find_row_index(&transcript_lines, "old session line")
         .expect("old session line remains in transcript");
-    let header_index =
-        find_row_index(&transcript_lines, "Devo").expect("new session header is appended");
+    let header_index = find_row_index(&transcript_lines, "new-session-model")
+        .expect("new session header is appended");
     assert!(header_index > old_line_index);
 }
 
