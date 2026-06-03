@@ -7,6 +7,7 @@ use devo_core::ModelCatalog;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderConfigSection;
 use devo_core::ProviderWireApi;
+use devo_core::resolve_model_binding;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::StreamEvent;
@@ -50,10 +51,11 @@ pub fn load_server_provider(
 
     if app_config.provider.model_providers.is_empty() {
         let resolved = app_config.resolve_provider_settings(user_config_dir)?;
-        let default_model = active_model_binding(&app_config.provider)
-            .map(|binding| binding.model_slug.clone())
-            .or_else(|| default_model.map(ToOwned::to_owned))
-            .unwrap_or(resolved.model);
+        let default_model =
+            resolve_model_binding(&app_config.provider, /*requested_model*/ None)
+                .map(|binding| binding.model_slug.clone())
+                .or_else(|| default_model.map(ToOwned::to_owned))
+                .unwrap_or(resolved.model);
         return build_server_provider(
             resolved.wire_api,
             default_model,
@@ -152,13 +154,24 @@ fn resolve_server_provider_settings(
     default_model: Option<&str>,
     auth: &devo_core::UserAuthConfigFile,
 ) -> Result<ServerProviderSettings> {
-    if let Some(binding) = active_model_binding(file_config) {
+    if let Some(binding) = resolve_model_binding(file_config, /*requested_model*/ None) {
         let provider = file_config
             .providers
-            .get(&binding.provider)
-            .with_context(|| format!("configured provider `{}` was not found", binding.provider))?;
+            .get(&binding.provider_id)
+            .with_context(|| {
+                format!(
+                    "configured provider `{}` was not found",
+                    binding.provider_id
+                )
+            })?;
         if !provider.enabled {
-            anyhow::bail!("configured provider `{}` is disabled", binding.provider);
+            anyhow::bail!("configured provider `{}` is disabled", binding.provider_id);
+        }
+        if !binding.enabled {
+            anyhow::bail!(
+                "configured model binding `{}` is disabled",
+                binding.binding_id
+            );
         }
         if !provider.wire_apis.is_empty()
             && !provider.wire_apis.contains(&binding.invocation_method)
@@ -173,7 +186,7 @@ fn resolve_server_provider_settings(
             wire_api: binding.invocation_method,
             model: binding.model_name.clone(),
             base_url: provider.base_url.clone(),
-            api_key: resolve_provider_api_key(&binding.provider, provider, auth)?,
+            api_key: resolve_provider_api_key(&binding.provider_id, provider, auth)?,
         });
     }
 
@@ -195,28 +208,6 @@ fn resolve_provider_api_key(
         )
     })?;
     Ok(Some(credential.value.clone()))
-}
-
-fn active_model_binding(config: &ProviderConfigSection) -> Option<&devo_core::ModelBindingConfig> {
-    config
-        .defaults
-        .model_binding
-        .as_deref()
-        .and_then(|binding_id| config.model_bindings.get(binding_id))
-        .or_else(|| {
-            config.model.as_deref().and_then(|model| {
-                config
-                    .model_bindings
-                    .values()
-                    .find(|binding| binding.model_slug == model || binding.model_name == model)
-            })
-        })
-        .or_else(|| {
-            config
-                .model_bindings
-                .values()
-                .find(|binding| binding.enabled)
-        })
 }
 
 fn resolve_legacy_server_provider_settings(

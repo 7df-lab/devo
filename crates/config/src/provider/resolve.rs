@@ -10,6 +10,31 @@ use super::schema::ProviderVendorConfig;
 use super::schema::ResolvedProviderSettings;
 use super::schema::UserAuthConfigFile;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModelBinding {
+    pub binding_id: String,
+    pub model_slug: String,
+    pub model_name: String,
+    pub provider_id: String,
+    pub invocation_method: devo_protocol::ProviderWireApi,
+    pub default_reasoning_effort: Option<String>,
+    pub enabled: bool,
+}
+
+impl ResolvedModelBinding {
+    fn from_config(binding_id: &str, binding: &ModelBindingConfig) -> Self {
+        Self {
+            binding_id: binding_id.to_string(),
+            model_slug: binding.model_slug.clone(),
+            model_name: binding.model_name.clone(),
+            provider_id: binding.provider.clone(),
+            invocation_method: binding.invocation_method,
+            default_reasoning_effort: binding.default_reasoning_effort.clone(),
+            enabled: binding.enabled,
+        }
+    }
+}
+
 /// Loads the user's provider config file from the standard config path.
 pub fn load_config() -> Result<ProviderConfigSection, ProviderConfigError> {
     let path = current_user_config_file().map_err(|error| ProviderConfigError::ConfigPath {
@@ -41,20 +66,26 @@ pub fn resolve_provider_settings_from_config_and_auth(
     file: &ProviderConfigSection,
     auth: &UserAuthConfigFile,
 ) -> Result<ResolvedProviderSettings, ProviderConfigError> {
-    if let Some((binding_id, binding)) = active_model_binding(file) {
-        let provider_config = file.providers.get(&binding.provider).ok_or_else(|| {
+    if let Some(binding) = resolve_model_binding(file, None) {
+        let provider_config = file.providers.get(&binding.provider_id).ok_or_else(|| {
             ProviderConfigError::Validation {
-                message: format!("configured provider `{}` was not found", binding.provider),
+                message: format!(
+                    "configured provider `{}` was not found",
+                    binding.provider_id
+                ),
             }
         })?;
         if !provider_config.enabled {
             return Err(ProviderConfigError::Validation {
-                message: format!("configured provider `{}` is disabled", binding.provider),
+                message: format!("configured provider `{}` is disabled", binding.provider_id),
             });
         }
         if !binding.enabled {
             return Err(ProviderConfigError::Validation {
-                message: format!("configured model binding `{binding_id}` is disabled"),
+                message: format!(
+                    "configured model binding `{}` is disabled",
+                    binding.binding_id
+                ),
             });
         }
         if !provider_config.wire_apis.is_empty()
@@ -64,18 +95,18 @@ pub fn resolve_provider_settings_from_config_and_auth(
         {
             return Err(ProviderConfigError::Validation {
                 message: format!(
-                    "model binding `{binding_id}` uses unsupported provider wire API `{}`",
-                    binding.invocation_method
+                    "model binding `{}` uses unsupported provider wire API `{}`",
+                    binding.binding_id, binding.invocation_method
                 ),
             });
         }
 
         return Ok(ResolvedProviderSettings {
-            provider_id: binding.provider.clone(),
+            provider_id: binding.provider_id.clone(),
             wire_api: binding.invocation_method,
             model: binding.model_name.clone(),
             base_url: provider_config.base_url.clone(),
-            api_key: resolve_provider_api_key(&binding.provider, provider_config, auth)?,
+            api_key: resolve_provider_api_key(&binding.provider_id, provider_config, auth)?,
             model_auto_compact_token_limit: file.model_auto_compact_token_limit,
             model_context_window: file.model_context_window,
             model_thinking_selection: file
@@ -113,7 +144,63 @@ fn resolve_provider_api_key(
     }
 }
 
-fn active_model_binding(config: &ProviderConfigSection) -> Option<(&str, &ModelBindingConfig)> {
+pub fn resolve_model_binding(
+    config: &ProviderConfigSection,
+    requested_model: Option<&str>,
+) -> Option<ResolvedModelBinding> {
+    if let Some(requested_model) = requested_model {
+        return config
+            .model_bindings
+            .iter()
+            .find(|(_, binding)| {
+                binding.model_slug == requested_model || binding.model_name == requested_model
+            })
+            .map(|(binding_id, binding)| ResolvedModelBinding::from_config(binding_id, binding));
+    }
+
+    if let Some(binding) = config
+        .defaults
+        .model_binding
+        .as_deref()
+        .and_then(|binding_id| {
+            config
+                .model_bindings
+                .get(binding_id)
+                .map(|binding| ResolvedModelBinding::from_config(binding_id, binding))
+        })
+    {
+        return Some(binding);
+    }
+
+    config
+        .model
+        .as_deref()
+        .and_then(|model| resolve_model_binding(config, Some(model)))
+        .or_else(|| {
+            config
+                .model_bindings
+                .iter()
+                .find(|(_, binding)| binding.enabled)
+                .map(|(binding_id, binding)| ResolvedModelBinding::from_config(binding_id, binding))
+        })
+}
+
+pub fn resolve_enabled_model_binding(
+    config: &ProviderConfigSection,
+    requested_model: Option<&str>,
+) -> Option<ResolvedModelBinding> {
+    if let Some(requested_model) = requested_model {
+        return config
+            .model_bindings
+            .iter()
+            .find(|(_, binding)| {
+                binding.enabled
+                    && (binding.model_slug == requested_model
+                        || binding.model_name == requested_model)
+            })
+            .map(|(binding_id, binding)| ResolvedModelBinding::from_config(binding_id, binding));
+    }
+
     config
         .defaults
         .model_binding
@@ -122,24 +209,26 @@ fn active_model_binding(config: &ProviderConfigSection) -> Option<(&str, &ModelB
             config
                 .model_bindings
                 .get(binding_id)
-                .map(|binding| (binding_id, binding))
-        })
-        .or_else(|| {
-            config
-                .model
-                .as_deref()
-                .and_then(|model| {
-                    config.model_bindings.iter().find(|(_, binding)| {
-                        binding.model_slug == model || binding.model_name == model
-                    })
-                })
-                .map(|(binding_id, binding)| (binding_id.as_str(), binding))
+                .filter(|binding| binding.enabled)
+                .map(|binding| ResolvedModelBinding::from_config(binding_id, binding))
         })
         .or_else(|| {
             config
                 .model_bindings
                 .iter()
                 .find(|(_, binding)| binding.enabled)
-                .map(|(binding_id, binding)| (binding_id.as_str(), binding))
+                .map(|(binding_id, binding)| ResolvedModelBinding::from_config(binding_id, binding))
         })
+}
+
+pub fn provider_request_model_map_for_binding(
+    config: &ProviderConfigSection,
+    binding: &ResolvedModelBinding,
+) -> std::collections::HashMap<String, String> {
+    config
+        .model_bindings
+        .values()
+        .filter(|candidate| candidate.enabled && candidate.provider == binding.provider_id)
+        .map(|candidate| (candidate.model_slug.clone(), candidate.model_name.clone()))
+        .collect()
 }

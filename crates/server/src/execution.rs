@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use devo_core::AppConfigStore;
-use devo_core::ModelBindingConfig;
+use devo_core::ProviderRequestModelMap;
 use devo_core::ProviderVendorCatalog;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
@@ -27,6 +27,8 @@ use devo_core::TurnConfig;
 use devo_core::TurnId;
 use devo_core::default_base_instructions;
 use devo_core::normalize_canonical_path;
+use devo_core::provider_request_model_map_for_binding;
+use devo_core::resolve_enabled_model_binding;
 use devo_core::tools::ToolRegistry;
 use devo_protocol::ApprovalDecisionValue;
 use devo_protocol::PendingInputItem;
@@ -155,59 +157,6 @@ impl ServerRuntimeDependencies {
         state
     }
 
-    fn resolve_binding_for_turn(
-        &self,
-        requested_model: Option<&str>,
-    ) -> Option<ModelBindingConfig> {
-        let config = self
-            .config_store
-            .lock()
-            .expect("app config store mutex should not be poisoned")
-            .effective_config()
-            .provider
-            .clone();
-
-        if let Some(requested_model) = requested_model {
-            return config
-                .model_bindings
-                .values()
-                .find(|binding| {
-                    binding.enabled
-                        && (binding.model_slug == requested_model
-                            || binding.model_name == requested_model)
-                })
-                .cloned();
-        }
-
-        config
-            .defaults
-            .model_binding
-            .as_deref()
-            .and_then(|binding_id| config.model_bindings.get(binding_id))
-            .filter(|binding| binding.enabled)
-            .cloned()
-            .or_else(|| {
-                config
-                    .model_bindings
-                    .values()
-                    .find(|binding| binding.enabled)
-                    .cloned()
-            })
-    }
-
-    fn variant_request_models(&self) -> HashMap<String, String> {
-        self.config_store
-            .lock()
-            .expect("app config store mutex should not be poisoned")
-            .effective_config()
-            .provider
-            .model_bindings
-            .values()
-            .filter(|binding| binding.enabled)
-            .map(|binding| (binding.model_slug.clone(), binding.model_name.clone()))
-            .collect()
-    }
-
     fn catalog_model_or_fallback(&self, model_slug: &str) -> Model {
         self.model_catalog
             .get(model_slug)
@@ -244,11 +193,22 @@ impl ServerRuntimeDependencies {
         requested_model: Option<&str>,
         thinking_selection: Option<String>,
     ) -> TurnConfig {
-        if let Some(binding) = self.resolve_binding_for_turn(requested_model) {
+        let provider_config = self
+            .config_store
+            .lock()
+            .expect("app config store mutex should not be poisoned")
+            .effective_config()
+            .provider
+            .clone();
+
+        if let Some(binding) = resolve_enabled_model_binding(&provider_config, requested_model) {
+            let provider_request_models = ProviderRequestModelMap::new(
+                provider_request_model_map_for_binding(&provider_config, &binding),
+            );
             return TurnConfig::with_request_model(
                 self.catalog_model_or_fallback(&binding.model_slug),
                 binding.model_name,
-                self.variant_request_models(),
+                provider_request_models,
                 thinking_selection,
             );
         }
@@ -685,6 +645,11 @@ enabled = true
 name = "OpenRouter"
 wire_apis = ["openai_chat_completions"]
 
+[providers.other]
+enabled = true
+name = "Other"
+wire_apis = ["openai_chat_completions"]
+
 [model_bindings.main]
 enabled = true
 model_slug = "catalog-slug"
@@ -725,6 +690,13 @@ enabled = true
 model_slug = "catalog-slug-thinking"
 provider = "openrouter"
 model_name = "vendor/model-name-thinking"
+invocation_method = "openai_chat_completions"
+
+[model_bindings.other-thinking]
+enabled = true
+model_slug = "catalog-slug-thinking"
+provider = "other"
+model_name = "other-provider/model-name-thinking"
 invocation_method = "openai_chat_completions"
 "#,
         );

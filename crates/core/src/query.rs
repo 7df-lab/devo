@@ -1770,7 +1770,8 @@ mod tests {
                 HashMap::from([(
                     "kimi-k2.5-thinking".into(),
                     "vendor/kimi-k2.5-thinking".into(),
-                )]),
+                )])
+                .into(),
                 Some("enabled".into()),
             ),
             Arc::clone(&provider),
@@ -1809,7 +1810,7 @@ mod tests {
             &TurnConfig::with_request_model(
                 model,
                 "vendor/model-name".into(),
-                HashMap::new(),
+                HashMap::new().into(),
                 /*thinking_selection*/ None,
             ),
             Arc::clone(&provider),

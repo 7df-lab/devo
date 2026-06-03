@@ -47,8 +47,30 @@ impl Default for SessionConfig {
 pub struct TurnConfig {
     pub model: Model,
     pub request_model: String,
-    pub variant_request_models: HashMap<String, String>,
+    pub provider_request_models: ProviderRequestModelMap,
     pub thinking_selection: Option<String>,
+}
+
+/// Provider request model names keyed by catalog model slug for one selected provider.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderRequestModelMap {
+    by_model_slug: HashMap<String, String>,
+}
+
+impl ProviderRequestModelMap {
+    pub fn new(by_model_slug: HashMap<String, String>) -> Self {
+        Self { by_model_slug }
+    }
+
+    pub fn get(&self, model_slug: &str) -> Option<&str> {
+        self.by_model_slug.get(model_slug).map(String::as_str)
+    }
+}
+
+impl From<HashMap<String, String>> for ProviderRequestModelMap {
+    fn from(by_model_slug: HashMap<String, String>) -> Self {
+        Self::new(by_model_slug)
+    }
 }
 
 impl TurnConfig {
@@ -57,7 +79,7 @@ impl TurnConfig {
         Self {
             model,
             request_model,
-            variant_request_models: HashMap::new(),
+            provider_request_models: ProviderRequestModelMap::default(),
             thinking_selection,
         }
     }
@@ -65,13 +87,13 @@ impl TurnConfig {
     pub fn with_request_model(
         model: Model,
         request_model: String,
-        variant_request_models: HashMap<String, String>,
+        provider_request_models: ProviderRequestModelMap,
         thinking_selection: Option<String>,
     ) -> Self {
         Self {
             model,
             request_model,
-            variant_request_models,
+            provider_request_models,
             thinking_selection,
         }
     }
@@ -80,9 +102,9 @@ impl TurnConfig {
         if resolved_catalog_model == self.model.slug {
             return self.request_model.clone();
         }
-        self.variant_request_models
+        self.provider_request_models
             .get(resolved_catalog_model)
-            .cloned()
+            .map(str::to_string)
             .unwrap_or_else(|| resolved_catalog_model.to_string())
     }
 }

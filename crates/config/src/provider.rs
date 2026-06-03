@@ -9,7 +9,11 @@ pub use auth::AUTH_CONFIG_FILE_NAME;
 pub use auth::read_user_auth_config;
 pub use auth::upsert_user_auth_api_key;
 pub use persistence::CONFIG_FILE_NAME;
+pub use resolve::ResolvedModelBinding;
 pub use resolve::load_config;
+pub use resolve::provider_request_model_map_for_binding;
+pub use resolve::resolve_enabled_model_binding;
+pub use resolve::resolve_model_binding;
 pub use resolve::resolve_provider_settings;
 pub use resolve::resolve_provider_settings_from_config_and_auth;
 pub use schema::*;
@@ -42,9 +46,12 @@ mod tests {
     use super::ProviderConfigSection;
     use super::ProviderDefaultsConfig;
     use super::ProviderWireApi;
+    use super::ResolvedModelBinding;
     use super::ResolvedProviderSettings;
     use super::UserAuthConfigFile;
     use super::read_user_auth_config;
+    use super::resolve_enabled_model_binding;
+    use super::resolve_model_binding;
     use super::resolve_provider_settings_from_config_and_auth;
     use super::upsert_user_auth_api_key;
     use super::write_provider_config;
@@ -138,6 +145,126 @@ model_name = "gpt-5.4"
 
         assert!(error.to_string().contains("xxxxx_api_key"));
         assert!(error.to_string().contains("auth.json"));
+    }
+
+    #[test]
+    fn enabled_model_binding_resolves_requested_model_slug() {
+        let config = provider_config_with_bindings();
+
+        let binding =
+            resolve_enabled_model_binding(&config, Some("catalog-two")).expect("resolve binding");
+
+        assert_eq!(binding, expected_resolved_binding("two"));
+    }
+
+    #[test]
+    fn enabled_model_binding_resolves_requested_model_name() {
+        let config = provider_config_with_bindings();
+
+        let binding =
+            resolve_enabled_model_binding(&config, Some("vendor/two")).expect("resolve binding");
+
+        assert_eq!(binding, expected_resolved_binding("two"));
+    }
+
+    #[test]
+    fn enabled_model_binding_uses_default_binding_without_requested_model() {
+        let config = provider_config_with_bindings();
+
+        let binding = resolve_enabled_model_binding(&config, /*requested_model*/ None)
+            .expect("resolve binding");
+
+        assert_eq!(binding, expected_resolved_binding("one"));
+    }
+
+    #[test]
+    fn enabled_model_binding_skips_disabled_default_binding() {
+        let mut config = provider_config_with_bindings();
+        config
+            .model_bindings
+            .get_mut("one")
+            .expect("default binding")
+            .enabled = false;
+
+        let binding = resolve_enabled_model_binding(&config, /*requested_model*/ None)
+            .expect("resolve binding");
+
+        assert_eq!(binding, expected_resolved_binding("two"));
+    }
+
+    #[test]
+    fn configured_model_binding_keeps_disabled_model_for_validation() {
+        let mut config = provider_config_with_bindings();
+        config.model = Some("catalog-one".to_string());
+        config.defaults.model_binding = None;
+        config
+            .model_bindings
+            .get_mut("one")
+            .expect("configured binding")
+            .enabled = false;
+
+        let binding =
+            resolve_model_binding(&config, /*requested_model*/ None).expect("resolve binding");
+
+        assert_eq!(
+            binding,
+            ResolvedModelBinding {
+                enabled: false,
+                ..expected_resolved_binding("one")
+            }
+        );
+    }
+
+    fn provider_config_with_bindings() -> ProviderConfigSection {
+        ProviderConfigSection {
+            defaults: ProviderDefaultsConfig {
+                model_binding: Some("one".to_string()),
+            },
+            model_bindings: [
+                (
+                    "one".to_string(),
+                    ModelBindingConfig {
+                        enabled: true,
+                        model_slug: "catalog-one".to_string(),
+                        provider: "openrouter".to_string(),
+                        model_name: "vendor/one".to_string(),
+                        invocation_method: ProviderWireApi::OpenAIResponses,
+                        ..ModelBindingConfig::default()
+                    },
+                ),
+                (
+                    "two".to_string(),
+                    ModelBindingConfig {
+                        enabled: true,
+                        model_slug: "catalog-two".to_string(),
+                        provider: "openrouter".to_string(),
+                        model_name: "vendor/two".to_string(),
+                        invocation_method: ProviderWireApi::OpenAIResponses,
+                        ..ModelBindingConfig::default()
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..ProviderConfigSection::default()
+        }
+    }
+
+    fn expected_resolved_binding(binding_id: &str) -> ResolvedModelBinding {
+        let model_suffix = match binding_id {
+            "one" => "one",
+            "two" => "two",
+            _ => panic!("unexpected binding id"),
+        };
+        ResolvedModelBinding {
+            binding_id: binding_id.to_string(),
+            model_slug: format!("catalog-{model_suffix}"),
+            model_name: format!("vendor/{model_suffix}"),
+            provider_id: "openrouter".to_string(),
+            invocation_method: ProviderWireApi::OpenAIResponses,
+            default_reasoning_effort: None,
+            enabled: true,
+        }
     }
 
     #[test]
