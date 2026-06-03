@@ -16,11 +16,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             ext: ""
             archive: tar.gz
           - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             ext: ""
             archive: tar.gz
           - os: macos-latest
@@ -47,28 +47,24 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      # Cross-compiling aarch64-unknown-linux-gnu needs an explicit gcc cross-toolchain.
-      - name: Install cross-compilation toolchain (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - uses: mlugg/setup-zig@v2
+        if: runner.os == 'Linux'
 
-      - name: Set cross-compilation env (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        shell: bash
-        run: |
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: Install cargo-zigbuild
+        if: runner.os == 'Linux'
+        run: cargo install cargo-zigbuild --version 0.22.3 --locked
 
       - name: Build release binary (x86_64 Linux)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: cargo build --release --target ${{ matrix.target }} -p devo-cli
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        env:
+          RUSTFLAGS: -C strip=symbols
+        run: cargo zigbuild --release --target ${{ matrix.target }} -p devo-cli
 
       - name: Build release binary (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cargo build --release --target ${{ matrix.target }} -p devo-cli
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        env:
+          RUSTFLAGS: -C strip=symbols
+        run: cargo zigbuild --release --target ${{ matrix.target }} -p devo-cli
 
       - name: Build release binary (macOS)
         if: runner.os == 'macOS'
@@ -77,14 +73,6 @@ jobs:
       - name: Build release binary (Windows)
         if: runner.os == 'Windows'
         run: cargo build --release --target ${{ matrix.target }} -p devo-cli
-
-      - name: Strip symbols (x86_64 Linux)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: strip target/${{ matrix.target }}/release/devo${{ matrix.ext }}
-
-      - name: Strip symbols (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: aarch64-linux-gnu-strip target/${{ matrix.target }}/release/devo${{ matrix.ext }}
 
       - name: Strip symbols (macOS)
         if: runner.os == 'macOS'
@@ -156,8 +144,8 @@ jobs:
           Download the archive for your platform from the Assets section below, extract it, and place the \`devo\` (or \`devo.exe\` on Windows) binary somewhere in your \`PATH\`.
 
           Supported platforms:
-          - Linux x86_64 (\`x86_64-unknown-linux-gnu\`)
-          - Linux ARM64 (\`aarch64-unknown-linux-gnu\`)
+          - Linux x86_64 (\`x86_64-unknown-linux-musl\`)
+          - Linux ARM64 (\`aarch64-unknown-linux-musl\`)
           - macOS Intel (\`x86_64-apple-darwin\`)
           - macOS Apple Silicon (\`aarch64-apple-darwin\`)
           - Windows x86_64 (\`x86_64-pc-windows-msvc\`)

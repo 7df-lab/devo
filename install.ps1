@@ -123,8 +123,22 @@ function Resolve-Version {
     return $latest.tag_name
 }
 
+# ── Banner ───────────────────────────────────────────────────────────────
+function Print-Banner {
+    Write-Host ""
+    Write-Host "██████╗  ███████╗██╗   ██╗ ██████╗" -ForegroundColor DarkGray
+    Write-Host "██╔══██╗ ██╔════╝██║   ██║██╔═══██╗" -ForegroundColor DarkGray
+    Write-Host "██║  ██║ █████╗  ██║   ██║██║   ██║" -ForegroundColor DarkGray
+    Write-Host "██║  ██║ ██╔══╝  ╚██╗ ██╔╝██║   ██║" -ForegroundColor DarkGray
+    Write-Host "██████╔╝ ███████╗ ╚████╔╝ ╚██████╔╝" -ForegroundColor DarkGray
+    Write-Host "╚═════╝  ╚══════╝  ╚═══╝   ╚═════╝" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
 # ── Install ──────────────────────────────────────────────────────────────
 function Main {
+    Print-Banner
+
     $target = Get-Target
     $version = Resolve-Version
     $archiveUrl = "https://github.com/$Repo/releases/download/$version/devo-${version}-${target}.zip"
