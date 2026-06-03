@@ -570,7 +570,7 @@ pub async fn prepare_model_invocation(
         model_binding_id: ModelBindingId::new(),
         display_name: resolved_model_def.display_name.clone(),
         context_window: resolved_model_def.context_window as u64,
-        effective_context_window: (resolved_model_def.context_window as f64 * 0.9) as u64,
+        effective_context_window: resolved_model_def.effective_context_window() as u64,
         reasoning_effort: None,
         modalities: vec!["text".to_string()],
     };

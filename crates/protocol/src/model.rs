@@ -296,6 +296,12 @@ impl Model {
         self.effective_context_window_percent.unwrap_or(95)
     }
 
+    pub fn effective_context_window(&self) -> u32 {
+        self.context_window
+            .saturating_mul(self.effective_context_window_percent() as u32)
+            / 100
+    }
+
     pub fn default_thinking_selection(&self) -> Option<String> {
         match &self.thinking_capability {
             ThinkingCapability::Unsupported => None,
@@ -885,6 +891,28 @@ mod tests {
         let deserialized: ModelRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.model, "claude-sonnet-4-20250514");
         assert_eq!(deserialized.messages.len(), 1);
+    }
+
+    #[test]
+    fn model_effective_context_window_uses_configured_percent() {
+        let model = Model {
+            context_window: 1_000,
+            effective_context_window_percent: Some(80),
+            ..Model::default()
+        };
+
+        assert_eq!(model.effective_context_window(), 800);
+    }
+
+    #[test]
+    fn model_effective_context_window_defaults_to_95_percent() {
+        let model = Model {
+            context_window: 1_000,
+            effective_context_window_percent: None,
+            ..Model::default()
+        };
+
+        assert_eq!(model.effective_context_window(), 950);
     }
 
     #[test]

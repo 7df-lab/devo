@@ -87,9 +87,23 @@ Important fields:
 
 | Field | Meaning |
 | --- | --- |
-| `model_slug` | Stable Devo-supported model id. |
+| `model_slug` | Stable model id matching a `slug` in the effective `models.json` catalog. |
 | `provider` | Provider id from `[providers.<id>]`. |
 | `model_name` | Provider-specific model name sent on the wire. |
 | `display_name` | User-facing label shown in clients. |
 | `invocation_method` | Provider wire API used for requests. |
 | `default_reasoning_effort` | Optional default reasoning selection for capable models. |
+
+## Model Catalog
+
+On first startup, Devo seeds `<DEVO_HOME>/models.json` from the built-in model
+catalog. Startup reads the effective catalog in this order: built-in defaults,
+`<DEVO_HOME>/models.json`, then `<workspace>/.devo/models.json`. Entries merge
+by `slug`, with later layers overriding earlier ones.
+
+Catalog entries can configure `context_window`, `max_tokens`, and
+`effective_context_window_percent`. A binding's `model_slug` selects catalog
+capabilities, while `model_name` is the provider model string. For example,
+`model_slug = "deepseek-v4-pro"` can map to catalog entry
+`"slug": "deepseek-v4-pro"`, while
+`model_name = "deepseek/deepseek-v4-pro"` is sent to the provider.

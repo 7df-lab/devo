@@ -354,7 +354,7 @@ Credential ids are stable keys inside `auth.json`. Renaming a provider does not 
 Required fields for an enabled binding:
 
 - `enabled`: boolean.
-- `model_slug`: canonical supported model slug.
+- `model_slug`: canonical model slug matching the effective model catalog.
 - `display_name`: user-configurable client display label for this binding.
 - `provider`: provider id from `[providers]`.
 - `model_name`: provider-specific model name used for API requests.
@@ -373,7 +373,7 @@ Allowed `invocation_method` values for the initial schema:
 
 Rules:
 
-- `model_slug` must exist in the built-in supported model catalog.
+- `model_slug` must exist in the effective model catalog loaded from built-in defaults plus user/workspace `models.json` overrides.
 - `display_name` is display metadata only. It must not be used as a stable identifier, provider API model name, or cross-reference key.
 - Program-created model bindings must persist `display_name`. When the user accepts the default suggestion, that persisted value should be copied from the built-in supported model definition's display name.
 - `provider` must reference an enabled effective provider.

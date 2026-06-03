@@ -2,7 +2,6 @@ use anyhow::Context;
 use devo_core::AUTH_CONFIG_FILE_NAME;
 use devo_core::Model;
 use devo_core::ModelCatalog;
-use devo_core::PresetModelCatalog;
 use devo_core::ProviderValidateParams;
 use devo_core::ProviderValidateResult;
 use devo_core::ProviderVendorConfig;
@@ -131,7 +130,7 @@ impl ServerRuntime {
             }
         };
 
-        match validate_provider_candidate(params).await {
+        match validate_provider_candidate(params, self.deps.model_catalog.as_ref()).await {
             Ok(reply_preview) => serde_json::to_value(SuccessResponse {
                 id: request_id,
                 result: ProviderValidateResult { reply_preview },
@@ -155,7 +154,10 @@ fn normalized_provider_id(name: &str) -> Option<String> {
     }
 }
 
-async fn validate_provider_candidate(params: ProviderValidateParams) -> anyhow::Result<String> {
+async fn validate_provider_candidate(
+    params: ProviderValidateParams,
+    catalog: &dyn ModelCatalog,
+) -> anyhow::Result<String> {
     let provider_id = normalized_provider_id(&params.provider_vendor.name)
         .context("provider name cannot be empty")?;
     if params.model_binding.provider.trim() != provider_id {
@@ -176,10 +178,11 @@ async fn validate_provider_candidate(params: ProviderValidateParams) -> anyhow::
     }
 
     let validation_model = resolve_validation_model(
+        catalog,
         params.model_binding.invocation_method,
         &params.model_binding.model_slug,
         &params.model_binding.model_name,
-    )?;
+    );
     let api_key = resolve_validation_api_key(&provider_id, &params)?;
     let provider = build_validation_provider(
         params.model_binding.invocation_method,
@@ -197,23 +200,23 @@ async fn validate_provider_candidate(params: ProviderValidateParams) -> anyhow::
 }
 
 fn resolve_validation_model(
+    catalog: &dyn ModelCatalog,
     wire_api: devo_core::ProviderWireApi,
     model_slug: &str,
     model_name: &str,
-) -> anyhow::Result<Model> {
-    let catalog = PresetModelCatalog::load()?;
+) -> Model {
     if let Some(entry) = catalog.get(model_slug) {
         let mut model = entry.clone();
         model.slug = model_name.to_string();
         model.provider = wire_api;
-        return Ok(model);
+        return model;
     }
-    Ok(Model {
+    Model {
         slug: model_name.to_string(),
         display_name: model_slug.to_string(),
         provider: wire_api,
         ..Model::default()
-    })
+    }
 }
 
 fn resolve_validation_api_key(
@@ -303,6 +306,8 @@ fn resolve_provider_api_key(
 
 #[cfg(test)]
 mod tests {
+    use devo_core::PresetModelCatalog;
+    use devo_core::ProviderWireApi;
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -314,5 +319,38 @@ mod tests {
             Some("openai".to_string())
         );
         assert_eq!(normalized_provider_id("   "), None);
+    }
+
+    #[test]
+    fn resolve_validation_model_uses_runtime_catalog_metadata_and_wire_model_name() {
+        let catalog = PresetModelCatalog::new(vec![Model {
+            slug: "catalog-slug".to_string(),
+            display_name: "Catalog Model".to_string(),
+            context_window: 123_456,
+            effective_context_window_percent: Some(70),
+            max_tokens: Some(7_654),
+            provider: ProviderWireApi::AnthropicMessages,
+            ..Model::default()
+        }]);
+
+        let model = resolve_validation_model(
+            &catalog,
+            ProviderWireApi::OpenAIChatCompletions,
+            "catalog-slug",
+            "vendor/model-name",
+        );
+
+        assert_eq!(
+            model,
+            Model {
+                slug: "vendor/model-name".to_string(),
+                display_name: "Catalog Model".to_string(),
+                context_window: 123_456,
+                effective_context_window_percent: Some(70),
+                max_tokens: Some(7_654),
+                provider: ProviderWireApi::OpenAIChatCompletions,
+                ..Model::default()
+            }
+        );
     }
 }

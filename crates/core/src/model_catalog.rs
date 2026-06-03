@@ -17,7 +17,7 @@
 //! - serde compatibility for the raw preset file belongs in `model_preset.rs`
 //! - execution logic should depend on `ModelCatalog` and `Model`, not on how this module reads JSON
 //!
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{Model, ModelCatalog, ModelError, ModelPreset};
 
@@ -31,6 +31,14 @@ const BUILTIN_MODELS_JSON: &str = include_str!("../models.json");
 #[derive(Debug, Clone, Default)]
 pub struct PresetModelCatalog {
     models: Vec<Model>,
+    warnings: Vec<ModelCatalogWarning>,
+}
+
+/// Non-fatal filesystem catalog issue recorded while loading `models.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCatalogWarning {
+    pub path: PathBuf,
+    pub message: String,
 }
 
 impl PresetModelCatalog {
@@ -38,6 +46,7 @@ impl PresetModelCatalog {
     pub fn load() -> Result<Self, PresetModelCatalogError> {
         Ok(Self {
             models: load_builtin_models()?,
+            warnings: Vec::new(),
         })
     }
 
@@ -56,31 +65,41 @@ impl PresetModelCatalog {
 
         let mut presets = load_builtin_model_presets()?;
 
-        if let Some(user_overrides) = load_models_from_file(&config_home.join("models.json")) {
-            presets = merge_model_presets(presets, user_overrides);
-        }
+        let mut warnings = Vec::new();
+        merge_filesystem_model_presets(
+            &mut presets,
+            &mut warnings,
+            &config_home.join("models.json"),
+        );
 
         if let Some(workspace_root) = workspace_root {
             let project_path = workspace_root.join(".devo").join("models.json");
-            if let Some(project_overrides) = load_models_from_file(&project_path) {
-                presets = merge_model_presets(presets, project_overrides);
-            }
+            merge_filesystem_model_presets(&mut presets, &mut warnings, &project_path);
         }
 
         presets.sort_by(|left, right| right.priority.cmp(&left.priority));
         Ok(Self {
             models: presets.into_iter().map(Model::from).collect(),
+            warnings,
         })
     }
 
     /// Creates a catalog from an already-loaded model list.
     pub fn new(models: Vec<Model>) -> Self {
-        Self { models }
+        Self {
+            models,
+            warnings: Vec::new(),
+        }
     }
 
     /// Returns the loaded models by value.
     pub fn into_inner(self) -> Vec<Model> {
         self.models
+    }
+
+    /// Returns non-fatal warnings encountered while loading filesystem overrides.
+    pub fn warnings(&self) -> &[ModelCatalogWarning] {
+        &self.warnings
     }
 }
 
@@ -120,14 +139,45 @@ pub fn load_builtin_models() -> Result<Vec<Model>, PresetModelCatalogError> {
     Ok(presets.into_iter().map(Model::from).collect())
 }
 
-/// Reads model presets from a filesystem JSON path. Returns `None` if the file
-/// does not exist, and a parse error if the file exists but is invalid.
-fn load_models_from_file(path: &Path) -> Option<Vec<ModelPreset>> {
-    let contents = std::fs::read_to_string(path).ok()?;
+/// Reads model presets from a filesystem JSON path. Missing files return `None`;
+/// invalid files return an error so callers can warn while continuing.
+fn load_models_from_file(path: &Path) -> Result<Option<Vec<ModelPreset>>, ModelCatalogFileError> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ModelCatalogFileError::Read(error)),
+    };
     if contents.trim().is_empty() {
-        return Some(Vec::new());
+        return Ok(Some(Vec::new()));
     }
-    Some(serde_json::from_str(&contents).unwrap_or_default())
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(ModelCatalogFileError::Parse)
+}
+
+fn merge_filesystem_model_presets(
+    presets: &mut Vec<ModelPreset>,
+    warnings: &mut Vec<ModelCatalogWarning>,
+    path: &Path,
+) {
+    match load_models_from_file(path) {
+        Ok(Some(overrides)) => {
+            *presets = merge_model_presets(std::mem::take(presets), overrides);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let message = error.to_string();
+            tracing::warn!(
+                path = %path.display(),
+                error = %message,
+                "skipping invalid model catalog override"
+            );
+            warnings.push(ModelCatalogWarning {
+                path: path.to_path_buf(),
+                message,
+            });
+        }
+    }
 }
 
 /// Merges two model lists by slug. Entries from `overlay` replace matching
@@ -168,6 +218,14 @@ pub enum PresetModelCatalogError {
     Parse(#[from] serde_json::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ModelCatalogFileError {
+    #[error("failed to read model catalog: {0}")]
+    Read(#[from] std::io::Error),
+    #[error("failed to parse model catalog: {0}")]
+    Parse(#[from] serde_json::Error),
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -198,6 +256,14 @@ mod tests {
             priority,
             ..ModelPreset::default()
         }
+    }
+
+    fn model_by_slug(models: &[crate::Model], slug: &str) -> crate::Model {
+        models
+            .iter()
+            .find(|model| model.slug == slug)
+            .cloned()
+            .expect("model exists")
     }
 
     #[test]
@@ -309,6 +375,90 @@ mod tests {
 
         assert!(models.iter().any(|m| m.slug == "custom"));
         assert!(models.iter().any(|m| m.slug == "qwen3-coder-next"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_from_config_applies_user_model_token_overrides() {
+        let root = unique_temp_dir("catalog-user-token-overrides");
+        let home = root.join("home").join(".devo");
+        std::fs::create_dir_all(&home).expect("create home");
+
+        std::fs::write(
+            home.join("models.json"),
+            r#"[
+                {
+                    "slug": "qwen3-coder-next",
+                    "display_name": "Custom Qwen",
+                    "context_window": 123456,
+                    "effective_context_window_percent": 77,
+                    "max_tokens": 7654
+                }
+            ]"#,
+        )
+        .expect("write user models");
+
+        let catalog =
+            PresetModelCatalog::load_from_config(&home, /*workspace_root*/ None).expect("load");
+        let model = model_by_slug(&catalog.into_inner(), "qwen3-coder-next");
+
+        assert_eq!(model.context_window, 123456);
+        assert_eq!(model.effective_context_window_percent, Some(77));
+        assert_eq!(model.max_tokens, Some(7654));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_from_config_project_overrides_user_by_slug() {
+        let root = unique_temp_dir("catalog-project-wins");
+        let home = root.join("home").join(".devo");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&home).expect("create home");
+        std::fs::create_dir_all(workspace.join(".devo")).expect("create project");
+
+        std::fs::write(
+            home.join("models.json"),
+            r#"[{"slug":"custom","display_name":"User","context_window":111,"effective_context_window_percent":66,"max_tokens":222}]"#,
+        )
+        .expect("write user models");
+        std::fs::write(
+            workspace.join(".devo").join("models.json"),
+            r#"[{"slug":"custom","display_name":"Project","context_window":333,"effective_context_window_percent":88,"max_tokens":444}]"#,
+        )
+        .expect("write project models");
+
+        let catalog = PresetModelCatalog::load_from_config(&home, Some(&workspace)).expect("load");
+        let model = model_by_slug(&catalog.into_inner(), "custom");
+
+        assert_eq!(model.display_name, "Project");
+        assert_eq!(model.context_window, 333);
+        assert_eq!(model.effective_context_window_percent, Some(88));
+        assert_eq!(model.max_tokens, Some(444));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_from_config_records_warning_and_continues_for_invalid_filesystem_catalog() {
+        let root = unique_temp_dir("catalog-invalid-warning");
+        let home = root.join("home").join(".devo");
+        std::fs::create_dir_all(&home).expect("create home");
+        let user_file = home.join("models.json");
+        std::fs::write(&user_file, "{not valid json").expect("write invalid user models");
+
+        let catalog =
+            PresetModelCatalog::load_from_config(&home, /*workspace_root*/ None).expect("load");
+
+        assert!(catalog.get("qwen3-coder-next").is_some());
+        assert_eq!(catalog.warnings().len(), 1);
+        assert_eq!(catalog.warnings()[0].path, user_file);
+        assert!(
+            catalog.warnings()[0]
+                .message
+                .contains("failed to parse model catalog")
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

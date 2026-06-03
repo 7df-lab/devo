@@ -82,9 +82,22 @@ default_reasoning_effort = "high"
 
 | 字段 | 含义 |
 | --- | --- |
-| `model_slug` | Devo 支持模型的稳定 id。 |
+| `model_slug` | 稳定模型 id，匹配有效 `models.json` catalog 中的 `slug`。 |
 | `provider` | 来自 `[providers.<id>]` 的提供方 id。 |
 | `model_name` | 发送到提供方的模型名称。 |
 | `display_name` | 客户端中显示的用户可读标签。 |
 | `invocation_method` | 请求使用的提供方 Wire API。 |
 | `default_reasoning_effort` | 支持推理的模型可使用的默认推理选择。 |
+
+## 模型 Catalog
+
+首次启动时，Devo 会用内置模型 catalog 初始化 `<DEVO_HOME>/models.json`。
+启动时按以下顺序读取有效 catalog：内置默认值、`<DEVO_HOME>/models.json`、
+`<workspace>/.devo/models.json`。条目按 `slug` 合并，后面的层级覆盖前面的层级。
+
+Catalog 条目可以配置 `context_window`、`max_tokens` 和
+`effective_context_window_percent`。绑定中的 `model_slug` 用于选择 catalog
+能力信息，`model_name` 是发送给提供方的模型字符串。例如，
+`model_slug = "deepseek-v4-pro"` 可以对应 catalog 条目
+`"slug": "deepseek-v4-pro"`，而 `model_name = "deepseek/deepseek-v4-pro"`
+会发送给提供方。

@@ -183,7 +183,7 @@ wire_apis = ["openai_chat_completions"] # openai_chat_completions | openai_respo
 enabled = true
 model_slug = "deepseek-v4-pro"
 provider = "api.deepseek.com"
-model_name = "deepseek-v4-pro"
+model_name = "deepseek/deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
 invocation_method = "openai_chat_completions"
 
@@ -241,7 +241,10 @@ check_interval_hours = 24            # optional
 
 A separate JSON file defines available models and their capabilities. On first
 run, the built-in catalog is automatically copied to `~/.devo/models.json` so
-you can customize it. Models are organized by `channel` (brand/vendor).
+you can customize it. Models are organized by `channel` (brand/vendor). The
+`slug` in this file is the value used by `model_slug` in `config.toml`.
+`model_name` in a model binding is separate: it is the provider-specific name
+sent to the vendor API.
 
 ```json
 [
@@ -253,6 +256,7 @@ you can customize it. Models are organized by `channel` (brand/vendor).
     "description": "DeepSeek v4 pro model",
     "context_window": 1000000,
     "max_tokens": 384000,
+    "effective_context_window_percent": 95,
     "thinking_capability": "toggle",
     "supported_reasoning_levels": ["high", "max"],
     "base_instructions": "You are Devo, a coding agent based on DeepSeek...",
@@ -265,6 +269,12 @@ you can customize it. Models are organized by `channel` (brand/vendor).
 Merge order: builtin defaults < `~/.devo/models.json` < `<workspace>/.devo/models.json`,
 merged by model `slug`. You can override existing entries (e.g. change prompts or
 context window) or add custom models.
+
+For example, a binding can use `model_slug = "deepseek-v4-pro"` to read
+capabilities from the effective catalog entry with `"slug": "deepseek-v4-pro"`,
+while `model_name = "deepseek/deepseek-v4-pro"` is sent to the provider.
+`context_window`, `effective_context_window_percent`, and `max_tokens` are read
+from the effective catalog at startup.
 
 The `/model` slash command in the TUI shows only models you have configured
 with credentials in `config.toml`, not the full catalog.
