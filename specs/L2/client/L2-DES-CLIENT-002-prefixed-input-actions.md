@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-26
+last_updated: 2026-06-04
 ---
 
 # L2-DES-CLIENT-002 — Prefixed Input Actions
@@ -43,6 +43,7 @@ The text immediately following `@` is always the fuzzy-search query keyword. Use
 Rules:
 
 - `@` triggers prefixed input only when it is the first character of the composer buffer.
+- TUI compatibility extension: the terminal composer may also trigger `@` fuzzy search at the start of the current whitespace-delimited token anywhere in the composer, including slash-command arguments. This does not change the shared leading-prefix contract for other clients.
 - Leading whitespace before `@` does not trigger prefixed input behavior.
 - `\@` at the first character escapes a literal leading `@`; the backslash is removed when submitted as normal chat text.
 - Prefix recognition must occur only after text is committed. IME composition updates must not trigger fuzzy search.
@@ -218,3 +219,4 @@ Search events are live UI projections. They are not transcript records.
 | 1 | 2026-05-25 | Assistant | Initial | Initial prefixed input design for `@` fuzzy search, selection, mention insertion, escaping, provider grouping, and protocol boundaries. |
 | 1 | 2026-05-25 | Human | Refinement | Clarified that text immediately after `@` is the query keyword, not a provider or result-type selector. |
 | 1 | 2026-05-26 | Human | Refinement | Clarified TUI marker semantics for prefix-search result focus and avoided using `●` for inserted-reference results. |
+| 1 | 2026-06-04 | Assistant | Implementation note | Documented the TUI token-local `@` compatibility extension for slash-command arguments and normal composer text. |
