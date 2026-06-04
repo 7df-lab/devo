@@ -168,6 +168,7 @@ The semantic retrieval tool should:
 - Return bounded structured JSON results containing score, workspace-relative file path, line range, language, and chunk content.
 - Use workspace search permissions and remain eligible for parallel read-only execution.
 - Cache indexes locally when possible, while invalidating them when the indexed file manifest, content mode, or embedding model changes.
+- Refresh cached indexes incrementally when possible, re-embedding changed files while reusing unchanged file records, and use watcher-backed warm reuse only when the watched root is clean and within a bounded safety interval.
 - Return a structured unavailable result when the embedding model cannot be loaded or cached, rather than fabricating semantic results.
 
 The initial retrieval design uses hybrid ranking: dense code embeddings, BM25 sparse retrieval over code-aware identifier tokens, reciprocal-rank fusion, and code-aware reranking that can boost symbol definitions and path matches while de-emphasizing tests, examples, docs, compatibility, and legacy paths.
@@ -404,3 +405,4 @@ Live server-client events may be more frequent than durable records, but replay 
 | 1 | 2026-05-25 | Assistant | Refinement | Added `L1-REQ-APP-003` as the application-safety source for tool permission, sandbox, and approval behavior. |
 | 1 | 2026-05-26 | Assistant | Refinement | Linked `multi_tool_use` behavior to `L2-DES-TOOL-002` and removed runtime-selected serialization wording. |
 | 1 | 2026-06-04 | Assistant | Refinement | Added read-only semantic code retrieval as a workspace search capability with structured output, model-unavailable behavior, and cache invalidation expectations. |
+| 1 | 2026-06-04 | Assistant | Refinement | Clarified semantic code retrieval cache refresh as incremental per-file re-embedding with watcher-backed warm reuse bounded by a safety interval. |

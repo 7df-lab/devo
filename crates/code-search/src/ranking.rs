@@ -174,14 +174,15 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
-    use crate::cache::CachedPayload;
+    use crate::cache::{CachedFileRecord, CachedIndexPayloadV2, content_hash};
+    use crate::files::FileManifestEntry;
     use crate::index::SearchIndex;
     use crate::types::{Chunk, ContentFilter};
 
     use super::*;
 
     fn index_with_chunks(chunks: Vec<Chunk>) -> SearchIndex {
-        let embeddings = chunks
+        let embeddings: Vec<Vec<f32>> = chunks
             .iter()
             .map(|chunk| {
                 if chunk.content.contains("parser") {
@@ -191,13 +192,27 @@ mod tests {
                 }
             })
             .collect();
-        SearchIndex::from_payload(CachedPayload::new(
+        let records = chunks
+            .into_iter()
+            .zip(embeddings)
+            .map(|(chunk, embedding)| {
+                CachedFileRecord::new(
+                    FileManifestEntry {
+                        path: chunk.file_path.clone(),
+                        size: chunk.content.len() as u64,
+                        modified_unix_nanos: 1,
+                    },
+                    content_hash(&chunk.content),
+                    vec![chunk],
+                    vec![embedding],
+                )
+            })
+            .collect();
+        SearchIndex::from_payload(CachedIndexPayloadV2::new(
             PathBuf::from("/repo"),
             ContentFilter::Code,
             "test".to_string(),
-            Vec::new(),
-            chunks,
-            embeddings,
+            records,
         ))
         .expect("index")
     }

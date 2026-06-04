@@ -2,10 +2,15 @@ use std::path::{Path, PathBuf};
 
 use bm25::{Document, SearchEngine, SearchEngineBuilder, Tokenizer};
 
-use crate::cache::CachedPayload;
-use crate::chunking::chunk_file;
-use crate::dense::{EmbeddingProvider, cosine_similarity};
-use crate::files::{FileEntry, FileManifestEntry, read_indexable_text};
+use crate::cache::CachedIndexPayloadV2;
+#[cfg(test)]
+use crate::dense::EmbeddingProvider;
+use crate::dense::cosine_similarity;
+#[cfg(test)]
+use crate::files::FileEntry;
+use crate::files::FileManifestEntry;
+#[cfg(test)]
+use crate::refresh::IndexRefresh;
 use crate::tokens::{enrich_for_bm25, split_identifier_tokens};
 use crate::types::{
     Chunk, CodeSearchError, ContentFilter, IndexStats, SearchFilters, SearchResult,
@@ -23,7 +28,6 @@ impl Tokenizer for CodeTokenizer {
 pub struct SearchIndex {
     root: PathBuf,
     content: ContentFilter,
-    model_id: String,
     manifest: Vec<FileManifestEntry>,
     chunks: Vec<Chunk>,
     embeddings: Vec<Vec<f32>>,
@@ -32,63 +36,40 @@ pub struct SearchIndex {
 }
 
 impl SearchIndex {
+    #[cfg(test)]
     pub fn build(
         root: PathBuf,
         content: ContentFilter,
         files: &[FileEntry],
         provider: &dyn EmbeddingProvider,
     ) -> Result<Self, CodeSearchError> {
-        let mut chunks = Vec::new();
-        for file in files {
-            let Some(text) = read_indexable_text(&file.absolute_path)? else {
-                continue;
-            };
-            chunks.extend(chunk_file(&file.relative_path, &file.language, &text));
-        }
-        let texts = chunks
-            .iter()
-            .map(|chunk| chunk.content.clone())
-            .collect::<Vec<_>>();
-        let embeddings = provider.embed(&texts)?;
-        if embeddings.len() != chunks.len() {
-            return Err(CodeSearchError::Index(format!(
-                "embedding provider returned {} vectors for {} chunks",
-                embeddings.len(),
-                chunks.len()
-            )));
-        }
-        Self::from_parts(
-            root,
-            content,
-            provider.model_id().to_string(),
-            files.iter().map(|file| file.manifest.clone()).collect(),
-            chunks,
-            embeddings,
-            files.len(),
-        )
+        let outcome =
+            IndexRefresh::refresh(root.as_path(), content, files.to_vec(), None, provider)?;
+        Self::from_payload(outcome.payload)
     }
 
-    pub fn from_payload(payload: CachedPayload) -> Result<Self, CodeSearchError> {
-        let indexed_files = payload.manifest.len();
+    pub fn from_payload(payload: CachedIndexPayloadV2) -> Result<Self, CodeSearchError> {
+        let indexed_files = payload.files.len();
+        let mut manifest = Vec::new();
+        let mut chunks = Vec::new();
+        let mut embeddings = Vec::new();
+        for record in payload.files {
+            if record.chunks.len() != record.embeddings.len() {
+                return Err(CodeSearchError::Index(
+                    "cached chunk and embedding counts do not match".to_string(),
+                ));
+            }
+            manifest.push(record.manifest);
+            chunks.extend(record.chunks);
+            embeddings.extend(record.embeddings);
+        }
         Self::from_parts(
             payload.root,
             payload.content,
-            payload.model_id,
-            payload.manifest,
-            payload.chunks,
-            payload.embeddings,
+            manifest,
+            chunks,
+            embeddings,
             indexed_files,
-        )
-    }
-
-    pub fn payload(&self) -> CachedPayload {
-        CachedPayload::new(
-            self.root.clone(),
-            self.content,
-            self.model_id.clone(),
-            self.manifest.clone(),
-            self.chunks.clone(),
-            self.embeddings.clone(),
         )
     }
 
@@ -210,7 +191,6 @@ impl SearchIndex {
     fn from_parts(
         root: PathBuf,
         content: ContentFilter,
-        model_id: String,
         manifest: Vec<FileManifestEntry>,
         chunks: Vec<Chunk>,
         embeddings: Vec<Vec<f32>>,
@@ -229,7 +209,6 @@ impl SearchIndex {
         Ok(Self {
             root,
             content,
-            model_id,
             manifest,
             chunks,
             embeddings,
@@ -302,13 +281,20 @@ mod tests {
             end_line: 12,
             language: "rust".to_string(),
         };
-        let payload = CachedPayload::new(
+        let payload = CachedIndexPayloadV2::new(
             PathBuf::from("/repo"),
             ContentFilter::Code,
             "test".to_string(),
-            Vec::new(),
-            vec![chunk],
-            vec![vec![1.0]],
+            vec![crate::cache::CachedFileRecord::new(
+                FileManifestEntry {
+                    path: PathBuf::from("src/lib.rs"),
+                    size: 10,
+                    modified_unix_nanos: 1,
+                },
+                crate::cache::content_hash("fn parse() {}"),
+                vec![chunk],
+                vec![vec![1.0]],
+            )],
         );
         let index = SearchIndex::from_payload(payload).expect("index");
 
