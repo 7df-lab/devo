@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = { workspace = true }
 bm25 = { workspace = true }
+devo-util-paths = { workspace = true }
 dirs = { workspace = true }
 hf-hub = { workspace = true }
 hnsw_rs = { workspace = true }

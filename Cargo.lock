@@ -1387,6 +1387,7 @@ version = "0.1.11"
 dependencies = [
  "anyhow",
  "bm25",
+ "devo-util-paths",
  "dirs",
  "hf-hub",
  "hnsw_rs",
