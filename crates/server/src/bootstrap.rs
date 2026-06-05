@@ -86,8 +86,8 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
         config.mcp.clone(),
         config.mcp_oauth_credentials_store.unwrap_or_default(),
     ));
-    let registry =
-        handlers::build_registry_from_plan_with_mcp(&ToolPlanConfig::default(), mcp_manager).await;
+    let tool_plan = ToolPlanConfig::from_app_config(&config);
+    let registry = handlers::build_registry_from_plan_with_mcp(&tool_plan, mcp_manager).await;
     let model_catalog: Arc<dyn ModelCatalog> = Arc::new(PresetModelCatalog::load_from_config(
         &resolver.user_config_dir(),
         args.working_root.as_deref(),

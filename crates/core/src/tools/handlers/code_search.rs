@@ -11,8 +11,7 @@ use serde::Deserialize;
 use crate::contracts::{
     ToolCallError, ToolContext, ToolProgressSender, ToolResult, ToolResultContent,
 };
-use crate::registry_plan::ToolPlanConfig;
-use crate::registry_plan::build_tool_registry_plan;
+use crate::registry_plan::code_search_tool_spec;
 use crate::tool_handler::ToolHandler;
 use crate::tool_spec::ToolSpec;
 
@@ -27,11 +26,7 @@ impl CodeSearchHandler {
     }
 
     pub fn with_service(service: Arc<CodeSearchService>) -> Self {
-        let spec = build_tool_registry_plan(&ToolPlanConfig::default())
-            .specs
-            .into_iter()
-            .find(|spec| spec.name == "code_search")
-            .expect("code_search spec must be registered");
+        let spec = code_search_tool_spec();
         Self { spec, service }
     }
 }
@@ -273,6 +268,13 @@ mod tests {
         let service =
             CodeSearchService::new(Arc::new(HashEmbeddingProvider::new("test", 16)), cache_dir);
         CodeSearchHandler::with_service(Arc::new(service))
+    }
+
+    #[test]
+    fn handler_constructor_sets_code_search_spec() {
+        let handler = CodeSearchHandler::new();
+
+        assert_eq!(handler.spec().name, "code_search");
     }
 
     /// Trace: L2-DES-TOOL-001

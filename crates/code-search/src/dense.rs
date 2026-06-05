@@ -1,7 +1,7 @@
 //! Dense embedding providers and vector math.
 //!
 //! Production search uses model2vec with the Semble-compatible
-//! `minishlab/potion-code-16M` model cached under the local Devo cache
+//! `minishlab/potion-code-16M` model cached under the local Devo model
 //! directory. Missing model files are fetched on first use; load/download
 //! failures become typed `ModelUnavailable` errors so the tool can report a
 //! recoverable cache/model problem instead of panicking. Tests use a deterministic
@@ -19,7 +19,16 @@ use crate::types::CodeSearchError;
 const DEFAULT_MODEL_OWNER: &str = "minishlab";
 const DEFAULT_MODEL_NAME: &str = "potion-code-16M";
 const DEFAULT_MODEL_ID: &str = "minishlab/potion-code-16M";
+const DEVO_HOME_ENV: &str = "DEVO_HOME";
+const LOCAL_MODELS_DIR: &str = "local-models";
 const MODEL_FILES: [&str; 3] = ["tokenizer.json", "model.safetensors", "config.json"];
+
+#[derive(Debug)]
+struct DefaultModelCacheInputs {
+    devo_home: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+    temp_dir: PathBuf,
+}
 
 /// Embeds code-search documents and queries into dense vectors.
 ///
@@ -197,11 +206,21 @@ fn ensure_model_files(model_dir: &PathBuf) -> Result<(), CodeSearchError> {
 
 /// Computes the on-disk directory for the default model.
 fn default_model_cache_dir() -> PathBuf {
-    dirs::cache_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("devo")
-        .join("code-search")
-        .join("models")
+    default_model_cache_dir_from_inputs(DefaultModelCacheInputs {
+        devo_home: std::env::var_os(DEVO_HOME_ENV).map(PathBuf::from),
+        home_dir: dirs::home_dir(),
+        temp_dir: std::env::temp_dir(),
+    })
+}
+
+fn default_model_cache_dir_from_inputs(inputs: DefaultModelCacheInputs) -> PathBuf {
+    let base_dir = inputs
+        .devo_home
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| inputs.home_dir.map(|home_dir| home_dir.join(".devo")))
+        .unwrap_or_else(|| inputs.temp_dir.join(".devo"));
+    base_dir
+        .join(LOCAL_MODELS_DIR)
         .join(DEFAULT_MODEL_ID.replace('/', "--"))
 }
 
@@ -255,5 +274,76 @@ mod tests {
     fn cosine_similarity_scores_identical_vectors_highest() {
         assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]), 1.0);
         assert_eq!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]), 0.0);
+    }
+
+    #[test]
+    fn default_model_cache_dir_uses_devo_home_when_set() {
+        let devo_home = PathBuf::from("devo-home");
+        let inputs = DefaultModelCacheInputs {
+            devo_home: Some(devo_home.clone()),
+            home_dir: Some(PathBuf::from("home")),
+            temp_dir: PathBuf::from("temp"),
+        };
+
+        assert_eq!(
+            default_model_cache_dir_from_inputs(inputs),
+            devo_home
+                .join(LOCAL_MODELS_DIR)
+                .join("minishlab--potion-code-16M")
+        );
+    }
+
+    #[test]
+    fn default_model_cache_dir_uses_home_when_devo_home_is_absent() {
+        let home_dir = PathBuf::from("home");
+        let inputs = DefaultModelCacheInputs {
+            devo_home: None,
+            home_dir: Some(home_dir.clone()),
+            temp_dir: PathBuf::from("temp"),
+        };
+
+        assert_eq!(
+            default_model_cache_dir_from_inputs(inputs),
+            home_dir
+                .join(".devo")
+                .join(LOCAL_MODELS_DIR)
+                .join("minishlab--potion-code-16M")
+        );
+    }
+
+    #[test]
+    fn default_model_cache_dir_treats_empty_devo_home_as_absent() {
+        let home_dir = PathBuf::from("home");
+        let inputs = DefaultModelCacheInputs {
+            devo_home: Some(PathBuf::new()),
+            home_dir: Some(home_dir.clone()),
+            temp_dir: PathBuf::from("temp"),
+        };
+
+        assert_eq!(
+            default_model_cache_dir_from_inputs(inputs),
+            home_dir
+                .join(".devo")
+                .join(LOCAL_MODELS_DIR)
+                .join("minishlab--potion-code-16M")
+        );
+    }
+
+    #[test]
+    fn default_model_cache_dir_falls_back_to_temp_when_home_is_absent() {
+        let temp_dir = PathBuf::from("temp");
+        let inputs = DefaultModelCacheInputs {
+            devo_home: None,
+            home_dir: None,
+            temp_dir: temp_dir.clone(),
+        };
+
+        assert_eq!(
+            default_model_cache_dir_from_inputs(inputs),
+            temp_dir
+                .join(".devo")
+                .join(LOCAL_MODELS_DIR)
+                .join("minishlab--potion-code-16M")
+        );
     }
 }

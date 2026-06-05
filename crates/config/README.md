@@ -14,6 +14,7 @@ consumer crates.
 - `server.rs` defines server transport and connection defaults.
 - `logging.rs` defines logging and rolling file-log settings.
 - `skills.rs` defines skill discovery settings.
+- `experimental.rs` defines opt-in experimental feature gates.
 - `error.rs` defines app and provider config error types.
 - `provider.rs` re-exports provider config APIs and contains provider-focused
   tests.
@@ -82,6 +83,7 @@ without clearing every omitted provider field from user config.
 - `skills.bundled.enabled = true`
 - `skills.include_instructions = true`
 - `skills.config = []`
+- `experimental.code_search = false`
 - `updates.enabled = true`
 - `updates.check_on_startup = true`
 - `updates.check_interval_hours = 24`
@@ -131,6 +133,9 @@ enabled = false
 [[skills.config]]
 name = "code-review"
 enabled = true
+
+[experimental]
+code-search = false
 
 [updates]
 enabled = true

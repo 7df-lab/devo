@@ -645,6 +645,29 @@ mod tests {
     }
 
     #[test]
+    fn tool_search_does_not_resolve_code_search_alias_when_unregistered() {
+        let mut loaded = LoadedDeferredTools::default();
+        let tools = vec![
+            tool("read", "Read a file."),
+            tool("ToolSearch", "Load deferred tools."),
+        ];
+
+        let err = execute_tool_search(
+            "session-1",
+            "select:semble",
+            &tools,
+            &mut loaded,
+            &DeferredLoadingConfig::default(),
+        )
+        .expect_err("unregistered code_search alias should not resolve");
+
+        assert_eq!(
+            err,
+            "Not found: semble. Only request exact tool names from the Deferred tools list."
+        );
+    }
+
+    #[test]
     fn loaded_tools_are_session_scoped_and_listed_deterministically() {
         let mut loaded = LoadedDeferredTools::default();
         loaded.mark_loaded("s1", "skill");

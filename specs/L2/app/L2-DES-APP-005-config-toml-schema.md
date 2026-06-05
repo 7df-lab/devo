@@ -82,6 +82,7 @@ Top-level sections:
 [mcp.servers.<server_id>]
 [skills]
 [skills.roots.<root_id>]
+[experimental]
 [workspace.instructions]
 [tui]
 [telemetry]
@@ -456,6 +457,19 @@ Rules:
 - Supporting files under a skill root are not loaded during configuration load.
 - Workspace skill roots should be trust-visible before automatic activation.
 - Duplicate skill names must be resolved deterministically or reported as conflicts by the skill catalog, not silently overwritten by configuration merge.
+
+## Experimental
+
+`[experimental]` controls opt-in experimental runtime features.
+
+Fields:
+
+- `code-search`: boolean; when true, the built-in `code_search` code retrieval tool is registered and exposed.
+
+Rules:
+
+- Missing `code-search` defaults to false.
+- `code_search` may be accepted as a compatibility alias, but writers should emit `code-search`.
 
 ## Tools
 

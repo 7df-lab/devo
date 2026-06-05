@@ -4,4 +4,4 @@
 - Filter files by pattern with the include parameter (eg. "*.js", "*.{ts,tsx}")
 - Returns file paths, line numbers, and matching lines
 - Use this tool when you need to search for an exact string or regex pattern
-- Prefer code_search for codebase investigation, architecture questions, related-code lookup, symbol/module discovery, and natural-language intent searches
+- When code_search is available, prefer it for codebase investigation, architecture questions, related-code lookup, symbol/module discovery, and natural-language intent searches

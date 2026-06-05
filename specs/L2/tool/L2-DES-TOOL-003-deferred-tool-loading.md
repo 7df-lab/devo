@@ -62,7 +62,7 @@ The mechanism must:
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ System Prompt                                                 │
-│   [Pre-loaded tool schemas: read, find, grep, code_search, ...] │
+│   [Pre-loaded tool schemas: read, find, grep, optional code_search, ...] │
 │                                                               │
 │   <system-reminder>                                           │
 │   Deferred tools:                                             │
@@ -87,7 +87,7 @@ The mechanism must:
          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ Next Turn Prompt                                              │
-│   [Pre-loaded tool schemas: read, find, grep, code_search, ...] │
+│   [Pre-loaded tool schemas: read, find, grep, optional code_search, ...] │
 │   [Loaded deferred schemas: web_search, fetch_url]            │
 │   <system-reminder>                                           │
 │   Deferred tools:                                             │
@@ -104,14 +104,14 @@ Every tool registered in the server-owned tool registry has a prompt loading pol
 
 ### Group 1: Pre-loaded (Core) — Always in Prompt
 
-These tools are always included in every model turn. They are the tools the model uses on virtually every decision-to-action cycle, or tools whose absence would make ordinary agent work brittle.
+These tools are included in every model turn when registered by the effective configuration. They are the tools the model uses on virtually every decision-to-action cycle, or tools whose absence would make ordinary agent work brittle. Experimental tools are absent unless their feature flag is enabled.
 
 | Tool | Category | Purpose |
 |---|---|---|
 | `read` | File read | Read file contents and metadata, including supported attachments. |
 | `find` | Search | Filename and path search backed by ripgrep. |
 | `grep` | Search | High-performance content search, normally backed by ripgrep. |
-| `code_search` | Search | Preferred codebase investigation and code retrieval tool. |
+| `code_search` | Search | Preferred codebase investigation and code retrieval tool when `[experimental] code-search = true`. |
 | `ls` | File read | List directory contents with optional pattern filtering. |
 | `write` | File mutation | Create or overwrite files through structured content. |
 | `apply_patch` | File mutation | Apply structured patches to files. |
@@ -390,10 +390,13 @@ MCP tools are conditionally deferred. Each MCP server can define a tool loading 
 In user or project `config.toml`:
 
 ```toml
+[experimental]
+code-search = true
+
 [tools.deferred_loading]
 enabled = true
 default_policy = "defer_optional"
-preloaded = ["read", "find", "grep", "code_search", "ls", "write", "apply_patch", "shell_command", "plan", "approval"]
+preloaded = ["read", "find", "grep", "ls", "write", "apply_patch", "shell_command", "plan", "approval"] # code_search is added when enabled experimentally
 deferred = ["web_search", "fetch_url", "skill", "spawn_subagent", "multi_tool_use"]
 hidden = []
 

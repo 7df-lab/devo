@@ -32,7 +32,7 @@ Usage notes:
   - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
 
   - Avoid using shell_command with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
-    - Codebase investigation: Use code_search first for finding relevant code, modules, symbols, implementations, or architecture context.
+    - Codebase investigation: When code_search is available, use it first for finding relevant code, modules, symbols, implementations, or architecture context.
     - File search: Use find for filenames and paths (NOT shell find or ls)
     - Content search: Use grep for exact text or regex searches (NOT shell grep or rg)
     - Read files: Use Read (NOT cat/head/tail)

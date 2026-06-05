@@ -27,7 +27,7 @@ impl GrepHandler {
         Self {
             spec: ToolSpec {
                 name: "grep".into(),
-                description: "Fast exact text and regex content search backed by ripgrep. Use grep for known strings or regexes; prefer code_search for codebase investigation.".into(),
+                description: "Fast exact text and regex content search backed by ripgrep. Use grep for known strings or regexes. When code_search is available, prefer it for codebase investigation.".into(),
                 input_schema: JsonSchema::object(
                     std::collections::BTreeMap::from([
                         (

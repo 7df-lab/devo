@@ -27,7 +27,7 @@ impl GlobHandler {
         Self {
             spec: ToolSpec {
                 name: "find".into(),
-                description: "Fast filename and path search backed by ripgrep. Use only for literal file/path discovery; prefer code_search for codebase investigation."
+                description: "Fast filename and path search backed by ripgrep. Use only for literal file/path discovery. When code_search is available, prefer it for codebase investigation."
                     .into(),
                 input_schema: JsonSchema::object(
                     std::collections::BTreeMap::from([

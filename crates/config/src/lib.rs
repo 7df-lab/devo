@@ -1,5 +1,6 @@
 mod app;
 mod error;
+mod experimental;
 mod logging;
 mod mcp;
 mod oauth;
@@ -9,6 +10,7 @@ mod skills;
 
 pub use app::*;
 pub use error::*;
+pub use experimental::*;
 pub use logging::*;
 pub use mcp::*;
 pub use oauth::*;

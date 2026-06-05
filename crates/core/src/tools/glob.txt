@@ -2,4 +2,4 @@
 - Supports ripgrep glob patterns like "**/*.js" or "src/**/*.ts"
 - Returns matching file paths
 - Use this tool when you need to find files by name or path patterns
-- Prefer code_search for codebase investigation, related-code lookup, module discovery, or natural-language searches
+- When code_search is available, prefer it for codebase investigation, related-code lookup, module discovery, or natural-language searches

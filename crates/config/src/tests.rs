@@ -9,6 +9,7 @@ use pretty_assertions::assert_eq;
 use super::AppConfig;
 use super::AppConfigLoader;
 use super::AppConfigStore;
+use super::ExperimentalConfig;
 use super::FileSystemAppConfigLoader;
 use super::LogRotation;
 use super::LoggingConfig;
@@ -115,6 +116,7 @@ check_interval_hours = 48
                 include_instructions: Some(true),
                 config: Vec::new(),
             },
+            experimental: ExperimentalConfig { code_search: false },
             mcp_oauth_credentials_store: Some(OAuthCredentialsStoreMode::default()),
             mcp: super::McpConfig::default(),
             provider: ProviderConfigSection::default(),
@@ -126,6 +128,90 @@ check_interval_hours = 48
             project_root_markers: vec![".workspace".into()],
             projects: BTreeMap::new(),
         }
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn default_app_config_disables_experimental_code_search() {
+    assert_eq!(
+        AppConfig::default().experimental,
+        ExperimentalConfig { code_search: false }
+    );
+}
+
+#[test]
+fn loader_accepts_experimental_code_search_kebab_key() {
+    let root = unique_temp_dir("config-experimental-kebab");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        "[experimental]\ncode-search = true\n",
+    )
+    .expect("write user config");
+
+    let loader = FileSystemAppConfigLoader::new(home);
+    let config = loader.load(None).expect("load config");
+
+    assert_eq!(
+        config.experimental,
+        ExperimentalConfig { code_search: true }
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_accepts_experimental_code_search_snake_alias() {
+    let root = unique_temp_dir("config-experimental-snake");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        "[experimental]\ncode_search = true\n",
+    )
+    .expect("write user config");
+
+    let loader = FileSystemAppConfigLoader::new(home);
+    let config = loader.load(None).expect("load config");
+
+    assert_eq!(
+        config.experimental,
+        ExperimentalConfig { code_search: true }
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_merges_experimental_config_in_normal_precedence_order() {
+    let root = unique_temp_dir("config-experimental-merge");
+    let home = root.join("home").join(".devo");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::create_dir_all(workspace.join(".devo")).expect("workspace config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        "[experimental]\ncode-search = false\n",
+    )
+    .expect("write user config");
+    std::fs::write(
+        workspace.join(".devo").join("config.toml"),
+        "[experimental]\ncode-search = true\n",
+    )
+    .expect("write project config");
+    let cli_overrides: toml::Value = "[experimental]\ncode-search = false\n"
+        .parse()
+        .expect("parse cli overrides");
+
+    let loader = FileSystemAppConfigLoader::new(home).with_cli_overrides(cli_overrides);
+    let config = loader.load(Some(&workspace)).expect("load config");
+
+    assert_eq!(
+        config.experimental,
+        ExperimentalConfig { code_search: false }
     );
 
     let _ = std::fs::remove_dir_all(root);

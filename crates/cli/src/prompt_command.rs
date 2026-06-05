@@ -67,9 +67,8 @@ pub(crate) async fn run_prompt(
             app_config.mcp.clone(),
             app_config.mcp_oauth_credentials_store.unwrap_or_default(),
         ));
-        let reg =
-            handlers::build_registry_from_plan_with_mcp(&ToolPlanConfig::default(), mcp_manager)
-                .await;
+        let tool_plan = ToolPlanConfig::from_app_config(&app_config);
+        let reg = handlers::build_registry_from_plan_with_mcp(&tool_plan, mcp_manager).await;
         std::sync::Arc::new(reg)
     };
     let runtime = ToolRuntime::new_with_context(

@@ -15,6 +15,7 @@ use devo_utils::git_op::get_git_repo_root;
 
 use crate::AUTH_CONFIG_FILE_NAME;
 use crate::AppConfigError;
+use crate::ExperimentalConfig;
 use crate::LogRotation;
 use crate::LoggingConfig;
 use crate::LoggingFileConfig;
@@ -47,6 +48,9 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     /// Skill discovery roots and behavior.
     pub skills: SkillsConfig,
+    /// Experimental feature gates.
+    #[serde(default)]
+    pub experimental: ExperimentalConfig,
     /// Preferred backend for storing MCP OAuth credentials.
     /// keyring: Use an OS-specific keyring service.
     /// file: Use a file in the Devo home directory.
@@ -138,6 +142,7 @@ impl Default for AppConfig {
                 },
             },
             skills: SkillsConfig::default(),
+            experimental: ExperimentalConfig::default(),
             mcp_oauth_credentials_store: Some(OAuthCredentialsStoreMode::default()),
             mcp: McpConfig::default(),
             provider: ProviderConfigSection::default(),
