@@ -1530,7 +1530,7 @@ impl HistoryCell for FinalMessageSeparator {
 /// End-of-turn summary showing ▣ symbol, model name, and duration.
 ///
 /// Inspired by opencode's assistant message footer:
-/// `▣ model-name · 15s` or `▣ model-name · interrupted`
+/// `▣ model-name · 4m17s` or `▣ model-name · interrupted`
 #[derive(Debug)]
 pub struct TurnSummaryCell {
     pub model_name: String,
@@ -1559,18 +1559,25 @@ impl TurnSummaryCell {
     }
 }
 
-fn format_duration_largest_unit(duration_secs: u64) -> String {
-    if duration_secs >= 604_800 {
-        let weeks = duration_secs / 604_800;
-        format!("{weeks}w")
-    } else if duration_secs >= 86_400 {
-        let days = duration_secs / 86_400;
-        format!("{days}d")
-    } else if duration_secs >= 3_600 {
-        let hours = duration_secs / 3_600;
-        format!("{hours}h")
+fn format_duration_hms(duration_secs: u64) -> String {
+    let hours = duration_secs / 3_600;
+    let minutes = (duration_secs % 3_600) / 60;
+    let seconds = duration_secs % 60;
+
+    if hours > 0 {
+        match (minutes, seconds) {
+            (0, 0) => format!("{hours}h"),
+            (_, 0) => format!("{hours}h{minutes}m"),
+            _ => format!("{hours}h{minutes}m{seconds}s"),
+        }
+    } else if minutes > 0 {
+        if seconds == 0 {
+            format!("{minutes}m")
+        } else {
+            format!("{minutes}m{seconds}s")
+        }
     } else {
-        format!("{duration_secs}s")
+        format!("{seconds}s")
     }
 }
 
@@ -1587,7 +1594,7 @@ impl HistoryCell for TurnSummaryCell {
             spans.push(Span::styled(" · ", Style::default().dim()));
             spans.push(Span::styled("interrupted", Style::default().dim()));
         } else if let Some(duration) = self.duration {
-            let formatted = format_duration_largest_unit(duration);
+            let formatted = format_duration_hms(duration);
             spans.push(Span::styled(" · ", Style::default().dim()));
             spans.push(Span::styled(formatted, Style::default().dim()));
         }
@@ -1606,4 +1613,21 @@ fn format_duration_ms(duration_ms: u64) -> String {
 
 fn pluralize(count: u64, singular: &'static str, plural: &'static str) -> &'static str {
     if count == 1 { singular } else { plural }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::format_duration_hms;
+
+    #[test]
+    fn turn_summary_duration_uses_hour_minute_second_units() {
+        assert_eq!(format_duration_hms(3), "3s");
+        assert_eq!(format_duration_hms(60), "1m");
+        assert_eq!(format_duration_hms(257), "4m17s");
+        assert_eq!(format_duration_hms(3_600), "1h");
+        assert_eq!(format_duration_hms(3_601), "1h0m1s");
+        assert_eq!(format_duration_hms(3_723), "1h2m3s");
+    }
 }

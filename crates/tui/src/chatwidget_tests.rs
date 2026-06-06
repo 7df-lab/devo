@@ -2384,7 +2384,7 @@ fn completed_turn_summary_keeps_duration_for_text_turns() {
     let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
 
     let _ = widget.drain_scrollback_lines(80);
-    widget.force_task_elapsed_seconds(3);
+    widget.force_task_elapsed_seconds(257);
     widget.handle_worker_event(crate::events::WorkerEvent::TextDelta("hello".to_string()));
     widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
         stop_reason: "Completed".to_string(),
@@ -2412,7 +2412,8 @@ fn completed_turn_summary_keeps_duration_for_text_turns() {
 
     assert!(committed.contains("▣"));
     assert!(committed.contains("Test Model"));
-    assert!(committed.contains("3s"));
+    assert!(committed.contains("4m17s"));
+    assert!(!committed.contains("257s"));
 }
 
 #[test]
