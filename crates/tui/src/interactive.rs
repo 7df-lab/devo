@@ -711,6 +711,12 @@ fn handle_app_event(
             chat_widget.handle_app_event(app_event);
             return Ok(LoopAction::Continue);
         }
+        AppEvent::OpenSubagentOverlay { session_id } => {
+            loop_state
+                .overlay
+                .open_subagent_transcript(tui, chat_widget, *session_id)?;
+            return Ok(LoopAction::Continue);
+        }
         _ => {}
     }
     if let AppEvent::Command(command) = &app_event {
@@ -862,7 +868,6 @@ fn handle_worker_event(
         | WorkerEvent::PlanUpdated { .. }
         | WorkerEvent::ProviderVendorsListed { .. }
         | WorkerEvent::SessionsListed { .. }
-        | WorkerEvent::SubagentsListed { .. }
         | WorkerEvent::SubagentDiscovered { .. }
         | WorkerEvent::SubagentMonitor { .. }
         | WorkerEvent::SkillsListed { .. }
@@ -967,9 +972,6 @@ fn handle_app_command(
             } else if command == "skills list" {
                 worker.list_skills()?;
                 chat_widget.set_status_message("Loading skills");
-            } else if command == "agent list" {
-                worker.list_agents()?;
-                chat_widget.set_status_message("Loading sub-agents");
             } else if command == "mcp list" {
                 match find_devo_home()
                     .map_err(anyhow::Error::from)

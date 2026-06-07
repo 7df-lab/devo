@@ -8,7 +8,6 @@ use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
-use devo_protocol::AgentListParams;
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
@@ -151,8 +150,6 @@ enum OperationCommand {
     },
     /// Request a session list from the server.
     ListSessions,
-    /// Request direct child agents for the active session.
-    ListAgents,
     /// Request a skills list from the server.
     ListSkills,
     /// Request or update a server-backed composer reference search.
@@ -318,13 +315,6 @@ impl QueryWorkerHandle {
     pub(crate) fn list_sessions(&self) -> Result<()> {
         self.command_tx
             .send(OperationCommand::ListSessions)
-            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
-    }
-
-    /// Requests direct child agents for the active session.
-    pub(crate) fn list_agents(&self) -> Result<()> {
-        self.command_tx
-            .send(OperationCommand::ListAgents)
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -843,59 +833,6 @@ async fn run_worker_inner(
                             Err(_) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
                                     message: "session list request timed out".to_string(),
-                                    turn_count,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    total_cache_read_tokens,
-                                    prompt_token_estimate: total_input_tokens,
-                                    last_query_input_tokens,
-                                });
-                            }
-                        }
-                    }
-                    Some(OperationCommand::ListAgents) => {
-                        let Some(active_session_id) = session_id else {
-                            let _ = event_tx.send(WorkerEvent::SubagentsListed {
-                                agents: Vec::new(),
-                                open: true,
-                            });
-                            continue;
-                        };
-                        match tokio::time::timeout(
-                            Duration::from_secs(5),
-                            client.agent_list(AgentListParams {
-                                session_id: active_session_id,
-                                path_prefix: None,
-                            }),
-                        )
-                        .await
-                        {
-                            Ok(Ok(result)) => {
-                                let agents = result
-                                    .agents
-                                    .into_iter()
-                                    .filter_map(subagent_events::agent_from_info)
-                                    .collect::<Vec<_>>();
-                                child_agent_sessions.extend(agents.iter().map(|agent| agent.session_id));
-                                let _ = event_tx.send(WorkerEvent::SubagentsListed {
-                                    agents,
-                                    open: true,
-                                });
-                            }
-                            Ok(Err(error)) => {
-                                let _ = event_tx.send(WorkerEvent::TurnFailed {
-                                    message: error.to_string(),
-                                    turn_count,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    total_cache_read_tokens,
-                                    prompt_token_estimate: total_input_tokens,
-                                    last_query_input_tokens,
-                                });
-                            }
-                            Err(_) => {
-                                let _ = event_tx.send(WorkerEvent::TurnFailed {
-                                    message: "agent list request timed out".to_string(),
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
@@ -1504,10 +1441,7 @@ async fn run_worker_inner(
                         ) {
                             subagent_events::RoutedServerEvent::Discovered(agent) => {
                                 child_agent_sessions.insert(agent.session_id);
-                                let _ = event_tx.send(WorkerEvent::SubagentDiscovered {
-                                    agent,
-                                    auto_open: true,
-                                });
+                                let _ = event_tx.send(WorkerEvent::SubagentDiscovered { agent });
                                 continue;
                             }
                             subagent_events::RoutedServerEvent::Child => {

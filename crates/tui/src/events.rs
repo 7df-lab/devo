@@ -332,16 +332,8 @@ pub(crate) enum WorkerEvent {
         /// Structured sessions rendered into the bottom picker panel.
         sessions: Vec<SessionListEntry>,
     },
-    /// Direct child agents were discovered or refreshed for the active session.
-    SubagentsListed {
-        agents: Vec<SubagentMonitorAgent>,
-        open: bool,
-    },
     /// A new child agent session was observed from server metadata.
-    SubagentDiscovered {
-        agent: SubagentMonitorAgent,
-        auto_open: bool,
-    },
+    SubagentDiscovered { agent: SubagentMonitorAgent },
     /// A live child-agent event should update the read-only monitor.
     SubagentMonitor { event: SubagentMonitorEvent },
     /// Current known skills were listed from the server.

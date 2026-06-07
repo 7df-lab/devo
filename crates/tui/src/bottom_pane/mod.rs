@@ -167,6 +167,7 @@ pub(crate) struct BottomPane {
     placeholder_text: String,
     /// Status indicator shown above the composer while a task is running.
     status: Option<StatusIndicatorWidget>,
+    subagent_hint_visible: bool,
     is_task_running: bool,
     pending_interrupt_esc: bool,
     animations_enabled: bool,
@@ -209,6 +210,7 @@ impl BottomPane {
             pending_cell_texts: Vec::new(),
             placeholder_text,
             status: None,
+            subagent_hint_visible: false,
             is_task_running: false,
             pending_interrupt_esc: false,
             animations_enabled,
@@ -456,6 +458,24 @@ impl BottomPane {
         }
     }
 
+    pub(crate) fn set_subagent_hint_visible(&mut self, visible: bool) {
+        if self.subagent_hint_visible == visible {
+            return;
+        }
+        self.subagent_hint_visible = visible;
+        self.sync_subagent_hint_surface();
+        self.request_redraw();
+    }
+
+    fn sync_subagent_hint_surface(&mut self) {
+        let status_visible = self.status.is_some();
+        if let Some(status) = self.status.as_mut() {
+            status.set_subagent_hint_visible(self.subagent_hint_visible);
+        }
+        self.composer
+            .set_subagent_hint_visible(self.subagent_hint_visible && !status_visible);
+    }
+
     pub(crate) fn set_task_running(&mut self, running: bool) {
         let was_running = self.is_task_running;
         self.is_task_running = running;
@@ -472,6 +492,7 @@ impl BottomPane {
                 if let Some(status) = self.status.as_mut() {
                     status.set_interrupt_hint_visible(true);
                 }
+                self.sync_subagent_hint_surface();
                 self.request_redraw();
             }
         } else {
@@ -482,6 +503,7 @@ impl BottomPane {
     pub(crate) fn hide_status_indicator(&mut self) {
         if self.status.take().is_some() {
             self.pending_interrupt_esc = false;
+            self.sync_subagent_hint_surface();
             self.request_redraw();
         }
     }
@@ -527,6 +549,7 @@ impl BottomPane {
                 self.frame_requester.clone(),
                 self.animations_enabled,
             ));
+            self.sync_subagent_hint_surface();
             self.request_redraw();
         }
     }

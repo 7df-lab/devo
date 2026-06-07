@@ -1,4 +1,4 @@
-﻿//! The bottom-pane footer renders transient hints and context indicators.
+//! The bottom-pane footer renders transient hints and context indicators.
 //!
 //! The footer is pure rendering: it formats `FooterProps` into `Line`s without mutating any state.
 //! It intentionally does not decide *which* footer content should be shown; that is owned by the
@@ -84,6 +84,8 @@ pub(crate) struct FooterProps {
     /// When both this label and the configured status line are available, they are rendered on the
     /// same row separated by ` 路 `.
     pub(crate) active_agent_label: Option<String>,
+    /// Whether live direct sub-agents can be opened with Ctrl+X.
+    pub(crate) subagent_hint_visible: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -656,6 +658,21 @@ pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'st
         }
     }
 
+    if props.subagent_hint_visible {
+        if let Some(existing) = line.as_mut() {
+            existing.spans.push(" 路 ".into());
+            existing
+                .spans
+                .push(key_hint::ctrl(KeyCode::Char('x')).into());
+            existing.spans.push(" agents".into());
+        } else {
+            line = Some(Line::from(vec![
+                key_hint::ctrl(KeyCode::Char('x')).into(),
+                " agents".into(),
+            ]));
+        }
+    }
+
     line
 }
 
@@ -679,7 +696,7 @@ pub(crate) fn shows_passive_footer_line(props: &FooterProps) -> bool {
 /// can be rendered by the standard footer flow, so this only becomes `true` when the status line
 /// feature is enabled and the current mode allows contextual footer content.
 pub(crate) fn uses_passive_footer_status_layout(props: &FooterProps) -> bool {
-    props.status_line_enabled && shows_passive_footer_line(props)
+    (props.status_line_enabled || props.subagent_hint_visible) && shows_passive_footer_line(props)
 }
 
 pub(crate) fn footer_line_width(

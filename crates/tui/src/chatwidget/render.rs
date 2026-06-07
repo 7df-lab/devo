@@ -45,7 +45,7 @@ pub(crate) struct ActiveAssistantRenderSnapshot {
 
 impl Renderable for ChatWidget {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        if self.render_subagent_monitor_if_open(area, buf) {
+        if self.render_subagent_selector_if_open(area, buf) {
             return;
         }
         if self.render_resume_browser_if_open(area, buf) {
@@ -119,7 +119,7 @@ impl Renderable for ChatWidget {
                 .saturating_add(self.bottom_pane.desired_height(width))
                 .saturating_add(2);
         }
-        if self.resume_browser.is_some() || self.is_subagent_monitor_open() {
+        if self.resume_browser.is_some() || self.is_subagent_selector_open() {
             return u16::MAX;
         }
         let history_height =
@@ -130,7 +130,7 @@ impl Renderable for ChatWidget {
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
-        if self.resume_browser.is_some() || self.is_subagent_monitor_open() {
+        if self.resume_browser.is_some() || self.is_subagent_selector_open() {
             return None;
         }
         let bottom_height = self
@@ -153,7 +153,7 @@ impl ChatWidget {
         &self,
         area: Rect,
     ) -> Option<ActiveAssistantRenderSnapshot> {
-        if self.is_subagent_monitor_open() || self.resume_browser.is_some() {
+        if self.is_subagent_selector_open() || self.resume_browser.is_some() {
             return None;
         }
 

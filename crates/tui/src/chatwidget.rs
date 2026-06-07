@@ -53,6 +53,8 @@ mod session_header;
 
 mod subagent_monitor;
 
+mod subagent_selector;
+
 mod permission_presets;
 
 mod resume_browser;

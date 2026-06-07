@@ -50,6 +50,7 @@ pub(crate) struct StatusIndicatorWidget {
     /// Optional suffix rendered after the elapsed/interrupt segment.
     inline_message: Option<String>,
     show_interrupt_hint: bool,
+    subagent_hint_visible: bool,
 
     elapsed_running: Duration,
     last_resume_at: Instant,
@@ -88,6 +89,7 @@ impl StatusIndicatorWidget {
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
             inline_message: None,
             show_interrupt_hint: true,
+            subagent_hint_visible: false,
             elapsed_running: Duration::ZERO,
             last_resume_at: Instant::now(),
             is_paused: false,
@@ -145,6 +147,10 @@ impl StatusIndicatorWidget {
 
     pub(crate) fn set_interrupt_hint_visible(&mut self, visible: bool) {
         self.show_interrupt_hint = visible;
+    }
+
+    pub(crate) fn set_subagent_hint_visible(&mut self, visible: bool) {
+        self.subagent_hint_visible = visible;
     }
 
     #[cfg(test)]
@@ -271,6 +277,11 @@ impl Renderable for StatusIndicatorWidget {
             // interrupt affordances stay in a fixed visual location.
             spans.push(" · ".dim());
             spans.push(message.clone().dim());
+        }
+        if self.subagent_hint_visible {
+            spans.push(" · ".dim());
+            spans.push(key_hint::ctrl(KeyCode::Char('x')).into());
+            spans.push(" agents".dim());
         }
 
         let content_width = area.width.saturating_sub(LIVE_PREFIX_COLS);

@@ -80,6 +80,16 @@ impl Overlay {
         Self::Transcript(Box::new(TranscriptOverlay::new(cells, width)))
     }
 
+    pub(crate) fn new_transcript_with_title(
+        cells: Vec<TranscriptOverlayCell>,
+        width: u16,
+        title: String,
+    ) -> Self {
+        Self::Transcript(Box::new(TranscriptOverlay::new_with_title(
+            cells, width, title,
+        )))
+    }
+
     pub(crate) fn new_static_with_lines(lines: Vec<Line<'static>>, title: String) -> Self {
         Self::Static(Box::new(StaticOverlay::new(lines, title)))
     }
@@ -445,16 +455,16 @@ impl fmt::Debug for TranscriptOverlay {
 
 impl TranscriptOverlay {
     fn new(cells: Vec<TranscriptOverlayCell>, width: u16) -> Self {
+        Self::new_with_title(cells, width, "T R A N S C R I P T".to_string())
+    }
+
+    fn new_with_title(cells: Vec<TranscriptOverlayCell>, width: u16, title: String) -> Self {
         let committed_key = CommittedCellsKey {
             width: width.max(1),
             cell_count: cells.len(),
         };
         Self {
-            view: PagerView::new(
-                Self::render_cells(&cells, None),
-                "T R A N S C R I P T".to_string(),
-                usize::MAX,
-            ),
+            view: PagerView::new(Self::render_cells(&cells, None), title, usize::MAX),
             cells,
             committed_key,
             live_tail: None,

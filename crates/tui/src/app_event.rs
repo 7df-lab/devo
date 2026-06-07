@@ -2,6 +2,7 @@
 //!
 use std::path::PathBuf;
 
+use devo_core::SessionId;
 use devo_protocol::ReferenceSearchSnapshot;
 
 use crate::app_command::AppCommand;
@@ -32,6 +33,9 @@ pub(crate) enum AppEvent {
 
     /// Send a command request to the host/worker adapter.
     Command(AppCommand),
+
+    /// Open a read-only transcript overlay for a live direct child agent.
+    OpenSubagentOverlay { session_id: SessionId },
 
     #[allow(dead_code)]
     /// Interrupt the current turn or cancel the active UI surface.

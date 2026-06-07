@@ -657,11 +657,8 @@ impl ChatWidget {
                 self.resume_browser_loading = false;
                 self.open_resume_browser(sessions);
             }
-            WorkerEvent::SubagentsListed { agents, open } => {
-                self.on_subagents_listed(agents, open);
-            }
-            WorkerEvent::SubagentDiscovered { agent, auto_open } => {
-                self.on_subagent_discovered(agent, auto_open);
+            WorkerEvent::SubagentDiscovered { agent } => {
+                self.on_subagent_discovered(agent);
             }
             WorkerEvent::SubagentMonitor { event } => {
                 self.on_subagent_monitor_event(event);

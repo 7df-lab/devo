@@ -27,7 +27,6 @@ impl ChatWidget {
             SlashCommand::Compact => "session",
             SlashCommand::New => "session",
             SlashCommand::Resume => "session",
-            SlashCommand::Agents => "session",
             SlashCommand::Permissions => "permissions",
             SlashCommand::Diff => "diff",
             SlashCommand::Mcp
@@ -137,13 +136,6 @@ impl ChatWidget {
                         command: "session list".to_string(),
                     }));
                 self.set_status_message("Loading sessions");
-            }
-            SlashCommand::Agents => {
-                self.app_event_tx
-                    .send(AppEvent::Command(AppCommand::RunUserShellCommand {
-                        command: "agent list".to_string(),
-                    }));
-                self.set_status_message("Loading sub-agents");
             }
             SlashCommand::Btw => {
                 if let Some(turn_id) = self.active_turn_id {

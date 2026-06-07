@@ -3716,7 +3716,7 @@ fn monitor_agent(
 }
 
 #[test]
-fn subagent_monitor_auto_opens_and_renders_child_stream() {
+fn subagent_discovery_shows_ctrl_x_hint_without_auto_opening_selector() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
@@ -3729,7 +3729,6 @@ fn subagent_monitor_auto_opens_and_renders_child_stream() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
         agent: monitor_agent(child, parent, "reviewer"),
-        auto_open: true,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
         event: crate::events::SubagentMonitorEvent::TextItemDelta {
@@ -3740,18 +3739,17 @@ fn subagent_monitor_auto_opens_and_renders_child_stream() {
         },
     });
 
-    assert!(widget.is_subagent_monitor_open_for_test());
+    assert!(!widget.is_subagent_monitor_open_for_test());
     assert_eq!(widget.selected_subagent_for_test(), Some(child));
     let rows = rendered_rows(&widget, 100, 18).join("\n");
-    assert!(rows.contains("Sub-agents"), "rows:\n{rows}");
-    assert!(rows.contains("reviewer"), "rows:\n{rows}");
-    assert!(rows.contains("checking files"), "rows:\n{rows}");
+    assert!(rows.contains("ctrl + x agents"), "rows:\n{rows}");
+    assert!(!rows.contains("checking files"), "rows:\n{rows}");
     let parent_transcript = line_texts(widget.transcript_overlay_lines(80)).join("\n");
     assert!(!parent_transcript.contains("checking files"));
 }
 
 #[test]
-fn subagent_monitor_selects_newest_until_user_selects_another_child() {
+fn ctrl_x_selector_selects_live_subagents_and_q_exits() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
@@ -3761,30 +3759,33 @@ fn subagent_monitor_selects_newest_until_user_selects_another_child() {
     let parent = SessionId::new();
     let first = SessionId::new();
     let second = SessionId::new();
-    let third = SessionId::new();
 
     widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
         agent: monitor_agent(first, parent, "first"),
-        auto_open: true,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
         agent: monitor_agent(second, parent, "second"),
-        auto_open: true,
     });
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    assert!(widget.is_subagent_monitor_open_for_test());
     assert_eq!(widget.selected_subagent_for_test(), Some(second));
+    let rows = rendered_rows(&widget, 100, 18).join("\n");
+    assert!(rows.contains("Sub-agents"), "rows:\n{rows}");
+    assert!(rows.contains("run first"), "rows:\n{rows}");
+    assert!(rows.contains("root/second"), "rows:\n{rows}");
 
     widget.handle_key_event(press_key(KeyCode::Up));
     assert_eq!(widget.selected_subagent_for_test(), Some(first));
+    widget.handle_key_event(press_key(KeyCode::Down));
+    assert_eq!(widget.selected_subagent_for_test(), Some(second));
 
-    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
-        agent: monitor_agent(third, parent, "third"),
-        auto_open: true,
-    });
-    assert_eq!(widget.selected_subagent_for_test(), Some(first));
+    widget.handle_key_event(press_key(KeyCode::Char('q')));
+    assert!(!widget.is_subagent_monitor_open_for_test());
 }
 
 #[test]
-fn subagent_monitor_closes_and_reopens_from_list_result() {
+fn terminal_subagent_status_hides_ctrl_x_hint_when_no_live_children_remain() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
@@ -3794,20 +3795,144 @@ fn subagent_monitor_closes_and_reopens_from_list_result() {
     let parent = SessionId::new();
     let child = SessionId::new();
 
-    widget.handle_worker_event(crate::events::WorkerEvent::SubagentsListed {
-        agents: vec![monitor_agent(child, parent, "builder")],
-        open: true,
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "builder"),
     });
-    assert!(widget.is_subagent_monitor_open_for_test());
+    assert!(widget.has_live_subagents_for_test());
+    let rows = rendered_rows(&widget, 100, 18).join("\n");
+    assert!(rows.contains("ctrl + x agents"), "rows:\n{rows}");
 
-    widget.handle_key_event(press_key(KeyCode::Esc));
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TurnFinished {
+            session_id: child,
+            status: "completed".to_string(),
+        },
+    });
+
+    assert!(!widget.has_live_subagents_for_test());
     assert!(!widget.is_subagent_monitor_open_for_test());
+    let rows = rendered_rows(&widget, 100, 18).join("\n");
+    assert!(!rows.contains("ctrl + x agents"), "rows:\n{rows}");
+}
 
-    widget.handle_worker_event(crate::events::WorkerEvent::SubagentsListed {
-        agents: vec![monitor_agent(child, parent, "builder")],
-        open: true,
+#[test]
+fn subagent_selector_enter_emits_overlay_request_for_selected_child() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "builder"),
     });
-    assert!(widget.is_subagent_monitor_open_for_test());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    widget.handle_key_event(press_key(KeyCode::Enter));
+
+    assert!(!widget.is_subagent_monitor_open_for_test());
+    assert_eq!(
+        app_event_rx.try_recv().expect("overlay request event"),
+        AppEvent::OpenSubagentOverlay { session_id: child }
+    );
+}
+
+#[test]
+fn subagent_transcript_overlay_live_tail_reflects_additional_child_text_delta() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+    let item_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "builder"),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TextItemDelta {
+            session_id: child,
+            item_id: Some(item_id),
+            kind: crate::events::TextItemKind::Assistant,
+            delta: "partial".to_string(),
+        },
+    });
+
+    let initial_tail = line_texts(
+        widget
+            .subagent_transcript_overlay_live_tail_lines(child, 80)
+            .expect("child live tail"),
+    )
+    .join("\n");
+    assert!(initial_tail.contains("partial"), "{initial_tail}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TextItemDelta {
+            session_id: child,
+            item_id: Some(item_id),
+            kind: crate::events::TextItemKind::Assistant,
+            delta: " update".to_string(),
+        },
+    });
+
+    let updated_tail = line_texts(
+        widget
+            .subagent_transcript_overlay_live_tail_lines(child, 80)
+            .expect("updated child live tail"),
+    )
+    .join("\n");
+    assert!(updated_tail.contains("partial update"), "{updated_tail}");
+}
+
+#[test]
+fn subagent_transcript_overlay_cells_render_assistant_and_tool_result() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+    let item_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "builder"),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TextItemCompleted {
+            session_id: child,
+            item_id: Some(item_id),
+            kind: crate::events::TextItemKind::Assistant,
+            final_text: "assistant report".to_string(),
+        },
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::ToolResult {
+            session_id: child,
+            tool_use_id: "tool-1".to_string(),
+            title: "exec".to_string(),
+            preview: "tool output".to_string(),
+            is_error: false,
+        },
+    });
+
+    let overlay_text = widget
+        .subagent_transcript_overlay_cells(child, 80)
+        .expect("child transcript cells")
+        .into_iter()
+        .flat_map(|cell| line_texts(cell.lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(overlay_text.contains("assistant report"), "{overlay_text}");
+    assert!(overlay_text.contains("Ran exec"), "{overlay_text}");
+    assert!(overlay_text.contains("tool output"), "{overlay_text}");
 }
 
 #[test]

@@ -1,41 +1,41 @@
-//! Read-only sub-agent monitor for `ChatWidget`.
+//! Read-only sub-agent selection and transcript projection for `ChatWidget`.
 //!
-//! The monitor renders child-agent activity in the normal TUI without switching
-//! the active parent session. Worker events update per-child transcript state,
-//! while keyboard input only selects, scrolls, or closes the monitor.
+//! Worker events update per-child transcript state. Ctrl+X opens a lightweight
+//! selector for live direct children, and Enter asks the host overlay to render
+//! the selected child through the normal transcript pager.
 
 use std::collections::HashMap;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use devo_core::ItemId;
+use devo_core::SessionId;
 use ratatui::buffer::Buffer;
-use ratatui::layout::Constraint;
-use ratatui::layout::Layout;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
-use ratatui::text::Text;
-use ratatui::widgets::Block;
-use ratatui::widgets::Paragraph;
-use ratatui::widgets::Widget;
-use ratatui::widgets::Wrap;
 
-use devo_core::ItemId;
-use devo_core::SessionId;
-
+use crate::ansi_escape::ansi_escape_line;
+use crate::app_event::AppEvent;
 use crate::events::PlanStepStatus;
 use crate::events::SubagentMonitorAgent;
 use crate::events::SubagentMonitorEvent;
 use crate::events::TextItemKind;
+use crate::history_cell;
+use crate::history_cell::HistoryCell;
+use crate::tool_result_cell::ToolResultCell;
 
+use super::ActiveCellTranscriptKey;
 use super::ChatWidget;
+use super::DotStatus;
+use super::TranscriptOverlayCell;
+use super::subagent_selector;
 
 #[derive(Debug, Default)]
 pub(super) struct SubagentMonitorState {
-    open: bool,
+    selector_open: bool,
     agents: Vec<SubagentMonitorAgent>,
     selected: Option<SessionId>,
     user_selected: bool,
@@ -49,8 +49,8 @@ struct SubagentSessionView {
     transcript: Vec<MonitorTranscriptItem>,
     active_text: HashMap<String, MonitorTextItem>,
     active_tools: HashMap<String, MonitorToolItem>,
-    scroll_offset: usize,
     active_turn: Option<devo_core::TurnId>,
+    revision: u64,
 }
 
 #[derive(Debug)]
@@ -66,54 +66,68 @@ struct MonitorToolItem {
     is_error: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum MonitorTranscriptKind {
+    Assistant,
+    Reasoning,
+    Tool,
+    Plan,
+    Status,
+}
+
 #[derive(Debug)]
 struct MonitorTranscriptItem {
+    kind: MonitorTranscriptKind,
     title: String,
     body: String,
     is_error: bool,
 }
 
 impl ChatWidget {
-    pub(super) fn is_subagent_monitor_open(&self) -> bool {
-        self.subagent_monitor.open
+    pub(super) fn is_subagent_selector_open(&self) -> bool {
+        self.subagent_monitor.selector_open
     }
 
-    pub(super) fn handle_subagent_monitor_key_event(&mut self, key: KeyEvent) {
+    pub(super) fn open_subagent_selector(&mut self) {
+        if !self.has_live_subagents() {
+            self.subagent_monitor.selector_open = false;
+            self.set_status_message("No active sub-agents");
+            self.frame_requester.schedule_frame();
+            return;
+        }
+
+        self.subagent_monitor.selector_open = true;
+        self.ensure_live_subagent_selected();
+        self.set_status_message("Select sub-agent");
+        self.frame_requester.schedule_frame();
+    }
+
+    pub(super) fn handle_subagent_selector_key_event(&mut self, key: KeyEvent) {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
         }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.subagent_monitor.open = false;
+                self.subagent_monitor.selector_open = false;
                 self.set_status_message("Ready");
                 self.frame_requester.schedule_frame();
             }
             KeyCode::Up => {
-                self.select_relative_subagent(-1);
+                self.select_relative_live_subagent(-1);
             }
             KeyCode::Down => {
-                self.select_relative_subagent(1);
+                self.select_relative_live_subagent(1);
             }
-            KeyCode::PageUp => {
-                self.adjust_selected_subagent_scroll(8);
-            }
-            KeyCode::PageDown => {
-                self.adjust_selected_subagent_scroll(-8);
-            }
-            KeyCode::Home => {
-                if let Some(view) = self.selected_subagent_view_mut() {
-                    view.scroll_offset = usize::MAX / 2;
-                    self.frame_requester.schedule_frame();
-                }
-            }
-            KeyCode::End => {
-                if let Some(view) = self.selected_subagent_view_mut() {
-                    view.scroll_offset = 0;
+            KeyCode::Enter => {
+                if let Some(session_id) = self.selected_live_subagent() {
+                    self.subagent_monitor.selector_open = false;
+                    self.app_event_tx
+                        .send(AppEvent::OpenSubagentOverlay { session_id });
                     self.frame_requester.schedule_frame();
                 }
             }
             KeyCode::Backspace
-            | KeyCode::Enter
             | KeyCode::Left
             | KeyCode::Right
             | KeyCode::Char(_)
@@ -130,62 +144,149 @@ impl ChatWidget {
             | KeyCode::Pause
             | KeyCode::Menu
             | KeyCode::KeypadBegin
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
             | KeyCode::Media(_)
             | KeyCode::Modifier(_) => {}
         }
     }
 
-    pub(super) fn render_subagent_monitor_if_open(&self, area: Rect, buf: &mut Buffer) -> bool {
-        if !self.subagent_monitor.open {
+    pub(super) fn render_subagent_selector_if_open(&self, area: Rect, buf: &mut Buffer) -> bool {
+        if !self.subagent_monitor.selector_open {
             return false;
         }
-        let [agent_area, transcript_area] =
-            Layout::horizontal([Constraint::Length(30), Constraint::Min(1)]).areas(area);
-        self.render_subagent_agent_list(agent_area, buf);
-        self.render_selected_subagent_transcript(transcript_area, buf);
+
+        let agents = self
+            .live_subagent_ids()
+            .into_iter()
+            .filter_map(|session_id| {
+                let agent = self.subagent_agent(session_id)?;
+                Some(subagent_selector::SubagentSelectorAgent {
+                    session_id,
+                    nickname: &agent.nickname,
+                    role: &agent.role,
+                    status: self.subagent_status_for_agent(agent),
+                    task: agent.last_task_message.as_deref(),
+                    agent_path: &agent.agent_path,
+                })
+            })
+            .collect::<Vec<_>>();
+        subagent_selector::render(
+            area,
+            buf,
+            &agents,
+            self.subagent_monitor.selected,
+            self.active_accent_color(),
+        );
         true
     }
 
-    pub(crate) fn on_subagents_listed(&mut self, agents: Vec<SubagentMonitorAgent>, open: bool) {
-        for agent in agents {
-            self.upsert_subagent(agent, /*auto_open*/ false);
-        }
-        if open {
-            self.subagent_monitor.open = true;
-            if self.subagent_monitor.selected.is_none() {
-                self.select_newest_subagent();
-            }
-            self.set_status_message("Sub-agent monitor");
-        }
-        self.frame_requester.schedule_frame();
-    }
-
-    pub(crate) fn on_subagent_discovered(&mut self, agent: SubagentMonitorAgent, auto_open: bool) {
-        self.upsert_subagent(agent, auto_open);
+    pub(crate) fn on_subagent_discovered(&mut self, agent: SubagentMonitorAgent) {
+        self.upsert_subagent(agent);
+        self.sync_subagent_hint();
         self.frame_requester.schedule_frame();
     }
 
     pub(crate) fn on_subagent_monitor_event(&mut self, event: SubagentMonitorEvent) {
         let session_id = event.session_id();
-        let view = self
+        let status = {
+            let view = self
+                .subagent_monitor
+                .sessions
+                .entry(session_id)
+                .or_default();
+            view.apply_event(event);
+            view.status.clone()
+        };
+
+        let updated_agent = self
             .subagent_monitor
-            .sessions
-            .entry(session_id)
-            .or_default();
-        view.apply_event(event);
-        if self.subagent_monitor.selected == Some(session_id) {
-            view.scroll_offset = 0;
+            .agents
+            .iter_mut()
+            .find(|agent| agent.session_id == session_id)
+            .map(|agent| {
+                agent.status = status.clone();
+                agent.clone()
+            });
+        if let Some(updated_agent) = updated_agent
+            && let Some(view) = self.subagent_monitor.sessions.get_mut(&session_id)
+        {
+            view.agent = Some(updated_agent);
         }
+
+        self.sync_subagent_hint();
         self.frame_requester.schedule_frame();
     }
 
     pub(crate) fn reset_subagent_monitor(&mut self) {
         self.subagent_monitor = SubagentMonitorState::default();
+        self.bottom_pane.set_subagent_hint_visible(false);
+    }
+
+    pub(crate) fn subagent_overlay_title(&self, session_id: SessionId) -> Option<String> {
+        let view = self.subagent_monitor.sessions.get(&session_id)?;
+        let status = view.status.as_str();
+        let label = view
+            .agent
+            .as_ref()
+            .map(|agent| agent.nickname.as_str())
+            .or_else(|| {
+                self.subagent_agent(session_id)
+                    .map(|agent| agent.nickname.as_str())
+            })
+            .unwrap_or("sub-agent");
+        Some(format!("{label} [{status}]"))
+    }
+
+    pub(crate) fn subagent_transcript_overlay_cell_count(
+        &self,
+        session_id: SessionId,
+    ) -> Option<usize> {
+        let view = self.subagent_monitor.sessions.get(&session_id)?;
+        Some(view.transcript.len())
+    }
+
+    pub(crate) fn subagent_transcript_overlay_cells(
+        &self,
+        session_id: SessionId,
+        width: u16,
+    ) -> Option<Vec<TranscriptOverlayCell>> {
+        let view = self.subagent_monitor.sessions.get(&session_id)?;
+        Some(
+            view.transcript
+                .iter()
+                .map(|item| self.subagent_transcript_item_cell(item, width))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn subagent_transcript_overlay_live_tail_key(
+        &self,
+        session_id: SessionId,
+    ) -> Option<ActiveCellTranscriptKey> {
+        let view = self.subagent_monitor.sessions.get(&session_id)?;
+        view.has_live_tail().then_some(ActiveCellTranscriptKey {
+            revision: view.revision,
+            is_stream_continuation: false,
+            animation_tick: None,
+        })
+    }
+
+    pub(crate) fn subagent_transcript_overlay_live_tail_lines(
+        &self,
+        session_id: SessionId,
+        width: u16,
+    ) -> Option<Vec<Line<'static>>> {
+        let view = self.subagent_monitor.sessions.get(&session_id)?;
+        view.has_live_tail()
+            .then(|| self.subagent_live_tail_lines(view, width))
     }
 
     #[cfg(test)]
     pub(crate) fn is_subagent_monitor_open_for_test(&self) -> bool {
-        self.subagent_monitor.open
+        self.subagent_monitor.selector_open
     }
 
     #[cfg(test)]
@@ -193,7 +294,12 @@ impl ChatWidget {
         self.subagent_monitor.selected
     }
 
-    fn upsert_subagent(&mut self, agent: SubagentMonitorAgent, auto_open: bool) {
+    #[cfg(test)]
+    pub(crate) fn has_live_subagents_for_test(&self) -> bool {
+        self.has_live_subagents()
+    }
+
+    fn upsert_subagent(&mut self, agent: SubagentMonitorAgent) {
         let session_id = agent.session_id;
         if let Some(existing) = self
             .subagent_monitor
@@ -205,6 +311,7 @@ impl ChatWidget {
         } else {
             self.subagent_monitor.agents.push(agent.clone());
         }
+
         let view = self
             .subagent_monitor
             .sessions
@@ -212,36 +319,56 @@ impl ChatWidget {
             .or_default();
         view.status = agent.status.clone();
         view.agent = Some(agent);
-        if auto_open {
-            self.subagent_monitor.open = true;
-            if !self.subagent_monitor.user_selected {
-                self.subagent_monitor.selected = Some(session_id);
-            }
-            self.set_status_message("Sub-agent monitor");
+    }
+
+    fn sync_subagent_hint(&mut self) {
+        let has_live = self.has_live_subagents();
+        if !has_live {
+            self.subagent_monitor.selector_open = false;
+            self.subagent_monitor.selected = None;
+            self.subagent_monitor.user_selected = false;
+        } else {
+            self.ensure_live_subagent_selected();
         }
+        self.bottom_pane.set_subagent_hint_visible(has_live);
     }
 
-    fn select_newest_subagent(&mut self) {
-        self.subagent_monitor.selected = self
-            .subagent_monitor
+    fn has_live_subagents(&self) -> bool {
+        self.subagent_monitor
             .agents
-            .last()
-            .map(|agent| agent.session_id);
+            .iter()
+            .any(|agent| is_live_status(&self.subagent_status_for_agent(agent)))
     }
 
-    fn select_relative_subagent(&mut self, delta: isize) {
-        let len = self.subagent_monitor.agents.len();
-        if len == 0 {
+    fn selected_live_subagent(&self) -> Option<SessionId> {
+        let selected = self.subagent_monitor.selected?;
+        self.subagent_agent(selected)
+            .filter(|agent| is_live_status(&self.subagent_status_for_agent(agent)))
+            .map(|agent| agent.session_id)
+    }
+
+    fn ensure_live_subagent_selected(&mut self) {
+        if self.selected_live_subagent().is_some()
+            && (self.subagent_monitor.selector_open || self.subagent_monitor.user_selected)
+        {
+            return;
+        }
+        self.subagent_monitor.selected = self.live_subagent_ids().last().copied();
+        self.subagent_monitor.user_selected = false;
+    }
+
+    fn select_relative_live_subagent(&mut self, delta: isize) {
+        let live_ids = self.live_subagent_ids();
+        if live_ids.is_empty() {
             return;
         }
         let current = self
             .subagent_monitor
             .selected
             .and_then(|selected| {
-                self.subagent_monitor
-                    .agents
+                live_ids
                     .iter()
-                    .position(|agent| agent.session_id == selected)
+                    .position(|session_id| *session_id == selected)
             })
             .unwrap_or(0);
         let next = if delta.is_negative() {
@@ -249,99 +376,156 @@ impl ChatWidget {
         } else {
             current
                 .saturating_add(delta as usize)
-                .min(len.saturating_sub(1))
+                .min(live_ids.len().saturating_sub(1))
         };
-        self.subagent_monitor.selected = Some(self.subagent_monitor.agents[next].session_id);
+        self.subagent_monitor.selected = Some(live_ids[next]);
         self.subagent_monitor.user_selected = true;
         self.frame_requester.schedule_frame();
     }
 
-    fn adjust_selected_subagent_scroll(&mut self, delta: isize) {
-        if let Some(view) = self.selected_subagent_view_mut() {
-            if delta.is_negative() {
-                view.scroll_offset = view.scroll_offset.saturating_sub(delta.unsigned_abs());
-            } else {
-                view.scroll_offset = view.scroll_offset.saturating_add(delta as usize);
+    fn live_subagent_ids(&self) -> Vec<SessionId> {
+        self.subagent_monitor
+            .agents
+            .iter()
+            .filter(|agent| is_live_status(&self.subagent_status_for_agent(agent)))
+            .map(|agent| agent.session_id)
+            .collect()
+    }
+
+    fn subagent_agent(&self, session_id: SessionId) -> Option<&SubagentMonitorAgent> {
+        self.subagent_monitor
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == session_id)
+    }
+
+    fn subagent_status_for_agent(&self, agent: &SubagentMonitorAgent) -> String {
+        self.subagent_monitor
+            .sessions
+            .get(&agent.session_id)
+            .map(|view| view.status.clone())
+            .filter(|status| !status.is_empty())
+            .unwrap_or_else(|| agent.status.clone())
+    }
+
+    fn subagent_transcript_item_cell(
+        &self,
+        item: &MonitorTranscriptItem,
+        width: u16,
+    ) -> TranscriptOverlayCell {
+        let lines = match item.kind {
+            MonitorTranscriptKind::Assistant => history_cell::AgentMarkdownCell::new(
+                item.body.clone(),
+                &self.session.cwd,
+                Self::completed_dot_prefix(),
+                "  ",
+            )
+            .transcript_lines(width),
+            MonitorTranscriptKind::Reasoning => history_cell::AgentMessageCell::new_with_prefix(
+                titled_body_lines(&item.title, &item.body),
+                Self::reasoning_dot_prefix(DotStatus::Completed),
+                "  ",
+                false,
+            )
+            .transcript_lines(width),
+            MonitorTranscriptKind::Tool => {
+                let title_line = (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title));
+                ToolResultCell::new(
+                    title_line,
+                    item.body.clone(),
+                    self.dot_prefix(if item.is_error {
+                        DotStatus::Failed
+                    } else {
+                        DotStatus::Completed
+                    }),
+                    Line::from("  "),
+                    Self::tool_text_style(),
+                    false,
+                )
+                .transcript_lines(width)
             }
-            self.frame_requester.schedule_frame();
-        }
-    }
-
-    fn selected_subagent_view_mut(&mut self) -> Option<&mut SubagentSessionView> {
-        let selected = self.subagent_monitor.selected?;
-        self.subagent_monitor.sessions.get_mut(&selected)
-    }
-
-    fn render_subagent_agent_list(&self, area: Rect, buf: &mut Buffer) {
-        let mut lines = vec![
-            Line::from("Sub-agents".bold()),
-            Line::from("Up/Down select  q close".dim()),
-            Line::from(""),
-        ];
-        if self.subagent_monitor.agents.is_empty() {
-            lines.push(Line::from("No sub-agents for this session.".dim()));
-        } else {
-            for agent in &self.subagent_monitor.agents {
-                let selected = self.subagent_monitor.selected == Some(agent.session_id);
-                let marker = if selected { ">" } else { " " };
-                let label = format!("{marker} {} [{}]", agent.nickname, agent.status);
-                lines.push(if selected {
-                    Line::from(label).bold()
+            MonitorTranscriptKind::Plan | MonitorTranscriptKind::Status => {
+                let dot_prefix = if item.is_error {
+                    self.failed_dot_prefix()
                 } else {
-                    Line::from(label)
-                });
-                lines.push(Line::from(format!("  {}", agent.agent_path)).dim());
+                    Self::completed_dot_prefix()
+                };
+                history_cell::AgentMessageCell::new_with_prefix(
+                    titled_body_lines(&item.title, &item.body),
+                    dot_prefix,
+                    "  ",
+                    false,
+                )
+                .transcript_lines(width)
             }
+        };
+
+        TranscriptOverlayCell {
+            lines,
+            is_stream_continuation: false,
+            user_message: None,
+            is_selected_user: false,
         }
-        Paragraph::new(Text::from(lines))
-            .block(Block::default().title("Agents"))
-            .wrap(Wrap { trim: false })
-            .render(area, buf);
     }
 
-    fn render_selected_subagent_transcript(&self, area: Rect, buf: &mut Buffer) {
-        let Some(selected) = self.subagent_monitor.selected else {
-            Paragraph::new("Select a sub-agent.")
-                .block(Block::default().title("Activity"))
-                .render(area, buf);
-            return;
-        };
-        let Some(view) = self.subagent_monitor.sessions.get(&selected) else {
-            Paragraph::new("No activity yet.")
-                .block(Block::default().title("Activity"))
-                .render(area, buf);
-            return;
-        };
-        let title = view
-            .agent
-            .as_ref()
-            .map(|agent| format!("{} - {}", agent.nickname, view.status))
-            .unwrap_or_else(|| format!("{selected} - {}", view.status));
-        let mut lines = view.render_lines();
-        if lines.is_empty() {
-            lines.push(Line::from("Waiting for sub-agent activity...".dim()));
+    fn subagent_live_tail_lines(
+        &self,
+        view: &SubagentSessionView,
+        width: u16,
+    ) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        let mut text_keys = view.active_text.keys().cloned().collect::<Vec<_>>();
+        text_keys.sort();
+        for key in text_keys {
+            let Some(text) = view.active_text.get(&key) else {
+                continue;
+            };
+            let next = match text.kind {
+                TextItemKind::Assistant => history_cell::AgentMarkdownCell::new(
+                    text.text.clone(),
+                    &self.session.cwd,
+                    Self::pending_dot_prefix(),
+                    "  ",
+                )
+                .transcript_lines(width),
+                TextItemKind::Reasoning => history_cell::AgentMessageCell::new_with_prefix(
+                    titled_body_lines("Reasoning", &text.text),
+                    Self::reasoning_dot_prefix(DotStatus::Pending),
+                    "  ",
+                    false,
+                )
+                .transcript_lines(width),
+            };
+            extend_lines_with_separator(&mut lines, next);
         }
-        let visible_height = area.height.saturating_sub(2) as usize;
-        let max_scroll = lines.len().saturating_sub(visible_height.max(1));
-        let scroll_offset = view.scroll_offset.min(max_scroll);
-        let start = lines
-            .len()
-            .saturating_sub(visible_height.saturating_add(scroll_offset));
-        let end = lines.len().saturating_sub(scroll_offset);
-        let visible = lines
-            .into_iter()
-            .skip(start)
-            .take(end.saturating_sub(start))
-            .collect::<Vec<_>>();
-        Paragraph::new(Text::from(visible))
-            .block(Block::default().title(title))
-            .wrap(Wrap { trim: false })
-            .render(area, buf);
+
+        let mut tool_keys = view.active_tools.keys().cloned().collect::<Vec<_>>();
+        tool_keys.sort();
+        for key in tool_keys {
+            let Some(tool) = view.active_tools.get(&key) else {
+                continue;
+            };
+            let mut tool_lines = vec![Line::from(vec![
+                Span::styled("Running ", Self::tool_status_running_style()),
+                Span::styled(tool.title.clone(), Self::tool_text_style()),
+            ])];
+            tool_lines.extend(tool_output_lines(&tool.output));
+            let next = history_cell::AgentMessageCell::new_with_prefix(
+                tool_lines,
+                Self::pending_dot_prefix(),
+                "  ",
+                false,
+            )
+            .transcript_lines(width);
+            extend_lines_with_separator(&mut lines, next);
+        }
+        lines
     }
 }
 
 impl SubagentSessionView {
     fn apply_event(&mut self, event: SubagentMonitorEvent) {
+        self.revision = self.revision.wrapping_add(1);
         match event {
             SubagentMonitorEvent::TurnStarted {
                 session_id: _,
@@ -349,11 +533,6 @@ impl SubagentSessionView {
             } => {
                 self.status = "running".to_string();
                 self.active_turn = Some(turn_id);
-                self.transcript.push(MonitorTranscriptItem {
-                    title: "Turn started".to_string(),
-                    body: String::new(),
-                    is_error: false,
-                });
             }
             SubagentMonitorEvent::TextItemStarted {
                 session_id: _,
@@ -391,6 +570,7 @@ impl SubagentSessionView {
             } => {
                 self.active_text.remove(&text_key(item_id, kind));
                 self.transcript.push(MonitorTranscriptItem {
+                    kind: transcript_kind_for_text(kind),
                     title: text_title(kind).to_string(),
                     body: final_text,
                     is_error: false,
@@ -439,6 +619,7 @@ impl SubagentSessionView {
             } => {
                 self.active_tools.remove(&tool_use_id);
                 self.transcript.push(MonitorTranscriptItem {
+                    kind: MonitorTranscriptKind::Tool,
                     title,
                     body: preview,
                     is_error,
@@ -463,6 +644,7 @@ impl SubagentSessionView {
                     body.push_str(&step.text);
                 }
                 self.transcript.push(MonitorTranscriptItem {
+                    kind: MonitorTranscriptKind::Plan,
                     title: "Plan updated".to_string(),
                     body,
                     is_error: false,
@@ -476,6 +658,7 @@ impl SubagentSessionView {
                 self.active_turn = None;
                 self.flush_active_items();
                 self.transcript.push(MonitorTranscriptItem {
+                    kind: MonitorTranscriptKind::Status,
                     title: format!("Turn {status}"),
                     body: String::new(),
                     is_error: status.to_lowercase().contains("failed"),
@@ -489,6 +672,7 @@ impl SubagentSessionView {
                 self.active_turn = None;
                 self.flush_active_items();
                 self.transcript.push(MonitorTranscriptItem {
+                    kind: MonitorTranscriptKind::Status,
                     title: "Turn failed".to_string(),
                     body: message,
                     is_error: true,
@@ -498,42 +682,22 @@ impl SubagentSessionView {
                 session_id: _,
                 status,
             } => {
-                self.status = format!("{status:?}").to_lowercase();
+                if !is_terminal_status(&self.status) {
+                    self.status = format!("{status:?}").to_lowercase();
+                }
             }
         }
     }
 
-    fn render_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = Vec::new();
-        for item in &self.transcript {
-            lines.push(if item.is_error {
-                Line::from(item.title.clone()).red()
-            } else {
-                Line::from(item.title.clone()).bold()
-            });
-            lines.extend(body_lines(&item.body));
-            lines.push(Line::from(""));
-        }
-        for text in self.active_text.values() {
-            lines.push(Line::from(format!("{} streaming", text_title(text.kind))).bold());
-            lines.extend(body_lines(&text.text));
-            lines.push(Line::from(""));
-        }
-        for tool in self.active_tools.values() {
-            lines.push(Line::from(vec![
-                Span::raw("Running "),
-                Span::styled(tool.title.clone(), Style::default().bold()),
-            ]));
-            lines.extend(body_lines(&tool.output));
-            lines.push(Line::from(""));
-        }
-        lines
+    fn has_live_tail(&self) -> bool {
+        !self.active_text.is_empty() || !self.active_tools.is_empty()
     }
 
     fn flush_active_items(&mut self) {
         for text in self.active_text.drain().map(|(_, text)| text) {
             if !text.text.trim().is_empty() {
                 self.transcript.push(MonitorTranscriptItem {
+                    kind: transcript_kind_for_text(text.kind),
                     title: text_title(text.kind).to_string(),
                     body: text.text,
                     is_error: false,
@@ -542,6 +706,7 @@ impl SubagentSessionView {
         }
         for tool in self.active_tools.drain().map(|(_, tool)| tool) {
             self.transcript.push(MonitorTranscriptItem {
+                kind: MonitorTranscriptKind::Tool,
                 title: tool.title,
                 body: tool.output,
                 is_error: tool.is_error,
@@ -569,6 +734,17 @@ impl SubagentMonitorEvent {
     }
 }
 
+fn is_live_status(status: &str) -> bool {
+    !is_terminal_status(status)
+}
+
+fn is_terminal_status(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "completed" | "failed" | "interrupted" | "closed"
+    )
+}
+
 fn text_key(item_id: Option<ItemId>, kind: TextItemKind) -> String {
     item_id
         .map(|item_id| item_id.to_string())
@@ -582,8 +758,39 @@ fn text_title(kind: TextItemKind) -> &'static str {
     }
 }
 
-fn body_lines(body: &str) -> Vec<Line<'static>> {
-    body.lines()
-        .map(|line| Line::from(format!("  {line}")))
-        .collect()
+fn transcript_kind_for_text(kind: TextItemKind) -> MonitorTranscriptKind {
+    match kind {
+        TextItemKind::Assistant => MonitorTranscriptKind::Assistant,
+        TextItemKind::Reasoning => MonitorTranscriptKind::Reasoning,
+    }
+}
+
+fn titled_body_lines(title: &str, body: &str) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if !title.is_empty() {
+        lines.push(Line::from(title.to_string()).bold());
+    }
+    lines.extend(tool_output_lines(body));
+    lines
+}
+
+fn tool_output_lines(body: &str) -> Vec<Line<'static>> {
+    body.lines().map(ansi_escape_line).collect()
+}
+
+fn extend_lines_with_separator(target: &mut Vec<Line<'static>>, mut next: Vec<Line<'static>>) {
+    if next.is_empty() {
+        return;
+    }
+
+    let should_insert_separator =
+        !target.is_empty() && target.last().is_some_and(|line| !is_blank_line(line));
+    if should_insert_separator && next.first().is_some_and(|line| !is_blank_line(line)) {
+        target.push(Line::from(""));
+    }
+    target.append(&mut next);
+}
+
+fn is_blank_line(line: &Line<'_>) -> bool {
+    line.spans.iter().all(|span| span.content.trim().is_empty())
 }

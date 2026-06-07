@@ -352,6 +352,7 @@ pub(crate) struct ChatComposer {
     status_line_enabled: bool,
     // Agent label injected into the footer's contextual row when multi-agent mode is active.
     active_agent_label: Option<String>,
+    subagent_hint_visible: bool,
     accent_color: Color,
 }
 
@@ -479,6 +480,7 @@ impl ChatComposer {
             status_line_value: None,
             status_line_enabled: false,
             active_agent_label: None,
+            subagent_hint_visible: false,
             accent_color: Color::Cyan,
         };
         // Apply configuration via the setter to keep side-effects centralized.
@@ -2974,6 +2976,7 @@ impl ChatComposer {
             status_line_value: self.status_line_value.clone(),
             status_line_enabled: self.status_line_enabled,
             active_agent_label: self.active_agent_label.clone(),
+            subagent_hint_visible: self.subagent_hint_visible,
         }
     }
 
@@ -3392,6 +3395,14 @@ impl ChatComposer {
             return false;
         }
         self.active_agent_label = active_agent_label;
+        true
+    }
+
+    pub(crate) fn set_subagent_hint_visible(&mut self, visible: bool) -> bool {
+        if self.subagent_hint_visible == visible {
+            return false;
+        }
+        self.subagent_hint_visible = visible;
         true
     }
 }
