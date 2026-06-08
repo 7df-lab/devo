@@ -101,9 +101,38 @@ fn deepseek_provider_vendor() -> ProviderVendor {
         name: "Deepseek".to_string(),
         base_url: Some("https://api.deepseek.com".to_string()),
         credential: Some("deepseek_api_key".to_string()),
+        headers: None,
         wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
         enabled: true,
     }
+}
+
+fn widget_at_invocation_method_popup() -> OnboardingWidget {
+    let models = vec![deepseek_model()];
+    let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = OnboardingWidget::new(
+        &models,
+        AppEventSender::new(app_event_tx),
+        FrameRequester::test_dummy(),
+        true,
+    );
+    assert_eq!(
+        next_shell_command(&mut app_event_rx),
+        "provider list".to_string()
+    );
+
+    widget.on_provider_vendors_listed(vec![deepseek_provider_vendor()]);
+    widget.handle_key_event(press(KeyCode::Enter));
+    widget.handle_key_event(press(KeyCode::Enter));
+    widget.handle_key_event(press(KeyCode::Enter));
+    widget.handle_key_event(press(KeyCode::Enter));
+    widget
+}
+
+fn widget_at_reasoning_effort_popup() -> OnboardingWidget {
+    let mut widget = widget_at_invocation_method_popup();
+    widget.handle_key_event(press(KeyCode::Enter));
+    widget
 }
 
 fn failed_validation_widget() -> (OnboardingWidget, mpsc::UnboundedReceiver<AppEvent>) {
@@ -514,4 +543,44 @@ fn onboarding_invocation_and_reasoning_popups_render_inline_and_use_model_preset
         serde_json::Value::String("high".to_string())
     );
     assert_eq!(payload["api_key"], serde_json::Value::Null);
+}
+
+#[test]
+fn onboarding_invocation_popup_keeps_active_section_visible_when_short() {
+    let widget = widget_at_invocation_method_popup();
+
+    let invocation_view = rendered_rows(&widget, 72, 10).join("\n");
+
+    assert!(
+        invocation_view.contains("Invocation Method: OpenAI Chat Completions"),
+        "expected invocation step in short viewport:\n{invocation_view}"
+    );
+    assert!(
+        invocation_view.contains("Choose the API protocol."),
+        "expected invocation hint in short viewport:\n{invocation_view}"
+    );
+    assert!(
+        invocation_view.contains("> OpenAI Chat Completions"),
+        "expected selected invocation option in short viewport:\n{invocation_view}"
+    );
+}
+
+#[test]
+fn onboarding_reasoning_popup_keeps_active_section_visible_when_short_and_narrow() {
+    let widget = widget_at_reasoning_effort_popup();
+
+    let reasoning_view = rendered_rows(&widget, 48, 10).join("\n");
+
+    assert!(
+        reasoning_view.contains("Reason Effort: High"),
+        "expected reasoning step in short viewport:\n{reasoning_view}"
+    );
+    assert!(
+        reasoning_view.contains("Choose the default reasoning effort"),
+        "expected wrapped reasoning hint in short viewport:\n{reasoning_view}"
+    );
+    assert!(
+        reasoning_view.contains("> High"),
+        "expected selected reasoning effort in short viewport:\n{reasoning_view}"
+    );
 }

@@ -45,6 +45,7 @@ pub(crate) fn onboarding_provider_vendor(
         name: provider_id.clone(),
         base_url: normalized_optional(base_url).map(ToOwned::to_owned),
         credential: normalized_optional(api_key).map(|_| credential_id_for_provider(&provider_id)),
+        headers: None,
         wire_apis: vec![binding.invocation_method],
         enabled: true,
     }
@@ -314,6 +315,7 @@ fn merge_onboarding_config(
                 name: provider_name,
                 base_url: normalized_optional(base_url).map(ToOwned::to_owned),
                 credential: normalized_optional(credential_id).map(ToOwned::to_owned),
+                headers: None,
                 wire_apis: vec![binding_config.invocation_method],
                 enabled: true,
             },
@@ -751,6 +753,7 @@ mod tests {
                 name: "openai_chat_completions".to_string(),
                 base_url: Some("https://example.com/v1".to_string()),
                 credential: Some("openai_chat_completions_api_key".to_string()),
+                headers: None,
                 wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
                 enabled: true,
             }
