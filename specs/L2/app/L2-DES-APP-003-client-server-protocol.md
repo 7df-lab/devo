@@ -42,6 +42,8 @@ If every client launches its own private server process over stdio, those client
 - `L1-REQ-APP-011` requires actionable error recovery and provider error detail presentation.
 - `L1-REQ-APP-012` requires user-data ownership, export, deletion, and credential-safe projections.
 - `L1-REQ-AGENT-005` restricts the question tool to Plan Mode.
+- `L1-REQ-TUI-008` requires leading `!` input to execute terminal commands through the program.
+- `L1-REQ-TUI-009` requires TUI Build, Plan, and Shell input modes.
 - `L1-REQ-APP-006` requires fuzzy search across user-facing entities.
 - `L1-REQ-CLIENT-004` requires `@` prefixed input to open fuzzy search.
 - `L1-REQ-TOOL-001` requires tool output safety and redaction visibility.
@@ -133,7 +135,7 @@ JSON-RPC request and notification method names must use `/` path separators rath
 
 Rules:
 
-- Use names such as `server/initialize`, `turn/submit`, and `config/update`.
+- Use names such as `server/initialize`, `turn/start`, and `config/update`.
 - Do not introduce dot-form aliases such as `server.initialize`, `turn.submit`, or `config.update`.
 - Existing notification names from `crates/protocol/src/event.rs::ServerEvent::method_name()` should be reused where the semantic event already exists. Examples include `session/started`, `turn/started`, `turn/usage/updated`, `item/started`, `item/agentMessage/delta`, `inputQueue/updated`, `steer/accepted`, and `serverRequest/resolved`.
 - Conceptual event-kind names such as `turn_started` or `item_content_update` may still be used inside projections or explanatory tables, but the JSON-RPC envelope `method` string uses the slash-separated method name.
@@ -155,7 +157,12 @@ Representative client-to-server JSON-RPC request methods and response results:
 | `session/export` | Export session history and allowed related data for user data portability. | `session_id`, `include_inherited_history`, `redaction_level`, `format`. | `export_id`, `accepted`, `status`, optional `download_ref`, `latest_sequence`. |
 | `session/subscribe` | Start receiving ordered events for a session from a given sequence or from the current state. | `session_id`, `from_sequence`, `event_filter`, `projection`. | `subscription_id`, optional `session_snapshot`, `next_sequence`. |
 | `session/unsubscribe` | Stop a previous session subscription. | `subscription_id`, `session_id`. | `subscription_id`, `closed`. |
-| `turn/submit` | Submit user input, content parts, and mentions for agent execution. If a turn is active, the client must state whether the message is normal, steer, or queue. | `session_id` or `new_session`, `submission_mode`, `active_turn_id` where applicable, `content_parts`, `mentions`, `client_message_id`, optional `mode_overrides`. | `session_id`, `turn_id` or `queue_item_id` or `steer_item_id`, `accepted`, `classification`, `latest_sequence`. |
+| `turn/start` | Submit user input, content parts, and mentions for agent execution. If a turn is active, the client must state whether the message is normal, steer, or queue. | `session_id` or `new_session`, `submission_mode`, `active_turn_id` where applicable, `content_parts`, `mentions`, `client_message_id`, `interaction_mode` defaulting to `build`, optional `mode_overrides`. | `session_id`, `turn_id` or `queue_item_id` or `steer_item_id`, `accepted`, `classification`, `latest_sequence`. |
+| `command/exec` | Start a client-owned PTY process for Shell Mode or one-shot shell execution. | optional `session_id`, `process_id`, `program`, optional `cwd`, optional `size`. `cwd` is required when `session_id` is omitted. | `process_id`. |
+| `command/exec/write` | Write base64-encoded stdin bytes to a running client-owned PTY process. | optional `session_id`, `process_id`, optional `delta_base64`, `close_stdin`. | empty success. |
+| `command/exec/resize` | Resize a running PTY process. | optional `session_id`, `process_id`, `size`. | empty success. |
+| `command/exec/terminate` | Terminate a running client-owned PTY process. | optional `session_id`, `process_id`. | empty success. |
+| `turn/shell_command` | Legacy compatibility path for submitting a user-authored Shell Mode command as a turn. | `session_id`, `command`, optional `cwd`. | `session_id`, `turn_id`, `accepted`, `latest_sequence`. |
 | `message/editPrevious` | Edit the immediately preceding eligible user-authored message in the current session branch. | `session_id`, `expected_target_message_id`, `edited_content_parts`, `edited_mentions`, `client_edit_id`, optional `edit_mode`, optional `workspace_restore_policy`. | `accepted`, `edit_id`, `target_message_id`, `replacement_message_id`, `superseded_turn_id` where applicable, `workspace_restore_state`, `new_turn_id` or `queue_item_id` where applicable, `edit_state`, `latest_sequence`. |
 | `turn/interrupt` | Request interruption of active execution, including model generation, tool execution, pending prompts, or the whole turn. | `session_id`, `turn_id`, `reason`, optional `target_kind`, optional `target_id`, optional `interrupt_mode`. | `turn_id`, `interrupt_id`, `interrupt_state`, `cleanup_state`, `latest_sequence`. |
 | `turn/resume` | Start a continuation turn linked to an interrupted or otherwise recoverable turn. | `session_id`, `interrupted_turn_id`, `client_resume_id`, optional `resume_content_parts`, optional `resume_mentions`, optional `resume_mode`. | `session_id`, `turn_id`, `resume_of_turn_id`, `accepted`, `resume_state`, `latest_sequence`. |
@@ -181,6 +188,23 @@ Representative client-to-server JSON-RPC request methods and response results:
 
 Request methods should return explicit success or structured error results.
 
+## Turn Input Mode Protocol Rules
+
+The `turn/start` request carries the client-selected `interaction_mode` for the submitted turn. Missing `interaction_mode` must be interpreted as `build` so older clients continue to submit normal build turns.
+
+Rules:
+
+- `build` is the default interaction mode and does not add mode-specific context.
+- `plan` marks the submitted turn as Plan Mode. In the v1 protocol/runtime integration, the server appends hidden model context instructing the agent not to modify files or perform implementation work. This is prompt-level behavior, not a hard per-tool runtime gate.
+- Queued user turns must preserve their submitted interaction mode when they later start.
+- Shell Mode commands are not encoded as `turn/start` user text.
+- The TUI starts each Shell Mode submission through a one-shot `command/exec` process and receives output through `command/exec/outputDelta`.
+- `command/exec` returns a start acknowledgement immediately. Process completion is reported by `command/exec/exited`.
+- `command/exec` process routing is keyed by connection id, optional `session_id`, and `process_id`. Missing `session_id` is valid for startup shell commands when the client provides an explicit `cwd`.
+- When `session_id` is omitted, the server must not create or activate a session. When `session_id` is present and `cwd` is omitted, the server resolves the process cwd from the session.
+- `command/exec/outputDelta` and `command/exec/exited` are delivered to the owning connection for both session-bound and sessionless processes.
+- `turn/shell_command` remains a legacy compatibility endpoint, but the TUI should not use it for Shell Mode.
+
 ## Server Notifications
 
 Representative server-to-client JSON-RPC notification methods:
@@ -205,6 +229,8 @@ Representative server-to-client JSON-RPC notification methods:
 | `inputQueue/updated`, `steer/accepted` | Reuse existing concrete active-turn input notification methods. | Existing queue or steer payload. |
 | `item/started`, `item/completed` | Reuse existing concrete item lifecycle notification methods. | Existing item payload plus item context. |
 | `item/agentMessage/delta`, `item/reasoning/summaryTextDelta`, `item/reasoning/textDelta`, `item/commandExecution/outputDelta`, `item/fileChange/outputDelta`, `item/plan/delta` | Reuse existing concrete streaming delta notification methods. | Existing item delta payload plus item context. |
+| `command/exec/outputDelta` | Stream base64 PTY bytes for a client-owned Shell Mode process. | optional `session_id`, `process_id`, `stream`, `delta_base64`. |
+| `command/exec/exited` | Report completion of a client-owned Shell Mode process. | optional `session_id`, `process_id`, optional `exit_code`. |
 | `serverRequest/resolved` | Reuse existing concrete pending server-request resolution notification method. | Existing request resolution payload. |
 
 Notifications should include sequence numbers sufficient for clients to order events and request catch-up after reconnect.
@@ -278,7 +304,7 @@ All clients, including the client that initiated the request, should receive the
 
 Examples:
 
-- If the TUI submits `turn/submit`, desktop and IDE clients subscribed to the same session receive the new user item and turn state.
+- If the TUI submits `turn/start`, desktop and IDE clients subscribed to the same session receive the new user item and turn state.
 - If the desktop client answers an approval request, the TUI and IDE clients receive the approval state update and any resumed turn events.
 - If the server streams assistant output, every subscribed client receives ordered `item_content_update` events for the same item.
 - If the agent updates the plan tool, every subscribed client receives `plan_updated` for the same active plan state.
@@ -465,6 +491,8 @@ If a client disconnects, the server continues owning active work subject to user
 | related-to | L1-REQ-APP-010 | 1 | specs/L1/L1-REQ-APP-010-configuration.md | Defines configuration inspection and update protocol behavior. |
 | related-to | L1-REQ-APP-011 | 1 | specs/L1/L1-REQ-APP-011-error-recovery.md | Defines error and retry event payload requirements. |
 | related-to | L1-REQ-APP-012 | 1 | specs/L1/L1-REQ-APP-012-privacy-data-ownership.md | Defines export, deletion, and credential-safe projection behavior. |
+| related-to | L1-REQ-TUI-008 | 1 | specs/L1/L1-REQ-TUI-008-terminal-command-prefix.md | Defines the protocol surface for user-submitted Shell Mode commands. |
+| related-to | L1-REQ-TUI-009 | 1 | specs/L1/L1-REQ-TUI-009-session-input-modes.md | Defines per-turn input-mode metadata and Shell command submission. |
 | related-to | L1-REQ-APP-006 | 1 | specs/L1/L1-REQ-APP-006-fuzzysearch.md | Defines fuzzy-search request and live result event behavior. |
 | related-to | L1-REQ-CLIENT-004 | 1 | specs/L1/L1-REQ-CLIENT-004-prefixed-input-actions.md | Defines protocol support for `@` prefix fuzzy-search sessions. |
 | related-to | L1-REQ-AGENT-001 | 1 | specs/L1/L1-REQ-AGENT-001-execution-workflow.md | Exposes execution lifecycle requests and events to clients. |
@@ -531,3 +559,4 @@ If a client disconnects, the server continues owning active work subject to user
 | 1 | 2026-05-25 | Assistant | Refinement | Linked approval protocol behavior to `L1-REQ-APP-003` application safety. |
 | 1 | 2026-05-26 | Assistant | Refinement | Added parallel tool parent/child event identity fields for `multi_tool_use`. |
 | 2 | 2026-05-27 | Human | Refinement | Changed JSON-RPC method names from dot separators to slash separators and aligned server notification method names with existing protocol event names where available. |
+| 2 | 2026-06-08 | Assistant | Refinement | Added `interaction_mode` to `turn/start`, defined `command/exec` dynamic PTY process control for Shell Mode, allowed sessionless startup shell commands with explicit `cwd`, and retained `turn/shell_command` as a legacy compatibility path. |

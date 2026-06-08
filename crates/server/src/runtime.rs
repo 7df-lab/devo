@@ -39,16 +39,20 @@ use devo_core::history::compaction::CompactionKind;
 use devo_core::history::compaction::compact_history;
 use devo_core::history::summarizer::DefaultHistorySummarizer;
 use devo_core::message_to_response_items;
-use devo_core::query;
+use devo_core::query_with_interaction_mode;
 use devo_core::tools::AgentToolCoordinator;
 use devo_core::tools::PermissionChecker;
 use devo_core::tools::ToolAgentScope;
+use devo_core::tools::ToolCall;
 use devo_core::tools::ToolCallError;
+use devo_core::tools::ToolCallResult;
+use devo_core::tools::ToolContent;
 use devo_core::tools::ToolExecutionOptions;
 use devo_core::tools::ToolPermissionRequest;
 use devo_core::tools::ToolRuntime;
 use devo_core::tools::ToolRuntimeContext;
 use devo_safety::PermissionMode;
+use devo_util_shell_command::parse_command::parse_command;
 
 use crate::ApprovalDecisionValue;
 use crate::ApprovalRequestPayload;
@@ -97,6 +101,8 @@ use crate::SessionStartResult;
 use crate::SessionStatusChangedPayload;
 use crate::SessionTitleUpdateParams;
 use crate::SessionTitleUpdateResult;
+use crate::ShellCommandParams;
+use crate::ShellCommandResult;
 use crate::SuccessResponse;
 use crate::ToolCallPayload;
 use crate::ToolResultPayload;
@@ -139,6 +145,7 @@ use crate::titles::normalize_generated_title;
 
 mod agents;
 mod approval;
+mod command_exec;
 mod connection;
 mod goal_handlers;
 mod handlers;
@@ -176,6 +183,8 @@ pub struct ServerRuntime {
     /// Live client-owned reference search sessions.
     reference_searches:
         Mutex<HashMap<devo_protocol::ReferenceSearchId, reference_search::ReferenceSearchState>>,
+    /// Live client-owned shell/process sessions.
+    command_exec_manager: command_exec::CommandExecManager,
 }
 
 impl ServerRuntime {
@@ -201,6 +210,7 @@ impl ServerRuntime {
             agent_mailboxes: Mutex::new(HashMap::new()),
             agent_output_buffers: Mutex::new(HashMap::new()),
             reference_searches: Mutex::new(HashMap::new()),
+            command_exec_manager: command_exec::CommandExecManager::new(),
         })
     }
 }

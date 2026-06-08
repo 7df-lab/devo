@@ -34,7 +34,7 @@ Define the TUI behavior for `/new`, which starts a new chat session.
 <HEADER box>
 
 ┃
-  Build · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
+  BUILD · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
 ```
 
 Rules:

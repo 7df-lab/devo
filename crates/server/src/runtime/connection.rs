@@ -55,6 +55,9 @@ impl ServerRuntime {
             .lock()
             .await
             .retain(|_, state| state.connection_id() != connection_id);
+        self.command_exec_manager
+            .terminate_connection(connection_id)
+            .await;
         let active_connections = self.connections.lock().await.len();
         tracing::info!(
             connection_id,
@@ -155,8 +158,26 @@ impl ServerRuntime {
             Some(ClientMethod::ModelCatalog) => Some(self.handle_model_catalog(id?, params).await),
             // TODO: not sure, config model from client should be deprecated
             Some(ClientMethod::ModelSaved) => Some(self.handle_model_saved(id?, params).await),
+            Some(ClientMethod::CommandExec) => {
+                Some(self.handle_command_exec(connection_id, id?, params).await)
+            }
+            Some(ClientMethod::CommandExecWrite) => Some(
+                self.handle_command_exec_write(connection_id, id?, params)
+                    .await,
+            ),
+            Some(ClientMethod::CommandExecResize) => Some(
+                self.handle_command_exec_resize(connection_id, id?, params)
+                    .await,
+            ),
+            Some(ClientMethod::CommandExecTerminate) => Some(
+                self.handle_command_exec_terminate(connection_id, id?, params)
+                    .await,
+            ),
             // TODO: start a new user turn, maybe should change name to "turn/submit"
             Some(ClientMethod::TurnStart) => Some(self.handle_turn_start(id?, params).await),
+            Some(ClientMethod::TurnShellCommand) => {
+                Some(self.handle_turn_shell_command(id?, params).await)
+            }
             // interupt the current working turn
             Some(ClientMethod::TurnInterrupt) => {
                 Some(self.handle_turn_interrupt(id?, params).await)

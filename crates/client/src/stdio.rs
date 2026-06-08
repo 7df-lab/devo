@@ -15,6 +15,14 @@ use devo_protocol::ApprovalRespondParams;
 use devo_protocol::ClientNotification;
 use devo_protocol::ClientRequest;
 use devo_protocol::ClientTransportKind;
+use devo_protocol::CommandExecParams;
+use devo_protocol::CommandExecResizeParams;
+use devo_protocol::CommandExecResizeResult;
+use devo_protocol::CommandExecResult;
+use devo_protocol::CommandExecTerminateParams;
+use devo_protocol::CommandExecTerminateResult;
+use devo_protocol::CommandExecWriteParams;
+use devo_protocol::CommandExecWriteResult;
 use devo_protocol::ErrorResponse;
 use devo_protocol::InitializeParams;
 use devo_protocol::InitializeResult;
@@ -55,6 +63,8 @@ use devo_protocol::SessionStartParams;
 use devo_protocol::SessionStartResult;
 use devo_protocol::SessionTitleUpdateParams;
 use devo_protocol::SessionTitleUpdateResult;
+use devo_protocol::ShellCommandParams;
+use devo_protocol::ShellCommandResult;
 use devo_protocol::SkillChangedParams;
 use devo_protocol::SkillChangedResult;
 use devo_protocol::SkillListParams;
@@ -287,8 +297,40 @@ impl StdioServerClient {
         self.request("provider/validate", params).await
     }
 
+    pub async fn command_exec(&mut self, params: CommandExecParams) -> Result<CommandExecResult> {
+        self.request("command/exec", params).await
+    }
+
+    pub async fn command_exec_write(
+        &mut self,
+        params: CommandExecWriteParams,
+    ) -> Result<CommandExecWriteResult> {
+        self.request("command/exec/write", params).await
+    }
+
+    pub async fn command_exec_resize(
+        &mut self,
+        params: CommandExecResizeParams,
+    ) -> Result<CommandExecResizeResult> {
+        self.request("command/exec/resize", params).await
+    }
+
+    pub async fn command_exec_terminate(
+        &mut self,
+        params: CommandExecTerminateParams,
+    ) -> Result<CommandExecTerminateResult> {
+        self.request("command/exec/terminate", params).await
+    }
+
     pub async fn turn_start(&mut self, params: TurnStartParams) -> Result<TurnStartResult> {
         self.request("turn/start", params).await
+    }
+
+    pub async fn turn_shell_command(
+        &mut self,
+        params: ShellCommandParams,
+    ) -> Result<ShellCommandResult> {
+        self.request("turn/shell_command", params).await
     }
 
     pub async fn turn_interrupt(

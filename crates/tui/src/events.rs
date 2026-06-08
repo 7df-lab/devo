@@ -14,6 +14,7 @@ use devo_protocol::ReferenceSearchSnapshot;
 use devo_protocol::SessionHistoryItem;
 use devo_protocol::SessionRuntimeStatus;
 use devo_protocol::parse_command::ParsedCommand;
+use devo_protocol::protocol::ExecCommandSource;
 use devo_protocol::protocol::FileChange;
 const TOOL_RESULT_FOLD_FINAL_STAGE: u8 = 3;
 
@@ -196,6 +197,17 @@ pub(crate) enum WorkerEvent {
         /// Optional parsed command semantics for command-like and exploration-like tools.
         parsed_commands: Option<Vec<ParsedCommand>>,
     },
+    /// A command-execution item started.
+    CommandExecutionStarted {
+        /// Stable identifier used to match later output and result events.
+        tool_use_id: String,
+        /// The command text executed by the server.
+        command: String,
+        /// Whether this command came from the agent, Shell Mode, or unified exec.
+        source: ExecCommandSource,
+        /// Parsed command semantics supplied by the server.
+        command_actions: Vec<ParsedCommand>,
+    },
     /// Updated metadata for a previously started tool call.
     ToolCallUpdated {
         /// Stable identifier matching the original tool call.
@@ -224,6 +236,11 @@ pub(crate) enum WorkerEvent {
         is_error: bool,
         /// Whether the preview was truncated for display.
         truncated: bool,
+    },
+    /// A user-shell command/process finished outside the model turn loop.
+    ShellCommandFinished {
+        /// Process exit code when known.
+        exit_code: Option<i32>,
     },
     /// A structured patch/edit summary derived from apply_patch output.
     PatchApplied {

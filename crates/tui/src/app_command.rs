@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use devo_protocol::ApprovalDecisionValue;
 use devo_protocol::ApprovalScopeValue;
 use devo_protocol::InputItem;
+use devo_protocol::InteractionMode;
 use devo_protocol::SessionId;
 use devo_protocol::TurnId;
 use devo_protocol::TurnStartParams;
@@ -24,6 +25,12 @@ pub(crate) enum AppCommand {
     RunUserShellCommand {
         command: String,
     },
+    SubmitShellInput {
+        command: String,
+    },
+    ExecuteShellCommand {
+        command: String,
+    },
     Compact,
     UserTurn {
         input: Vec<InputItem>,
@@ -32,6 +39,7 @@ pub(crate) enum AppCommand {
         thinking: Option<String>,
         sandbox: Option<String>,
         approval_policy: Option<String>,
+        interaction_mode: InteractionMode,
     },
     OverrideTurnContext {
         cwd: Option<PathBuf>,
@@ -77,6 +85,12 @@ pub(crate) enum AppCommandView<'a> {
     RunUserShellCommand {
         command: &'a str,
     },
+    SubmitShellInput {
+        command: &'a str,
+    },
+    ExecuteShellCommand {
+        command: &'a str,
+    },
     Compact,
     UserTurn {
         input: &'a [InputItem],
@@ -85,6 +99,7 @@ pub(crate) enum AppCommandView<'a> {
         thinking: &'a Option<String>,
         sandbox: &'a Option<String>,
         approval_policy: &'a Option<String>,
+        interaction_mode: InteractionMode,
     },
     SteerTurn {
         input: &'a [InputItem],
@@ -147,6 +162,27 @@ impl AppCommand {
         sandbox: Option<String>,
         approval_policy: Option<String>,
     ) -> Self {
+        Self::user_turn_with_interaction_mode(
+            input,
+            cwd,
+            model,
+            thinking,
+            sandbox,
+            approval_policy,
+            InteractionMode::Build,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn user_turn_with_interaction_mode(
+        input: Vec<InputItem>,
+        cwd: Option<PathBuf>,
+        model: Option<String>,
+        thinking: Option<String>,
+        sandbox: Option<String>,
+        approval_policy: Option<String>,
+        interaction_mode: InteractionMode,
+    ) -> Self {
         Self::UserTurn {
             input,
             cwd,
@@ -154,7 +190,16 @@ impl AppCommand {
             thinking,
             sandbox,
             approval_policy,
+            interaction_mode,
         }
+    }
+
+    pub(crate) fn execute_shell_command(command: String) -> Self {
+        Self::ExecuteShellCommand { command }
+    }
+
+    pub(crate) fn submit_shell_input(command: String) -> Self {
+        Self::SubmitShellInput { command }
     }
 
     #[allow(dead_code)]
@@ -209,6 +254,8 @@ impl AppCommand {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::RunUserShellCommand { .. } => "run_user_shell_command",
+            Self::SubmitShellInput { .. } => "submit_shell_input",
+            Self::ExecuteShellCommand { .. } => "execute_shell_command",
             Self::Compact => "compact",
             Self::UserTurn { .. } => "user_turn",
             Self::OverrideTurnContext { .. } => "override_turn_context",
@@ -228,6 +275,10 @@ impl AppCommand {
             Self::RunUserShellCommand { command } => {
                 AppCommandView::RunUserShellCommand { command }
             }
+            Self::SubmitShellInput { command } => AppCommandView::SubmitShellInput { command },
+            Self::ExecuteShellCommand { command } => {
+                AppCommandView::ExecuteShellCommand { command }
+            }
             Self::Compact => AppCommandView::Compact,
             Self::UserTurn {
                 input,
@@ -236,6 +287,7 @@ impl AppCommand {
                 thinking,
                 sandbox,
                 approval_policy,
+                interaction_mode,
             } => AppCommandView::UserTurn {
                 input,
                 cwd,
@@ -243,6 +295,7 @@ impl AppCommand {
                 thinking,
                 sandbox,
                 approval_policy,
+                interaction_mode: *interaction_mode,
             },
             Self::OverrideTurnContext {
                 cwd,
@@ -295,6 +348,7 @@ impl AppCommand {
             thinking,
             sandbox,
             approval_policy,
+            interaction_mode,
         } = self
         else {
             return None;
@@ -308,6 +362,7 @@ impl AppCommand {
             sandbox: sandbox.clone(),
             approval_policy: approval_policy.clone(),
             cwd: cwd.clone(),
+            interaction_mode: *interaction_mode,
         })
     }
 }

@@ -1,5 +1,6 @@
 mod agent;
 mod approval;
+mod command_exec;
 mod connection;
 mod conversation;
 mod event;
@@ -21,6 +22,7 @@ pub mod user_input;
 
 pub use agent::*;
 pub use approval::*;
+pub use command_exec::*;
 pub use connection::*;
 pub use conversation::*;
 pub use event::*;

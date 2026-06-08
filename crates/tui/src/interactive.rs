@@ -776,6 +776,7 @@ fn handle_worker_event(
         }
         // Streaming deltas are handled entirely within the ChatWidget
         WorkerEvent::ToolOutputDelta { .. } => {}
+        WorkerEvent::CommandExecutionStarted { .. } => {}
         WorkerEvent::UsageUpdated {
             total_input_tokens: next_total_input_tokens,
             total_output_tokens: next_total_output_tokens,
@@ -864,6 +865,7 @@ fn handle_worker_event(
         | WorkerEvent::ToolCall { .. }
         | WorkerEvent::ToolCallUpdated { .. }
         | WorkerEvent::ToolResult { .. }
+        | WorkerEvent::ShellCommandFinished { .. }
         | WorkerEvent::PatchApplied { .. }
         | WorkerEvent::PlanUpdated { .. }
         | WorkerEvent::ProviderVendorsListed { .. }
@@ -907,13 +909,24 @@ fn handle_app_command(
             model,
             thinking,
             approval_policy,
+            interaction_mode,
             ..
         } => {
             if let Some(model) = model {
                 worker.set_model(model.clone())?;
             }
             worker.set_thinking(thinking.clone())?;
-            worker.submit_input(input.clone(), approval_policy.clone())?;
+            worker.submit_input_with_interaction_mode(
+                input.clone(),
+                approval_policy.clone(),
+                *interaction_mode,
+            )?;
+        }
+        AppCommand::ExecuteShellCommand { command } => {
+            worker.execute_shell_command(command.clone())?;
+        }
+        AppCommand::SubmitShellInput { command } => {
+            worker.submit_shell_input(command.clone())?;
         }
         AppCommand::SteerTurn {
             input,

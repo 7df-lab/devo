@@ -619,6 +619,16 @@ fn command_actions_from_tool_result(
     }
 }
 
+fn interaction_mode_from_pending_metadata(
+    metadata: Option<&serde_json::Value>,
+) -> devo_protocol::InteractionMode {
+    metadata
+        .and_then(|metadata| metadata.get("interaction_mode"))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
 fn command_execution_item_id_for_progress(
     pending_tool_calls: &HashMap<String, PendingToolCall>,
     tool_use_id: &str,
@@ -629,7 +639,188 @@ fn command_execution_item_id_for_progress(
         .and_then(|pending| pending.item_id)
 }
 
+fn user_shell_exec_input(command: &str, cwd: std::path::PathBuf) -> serde_json::Value {
+    serde_json::json!({
+        "cmd": command,
+        "workdir": cwd,
+        "login": true,
+        "tty": true,
+    })
+}
+
+fn user_shell_command_payload(
+    tool_call_id: &str,
+    command: &str,
+    command_actions: Vec<devo_protocol::parse_command::ParsedCommand>,
+    output: Option<serde_json::Value>,
+    is_error: bool,
+) -> CommandExecutionPayload {
+    CommandExecutionPayload {
+        tool_call_id: tool_call_id.to_string(),
+        tool_name: "exec_command".to_string(),
+        command: command.to_string(),
+        source: devo_protocol::protocol::ExecCommandSource::UserShell,
+        command_actions,
+        output,
+        is_error,
+    }
+}
+
 impl ServerRuntime {
+    pub(super) async fn execute_shell_command_turn(
+        self: Arc<Self>,
+        session_id: SessionId,
+        turn: TurnMetadata,
+        command: String,
+        cwd: std::path::PathBuf,
+    ) {
+        if let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() {
+            session_arc.lock().await.turn_approval_cache =
+                crate::execution::ApprovalGrantCache::default();
+        }
+
+        let tool_call_id = format!("user-shell-{}", turn.turn_id);
+        let input = user_shell_exec_input(&command, cwd.clone());
+        let command_actions = parse_command(std::slice::from_ref(&command));
+        let (item_id, item_seq) = self
+            .start_item(
+                session_id,
+                turn.turn_id,
+                ItemKind::CommandExecution,
+                serde_json::to_value(user_shell_command_payload(
+                    &tool_call_id,
+                    &command,
+                    command_actions.clone(),
+                    None,
+                    false,
+                ))
+                .expect("serialize command execution payload"),
+            )
+            .await;
+
+        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+            return;
+        };
+        let (permission_mode, permission_profile) = {
+            let session = session_arc.lock().await;
+            let core_session = session.core_session.lock().await;
+            (
+                core_session.config.permission_mode,
+                core_session.config.permission_profile.clone(),
+            )
+        };
+        let runtime = ToolRuntime::new_with_context(
+            Arc::clone(&self.deps.registry),
+            self.build_permission_checker(
+                session_id,
+                turn.turn_id,
+                permission_mode,
+                permission_profile,
+            ),
+            ToolRuntimeContext {
+                session_id: session_id.to_string(),
+                turn_id: Some(turn.turn_id.to_string()),
+                cwd,
+                agent_scope: ToolAgentScope::Parent,
+                agent_coordinator: None,
+            },
+        );
+        let result = runtime
+            .execute_batch(&[ToolCall {
+                id: tool_call_id.clone(),
+                name: "exec_command".to_string(),
+                input: input.clone(),
+            }])
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| ToolCallResult::error(&tool_call_id, "shell command did not run"));
+        let output = match result.content.clone() {
+            ToolContent::Text(text) => serde_json::Value::String(text),
+            ToolContent::Json(json) => json,
+            ToolContent::Mixed { text, json } => {
+                json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+            }
+        };
+        let is_error = result.is_error;
+        self.complete_item(
+            session_id,
+            turn.turn_id,
+            item_id,
+            item_seq,
+            ItemKind::CommandExecution,
+            TurnItem::CommandExecution(CommandExecutionItem {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: "exec_command".to_string(),
+                command: command.clone(),
+                input,
+                output: output.clone(),
+                is_error,
+            }),
+            serde_json::to_value(user_shell_command_payload(
+                &tool_call_id,
+                &command,
+                command_actions,
+                Some(output),
+                is_error,
+            ))
+            .expect("serialize command execution payload"),
+        )
+        .await;
+
+        let final_turn = {
+            let mut session = session_arc.lock().await;
+            let mut final_turn = turn.clone();
+            final_turn.completed_at = Some(Utc::now());
+            final_turn.status = if is_error {
+                TurnStatus::Failed
+            } else {
+                TurnStatus::Completed
+            };
+            session.latest_turn = Some(final_turn.clone());
+            session.active_turn = None;
+            session.summary.status = SessionRuntimeStatus::Idle;
+            session.summary.updated_at = Utc::now();
+            final_turn
+        };
+        let (record, session_context, turn_context) = {
+            let session = session_arc.lock().await;
+            let core_session = session.core_session.lock().await;
+            (
+                session.record.clone(),
+                core_session.session_context.clone(),
+                core_session.latest_turn_context.clone(),
+            )
+        };
+        if let Some(record) = record
+            && let Err(error) = self.rollout_store.append_turn(
+                &record,
+                build_turn_record(&final_turn, session_context, turn_context),
+            )
+        {
+            tracing::warn!(session_id = %session_id, error = %error, "failed to persist shell command turn line");
+        }
+        if is_error {
+            self.broadcast_event(ServerEvent::TurnFailed(TurnEventPayload {
+                session_id,
+                turn: final_turn.clone(),
+            }))
+            .await;
+        }
+        self.broadcast_event(ServerEvent::TurnCompleted(TurnEventPayload {
+            session_id,
+            turn: final_turn,
+        }))
+        .await;
+        self.broadcast_event(ServerEvent::SessionStatusChanged(
+            SessionStatusChangedPayload {
+                session_id,
+                status: SessionRuntimeStatus::Idle,
+            },
+        ))
+        .await;
+    }
+
     /// Execute one turn end-to-end, including streaming query events,
     /// persisting turn state, and draining queued follow-up inputs.
     pub(super) async fn execute_turn(
@@ -639,6 +830,7 @@ impl ServerRuntime {
         turn_config: TurnConfig,
         display_input: String,
         input: String,
+        interaction_mode: devo_protocol::InteractionMode,
     ) {
         if let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() {
             session_arc.lock().await.turn_approval_cache =
@@ -1500,13 +1692,15 @@ impl ServerRuntime {
                     ..ToolExecutionOptions::default()
                 },
             );
-            let result = query(
+            let result = query_with_interaction_mode(
                 &mut core_session,
                 &turn_config,
-                self.deps.provider.clone(),
+                self.deps
+                    .provider_for_route(turn_config.provider_route.clone()),
                 registry,
                 &runtime,
                 Some(callback),
+                interaction_mode,
             )
             .await;
             (
@@ -1681,7 +1875,7 @@ impl ServerRuntime {
         .await;
 
         // After the turn completes, check for queued inputs and start the next turn.
-        let (display_input, input_text) = {
+        let (display_input, input_text, queued_interaction_mode) = {
             let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
                 Some(s) => s,
                 None => return,
@@ -1699,8 +1893,13 @@ impl ServerRuntime {
             match queue.pop_front() {
                 Some(devo_core::PendingInputItem {
                     kind: devo_core::PendingInputKind::UserText { text },
+                    metadata,
                     ..
-                }) => (text.clone(), text),
+                }) => (
+                    text.clone(),
+                    text,
+                    interaction_mode_from_pending_metadata(metadata.as_ref()),
+                ),
                 Some(devo_core::PendingInputItem {
                     kind:
                         devo_core::PendingInputKind::UserInput {
@@ -1708,8 +1907,13 @@ impl ServerRuntime {
                             prompt_text,
                             ..
                         },
+                    metadata,
                     ..
-                }) => (display_text, prompt_text),
+                }) => (
+                    display_text,
+                    prompt_text,
+                    interaction_mode_from_pending_metadata(metadata.as_ref()),
+                ),
                 _ => return,
             }
         };
@@ -1783,6 +1987,7 @@ impl ServerRuntime {
             turn_config,
             display_input,
             input_text,
+            queued_interaction_mode,
         ))
         .await;
     }
@@ -1792,7 +1997,7 @@ impl ServerRuntime {
     /// its response immediately.
     pub(super) async fn spawn_next_turn_from_queue(self: &Arc<Self>, session_id: SessionId) {
         // Pop one queued input.
-        let (display_input, input_text) = {
+        let (display_input, input_text, queued_interaction_mode) = {
             let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
                 Some(s) => s,
                 None => return,
@@ -1807,8 +2012,13 @@ impl ServerRuntime {
             match guard.pop_front() {
                 Some(devo_core::PendingInputItem {
                     kind: devo_core::PendingInputKind::UserText { text },
+                    metadata,
                     ..
-                }) => (text.clone(), text),
+                }) => (
+                    text.clone(),
+                    text,
+                    interaction_mode_from_pending_metadata(metadata.as_ref()),
+                ),
                 Some(devo_core::PendingInputItem {
                     kind:
                         devo_core::PendingInputKind::UserInput {
@@ -1816,8 +2026,13 @@ impl ServerRuntime {
                             prompt_text,
                             ..
                         },
+                    metadata,
                     ..
-                }) => (display_text, prompt_text),
+                }) => (
+                    display_text,
+                    prompt_text,
+                    interaction_mode_from_pending_metadata(metadata.as_ref()),
+                ),
                 _ => return,
             }
         };
@@ -1888,7 +2103,14 @@ impl ServerRuntime {
         let runtime = Arc::clone(self);
         tokio::spawn(async move {
             runtime
-                .execute_turn(session_id, turn, turn_config, display_input, input_text)
+                .execute_turn(
+                    session_id,
+                    turn,
+                    turn_config,
+                    display_input,
+                    input_text,
+                    queued_interaction_mode,
+                )
                 .await;
         });
     }
@@ -2118,6 +2340,44 @@ mod tests {
                 source: devo_protocol::protocol::ExecCommandSource::Agent,
                 command_actions: Vec::new(),
                 output: None,
+                is_error: false,
+            }
+        );
+    }
+
+    #[test]
+    fn user_shell_exec_input_uses_pty_backed_exec_command() {
+        let cwd = std::path::PathBuf::from("workspace");
+
+        let input = user_shell_exec_input("pwd", cwd.clone());
+
+        assert_eq!(
+            input,
+            serde_json::json!({
+                "cmd": "pwd",
+                "workdir": cwd,
+                "login": true,
+                "tty": true,
+            })
+        );
+    }
+
+    #[test]
+    fn user_shell_command_payload_uses_user_shell_source() {
+        let output = serde_json::json!({ "output": "done" });
+
+        let payload =
+            user_shell_command_payload("call-1", "pwd", Vec::new(), Some(output.clone()), false);
+
+        assert_eq!(
+            payload,
+            CommandExecutionPayload {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "exec_command".to_string(),
+                command: "pwd".to_string(),
+                source: devo_protocol::protocol::ExecCommandSource::UserShell,
+                command_actions: Vec::new(),
+                output: Some(output),
                 is_error: false,
             }
         );

@@ -80,7 +80,7 @@ Compact shell placement:
 ┃ Ask Devo
 
 <status>
-  Build · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
+  BUILD · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
 ```
 
 ## Transcript Cell Types

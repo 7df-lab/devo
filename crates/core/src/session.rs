@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use devo_provider::ProviderRoute;
 use devo_safety::PermissionMode;
 use devo_safety::PermissionPreset;
 use devo_safety::RuntimePermissionProfile;
@@ -54,6 +55,8 @@ pub struct TurnConfig {
     /// Provider-scoped variant lookup used when thinking resolves to another
     /// catalog slug before the request is built.
     pub provider_request_models: ProviderRequestModelMap,
+    /// Provider route selected by the model-provider binding for this turn.
+    pub provider_route: ProviderRoute,
     pub thinking_selection: Option<String>,
 }
 
@@ -91,6 +94,7 @@ impl TurnConfig {
             model,
             request_model,
             provider_request_models: ProviderRequestModelMap::default(),
+            provider_route: ProviderRoute::Default,
             thinking_selection,
         }
     }
@@ -101,11 +105,28 @@ impl TurnConfig {
         provider_request_models: ProviderRequestModelMap,
         thinking_selection: Option<String>,
     ) -> Self {
+        Self::with_provider_route(
+            model,
+            request_model,
+            provider_request_models,
+            ProviderRoute::Default,
+            thinking_selection,
+        )
+    }
+
+    pub fn with_provider_route(
+        model: Model,
+        request_model: String,
+        provider_request_models: ProviderRequestModelMap,
+        provider_route: ProviderRoute,
+        thinking_selection: Option<String>,
+    ) -> Self {
         let thinking_selection = model.normalize_thinking_selection(thinking_selection.as_deref());
         Self {
             model,
             request_model,
             provider_request_models,
+            provider_route,
             thinking_selection,
         }
     }

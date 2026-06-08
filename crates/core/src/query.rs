@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use devo_protocol::InteractionMode;
 use devo_protocol::ModelRequest;
 use devo_protocol::RequestContent;
 use devo_protocol::RequestMessage;
@@ -55,6 +56,24 @@ use crate::tools::DeferredLoadingConfig;
 use crate::tools::hide_subagent_agent_coordination_tools;
 
 const SUBAGENT_MODE_REMINDER: &str = "<system-reminder>\nYou are running as a sub-agent. Complete the delegated task using the available non-agent tools. Do not call agent coordination tools such as spawn_agent, send_message, wait_agent, list_agents, or close_agent; report progress and final results through assistant output.\n</system-reminder>";
+const PLAN_MODE_REMINDER: &str = "<system-reminder>\nYou are now in Plan Mode. Do not modify files or perform implementation work. You may inspect context and produce a plan for the requested change.\n</system-reminder>";
+
+fn with_interaction_mode_reminder(
+    system: Option<String>,
+    interaction_mode: InteractionMode,
+) -> Option<String> {
+    match interaction_mode {
+        InteractionMode::Build => system,
+        InteractionMode::Plan => Some(match system {
+            Some(system) if !system.is_empty() => format!(
+                "{system}
+
+{PLAN_MODE_REMINDER}"
+            ),
+            _ => PLAN_MODE_REMINDER.to_string(),
+        }),
+    }
+}
 
 fn estimate_request_prompt_tokens(request: &ModelRequest) -> usize {
     let system_bytes = request.system.as_ref().map_or(0, String::len);
@@ -419,6 +438,27 @@ pub async fn query(
     runtime: &ToolRuntime,
     on_event: Option<EventCallback>,
 ) -> Result<(), AgentError> {
+    query_with_interaction_mode(
+        session,
+        turn_config,
+        provider,
+        registry,
+        runtime,
+        on_event,
+        InteractionMode::Build,
+    )
+    .await
+}
+
+pub async fn query_with_interaction_mode(
+    session: &mut SessionState,
+    turn_config: &TurnConfig,
+    provider: Arc<dyn ModelProviderSDK>,
+    registry: Arc<ToolRegistry>,
+    runtime: &ToolRuntime,
+    on_event: Option<EventCallback>,
+    interaction_mode: InteractionMode,
+) -> Result<(), AgentError> {
     // emit is the event callback function.
     let emit = |event: QueryEvent| {
         if let Some(ref cb) = on_event {
@@ -576,11 +616,14 @@ pub async fn query(
         let tool_prompt_metrics = prompt_surface.metrics.clone();
         let deferred_tool_count = prompt_surface.deferred_tool_names.len();
         let loaded_deferred_tool_count = prompt_surface.loaded_deferred_tool_names.len();
-        let request_system = if agent_scope == ToolAgentScope::Subagent {
-            (!base_system.is_empty()).then_some(base_system)
-        } else {
-            prompt_surface.system.clone()
-        };
+        let request_system = with_interaction_mode_reminder(
+            if agent_scope == ToolAgentScope::Subagent {
+                (!base_system.is_empty()).then_some(base_system)
+            } else {
+                prompt_surface.system.clone()
+            },
+            interaction_mode,
+        );
 
         // resolve thinking request parameter
         let ResolvedThinkingRequest {
@@ -1136,6 +1179,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    use super::query_with_interaction_mode;
     use crate::tools::ToolAgentScope;
     use crate::tools::ToolPreparationFeedback;
     use crate::tools::ToolRegistry;
@@ -1149,6 +1193,7 @@ mod tests {
     use crate::tools::tool_spec::{ToolExecutionMode, ToolOutputMode, ToolSpec};
     use anyhow::Result;
     use async_trait::async_trait;
+    use devo_protocol::InteractionMode;
     use devo_protocol::ModelRequest;
     use devo_protocol::ModelResponse;
     use devo_protocol::RequestContent;
@@ -2124,6 +2169,43 @@ mod tests {
                 .slug,
             "catalog-slug"
         );
+    }
+
+    /// Trace: L2-DES-CONTEXT-001
+    /// Verifies: Plan turns append the Plan Mode instruction to the provider system prompt.
+    #[tokio::test]
+    async fn query_appends_plan_mode_reminder_to_system_prompt() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn ModelProviderSDK> = Arc::new(CapturingProvider {
+            requests: Arc::clone(&requests),
+        });
+        let registry = Arc::new(ToolRegistry::new());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+        let model = Model {
+            slug: "model-a".into(),
+            base_instructions: "base instructions".into(),
+            ..Model::default()
+        };
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("plan this"));
+
+        query_with_interaction_mode(
+            &mut session,
+            &TurnConfig::new(model, None),
+            Arc::clone(&provider),
+            registry,
+            &runtime,
+            None,
+            InteractionMode::Plan,
+        )
+        .await
+        .expect("query should succeed");
+
+        let captured = requests.lock().expect("lock requests");
+        assert_eq!(captured.len(), 1);
+        let system = captured[0].system.as_deref().expect("system prompt");
+        assert!(system.contains("base instructions"));
+        assert!(system.contains("You are now in Plan Mode"));
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@
 //! - Routing keys to the active popup (slash commands, `@` reference search, `$` skill mentions).
 //! - Promoting typed slash commands into atomic elements when the command name is completed.
 //! - Handling submit vs newline on Enter.
+//! - Rendering the active Build/Plan/Shell mode indicator supplied by the bottom pane.
 //! - Turning raw key streams into explicit paste operations on platforms where terminals
 //!   don't provide reliable bracketed paste (notably Windows).
 //!
@@ -51,6 +52,17 @@
 //! and attachment pruning, and clears pending paste state on success.
 //! Slash commands with arguments (like `/plan` and `/review`) reuse the same preparation path so
 //! pasted content and text elements are preserved when extracting args.
+//!
+//! # Build, Plan, and Shell Modes
+//!
+//! The bottom pane owns the active input mode and passes it into the composer for footer rendering.
+//! The composer renders the uppercase mode label as the first passive bottom status-line field and
+//! colors the bottom input marker `┃` with the active [`InputMode`] color.
+//!
+//! Mode-changing keys and shell-prefix parsing are handled by the bottom pane before normal text
+//! editing: `Shift+Tab` toggles Build <-> Plan, bare `!` enters Shell Mode with an empty draft,
+//! `!cmd` submits a one-shot user shell command, `\!text` submits normal chat beginning with
+//! `!text`, and leading whitespace before `!` remains normal chat text.
 //!
 //! # Remote Image Rows (Up/Down/Delete)
 //!
@@ -114,7 +126,6 @@
 //! overall state machine, since it affects which transitions are even possible from a given UI
 //! state.
 //!
-use crate::bottom_pane::footer::mode_indicator_line;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::key_hint::has_ctrl_or_alt;
@@ -145,7 +156,6 @@ use super::chat_composer_history::HistoryEntry;
 use super::command_popup::CommandItem;
 use super::command_popup::CommandPopup;
 use super::command_popup::CommandPopupFlags;
-use super::footer::CollaborationModeIndicator;
 use super::footer::FooterMode;
 use super::footer::FooterProps;
 use super::footer::SummaryLeft;
@@ -156,7 +166,6 @@ use super::footer::footer_height;
 use super::footer::footer_hint_items_width;
 use super::footer::footer_line_width;
 use super::footer::inset_footer_hint_area;
-use super::footer::max_left_width_for_right;
 use super::footer::passive_footer_status_line;
 use super::footer::render_context_right;
 use super::footer::render_footer_from_props;
@@ -164,8 +173,10 @@ use super::footer::render_footer_hint_items;
 use super::footer::render_footer_line;
 use super::footer::reset_mode_after_activity;
 use super::footer::single_line_footer_layout;
+use super::footer::status_line_with_input_mode;
 use super::footer::toggle_shortcut_mode;
 use super::footer::uses_passive_footer_status_layout;
+use super::input_mode::InputMode;
 use super::paste_burst::CharDecision;
 use super::paste_burst::PasteBurst;
 use super::reference_popup::ReferencePopup;
@@ -222,10 +233,12 @@ fn user_input_too_large_message(actual_chars: usize) -> String {
 #[derive(Debug, PartialEq)]
 pub enum InputResult {
     Submitted {
+        raw_text: String,
         text: String,
         text_elements: Vec<TextElement>,
     },
     Queued {
+        raw_text: String,
         text: String,
         text_elements: Vec<TextElement>,
     },
@@ -337,9 +350,9 @@ pub(crate) struct ChatComposer {
     dismissed_mention_popup_token: Option<String>,
     mention_bindings: HashMap<u64, ComposerMentionBinding>,
     recent_submission_mention_bindings: Vec<MentionBinding>,
-    collaboration_modes_enabled: bool,
+    input_modes_enabled: bool,
     config: ChatComposerConfig,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    input_mode_indicator: Option<InputMode>,
     connectors_enabled: bool,
     plugins_command_enabled: bool,
     fast_command_enabled: bool,
@@ -381,7 +394,7 @@ const FOOTER_SPACING_HEIGHT: u16 = 0;
 impl ChatComposer {
     fn builtin_command_flags(&self) -> BuiltinCommandFlags {
         BuiltinCommandFlags {
-            collaboration_modes_enabled: self.collaboration_modes_enabled,
+            collaboration_modes_enabled: self.input_modes_enabled,
             connectors_enabled: self.connectors_enabled,
             plugins_command_enabled: self.plugins_command_enabled,
             fast_command_enabled: self.fast_command_enabled,
@@ -463,9 +476,9 @@ impl ChatComposer {
             dismissed_mention_popup_token: None,
             mention_bindings: HashMap::new(),
             recent_submission_mention_bindings: Vec::new(),
-            collaboration_modes_enabled: false,
+            input_modes_enabled: true,
             config,
-            collaboration_mode_indicator: None,
+            input_mode_indicator: Some(InputMode::Build),
             connectors_enabled: false,
             plugins_command_enabled: false,
             fast_command_enabled: false,
@@ -536,8 +549,8 @@ impl ChatComposer {
     }
 
     #[allow(dead_code)]
-    pub fn set_collaboration_modes_enabled(&mut self, enabled: bool) {
-        self.collaboration_modes_enabled = enabled;
+    pub fn set_input_modes_enabled(&mut self, enabled: bool) {
+        self.input_modes_enabled = enabled;
     }
 
     #[allow(dead_code)]
@@ -551,11 +564,8 @@ impl ChatComposer {
     }
 
     #[allow(dead_code)]
-    pub fn set_collaboration_mode_indicator(
-        &mut self,
-        indicator: Option<CollaborationModeIndicator>,
-    ) {
-        self.collaboration_mode_indicator = indicator;
+    pub fn set_input_mode_indicator(&mut self, indicator: Option<InputMode>) {
+        self.input_mode_indicator = indicator;
     }
 
     #[allow(dead_code)]
@@ -2366,6 +2376,10 @@ impl ChatComposer {
             self.handle_paste(pasted);
         }
 
+        if self.is_task_running && self.is_shell_submission_candidate() {
+            return (InputResult::None, true);
+        }
+
         let original_input = self.textarea.text().to_string();
         let original_text_elements = self.textarea.text_elements();
         let original_mention_bindings = self.snapshot_mention_bindings();
@@ -2385,6 +2399,7 @@ impl ChatComposer {
             if should_queue {
                 (
                     InputResult::Queued {
+                        raw_text: original_input,
                         text,
                         text_elements,
                     },
@@ -2394,6 +2409,7 @@ impl ChatComposer {
                 // Do not clear attached_images here; ChatWidget drains them via take_recent_submission_images().
                 (
                     InputResult::Submitted {
+                        raw_text: original_input,
                         text,
                         text_elements,
                     },
@@ -2694,8 +2710,12 @@ impl ChatComposer {
         }
     }
 
+    fn is_shell_submission_candidate(&self) -> bool {
+        self.input_mode_indicator == Some(InputMode::Shell) || self.is_bang_shell_command()
+    }
+
     fn is_bang_shell_command(&self) -> bool {
-        self.textarea.text().trim_start().starts_with('!')
+        self.textarea.text().starts_with('!')
     }
 
     /// Applies any due `PasteBurst` flush at time `now`.
@@ -2969,7 +2989,7 @@ impl ChatComposer {
             use_shift_enter_hint: self.use_shift_enter_hint,
             is_task_running: self.is_task_running,
             quit_shortcut_key: self.quit_shortcut_key,
-            collaboration_modes_enabled: self.collaboration_modes_enabled,
+            input_modes_enabled: self.input_modes_enabled,
             is_wsl,
             context_window_percent: self.context_window_percent,
             context_window_used_tokens: self.context_window_used_tokens,
@@ -3218,7 +3238,7 @@ impl ChatComposer {
             }
             _ => {
                 if is_editing_slash_command_name {
-                    let collaboration_modes_enabled = self.collaboration_modes_enabled;
+                    let collaboration_modes_enabled = self.input_modes_enabled;
                     let connectors_enabled = self.connectors_enabled;
                     let plugins_command_enabled = self.plugins_command_enabled;
                     let fast_command_enabled = self.fast_command_enabled;
@@ -3554,7 +3574,7 @@ impl ChatComposer {
             ActivePopup::None => {
                 let footer_props = self.footer_props();
                 let show_cycle_hint =
-                    !footer_props.is_task_running && self.collaboration_mode_indicator.is_some();
+                    !footer_props.is_task_running && self.input_mode_indicator.is_some();
                 let show_shortcuts_hint = match footer_props.mode {
                     FooterMode::ComposerEmpty => !self.is_in_paste_burst(),
                     FooterMode::ComposerHasDraft => false,
@@ -3587,11 +3607,14 @@ impl ChatComposer {
                     hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
                 let status_line_active = uses_passive_footer_status_layout(&footer_props);
                 let combined_status_line = if status_line_active {
-                    passive_footer_status_line(&footer_props).map(ratatui::prelude::Stylize::dim)
+                    status_line_with_input_mode(
+                        self.input_mode_indicator,
+                        passive_footer_status_line(&footer_props),
+                    )
                 } else {
                     None
                 };
-                let mut truncated_status_line = if status_line_active {
+                let truncated_status_line = if status_line_active {
                     combined_status_line.as_ref().map(|line| {
                         truncate_line_with_ellipsis_if_overflow(line.clone(), available_width)
                     })
@@ -3601,9 +3624,9 @@ impl ChatComposer {
                 let left_mode_indicator = if status_line_active {
                     None
                 } else {
-                    self.collaboration_mode_indicator
+                    self.input_mode_indicator
                 };
-                let mut left_width = if self.footer_flash_visible() {
+                let left_width = if self.footer_flash_visible() {
                     self.footer_flash
                         .as_ref()
                         .map(|flash| flash.line.width() as u16)
@@ -3625,18 +3648,7 @@ impl ChatComposer {
                     )
                 };
                 let right_line = if status_line_active {
-                    let full =
-                        mode_indicator_line(self.collaboration_mode_indicator, show_cycle_hint);
-                    let compact = mode_indicator_line(
-                        self.collaboration_mode_indicator,
-                        /*show_cycle_hint*/ false,
-                    );
-                    let full_width = full.as_ref().map(|l| l.width() as u16).unwrap_or(0);
-                    if can_show_left_with_context(hint_rect, left_width, full_width) {
-                        full
-                    } else {
-                        compact
-                    }
+                    None
                 } else {
                     Some(context_window_line(
                         footer_props.context_window_percent,
@@ -3644,16 +3656,6 @@ impl ChatComposer {
                     ))
                 };
                 let right_width = right_line.as_ref().map(|l| l.width() as u16).unwrap_or(0);
-                if status_line_active
-                    && let Some(max_left) = max_left_width_for_right(hint_rect, right_width)
-                    && left_width > max_left
-                    && let Some(line) = combined_status_line.as_ref().map(|line| {
-                        truncate_line_with_ellipsis_if_overflow(line.clone(), max_left as usize)
-                    })
-                {
-                    left_width = line.width() as u16;
-                    truncated_status_line = Some(line);
-                }
                 let can_show_left_and_context =
                     can_show_left_with_context(hint_rect, left_width, right_width);
                 let has_override =
@@ -3744,7 +3746,7 @@ impl ChatComposer {
                         hint_rect,
                         buf,
                         &footer_props,
-                        self.collaboration_mode_indicator,
+                        self.input_mode_indicator,
                         show_cycle_hint,
                         show_shortcuts_hint,
                         show_queue_hint,
@@ -3792,11 +3794,15 @@ impl ChatComposer {
             buf.set_style(textarea_rect, textarea_style);
         }
         if !textarea_rect.is_empty() {
+            let mode_color = self
+                .input_mode_indicator
+                .map(InputMode::color)
+                .unwrap_or(self.accent_color);
             let prompt = if self.input_enabled {
                 if is_zellij {
-                    Span::styled("┃", style.fg(self.accent_color))
+                    Span::styled("┃", style.fg(mode_color))
                 } else {
-                    Span::styled("┃", Style::default().fg(self.accent_color))
+                    Span::styled("┃", Style::default().fg(mode_color))
                 }
             } else if is_zellij {
                 Span::styled("┃", style.fg(ratatui::style::Color::DarkGray))

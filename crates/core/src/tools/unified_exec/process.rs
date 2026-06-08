@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Instant;
 
 use devo_util_process::SpawnedProcess;
-use devo_util_process::TerminalSize;
+pub use devo_util_process::TerminalSize;
 use devo_util_process::combine_output_receivers;
 use devo_util_process::spawn_pipe_process_no_stdin;
 use devo_util_process::spawn_pty_process;
@@ -94,6 +94,27 @@ fn shell_args(shell: &str, login: bool) -> Vec<String> {
     vec![if login { "-lc" } else { "-c" }.to_string()]
 }
 
+fn interactive_shell_args(shell: &str, login: bool) -> Vec<String> {
+    let shell_name = shell_name(shell);
+
+    if is_powershell_name(&shell_name) {
+        if login {
+            return Vec::new();
+        }
+        return vec!["-NoProfile".to_string()];
+    }
+
+    if shell_name == "cmd" {
+        return Vec::new();
+    }
+
+    if login {
+        vec!["-l".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
 fn shell_name(shell: &str) -> String {
     Path::new(shell)
         .file_stem()
@@ -168,6 +189,36 @@ impl UnifiedExecProcess {
         Ok(Self::from_spawned_process(process_id, tty, spawned))
     }
 
+    pub async fn spawn_interactive_shell(
+        process_id: i32,
+        cwd: &Path,
+        shell: Option<&str>,
+        login: bool,
+        size: Option<TerminalSize>,
+    ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
+        let shell_spec = resolve_shell(shell, login);
+        let args = interactive_shell_args(&shell_spec.program, login);
+        let env = unified_exec_env();
+
+        let spawned = spawn_pty_process(
+            &shell_spec.program,
+            &args,
+            cwd,
+            &env,
+            /*arg0*/ &None,
+            size.unwrap_or(TerminalSize {
+                rows: PTY_ROWS,
+                cols: PTY_COLS,
+            }),
+        )
+        .await
+        .map_err(|error| format!("failed to spawn interactive shell: {error}"))?;
+
+        Ok(Self::from_spawned_process(
+            process_id, /*tty*/ true, spawned,
+        ))
+    }
+
     fn from_spawned_process(
         process_id: i32,
         tty: bool,
@@ -237,6 +288,16 @@ impl UnifiedExecProcess {
     pub fn terminate(&self) {
         self.terminated_flag.store(true, Ordering::SeqCst);
         self.session.request_terminate();
+    }
+
+    pub fn close_stdin(&self) {
+        self.session.close_stdin();
+    }
+
+    pub fn resize(&self, size: TerminalSize) -> Result<(), String> {
+        self.session
+            .resize(size)
+            .map_err(|error| format!("failed to resize PTY: {error}"))
     }
 
     pub fn exit_code(&self) -> Option<i32> {

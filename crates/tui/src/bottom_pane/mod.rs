@@ -5,6 +5,7 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use devo_protocol::InteractionMode;
 use devo_protocol::ReferenceSearchSnapshot;
 use devo_protocol::user_input::TextElement;
 use ratatui::buffer::Buffer;
@@ -23,6 +24,7 @@ mod chat_composer;
 mod chat_composer_history;
 mod command_popup;
 mod footer;
+mod input_mode;
 pub(crate) mod list_selection_view;
 mod paste_burst;
 mod pending_thread_approvals;
@@ -42,6 +44,7 @@ pub(crate) use approval_overlay::ApprovalOverlayRequest;
 pub(crate) use chat_composer::ChatComposer;
 use chat_composer::ChatComposerConfig;
 use chat_composer::InputResult as ComposerInputResult;
+pub(crate) use input_mode::InputMode;
 
 use crate::app_command::AppCommand;
 use crate::app_command::InputHistoryDirection;
@@ -76,6 +79,46 @@ pub(crate) struct LocalImageAttachment {
 pub(crate) struct MentionBinding {
     pub(crate) mention: String,
     pub(crate) path: String,
+}
+
+fn is_input_mode_cycle_key(key: KeyEvent) -> bool {
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && (key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT)))
+}
+
+fn is_bare_shell_mode_trigger(key: KeyEvent) -> bool {
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && key.code == KeyCode::Char('!')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+fn one_shot_shell_command(text: &str) -> Option<String> {
+    text.strip_prefix('!').map(str::to_string)
+}
+
+fn escaped_bang_submission(
+    text: String,
+    text_elements: Vec<TextElement>,
+) -> (String, Vec<TextElement>) {
+    let Some(rest) = text.strip_prefix("\\!") else {
+        return (text, text_elements);
+    };
+    let mut adjusted = Vec::new();
+    for element in text_elements {
+        if element.byte_range.start == 0 {
+            continue;
+        }
+        adjusted.push(
+            element.map_range(|range| devo_protocol::user_input::Utf8ByteSpan {
+                start: range.start.saturating_sub(1),
+                end: range.end.saturating_sub(1),
+            }),
+        );
+    }
+    (format!("!{rest}"), adjusted)
 }
 
 #[derive(Debug, Default)]
@@ -121,6 +164,13 @@ pub(crate) enum InputResult {
         text_elements: Vec<TextElement>,
         local_images: Vec<LocalImageAttachment>,
         mention_bindings: Vec<MentionBinding>,
+        interaction_mode: InteractionMode,
+    },
+    ShellCommand {
+        command: String,
+    },
+    ShellInput {
+        command: String,
     },
     Command {
         command: SlashCommand,
@@ -175,6 +225,7 @@ pub(crate) struct BottomPane {
     allow_empty_submit: bool,
     external_history_active: bool,
     external_history_draft: Option<String>,
+    input_mode: InputMode,
     accent_color: Color,
 }
 
@@ -218,6 +269,7 @@ impl BottomPane {
             allow_empty_submit: false,
             external_history_active: false,
             external_history_draft: None,
+            input_mode: InputMode::Build,
             accent_color: Color::Cyan,
         }
     }
@@ -226,6 +278,22 @@ impl BottomPane {
         self.accent_color = color;
         self.composer.set_accent_color(color);
         self.request_redraw();
+    }
+    pub(crate) fn input_mode(&self) -> InputMode {
+        self.input_mode
+    }
+
+    fn set_input_mode(&mut self, mode: InputMode) {
+        if self.input_mode == mode {
+            return;
+        }
+        self.input_mode = mode;
+        self.composer.set_input_mode_indicator(Some(mode));
+        self.request_redraw();
+    }
+
+    fn cycle_input_mode(&mut self) {
+        self.set_input_mode(self.input_mode.next());
     }
 
     pub(crate) fn set_skill_mentions(&mut self, skills: Option<Vec<SkillMetadata>>) {
@@ -241,6 +309,16 @@ impl BottomPane {
     pub(crate) fn handle_key_event(&mut self, key: KeyEvent) -> InputResult {
         if !self.view_stack.is_empty() {
             return self.handle_view_key_event(key);
+        }
+
+        if is_input_mode_cycle_key(key) && !self.composer.popup_active() {
+            self.cycle_input_mode();
+            return InputResult::None;
+        }
+
+        if is_bare_shell_mode_trigger(key) && self.composer.is_empty() {
+            self.set_input_mode(InputMode::Shell);
+            return InputResult::None;
         }
 
         if key.code == KeyCode::Esc
@@ -279,6 +357,7 @@ impl BottomPane {
                 text_elements: Vec::new(),
                 local_images: Vec::new(),
                 mention_bindings: Vec::new(),
+                interaction_mode: InteractionMode::Build,
             };
         }
 
@@ -625,22 +704,17 @@ impl BottomPane {
     fn map_composer_input_result(&mut self, input_result: ComposerInputResult) -> InputResult {
         match input_result {
             ComposerInputResult::Submitted {
+                raw_text,
                 text,
                 text_elements,
             }
             | ComposerInputResult::Queued {
+                raw_text,
                 text,
                 text_elements,
             } => {
                 self.reset_external_history_navigation();
-                InputResult::Submitted {
-                    text,
-                    text_elements,
-                    local_images: self
-                        .composer
-                        .take_recent_submission_images_with_placeholders(),
-                    mention_bindings: self.composer.take_recent_submission_mention_bindings(),
-                }
+                self.map_text_submission(raw_text, text, text_elements)
             }
             ComposerInputResult::Command(command) => {
                 self.reset_external_history_navigation();
@@ -654,6 +728,48 @@ impl BottomPane {
                 InputResult::Command { command, argument }
             }
             ComposerInputResult::None => InputResult::None,
+        }
+    }
+
+    fn map_text_submission(
+        &mut self,
+        raw_text: String,
+        text: String,
+        text_elements: Vec<TextElement>,
+    ) -> InputResult {
+        let local_images = self
+            .composer
+            .take_recent_submission_images_with_placeholders();
+        let mention_bindings = self.composer.take_recent_submission_mention_bindings();
+
+        if self.input_mode == InputMode::Shell {
+            return InputResult::ShellInput { command: text };
+        }
+
+        if let Some(command) = one_shot_shell_command(&raw_text) {
+            return if command.trim().is_empty() {
+                self.set_input_mode(InputMode::Shell);
+                InputResult::None
+            } else {
+                self.set_input_mode(InputMode::Build);
+                InputResult::ShellCommand { command }
+            };
+        }
+
+        let (text, text_elements) = if raw_text.starts_with("\\!") {
+            escaped_bang_submission(text, text_elements)
+        } else {
+            (text, text_elements)
+        };
+        InputResult::Submitted {
+            text,
+            text_elements,
+            local_images,
+            mention_bindings,
+            interaction_mode: match self.input_mode {
+                InputMode::Build | InputMode::Shell => InteractionMode::Build,
+                InputMode::Plan => InteractionMode::Plan,
+            },
         }
     }
 

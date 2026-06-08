@@ -74,6 +74,8 @@ The mode prompt set for `plan` should include:
 - Permission to ask clarification questions through the question tool.
 - Instruction that the output is a plan, not an implementation.
 
+The v1 TUI/server Plan Mode integration is intentionally prompt-level: a Plan Mode `turn/start` appends a hidden system reminder to the model request for that turn. It does not require broad per-tool runtime refactoring in this pass. Hard mutation blocking and question-tool gates remain the policy/tool-gating target for later implementation layers.
+
 The mode prompt set for `review` should include:
 - Prohibition on file creation, editing, deletion, renaming, or other mutation.
 - Requirement to inspect the relevant code, diff, branch, commit, or pull request context.
@@ -250,3 +252,4 @@ This design treats persona, interaction mode, and review behavior as metadata-de
 |---:|---|---|---|---|
 | 1 | 2026-05-22 | Assistant | Initial | Initial context assembly design refining token efficiency, persona, plan mode, and code review into immutable prefix, metadata-derived content, and consolidated change-signal message. |
 | 1 | 2026-05-23 | Human | Refinement | Added hidden Ralph Loop goal context as metadata-derived model-visible content. |
+| 1 | 2026-06-08 | Assistant | Refinement | Documented the prompt-only v1 Plan Mode integration using hidden per-turn model context. |

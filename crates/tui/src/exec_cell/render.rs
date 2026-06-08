@@ -37,6 +37,7 @@ pub(crate) struct OutputLinesParams {
     pub(crate) only_err: bool,
     pub(crate) include_angle_pipe: bool,
     pub(crate) include_prefix: bool,
+    pub(crate) dim: bool,
 }
 
 fn read_display_name(name: &str, path: &std::path::Path, cmd: &str) -> String {
@@ -121,6 +122,7 @@ pub(crate) fn output_lines(
         only_err,
         include_angle_pipe,
         include_prefix,
+        dim,
     } = params;
     let CommandOutput {
         aggregated_output, ..
@@ -156,9 +158,11 @@ pub(crate) fn output_lines(
             "    "
         };
         line.spans.insert(0, prefix.into());
-        line.spans.iter_mut().for_each(|span| {
-            span.style = span.style.add_modifier(Modifier::DIM);
-        });
+        if dim {
+            line.spans.iter_mut().for_each(|span| {
+                span.style = span.style.add_modifier(Modifier::DIM);
+            });
+        }
         out.push(line);
     }
 
@@ -183,9 +187,11 @@ pub(crate) fn output_lines(
         if include_prefix {
             line.spans.insert(0, "    ".into());
         }
-        line.spans.iter_mut().for_each(|span| {
-            span.style = span.style.add_modifier(Modifier::DIM);
-        });
+        if dim {
+            line.spans.iter_mut().for_each(|span| {
+                span.style = span.style.add_modifier(Modifier::DIM);
+            });
+        }
         out.push(line);
     }
 
@@ -212,6 +218,7 @@ pub(crate) fn truncated_tool_output_preview(
             only_err: false,
             include_angle_pipe: false,
             include_prefix: false,
+            dim: true,
         },
     );
     if raw_output.lines.is_empty() {
@@ -242,7 +249,7 @@ pub(crate) fn truncated_tool_output_preview(
 
 pub(crate) fn spinner(start_time: Option<Instant>, animations_enabled: bool) -> Span<'static> {
     if !animations_enabled {
-        return Span::from("•").dim();
+        return Span::from("▌").dim();
     }
     if supports_color::on_cached(supports_color::Stream::Stdout)
         .map(|level| level.has_16m)
@@ -429,17 +436,17 @@ impl ExecCell {
         let layout = EXEC_DISPLAY_LAYOUT;
         let success = call.output.as_ref().map(|o| o.exit_code == 0);
         let bullet = match success {
-            Some(true) => "•".green().bold(),
-            Some(false) => "•".red().bold(),
+            Some(true) => "▌".green().bold(),
+            Some(false) => "▌".red().bold(),
             None => spinner(call.start_time, self.animations_enabled()),
         };
         let is_interaction = call.is_unified_exec_interaction();
         let title = if is_interaction {
             ""
+        } else if call.is_user_shell_command() {
+            "$"
         } else if self.is_active() {
             "Running"
-        } else if call.is_user_shell_command() {
-            "You ran"
         } else {
             "Ran"
         };
@@ -512,6 +519,7 @@ impl ExecCell {
                     only_err: false,
                     include_angle_pipe: false,
                     include_prefix: false,
+                    dim: !call.is_user_shell_command(),
                 },
             );
             let display_limit = if call.is_user_shell_command() {
@@ -809,6 +817,7 @@ mod tests {
                 only_err: false,
                 include_angle_pipe: false,
                 include_prefix: false,
+                dim: true,
             },
         );
         let output_wrap_width = layout.output_block.wrap_width(width);
