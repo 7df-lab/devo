@@ -3839,6 +3839,59 @@ impl ChatComposer {
         } else {
             StatefulWidgetRef::render_ref(&(&self.textarea), textarea_rect, buf, &mut state);
         }
+        let slash_parameter_hint =
+            if !textarea_is_empty && self.input_enabled && mask_char.is_none() {
+                let text = self.textarea.text();
+                let cursor = self.textarea.cursor();
+                let first_line_end = text.find('\n').unwrap_or(text.len());
+                if cursor == text.len() && first_line_end == text.len() {
+                    parse_slash_name(text).and_then(|(name, rest, _rest_offset)| {
+                        if rest.is_empty() && !name.contains('/') {
+                            slash_commands::find_builtin_command(name, self.builtin_command_flags())
+                                .and_then(SlashCommand::parameter_hint)
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+        if let Some(hint) = slash_parameter_hint
+            && let Some((cursor_x, cursor_y)) =
+                self.textarea.cursor_pos_with_state(textarea_rect, *state)
+            && cursor_y < textarea_rect.y.saturating_add(textarea_rect.height)
+            && cursor_x < textarea_rect.x.saturating_add(textarea_rect.width)
+        {
+            let hint_text = if self
+                .textarea
+                .text()
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+            {
+                hint.to_string()
+            } else {
+                format!(" {hint}")
+            };
+            let remaining_width = textarea_rect
+                .x
+                .saturating_add(textarea_rect.width)
+                .saturating_sub(cursor_x);
+            if remaining_width > 0 {
+                let hint_span = if is_zellij {
+                    Span::styled(
+                        hint_text,
+                        textarea_style.fg(ratatui::style::Color::DarkGray),
+                    )
+                } else {
+                    Span::from(hint_text).dim()
+                };
+                buf.set_span(cursor_x, cursor_y, &hint_span, remaining_width);
+            }
+        }
         if textarea_is_empty {
             let text = if self.input_enabled {
                 self.placeholder_text.as_str().to_string()

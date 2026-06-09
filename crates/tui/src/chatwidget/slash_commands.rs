@@ -61,10 +61,7 @@ impl ChatWidget {
                     .send(AppEvent::Exit(crate::app_event::ExitMode::ShutdownFirst));
             }
             SlashCommand::Clear => {
-                self.history.clear();
-                self.next_history_flush_index = 0;
-                self.active_text_items.clear();
-                self.stream_chunking_policy.reset();
+                self.clear_transcript_view();
                 self.set_status_message("Transcript cleared");
             }
             SlashCommand::Status => {
@@ -148,6 +145,7 @@ impl ChatWidget {
                         Vec::new(),
                         Vec::new(),
                         self.active_accent_color(),
+                        self.current_turn_mode,
                     ));
                     self.app_event_tx
                         .send(AppEvent::Command(AppCommand::SteerTurn {

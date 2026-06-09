@@ -2,6 +2,8 @@ use ratatui::style::Color;
 use ratatui::style::Style;
 use ratatui::text::Span;
 
+use devo_protocol::InteractionMode;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum InputMode {
     #[default]
@@ -38,6 +40,20 @@ impl InputMode {
             Self::Shell => Color::Rgb(245, 142, 53),
         }
     }
+
+    pub(crate) fn interaction_mode(self) -> InteractionMode {
+        match self {
+            Self::Build | Self::Shell => InteractionMode::Build,
+            Self::Plan => InteractionMode::Plan,
+        }
+    }
+
+    pub(crate) fn from_interaction_mode(interaction_mode: InteractionMode) -> Self {
+        match interaction_mode {
+            InteractionMode::Build => Self::Build,
+            InteractionMode::Plan => Self::Plan,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -62,6 +78,17 @@ mod tests {
         assert_eq!(
             InputMode::Shell.styled_span(false),
             Span::styled("SHELL", Style::default().fg(Color::Rgb(245, 142, 53)))
+        );
+        assert_eq!(InputMode::Build.interaction_mode(), InteractionMode::Build);
+        assert_eq!(InputMode::Plan.interaction_mode(), InteractionMode::Plan);
+        assert_eq!(InputMode::Shell.interaction_mode(), InteractionMode::Build);
+        assert_eq!(
+            InputMode::from_interaction_mode(InteractionMode::Build),
+            InputMode::Build
+        );
+        assert_eq!(
+            InputMode::from_interaction_mode(InteractionMode::Plan),
+            InputMode::Plan
         );
     }
 }

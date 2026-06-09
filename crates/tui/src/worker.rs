@@ -3889,7 +3889,15 @@ mod tests {
         );
 
         assert_eq!(
-            event_rx.try_recv().expect("worker event"),
+            event_rx.try_recv().expect("worker details event"),
+            WorkerEvent::ToolCallDetails {
+                tool_use_id: "call-1".to_string(),
+                tool_name: "read".to_string(),
+                input: serde_json::json!({}),
+            }
+        );
+        assert_eq!(
+            event_rx.try_recv().expect("worker update event"),
             WorkerEvent::ToolCallUpdated {
                 tool_use_id: "call-1".to_string(),
                 summary: "read crates/tui/src/mod.rs".to_string(),
@@ -3932,7 +3940,18 @@ mod tests {
         );
 
         assert_eq!(
-            event_rx.try_recv().expect("worker event"),
+            event_rx.try_recv().expect("worker details event"),
+            WorkerEvent::ToolCallDetails {
+                tool_use_id: "call-1".to_string(),
+                tool_name: "glob".to_string(),
+                input: serde_json::json!({
+                    "pattern": "**/Cargo.toml",
+                    "path": "crates"
+                }),
+            }
+        );
+        assert_eq!(
+            event_rx.try_recv().expect("worker update event"),
             WorkerEvent::ToolCallUpdated {
                 tool_use_id: "call-1".to_string(),
                 summary: "glob **/Cargo.toml in crates".to_string(),

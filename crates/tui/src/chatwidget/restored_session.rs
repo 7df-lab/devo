@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use crate::bottom_pane::InputMode;
 use crate::events::TranscriptItem;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
@@ -208,6 +209,7 @@ impl ChatWidget {
                         Vec::new(),
                         Vec::new(),
                         self.active_accent_color(),
+                        InputMode::Build,
                     )));
                 }
                 devo_protocol::SessionHistoryItemKind::Assistant => {
@@ -253,6 +255,7 @@ impl ChatWidget {
                 devo_protocol::SessionHistoryItemKind::TurnSummary => {
                     self.add_history_entry_without_redraw(Box::new(
                         history_cell::TurnSummaryCell::new(
+                            InputMode::Build,
                             item.title.clone(),
                             item.duration_ms,
                             self.active_accent_color(),

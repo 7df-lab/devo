@@ -63,6 +63,25 @@ impl SlashCommand {
         )
     }
 
+    pub fn parameter_hint(self) -> Option<&'static str> {
+        match self {
+            SlashCommand::Btw => Some("<side conversation message>"),
+            SlashCommand::Goal => Some("<objective for autonomous work>"),
+            SlashCommand::Theme
+            | SlashCommand::Model
+            | SlashCommand::Skills
+            | SlashCommand::Mcp
+            | SlashCommand::Compact
+            | SlashCommand::Resume
+            | SlashCommand::New
+            | SlashCommand::Status
+            | SlashCommand::Permissions
+            | SlashCommand::Clear
+            | SlashCommand::Diff
+            | SlashCommand::Exit => None,
+        }
+    }
+
     pub fn available_during_task(self) -> bool {
         !matches!(
             self,
@@ -140,6 +159,10 @@ mod tests {
         assert_eq!("goal".parse::<SlashCommand>(), Ok(SlashCommand::Goal));
         assert!(SlashCommand::Goal.supports_inline_args());
         assert!(SlashCommand::Goal.available_during_task());
+        assert_eq!(
+            SlashCommand::Goal.parameter_hint(),
+            Some("<objective for autonomous work>")
+        );
         assert!(
             built_in_slash_commands()
                 .iter()

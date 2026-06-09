@@ -10,6 +10,7 @@
 //! bumps the active-cell revision tracked by `ChatWidget`, so the cache key changes whenever the
 //! rendered transcript output can change.
 
+use crate::bottom_pane::InputMode;
 use crate::diff_render::create_diff_summary;
 use crate::diff_render::display_path_for;
 use crate::exec_cell::CommandOutput;
@@ -193,6 +194,7 @@ pub(crate) struct UserHistoryCell {
     pub local_image_paths: Vec<PathBuf>,
     pub remote_image_urls: Vec<String>,
     pub accent_color: Color,
+    pub input_mode: InputMode,
     pub selected: bool,
 }
 
@@ -295,13 +297,14 @@ impl HistoryCell for UserHistoryCell {
             .max(1);
 
         let accent = self.accent_color;
+        let mode_color = self.input_mode.color();
         let style = if self.selected {
-            user_message_style().fg(accent)
+            user_message_style().fg(mode_color)
         } else {
             user_message_style()
         };
         let element_style = style.fg(accent);
-        let prefix_style = Style::default().fg(accent);
+        let prefix_style = Style::default().fg(mode_color);
         let blank_prefixed_line = || {
             Line::from(vec![
                 Span::styled("▌ ", prefix_style),
@@ -1136,6 +1139,7 @@ pub(crate) fn new_user_prompt(
     local_image_paths: Vec<PathBuf>,
     remote_image_urls: Vec<String>,
     accent_color: Color,
+    input_mode: InputMode,
 ) -> UserHistoryCell {
     UserHistoryCell {
         message,
@@ -1143,6 +1147,7 @@ pub(crate) fn new_user_prompt(
         local_image_paths,
         remote_image_urls,
         accent_color,
+        input_mode,
         selected: false,
     }
 }
@@ -1574,34 +1579,43 @@ impl HistoryCell for FinalMessageSeparator {
     }
 }
 
-/// End-of-turn summary showing ▣ symbol, model name, and duration.
+/// End-of-turn summary showing ▣ symbol, input mode, model name, and duration.
 ///
-/// Inspired by opencode's assistant message footer:
-/// `▣ model-name · 4m17s` or `▣ model-name · interrupted`
+/// Inspired by opencode's assistant message footer, with Devo's mode label included:
+/// `▣ BUILD · model-name · 4m17s` or `▣ PLAN · model-name · interrupted`
 #[derive(Debug)]
 pub struct TurnSummaryCell {
+    pub input_mode: InputMode,
     pub model_name: String,
     pub duration: Option<u64>,
     pub interrupted: bool,
-    pub accent_color: Color,
 }
 
 impl TurnSummaryCell {
-    pub(crate) fn new(model_name: String, duration: Option<u64>, accent_color: Color) -> Self {
+    pub(crate) fn new(
+        input_mode: InputMode,
+        model_name: String,
+        duration: Option<u64>,
+        _accent_color: Color,
+    ) -> Self {
         Self {
+            input_mode,
             model_name,
             duration,
             interrupted: false,
-            accent_color,
         }
     }
 
-    pub(crate) fn new_interrupted(model_name: String, accent_color: Color) -> Self {
+    pub(crate) fn new_interrupted(
+        input_mode: InputMode,
+        model_name: String,
+        _accent_color: Color,
+    ) -> Self {
         Self {
+            input_mode,
             model_name,
             duration: None,
             interrupted: true,
-            accent_color,
         }
     }
 }
@@ -1631,10 +1645,13 @@ fn format_duration_hms(duration_secs: u64) -> String {
 impl HistoryCell for TurnSummaryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let _ = width;
+        let mode_color = self.input_mode.color();
         let mut spans: Vec<Span<'static>> = vec![
             Span::raw(" ".repeat(LIVE_PREFIX_COLS as usize)),
-            Span::styled("▣", Style::default().fg(self.accent_color)),
+            Span::styled("▣", Style::default().fg(mode_color)),
             Span::styled(" ", Style::default()),
+            Span::styled(self.input_mode.label(), Style::default().fg(mode_color)),
+            Span::styled(" · ", Style::default().dim()),
             Span::styled(self.model_name.clone(), Style::default().dim()),
         ];
         if self.interrupted {

@@ -24,6 +24,7 @@ use devo_protocol::TurnId;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
+use crate::bottom_pane::InputMode;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::MentionBinding;
 use crate::history_cell::HistoryCell;
@@ -269,7 +270,10 @@ pub(crate) struct ChatWidget {
     last_query_total_tokens: usize,
     last_plan_progress: Option<(usize, usize)>,
     queued_count: usize,
+    queued_input_modes: VecDeque<InputMode>,
+    promoted_input_modes: VecDeque<InputMode>,
     active_turn_id: Option<TurnId>,
+    current_turn_mode: InputMode,
     committed_server_assistant_in_turn: bool,
     current_turn_has_user_shell_command: bool,
     pending_approval: Option<PendingApprovalRequest>,
@@ -400,7 +404,10 @@ impl ChatWidget {
             last_query_total_tokens: 0,
             last_plan_progress: None,
             queued_count: 0,
+            queued_input_modes: VecDeque::new(),
+            promoted_input_modes: VecDeque::new(),
             active_turn_id: None,
+            current_turn_mode: InputMode::Build,
             committed_server_assistant_in_turn: false,
             current_turn_has_user_shell_command: false,
             pending_approval: None,

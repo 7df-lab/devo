@@ -371,7 +371,15 @@ impl ChatWidget {
     }
 
     pub(super) fn refresh_header_box(&mut self) {
-        if self.history.is_empty() {
+        if self
+            .history
+            .first()
+            .and_then(|cell| {
+                cell.as_any()
+                    .downcast_ref::<history_cell::SessionInfoCell>()
+            })
+            .is_none()
+        {
             return;
         }
         let accent = self.active_accent_color();

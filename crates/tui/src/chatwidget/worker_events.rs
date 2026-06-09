@@ -12,6 +12,7 @@ use ratatui::text::Line;
 use crate::app_event::AppEvent;
 use crate::bottom_pane::ApprovalOverlay;
 use crate::bottom_pane::ApprovalOverlayRequest;
+use crate::bottom_pane::InputMode;
 use crate::events::TextItemKind;
 use crate::events::WorkerEvent;
 use crate::exec_cell::CommandOutput;
@@ -44,6 +45,7 @@ impl ChatWidget {
     ) {
         if matches!(source, ExecCommandSource::UserShell) {
             self.current_turn_has_user_shell_command = true;
+            self.current_turn_mode = InputMode::Shell;
         }
 
         if let Some(cell) = self
@@ -117,6 +119,9 @@ impl ChatWidget {
                 ..
             } => {
                 self.active_turn_id = Some(turn_id);
+                if let Some(input_mode) = self.promoted_input_modes.pop_front() {
+                    self.current_turn_mode = input_mode;
+                }
                 self.committed_server_assistant_in_turn = false;
                 self.current_turn_has_user_shell_command = false;
                 self.sync_session_catalog_model(model);
@@ -671,15 +676,22 @@ impl ChatWidget {
                 let accent_color = self.active_accent_color();
                 let cell = if interrupted {
                     history_cell::TurnSummaryCell::new_interrupted(
+                        InputMode::Shell,
                         "Shell".to_string(),
                         accent_color,
                     )
                 } else {
-                    history_cell::TurnSummaryCell::new("Shell".to_string(), None, accent_color)
+                    history_cell::TurnSummaryCell::new(
+                        InputMode::Shell,
+                        "Shell".to_string(),
+                        None,
+                        accent_color,
+                    )
                 };
                 self.add_to_history(cell);
                 self.set_status_message("Shell command completed");
                 self.current_turn_has_user_shell_command = false;
+                self.current_turn_mode = InputMode::Build;
             }
             WorkerEvent::PlanUpdated { explanation, steps } => {
                 self.on_plan_updated(explanation, steps);
@@ -819,6 +831,11 @@ impl ChatWidget {
                 self.last_query_total_tokens = last_query_total_tokens;
                 self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
+                let input_mode = if self.current_turn_has_user_shell_command {
+                    InputMode::Shell
+                } else {
+                    self.current_turn_mode
+                };
                 let model_name = if self.current_turn_has_user_shell_command {
                     "Shell".to_string()
                 } else {
@@ -838,12 +855,22 @@ impl ChatWidget {
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Ready");
                 let cell = if was_interrupted {
-                    history_cell::TurnSummaryCell::new_interrupted(model_name, accent_color)
+                    history_cell::TurnSummaryCell::new_interrupted(
+                        input_mode,
+                        model_name,
+                        accent_color,
+                    )
                 } else {
-                    history_cell::TurnSummaryCell::new(model_name, elapsed, accent_color)
+                    history_cell::TurnSummaryCell::new(
+                        input_mode,
+                        model_name,
+                        elapsed,
+                        accent_color,
+                    )
                 };
                 self.add_to_history(cell);
                 self.current_turn_has_user_shell_command = false;
+                self.current_turn_mode = InputMode::Build;
             }
             WorkerEvent::TurnFailed {
                 message,
@@ -867,6 +894,11 @@ impl ChatWidget {
                 self.total_cache_read_tokens = total_cache_read_tokens;
                 self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
+                let input_mode = if self.current_turn_has_user_shell_command {
+                    InputMode::Shell
+                } else {
+                    self.current_turn_mode
+                };
                 let model_name = if self.current_turn_has_user_shell_command {
                     "Shell".to_string()
                 } else {
@@ -878,6 +910,7 @@ impl ChatWidget {
                         .unwrap_or_default()
                 };
                 self.add_to_history(history_cell::TurnSummaryCell::new_interrupted(
+                    input_mode,
                     model_name,
                     self.active_accent_color(),
                 ));
@@ -885,6 +918,7 @@ impl ChatWidget {
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Query failed; see error above");
                 self.current_turn_has_user_shell_command = false;
+                self.current_turn_mode = InputMode::Build;
             }
             WorkerEvent::ProviderValidationSucceeded { reply_preview } => {
                 if let Some(onboarding) = self.onboarding.as_mut() {
@@ -1005,6 +1039,9 @@ impl ChatWidget {
                 self.pending_tool_calls.clear();
                 self.active_text_items.clear();
                 self.committed_server_assistant_in_turn = false;
+                self.current_turn_mode = InputMode::Build;
+                self.queued_input_modes.clear();
+                self.promoted_input_modes.clear();
                 self.stream_chunking_policy.reset();
                 self.busy = false;
                 self.turn_count = 0;
@@ -1054,6 +1091,9 @@ impl ChatWidget {
                 self.next_history_flush_index = 0;
                 self.active_text_items.clear();
                 self.committed_server_assistant_in_turn = false;
+                self.current_turn_mode = InputMode::Build;
+                self.queued_input_modes.clear();
+                self.promoted_input_modes.clear();
                 self.stream_chunking_policy.reset();
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
@@ -1076,9 +1116,11 @@ impl ChatWidget {
                 }
                 // Restore pending queue state from the resumed session
                 self.queued_count = pending_texts.len();
+                self.queued_input_modes.clear();
                 self.bottom_pane.clear_pending_cells();
                 for text in &pending_texts {
                     self.bottom_pane.push_pending_cell(text.clone());
+                    self.queued_input_modes.push_back(InputMode::Build);
                 }
                 self.busy = false;
                 self.set_status_message("Session switched");

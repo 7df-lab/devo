@@ -1012,8 +1012,7 @@ fn shift_tab_plan_submission_marks_user_turn_plan_mode() {
     let (mut widget, mut app_event_rx) = widget_with_model(model, cwd);
 
     widget.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    widget.handle_paste("plan this".to_string());
-    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    paste_and_submit(&mut widget, "plan this");
 
     let AppEvent::Command(AppCommand::UserTurn {
         interaction_mode, ..
@@ -1052,6 +1051,39 @@ fn composer_marker_color(widget: &ChatWidget) -> Color {
     }
 
     panic!("missing composer marker in rendered buffer")
+}
+
+fn scrollback_marker_color_for_text(widget: &mut ChatWidget, needle: &str) -> Color {
+    let lines = widget.drain_scrollback_lines(100);
+    for line in &lines {
+        let row_text = line
+            .line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        if !row_text.contains(needle) {
+            continue;
+        }
+
+        for span in &line.line.spans {
+            if span.content.contains('▌')
+                && let Some(color) = span.style.fg
+            {
+                return color;
+            }
+        }
+    }
+
+    let rendered = scrollback_plain_lines(&lines).join("\n");
+    panic!("missing history marker for {needle} in scrollback:\n{rendered}")
+}
+
+fn paste_and_submit(widget: &mut ChatWidget, text: &str) {
+    widget.handle_paste(text.to_string());
+    std::thread::sleep(crate::bottom_pane::ChatComposer::recommended_paste_flush_delay());
+    widget.pre_draw_tick();
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 }
 
 /// Trace: L2-DES-TUI-003
@@ -1112,6 +1144,130 @@ fn composer_marker_uses_active_mode_color() {
 
     widget.handle_key_event(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
     assert_eq!(composer_marker_color(&widget), Color::Rgb(245, 142, 53));
+}
+
+/// Trace: L2-DES-TUI-003
+/// Verifies: Historical user prompt marker color follows the submitted mode.
+#[test]
+fn submitted_user_prompt_marker_uses_submitted_mode_color() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.handle_app_event(AppEvent::ClearTranscript);
+
+    paste_and_submit(&mut widget, "build message");
+    assert_eq!(
+        scrollback_marker_color_for_text(&mut widget, "build message"),
+        Color::Cyan
+    );
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    paste_and_submit(&mut widget, "plan message");
+    assert_eq!(
+        scrollback_marker_color_for_text(&mut widget, "plan message"),
+        Color::Magenta
+    );
+}
+
+#[test]
+fn turn_summary_uses_submitted_mode_after_composer_mode_changes() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.handle_app_event(AppEvent::ClearTranscript);
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    widget.handle_paste("plan this".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    widget.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "done".to_string(),
+        turn_count: 1,
+        total_input_tokens: 10,
+        total_output_tokens: 20,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 30,
+        last_query_input_tokens: 10,
+        prompt_token_estimate: 10,
+    });
+
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join(
+        "
+",
+    );
+    assert!(
+        history.contains("▣ PLAN · Test Model"),
+        "expected Plan mode in turn summary:
+{history}"
+    );
+}
+
+#[test]
+fn queued_prompt_keeps_submitted_mode_when_promoted_to_history() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.handle_app_event(AppEvent::ClearTranscript);
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    paste_and_submit(&mut widget, "queued plan");
+    widget.handle_worker_event(crate::events::WorkerEvent::InputQueueUpdated {
+        pending_count: 0,
+        pending_texts: Vec::new(),
+    });
+
+    assert_eq!(
+        scrollback_marker_color_for_text(&mut widget, "queued plan"),
+        Color::Magenta
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "done".to_string(),
+        turn_count: 2,
+        total_input_tokens: 10,
+        total_output_tokens: 20,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 30,
+        last_query_input_tokens: 10,
+        prompt_token_estimate: 10,
+    });
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join(
+        "
+",
+    );
+    assert!(
+        history.contains("▣ PLAN · Test Model"),
+        "expected queued Plan mode in turn summary:
+{history}"
+    );
 }
 
 /// Trace: L2-DES-TUI-003
@@ -1385,6 +1541,127 @@ fn trailing_space_exit_slash_command_exits() {
 }
 
 #[test]
+fn typed_clear_slash_command_clears_history_and_active_streams() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.handle_app_event(AppEvent::ClearTranscript);
+
+    paste_and_submit(&mut widget, "old prompt");
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "active stream body".to_string(),
+    ));
+    let before_scrollback = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join(
+        "
+",
+    );
+    assert!(before_scrollback.contains("old prompt"));
+    let before = rendered_rows(&widget, 100, 16).join(
+        "
+",
+    );
+    assert!(before.contains("active stream body"));
+
+    paste_and_submit(&mut widget, "/clear");
+
+    let after_scrollback = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join(
+        "
+",
+    );
+    let after = rendered_rows(&widget, 100, 16).join(
+        "
+",
+    );
+    assert!(
+        !after_scrollback.contains("old prompt") && !after.contains("active stream body"),
+        "typed /clear should remove visible history and active streams:
+scrollback:
+{after_scrollback}
+rendered:
+{after}"
+    );
+}
+
+#[test]
+fn clear_transcript_event_uses_same_visual_clear_path() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.submit_text("event old prompt".to_string());
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "event active stream".to_string(),
+    ));
+
+    widget.handle_app_event(AppEvent::ClearTranscript);
+
+    let after = rendered_rows(&widget, 100, 16).join(
+        "
+",
+    );
+    assert!(
+        !after.contains("event old prompt") && !after.contains("event active stream"),
+        "ClearTranscript should use the same visual clear path:
+{after}"
+    );
+}
+
+#[test]
+fn slash_command_parameter_hints_render_for_inline_commands() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+
+    let (mut goal_widget, _app_event_rx) = widget_with_model(model.clone(), PathBuf::from("."));
+    goal_widget.handle_paste("/goal".to_string());
+    let goal_rendered = rendered_rows(&goal_widget, 100, 12).join("\n");
+    assert!(
+        goal_rendered.contains("/goal <objective for autonomous work>"),
+        "expected /goal parameter hint:\n{goal_rendered}"
+    );
+
+    let (mut spaced_goal_widget, _app_event_rx) =
+        widget_with_model(model.clone(), PathBuf::from("."));
+    spaced_goal_widget.handle_paste("/goal ".to_string());
+    let spaced_goal_rendered = rendered_rows(&spaced_goal_widget, 100, 12).join("\n");
+    assert!(
+        spaced_goal_rendered.contains("/goal <objective for autonomous work>"),
+        "expected /goal parameter hint after trailing space:\n{spaced_goal_rendered}"
+    );
+    assert!(
+        !spaced_goal_rendered.contains("/goal  <objective for autonomous work>"),
+        "parameter hint should not duplicate spaces:\n{spaced_goal_rendered}"
+    );
+
+    let (mut btw_widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    btw_widget.handle_paste("/btw".to_string());
+    let btw_rendered = rendered_rows(&btw_widget, 100, 12).join("\n");
+    assert!(
+        btw_rendered.contains("/btw <side conversation message>"),
+        "expected /btw parameter hint:\n{btw_rendered}"
+    );
+}
+
+#[test]
 fn goal_slash_command_emits_set_goal_objective() {
     let model = Model {
         slug: "test-model".to_string(),
@@ -1394,6 +1671,16 @@ fn goal_slash_command_emits_set_goal_objective() {
     let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
 
     widget.handle_paste("/goal improve benchmark coverage".to_string());
+    let rendered = rendered_rows(&widget, 100, 12).join("\n");
+    assert!(
+        rendered.contains("/goal improve benchmark coverage"),
+        "expected typed /goal objective in composer:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("<objective for autonomous work>"),
+        "parameter hint should disappear after objective text:\n{rendered}"
+    );
+
     widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     assert_eq!(
@@ -2814,8 +3101,8 @@ crates
 {history}"
     );
     assert!(
-        history.contains("▣ Shell"),
-        "shell command turn summary should use Shell label:
+        history.contains("▣ SHELL · Shell"),
+        "shell command turn summary should use Shell mode label:
 {history}"
     );
     assert!(

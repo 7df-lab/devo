@@ -11,6 +11,7 @@ use ratatui::text::Span;
 
 use devo_core::ItemId;
 
+use crate::bottom_pane::InputMode;
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
 use crate::events::TranscriptItem;
@@ -36,8 +37,26 @@ impl ChatWidget {
         self.active_tool_calls.clear();
         self.pending_tool_calls.clear();
         self.active_text_items.clear();
+        self.queued_input_modes.clear();
+        self.promoted_input_modes.clear();
+        self.current_turn_mode = InputMode::Build;
         self.bottom_pane.clear_composer();
         self.set_status_message("Resuming session");
+    }
+
+    pub(super) fn clear_transcript_view(&mut self) {
+        self.history.clear();
+        self.next_history_flush_index = 0;
+        self.active_cell = None;
+        self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+        self.last_terminal_assistant_visible_hash = None;
+        self.active_text_items.clear();
+        self.active_proposed_plan = None;
+        self.stream_chunking_policy.reset();
+        self.selection_mode = false;
+        self.selected_user_cell_index = None;
+        self.user_cell_history_indices.clear();
+        self.frame_requester.schedule_frame();
     }
 
     pub(super) fn set_default_placeholder(&mut self) {
@@ -264,6 +283,7 @@ impl ChatWidget {
                     Vec::new(),
                     Vec::new(),
                     self.active_accent_color(),
+                    InputMode::Build,
                 )));
             }
             TranscriptItemKind::Assistant => {
@@ -306,6 +326,7 @@ impl ChatWidget {
                 // item.title contains model name, item.duration_ms contains seconds
                 self.add_history_entry_without_redraw(Box::new(
                     history_cell::TurnSummaryCell::new(
+                        InputMode::Build,
                         item.title.clone(),
                         item.duration_ms,
                         self.active_accent_color(),
@@ -349,12 +370,18 @@ impl ChatWidget {
     /// as a normal user input cell.
     pub(super) fn unqueue_oldest_pending(&mut self) {
         if let Some(text) = self.bottom_pane.pop_oldest_pending_cell() {
+            let input_mode = self
+                .queued_input_modes
+                .pop_front()
+                .unwrap_or(InputMode::Build);
+            self.promoted_input_modes.push_back(input_mode);
             self.add_to_history(history_cell::new_user_prompt(
                 text,
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 self.active_accent_color(),
+                input_mode,
             ));
         }
         self.queued_count = self.queued_count.saturating_sub(1);

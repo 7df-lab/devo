@@ -62,8 +62,13 @@ impl ChatWidget {
         }
 
         if let Some(model) = self.session.model.as_mut() {
+            let display_name = if model.slug == slug && !model.display_name.is_empty() {
+                model.display_name.clone()
+            } else {
+                slug.clone()
+            };
             model.slug = slug.clone();
-            model.display_name = slug;
+            model.display_name = display_name;
             self.session.reasoning_effort = model
                 .resolve_thinking_selection(self.thinking_selection.as_deref())
                 .effective_reasoning_effort;
