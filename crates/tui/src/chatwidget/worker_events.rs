@@ -5,6 +5,8 @@
 
 use std::time::Instant;
 
+use devo_protocol::parse_command::ParsedCommand;
+use devo_protocol::protocol::ExecCommandSource;
 use ratatui::text::Line;
 
 use crate::app_event::AppEvent;
@@ -28,6 +30,71 @@ use super::SKILLS_TRANSCRIPT_TITLE;
 use super::text_stream::ActiveTextItemId;
 
 impl ChatWidget {
+    fn start_command_execution_cell(
+        &mut self,
+        tool_use_id: String,
+        title: String,
+        command: Vec<String>,
+        parsed: Vec<ParsedCommand>,
+        source: ExecCommandSource,
+    ) {
+        if matches!(source, ExecCommandSource::UserShell) {
+            self.current_turn_has_user_shell_command = true;
+        }
+
+        if let Some(cell) = self
+            .active_cell
+            .as_mut()
+            .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+            && let Some(grouped) = cell.with_added_call(
+                tool_use_id.clone(),
+                command.clone(),
+                parsed.clone(),
+                source,
+                None,
+            )
+        {
+            *cell = grouped;
+            self.active_tool_calls.insert(
+                tool_use_id.clone(),
+                ActiveToolCall {
+                    tool_use_id,
+                    title,
+                    lines: Vec::new(),
+                    exec_like: true,
+                    start_time: None,
+                },
+            );
+            self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+            self.frame_requester.schedule_frame();
+            self.set_status_message("Tool started");
+            return;
+        }
+
+        self.flush_active_cell();
+        self.active_cell = Some(Box::new(new_active_exec_command(
+            tool_use_id.clone(),
+            command,
+            parsed,
+            source,
+            None,
+            true,
+        )));
+        self.active_tool_calls.insert(
+            tool_use_id.clone(),
+            ActiveToolCall {
+                tool_use_id,
+                title,
+                lines: Vec::new(),
+                exec_like: true,
+                start_time: None,
+            },
+        );
+        self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+        self.frame_requester.schedule_frame();
+        self.set_status_message("Tool started");
+    }
+
     pub(crate) fn handle_worker_event(&mut self, event: WorkerEvent) {
         match event {
             WorkerEvent::SessionActivated { .. } => {}
@@ -40,6 +107,7 @@ impl ChatWidget {
             } => {
                 self.active_turn_id = Some(turn_id);
                 self.committed_server_assistant_in_turn = false;
+                self.current_turn_has_user_shell_command = false;
                 self.sync_session_catalog_model(model);
                 self.thinking_selection = thinking;
                 self.session.reasoning_effort = reasoning_effort;
@@ -143,57 +211,13 @@ impl ChatWidget {
                         )
                     });
                 if exec_like && !preparing {
-                    if let Some(cell) = self
-                        .active_cell
-                        .as_mut()
-                        .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
-                        && let Some(grouped) = cell.with_added_call(
-                            tool_use_id.clone(),
-                            command.clone(),
-                            parsed.clone(),
-                            devo_protocol::protocol::ExecCommandSource::Agent,
-                            None,
-                        )
-                    {
-                        *cell = grouped;
-                        self.active_tool_calls.insert(
-                            tool_use_id.clone(),
-                            ActiveToolCall {
-                                tool_use_id,
-                                title: summary,
-                                lines: Vec::new(),
-                                exec_like: true,
-                                start_time: None,
-                            },
-                        );
-                        self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
-                        self.frame_requester.schedule_frame();
-                        self.set_status_message("Tool started");
-                        return;
-                    }
-
-                    self.flush_active_cell();
-                    self.active_cell = Some(Box::new(new_active_exec_command(
-                        tool_use_id.clone(),
+                    self.start_command_execution_cell(
+                        tool_use_id,
+                        summary,
                         command,
                         parsed,
-                        devo_protocol::protocol::ExecCommandSource::Agent,
-                        None,
-                        true,
-                    )));
-                    self.active_tool_calls.insert(
-                        tool_use_id.clone(),
-                        ActiveToolCall {
-                            tool_use_id,
-                            title: summary,
-                            lines: Vec::new(),
-                            exec_like: true,
-                            start_time: None,
-                        },
+                        ExecCommandSource::Agent,
                     );
-                    self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
-                    self.frame_requester.schedule_frame();
-                    self.set_status_message("Tool started");
                     return;
                 }
 
@@ -242,6 +266,21 @@ impl ChatWidget {
                 self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
                 self.frame_requester.schedule_frame();
                 self.set_status_message("Tool started");
+            }
+            WorkerEvent::CommandExecutionStarted {
+                tool_use_id,
+                command,
+                source,
+                command_actions,
+            } => {
+                let command_parts = crate::exec_command::split_command_string(&command);
+                self.start_command_execution_cell(
+                    tool_use_id,
+                    command,
+                    command_parts,
+                    command_actions,
+                    source,
+                );
             }
             WorkerEvent::ToolCallUpdated {
                 tool_use_id,
@@ -414,6 +453,21 @@ impl ChatWidget {
                     });
                 }
             }
+            WorkerEvent::ShellCommandFinished { exit_code } => {
+                let interrupted = exit_code.is_none();
+                let accent_color = self.active_accent_color();
+                let cell = if interrupted {
+                    history_cell::TurnSummaryCell::new_interrupted(
+                        "Shell".to_string(),
+                        accent_color,
+                    )
+                } else {
+                    history_cell::TurnSummaryCell::new("Shell".to_string(), None, accent_color)
+                };
+                self.add_to_history(cell);
+                self.set_status_message("Shell command completed");
+                self.current_turn_has_user_shell_command = false;
+            }
             WorkerEvent::PlanUpdated { explanation, steps } => {
                 self.on_plan_updated(explanation, steps);
                 self.set_status_message("Plan updated");
@@ -524,13 +578,16 @@ impl ChatWidget {
                 self.last_query_total_tokens = last_query_total_tokens;
                 self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
-                let model_name = self
-                    .session
-                    .model
-                    .as_ref()
-                    .map(|m| m.display_name.clone())
-                    .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
-                    .unwrap_or_default();
+                let model_name = if self.current_turn_has_user_shell_command {
+                    "Shell".to_string()
+                } else {
+                    self.session
+                        .model
+                        .as_ref()
+                        .map(|m| m.display_name.clone())
+                        .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
+                        .unwrap_or_default()
+                };
                 let accent_color = self.active_accent_color();
                 let elapsed = self
                     .bottom_pane
@@ -545,6 +602,7 @@ impl ChatWidget {
                     history_cell::TurnSummaryCell::new(model_name, elapsed, accent_color)
                 };
                 self.add_to_history(cell);
+                self.current_turn_has_user_shell_command = false;
             }
             WorkerEvent::TurnFailed {
                 message,
@@ -568,13 +626,16 @@ impl ChatWidget {
                 self.total_cache_read_tokens = total_cache_read_tokens;
                 self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
-                let model_name = self
-                    .session
-                    .model
-                    .as_ref()
-                    .map(|m| m.display_name.clone())
-                    .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
-                    .unwrap_or_default();
+                let model_name = if self.current_turn_has_user_shell_command {
+                    "Shell".to_string()
+                } else {
+                    self.session
+                        .model
+                        .as_ref()
+                        .map(|m| m.display_name.clone())
+                        .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
+                        .unwrap_or_default()
+                };
                 self.add_to_history(history_cell::TurnSummaryCell::new_interrupted(
                     model_name,
                     self.active_accent_color(),
@@ -582,6 +643,7 @@ impl ChatWidget {
                 self.add_to_history(history_cell::new_error_event(message));
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Query failed; see error above");
+                self.current_turn_has_user_shell_command = false;
             }
             WorkerEvent::ProviderValidationSucceeded { reply_preview } => {
                 if let Some(onboarding) = self.onboarding.as_mut() {
@@ -779,6 +841,27 @@ impl ChatWidget {
                 }
                 self.busy = false;
                 self.set_status_message("Session switched");
+            }
+            WorkerEvent::GoalStatusLoaded { goal } => {
+                self.show_goal_status(goal);
+            }
+            WorkerEvent::GoalUpdated { goal } => {
+                self.show_goal_updated(goal);
+            }
+            WorkerEvent::GoalReplaceConfirmationRequested {
+                current_goal,
+                objective,
+            } => {
+                self.show_goal_replace_confirmation(current_goal, objective);
+            }
+            WorkerEvent::GoalEditLoaded { goal } => {
+                self.show_goal_edit_prompt(goal);
+            }
+            WorkerEvent::GoalCleared { cleared } => {
+                self.show_goal_cleared(cleared);
+            }
+            WorkerEvent::GoalOperationFailed { message } => {
+                self.show_goal_operation_failed(message);
             }
             WorkerEvent::SessionRenamed { session_id, title } => {
                 self.add_to_history(history_cell::new_info_event(

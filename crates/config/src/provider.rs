@@ -111,6 +111,8 @@ invocation_method = "openai_responses"
                 model: "gpt-5.4".to_string(),
                 base_url: Some("https://xxxxx/v1".to_string()),
                 api_key: Some("secret-value".to_string()),
+                proxy_url: None,
+                headers: None,
                 model_auto_compact_token_limit: Some(970000),
                 model_context_window: Some(997500),
                 model_thinking_selection: Some("medium".to_string()),

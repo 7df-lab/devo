@@ -34,6 +34,7 @@ use super::shared::tool_definitions;
 use crate::ModelProviderSDK;
 use crate::ProviderAdapter;
 use crate::ProviderCapabilities;
+use crate::ProviderHttpOptions;
 use crate::merge_extra_body;
 use crate::text_normalization::split_tagged_text;
 
@@ -44,6 +45,7 @@ pub struct OpenAIProvider {
     client: Client,
     base_url: String,
     api_key: Option<String>,
+    http_options: ProviderHttpOptions,
 }
 
 impl OpenAIProvider {
@@ -54,19 +56,32 @@ impl OpenAIProvider {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(300);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let http_options = ProviderHttpOptions::default();
         Self {
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .build()
+            client: http_options
+                .build_client(Some(timeout))
                 .unwrap_or_else(|_| Client::new()),
             base_url: base_url.into(),
             api_key: None,
+            http_options,
         }
     }
 
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
         self
+    }
+
+    pub fn with_http_options(mut self, http_options: ProviderHttpOptions) -> Result<Self> {
+        let timeout_secs = std::env::var("DEVO_REQUEST_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        self.client = http_options.build_client(Some(timeout))?;
+        self.http_options = http_options;
+        Ok(self)
     }
 
     fn endpoint(&self) -> String {
@@ -83,7 +98,7 @@ impl OpenAIProvider {
         } else {
             builder
         };
-        builder.json(body)
+        self.http_options.apply_custom_headers(builder).json(body)
     }
 }
 

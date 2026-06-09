@@ -78,6 +78,7 @@ impl RecordingRouter {
 impl ProviderRouter for RecordingRouter {
     async fn stream(
         &self,
+        _route: devo_provider::ProviderRoute,
         _request: ModelRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>, ProviderError> {
         Ok(Box::pin(stream::iter(vec![Ok(StreamEvent::MessageDone {
@@ -85,7 +86,11 @@ impl ProviderRouter for RecordingRouter {
         })])))
     }
 
-    async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ProviderError> {
+    async fn complete(
+        &self,
+        _route: devo_provider::ProviderRoute,
+        request: ModelRequest,
+    ) -> Result<ModelResponse, ProviderError> {
         self.requests
             .lock()
             .expect("router requests mutex should not be poisoned")

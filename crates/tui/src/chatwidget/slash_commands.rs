@@ -7,11 +7,14 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 
 use crate::app_command::AppCommand;
+use crate::app_command::GoalObjectiveMode;
 use crate::app_event::AppEvent;
 use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
 use crate::history_cell::PlainHistoryCell;
 use crate::slash_command::SlashCommand;
+use devo_protocol::MAX_THREAD_GOAL_OBJECTIVE_CHARS;
+use devo_protocol::ThreadGoalStatus;
 
 use super::ChatWidget;
 
@@ -157,10 +160,7 @@ impl ChatWidget {
                 }
             }
             SlashCommand::Goal => {
-                self.set_status_message("Goal management");
-                self.add_to_history(PlainHistoryCell::new(vec![Line::from(
-                    "Use /goal to view or manage the active goal. See goal/create, goal/pause, goal/resume in the protocol.",
-                )]));
+                self.handle_goal_slash_command(argument);
             }
             SlashCommand::Diff => {
                 self.set_status_message("Computing diff");
@@ -171,5 +171,62 @@ impl ChatWidget {
                 });
             }
         }
+    }
+
+    fn handle_goal_slash_command(&mut self, argument: String) {
+        let trimmed = argument.trim();
+        if trimmed.is_empty() {
+            self.app_event_tx
+                .send(AppEvent::Command(AppCommand::show_goal()));
+            self.set_status_message("Loading goal");
+            return;
+        }
+
+        match trimmed.to_ascii_lowercase().as_str() {
+            "clear" => {
+                self.app_event_tx
+                    .send(AppEvent::Command(AppCommand::clear_goal()));
+                self.set_status_message("Clearing goal");
+                return;
+            }
+            "edit" => {
+                self.app_event_tx
+                    .send(AppEvent::Command(AppCommand::edit_goal()));
+                self.set_status_message("Loading goal editor");
+                return;
+            }
+            "pause" => {
+                self.app_event_tx
+                    .send(AppEvent::Command(AppCommand::set_goal_status(
+                        ThreadGoalStatus::Paused,
+                    )));
+                self.set_status_message("Pausing goal");
+                return;
+            }
+            "resume" => {
+                self.app_event_tx
+                    .send(AppEvent::Command(AppCommand::set_goal_status(
+                        ThreadGoalStatus::Active,
+                    )));
+                self.set_status_message("Resuming goal");
+                return;
+            }
+            _ => {}
+        }
+
+        if trimmed.chars().count() > MAX_THREAD_GOAL_OBJECTIVE_CHARS {
+            self.add_to_history(history_cell::new_error_event(format!(
+                "Goal objective is too long: limit is {MAX_THREAD_GOAL_OBJECTIVE_CHARS} characters"
+            )));
+            self.set_status_message("Goal objective too long");
+            return;
+        }
+
+        self.app_event_tx
+            .send(AppEvent::Command(AppCommand::set_goal_objective(
+                trimmed.to_string(),
+                GoalObjectiveMode::ConfirmIfExists,
+            )));
+        self.set_status_message("Setting goal");
     }
 }

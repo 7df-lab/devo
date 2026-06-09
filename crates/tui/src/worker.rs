@@ -8,6 +8,8 @@ use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
@@ -18,7 +20,15 @@ use devo_core::ReasoningEffort;
 use devo_core::SessionId;
 use devo_core::TurnId;
 use devo_core::TurnStatus;
+use devo_protocol::CommandExecExitedPayload;
+use devo_protocol::CommandExecOutputDeltaPayload;
+use devo_protocol::CommandExecParams;
+use devo_protocol::CommandExecProgram;
+use devo_protocol::GoalClearParams;
+use devo_protocol::GoalSetParams;
+use devo_protocol::GoalStatusParams;
 use devo_protocol::ProviderModelBinding;
+use devo_protocol::ThreadGoalStatus;
 use devo_protocol::ProviderValidateParams;
 use devo_protocol::ProviderVendor;
 use devo_protocol::ProviderVendorListParams;
@@ -34,6 +44,7 @@ use devo_server::ApprovalRequestPayload;
 use devo_server::ApprovalRespondParams;
 use devo_server::CommandExecutionPayload;
 use devo_server::InputItem;
+use devo_server::InteractionMode;
 use devo_server::ItemEnvelope;
 use devo_server::ItemEventPayload;
 use devo_server::ItemKind;
@@ -58,6 +69,7 @@ use devo_server::TurnInterruptParams;
 use devo_server::TurnStartParams;
 use devo_server::TurnSteerParams;
 
+use crate::app_command::GoalObjectiveMode;
 use crate::app_command::InputHistoryDirection;
 use crate::bottom_pane::SkillInterfaceMetadata;
 use crate::bottom_pane::SkillMetadata;
@@ -113,6 +125,13 @@ enum OperationCommand {
     SubmitInput {
         input: Vec<InputItem>,
         approval_policy: Option<String>,
+        interaction_mode: InteractionMode,
+    },
+    ExecuteShellCommand {
+        command: String,
+    },
+    SubmitShellInput {
+        command: String,
     },
     /// Update the model used for future turns.
     /// TODO: Model should be bind at Session Metadata, not turn, indicate to the model utilized to generate
@@ -153,13 +172,33 @@ enum OperationCommand {
     /// Request a skills list from the server.
     ListSkills,
     /// Request or update a server-backed composer reference search.
-    ReferenceSearchRequested { query: String },
+    ReferenceSearchRequested {
+        query: String,
+    },
     /// Cancel the active composer reference search session.
     ReferenceSearchCancelled,
     /// Persistently enable or disable one skill by canonical `SKILL.md` path.
-    SetSkillEnabled { path: PathBuf, enabled: bool },
+    SetSkillEnabled {
+        path: PathBuf,
+        enabled: bool,
+    },
     /// Request proactive compaction for the active session.
     CompactSession,
+    /// Show the current goal for the active session.
+    ShowGoal,
+    /// Open the current goal in the editor.
+    EditGoal,
+    /// Create or update the current goal objective.
+    SetGoalObjective {
+        objective: String,
+        mode: GoalObjectiveMode,
+    },
+    /// Pause, resume, or complete the current goal.
+    SetGoalStatus {
+        status: ThreadGoalStatus,
+    },
+    /// Clear the current goal.
+    ClearGoal,
     /// Clear the active session so the next prompt starts a fresh one lazily.
     StartNewSession,
     /// Switch the active session to a persisted session identifier.
@@ -191,6 +230,39 @@ enum OperationCommand {
     BrowseInputHistory(InputHistoryDirection),
     /// Stop the worker loop.
     Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ShellCommandExecStart {
+    process_id: String,
+    started_event: WorkerEvent,
+    params: CommandExecParams,
+}
+
+fn next_shell_command_exec_start(
+    session_id: Option<SessionId>,
+    cwd: PathBuf,
+    command: String,
+    next_shell_process_index: &mut u64,
+) -> ShellCommandExecStart {
+    let process_id = format!("user-shell-{}", *next_shell_process_index);
+    *next_shell_process_index += 1;
+    ShellCommandExecStart {
+        process_id: process_id.clone(),
+        started_event: WorkerEvent::CommandExecutionStarted {
+            tool_use_id: process_id.clone(),
+            command: command.clone(),
+            source: devo_protocol::protocol::ExecCommandSource::UserShell,
+            command_actions: Vec::new(),
+        },
+        params: CommandExecParams {
+            session_id,
+            process_id,
+            cwd: Some(cwd),
+            program: CommandExecProgram::OneShot { command },
+            size: None,
+        },
+    }
 }
 
 /// Handle used by the UI thread to interact with the background query worker.
@@ -230,11 +302,33 @@ impl QueryWorkerHandle {
         input: Vec<InputItem>,
         approval_policy: Option<String>,
     ) -> Result<()> {
+        self.submit_input_with_interaction_mode(input, approval_policy, InteractionMode::Build)
+    }
+
+    pub(crate) fn submit_input_with_interaction_mode(
+        &self,
+        input: Vec<InputItem>,
+        approval_policy: Option<String>,
+        interaction_mode: InteractionMode,
+    ) -> Result<()> {
         self.command_tx
             .send(OperationCommand::SubmitInput {
                 input,
                 approval_policy,
+                interaction_mode,
             })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn execute_shell_command(&self, command: String) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::ExecuteShellCommand { command })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn submit_shell_input(&self, command: String) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::SubmitShellInput { command })
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -348,6 +442,40 @@ impl QueryWorkerHandle {
     pub(crate) fn compact_session(&self) -> Result<()> {
         self.command_tx
             .send(OperationCommand::CompactSession)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn show_goal(&self) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::ShowGoal)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn edit_goal(&self) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::EditGoal)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn set_goal_objective(
+        &self,
+        objective: String,
+        mode: GoalObjectiveMode,
+    ) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::SetGoalObjective { objective, mode })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn set_goal_status(&self, status: ThreadGoalStatus) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::SetGoalStatus { status })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn clear_goal(&self) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::ClearGoal)
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -523,6 +651,8 @@ async fn run_worker_inner(
     let mut latest_completed_agent_messages_by_child: HashMap<SessionId, String> = HashMap::new();
     let mut input_history_cursor: Option<usize> = None;
     let mut active_reference_search_id: Option<ReferenceSearchId> = None;
+    let mut active_shell_process_ids: HashSet<String> = HashSet::new();
+    let mut next_shell_process_index = 1_u64;
 
     if let Some(initial_session_id) = config.initial_session_id {
         match client
@@ -589,6 +719,7 @@ async fn run_worker_inner(
                     Some(OperationCommand::SubmitInput {
                         input,
                         approval_policy,
+                        interaction_mode,
                     }) => {
                         let session_start = ensure_session_started(
                             &mut client,
@@ -624,6 +755,7 @@ async fn run_worker_inner(
                             sandbox: None,
                             approval_policy,
                             cwd: None,
+                            interaction_mode,
                         }).await;
                         match start_result {
                             Ok(result) => {
@@ -638,6 +770,44 @@ async fn run_worker_inner(
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
+                                });
+                            }
+                        }
+                    }
+                    Some(
+                        OperationCommand::ExecuteShellCommand { command }
+                        | OperationCommand::SubmitShellInput { command },
+                    ) => {
+                        if active_turn_id.is_some() {
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: "cannot run shell command while a turn is in progress".to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cache_read_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
+                            });
+                            continue;
+                        }
+                        let shell_start = next_shell_command_exec_start(
+                            session_id,
+                            session_cwd.clone(),
+                            command,
+                            &mut next_shell_process_index,
+                        );
+                        active_shell_process_ids.insert(shell_start.process_id.clone());
+                        let _ = event_tx.send(shell_start.started_event);
+                        match client.command_exec(shell_start.params).await {
+                            Ok(_) => {}
+                            Err(error) => {
+                                active_shell_process_ids.remove(&shell_start.process_id);
+                                let _ = event_tx.send(WorkerEvent::ToolResult {
+                                    tool_use_id: shell_start.process_id,
+                                    title: "Shell".to_string(),
+                                    preview: error.to_string(),
+                                    is_error: true,
+                                    truncated: false,
                                 });
                             }
                         }
@@ -930,6 +1100,213 @@ async fn run_worker_inner(
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::ShowGoal) => {
+                        let goal = if let Some(active_session_id) = session_id {
+                            match client
+                                .goal_status(GoalStatusParams {
+                                    session_id: active_session_id,
+                                })
+                                .await
+                            {
+                                Ok(result) => result.goal,
+                                Err(error) => {
+                                    let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                        message: error.to_string(),
+                                    });
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let _ = event_tx.send(WorkerEvent::GoalStatusLoaded { goal });
+                    }
+                    Some(OperationCommand::EditGoal) => {
+                        let Some(active_session_id) = session_id else {
+                            let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                message: "No goal is currently set.".to_string(),
+                            });
+                            continue;
+                        };
+                        match client
+                            .goal_status(GoalStatusParams {
+                                session_id: active_session_id,
+                            })
+                            .await
+                        {
+                            Ok(result) => match result.goal {
+                                Some(goal) => {
+                                    let _ = event_tx.send(WorkerEvent::GoalEditLoaded { goal });
+                                }
+                                None => {
+                                    let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                        message: "No goal is currently set.".to_string(),
+                                    });
+                                }
+                            },
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                    message: error.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::SetGoalObjective { objective, mode }) => {
+                        let session_start = ensure_session_started(
+                            &mut client,
+                            &config.cwd,
+                            &model,
+                            &mut session_id,
+                        )
+                        .await?;
+                        if let Some(start_model) = session_start.model.clone() {
+                            model = start_model;
+                        }
+                        thinking_selection = session_start.thinking.clone().or(thinking_selection);
+                        let active_session_id = session_start.session_id;
+                        if session_start.created {
+                            let _ = event_tx.send(WorkerEvent::SessionActivated {
+                                session_id: active_session_id,
+                            });
+                            apply_session_permissions(
+                                &mut client,
+                                active_session_id,
+                                permission_preset,
+                            )
+                            .await?;
+                        }
+
+                        if matches!(mode, GoalObjectiveMode::ConfirmIfExists) {
+                            match client
+                                .goal_status(GoalStatusParams {
+                                    session_id: active_session_id,
+                                })
+                                .await
+                            {
+                                Ok(result) => {
+                                    if let Some(current_goal) = result.goal {
+                                        let _ = event_tx.send(
+                                            WorkerEvent::GoalReplaceConfirmationRequested {
+                                                current_goal,
+                                                objective,
+                                            },
+                                        );
+                                        continue;
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                        message: error.to_string(),
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if matches!(mode, GoalObjectiveMode::ReplaceExisting) {
+                            match client
+                                .goal_clear(GoalClearParams {
+                                    session_id: active_session_id,
+                                })
+                                .await
+                            {
+                                Ok(_) => {}
+                                Err(error) => {
+                                    let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                        message: error.to_string(),
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+
+                        let (status, token_budget) = match mode {
+                            GoalObjectiveMode::ConfirmIfExists | GoalObjectiveMode::ReplaceExisting => {
+                                (Some(ThreadGoalStatus::Active), None)
+                            }
+                            GoalObjectiveMode::UpdateExisting {
+                                status,
+                                token_budget,
+                            } => (Some(status), token_budget),
+                        };
+                        match client
+                            .goal_set(GoalSetParams {
+                                session_id: active_session_id,
+                                objective: Some(objective),
+                                status,
+                                token_budget,
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                let _ = event_tx.send(WorkerEvent::GoalUpdated {
+                                    goal: result.goal,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                    message: error.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::SetGoalStatus { status }) => {
+                        let Some(active_session_id) = session_id else {
+                            let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                message: "no active session exists yet; set a goal first".to_string(),
+                            });
+                            continue;
+                        };
+                        if status == ThreadGoalStatus::BudgetLimited {
+                            let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                message: "budget-limited status is controlled by the system".to_string(),
+                            });
+                            continue;
+                        }
+                        match client
+                            .goal_set(GoalSetParams {
+                                session_id: active_session_id,
+                                objective: None,
+                                status: Some(status),
+                                token_budget: None,
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                let _ = event_tx.send(WorkerEvent::GoalUpdated {
+                                    goal: result.goal,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                    message: error.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::ClearGoal) => {
+                        let Some(active_session_id) = session_id else {
+                            let _ = event_tx.send(WorkerEvent::GoalCleared { cleared: false });
+                            continue;
+                        };
+                        match client
+                            .goal_clear(GoalClearParams {
+                                session_id: active_session_id,
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                let _ = event_tx.send(WorkerEvent::GoalCleared {
+                                    cleared: result.cleared,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                    message: error.to_string(),
                                 });
                             }
                         }
@@ -1498,12 +1875,14 @@ async fn run_worker_inner(
                                                     payload.item.payload,
                                                 )
                                             {
-                                                let _ = event_tx.send(WorkerEvent::ToolCall {
-                                                    tool_use_id: payload.tool_call_id,
-                                                    summary: payload.command,
-                                                    preparing: false,
-                                                    parsed_commands: Some(payload.command_actions),
-                                                });
+                                                let _ = event_tx.send(
+                                                    WorkerEvent::CommandExecutionStarted {
+                                                        tool_use_id: payload.tool_call_id,
+                                                        command: payload.command,
+                                                        source: payload.source,
+                                                        command_actions: payload.command_actions,
+                                                    },
+                                                );
                                             }
                                         }
                                         ItemKind::ToolCall => {
@@ -1575,6 +1954,52 @@ async fn run_worker_inner(
                                                 delta: text.to_string(),
                                             });
                                         }
+                                    }
+                                }
+                            }
+                            "command/exec/outputDelta" => {
+                                if let ServerEvent::CommandExecOutputDelta(payload) = event {
+                                    let CommandExecOutputDeltaPayload {
+                                        process_id,
+                                        delta_base64,
+                                        ..
+                                    } = payload;
+                                    match BASE64_STANDARD.decode(delta_base64) {
+                                        Ok(bytes) => {
+                                            let delta =
+                                                String::from_utf8_lossy(&bytes).to_string();
+                                            let _ = event_tx.send(WorkerEvent::ToolOutputDelta {
+                                                tool_use_id: process_id,
+                                                delta,
+                                            });
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                %error,
+                                                "failed to decode command/exec output delta"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            "command/exec/exited" => {
+                                if let ServerEvent::CommandExecExited(payload) = event {
+                                    let CommandExecExitedPayload {
+                                        process_id,
+                                        exit_code,
+                                        ..
+                                    } = payload;
+                                    if active_shell_process_ids.remove(&process_id) {
+                                        let _ = event_tx.send(WorkerEvent::ToolResult {
+                                            tool_use_id: process_id,
+                                            title: "Shell".to_string(),
+                                            preview: String::new(),
+                                            is_error: exit_code != Some(0),
+                                            truncated: false,
+                                        });
+                                        let _ = event_tx.send(WorkerEvent::ShellCommandFinished {
+                                            exit_code,
+                                        });
                                     }
                                 }
                             }
@@ -2933,7 +3358,9 @@ mod tests {
     use devo_server::SkillSource;
 
     use super::QueryWorkerHandle;
+    use super::ShellCommandExecStart;
     use super::handle_completed_item;
+    use super::next_shell_command_exec_start;
     use super::normalize_display_output;
     use super::project_history_items;
     use super::render_skill_list_body;
@@ -2976,6 +3403,68 @@ mod tests {
             .unwrap_or(false);
 
         assert_eq!([completed], [true]);
+    }
+
+    #[test]
+    fn shell_command_exec_start_uses_distinct_one_shot_processes() {
+        let session_id = SessionId::new();
+        let mut next_shell_process_index = 1_u64;
+
+        let first = next_shell_command_exec_start(
+            Some(session_id.clone()),
+            PathBuf::from("/tmp/project"),
+            "pwd".to_string(),
+            &mut next_shell_process_index,
+        );
+        let second = next_shell_command_exec_start(
+            /*session_id*/ None,
+            PathBuf::from("/tmp/project"),
+            "whoami".to_string(),
+            &mut next_shell_process_index,
+        );
+
+        assert_eq!(
+            vec![first, second],
+            vec![
+                ShellCommandExecStart {
+                    process_id: "user-shell-1".to_string(),
+                    started_event: WorkerEvent::CommandExecutionStarted {
+                        tool_use_id: "user-shell-1".to_string(),
+                        command: "pwd".to_string(),
+                        source: devo_protocol::protocol::ExecCommandSource::UserShell,
+                        command_actions: Vec::new(),
+                    },
+                    params: devo_protocol::CommandExecParams {
+                        session_id: Some(session_id),
+                        process_id: "user-shell-1".to_string(),
+                        cwd: Some(PathBuf::from("/tmp/project")),
+                        program: devo_protocol::CommandExecProgram::OneShot {
+                            command: "pwd".to_string(),
+                        },
+                        size: None,
+                    },
+                },
+                ShellCommandExecStart {
+                    process_id: "user-shell-2".to_string(),
+                    started_event: WorkerEvent::CommandExecutionStarted {
+                        tool_use_id: "user-shell-2".to_string(),
+                        command: "whoami".to_string(),
+                        source: devo_protocol::protocol::ExecCommandSource::UserShell,
+                        command_actions: Vec::new(),
+                    },
+                    params: devo_protocol::CommandExecParams {
+                        session_id: None,
+                        process_id: "user-shell-2".to_string(),
+                        cwd: Some(PathBuf::from("/tmp/project")),
+                        program: devo_protocol::CommandExecProgram::OneShot {
+                            command: "whoami".to_string(),
+                        },
+                        size: None,
+                    },
+                },
+            ]
+        );
+        assert_eq!(next_shell_process_index, 3);
     }
 
     #[test]
@@ -3599,17 +4088,17 @@ mod tests {
         };
 
         assert_eq!(
-            WorkerEvent::ToolCall {
+            WorkerEvent::CommandExecutionStarted {
                 tool_use_id: payload.tool_call_id.clone(),
-                summary: payload.command.clone(),
-                preparing: false,
-                parsed_commands: Some(payload.command_actions.clone()),
+                command: payload.command.clone(),
+                source: payload.source,
+                command_actions: payload.command_actions.clone(),
             },
-            WorkerEvent::ToolCall {
+            WorkerEvent::CommandExecutionStarted {
                 tool_use_id: payload.tool_call_id,
-                summary: payload.command,
-                preparing: false,
-                parsed_commands: Some(payload.command_actions),
+                command: payload.command,
+                source: devo_protocol::protocol::ExecCommandSource::Agent,
+                command_actions: payload.command_actions,
             }
         );
     }

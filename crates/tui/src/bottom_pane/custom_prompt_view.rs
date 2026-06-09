@@ -54,6 +54,11 @@ impl CustomPromptView {
             complete: false,
         }
     }
+
+    pub(crate) fn with_initial_text(mut self, text: &str) -> Self {
+        self.textarea.set_text_clearing_elements(text);
+        self
+    }
 }
 
 impl BottomPaneView for CustomPromptView {

@@ -113,6 +113,7 @@ fn update_provider_config_document(
             overlay_optional_key(provider, replacement_provider, "name");
             overlay_optional_key(provider, replacement_provider, "base_url");
             overlay_optional_key(provider, replacement_provider, "credential");
+            overlay_optional_key(provider, replacement_provider, "headers");
             overlay_optional_key(provider, replacement_provider, "wire_apis");
             overlay_optional_key(provider, replacement_provider, "enabled");
         }
@@ -248,6 +249,7 @@ pub(crate) fn provider_vendor_from_config(
         },
         base_url: provider_config.base_url.clone(),
         credential: provider_config.credential.clone(),
+        headers: provider_config.headers.clone(),
         wire_apis: provider_config.wire_apis.clone(),
         enabled: provider_config.enabled,
     }

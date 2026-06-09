@@ -149,7 +149,7 @@ impl Default for AnthropicApi {
 }
 
 /// One supported provider wire protocol exposed by the runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProviderWireApi {
     /// OpenAI-compatible `/v1/chat/completions`.
     #[serde(rename = "openai_chat_completions")]

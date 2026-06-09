@@ -26,7 +26,7 @@ Session-local input modes affect how the TUI interprets the next composer submis
 - `L1-REQ-TUI-001` requires reliable text entry, multi-line input, intentional submit, command discovery, and session-local input modes.
 - `L1-REQ-TUI-006` requires discoverable and intentional command invocation from the TUI.
 - `L1-REQ-TUI-008` requires leading `!` input to enter Shell Mode and execute through the terminal command capability.
-- `L1-REQ-TUI-009` requires Default Input Mode, Shell Mode, Plan Mode, and bottom status line labels for `Build`, `Plan`, and `Shell`.
+- `L1-REQ-TUI-009` requires Default Input Mode, Shell Mode, Plan Mode, and bottom status line labels for `BUILD`, `PLAN`, and `SHELL`.
 - `L1-REQ-TUI-007` requires the composer and bottom status line to remain readable and non-overlapping.
 - `L1-REQ-CLIENT-001` requires Unicode, IME, and wide-character safety.
 - `L1-REQ-AGENT-005` defines agent-level Plan Mode behavior.
@@ -43,9 +43,9 @@ The TUI should support these session-local input modes:
 
 | Input Mode | Purpose | Status Label |
 |---|---|---|
-| Default Input Mode | Normal build/task input. | `Build` |
-| Shell Mode | Terminal command input routed to the program's command execution capability. | `Shell` |
-| Plan Mode | Plan-oriented input governed by agent-level Plan Mode behavior. | `Plan` |
+| Default Input Mode | Normal build/task input. | `BUILD` |
+| Shell Mode | Terminal command input routed to the program's command execution capability. | `SHELL` |
+| Plan Mode | Plan-oriented input governed by agent-level Plan Mode behavior. | `PLAN` |
 
 ## Style System Boundary
 
@@ -56,7 +56,7 @@ Composer-specific token use:
 - Input band background: `surface.inputBand`.
 - Empty hint: `text.muted`.
 - User-entered text: `text.primary`.
-- Prompt marker `┃`: `core.primary`.
+- Prompt marker `┃`: active input mode color for the bottom composer only.
 - Matched slash command token: `core.primary`.
 - Slash command parameter hint: `text.muted`.
 - Mode label colors: `mode.build`, `mode.plan`, and `mode.shell`.
@@ -69,7 +69,7 @@ Default composer:
 
 ┃ Ask Devo
 
-  Build · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
+  BUILD · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
 ```
 
 Multi-line composer:
@@ -81,7 +81,7 @@ Multi-line composer:
 ┃ 2. add regression tests
 ┃ 3. run the focused suite
 
-  Build · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
+  BUILD · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
 ```
 
 Shell Mode composer:
@@ -90,7 +90,7 @@ Shell Mode composer:
 
 ┃ cargo test parser::quoted -- --nocapture
 
-  Shell · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
+  SHELL · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
 ```
 
 Plan Mode composer:
@@ -99,18 +99,18 @@ Plan Mode composer:
 
 ┃ Plan the migration steps before changing files.
 
-  Plan · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
+  PLAN · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
 ```
 
 Rules:
 
-- Composer content lines use a left `┃` marker in the theme primary foreground color.
+- Composer content lines use a left `┃` marker in the active input mode color. Build uses the current blue/cyan color, Plan uses purple, and Shell uses orange.
 - The composer is rendered as a full-width input band: one padding line above the content, the content lines, and one padding line below the content share the same background span.
 - For multi-line input, each user-entered content line may repeat the `┃` marker. The top and bottom padding rows must keep the input-band background but must not render `┃`.
 - `Ask Devo` is the empty-input hint. It uses muted grey text and disappears as soon as the user types content.
 - User-entered input replaces the hint and uses normal input foreground styling.
-- The status label is the first field in the bottom status line.
-- `Build`, `Plan`, and `Shell` must use distinct colors.
+- The status label is the first visible field in the bottom status line.
+- `BUILD`, `PLAN`, and `SHELL` must use distinct colors.
 - The bottom status line appears below the composer.
 - Composer height may grow for multi-line input within configured bounds, then scroll internally or show a line count.
 
@@ -119,12 +119,12 @@ Rules:
 The bottom status line has this conceptual shape:
 
 ```text
-  Build · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
+  BUILD · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
 ```
 
 Fields:
 
-- `Build`, `Plan`, or `Shell`: current TUI input/work mode. `Build` is the normal default work-state label. `Plan` and `Shell` replace it when those session-local input modes are active.
+- `BUILD`, `PLAN`, or `SHELL`: current TUI input mode, rendered as the first visible status-line field. `BUILD` is the normal default label. `PLAN` and `SHELL` replace it when those session-local input modes are active.
 - `deepseek-v4-pro`: current model display name. The supported model slug is a fallback only for recovery or invalid configuration states where a display name is unavailable.
 - `high`: current reasoning effort.
 - `↑0[cached 0 0%]`: input token count, cached input token count, and input cache hit rate.
@@ -134,6 +134,21 @@ Fields:
 - `0/950k`: context-window usage and effective context-window length.
 
 The status line should derive model, reasoning, token, cache, and context values from server-confirmed usage and context events where available. If a value is unavailable, estimated, or redacted, the status line should use a compact marker defined by L3 rather than inventing an exact value.
+
+## Mode Cycling
+
+The TUI toggles Build and Plan input modes with `Shift+Tab`. Shell Mode is entered only through the leading `!` prefix.
+
+Rules:
+
+- `Shift+Tab` toggles `Build <-> Plan`.
+- `Shift+Tab` must not enter Shell Mode from either Build Mode or Plan Mode.
+- If Shell Mode is already active, `Shift+Tab` may leave Shell Mode and return to Build Mode.
+- Shell Mode is entered only by typing bare `!` as the first composer character. `!cmd` from Build Mode runs a one-shot shell command and returns to Build Mode.
+- The cycle is session-local TUI state. It does not change the session-level agent mode.
+- The active mode label must update immediately as the first field on the bottom status line.
+- `Build` uses the default build/input color, `Plan` uses the plan color, and `Shell` uses the shell color.
+- The shortcut is handled before normal composer text editing so it cannot insert a tab character into the draft.
 
 ## Submission Semantics
 
@@ -159,9 +174,9 @@ Rules:
 - If the first character of composer input is `!`, the TUI enters Shell Mode.
 - Leading whitespace before `!` does not trigger Shell Mode. This keeps pasted text and indented examples from becoming commands unexpectedly.
 - A literal normal-chat message beginning with `!` should be escapable by prefixing a backslash, for example `\!important`. The backslash is removed before normal chat submission.
-- Input that consists only of `!` enters Shell Mode without executing a command.
-- Input that starts with `!` followed by command text may be treated as one-shot Shell Mode submission.
-- Shell Mode should exit back to Default Input Mode after a command completes unless the user explicitly enters a persistent Shell Mode in a later approved design.
+- Typing bare `!` as the first composer character enters Shell Mode and clears the `!` from the editor.
+- Submitting input that starts with `!` followed by command text from Build Mode runs the command once and returns the composer to Build Mode.
+- While Shell Mode is active, submitted composer content is treated as command text until the user changes mode.
 
 ## Shell Mode Execution
 
@@ -171,8 +186,13 @@ Rules:
 
 - The command text is the composer content after the leading `!` prefix or the Shell Mode editor content.
 - Shell Mode command execution must use the program's terminal command capability, not an unmanaged client-local shell.
+- Each Shell Mode submission should start a fresh one-shot PTY command through the server `command/exec` API and render `command/exec/outputDelta` notifications.
+- `!cmd` from Build Mode should use the same one-shot `command/exec` path and then return to Build Mode.
+- If no Devo session exists yet, Shell Mode and `!cmd` should omit `session_id`, pass an explicit `cwd`, and must not call `session/start`, emit session activation, or apply session permissions only to execute a command.
+- After a Devo session exists, Shell Mode command execution may include that `session_id`, but it still must not create a new session for shell execution.
 - Shell Mode must respect workspace, permission policy, safety, privacy, and sandbox constraints.
-- Shell Mode results should appear in the transcript as command/tool output with bounded display.
+- Shell Mode results should appear in the transcript as direct command execution output with `UserShell` source attribution and bounded display.
+- Shell Mode process completions should use `▣ Shell` for the summary instead of the active model display name.
 - If approval is required, the TUI should show the approval prompt and keep Shell Mode state understandable.
 - Command output should be summarized or folded when long.
 - Failed commands should show status, exit code where available, and a natural-language result summary.
@@ -186,19 +206,20 @@ User types:
 
 TUI state:
 
-┃ Running  cargo test parser::quoted
+▌ $ cargo test parser::quoted
 
 ⠋ Working · ⏱ 2s
 
 ┃ Ask Devo
 
-  Shell · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
+  SHELL · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
 
 After completion:
 
-┃ Run      cargo test parser::quoted                    failed  2.1s
-  ┗ output  42 lines hidden, 12 shown                   Ctrl+T for full transcript
-      Test failed: parser::quoted_escape expected escaped quote handling.
+▌ $ cargo test parser::quoted
+  └ Test failed: parser::quoted_escape expected escaped quote handling.
+
+  ▣ Shell · 2.1s
 ```
 
 ## Plan Mode Input
@@ -210,12 +231,12 @@ Rules:
 - Plan Mode must be visible in the bottom status line.
 - Plan Mode does not change the session-level agent mode.
 - Submitted Plan Mode input must be marked so the server applies Plan Mode rules.
-- While Plan Mode is active, file modification is prohibited by agent/tool policy.
-- The question tool may be used only where Plan Mode permits it.
+- For the v1 TUI/server integration, Plan Mode is prompt-level and advisory: the server appends hidden model context instructing the agent not to modify files or perform implementation work.
+- The v1 integration does not require broad per-tool runtime refactoring. Hard mutation blocking remains a later policy/tool-gating concern.
 - The TUI must not present Plan Mode as permission to make changes.
-- Leaving Plan Mode returns the composer to Default Input Mode.
+- Leaving Plan Mode returns the composer to Build Mode.
 
-Plan Mode can be entered by slash command, command palette, or another L3-defined control. This L2 document defines mode behavior, not the final keybinding.
+Plan Mode can be entered by `Shift+Tab` mode cycling. Slash command or command palette entry points may be added by later designs.
 
 ## Command Discovery
 
@@ -283,7 +304,7 @@ Example matched slash command with parameter hint:
 ```text
 ┃ /btw <your side conversation message>
 
-  Build · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
+  BUILD · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
 ```
 
 In the rendered TUI, `/btw` uses the primary foreground color and `<your side conversation message>` uses muted foreground color.
@@ -366,3 +387,4 @@ Rules:
 | 2 | 2026-05-26 | Assistant | Revision | Linked composer and command discovery visual treatment to the shared TUI style system. |
 | 3 | 2026-05-26 | Human | Refinement | Updated navigable slash-command lists so `>` marks the focused row and `●` is reserved for enabled options in choice lists. |
 | 4 | 2026-05-27 | Human | Refinement | Removed `/onboard` from slash-command discovery because onboarding is entered through startup CLI arguments. |
+| 4 | 2026-06-08 | Assistant | Refinement | Defined `Shift+Tab` Build/Plan toggling, leftmost uppercase mode labels, Shell-only `!` entry behavior, one-shot PTY-backed Shell execution including sessionless startup commands, prompt-only Plan Mode v1 behavior, active-mode composer marker color, direct user-shell output, and `▣ Shell` process summaries. |

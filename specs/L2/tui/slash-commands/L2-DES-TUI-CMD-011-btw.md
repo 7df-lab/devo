@@ -30,7 +30,7 @@ Inline command rendering shows the command token in primary color and the parame
 ```text
 ┃ /btw <side conversation message>
 
-  Build · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
+  BUILD · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
 ```
 
 Submission example:

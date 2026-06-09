@@ -28,10 +28,10 @@
 //!    - When the queue hint is active, prefer keeping that queue hint visible,
 //!      even if it means dropping the right-side context earlier; the queue
 //!      hint may also be shortened before it is removed.
-//!    - When the queue hint is not active but the mode cycle hint is applicable,
-//!      drop "? for shortcuts" before dropping "(shift+tab to cycle)".
-//!    - If "(shift+tab to cycle)" cannot fit, also hide the right-side
-//!      context to avoid too many state transitions in quick succession.
+//!    - When the queue hint is not active but the mode label is applicable,
+//!      drop optional shortcut help before dropping the mode label.
+//!    - If the combined footer cannot fit, also hide the right-side context
+//!      to avoid too many state transitions in quick succession.
 //!    - Finally, try a mode-only line (with and without context), and fall
 //!      back to no left-side footer if nothing can fit.
 //! 3. When collapse chooses a specific line, callers render it via
@@ -42,6 +42,7 @@
 //! render helpers choose whether to draw the chosen line or the default
 //! `FooterProps` mapping.
 
+use super::input_mode::InputMode;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::render::line_utils::prefix_lines;
@@ -68,7 +69,7 @@ pub(crate) struct FooterProps {
     pub(crate) esc_backtrack_hint: bool,
     pub(crate) use_shift_enter_hint: bool,
     pub(crate) is_task_running: bool,
-    pub(crate) collaboration_modes_enabled: bool,
+    pub(crate) input_modes_enabled: bool,
     pub(crate) is_wsl: bool,
     /// Which key the user must press again to quit.
     ///
@@ -88,44 +89,7 @@ pub(crate) struct FooterProps {
     pub(crate) subagent_hint_visible: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CollaborationModeIndicator {
-    #[allow(dead_code)]
-    Plan,
-    #[allow(dead_code)] // Hidden by current mode filtering; kept for future UI re-enablement.
-    PairProgramming,
-    #[allow(dead_code)] // Hidden by current mode filtering; kept for future UI re-enablement.
-    Execute,
-}
-
-const MODE_CYCLE_HINT: &str = "shift+tab to cycle";
 const FOOTER_CONTEXT_GAP_COLS: u16 = 1;
-
-impl CollaborationModeIndicator {
-    fn label(self, show_cycle_hint: bool) -> String {
-        let suffix = if show_cycle_hint {
-            format!(" ({MODE_CYCLE_HINT})")
-        } else {
-            String::new()
-        };
-        match self {
-            CollaborationModeIndicator::Plan => format!("Plan mode{suffix}"),
-            CollaborationModeIndicator::PairProgramming => {
-                format!("Pair Programming mode{suffix}")
-            }
-            CollaborationModeIndicator::Execute => format!("Execute mode{suffix}"),
-        }
-    }
-
-    fn styled_span(self, show_cycle_hint: bool) -> Span<'static> {
-        let label = self.label(show_cycle_hint);
-        match self {
-            CollaborationModeIndicator::Plan => Span::from(label).magenta(),
-            CollaborationModeIndicator::PairProgramming => Span::from(label).cyan(),
-            CollaborationModeIndicator::Execute => Span::from(label).dim(),
-        }
-    }
-}
 
 /// Selects which footer content is rendered.
 ///
@@ -204,7 +168,7 @@ pub(crate) fn footer_height(props: &FooterProps) -> u16 {
     };
     footer_from_props_lines(
         props,
-        /*collaboration_mode_indicator*/ None,
+        /*input_mode_indicator*/ None,
         /*show_cycle_hint*/ false,
         show_shortcuts_hint,
         show_queue_hint,
@@ -233,7 +197,7 @@ pub(crate) fn render_footer_from_props(
     area: Rect,
     buf: &mut Buffer,
     props: &FooterProps,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    input_mode_indicator: Option<InputMode>,
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
@@ -241,7 +205,7 @@ pub(crate) fn render_footer_from_props(
     Paragraph::new(prefix_lines(
         footer_from_props_lines(
             props,
-            collaboration_mode_indicator,
+            input_mode_indicator,
             show_cycle_hint,
             show_shortcuts_hint,
             show_queue_hint,
@@ -271,11 +235,17 @@ struct LeftSideState {
     show_cycle_hint: bool,
 }
 
-fn left_side_line(
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
-    state: LeftSideState,
-) -> Line<'static> {
+fn left_side_line(input_mode_indicator: Option<InputMode>, state: LeftSideState) -> Line<'static> {
     let mut line = Line::from("");
+    if let Some(input_mode_indicator) = input_mode_indicator {
+        line.push_span(input_mode_indicator.styled_span(state.show_cycle_hint));
+    }
+
+    let has_hint = !matches!(state.hint, SummaryHintKind::None);
+    if input_mode_indicator.is_some() && has_hint {
+        line.push_span(" · ".dim());
+    }
+
     match state.hint {
         SummaryHintKind::None => {}
         SummaryHintKind::Shortcuts => {
@@ -292,13 +262,6 @@ fn left_side_line(
         }
     };
 
-    if let Some(collaboration_mode_indicator) = collaboration_mode_indicator {
-        if !matches!(state.hint, SummaryHintKind::None) {
-            line.push_span(" 路 ".dim());
-        }
-        line.push_span(collaboration_mode_indicator.styled_span(state.show_cycle_hint));
-    }
-
     line
 }
 
@@ -313,7 +276,7 @@ pub(crate) enum SummaryLeft {
 pub(crate) fn single_line_footer_layout(
     area: Rect,
     context_width: u16,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    input_mode_indicator: Option<InputMode>,
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
@@ -329,7 +292,7 @@ pub(crate) fn single_line_footer_layout(
         hint: hint_kind,
         show_cycle_hint,
     };
-    let default_line = left_side_line(collaboration_mode_indicator, default_state);
+    let default_line = left_side_line(input_mode_indicator, default_state);
     let default_width = default_line.width() as u16;
     if default_width > 0 && can_show_left_with_context(area, default_width, context_width) {
         return (SummaryLeft::Default, true);
@@ -339,12 +302,12 @@ pub(crate) fn single_line_footer_layout(
         if state == default_state {
             default_line.clone()
         } else {
-            left_side_line(collaboration_mode_indicator, state)
+            left_side_line(input_mode_indicator, state)
         }
     };
     let state_width = |state: LeftSideState| -> u16 { state_line(state).width() as u16 };
     // When the mode cycle hint is applicable (idle, non-queue mode), only show
-    // the right-side context indicator if the "(shift+tab to cycle)" variant
+    // the right-side context indicator if the expanded mode variant
     // can also fit.
     let context_requires_cycle_hint = show_cycle_hint && !show_queue_hint;
 
@@ -396,7 +359,7 @@ pub(crate) fn single_line_footer_layout(
                 return (SummaryLeft::Custom(state_line(state)), false);
             }
         }
-    } else if collaboration_mode_indicator.is_some() {
+    } else if input_mode_indicator.is_some() {
         if show_cycle_hint {
             // First fallback: drop shortcut hint but keep the cycle
             // hint on the mode label if it can fit.
@@ -415,7 +378,7 @@ pub(crate) fn single_line_footer_layout(
 
         // Next fallback: mode label only. If the cycle hint is applicable but
         // cannot fit, we also suppress context so the right side does not
-        // outlive "(shift+tab to cycle)" on the left.
+        // outlive the mode label on the left.
         let mode_only_state = LeftSideState {
             hint: SummaryHintKind::None,
             show_cycle_hint: false,
@@ -440,7 +403,7 @@ pub(crate) fn single_line_footer_layout(
 
     // Final fallback: if queue variants (or other earlier states) could not fit
     // at all, drop every hint and try to show just the mode label.
-    if let Some(collaboration_mode_indicator) = collaboration_mode_indicator {
+    if let Some(input_mode_indicator) = input_mode_indicator {
         let mode_only_state = LeftSideState {
             hint: SummaryHintKind::None,
             show_cycle_hint: false,
@@ -448,37 +411,24 @@ pub(crate) fn single_line_footer_layout(
         // Compute the width without going through `state_line` so we do not
         // depend on `default_state` (which may still be a queue variant).
         let mode_only_width =
-            left_side_line(Some(collaboration_mode_indicator), mode_only_state).width() as u16;
+            left_side_line(Some(input_mode_indicator), mode_only_state).width() as u16;
         if !context_requires_cycle_hint
             && can_show_left_with_context(area, mode_only_width, context_width)
         {
             return (
-                SummaryLeft::Custom(left_side_line(
-                    Some(collaboration_mode_indicator),
-                    mode_only_state,
-                )),
+                SummaryLeft::Custom(left_side_line(Some(input_mode_indicator), mode_only_state)),
                 true, // show_context
             );
         }
         if left_fits(area, mode_only_width) {
             return (
-                SummaryLeft::Custom(left_side_line(
-                    Some(collaboration_mode_indicator),
-                    mode_only_state,
-                )),
+                SummaryLeft::Custom(left_side_line(Some(input_mode_indicator), mode_only_state)),
                 false, // show_context
             );
         }
     }
 
     (SummaryLeft::None, true)
-}
-
-pub(crate) fn mode_indicator_line(
-    indicator: Option<CollaborationModeIndicator>,
-    show_cycle_hint: bool,
-) -> Option<Line<'static>> {
-    indicator.map(|indicator| Line::from(vec![indicator.styled_span(show_cycle_hint)]))
 }
 
 fn right_aligned_x(area: Rect, content_width: u16) -> Option<u16> {
@@ -502,20 +452,6 @@ fn right_aligned_x(area: Rect, content_width: u16) -> Option<u16> {
             .saturating_sub(content_width)
             .saturating_sub(right_padding),
     )
-}
-
-pub(crate) fn max_left_width_for_right(area: Rect, right_width: u16) -> Option<u16> {
-    let context_x = right_aligned_x(area, right_width)?;
-    let left_start = area.x + FOOTER_INDENT_COLS as u16;
-
-    // minimal one column gap between left and right
-    let gap = FOOTER_CONTEXT_GAP_COLS;
-
-    if context_x <= left_start + gap {
-        return Some(0);
-    }
-
-    Some(context_x.saturating_sub(left_start + gap))
 }
 
 pub(crate) fn can_show_left_with_context(area: Rect, left_width: u16, context_width: u16) -> bool {
@@ -582,15 +518,17 @@ pub(crate) fn render_footer_hint_items(area: Rect, buf: &mut Buffer, items: &[(S
 /// formats the chosen/default content.
 fn footer_from_props_lines(
     props: &FooterProps,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    input_mode_indicator: Option<InputMode>,
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
 ) -> Vec<Line<'static>> {
     // Passive footer context can come from the configurable status line, the
     // active agent label, or both combined.
-    if let Some(status_line) = passive_footer_status_line(props) {
-        return vec![status_line.dim()];
+    if let Some(status_line) = passive_footer_status_line(props)
+        && let Some(line) = status_line_with_input_mode(input_mode_indicator, Some(status_line))
+    {
+        return vec![line];
     }
     match props.mode {
         FooterMode::QuitShortcutReminder => {
@@ -605,14 +543,14 @@ fn footer_from_props_lines(
                 },
                 show_cycle_hint,
             };
-            vec![left_side_line(collaboration_mode_indicator, state)]
+            vec![left_side_line(input_mode_indicator, state)]
         }
         FooterMode::ShortcutOverlay => {
             let state = ShortcutsState {
                 use_shift_enter_hint: props.use_shift_enter_hint,
                 esc_backtrack_hint: props.esc_backtrack_hint,
                 is_wsl: props.is_wsl,
-                collaboration_modes_enabled: props.collaboration_modes_enabled,
+                input_modes_enabled: props.input_modes_enabled,
             };
             shortcut_overlay_lines(state)
         }
@@ -628,9 +566,28 @@ fn footer_from_props_lines(
                 },
                 show_cycle_hint,
             };
-            vec![left_side_line(collaboration_mode_indicator, state)]
+            vec![left_side_line(input_mode_indicator, state)]
         }
     }
+}
+
+/// Prepends the input mode to a contextual status line while keeping only the status content dimmed.
+pub(crate) fn status_line_with_input_mode(
+    input_mode_indicator: Option<InputMode>,
+    status_line: Option<Line<'static>>,
+) -> Option<Line<'static>> {
+    let mut spans = Vec::new();
+    if let Some(input_mode_indicator) = input_mode_indicator {
+        spans.push(input_mode_indicator.styled_span(/*show_cycle_hint*/ false));
+    }
+    if let Some(status_line) = status_line {
+        let status_line = status_line.dim();
+        if !spans.is_empty() && status_line.width() > 0 {
+            spans.push(" · ".dim());
+        }
+        spans.extend(status_line.spans);
+    }
+    (!spans.is_empty()).then(|| Line::from(spans))
 }
 
 /// Returns the contextual footer row when the footer is not busy showing an instructional hint.
@@ -701,14 +658,14 @@ pub(crate) fn uses_passive_footer_status_layout(props: &FooterProps) -> bool {
 
 pub(crate) fn footer_line_width(
     props: &FooterProps,
-    collaboration_mode_indicator: Option<CollaborationModeIndicator>,
+    input_mode_indicator: Option<InputMode>,
     show_cycle_hint: bool,
     show_shortcuts_hint: bool,
     show_queue_hint: bool,
 ) -> u16 {
     footer_from_props_lines(
         props,
-        collaboration_mode_indicator,
+        input_mode_indicator,
         show_cycle_hint,
         show_shortcuts_hint,
         show_queue_hint,
@@ -755,7 +712,7 @@ struct ShortcutsState {
     use_shift_enter_hint: bool,
     esc_backtrack_hint: bool,
     is_wsl: bool,
-    collaboration_modes_enabled: bool,
+    input_modes_enabled: bool,
 }
 
 fn quit_shortcut_reminder_line(key: KeyBinding) -> Line<'static> {
@@ -933,7 +890,7 @@ enum DisplayCondition {
     WhenShiftEnterHint,
     WhenNotShiftEnterHint,
     WhenUnderWSL,
-    WhenCollaborationModesEnabled,
+    WhenInputModesEnabled,
 }
 
 impl DisplayCondition {
@@ -943,7 +900,7 @@ impl DisplayCondition {
             DisplayCondition::WhenShiftEnterHint => state.use_shift_enter_hint,
             DisplayCondition::WhenNotShiftEnterHint => !state.use_shift_enter_hint,
             DisplayCondition::WhenUnderWSL => state.is_wsl,
-            DisplayCondition::WhenCollaborationModesEnabled => state.collaboration_modes_enabled,
+            DisplayCondition::WhenInputModesEnabled => state.input_modes_enabled,
         }
     }
 }
@@ -1090,7 +1047,7 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
         id: ShortcutId::ChangeMode,
         bindings: &[ShortcutBinding {
             key: key_hint::shift(KeyCode::Tab),
-            condition: DisplayCondition::WhenCollaborationModesEnabled,
+            condition: DisplayCondition::WhenInputModesEnabled,
         }],
         prefix: "",
         label: " to change mode",

@@ -3,12 +3,14 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use devo_core::AppConfigStore;
 use devo_core::ProviderRequestModelMap;
 use devo_core::ProviderVendorCatalog;
+use futures::Stream;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
@@ -31,12 +33,16 @@ use devo_core::provider_request_model_map_for_binding;
 use devo_core::resolve_enabled_model_binding;
 use devo_core::tools::ToolRegistry;
 use devo_protocol::ApprovalDecisionValue;
+use devo_protocol::ModelRequest;
+use devo_protocol::ModelResponse;
 use devo_protocol::PendingInputItem;
 use devo_protocol::SkillDependencies as ProtocolSkillDependencies;
 use devo_protocol::SkillInterface as ProtocolSkillInterface;
 use devo_protocol::SkillScope as ProtocolSkillScope;
 use devo_protocol::SkillToolDependency as ProtocolSkillToolDependency;
+use devo_protocol::StreamEvent;
 use devo_provider::ModelProviderSDK;
+use devo_provider::ProviderRoute;
 use devo_provider::ProviderRouter;
 
 use crate::InputItem;
@@ -68,6 +74,41 @@ pub(crate) struct ApprovalGrantCache {
     pub(crate) hosts: HashSet<String>,
     pub(crate) path_prefixes: HashSet<PathBuf>,
     pub(crate) command_prefixes: HashSet<Vec<String>>,
+}
+
+struct RoutedModelProvider {
+    router: Arc<dyn ProviderRouter>,
+    route: ProviderRoute,
+}
+
+impl RoutedModelProvider {
+    fn new(router: Arc<dyn ProviderRouter>, route: ProviderRoute) -> Self {
+        Self { router, route }
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProviderSDK for RoutedModelProvider {
+    async fn completion(&self, request: ModelRequest) -> anyhow::Result<ModelResponse> {
+        self.router
+            .complete(self.route.clone(), request)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    async fn completion_stream(
+        &self,
+        request: ModelRequest,
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>> {
+        self.router
+            .stream(self.route.clone(), request)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    fn name(&self) -> &str {
+        self.router.name()
+    }
 }
 
 /// Shared server-owned runtime dependencies used by live turn execution.
@@ -135,6 +176,13 @@ impl ServerRuntimeDependencies {
             db,
             config_store,
         }
+    }
+
+    pub(crate) fn provider_for_route(&self, route: ProviderRoute) -> Arc<dyn ModelProviderSDK> {
+        Arc::new(RoutedModelProvider::new(
+            Arc::clone(&self.provider_router),
+            route,
+        ))
     }
 
     /// Creates an initial core session state for a newly created server session.
@@ -208,10 +256,11 @@ impl ServerRuntimeDependencies {
             let provider_request_models = ProviderRequestModelMap::new(
                 provider_request_model_map_for_binding(&provider_config, &binding),
             );
-            return TurnConfig::with_request_model(
+            return TurnConfig::with_provider_route(
                 self.catalog_model_or_fallback(&binding.model_slug),
                 binding.model_name,
                 provider_request_models,
+                ProviderRoute::binding(binding.provider_id, binding.invocation_method),
                 thinking_selection,
             );
         }
@@ -563,8 +612,10 @@ mod tests {
     use devo_core::tools::ToolRegistry;
     use devo_protocol::ModelRequest;
     use devo_protocol::ModelResponse;
+    use devo_protocol::ProviderWireApi;
     use devo_protocol::StreamEvent;
     use devo_provider::ModelProviderSDK;
+    use devo_provider::ProviderRoute;
     use devo_provider::SingleProviderRouter;
     use futures::Stream;
     use pretty_assertions::assert_eq;
@@ -669,6 +720,10 @@ invocation_method = "openai_chat_completions"
 
         assert_eq!(turn_config.model.slug, "catalog-slug");
         assert_eq!(turn_config.request_model, "vendor/model-name");
+        assert_eq!(
+            turn_config.provider_route,
+            ProviderRoute::binding("openrouter", ProviderWireApi::OpenAIChatCompletions)
+        );
     }
 
     #[test]
@@ -711,6 +766,10 @@ invocation_method = "openai_chat_completions"
         assert_eq!(
             turn_config.provider_request_model("catalog-slug-thinking"),
             "vendor/model-name-thinking"
+        );
+        assert_eq!(
+            turn_config.provider_route,
+            ProviderRoute::binding("openrouter", ProviderWireApi::OpenAIChatCompletions)
         );
     }
 }

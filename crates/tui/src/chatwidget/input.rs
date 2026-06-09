@@ -24,6 +24,7 @@ use crate::history_cell::PlainHistoryCell;
 use crate::onboarding_widget::OnboardingResult;
 use crate::onboarding_widget::OnboardingTranscriptEvent;
 use crate::slash_command::SlashCommand;
+use devo_protocol::InteractionMode;
 
 use super::ChatWidget;
 use super::ExternalEditorState;
@@ -86,6 +87,7 @@ impl ChatWidget {
                 text_elements,
                 local_images,
                 mention_bindings,
+                interaction_mode,
             } => {
                 let user_message = UserMessage {
                     text,
@@ -99,18 +101,40 @@ impl ChatWidget {
                     self.bottom_pane
                         .push_pending_cell(user_message.text.clone());
                     self.queued_count += 1;
-                    self.app_event_tx
-                        .send(AppEvent::Command(AppCommand::user_turn(
+                    self.app_event_tx.send(AppEvent::Command(
+                        AppCommand::user_turn_with_interaction_mode(
                             input_items_for_user_message(&user_message),
                             Some(self.session.cwd.clone()),
                             self.user_turn_model(),
                             self.thinking_selection.clone(),
                             /*sandbox*/ None,
                             Some("on-request".to_string()),
-                        )));
+                            interaction_mode,
+                        ),
+                    ));
                     self.set_status_message("Message queued");
                 } else {
-                    self.submit_user_message(user_message);
+                    self.submit_user_message_with_interaction_mode(user_message, interaction_mode);
+                }
+            }
+            InputResult::ShellCommand { command } => {
+                if self.busy {
+                    self.set_status_message("Cannot run shell command while generating");
+                } else {
+                    self.app_event_tx
+                        .send(AppEvent::Command(AppCommand::execute_shell_command(
+                            command,
+                        )));
+                    self.set_status_message("Shell command submitted");
+                }
+            }
+            InputResult::ShellInput { command } => {
+                if self.busy {
+                    self.set_status_message("Cannot run shell command while generating");
+                } else {
+                    self.app_event_tx
+                        .send(AppEvent::Command(AppCommand::submit_shell_input(command)));
+                    self.set_status_message("Shell command submitted");
                 }
             }
             InputResult::Command { command, argument } => {
@@ -258,6 +282,14 @@ impl ChatWidget {
     }
 
     pub(super) fn submit_user_message(&mut self, user_message: UserMessage) {
+        self.submit_user_message_with_interaction_mode(user_message, InteractionMode::Build);
+    }
+
+    pub(super) fn submit_user_message_with_interaction_mode(
+        &mut self,
+        user_message: UserMessage,
+        interaction_mode: InteractionMode,
+    ) {
         if user_message.text.trim().is_empty() {
             return;
         }
@@ -276,15 +308,17 @@ impl ChatWidget {
             self.active_accent_color(),
         ));
 
-        self.app_event_tx
-            .send(AppEvent::Command(AppCommand::user_turn(
+        self.app_event_tx.send(AppEvent::Command(
+            AppCommand::user_turn_with_interaction_mode(
                 input,
                 Some(self.session.cwd.clone()),
                 self.user_turn_model(),
                 self.thinking_selection.clone(),
                 /*sandbox*/ None,
                 Some("on-request".to_string()),
-            )));
+                interaction_mode,
+            ),
+        ));
         self.set_status_message("Submitted locally");
     }
 

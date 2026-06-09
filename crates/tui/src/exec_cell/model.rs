@@ -88,7 +88,17 @@ impl ExecCell {
         let Some(call) = self.calls.iter_mut().rev().find(|c| c.call_id == call_id) else {
             return false;
         };
-        call.output = Some(output);
+        match call.output.as_mut() {
+            Some(existing) if output.aggregated_output.is_empty() => {
+                existing.exit_code = output.exit_code;
+                if !output.formatted_output.is_empty() {
+                    existing.formatted_output = output.formatted_output;
+                }
+            }
+            _ => {
+                call.output = Some(output);
+            }
+        }
         call.duration = Some(duration);
         call.start_time = None;
         true

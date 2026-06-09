@@ -32,7 +32,7 @@ impl SlashCommand {
             SlashCommand::Clear => "clear the current transcript",
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Btw => "inject text into the current turn immediately",
-            SlashCommand::Goal => "view and manage the current goal",
+            SlashCommand::Goal => "set or view the goal for a long-running task",
             SlashCommand::Exit => "exit Devo",
         }
     }
@@ -57,7 +57,10 @@ impl SlashCommand {
     }
 
     pub fn supports_inline_args(self) -> bool {
-        matches!(self, SlashCommand::Model | SlashCommand::Btw)
+        matches!(
+            self,
+            SlashCommand::Model | SlashCommand::Btw | SlashCommand::Goal
+        )
     }
 
     pub fn available_during_task(self) -> bool {
@@ -67,7 +70,6 @@ impl SlashCommand {
                 | SlashCommand::Theme
                 | SlashCommand::Compact
                 | SlashCommand::Diff
-                | SlashCommand::Goal
                 | SlashCommand::New
                 | SlashCommand::Resume
         )
@@ -130,6 +132,18 @@ mod tests {
             built_in_slash_commands()
                 .iter()
                 .any(|(name, command)| *name == "mcp" && *command == SlashCommand::Mcp)
+        );
+    }
+
+    #[test]
+    fn goal_slash_command_parses_and_accepts_inline_args_during_tasks() {
+        assert_eq!("goal".parse::<SlashCommand>(), Ok(SlashCommand::Goal));
+        assert!(SlashCommand::Goal.supports_inline_args());
+        assert!(SlashCommand::Goal.available_during_task());
+        assert!(
+            built_in_slash_commands()
+                .iter()
+                .any(|(name, command)| *name == "goal" && *command == SlashCommand::Goal)
         );
     }
 

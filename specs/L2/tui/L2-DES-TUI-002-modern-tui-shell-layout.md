@@ -117,7 +117,7 @@ The following sketch is normative for region order and relative priority. It is 
 
 ┃ Ask Devo
 
-  Build · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
+  BUILD · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
 ```
 
 Required characteristics:
@@ -127,7 +127,7 @@ Required characteristics:
 - The optional pinned plan surface appears only while there is active visible plan state.
 - The active work strip appears only when useful and shows transient live state such as `⠋ Working · ⏱ 12s`.
 - The composer remains above the bottom status line.
-- The bottom status line is reserved for active mode, current model/reasoning, token usage, and context-window pressure.
+- The bottom status line is reserved for the leftmost active input mode label, current model/reasoning, token usage, and context-window pressure.
 - The `┃` glyph in transcript and composer regions is normally a single leading marker for the active prompt line, cell title, or first content line. User-message cells and the bottom input composer are background-band surfaces: when they contain multiple user-entered lines, each content line may repeat `┃`, while top and bottom padding rows keep the shared background without rendering the marker. Diff detail, tool output detail, and assistant wrapped text align under their content column and do not repeat the marker unless they are separate logical cells.
 
 ## Startup Header Visual Rules
@@ -186,7 +186,7 @@ Example shell composition with transcript content:
 
 ┃ Ask Devo
 
-  Build · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
+  BUILD · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
 ```
 
 ## Region Responsibilities

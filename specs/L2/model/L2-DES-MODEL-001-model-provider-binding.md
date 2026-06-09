@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-26
+last_updated: 2026-06-08
 ---
 
 # L2-DES-MODEL-001 — Model Provider Binding
@@ -79,6 +79,7 @@ Required conceptual fields:
 - `provider_name`: user-entered display name used to recognize the provider later.
 - `base_url`: provider API base URL.
 - `credential_ref`: credential id referencing stored credential material in user-scoped `auth.json`, or credential status when projected to clients.
+- `custom_headers`: optional raw provider HTTP header configuration.
 - `availability_status`: optional provider availability or validation status.
 
 `UserProvider` must not contain:
@@ -131,7 +132,7 @@ Persistent model configuration should store references to supported model slugs 
 
 Current-session model and reasoning selection is not itself a `ModelProviderBinding`. A session may select a configured binding and use a session-local reasoning effort without rewriting the binding record. Configuration writes should occur only when a provider, binding, or persisted default selection is created or changed by the relevant workflow.
 
-The TOML schema stores providers under `[providers.<provider_id>]`, invocable bindings under `[model_bindings.<binding_id>]`, and durable default selection under `[defaults]`. Provider records reference credentials by id. Runtime-only `ResolvedModelProfile` values and plaintext credential values are not persisted in `config.toml`.
+The TOML schema stores global provider HTTP settings under `[provider_http]`, providers under `[providers.<provider_id>]`, invocable bindings under `[model_bindings.<binding_id>]`, and durable default selection under `[defaults]`. Provider records reference credentials by id and may contain raw custom HTTP header configuration. Runtime-only `ResolvedModelProfile` values are not persisted in `config.toml`.
 
 The effective provider and binding set is resolved through configuration precedence:
 
@@ -145,7 +146,7 @@ Effective invocable model configuration
 
 When workspace-scoped and user-scoped configuration define overlapping provider or binding records, the effective record is merged field by field. For the same record and same field, the workspace value takes precedence. User fields not mentioned by the workspace record remain effective.
 
-Credential storage details are defined by configuration and privacy design. This L2 model design expects provider records to refer to user-scoped `auth.json` credential ids through `credential_ref` or equivalent credential state, while routine client projections still avoid plaintext API keys by default.
+Credential storage details are defined by configuration and privacy design. This L2 model design expects provider records to refer to user-scoped `auth.json` credential ids through `credential_ref` or equivalent credential state. Raw custom HTTP header configuration is an explicit exception that may contain secret values in `config.toml`, while routine client projections still avoid plaintext API keys and custom header values by default.
 
 ## Resolution
 
@@ -207,5 +208,6 @@ Routine client projections must not include plaintext API keys by default.
 | 1 | 2026-05-25 | Human | Refinement | Clarified that binding reasoning effort is configured default state and session-local reasoning selection does not rewrite binding records by itself. |
 | 1 | 2026-05-25 | Human | Refinement | Linked provider and binding persistence to the concrete `config.toml` schema. |
 | 1 | 2026-05-25 | Human | Refinement | Clarified that provider credentials are stored in companion `auth.json` files, not inline in `config.toml`. |
+| 2 | 2026-06-08 | Human | Refinement | Added global provider HTTP proxy settings and per-provider custom header configuration. |
 | 1 | 2026-05-26 | Human | Refinement | Added binding-level model display name as mutable UI metadata distinct from the canonical model slug and provider API model name. |
 | 2 | 2026-05-27 | Assistant | Correction | Aligned provider and binding persistence with workspace-over-user field-level config merge and user-only `auth.json`; removed binding-local default marker semantics. |

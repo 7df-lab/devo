@@ -13,7 +13,6 @@ use devo_core::ProviderVendorCatalog;
 use devo_core::tools::ToolPlanConfig;
 use devo_core::tools::handlers;
 use devo_mcp::manager::RmcpMcpManager;
-use devo_provider::SingleProviderRouter;
 use devo_util_paths::FileSystemConfigPathResolver;
 
 use crate::ListenTarget;
@@ -118,7 +117,7 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     let db = Arc::new(Database::open(db_path)?);
 
     let registry = Arc::new(registry);
-    let provider_router = Arc::new(SingleProviderRouter::new(provider.provider.clone()));
+    let provider_router = Arc::clone(&provider.provider_router);
     let runtime = ServerRuntime::new(
         resolver.user_config_dir(),
         ServerRuntimeDependencies::new(

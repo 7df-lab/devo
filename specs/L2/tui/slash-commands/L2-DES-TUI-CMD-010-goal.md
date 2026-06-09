@@ -39,7 +39,7 @@ Typing `/goal` without objective text opens the current-goal panel. If no goal e
 
     [Pause] [Complete] [Cancel] [Clear]
 
-  Build · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
+  BUILD · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
 ```
 
 Typing `/goal <objective>` creates and activates a goal directly. The prompt following `/goal` is the objective; pressing Enter begins execution.
@@ -72,7 +72,7 @@ When the composer recognizes `/goal`, the command token uses the theme primary c
 ```text
 ┃ /goal <objective for autonomous work>
 
-  Build · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
+  BUILD · deepseek-v4-pro high  ↑0[cached 0 0%]  ↓0  ▱▱▱▱▱▱▱▱▱▱  0%  0/950k
 ```
 
 ## State And Error Behavior

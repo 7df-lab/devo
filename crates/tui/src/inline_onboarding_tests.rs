@@ -59,6 +59,7 @@ fn deepseek_vendor() -> ProviderVendor {
         name: "Deepseek".to_string(),
         base_url: Some("https://api.deepseek.com".to_string()),
         credential: Some("deepseek_api_key".to_string()),
+        headers: None,
         wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
         enabled: true,
     }

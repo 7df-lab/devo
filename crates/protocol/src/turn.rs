@@ -73,6 +73,14 @@ impl<'de> Deserialize<'de> for InputItem {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionMode {
+    #[default]
+    Build,
+    Plan,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnStartParams {
     pub session_id: SessionId,
@@ -82,6 +90,8 @@ pub struct TurnStartParams {
     pub sandbox: Option<String>,
     pub approval_policy: Option<String>,
     pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub interaction_mode: InteractionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +100,15 @@ pub struct TurnStartResult {
     pub status: TurnStatus,
     pub accepted_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellCommandParams {
+    pub session_id: SessionId,
+    pub command: String,
+    pub cwd: Option<PathBuf>,
+}
+
+pub type ShellCommandResult = TurnStartResult;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnInterruptParams {
@@ -198,6 +217,23 @@ mod tests {
         let json = serde_json::to_string(&metadata).expect("serialize");
         let restored: TurnMetadata = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored, metadata);
+    }
+
+    #[test]
+    fn turn_start_params_default_to_build_interaction_mode() {
+        let json = serde_json::json!({
+            "session_id": SessionId::new(),
+            "input": [{ "type": "text", "text": "hello" }],
+            "model": null,
+            "thinking": null,
+            "sandbox": null,
+            "approval_policy": null,
+            "cwd": null
+        });
+
+        let restored: TurnStartParams = serde_json::from_value(json).expect("deserialize");
+
+        assert_eq!(restored.interaction_mode, InteractionMode::Build);
     }
 
     #[test]

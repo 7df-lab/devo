@@ -93,10 +93,10 @@ impl ServerRuntime {
             let response = match self
                 .deps
                 .provider_router
-                .complete(build_title_generation_request(
-                    request_model.clone(),
-                    &first_user_input,
-                ))
+                .complete(
+                    turn_config.provider_route.clone(),
+                    build_title_generation_request(request_model.clone(), &first_user_input),
+                )
                 .await
             {
                 Ok(response) => response,

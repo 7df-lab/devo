@@ -107,6 +107,8 @@ pub fn resolve_provider_settings_from_config_and_auth(
             model: binding.model_name.clone(),
             base_url: provider_config.base_url.clone(),
             api_key: resolve_provider_api_key(&binding.provider_id, provider_config, auth)?,
+            proxy_url: None,
+            headers: provider_config.headers.clone(),
             model_auto_compact_token_limit: file.model_auto_compact_token_limit,
             model_context_window: file.model_context_window,
             model_thinking_selection: file

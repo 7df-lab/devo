@@ -92,10 +92,10 @@ impl ServerRuntime {
                 .model
                 .as_deref()
                 .unwrap_or(&self.deps.default_model);
-            let request_model = self
+            let turn_config = self
                 .deps
-                .resolve_turn_config(Some(model_slug), /*thinking_selection*/ None)
-                .request_model;
+                .resolve_turn_config(Some(model_slug), /*thinking_selection*/ None);
+            let request_model = turn_config.request_model.clone();
             let max_tokens = self
                 .deps
                 .model_catalog
@@ -104,7 +104,8 @@ impl ServerRuntime {
                 .unwrap_or(4096);
 
             let summarizer = DefaultHistorySummarizer::with_slug(
-                self.deps.provider.clone(),
+                self.deps
+                    .provider_for_route(turn_config.provider_route.clone()),
                 request_model.clone(),
                 max_tokens,
             );

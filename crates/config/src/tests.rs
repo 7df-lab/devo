@@ -18,6 +18,7 @@ use super::OAuthCredentialsStoreMode;
 use super::ProjectConfig;
 use super::ProviderConfigSection;
 use super::ProviderDefaultsConfig;
+use super::ProviderHttpConfig;
 use super::ProviderVendorConfig;
 use super::SummaryModelSelection;
 use super::UpdatesConfig;
@@ -120,6 +121,7 @@ check_interval_hours = 48
             mcp_oauth_credentials_store: Some(OAuthCredentialsStoreMode::default()),
             mcp: super::McpConfig::default(),
             provider: ProviderConfigSection::default(),
+            provider_http: super::ProviderHttpConfig::default(),
             updates: UpdatesConfig {
                 enabled: false,
                 check_on_startup: true,
@@ -217,6 +219,8 @@ fn loader_merges_experimental_config_in_normal_precedence_order() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Trace: L2-DES-APP-005
+/// Verifies: provider HTTP proxy settings and provider header fields follow user/workspace merge precedence.
 #[test]
 fn loader_merges_provider_sections_with_provider_overlay_rules() {
     let root = unique_temp_dir("config-provider-merge");
@@ -228,6 +232,9 @@ fn loader_merges_provider_sections_with_provider_overlay_rules() {
     std::fs::write(
         home.join("config.toml"),
         r#"
+[provider_http]
+proxy_url = "http://user-proxy.example:8080"
+
 [defaults]
 model_binding = "main"
 
@@ -235,6 +242,7 @@ model_binding = "main"
 name = "User Provider"
 base_url = "https://user.example/v1"
 credential = "user_api_key"
+headers = '{"X-User":"yes"}'
 wire_apis = ["openai_responses"]
 
 [model_bindings.main]
@@ -248,6 +256,9 @@ invocation_method = "openai_responses"
     std::fs::write(
         workspace.join(".devo").join("config.toml"),
         r#"
+[provider_http]
+proxy_url = "http://workspace-proxy.example:8080"
+
 [providers.main]
 name = "Project Provider"
 
@@ -264,6 +275,12 @@ invocation_method = "openai_responses"
     let config = loader.load(Some(&workspace)).expect("load config");
 
     assert_eq!(
+        config.provider_http,
+        ProviderHttpConfig {
+            proxy_url: Some("http://workspace-proxy.example:8080".to_string()),
+        }
+    );
+    assert_eq!(
         config.provider,
         ProviderConfigSection {
             defaults: ProviderDefaultsConfig {
@@ -275,6 +292,7 @@ invocation_method = "openai_responses"
                     name: "Project Provider".to_string(),
                     base_url: Some("https://user.example/v1".to_string()),
                     credential: Some("user_api_key".to_string()),
+                    headers: Some(r#"{"X-User":"yes"}"#.to_string()),
                     wire_apis: vec![ProviderWireApi::OpenAIResponses],
                     enabled: true,
                 },
@@ -296,6 +314,8 @@ invocation_method = "openai_responses"
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Trace: L2-DES-APP-005
+/// Verifies: provider upsert persists custom provider header JSON in user config and projections.
 #[test]
 fn provider_upsert_writes_user_config_when_workspace_is_active() {
     let root = unique_temp_dir("provider-upsert-user");
@@ -305,13 +325,14 @@ fn provider_upsert_writes_user_config_when_workspace_is_active() {
     std::fs::create_dir_all(workspace.join(".devo")).expect("workspace config dir");
 
     let mut store = AppConfigStore::load(home.clone(), Some(&workspace)).expect("load store");
-    store
+    let written_provider = store
         .upsert_provider_vendor(
             "openrouter".to_string(),
             ProviderVendor {
                 name: "openrouter".to_string(),
                 base_url: Some("https://openrouter.ai/api/v1".to_string()),
                 credential: None,
+                headers: Some(r#"{"X-Devo":"yes"}"#.to_string()),
                 wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
                 enabled: true,
             },
@@ -332,10 +353,23 @@ fn provider_upsert_writes_user_config_when_workspace_is_active() {
 
     let user_config = std::fs::read_to_string(home.join("config.toml")).expect("user config");
     let workspace_config = workspace.join(".devo").join("config.toml");
+    let document: toml::Value = toml::from_str(&user_config).expect("parse user config");
 
     assert!(user_config.contains("[providers.openrouter]"));
     assert!(user_config.contains("[model_bindings.qwen-openrouter]"));
     assert!(user_config.contains("model_binding = \"qwen-openrouter\""));
+    assert_eq!(
+        document["providers"]["openrouter"]["headers"].as_str(),
+        Some(r#"{"X-Devo":"yes"}"#)
+    );
+    assert_eq!(
+        written_provider.headers,
+        Some(r#"{"X-Devo":"yes"}"#.to_string())
+    );
+    assert_eq!(
+        store.provider_vendors()[0].headers,
+        Some(r#"{"X-Devo":"yes"}"#.to_string())
+    );
     assert!(!workspace_config.exists());
 
     let _ = std::fs::remove_dir_all(root);
@@ -379,6 +413,7 @@ provider = "Deepseek"
                 name: "Deepseek".to_string(),
                 base_url: Some("https://api.deepseek.com".to_string()),
                 credential: Some("deepseek_api_key".to_string()),
+                headers: None,
                 wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
                 enabled: true,
             },

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
+use crate::command_exec::{CommandExecExitedPayload, CommandExecOutputDeltaPayload};
 use crate::parse_command::ParsedCommand;
 use crate::protocol::{ExecCommandSource, FileChange};
 use crate::reference_search::{ReferenceSearchFailedPayload, ReferenceSearchSnapshot};
@@ -262,6 +263,8 @@ pub enum ServerEvent {
     ReferenceSearchUpdated(ReferenceSearchSnapshot),
     ReferenceSearchCompleted(ReferenceSearchSnapshot),
     ReferenceSearchFailed(ReferenceSearchFailedPayload),
+    CommandExecOutputDelta(CommandExecOutputDeltaPayload),
+    CommandExecExited(CommandExecExitedPayload),
 }
 
 impl ServerEvent {
@@ -293,6 +296,8 @@ impl ServerEvent {
             Self::ReferenceSearchUpdated(_)
             | Self::ReferenceSearchCompleted(_)
             | Self::ReferenceSearchFailed(_) => None,
+            Self::CommandExecOutputDelta(payload) => payload.session_id,
+            Self::CommandExecExited(payload) => payload.session_id,
         }
     }
 
@@ -330,6 +335,8 @@ impl ServerEvent {
             Self::ReferenceSearchUpdated(_) => "search/updated",
             Self::ReferenceSearchCompleted(_) => "search/completed",
             Self::ReferenceSearchFailed(_) => "search/failed",
+            Self::CommandExecOutputDelta(_) => "command/exec/outputDelta",
+            Self::CommandExecExited(_) => "command/exec/exited",
         }
     }
 
@@ -344,7 +351,9 @@ impl ServerEvent {
             | Self::SteerAccepted(_)
             | Self::ReferenceSearchUpdated(_)
             | Self::ReferenceSearchCompleted(_)
-            | Self::ReferenceSearchFailed(_) => {}
+            | Self::ReferenceSearchFailed(_)
+            | Self::CommandExecOutputDelta(_)
+            | Self::CommandExecExited(_) => {}
             _ => {}
         }
         self

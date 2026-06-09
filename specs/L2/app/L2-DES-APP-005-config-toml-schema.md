@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-26
+last_updated: 2026-06-08
 ---
 
 # L2-DES-APP-005 - Config TOML And Auth JSON Schema
@@ -76,6 +76,7 @@ Top-level sections:
 
 ```text
 [defaults]
+[provider_http]
 [providers.<provider_id>]
 [model_bindings.<binding_id>]
 [tools.web_search]
@@ -105,11 +106,15 @@ mode = "default"
 theme = "system"
 permission_policy = "default"
 
+[provider_http]
+proxy_url = "http://proxy.corp.com:8080"
+
 [providers.openrouter]
 enabled = true
 name = "OpenRouter"
 base_url = "https://openrouter.ai/api/v1"
 credential = "openrouter_api_key"
+headers = '{"X-Title":"Devo","Authorization":"custom-token"}'
 
 [providers.openai]
 enabled = true
@@ -272,6 +277,20 @@ Conceptual future policy dimensions:
 
 Sandbox policy is enforced by the host around tool execution. It is not a model-visible promise and not a substitute for permission policy, user approval, or tool validation.
 
+## Provider HTTP
+
+`[provider_http]` stores HTTP transport settings shared by model-provider requests.
+
+Optional fields:
+
+- `proxy_url`: proxy URL used by model-provider HTTP requests.
+
+Rules:
+
+- `proxy_url` applies to OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and provider validation requests.
+- `proxy_url` must not change MCP server requests, web fetch or web search tool requests, update checks, or unrelated HTTP clients.
+- A workspace-scoped `proxy_url` replaces the user-scoped `proxy_url` when both are present.
+
 ## Providers
 
 `[providers.<provider_id>]` stores reusable user-defined provider endpoints.
@@ -288,10 +307,19 @@ Optional fields:
 - `availability_status`: last known safe status such as `unknown`, `valid`, `auth_required`, or `unavailable`.
 - `timeout_ms`: provider request timeout.
 - `connect_timeout_ms`: provider connection timeout.
+- `headers`: JSON object encoded as a TOML string. Object keys are HTTP header names and object values must be strings.
 
 Provider ids are stable program-generated identifiers. Changing `name` must not change the provider id.
 
 Provider records must not contain model-specific fields such as `model_name`, `model_slug`, binding `display_name`, `invocation_method`, or reasoning effort.
+
+Custom provider headers:
+
+- `headers` is parsed only as a JSON object string, for example `headers = '{"X-Foo":"bar"}'`.
+- Header names and values must be valid HTTP header names and values.
+- Header values may contain secret material because this is an explicit raw configuration path.
+- Custom headers are applied after provider-owned headers. If a custom header duplicates a provider-owned header such as `Authorization`, `Content-Type`, `x-api-key`, or `anthropic-version`, the custom header value wins.
+- Routine client projections, logs, transcripts, and telemetry must not expose plaintext custom header values by default.
 
 ## Credentials
 
@@ -330,13 +358,13 @@ auth = { credential = "linear_api_key", scheme = "bearer" }
 Rules:
 
 - `auth.json` is the only designed durable storage location for API keys and other credential material.
-- Environment variables, OS keychains, external credential stores, and inline TOML secrets are not part of this design.
+- Environment variables, OS keychains, external credential stores, and inline TOML secrets are not part of this design except for explicit raw custom provider HTTP header values.
 - Routine client projections must show credential status, not plaintext credential values.
-- `config.toml` writes must not insert plaintext credential values.
+- `config.toml` writes must not insert plaintext credential values except when the user explicitly configures raw custom provider HTTP header values.
 - `auth.json` writes must update only the intended credential entries.
-- Errors may name the provider, MCP server, and credential id, but must not print credential values by default.
+- Errors may name the provider, MCP server, credential id, and invalid custom header name, but must not print credential or custom header values by default.
 - Workspace-scoped `auth.json` is not part of the durable credential design. Credential material must remain in user-scoped `auth.json`.
-- Workspace-scoped `config.toml` may reference credential ids from user-scoped `auth.json`, but it must not store plaintext credential material.
+- Workspace-scoped `config.toml` may reference credential ids from user-scoped `auth.json`, and may define explicit raw custom provider HTTP header values, but it must not otherwise store plaintext credential material.
 
 Auth records:
 
@@ -545,7 +573,7 @@ Source validation catches malformed TOML, unsupported schema versions, wrong val
 
 Auth validation catches malformed JSON, unsupported auth schema versions, wrong value types, missing credential values, duplicate credential ids inside the user auth file, and credential kinds unsupported by the referring config field.
 
-Effective validation catches references to missing providers, disabled providers, missing model bindings, missing credentials, invalid supported model slugs, invalid model display names, invalid invocation methods, unsupported reasoning efforts, invalid MCP transport combinations, and unavailable skill roots.
+Effective validation catches references to missing providers, disabled providers, missing model bindings, missing credentials, invalid supported model slugs, invalid model display names, invalid invocation methods, unsupported reasoning efforts, invalid provider HTTP proxy URLs, invalid provider custom header JSON, invalid provider custom header names or values, invalid MCP transport combinations, and unavailable skill roots.
 
 Invalid higher-priority configuration must produce an actionable error instead of silently falling back to lower-priority values for the same setting.
 
@@ -558,7 +586,7 @@ Configuration writes should be schema-aware:
 - Never write placeholder model names, provider ids, invocation methods, or reasoning values after validation failure.
 - Validate the full resulting file before replacing the previous file contents.
 - Use an atomic write strategy in L3/implementation design.
-- Report the target path and setting being changed without exposing plaintext credentials by default.
+- Report the target path and setting being changed without exposing plaintext credentials or custom header values by default.
 
 Auth writes should be schema-aware:
 
@@ -599,3 +627,4 @@ When a setup flow writes both `config.toml` and `auth.json`, the program should 
 | 2 | 2026-05-27 | Human | Refinement | Moved workspace config to `<workspace>/.devo/config.toml`, made `auth.json` user-scoped only, and changed record precedence to field-level merge. |
 | 1 | 2026-05-25 | Assistant | Refinement | Linked persisted `permission_policy` defaults to application safety requirements. |
 | 1 | 2026-05-26 | Human | Refinement | Added explicit model binding `display_name` examples and clarified display-name fallback and identifier rules. |
+| 2 | 2026-06-08 | Human | Refinement | Added global provider HTTP proxy configuration and per-provider raw custom header configuration. |

@@ -8,6 +8,7 @@ pub struct ProviderVendor {
     pub name: String,
     pub base_url: Option<String>,
     pub credential: Option<String>,
+    pub headers: Option<String>,
     pub wire_apis: Vec<ProviderWireApi>,
     pub enabled: bool,
 }

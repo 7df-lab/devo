@@ -1,22 +1,31 @@
 use anyhow::Context;
 use anyhow::Result;
 
+use devo_core::AUTH_CONFIG_FILE_NAME;
 use devo_core::AppConfig;
 use devo_core::LegacyModelProviderConfig;
 use devo_core::ModelCatalog;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderConfigSection;
 use devo_core::ProviderWireApi;
+use devo_core::UserAuthConfigFile;
+use devo_core::read_user_auth_config;
 use devo_core::resolve_model_binding;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::StreamEvent;
 use devo_provider::ModelProviderSDK;
+use devo_provider::MultiProviderRouter;
+use devo_provider::ProviderHttpOptions;
+use devo_provider::ProviderRoute;
+use devo_provider::ProviderRouter;
+use devo_provider::SingleProviderRouter;
 use devo_provider::anthropic::AnthropicProvider;
 use devo_provider::openai::OpenAIProvider;
 use devo_provider::openai::OpenAIResponsesProvider;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::Arc;
 
 const NO_PROVIDER_CONFIGURED_MESSAGE: &str =
     "No provider configured. Run `devo onboard` to complete setup.";
@@ -24,7 +33,9 @@ const NO_PROVIDER_CONFIGURED_MESSAGE: &str =
 /// Resolved provider bootstrap owned by the server runtime.
 pub struct ResolvedServerProvider {
     /// Concrete provider used for model requests.
-    pub provider: std::sync::Arc<dyn ModelProviderSDK>,
+    pub provider: Arc<dyn ModelProviderSDK>,
+    /// Route-aware provider facade used for model requests.
+    pub provider_router: Arc<dyn ProviderRouter>,
     /// Default model slug used when a session or turn does not request one.
     pub default_model: String,
 }
@@ -43,25 +54,39 @@ pub fn load_server_provider(
                 .slug
                 .clone(),
         };
+        let provider: Arc<dyn ModelProviderSDK> = Arc::new(MissingProvider);
         return Ok(ResolvedServerProvider {
-            provider: std::sync::Arc::new(MissingProvider),
+            provider: Arc::clone(&provider),
+            provider_router: Arc::new(SingleProviderRouter::new(provider)),
             default_model,
         });
     }
 
     if app_config.provider.model_providers.is_empty() {
+        let auth = read_user_auth_config(&user_config_dir.join(AUTH_CONFIG_FILE_NAME))?;
         let resolved = app_config.resolve_provider_settings(user_config_dir)?;
         let default_model =
             resolve_model_binding(&app_config.provider, /*requested_model*/ None)
                 .map(|binding| binding.model_slug.clone())
                 .or_else(|| default_model.map(ToOwned::to_owned))
                 .unwrap_or(resolved.model);
-        return build_server_provider(
+        let provider = build_provider_adapter(
             resolved.wire_api,
-            default_model,
             resolved.base_url,
             resolved.api_key,
-        );
+            ProviderHttpOptions::from_raw(resolved.proxy_url, resolved.headers)?,
+        )?;
+        let provider_router = build_multi_provider_router(
+            &app_config.provider,
+            app_config.provider_http.proxy_url.clone(),
+            &auth,
+            Arc::clone(&provider),
+        )?;
+        return Ok(ResolvedServerProvider {
+            provider,
+            provider_router,
+            default_model,
+        });
     }
 
     load_legacy_server_provider(app_config, default_model)
@@ -87,6 +112,34 @@ impl ModelProviderSDK for MissingProvider {
     }
 }
 
+struct UnavailableProvider {
+    message: String,
+}
+
+impl UnavailableProvider {
+    fn new(message: String) -> Self {
+        Self { message }
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProviderSDK for UnavailableProvider {
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        anyhow::bail!("{}", self.message)
+    }
+
+    async fn completion_stream(
+        &self,
+        _request: ModelRequest,
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
+        anyhow::bail!("{}", self.message)
+    }
+
+    fn name(&self) -> &str {
+        "unavailable-provider"
+    }
+}
+
 fn load_legacy_server_provider(
     app_config: &AppConfig,
     default_model: Option<&str>,
@@ -97,6 +150,7 @@ fn load_legacy_server_provider(
         resolved.model,
         resolved.base_url,
         resolved.api_key,
+        ProviderHttpOptions::from_raw(app_config.provider_http.proxy_url.clone(), None)?,
     )
 }
 
@@ -105,39 +159,114 @@ fn build_server_provider(
     model: String,
     base_url: Option<String>,
     api_key: Option<String>,
+    http_options: ProviderHttpOptions,
 ) -> Result<ResolvedServerProvider> {
-    let provider: std::sync::Arc<dyn ModelProviderSDK> = match wire_api {
+    let provider = build_provider_adapter(wire_api, base_url, api_key, http_options)?;
+    Ok(ResolvedServerProvider {
+        provider: Arc::clone(&provider),
+        provider_router: Arc::new(SingleProviderRouter::new(provider)),
+        default_model: model,
+    })
+}
+
+fn build_provider_adapter(
+    wire_api: ProviderWireApi,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    http_options: ProviderHttpOptions,
+) -> Result<Arc<dyn ModelProviderSDK>> {
+    let provider: Arc<dyn ModelProviderSDK> = match wire_api {
         ProviderWireApi::AnthropicMessages => {
             let api_key = api_key.context("anthropic provider requires an API key")?;
             let base_url = base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string());
-            std::sync::Arc::new(AnthropicProvider::new(base_url).with_api_key(api_key))
+            Arc::new(
+                AnthropicProvider::new(base_url)
+                    .with_http_options(http_options)?
+                    .with_api_key(api_key),
+            )
         }
         ProviderWireApi::OpenAIChatCompletions => {
             let base_url = normalize_openai_base_url(
                 &base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
             );
-            let mut provider = OpenAIProvider::new(base_url);
+            let mut provider = OpenAIProvider::new(base_url).with_http_options(http_options)?;
             if let Some(api_key) = api_key {
                 provider = provider.with_api_key(api_key);
             }
-            std::sync::Arc::new(provider)
+            Arc::new(provider)
         }
         ProviderWireApi::OpenAIResponses => {
             let base_url = normalize_openai_base_url(
                 &base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
             );
-            let mut provider = OpenAIResponsesProvider::new(base_url);
+            let mut provider =
+                OpenAIResponsesProvider::new(base_url).with_http_options(http_options)?;
             if let Some(api_key) = api_key {
                 provider = provider.with_api_key(api_key);
             }
-            std::sync::Arc::new(provider)
+            Arc::new(provider)
         }
     };
 
-    Ok(ResolvedServerProvider {
-        provider,
-        default_model: model,
-    })
+    Ok(provider)
+}
+
+fn build_multi_provider_router(
+    provider_config: &ProviderConfigSection,
+    proxy_url: Option<String>,
+    auth: &UserAuthConfigFile,
+    default_provider: Arc<dyn ModelProviderSDK>,
+) -> Result<Arc<dyn ProviderRouter>> {
+    let mut router = MultiProviderRouter::new(default_provider);
+
+    for binding in provider_config
+        .model_bindings
+        .values()
+        .filter(|binding| binding.enabled)
+    {
+        let Some(provider) = provider_config.providers.get(&binding.provider) else {
+            continue;
+        };
+        if !provider.enabled
+            || (!provider.wire_apis.is_empty()
+                && !provider.wire_apis.contains(&binding.invocation_method))
+        {
+            continue;
+        }
+        let provider = match build_provider_route(
+            binding.invocation_method,
+            provider.base_url.clone(),
+            &binding.provider,
+            provider,
+            auth,
+            proxy_url.clone(),
+        ) {
+            Ok(provider) => provider,
+            Err(error) => Arc::new(UnavailableProvider::new(error.to_string())),
+        };
+        router.insert_route(
+            ProviderRoute::binding(binding.provider.clone(), binding.invocation_method),
+            provider,
+        );
+    }
+
+    Ok(Arc::new(router))
+}
+
+fn build_provider_route(
+    wire_api: ProviderWireApi,
+    base_url: Option<String>,
+    provider_id: &str,
+    provider: &devo_core::ProviderVendorConfig,
+    auth: &UserAuthConfigFile,
+    proxy_url: Option<String>,
+) -> Result<Arc<dyn ModelProviderSDK>> {
+    build_provider_adapter(
+        wire_api,
+        base_url,
+        resolve_provider_api_key(provider_id, provider, auth)?,
+        ProviderHttpOptions::from_raw(proxy_url, provider.headers.clone())?,
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -193,7 +322,6 @@ fn resolve_server_provider_settings(
     resolve_legacy_server_provider_settings(file_config, default_model)
 }
 
-#[cfg(test)]
 fn resolve_provider_api_key(
     provider_id: &str,
     provider: &devo_core::ProviderVendorConfig,
@@ -306,6 +434,7 @@ pub(crate) fn normalize_openai_base_url(url: &str) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
+    use devo_core::AppConfig;
     use devo_core::AuthCredentialConfig;
     use devo_core::AuthCredentialKind;
     use devo_core::ModelBindingConfig;
@@ -365,6 +494,52 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "No provider configured. Run `devo onboard` to complete setup."
+        );
+    }
+
+    /// Trace: L2-DES-APP-005, L2-DES-MODEL-001
+    /// Verifies: server provider construction validates provider custom header configuration.
+    #[test]
+    fn load_server_provider_rejects_invalid_custom_headers() {
+        let config = AppConfig {
+            provider: ProviderConfigSection {
+                defaults: ProviderDefaultsConfig {
+                    model_binding: Some("main".to_string()),
+                },
+                providers: BTreeMap::from([(
+                    "openai".to_string(),
+                    ProviderVendorConfig {
+                        name: "OpenAI".to_string(),
+                        headers: Some(r#"{"bad header":"value"}"#.to_string()),
+                        wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
+                        enabled: true,
+                        ..ProviderVendorConfig::default()
+                    },
+                )]),
+                model_bindings: BTreeMap::from([(
+                    "main".to_string(),
+                    ModelBindingConfig {
+                        model_slug: "test-model".to_string(),
+                        provider: "openai".to_string(),
+                        model_name: "test-model".to_string(),
+                        invocation_method: ProviderWireApi::OpenAIChatCompletions,
+                        ..ModelBindingConfig::default()
+                    },
+                )]),
+                ..ProviderConfigSection::default()
+            },
+            ..AppConfig::default()
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let error = match load_server_provider(&config, None, dir.path()) {
+            Ok(_) => panic!("invalid headers should reject provider construction"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "invalid provider custom header name `bad header`"
         );
     }
 

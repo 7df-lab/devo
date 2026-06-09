@@ -24,6 +24,7 @@ use crate::ModelBindingConfig;
 use crate::OAuthCredentialsStoreMode;
 use crate::ProviderConfigError;
 use crate::ProviderConfigSection;
+use crate::ProviderHttpConfig;
 use crate::ResolvedProviderSettings;
 use crate::ServerConfig;
 use crate::SkillsConfig;
@@ -63,6 +64,9 @@ pub struct AppConfig {
     /// Provider, model, and active model defaults.
     #[serde(flatten)]
     pub provider: ProviderConfigSection,
+    /// HTTP transport settings shared by model-provider requests.
+    #[serde(default, skip_serializing_if = "ProviderHttpConfig::is_empty")]
+    pub provider_http: ProviderHttpConfig,
     /// Startup update-check defaults.
     pub updates: UpdatesConfig,
     /// Marker names used to discover the project root for instruction discovery.
@@ -146,6 +150,7 @@ impl Default for AppConfig {
             mcp_oauth_credentials_store: Some(OAuthCredentialsStoreMode::default()),
             mcp: McpConfig::default(),
             provider: ProviderConfigSection::default(),
+            provider_http: ProviderHttpConfig::default(),
             updates: UpdatesConfig {
                 enabled: true,
                 check_on_startup: true,
@@ -249,6 +254,10 @@ impl AppConfigStore {
             .as_deref()
             .and_then(non_empty_string);
         entry.credential = credential_id;
+        entry.headers = provider_vendor
+            .headers
+            .as_deref()
+            .and_then(non_empty_string);
         entry.wire_apis = provider_vendor.wire_apis.clone();
         entry.enabled = provider_vendor.enabled;
 
@@ -396,7 +405,9 @@ impl AppConfig {
         user_config_dir: &Path,
     ) -> Result<ResolvedProviderSettings, ProviderConfigError> {
         let auth = read_user_auth_config(&user_config_dir.join(AUTH_CONFIG_FILE_NAME))?;
-        resolve_provider_settings_from_config_and_auth(&self.provider, &auth)
+        let mut resolved = resolve_provider_settings_from_config_and_auth(&self.provider, &auth)?;
+        resolved.proxy_url = self.provider_http.proxy_url.clone();
+        Ok(resolved)
     }
 
     /// Returns true when the merged config contains any provider-era setup.

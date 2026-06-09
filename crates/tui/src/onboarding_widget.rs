@@ -40,6 +40,8 @@ use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::popup_consts::MAX_POPUP_ROWS;
 use crate::bottom_pane::scroll_state::ScrollState;
 use crate::exec_cell::spinner;
+use crate::onboarding_viewport::ViewportAnchor;
+use crate::onboarding_viewport::render_lines_with_anchor;
 use crate::render::renderable::Renderable;
 use crate::tui::frame_requester::FrameRequester;
 
@@ -1644,8 +1646,9 @@ impl OnboardingWidget {
     fn render_inline_setup_fields(
         lines: &mut Vec<Line<'static>>,
         params: &InlineSetupRenderParams,
-    ) {
-        Self::render_inline_field(
+    ) -> Option<ViewportAnchor> {
+        let mut anchor = None;
+        let field_anchor = Self::render_inline_field(
             lines,
             params,
             InlineField::ProviderName,
@@ -1654,7 +1657,10 @@ impl OnboardingWidget {
             params.provider_name,
             false,
         );
-        Self::render_inline_field(
+        if field_anchor.is_some() {
+            anchor = field_anchor;
+        }
+        let field_anchor = Self::render_inline_field(
             lines,
             params,
             InlineField::BaseUrl,
@@ -1663,7 +1669,10 @@ impl OnboardingWidget {
             params.base_url,
             false,
         );
-        Self::render_inline_field(
+        if field_anchor.is_some() {
+            anchor = field_anchor;
+        }
+        let field_anchor = Self::render_inline_field(
             lines,
             params,
             InlineField::ApiKey,
@@ -1672,7 +1681,10 @@ impl OnboardingWidget {
             params.api_key,
             true,
         );
-        Self::render_inline_field(
+        if field_anchor.is_some() {
+            anchor = field_anchor;
+        }
+        let field_anchor = Self::render_inline_field(
             lines,
             params,
             InlineField::ModelName,
@@ -1681,7 +1693,10 @@ impl OnboardingWidget {
             params.model_name,
             false,
         );
-        Self::render_inline_field(
+        if field_anchor.is_some() {
+            anchor = field_anchor;
+        }
+        let field_anchor = Self::render_inline_field(
             lines,
             params,
             InlineField::DisplayName,
@@ -1690,6 +1705,10 @@ impl OnboardingWidget {
             params.display_name,
             false,
         );
+        if field_anchor.is_some() {
+            anchor = field_anchor;
+        }
+        anchor
     }
 
     fn render_inline_setup(params: &InlineSetupRenderParams, area: Rect, buf: &mut Buffer) {
@@ -1701,7 +1720,7 @@ impl OnboardingWidget {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         Self::render_inline_setup_header(&mut lines, params.model);
-        Self::render_inline_setup_fields(&mut lines, params);
+        let anchor = Self::render_inline_setup_fields(&mut lines, params);
         Self::render_workflow_step(
             &mut lines,
             "Invocation Method",
@@ -1728,9 +1747,7 @@ impl OnboardingWidget {
 
         Self::render_footer(&mut lines, "Enter next field", "Esc back");
 
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .render(content_area, buf);
+        render_lines_with_anchor(lines, anchor, content_area, buf);
     }
 
     fn render_inline_field(
@@ -1741,7 +1758,8 @@ impl OnboardingWidget {
         hint: &str,
         value: &str,
         secret: bool,
-    ) {
+    ) -> Option<ViewportAnchor> {
+        let start = lines.len();
         let active_index = params
             .active_field
             .map(Self::inline_field_index)
@@ -1792,6 +1810,14 @@ impl OnboardingWidget {
             Span::styled(hint.to_string(), Style::default().dim()),
         ]));
         lines.push(Line::from(vec![Span::styled("|", rail_style)]));
+        if is_active {
+            Some(ViewportAnchor {
+                start,
+                end: start.saturating_add(2),
+            })
+        } else {
+            None
+        }
     }
 
     fn render_workflow_step(
@@ -1879,7 +1905,8 @@ impl OnboardingWidget {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         Self::render_inline_setup_header(&mut lines, params.model);
-        Self::render_inline_setup_fields(&mut lines, params);
+        let _ = Self::render_inline_setup_fields(&mut lines, params);
+        let active_step_start = lines.len();
         Self::render_workflow_step(
             &mut lines,
             "Invocation Method",
@@ -1890,6 +1917,10 @@ impl OnboardingWidget {
                 .unwrap_or("[open popup]"),
             WorkflowStepState::Active,
         );
+        let mut anchor = ViewportAnchor {
+            start: active_step_start,
+            end: lines.len(),
+        };
         for (idx, item) in items.iter().enumerate() {
             Self::render_inline_popup_option(
                 &mut lines,
@@ -1897,6 +1928,9 @@ impl OnboardingWidget {
                 &item.description,
                 idx == selected_idx,
             );
+            if idx == selected_idx {
+                anchor.end = lines.len();
+            }
         }
         if params.supports_reasoning {
             Self::render_workflow_step(
@@ -1916,9 +1950,7 @@ impl OnboardingWidget {
         );
         Self::render_footer(&mut lines, "Enter select", "Esc back");
 
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .render(content_area, buf);
+        render_lines_with_anchor(lines, Some(anchor), content_area, buf);
     }
 
     fn render_reasoning_effort_inline(
@@ -1936,7 +1968,7 @@ impl OnboardingWidget {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         Self::render_inline_setup_header(&mut lines, params.model);
-        Self::render_inline_setup_fields(&mut lines, params);
+        let _ = Self::render_inline_setup_fields(&mut lines, params);
         Self::render_workflow_step(
             &mut lines,
             "Invocation Method",
@@ -1944,6 +1976,7 @@ impl OnboardingWidget {
             &Self::invocation_method_label(invocation_method),
             WorkflowStepState::Completed,
         );
+        let active_step_start = lines.len();
         Self::render_workflow_step(
             &mut lines,
             "Reason Effort",
@@ -1954,6 +1987,10 @@ impl OnboardingWidget {
                 .unwrap_or("[open popup]"),
             WorkflowStepState::Active,
         );
+        let mut anchor = ViewportAnchor {
+            start: active_step_start,
+            end: lines.len(),
+        };
         for (idx, item) in items.iter().enumerate() {
             Self::render_inline_popup_option(
                 &mut lines,
@@ -1961,6 +1998,9 @@ impl OnboardingWidget {
                 &item.description,
                 idx == selected_idx,
             );
+            if idx == selected_idx {
+                anchor.end = lines.len();
+            }
         }
         Self::render_workflow_step(
             &mut lines,
@@ -1971,9 +2011,7 @@ impl OnboardingWidget {
         );
         Self::render_footer(&mut lines, "Enter select", "Esc back");
 
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .render(content_area, buf);
+        render_lines_with_anchor(lines, Some(anchor), content_area, buf);
     }
 
     fn input_with_cursor(input: &str, cursor_pos: usize) -> String {

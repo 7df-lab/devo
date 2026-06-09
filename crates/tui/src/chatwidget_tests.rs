@@ -18,6 +18,9 @@ use devo_protocol::SessionId;
 use devo_protocol::ThinkingCapability;
 use devo_protocol::TurnId;
 use pretty_assertions::assert_eq;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::text::Line;
 use tokio::sync::mpsc;
 
@@ -111,10 +114,16 @@ fn onboarding_widget_with_available_model(
     (widget, app_event_rx)
 }
 
-fn rendered_rows(widget: &ChatWidget, width: u16, height: u16) -> Vec<String> {
-    let area = ratatui::layout::Rect::new(0, 0, width, height);
-    let mut buf = ratatui::buffer::Buffer::empty(area);
+fn rendered_buffer(widget: &ChatWidget, width: u16, height: u16) -> Buffer {
+    let area = Rect::new(0, 0, width, height);
+    let mut buf = Buffer::empty(area);
     widget.render(area, &mut buf);
+    buf
+}
+
+fn rendered_rows(widget: &ChatWidget, width: u16, height: u16) -> Vec<String> {
+    let buf = rendered_buffer(widget, width, height);
+    let area = buf.area;
     (0..area.height)
         .map(|row| {
             (0..area.width)
@@ -990,6 +999,247 @@ fn submitted_prompt_requests_on_request_approval_policy() {
     assert_eq!(approval_policy, Some("on-request".to_string()));
 }
 
+/// Trace: L2-DES-TUI-003
+/// Verifies: Shift+Tab cycles from Build to Plan and marks submitted turns as Plan mode.
+#[test]
+fn shift_tab_plan_submission_marks_user_turn_plan_mode() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let cwd = PathBuf::from(".");
+    let (mut widget, mut app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    widget.handle_paste("plan this".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let AppEvent::Command(AppCommand::UserTurn {
+        interaction_mode, ..
+    }) = app_event_rx.try_recv().expect("user turn event")
+    else {
+        panic!("expected user turn command");
+    };
+    assert_eq!(interaction_mode, devo_protocol::InteractionMode::Plan);
+}
+
+fn status_row_starting_with(rows: &[String], mode: &str) -> String {
+    rows.iter()
+        .find(|row| row.trim_start().starts_with(mode))
+        .unwrap_or_else(|| panic!("missing {mode} status row in:\n{}", rows.join("\n")))
+        .clone()
+}
+
+fn composer_marker_color(widget: &ChatWidget) -> Color {
+    let buf = rendered_buffer(widget, 100, 12);
+    let area = buf.area;
+
+    for row in 0..area.height {
+        let row_text = (0..area.width)
+            .map(|col| buf[(col, row)].symbol())
+            .collect::<String>();
+        if !row_text.contains("Ask Devo") {
+            continue;
+        }
+
+        for col in 0..area.width {
+            let cell = &buf[(col, row)];
+            if cell.symbol() == "┃" {
+                return cell.fg;
+            }
+        }
+    }
+
+    panic!("missing composer marker in rendered buffer")
+}
+
+/// Trace: L2-DES-TUI-003
+/// Verifies: Mode labels render as the first bottom status-line field.
+#[test]
+fn mode_label_renders_at_left_of_status_line() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    let rows = rendered_rows(&widget, 100, 12);
+    let build_row = status_row_starting_with(&rows, "BUILD");
+    assert!(build_row.trim_start().starts_with("BUILD ·"));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    let rows = rendered_rows(&widget, 100, 12);
+    let plan_row = status_row_starting_with(&rows, "PLAN");
+    assert!(plan_row.trim_start().starts_with("PLAN ·"));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    let rows = rendered_rows(&widget, 100, 12);
+    let build_row = status_row_starting_with(&rows, "BUILD");
+    assert!(build_row.trim_start().starts_with("BUILD ·"));
+    assert!(
+        rows.iter()
+            .all(|row| !row.trim_start().starts_with("SHELL")),
+        "Shift+Tab should not enter Shell mode:\n{}",
+        rows.join("\n")
+    );
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+    let rows = rendered_rows(&widget, 100, 12);
+    let shell_row = status_row_starting_with(&rows, "SHELL");
+    assert!(shell_row.trim_start().starts_with("SHELL ·"));
+}
+
+/// Trace: L2-DES-TUI-003
+/// Verifies: Composer prompt marker color follows the active input mode.
+#[test]
+fn composer_marker_uses_active_mode_color() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    assert_eq!(composer_marker_color(&widget), Color::Cyan);
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(composer_marker_color(&widget), Color::Magenta);
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(composer_marker_color(&widget), Color::Cyan);
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+    assert_eq!(composer_marker_color(&widget), Color::Rgb(245, 142, 53));
+}
+
+/// Trace: L2-DES-TUI-003
+/// Verifies: Bare bang enters Shell mode and submits composer text as a shell command.
+#[test]
+fn bare_bang_enters_shell_mode_and_submits_shell_command() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+    widget.handle_paste("pwd".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app_event_rx.try_recv().expect("shell command event"),
+        AppEvent::Command(AppCommand::SubmitShellInput {
+            command: "pwd".to_string(),
+        })
+    );
+}
+
+/// Trace: L2-DES-TUI-003
+/// Verifies: `!cmd` submits a one-shot shell command and returns to Build mode.
+#[test]
+fn bang_command_from_build_submits_one_shot_shell_command() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_paste("!pwd".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app_event_rx.try_recv().expect("shell command event"),
+        AppEvent::Command(AppCommand::ExecuteShellCommand {
+            command: "pwd".to_string(),
+        })
+    );
+
+    widget.handle_paste("next task".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let AppEvent::Command(AppCommand::UserTurn {
+        input,
+        interaction_mode,
+        ..
+    }) = app_event_rx.try_recv().expect("user turn event")
+    else {
+        panic!("expected user turn command");
+    };
+    assert_eq!(
+        input,
+        vec![InputItem::Text {
+            text: "next task".to_string()
+        }]
+    );
+    assert_eq!(interaction_mode, devo_protocol::InteractionMode::Build);
+}
+
+/// Trace: L2-DES-TUI-003
+/// Verifies: `\!` escapes a leading bang and submits normal chat.
+#[test]
+fn escaped_bang_prefix_submits_normal_chat() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_paste("\\!important".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let AppEvent::Command(AppCommand::UserTurn {
+        input,
+        interaction_mode,
+        ..
+    }) = app_event_rx.try_recv().expect("user turn event")
+    else {
+        panic!("expected user turn command");
+    };
+    assert_eq!(
+        input,
+        vec![InputItem::Text {
+            text: "!important".to_string()
+        }]
+    );
+    assert_eq!(interaction_mode, devo_protocol::InteractionMode::Build);
+}
+
+/// Trace: L2-DES-TUI-003
+/// Verifies: Leading whitespace before `!` does not trigger Shell mode.
+#[test]
+fn leading_space_before_bang_submits_normal_chat() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_paste(" !pwd".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let AppEvent::Command(AppCommand::UserTurn {
+        input,
+        interaction_mode,
+        ..
+    }) = app_event_rx.try_recv().expect("user turn event")
+    else {
+        panic!("expected user turn command");
+    };
+    assert_eq!(
+        input,
+        vec![InputItem::Text {
+            text: "!pwd".to_string()
+        }]
+    );
+    assert_eq!(interaction_mode, devo_protocol::InteractionMode::Build);
+}
+
 #[test]
 fn permissions_command_opens_bottom_pane_picker_and_updates_default() {
     let model = Model {
@@ -1135,6 +1385,57 @@ fn trailing_space_exit_slash_command_exits() {
 }
 
 #[test]
+fn goal_slash_command_emits_set_goal_objective() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_paste("/goal improve benchmark coverage".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app_event_rx.try_recv().expect("goal command event"),
+        AppEvent::Command(AppCommand::SetGoalObjective {
+            objective: "improve benchmark coverage".to_string(),
+            mode: crate::app_command::GoalObjectiveMode::ConfirmIfExists,
+        })
+    );
+}
+
+#[test]
+fn goal_control_slash_commands_emit_goal_app_commands() {
+    fn event_for_slash(input: &str) -> AppEvent {
+        let model = Model {
+            slug: "test-model".to_string(),
+            display_name: "Test Model".to_string(),
+            ..Model::default()
+        };
+        let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+        widget.handle_paste(input.to_string());
+        widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app_event_rx.try_recv().expect("goal command event")
+    }
+
+    assert_eq!(
+        event_for_slash("/goal"),
+        AppEvent::Command(AppCommand::ShowGoal)
+    );
+    assert_eq!(
+        event_for_slash("/goal pause"),
+        AppEvent::Command(AppCommand::SetGoalStatus {
+            status: devo_protocol::ThreadGoalStatus::Paused,
+        })
+    );
+    assert_eq!(
+        event_for_slash("/goal clear"),
+        AppEvent::Command(AppCommand::ClearGoal)
+    );
+}
+
+#[test]
 fn busy_widget_blocks_model_change_with_transcript_message() {
     let model = Model {
         slug: "test-model".to_string(),
@@ -1272,6 +1573,7 @@ fn submit_text_emits_user_turn_with_model_and_thinking() {
             thinking: Some("disabled".to_string()),
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
+            interaction_mode: devo_protocol::InteractionMode::Build,
         })
     );
 }
@@ -1305,6 +1607,7 @@ fn typed_character_submits_after_paste_burst_flush() {
             thinking: None,
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
+            interaction_mode: devo_protocol::InteractionMode::Build,
         })
     );
 }
@@ -1413,6 +1716,7 @@ fn key_release_does_not_duplicate_text_input() {
             thinking: None,
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
+            interaction_mode: devo_protocol::InteractionMode::Build,
         })
     );
 }
@@ -1853,6 +2157,7 @@ fn onboarding_validation_succeeded_waits_for_provider_upsert() {
             name: "Deepseek".to_string(),
             base_url: Some("https://api.deepseek.com".to_string()),
             credential: Some("deepseek_api_key".to_string()),
+            headers: None,
             wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
             enabled: true,
         }],
@@ -1875,6 +2180,7 @@ fn onboarding_validation_succeeded_waits_for_provider_upsert() {
             name: "Deepseek".to_string(),
             base_url: Some("https://api.deepseek.com".to_string()),
             credential: Some("deepseek_api_key".to_string()),
+            headers: None,
             wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
             enabled: true,
         },
@@ -2421,6 +2727,184 @@ fn completed_turn_summary_keeps_duration_for_text_turns() {
     assert!(committed.contains("Test Model"));
     assert!(committed.contains("4m17s"));
     assert!(!committed.contains("257s"));
+}
+
+#[test]
+fn user_shell_command_renders_direct_output_and_shell_summary() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "deepseek-v4-flash".to_string(),
+        display_name: "DeepSeek V4 Flash".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let _ = widget.drain_scrollback_lines(100);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::CommandExecutionStarted {
+        tool_use_id: "user-shell-1".to_string(),
+        command: "ls".to_string(),
+        source: devo_protocol::protocol::ExecCommandSource::UserShell,
+        command_actions: vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
+            cmd: "ls".to_string(),
+            path: None,
+        }],
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolOutputDelta {
+        tool_use_id: "user-shell-1".to_string(),
+        delta: "Cargo.toml
+crates
+"
+        .to_string(),
+    });
+
+    let live = rendered_rows(&widget, 100, 16).join(
+        "
+",
+    );
+    assert!(
+        live.contains("Cargo.toml"),
+        "expected live user shell output:
+{live}"
+    );
+    assert!(
+        !live.contains("Explored") && !live.contains("List ls"),
+        "user shell list command must not render as an explored agent group:
+{live}"
+    );
+    assert!(
+        !live.contains("Ran ls") && !live.contains("You ran ls"),
+        "user shell command should not use agent command wording:
+{live}"
+    );
+    assert!(
+        live.contains("▌ $ ls"),
+        "user shell command should render the prompt-style header:
+{live}"
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "user-shell-1".to_string(),
+        title: "ls".to_string(),
+        preview: "Cargo.toml
+crates
+"
+        .to_string(),
+        is_error: false,
+        truncated: false,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ShellCommandFinished {
+        exit_code: Some(0),
+    });
+
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join(
+        "
+",
+    );
+    assert!(
+        history.contains("Cargo.toml"),
+        "expected committed shell output:
+{history}"
+    );
+    assert!(
+        history.contains("▣ Shell"),
+        "shell command turn summary should use Shell label:
+{history}"
+    );
+    assert!(
+        !history.contains("▣ DeepSeek V4 Flash"),
+        "shell command turn summary should not use model display name:
+{history}"
+    );
+    assert!(
+        !history.contains("Explored") && !history.contains("List ls"),
+        "committed user shell command must not render as explored agent group:
+{history}"
+    );
+    assert!(
+        history.contains("▌ $ ls"),
+        "committed user shell command should render the prompt-style header:
+{history}"
+    );
+}
+
+#[test]
+fn two_shell_commands_render_as_separate_prompt_cells() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "deepseek-v4-flash".to_string(),
+        display_name: "DeepSeek V4 Flash".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let _ = widget.drain_scrollback_lines(100);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::CommandExecutionStarted {
+        tool_use_id: "user-shell-1".to_string(),
+        command: "pwd".to_string(),
+        source: devo_protocol::protocol::ExecCommandSource::UserShell,
+        command_actions: Vec::new(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolOutputDelta {
+        tool_use_id: "user-shell-1".to_string(),
+        delta: "/tmp/project\n".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "user-shell-1".to_string(),
+        title: "Shell".to_string(),
+        preview: "/tmp/project\n".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ShellCommandFinished {
+        exit_code: Some(0),
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::CommandExecutionStarted {
+        tool_use_id: "user-shell-2".to_string(),
+        command: "whoami".to_string(),
+        source: devo_protocol::protocol::ExecCommandSource::UserShell,
+        command_actions: Vec::new(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolOutputDelta {
+        tool_use_id: "user-shell-2".to_string(),
+        delta: "tsiao\n".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "user-shell-2".to_string(),
+        title: "Shell".to_string(),
+        preview: "tsiao\n".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ShellCommandFinished {
+        exit_code: Some(0),
+    });
+
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join(
+        "
+",
+    );
+    assert!(
+        history.contains("▌ $ pwd") && history.contains("▌ $ whoami"),
+        "expected two prompt-style shell command headers:
+{history}"
+    );
+    assert!(
+        history.contains("/tmp/project") && history.contains("tsiao"),
+        "expected output from both shell commands:
+{history}"
+    );
+    assert_eq!(
+        history.matches("▌ $ ").count(),
+        2,
+        "shell commands should render as separate command cells:
+{history}"
+    );
+    assert!(
+        !history.contains("Explored") && !history.contains("List pwd"),
+        "shell commands must not render as explored agent groups:
+{history}"
+    );
 }
 
 #[test]
@@ -4138,6 +4622,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
             thinking: Some("high".to_string()),
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
+            interaction_mode: devo_protocol::InteractionMode::Build,
         })
     );
 }

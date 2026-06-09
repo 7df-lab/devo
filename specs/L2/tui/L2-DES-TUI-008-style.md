@@ -119,9 +119,9 @@ surface:
   popupBorder: "#4e4e4e"
 
 mode:
-  build: "#d75f00"
-  plan: "#afafff"
-  shell: "#5f8787"
+  build: "#5fafd7"
+  plan: "#af87ff"
+  shell: "#ff875f"
 
 tool:
   name: "#d7875f"
@@ -192,9 +192,9 @@ surface:
   popupBorder: "#c8c8c8"
 
 mode:
-  build: "#d75f00"
-  plan: "#5b5fc7"
-  shell: "#00695c"
+  build: "#0057a8"
+  plan: "#7b1fa2"
+  shell: "#e65100"
 
 tool:
   name: "#9a4f00"
@@ -341,9 +341,11 @@ Rules:
 - Background uses `surface.inputBand`.
 - Empty hint `Ask Devo` uses `text.muted`.
 - User input uses `text.primary`.
+- Prompt marker `┃` uses the active input mode color: `mode.build`, `mode.plan`, or `mode.shell`.
 - Matched slash command token uses `core.primary`.
 - Slash command parameter hint uses `text.muted`.
 - Build, Plan, and Shell status labels use `mode.build`, `mode.plan`, and `mode.shell`.
+- The uppercase status label is the first visible bottom status-line field.
 
 ### Assistant Cells
 
@@ -476,7 +478,7 @@ Rules:
 
 ┃ Ask Devo
 
-  Build · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
+  BUILD · deepseek-v4-pro high  ↑420[cached 300 71%]  ↓12  ▰▰▱▱▱▱▱▱▱▱  20%  190k/950k
 ```
 
 ## Traceability
@@ -509,3 +511,4 @@ Rules:
 | 2 | 2026-05-26 | Assistant | Minor | Added a direct Plan cell style example and linked detailed Plan behavior back to `L2-DES-TUI-004`. |
 | 3 | 2026-05-26 | Human | Refinement | Defined navigable-list marker semantics: `>` for focused row and `●` for currently enabled option. |
 | 4 | 2026-05-27 | Human | Refinement | Added the `⏱` symbol before elapsed time in live active-work indicators. |
+| 4 | 2026-06-08 | Assistant | Refinement | Aligned mode label colors with Build blue, Plan purple, and Shell orange, moved the mode label to the first status-line field, and made the bottom composer marker follow the active mode color. |

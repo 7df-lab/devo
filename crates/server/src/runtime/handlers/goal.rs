@@ -3,13 +3,17 @@
 //! Implements L3-BEH-SERVER-004 client protocol surface.
 #![allow(dead_code)]
 
+use devo_protocol::GoalCreateParams;
+use devo_protocol::GoalSetParams;
 use devo_protocol::SessionId;
+use devo_protocol::ThreadGoalStatus;
+use devo_protocol::validate_thread_goal_objective;
+use devo_protocol::validate_thread_goal_token_budget;
 use serde::{Deserialize, Serialize};
 
-use crate::goal::{
-    CreateGoalParams, Goal, GoalAction, GoalBudget, GoalError, GoalId, GoalMutation, GoalStatus,
-    GoalUsage,
-};
+use crate::goal::{Goal, GoalAction, GoalError, GoalMutation, GoalStatus};
+#[cfg(test)]
+use crate::goal::{GoalBudget, GoalId, GoalUsage};
 
 // ── Goal State Store (in-memory placeholder) ───────────────────────
 
@@ -28,32 +32,55 @@ impl GoalStore {
         self.active_goal.as_ref()
     }
 
-    pub fn create(&mut self, params: CreateGoalParams) -> Result<Goal, GoalError> {
-        if self.active_goal.is_some() {
+    pub fn create(&mut self, params: GoalCreateParams) -> Result<Goal, GoalError> {
+        if self.active_goal.is_some() && !params.replace_existing {
             return Err(GoalError::AlreadyActive);
         }
-        let goal = Goal {
-            goal_id: GoalId::new(),
-            session_id: params.session_id,
-            prompt: params.prompt,
-            description: params.description,
-            status: GoalStatus::Active,
-            created_turn_id: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            budget: GoalBudget {
-                max_turns: params.max_iterations,
-                max_tokens: params.max_tokens,
-                max_duration_seconds: params.max_duration_seconds,
-            },
-            usage: GoalUsage::default(),
-            progress_summary: None,
-            blocker_summary: None,
-            verification_summary: None,
-        };
+        let goal = Goal::from_create_params(params)?;
         let result = goal.clone();
         self.active_goal = Some(goal);
         Ok(result)
+    }
+
+    pub fn set(&mut self, params: GoalSetParams) -> Result<Goal, GoalError> {
+        validate_thread_goal_token_budget(params.token_budget)
+            .map_err(GoalError::InvalidObjective)?;
+
+        if let Some(objective) = params.objective.as_deref() {
+            let objective = objective.trim();
+            validate_thread_goal_objective(objective).map_err(GoalError::InvalidObjective)?;
+
+            if let Some(goal) = self.active_goal.as_mut() {
+                goal.prompt = objective.to_string();
+                apply_goal_update(goal, params.status, params.token_budget);
+                goal.updated_at = chrono::Utc::now();
+                return Ok(goal.clone());
+            }
+
+            let mut goal = Goal::from_create_params(GoalCreateParams {
+                session_id: params.session_id,
+                objective: objective.to_string(),
+                token_budget: params.token_budget,
+                replace_existing: false,
+            })?;
+            if let Some(status) = params.status {
+                goal.status = GoalStatus::from_thread_goal_status(status);
+                apply_goal_budget_limit(&mut goal);
+            }
+            let result = goal.clone();
+            self.active_goal = Some(goal);
+            return Ok(result);
+        }
+
+        let Some(goal) = self.active_goal.as_mut() else {
+            return Err(GoalError::NotFound("current".to_string()));
+        };
+        if params.status.is_none() && params.token_budget.is_none() {
+            return Err(GoalError::InvalidTransition);
+        }
+        apply_goal_update(goal, params.status, params.token_budget);
+        goal.updated_at = chrono::Utc::now();
+        Ok(goal.clone())
     }
 
     pub fn mutate(&mut self, mutation: GoalMutation) -> Result<Goal, GoalError> {
@@ -114,7 +141,8 @@ impl GoalStore {
                 goal.status = GoalStatus::Canceled;
             }
             GoalAction::Clear => {
-                return Err(GoalError::NotFound("cleared".into()));
+                self.active_goal = None;
+                return Ok(goal);
             }
         }
         goal.updated_at = chrono::Utc::now();
@@ -122,29 +150,46 @@ impl GoalStore {
         self.active_goal = Some(goal);
         Ok(result)
     }
+
+    pub fn set_status(&mut self, status: ThreadGoalStatus) -> Result<Goal, GoalError> {
+        let Some(goal) = self.active_goal.as_mut() else {
+            return Err(GoalError::NotFound("current".to_string()));
+        };
+        if goal.status.is_terminal() && status != ThreadGoalStatus::Active {
+            return Err(GoalError::InvalidTransition);
+        }
+        goal.status = GoalStatus::from_thread_goal_status(status);
+        goal.updated_at = chrono::Utc::now();
+        Ok(goal.clone())
+    }
+
+    pub fn clear(&mut self) -> bool {
+        self.active_goal.take().is_some()
+    }
+}
+
+fn apply_goal_update(goal: &mut Goal, status: Option<ThreadGoalStatus>, token_budget: Option<i64>) {
+    if let Some(token_budget) = token_budget {
+        goal.budget.max_tokens = Some(token_budget);
+    }
+    if let Some(status) = status {
+        goal.status = GoalStatus::from_thread_goal_status(status);
+    }
+    apply_goal_budget_limit(goal);
+}
+
+fn apply_goal_budget_limit(goal: &mut Goal) {
+    if goal.status == GoalStatus::Active
+        && goal
+            .budget
+            .max_tokens
+            .is_some_and(|budget| goal.usage.tokens_used >= budget)
+    {
+        goal.status = GoalStatus::BudgetLimited;
+    }
 }
 
 // ── Handler Params / Results ───────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GoalCreateParams {
-    pub session_id: SessionId,
-    pub prompt: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub max_iterations: Option<u32>,
-    #[serde(default)]
-    pub max_tokens: Option<i64>,
-    #[serde(default)]
-    pub max_duration_seconds: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GoalCreateResult {
-    pub goal_id: String,
-    pub status: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalPauseParams {
@@ -217,22 +262,21 @@ impl From<&Goal> for GoalProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
-    fn make_params() -> CreateGoalParams {
-        CreateGoalParams {
+    fn make_params() -> GoalCreateParams {
+        GoalCreateParams {
             session_id: SessionId::new(),
-            prompt: "Refactor auth".into(),
-            description: Some("Make testable".into()),
-            max_iterations: Some(10),
-            max_tokens: Some(100000),
-            max_duration_seconds: None,
+            objective: "Refactor auth".into(),
+            token_budget: Some(100_000),
+            replace_existing: false,
         }
     }
 
     #[test]
     fn goal_create_and_get() {
         let mut store = GoalStore::new();
-        let params = CreateGoalParams {
+        let params = GoalCreateParams {
             session_id: SessionId::new(),
             ..make_params()
         };
@@ -244,7 +288,7 @@ mod tests {
     #[test]
     fn goal_pause_and_resume() {
         let mut store = GoalStore::new();
-        let params = CreateGoalParams {
+        let params = GoalCreateParams {
             session_id: SessionId::new(),
             ..make_params()
         };
@@ -271,7 +315,7 @@ mod tests {
     #[test]
     fn goal_complete_is_terminal() {
         let mut store = GoalStore::new();
-        let params = CreateGoalParams {
+        let params = GoalCreateParams {
             session_id: SessionId::new(),
             ..make_params()
         };
@@ -297,7 +341,7 @@ mod tests {
     #[test]
     fn goal_cancel() {
         let mut store = GoalStore::new();
-        let params = CreateGoalParams {
+        let params = GoalCreateParams {
             session_id: SessionId::new(),
             ..make_params()
         };
@@ -316,40 +360,68 @@ mod tests {
     #[test]
     fn goal_clear_removes() {
         let mut store = GoalStore::new();
-        let params = CreateGoalParams {
+        let params = GoalCreateParams {
             session_id: SessionId::new(),
             ..make_params()
         };
-        let goal = store.create(params).expect("create");
-        let goal_id = goal.goal_id.clone();
+        store.create(params).expect("create");
 
-        // Complete first (clear only works on terminal goals)
-        store
-            .mutate(GoalMutation {
-                goal_id: goal_id.clone(),
-                action: GoalAction::Complete { summary: None },
-            })
-            .expect("complete");
-
-        store
-            .mutate(GoalMutation {
-                goal_id,
-                action: GoalAction::Clear,
-            })
-            .expect_err("clear removes goal from store");
+        assert!(store.clear());
         assert!(store.get().is_none());
     }
 
     #[test]
     fn goal_already_active_errors() {
         let mut store = GoalStore::new();
-        let params = CreateGoalParams {
+        let params = GoalCreateParams {
             session_id: SessionId::new(),
             ..make_params()
         };
         store.create(params.clone()).expect("create");
         let result = store.create(params);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn goal_set_updates_objective_without_resetting_usage() {
+        let mut store = GoalStore::new();
+        let session_id = SessionId::new();
+        store
+            .create(GoalCreateParams {
+                session_id,
+                objective: "Refactor auth".into(),
+                token_budget: Some(100_000),
+                replace_existing: false,
+            })
+            .expect("create");
+        let goal = store.active_goal.as_mut().expect("goal");
+        goal.usage.tokens_used = 1_500;
+        goal.usage.duration_seconds = 42;
+
+        let updated = store
+            .set(GoalSetParams {
+                session_id,
+                objective: Some("Refactor auth and payments".into()),
+                status: Some(ThreadGoalStatus::Paused),
+                token_budget: Some(80_000),
+            })
+            .expect("set");
+
+        let expected = Goal {
+            prompt: "Refactor auth and payments".into(),
+            status: GoalStatus::Paused,
+            budget: GoalBudget {
+                max_tokens: Some(80_000),
+                ..GoalBudget::default()
+            },
+            usage: GoalUsage {
+                turns_used: 0,
+                tokens_used: 1_500,
+                duration_seconds: 42,
+            },
+            ..updated.clone()
+        };
+        assert_eq!(updated, expected);
     }
 
     #[test]

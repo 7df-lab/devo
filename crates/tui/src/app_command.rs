@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use devo_protocol::ApprovalDecisionValue;
 use devo_protocol::ApprovalScopeValue;
 use devo_protocol::InputItem;
+use devo_protocol::InteractionMode;
 use devo_protocol::SessionId;
+use devo_protocol::ThreadGoalStatus;
 use devo_protocol::TurnId;
 use devo_protocol::TurnStartParams;
 use serde::Serialize;
@@ -12,6 +14,16 @@ use serde::Serialize;
 pub(crate) enum InputHistoryDirection {
     Previous,
     Next,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum GoalObjectiveMode {
+    ConfirmIfExists,
+    ReplaceExisting,
+    UpdateExisting {
+        status: ThreadGoalStatus,
+        token_budget: Option<i64>,
+    },
 }
 
 /// Command requests emitted by v2 UI components.
@@ -24,7 +36,23 @@ pub(crate) enum AppCommand {
     RunUserShellCommand {
         command: String,
     },
+    SubmitShellInput {
+        command: String,
+    },
+    ExecuteShellCommand {
+        command: String,
+    },
     Compact,
+    ShowGoal,
+    EditGoal,
+    SetGoalObjective {
+        objective: String,
+        mode: GoalObjectiveMode,
+    },
+    SetGoalStatus {
+        status: ThreadGoalStatus,
+    },
+    ClearGoal,
     UserTurn {
         input: Vec<InputItem>,
         cwd: Option<PathBuf>,
@@ -32,6 +60,7 @@ pub(crate) enum AppCommand {
         thinking: Option<String>,
         sandbox: Option<String>,
         approval_policy: Option<String>,
+        interaction_mode: InteractionMode,
     },
     OverrideTurnContext {
         cwd: Option<PathBuf>,
@@ -77,7 +106,23 @@ pub(crate) enum AppCommandView<'a> {
     RunUserShellCommand {
         command: &'a str,
     },
+    SubmitShellInput {
+        command: &'a str,
+    },
+    ExecuteShellCommand {
+        command: &'a str,
+    },
     Compact,
+    ShowGoal,
+    EditGoal,
+    SetGoalObjective {
+        objective: &'a str,
+        mode: GoalObjectiveMode,
+    },
+    SetGoalStatus {
+        status: ThreadGoalStatus,
+    },
+    ClearGoal,
     UserTurn {
         input: &'a [InputItem],
         cwd: &'a Option<PathBuf>,
@@ -85,6 +130,7 @@ pub(crate) enum AppCommandView<'a> {
         thinking: &'a Option<String>,
         sandbox: &'a Option<String>,
         approval_policy: &'a Option<String>,
+        interaction_mode: InteractionMode,
     },
     SteerTurn {
         input: &'a [InputItem],
@@ -147,6 +193,27 @@ impl AppCommand {
         sandbox: Option<String>,
         approval_policy: Option<String>,
     ) -> Self {
+        Self::user_turn_with_interaction_mode(
+            input,
+            cwd,
+            model,
+            thinking,
+            sandbox,
+            approval_policy,
+            InteractionMode::Build,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn user_turn_with_interaction_mode(
+        input: Vec<InputItem>,
+        cwd: Option<PathBuf>,
+        model: Option<String>,
+        thinking: Option<String>,
+        sandbox: Option<String>,
+        approval_policy: Option<String>,
+        interaction_mode: InteractionMode,
+    ) -> Self {
         Self::UserTurn {
             input,
             cwd,
@@ -154,7 +221,16 @@ impl AppCommand {
             thinking,
             sandbox,
             approval_policy,
+            interaction_mode,
         }
+    }
+
+    pub(crate) fn execute_shell_command(command: String) -> Self {
+        Self::ExecuteShellCommand { command }
+    }
+
+    pub(crate) fn submit_shell_input(command: String) -> Self {
+        Self::SubmitShellInput { command }
     }
 
     #[allow(dead_code)]
@@ -193,6 +269,26 @@ impl AppCommand {
         Self::Compact
     }
 
+    pub(crate) fn show_goal() -> Self {
+        Self::ShowGoal
+    }
+
+    pub(crate) fn edit_goal() -> Self {
+        Self::EditGoal
+    }
+
+    pub(crate) fn set_goal_objective(objective: String, mode: GoalObjectiveMode) -> Self {
+        Self::SetGoalObjective { objective, mode }
+    }
+
+    pub(crate) fn set_goal_status(status: ThreadGoalStatus) -> Self {
+        Self::SetGoalStatus { status }
+    }
+
+    pub(crate) fn clear_goal() -> Self {
+        Self::ClearGoal
+    }
+
     pub(crate) fn switch_session(session_id: SessionId) -> Self {
         Self::SwitchSession { session_id }
     }
@@ -209,7 +305,14 @@ impl AppCommand {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::RunUserShellCommand { .. } => "run_user_shell_command",
+            Self::SubmitShellInput { .. } => "submit_shell_input",
+            Self::ExecuteShellCommand { .. } => "execute_shell_command",
             Self::Compact => "compact",
+            Self::ShowGoal => "show_goal",
+            Self::EditGoal => "edit_goal",
+            Self::SetGoalObjective { .. } => "set_goal_objective",
+            Self::SetGoalStatus { .. } => "set_goal_status",
+            Self::ClearGoal => "clear_goal",
             Self::UserTurn { .. } => "user_turn",
             Self::OverrideTurnContext { .. } => "override_turn_context",
             Self::SteerTurn { .. } => "steer_turn",
@@ -228,7 +331,19 @@ impl AppCommand {
             Self::RunUserShellCommand { command } => {
                 AppCommandView::RunUserShellCommand { command }
             }
+            Self::SubmitShellInput { command } => AppCommandView::SubmitShellInput { command },
+            Self::ExecuteShellCommand { command } => {
+                AppCommandView::ExecuteShellCommand { command }
+            }
             Self::Compact => AppCommandView::Compact,
+            Self::ShowGoal => AppCommandView::ShowGoal,
+            Self::EditGoal => AppCommandView::EditGoal,
+            Self::SetGoalObjective { objective, mode } => AppCommandView::SetGoalObjective {
+                objective,
+                mode: *mode,
+            },
+            Self::SetGoalStatus { status } => AppCommandView::SetGoalStatus { status: *status },
+            Self::ClearGoal => AppCommandView::ClearGoal,
             Self::UserTurn {
                 input,
                 cwd,
@@ -236,6 +351,7 @@ impl AppCommand {
                 thinking,
                 sandbox,
                 approval_policy,
+                interaction_mode,
             } => AppCommandView::UserTurn {
                 input,
                 cwd,
@@ -243,6 +359,7 @@ impl AppCommand {
                 thinking,
                 sandbox,
                 approval_policy,
+                interaction_mode: *interaction_mode,
             },
             Self::OverrideTurnContext {
                 cwd,
@@ -295,6 +412,7 @@ impl AppCommand {
             thinking,
             sandbox,
             approval_policy,
+            interaction_mode,
         } = self
         else {
             return None;
@@ -308,6 +426,7 @@ impl AppCommand {
             sandbox: sandbox.clone(),
             approval_policy: approval_policy.clone(),
             cwd: cwd.clone(),
+            interaction_mode: *interaction_mode,
         })
     }
 }

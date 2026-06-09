@@ -49,6 +49,9 @@ pub struct ProviderVendorConfig {
     /// Credential id in user-scoped `auth.json`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+    /// Raw JSON object string containing provider-specific HTTP headers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wire_apis: Vec<ProviderWireApi>,
     #[serde(default = "default_true")]
@@ -61,6 +64,7 @@ impl ProviderVendorConfig {
         self.name.is_empty()
             && self.base_url.is_none()
             && self.credential.is_none()
+            && self.headers.is_none()
             && self.wire_apis.is_empty()
             && self.enabled
     }
@@ -230,6 +234,9 @@ impl ProviderConfigSection {
             if overlay_provider.credential.is_some() {
                 provider.credential = overlay_provider.credential;
             }
+            if overlay_provider.headers.is_some() {
+                provider.headers = overlay_provider.headers;
+            }
             if !overlay_provider.wire_apis.is_empty() {
                 provider.wire_apis = overlay_provider.wire_apis;
             }
@@ -264,6 +271,19 @@ impl ProviderDefaultsConfig {
     }
 }
 
+/// Provider HTTP settings shared by model-provider requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderHttpConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
+}
+
+impl ProviderHttpConfig {
+    pub fn is_empty(&self) -> bool {
+        self.proxy_url.is_none()
+    }
+}
+
 /// The fully-resolved provider settings that can be forwarded to a server process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedProviderSettings {
@@ -277,6 +297,10 @@ pub struct ResolvedProviderSettings {
     pub base_url: Option<String>,
     /// Optional provider API key override.
     pub api_key: Option<String>,
+    /// Optional global provider HTTP proxy URL.
+    pub proxy_url: Option<String>,
+    /// Optional raw provider custom header JSON object string.
+    pub headers: Option<String>,
     /// Optional active model auto-compaction threshold in tokens.
     pub model_auto_compact_token_limit: Option<u32>,
     /// Optional active model context window override in tokens.

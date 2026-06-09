@@ -33,6 +33,7 @@ use super::AnthropicAIRole;
 use crate::ModelProviderSDK;
 use crate::ProviderAdapter;
 use crate::ProviderCapabilities;
+use crate::ProviderHttpOptions;
 use crate::merge_extra_body;
 
 /// <https://platform.claude.com/docs/en/api/messages>
@@ -41,20 +42,31 @@ pub struct AnthropicProvider {
     client: Client,
     base_url: String,
     api_key: Option<String>,
+    http_options: ProviderHttpOptions,
 }
 
 impl AnthropicProvider {
     pub fn new(base_url: impl Into<String>) -> Self {
+        let http_options = ProviderHttpOptions::default();
         Self {
-            client: Client::new(),
+            client: http_options
+                .build_client(None)
+                .unwrap_or_else(|_| Client::new()),
             base_url: base_url.into(),
             api_key: None,
+            http_options,
         }
     }
 
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
         self
+    }
+
+    pub fn with_http_options(mut self, http_options: ProviderHttpOptions) -> Result<Self> {
+        self.client = http_options.build_client(None)?;
+        self.http_options = http_options;
+        Ok(self)
     }
 
     fn endpoint(&self) -> String {
@@ -73,7 +85,7 @@ impl AnthropicProvider {
         } else {
             builder
         };
-        builder.json(body)
+        self.http_options.apply_custom_headers(builder).json(body)
     }
 }
 

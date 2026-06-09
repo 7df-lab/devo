@@ -13,6 +13,7 @@ use devo_core::UserAuthConfigFile;
 use devo_core::read_user_auth_config;
 use devo_core::test_model_connection;
 use devo_provider::ModelProviderSDK;
+use devo_provider::ProviderHttpOptions;
 use devo_provider::anthropic::AnthropicProvider;
 use devo_provider::openai::OpenAIProvider;
 use devo_provider::openai::OpenAIResponsesProvider;
@@ -130,7 +131,17 @@ impl ServerRuntime {
             }
         };
 
-        match validate_provider_candidate(params, self.deps.model_catalog.as_ref()).await {
+        let proxy_url = {
+            let store = self
+                .deps
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned");
+            store.effective_config().provider_http.proxy_url.clone()
+        };
+
+        match validate_provider_candidate(params, self.deps.model_catalog.as_ref(), proxy_url).await
+        {
             Ok(reply_preview) => serde_json::to_value(SuccessResponse {
                 id: request_id,
                 result: ProviderValidateResult { reply_preview },
@@ -157,6 +168,7 @@ fn normalized_provider_id(name: &str) -> Option<String> {
 async fn validate_provider_candidate(
     params: ProviderValidateParams,
     catalog: &dyn ModelCatalog,
+    proxy_url: Option<String>,
 ) -> anyhow::Result<String> {
     let provider_id = normalized_provider_id(&params.provider_vendor.name)
         .context("provider name cannot be empty")?;
@@ -188,6 +200,7 @@ async fn validate_provider_candidate(
         params.model_binding.invocation_method,
         params.provider_vendor.base_url,
         api_key,
+        ProviderHttpOptions::from_raw(proxy_url, params.provider_vendor.headers.clone())?,
     )?;
 
     tokio::time::timeout(
@@ -234,6 +247,7 @@ fn resolve_validation_api_key(
         name: params.provider_vendor.name.clone(),
         base_url: params.provider_vendor.base_url.clone(),
         credential: params.provider_vendor.credential.clone(),
+        headers: params.provider_vendor.headers.clone(),
         wire_apis: params.provider_vendor.wire_apis.clone(),
         enabled: params.provider_vendor.enabled,
     };
@@ -248,20 +262,23 @@ fn build_validation_provider(
     wire_api: devo_core::ProviderWireApi,
     base_url: Option<String>,
     api_key: Option<String>,
+    http_options: ProviderHttpOptions,
 ) -> anyhow::Result<Box<dyn ModelProviderSDK>> {
     match wire_api {
         devo_core::ProviderWireApi::AnthropicMessages => {
             let api_key = api_key.context("anthropic provider requires an API key")?;
             let base_url = base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string());
             Ok(Box::new(
-                AnthropicProvider::new(base_url).with_api_key(api_key),
+                AnthropicProvider::new(base_url)
+                    .with_http_options(http_options)?
+                    .with_api_key(api_key),
             ))
         }
         devo_core::ProviderWireApi::OpenAIChatCompletions => {
             let base_url = normalize_openai_base_url(
                 &base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
             );
-            let mut provider = OpenAIProvider::new(base_url);
+            let mut provider = OpenAIProvider::new(base_url).with_http_options(http_options)?;
             if let Some(api_key) = api_key {
                 provider = provider.with_api_key(api_key);
             }
@@ -271,7 +288,8 @@ fn build_validation_provider(
             let base_url = normalize_openai_base_url(
                 &base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
             );
-            let mut provider = OpenAIResponsesProvider::new(base_url);
+            let mut provider =
+                OpenAIResponsesProvider::new(base_url).with_http_options(http_options)?;
             if let Some(api_key) = api_key {
                 provider = provider.with_api_key(api_key);
             }
@@ -308,6 +326,9 @@ fn resolve_provider_api_key(
 mod tests {
     use devo_core::PresetModelCatalog;
     use devo_core::ProviderWireApi;
+    use devo_protocol::ProviderModelBinding;
+    use devo_protocol::ProviderValidateParams;
+    use devo_protocol::ProviderVendor;
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -351,6 +372,43 @@ mod tests {
                 provider: ProviderWireApi::OpenAIChatCompletions,
                 ..Model::default()
             }
+        );
+    }
+
+    /// Trace: L2-DES-APP-005, L2-DES-MODEL-001
+    /// Verifies: provider validation applies provider custom header parsing before sending a validation request.
+    #[tokio::test]
+    async fn validate_provider_candidate_rejects_invalid_custom_headers() {
+        let params = ProviderValidateParams {
+            provider_vendor: ProviderVendor {
+                name: "openai".to_string(),
+                base_url: Some("http://provider.example/v1".to_string()),
+                credential: None,
+                headers: Some(r#"{"bad header":"value"}"#.to_string()),
+                wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
+                enabled: true,
+            },
+            model_binding: ProviderModelBinding {
+                binding_id: "main".to_string(),
+                model_slug: "test-model".to_string(),
+                provider: "openai".to_string(),
+                model_name: "test-model".to_string(),
+                display_name: None,
+                invocation_method: ProviderWireApi::OpenAIChatCompletions,
+                default_reasoning_effort: None,
+                enabled: true,
+            },
+            api_key: None,
+        };
+        let catalog = PresetModelCatalog::new(Vec::new());
+
+        let error = validate_provider_candidate(params, &catalog, None)
+            .await
+            .expect_err("invalid headers should reject validation");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid provider custom header name `bad header`"
         );
     }
 }

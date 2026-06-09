@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::text_normalization::{TaggedTextFragment, TaggedTextParser, split_tagged_text};
-use crate::{ModelProviderSDK, merge_extra_body};
+use crate::{ModelProviderSDK, ProviderHttpOptions, merge_extra_body};
 
 use super::capabilities::{OpenAITransport, resolve_request_profile};
 use super::{
@@ -30,20 +30,31 @@ pub struct OpenAIResponsesProvider {
     client: Client,
     base_url: String,
     api_key: Option<String>,
+    http_options: ProviderHttpOptions,
 }
 
 impl OpenAIResponsesProvider {
     pub fn new(base_url: impl Into<String>) -> Self {
+        let http_options = ProviderHttpOptions::default();
         Self {
-            client: Client::new(),
+            client: http_options
+                .build_client(None)
+                .unwrap_or_else(|_| Client::new()),
             base_url: base_url.into(),
             api_key: None,
+            http_options,
         }
     }
 
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
         self
+    }
+
+    pub fn with_http_options(mut self, http_options: ProviderHttpOptions) -> Result<Self> {
+        self.client = http_options.build_client(None)?;
+        self.http_options = http_options;
+        Ok(self)
     }
 
     fn endpoint(&self) -> String {
@@ -60,7 +71,7 @@ impl OpenAIResponsesProvider {
         } else {
             builder
         };
-        builder.json(body)
+        self.http_options.apply_custom_headers(builder).json(body)
     }
 }
 

@@ -1,5 +1,12 @@
 use super::super::*;
 
+fn pending_interaction_mode_metadata(
+    interaction_mode: devo_protocol::InteractionMode,
+) -> Option<serde_json::Value> {
+    (interaction_mode != devo_protocol::InteractionMode::Build)
+        .then(|| serde_json::json!({ "interaction_mode": interaction_mode }))
+}
+
 impl ServerRuntime {
     pub(crate) async fn handle_turn_start(
         self: &Arc<Self>,
@@ -86,6 +93,7 @@ impl ServerRuntime {
                 drop(session);
 
                 {
+                    let interaction_mode = params.interaction_mode;
                     let mut guard = pending_turn_queue
                         .lock()
                         .expect("pending turn queue mutex should not be poisoned");
@@ -95,7 +103,7 @@ impl ServerRuntime {
                             display_text: display_input.clone(),
                             prompt_text: input_text.clone(),
                         },
-                        metadata: None,
+                        metadata: pending_interaction_mode_metadata(interaction_mode),
                         created_at: chrono::Utc::now(),
                     };
                     guard.push_back(item.clone());
@@ -198,6 +206,7 @@ impl ServerRuntime {
                         turn_config_for_task,
                         display_input_for_task,
                         input_for_task,
+                        params.interaction_mode,
                     )
                     .await;
             });
@@ -285,6 +294,128 @@ impl ServerRuntime {
             },
         })
         .expect("serialize turn/start response")
+    }
+
+    pub(crate) async fn handle_turn_shell_command(
+        self: &Arc<Self>,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let params: ShellCommandParams = match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    format!("invalid turn/shell_command params: {error}"),
+                );
+            }
+        };
+        let command = params.command.trim().to_string();
+        if command.is_empty() {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::EmptyInput,
+                "shell command is empty",
+            );
+        }
+        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+
+        let now = Utc::now();
+        let (turn, cwd) = {
+            let mut session = session_arc.lock().await;
+            if session.active_turn.is_some() {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::TurnAlreadyRunning,
+                    "cannot run shell command while a turn is active",
+                );
+            }
+            let cwd = params
+                .cwd
+                .clone()
+                .unwrap_or_else(|| session.summary.cwd.clone());
+            if let Some(cwd) = params.cwd.clone() {
+                session.summary.cwd = cwd.clone();
+                session.core_session.lock().await.cwd = cwd;
+            }
+            let model = session.summary.model.clone().unwrap_or_default();
+            let turn = TurnMetadata {
+                turn_id: TurnId::new(),
+                session_id: params.session_id,
+                sequence: session
+                    .latest_turn
+                    .as_ref()
+                    .map_or(1, |turn| turn.sequence + 1),
+                status: TurnStatus::Running,
+                kind: devo_core::TurnKind::Other("shell_command".to_string()),
+                model: model.clone(),
+                thinking: session.summary.thinking.clone(),
+                reasoning_effort: session.summary.reasoning_effort,
+                request_model: model,
+                request_thinking: session.summary.thinking.clone(),
+                started_at: now,
+                completed_at: None,
+                usage: None,
+            };
+            session.summary.status = SessionRuntimeStatus::ActiveTurn;
+            session.summary.updated_at = now;
+            session.active_turn = Some(turn.clone());
+            (turn, cwd)
+        };
+
+        {
+            let session = session_arc.lock().await;
+            if let Some(record) = session.record.clone()
+                && let Err(error) = self
+                    .rollout_store
+                    .append_turn(&record, build_turn_record(&turn, None, None))
+            {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist shell command turn start: {error}"),
+                );
+            }
+        }
+
+        self.broadcast_event(ServerEvent::SessionStatusChanged(
+            SessionStatusChangedPayload {
+                session_id: params.session_id,
+                status: SessionRuntimeStatus::ActiveTurn,
+            },
+        ))
+        .await;
+        self.broadcast_event(ServerEvent::TurnStarted(TurnEventPayload {
+            session_id: params.session_id,
+            turn: turn.clone(),
+        }))
+        .await;
+
+        let runtime = Arc::clone(self);
+        let command_for_task = command.clone();
+        let turn_for_task = turn.clone();
+        tokio::spawn(async move {
+            runtime
+                .execute_shell_command_turn(params.session_id, turn_for_task, command_for_task, cwd)
+                .await;
+        });
+
+        serde_json::to_value(SuccessResponse {
+            id: request_id,
+            result: ShellCommandResult {
+                turn_id: turn.turn_id,
+                status: turn.status,
+                accepted_at: now,
+            },
+        })
+        .expect("serialize turn/shell_command response")
     }
 
     pub(crate) async fn handle_turn_interrupt(

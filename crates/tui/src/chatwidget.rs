@@ -37,6 +37,8 @@ mod diff_rules;
 
 mod configuration;
 
+mod goal;
+
 mod input;
 
 mod render;
@@ -259,6 +261,7 @@ pub(crate) struct ChatWidget {
     queued_count: usize,
     active_turn_id: Option<TurnId>,
     committed_server_assistant_in_turn: bool,
+    current_turn_has_user_shell_command: bool,
     pending_approval: Option<PendingApprovalRequest>,
     permission_preset: devo_protocol::PermissionPreset,
     busy: bool,
@@ -388,6 +391,7 @@ impl ChatWidget {
             queued_count: 0,
             active_turn_id: None,
             committed_server_assistant_in_turn: false,
+            current_turn_has_user_shell_command: false,
             pending_approval: None,
             permission_preset: initial_permission_preset,
             busy: false,

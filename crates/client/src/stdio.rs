@@ -15,7 +15,25 @@ use devo_protocol::ApprovalRespondParams;
 use devo_protocol::ClientNotification;
 use devo_protocol::ClientRequest;
 use devo_protocol::ClientTransportKind;
+use devo_protocol::CommandExecParams;
+use devo_protocol::CommandExecResizeParams;
+use devo_protocol::CommandExecResizeResult;
+use devo_protocol::CommandExecResult;
+use devo_protocol::CommandExecTerminateParams;
+use devo_protocol::CommandExecTerminateResult;
+use devo_protocol::CommandExecWriteParams;
+use devo_protocol::CommandExecWriteResult;
 use devo_protocol::ErrorResponse;
+use devo_protocol::GoalClearParams;
+use devo_protocol::GoalClearResult;
+use devo_protocol::GoalCreateParams;
+use devo_protocol::GoalCreateResult;
+use devo_protocol::GoalSetParams;
+use devo_protocol::GoalSetResult;
+use devo_protocol::GoalSetStatusParams;
+use devo_protocol::GoalSetStatusResult;
+use devo_protocol::GoalStatusParams;
+use devo_protocol::GoalStatusResult;
 use devo_protocol::InitializeParams;
 use devo_protocol::InitializeResult;
 use devo_protocol::ModelCatalogParams;
@@ -55,6 +73,8 @@ use devo_protocol::SessionStartParams;
 use devo_protocol::SessionStartResult;
 use devo_protocol::SessionTitleUpdateParams;
 use devo_protocol::SessionTitleUpdateResult;
+use devo_protocol::ShellCommandParams;
+use devo_protocol::ShellCommandResult;
 use devo_protocol::SkillChangedParams;
 use devo_protocol::SkillChangedResult;
 use devo_protocol::SkillListParams;
@@ -226,6 +246,40 @@ impl StdioServerClient {
         self.request("session/compact", params).await
     }
 
+    pub async fn goal_create(&mut self, params: GoalCreateParams) -> Result<GoalCreateResult> {
+        self.request("goal/create", params).await
+    }
+
+    pub async fn goal_set(&mut self, params: GoalSetParams) -> Result<GoalSetResult> {
+        self.request("goal/set", params).await
+    }
+
+    pub async fn goal_status(&mut self, params: GoalStatusParams) -> Result<GoalStatusResult> {
+        self.request("goal/status", params).await
+    }
+
+    pub async fn goal_pause(&mut self, params: GoalSetStatusParams) -> Result<GoalSetStatusResult> {
+        self.request("goal/pause", params).await
+    }
+
+    pub async fn goal_resume(
+        &mut self,
+        params: GoalSetStatusParams,
+    ) -> Result<GoalSetStatusResult> {
+        self.request("goal/resume", params).await
+    }
+
+    pub async fn goal_complete(
+        &mut self,
+        params: GoalSetStatusParams,
+    ) -> Result<GoalSetStatusResult> {
+        self.request("goal/complete", params).await
+    }
+
+    pub async fn goal_clear(&mut self, params: GoalClearParams) -> Result<GoalClearResult> {
+        self.request("goal/clear", params).await
+    }
+
     pub async fn session_fork(&mut self, params: SessionForkParams) -> Result<SessionForkResult> {
         self.request("session/fork", params).await
     }
@@ -287,8 +341,40 @@ impl StdioServerClient {
         self.request("provider/validate", params).await
     }
 
+    pub async fn command_exec(&mut self, params: CommandExecParams) -> Result<CommandExecResult> {
+        self.request("command/exec", params).await
+    }
+
+    pub async fn command_exec_write(
+        &mut self,
+        params: CommandExecWriteParams,
+    ) -> Result<CommandExecWriteResult> {
+        self.request("command/exec/write", params).await
+    }
+
+    pub async fn command_exec_resize(
+        &mut self,
+        params: CommandExecResizeParams,
+    ) -> Result<CommandExecResizeResult> {
+        self.request("command/exec/resize", params).await
+    }
+
+    pub async fn command_exec_terminate(
+        &mut self,
+        params: CommandExecTerminateParams,
+    ) -> Result<CommandExecTerminateResult> {
+        self.request("command/exec/terminate", params).await
+    }
+
     pub async fn turn_start(&mut self, params: TurnStartParams) -> Result<TurnStartResult> {
         self.request("turn/start", params).await
+    }
+
+    pub async fn turn_shell_command(
+        &mut self,
+        params: ShellCommandParams,
+    ) -> Result<ShellCommandResult> {
+        self.request("turn/shell_command", params).await
     }
 
     pub async fn turn_interrupt(
