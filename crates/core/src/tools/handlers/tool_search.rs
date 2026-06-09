@@ -126,7 +126,7 @@ impl ToolHandler for ToolSearchHandler {
             if names.is_empty() {
                 return Ok(ToolResult::success(
                     ToolResultContent::Text("No matching deferred tools found.".to_string()),
-                    "No tools loaded",
+                    "No tools available",
                 ));
             }
             format!("select:{}", names.join(","))
@@ -146,7 +146,7 @@ impl ToolHandler for ToolSearchHandler {
 
         Ok(ToolResult::success(
             ToolResultContent::Text(result.summary()),
-            "Tools loaded",
+            "Tools available",
         ))
     }
 }
@@ -166,17 +166,17 @@ pub fn tool_search_spec() -> ToolSpec {
     ToolSpec {
         name: "ToolSearch".to_string(),
         description: format!(
-            "Searches deferred tool metadata with BM25 and loads matching tool schemas for the next model request. Use natural-language queries, or `select:<name>[,<name>...]` for exact compatibility. Defaults to {TOOL_SEARCH_DEFAULT_LIMIT} results."
+            "Searches tool metadata with BM25 and returns matching available tool names. Use natural-language queries, or `select:<name>[,<name>...]` for exact compatibility. Defaults to {TOOL_SEARCH_DEFAULT_LIMIT} results."
         ),
         input_schema: JsonSchema::object(
             std::collections::BTreeMap::from([
                 (
                     "query".to_string(),
-                    JsonSchema::string(Some("Search query for deferred tools.")),
+                    JsonSchema::string(Some("Search query for available tools.")),
                 ),
                 (
                     "limit".to_string(),
-                    JsonSchema::number(Some("Maximum number of tools to load.")),
+                    JsonSchema::number(Some("Maximum number of tools to return.")),
                 ),
             ]),
             Some(vec!["query".to_string()]),
@@ -410,7 +410,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn natural_language_search_loads_matching_deferred_tool() {
+    async fn natural_language_search_returns_matching_available_tool() {
         let loaded_tools = Arc::new(Mutex::new(LoadedDeferredTools::default()));
         let handler = ToolSearchHandler::new(
             vec![
@@ -456,13 +456,13 @@ mod tests {
             .await
             .expect("tool search should succeed");
 
-        assert_eq!(result.result_summary, "Tools loaded");
+        assert_eq!(result.result_summary, "Tools available");
         let loaded_tools = loaded_tools.lock().expect("loaded tools");
-        assert!(loaded_tools.is_loaded("session-1", "mcp__docs__search"));
+        assert!(!loaded_tools.is_loaded("session-1", "mcp__docs__search"));
     }
 
     #[tokio::test]
-    async fn subagent_tool_search_cannot_load_parent_agent_coordination_tools() {
+    async fn subagent_tool_search_cannot_return_parent_agent_coordination_tools() {
         let loaded_tools = Arc::new(Mutex::new(LoadedDeferredTools::default()));
         let handler = ToolSearchHandler::new(
             vec![
@@ -554,7 +554,9 @@ mod tests {
                     None,
                 )
                 .await
-                .expect_err("subagent ToolSearch should not load parent-agent coordination tools");
+                .expect_err(
+                    "subagent ToolSearch should not return parent-agent coordination tools",
+                );
 
             match err {
                 ToolCallError::ExecutionFailed(message) => assert!(message.contains("Not found")),

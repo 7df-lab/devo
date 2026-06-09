@@ -108,7 +108,7 @@ impl ToolSearchResult {
     pub fn summary(&self) -> String {
         if self.is_error() {
             return format!(
-                "Not found: {}. Only request exact tool names from the Deferred tools list.",
+                "Not found: {}. Only request exact tool names from the available tools list.",
                 self.not_found.join(", ")
             );
         }
@@ -137,7 +137,7 @@ impl ToolSearchResult {
         }
         if !self.not_found.is_empty() {
             lines.push(format!(
-                "Not found: {}. Only request exact tool names from the Deferred tools list.",
+                "Not found: {}. Only request exact tool names from the available tools list.",
                 self.not_found.join(", ")
             ));
         }
@@ -280,10 +280,10 @@ pub fn assemble_deferred_tool_prompt(
 }
 
 pub fn execute_tool_search(
-    session_id: &str,
+    _session_id: &str,
     query: &str,
     all_tools: &[ToolDefinition],
-    loaded: &mut LoadedDeferredTools,
+    _loaded: &mut LoadedDeferredTools,
     config: &DeferredLoadingConfig,
 ) -> Result<ToolSearchResult, String> {
     let Some(selection) = query
@@ -315,14 +315,8 @@ pub fn execute_tool_search(
         }
 
         match resolve_tool_policy(&canonical_name, config) {
-            PromptLoadingPolicy::Preloaded => result.already_available.push(canonical_name),
-            PromptLoadingPolicy::Deferred => {
-                if loaded.is_loaded(session_id, &canonical_name) {
-                    result.already_loaded.push(canonical_name);
-                } else {
-                    loaded.mark_loaded(session_id, &canonical_name);
-                    result.loaded.push(canonical_name);
-                }
+            PromptLoadingPolicy::Preloaded | PromptLoadingPolicy::Deferred => {
+                result.already_available.push(canonical_name);
             }
             PromptLoadingPolicy::Hidden => result.not_found.push(requested_name.to_string()),
         }
@@ -518,7 +512,7 @@ mod tests {
             tool("read", "Read a file."),
             tool("find", "Find files."),
             tool("grep", "Search file contents."),
-            tool("ToolSearch", "Load deferred tools."),
+            tool("ToolSearch", "Search available tools."),
             tool(
                 "web_search",
                 "Search the web.\nLonger details are schema-only.",
@@ -531,7 +525,7 @@ mod tests {
 
     fn agent_coordination_tools() -> Vec<ToolDefinition> {
         vec![
-            tool("ToolSearch", "Load deferred tools."),
+            tool("ToolSearch", "Search available tools."),
             tool("spawn_agent", "Spawn a subagent."),
             tool("send_message", "Send input to a child agent."),
             tool("wait_agent", "Poll child output."),
@@ -589,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_search_loads_aliases_and_reports_available_tools() {
+    fn tool_search_resolves_aliases_and_reports_available_tools() {
         let config = DeferredLoadingConfig::default();
         let mut loaded = LoadedDeferredTools::default();
 
@@ -600,19 +594,24 @@ mod tests {
             &mut loaded,
             &config,
         )
-        .expect("tool search should load deferred tools");
+        .expect("tool search should return available tools");
 
         assert_eq!(
             result,
             ToolSearchResult {
-                loaded: vec!["web_search".to_string(), "fetch_url".to_string()],
+                loaded: Vec::new(),
                 already_loaded: Vec::new(),
-                already_available: vec!["read".to_string(), "find".to_string()],
+                already_available: vec![
+                    "web_search".to_string(),
+                    "fetch_url".to_string(),
+                    "read".to_string(),
+                    "find".to_string(),
+                ],
                 not_found: Vec::new(),
             }
         );
-        assert!(loaded.is_loaded("session-1", "web_search"));
-        assert!(loaded.is_loaded("session-1", "fetch_url"));
+        assert!(!loaded.is_loaded("session-1", "web_search"));
+        assert!(!loaded.is_loaded("session-1", "fetch_url"));
     }
 
     #[test]
@@ -633,13 +632,13 @@ mod tests {
             assert_eq!(
                 result,
                 ToolSearchResult {
-                    loaded: vec!["spawn_agent".to_string()],
+                    loaded: Vec::new(),
                     already_loaded: Vec::new(),
-                    already_available: Vec::new(),
+                    already_available: vec!["spawn_agent".to_string()],
                     not_found: Vec::new(),
                 }
             );
-            assert!(loaded.is_loaded("session-1", "spawn_agent"));
+            assert!(!loaded.is_loaded("session-1", "spawn_agent"));
         }
     }
 
@@ -726,7 +725,7 @@ mod tests {
         let mut loaded = LoadedDeferredTools::default();
         let tools = vec![
             tool("shell_command", "Run a shell command."),
-            tool("ToolSearch", "Load deferred tools."),
+            tool("ToolSearch", "Search available tools."),
         ];
 
         let result = execute_tool_search("session-1", "select:bash", &tools, &mut loaded, &config)
@@ -757,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_search_reports_already_loaded_and_not_found() {
+    fn tool_search_reports_available_and_not_found() {
         let config = DeferredLoadingConfig::default();
         let mut loaded = LoadedDeferredTools::default();
         loaded.mark_loaded("session-1", "web_search");
@@ -775,15 +774,15 @@ mod tests {
             result,
             ToolSearchResult {
                 loaded: Vec::new(),
-                already_loaded: vec!["web_search".to_string()],
-                already_available: Vec::new(),
+                already_loaded: Vec::new(),
+                already_available: vec!["web_search".to_string()],
                 not_found: vec!["missing".to_string()],
             }
         );
         assert!(
             result
                 .summary()
-                .contains("Already loaded 1 tool(s): web_search")
+                .contains("Already available 1 tool(s): web_search")
         );
         assert!(result.summary().contains("Not found: missing"));
     }
@@ -802,7 +801,7 @@ mod tests {
 
         assert_eq!(
             err,
-            "Not found: imaginary. Only request exact tool names from the Deferred tools list."
+            "Not found: imaginary. Only request exact tool names from the available tools list."
         );
     }
 
@@ -811,7 +810,7 @@ mod tests {
         let mut loaded = LoadedDeferredTools::default();
         let tools = vec![
             tool("read", "Read a file."),
-            tool("ToolSearch", "Load deferred tools."),
+            tool("ToolSearch", "Search available tools."),
         ];
 
         let err = execute_tool_search(
@@ -825,7 +824,7 @@ mod tests {
 
         assert_eq!(
             err,
-            "Not found: semble. Only request exact tool names from the Deferred tools list."
+            "Not found: semble. Only request exact tool names from the available tools list."
         );
     }
 

@@ -620,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_loads_deferred_tools_for_session() {
+    fn registry_reports_deferred_tools_available_for_session() {
         let mut builder = ToolRegistryBuilder::new();
         for name in ["read", "ToolSearch", "web_search"] {
             builder.push_spec(ToolSpec {
@@ -645,12 +645,15 @@ mod tests {
                 &DeferredLoadingConfig::default(),
                 "select:WebSearch",
             )
-            .expect("deferred tool should load");
+            .expect("deferred tool should be available");
 
-        assert_eq!(summary, "Loaded 1 tool(s): web_search");
+        assert_eq!(
+            summary,
+            "Already available 1 tool(s): web_search. Call these tools directly without loading."
+        );
         let loaded_tools = registry.loaded_deferred_tools();
         let loaded_tools = loaded_tools.lock().expect("loaded tool state");
-        assert!(loaded_tools.is_loaded("session-1", "web_search"));
+        assert!(!loaded_tools.is_loaded("session-1", "web_search"));
     }
 
     #[test]

@@ -39,7 +39,7 @@ use devo_core::history::compaction::CompactionKind;
 use devo_core::history::compaction::compact_history;
 use devo_core::history::summarizer::DefaultHistorySummarizer;
 use devo_core::message_to_response_items;
-use devo_core::query_with_goal_context;
+use devo_core::query;
 use devo_core::tools::AgentToolCoordinator;
 use devo_core::tools::PermissionChecker;
 use devo_core::tools::ToolAgentScope;
@@ -197,7 +197,7 @@ pub struct ServerRuntime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TurnInputMode {
     VisibleUserMessage,
-    HiddenGoalContinuation { goal_context: String },
+    HiddenGoalContinuation { goal: devo_protocol::ThreadGoal },
 }
 
 impl TurnInputMode {

@@ -5,7 +5,7 @@ You work in 3 phases, and you should *chat your way* to a great plan before fina
 
 ## Mode rules (strict)
 
-The active collaboration mode for this turn is **Plan Mode**. This system prompt is injected from session turn metadata.
+Plan Mode is active only when the latest `<context_changes>` reports `<collaboration_mode><current>plan</current>`.
 
 Plan Mode is not changed by user intent, tone, or imperative language. If a user asks for execution while still in Plan Mode, treat it as a request to **plan the execution**, not perform it.
 

@@ -10,7 +10,9 @@ use crate::TurnConfig;
 use crate::context::AgentsMdDiff;
 use crate::context::AgentsMdManager;
 use crate::context::AgentsMdSnapshot;
+use crate::context::ContextChangesFragment;
 use crate::context::ContextualUserFragment;
+use crate::context::MetadataContextChange;
 use crate::context::user_instructions::UserInstructions;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -94,7 +96,13 @@ impl SessionContext {
     }
 
     pub fn build_system_prompt(&self) -> String {
-        self.base_instructions.trim().to_string()
+        let base = self.base_instructions.trim();
+        let mode_prompt = crate::collaboration_mode_prompts::mode_introductions_prompt();
+        if base.is_empty() {
+            mode_prompt
+        } else {
+            format!("{base}\n\n{mode_prompt}")
+        }
     }
 
     pub fn prefix_user_inputs(&self) -> Vec<UserInput> {
@@ -156,117 +164,89 @@ impl TurnContext {
         }
     }
 
-    pub fn diff_since(&self, previous: &TurnContext) -> Option<ContextDiffFragment> {
-        let mut changes = Vec::new();
+    pub fn context_changes_since(&self, previous: Option<&TurnContext>) -> ContextChangesFragment {
+        let mut metadata = Vec::new();
+        let mut previous_collaboration_mode = None;
+        let mut collaboration_mode_note = None;
+
+        let Some(previous) = previous else {
+            return ContextChangesFragment::new(
+                self.collaboration_mode,
+                previous_collaboration_mode,
+                collaboration_mode_note,
+                metadata,
+            );
+        };
 
         if self.environment.cwd != previous.environment.cwd {
-            changes.push(format!(
-                "cwd: {} -> {}",
-                previous.environment.cwd.display(),
-                self.environment.cwd.display()
+            metadata.push(MetadataContextChange::new(
+                "cwd",
+                previous.environment.cwd.display().to_string(),
+                self.environment.cwd.display().to_string(),
             ));
         }
         if self.environment.shell != previous.environment.shell {
-            changes.push(format!(
-                "shell: {} -> {}",
-                previous.environment.shell, self.environment.shell
+            metadata.push(MetadataContextChange::new(
+                "shell",
+                previous.environment.shell.clone(),
+                self.environment.shell.clone(),
             ));
         }
         if self.environment.current_date != previous.environment.current_date {
-            changes.push(format!(
-                "current_date: {} -> {}",
-                previous.environment.current_date, self.environment.current_date
+            metadata.push(MetadataContextChange::new(
+                "current_date",
+                previous.environment.current_date.clone(),
+                self.environment.current_date.clone(),
             ));
         }
         if self.environment.timezone != previous.environment.timezone {
-            changes.push(format!(
-                "timezone: {} -> {}",
-                previous.environment.timezone, self.environment.timezone
+            metadata.push(MetadataContextChange::new(
+                "timezone",
+                previous.environment.timezone.clone(),
+                self.environment.timezone.clone(),
             ));
         }
         if self.persona != previous.persona {
-            changes.push(format!(
-                "persona: {} -> {}",
-                previous.persona.as_str(),
-                self.persona.as_str()
+            metadata.push(MetadataContextChange::new(
+                "persona",
+                previous.persona.as_str().to_string(),
+                self.persona.as_str().to_string(),
             ));
         }
         if self.model.slug != previous.model.slug {
-            changes.push(format!(
-                "model: {} -> {}",
-                previous.model.slug, self.model.slug
+            metadata.push(MetadataContextChange::new(
+                "model",
+                previous.model.slug.clone(),
+                self.model.slug.clone(),
             ));
         }
         if self.thinking_selection != previous.thinking_selection {
-            changes.push(format!(
-                "thinking_selection: {:?} -> {:?}",
-                previous.thinking_selection, self.thinking_selection
+            metadata.push(MetadataContextChange::new(
+                "thinking_selection",
+                format!("{:?}", previous.thinking_selection),
+                format!("{:?}", self.thinking_selection),
             ));
         }
         if self.reasoning_effort != previous.reasoning_effort {
-            changes.push(format!(
-                "reasoning_effort: {:?} -> {:?}",
-                previous.reasoning_effort, self.reasoning_effort
+            metadata.push(MetadataContextChange::new(
+                "reasoning_effort",
+                format!("{:?}", previous.reasoning_effort),
+                format!("{:?}", self.reasoning_effort),
             ));
         }
         if self.collaboration_mode != previous.collaboration_mode {
-            changes.push(format!(
-                "collaboration_mode: {} -> {}",
-                collaboration_mode_label(previous.collaboration_mode),
-                collaboration_mode_label(self.collaboration_mode)
-            ));
-            changes.push(
+            previous_collaboration_mode = Some(previous.collaboration_mode);
+            collaboration_mode_note = Some(
                 "any previous instructions for other modes (e.g. Plan mode) are no longer active."
                     .to_string(),
             );
         }
-
-        if changes.is_empty() {
-            return None;
-        }
-
-        Some(ContextDiffFragment { changes })
-    }
-
-    pub(crate) fn with_collaboration_mode_prompt(&self, system: Option<String>) -> Option<String> {
-        let mode_prompt =
-            crate::collaboration_mode_prompts::active_mode_prompt(self.collaboration_mode);
-        Some(match system {
-            Some(system) if !system.is_empty() => format!(
-                "{system}
-
-{mode_prompt}"
-            ),
-            _ => mode_prompt,
-        })
-    }
-}
-
-fn collaboration_mode_label(collaboration_mode: CollaborationMode) -> &'static str {
-    match collaboration_mode {
-        CollaborationMode::Build => "build",
-        CollaborationMode::Plan => "plan",
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContextDiffFragment {
-    changes: Vec<String>,
-}
-
-impl ContextDiffFragment {
-    pub fn to_message(&self) -> Message {
-        Message::user(self.render())
-    }
-}
-
-impl ContextualUserFragment for ContextDiffFragment {
-    const ROLE: &'static str = "user";
-    const START_MARKER: &'static str = "<context_changes>";
-    const END_MARKER: &'static str = "</context_changes>";
-
-    fn body(&self) -> String {
-        format!("\n{}\n", self.changes.join("\n"))
+        ContextChangesFragment::new(
+            self.collaboration_mode,
+            previous_collaboration_mode,
+            collaboration_mode_note,
+            metadata,
+        )
     }
 }
 
@@ -287,8 +267,8 @@ impl AgentsMdDiffFragment {
 
 impl ContextualUserFragment for AgentsMdDiffFragment {
     const ROLE: &'static str = "user";
-    const START_MARKER: &'static str = "<agents_md_updates>";
-    const END_MARKER: &'static str = "</agents_md_updates>";
+    const START_MARKER: &'static str = "<user_instructions_updates>";
+    const END_MARKER: &'static str = "</user_instructions_updates>";
 
     fn body(&self) -> String {
         let mut lines = Vec::new();
@@ -396,7 +376,7 @@ mod tests {
     use devo_protocol::UserInput;
     use pretty_assertions::assert_eq;
 
-    use super::{ContextDiffFragment, EnvironmentContext, SessionContext, TurnContext};
+    use super::{EnvironmentContext, SessionContext, TurnContext};
     use crate::{
         AgentsMdSnapshot, ContextualUserFragment, Model, ReasoningEffort, ThinkingCapability,
     };
@@ -466,19 +446,35 @@ mod tests {
             collaboration_mode: devo_protocol::CollaborationMode::Build,
         };
 
-        let diff = current.diff_since(&previous).expect("diff should exist");
+        let diff = current.context_changes_since(Some(&previous));
         let rendered = diff.render();
-        assert!(rendered.contains("model: a -> b"));
-        assert!(rendered.contains("thinking_selection"));
-        assert!(rendered.contains("reasoning_effort"));
-        assert!(rendered.contains("/tmp/a -> /tmp/b"));
+        assert!(rendered.contains("<metadata>"));
+        assert!(rendered.contains("<name>model</name>"));
+        assert!(rendered.contains("<previous>a</previous>"));
+        assert!(rendered.contains("<current>b</current>"));
+        assert!(rendered.contains("<name>thinking_selection</name>"));
+        assert!(rendered.contains("<name>reasoning_effort</name>"));
+        assert!(rendered.contains("<previous>/tmp/a</previous>"));
+        assert!(rendered.contains("<current>/tmp/b</current>"));
     }
 
     #[test]
-    fn context_diff_fragment_roundtrips_to_message() {
-        let fragment = ContextDiffFragment {
-            changes: vec!["model: a -> b".into()],
+    fn context_changes_fragment_roundtrips_to_message() {
+        let context = TurnContext {
+            environment: EnvironmentContext {
+                cwd: PathBuf::from("/tmp/a"),
+                shell: "bash".into(),
+                current_date: "2026-04-27".into(),
+                timezone: "UTC".into(),
+            },
+            persona: super::Persona::Default,
+            model: Model::default(),
+            thinking_selection: None,
+            reasoning_effort: None,
+            observed_agents_snapshot: None,
+            collaboration_mode: devo_protocol::CollaborationMode::Build,
         };
+        let fragment = context.context_changes_since(None);
 
         let message = fragment.to_message();
         assert_eq!(message.role, devo_protocol::Role::User);
@@ -511,60 +507,38 @@ mod tests {
             ..previous.clone()
         };
 
-        let diff = current.diff_since(&previous).expect("diff should exist");
+        let diff = current.context_changes_since(Some(&previous));
         let rendered = diff.render();
 
-        assert!(rendered.contains("collaboration_mode: plan -> build"));
+        assert!(rendered.contains("<collaboration_mode>"));
+        assert!(rendered.contains("<previous>plan</previous>"));
+        assert!(rendered.contains("<current>build</current>"));
+        assert!(rendered.contains("<transition>plan -> build</transition>"));
         assert!(rendered.contains(
-            "any previous instructions for other modes (e.g. Plan mode) are no longer active."
+            "<note>any previous instructions for other modes (e.g. Plan mode) are no longer active.</note>"
         ));
         assert!(!rendered.contains("<collaboration_mode_build>"));
         assert!(!rendered.contains("<collaboration_mode_plan>"));
     }
 
     #[test]
-    fn turn_context_collaboration_mode_prompt_uses_active_mode() {
-        let context = TurnContext {
-            environment: EnvironmentContext {
-                cwd: PathBuf::from("/tmp/a"),
-                shell: "bash".into(),
-                current_date: "2026-04-27".into(),
-                timezone: "UTC".into(),
-            },
-            persona: super::Persona::Default,
-            model: Model {
-                slug: "model-a".into(),
+    fn session_context_system_prompt_uses_stable_mode_introductions() {
+        let context = SessionContext::capture(
+            &Model {
+                base_instructions: "base instructions".into(),
                 ..Model::default()
             },
-            thinking_selection: None,
-            reasoning_effort: None,
-            observed_agents_snapshot: None,
-            collaboration_mode: devo_protocol::CollaborationMode::Plan,
-        };
-
-        assert_eq!(
-            context.with_collaboration_mode_prompt(Some("base instructions".into())),
-            Some(format!(
-                "base instructions\n\n{}",
-                crate::collaboration_mode_prompts::active_mode_prompt(
-                    devo_protocol::CollaborationMode::Plan
-                )
-            ))
+            None,
+            Path::new("/tmp/a"),
+            None,
         );
 
-        let context = TurnContext {
-            collaboration_mode: devo_protocol::CollaborationMode::Build,
-            ..context
-        };
-
         assert_eq!(
-            context.with_collaboration_mode_prompt(Some("base instructions".into())),
-            Some(format!(
+            context.build_system_prompt(),
+            format!(
                 "base instructions\n\n{}",
-                crate::collaboration_mode_prompts::active_mode_prompt(
-                    devo_protocol::CollaborationMode::Build
-                )
-            ))
+                crate::collaboration_mode_prompts::mode_introductions_prompt()
+            )
         );
     }
 }

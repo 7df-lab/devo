@@ -9,7 +9,7 @@ use futures::future::BoxFuture;
 
 struct GoalContinuationCandidate {
     goal_id: GoalId,
-    goal_context: String,
+    goal: devo_protocol::ThreadGoal,
 }
 
 impl ServerRuntime {
@@ -121,7 +121,6 @@ impl ServerRuntime {
             let runtime = Arc::clone(self);
             let task_turn = turn.clone();
             let task_turn_config = turn_config.clone();
-            let goal_context = candidate.goal_context;
             let task = tokio::spawn(async move {
                 runtime
                     .execute_turn(
@@ -131,7 +130,9 @@ impl ServerRuntime {
                         String::new(),
                         String::new(),
                         devo_protocol::CollaborationMode::Build,
-                        TurnInputMode::HiddenGoalContinuation { goal_context },
+                        TurnInputMode::HiddenGoalContinuation {
+                            goal: candidate.goal,
+                        },
                     )
                     .await;
             });
@@ -153,7 +154,7 @@ impl ServerRuntime {
         }
         Some(GoalContinuationCandidate {
             goal_id: goal.goal_id.clone(),
-            goal_context: goal.continuation_prompt()?,
+            goal: goal.to_thread_goal(),
         })
     }
 

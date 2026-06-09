@@ -50,9 +50,6 @@ use crate::history::compaction::compact_history;
 use crate::history::summarizer::DefaultHistorySummarizer;
 use crate::response_item::ResponseItem;
 use crate::response_item::message_to_response_items;
-use crate::tool_prompt::build_deferred_tool_prompt_surface;
-use crate::tools::DeferredLoadingConfig;
-use crate::tools::hide_subagent_agent_coordination_tools;
 
 const SUBAGENT_MODE_REMINDER: &str = "<system-reminder>\nYou are running as a sub-agent. Complete the delegated task using the available non-agent tools. Do not call agent coordination tools such as spawn_agent, send_message, wait_agent, list_agents, or close_agent; report progress and final results through assistant output.\n</system-reminder>";
 
@@ -333,21 +330,15 @@ fn preserve_full_tool_result(tool_name: Option<&str>) -> bool {
     matches!(tool_name, Some("wait_agent" | "subagent_result"))
 }
 
-fn insert_subagent_request_reminders(
-    messages: &mut Vec<RequestMessage>,
-    deferred_reminder: Option<&str>,
-) {
-    let mut reminders = Vec::new();
-    if let Some(reminder) = deferred_reminder.filter(|text| !text.trim().is_empty()) {
-        reminders.push(request_text_message(reminder.to_string()));
-    }
-    reminders.push(request_text_message(SUBAGENT_MODE_REMINDER.to_string()));
-
+fn insert_subagent_request_reminders(messages: &mut Vec<RequestMessage>) {
     let insert_at = messages
         .iter()
         .rposition(is_user_text_message)
         .unwrap_or(messages.len());
-    messages.splice(insert_at..insert_at, reminders);
+    messages.splice(
+        insert_at..insert_at,
+        [request_text_message(SUBAGENT_MODE_REMINDER.to_string())],
+    );
 }
 
 fn insert_goal_context_message(messages: &mut Vec<RequestMessage>, goal_context: &str) {
@@ -431,28 +422,6 @@ pub async fn query(
     runtime: &ToolRuntime,
     on_event: Option<EventCallback>,
 ) -> Result<(), AgentError> {
-    query_with_goal_context(
-        session,
-        turn_config,
-        provider,
-        registry,
-        runtime,
-        on_event,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn query_with_goal_context(
-    session: &mut SessionState,
-    turn_config: &TurnConfig,
-    provider: Arc<dyn ModelProviderSDK>,
-    registry: Arc<ToolRegistry>,
-    runtime: &ToolRuntime,
-    on_event: Option<EventCallback>,
-    goal_context: Option<&str>,
-) -> Result<(), AgentError> {
     // emit is the event callback function.
     let emit = |event: QueryEvent| {
         if let Some(ref cb) = on_event {
@@ -462,6 +431,8 @@ pub async fn query_with_goal_context(
 
     let agents_md_manager = AgentsMdManager::new(session.config.agents_md.clone());
     let current_agents_snapshot = load_workspace_instructions(&session.cwd, &agents_md_manager);
+    let agent_scope = runtime.agent_scope();
+    let request_tools = registry.tool_definitions();
 
     if session.session_context.is_none() {
         session.session_context = Some(SessionContext::capture(
@@ -473,13 +444,9 @@ pub async fn query_with_goal_context(
     }
     let current_turn_context =
         TurnContext::capture(session, turn_config, current_agents_snapshot.clone());
-    if let Some(diff) = session
-        .latest_turn_context
-        .as_ref()
-        .and_then(|previous| current_turn_context.diff_since(previous))
-    {
-        session.insert_context_message(diff.to_message());
-    }
+    let context_changes =
+        current_turn_context.context_changes_since(session.latest_turn_context.as_ref());
+    session.insert_context_message(context_changes.to_message());
     if let Some(previous_turn_context) = session.latest_turn_context.as_ref()
         && let Some(diff) = AgentsMdManager::diff(
             previous_turn_context.observed_agents_snapshot.as_ref(),
@@ -584,36 +551,8 @@ pub async fn query_with_goal_context(
         info!("starting turn");
 
         // Build model request from the session-locked prefix.
-        let base_system = session_context.build_system_prompt();
-        let agent_scope = runtime.agent_scope();
-        let mut deferred_config = DeferredLoadingConfig::default();
-        if agent_scope == ToolAgentScope::Subagent {
-            hide_subagent_agent_coordination_tools(&mut deferred_config);
-        }
-        let loaded_deferred_tools = registry.loaded_deferred_tools();
-        let prompt_surface = {
-            let loaded_deferred_tools = loaded_deferred_tools.lock().map_err(|_| {
-                AgentError::Provider(anyhow::anyhow!("loaded deferred tool state lock poisoned"))
-            })?;
-            // TODO: deferred tool should be a normal tool, do not let it be a special tool.
-            build_deferred_tool_prompt_surface(
-                Some(base_system.clone()),
-                &registry,
-                &session.id,
-                &loaded_deferred_tools,
-                &deferred_config,
-            )
-        };
-        let tool_prompt_metrics = prompt_surface.metrics.clone();
-        let deferred_tool_count = prompt_surface.deferred_tool_names.len();
-        let loaded_deferred_tool_count = prompt_surface.loaded_deferred_tool_names.len();
-        let request_system = current_turn_context.with_collaboration_mode_prompt(
-            if agent_scope == ToolAgentScope::Subagent {
-                (!base_system.is_empty()).then_some(base_system)
-            } else {
-                prompt_surface.system.clone()
-            },
-        );
+        let request_system =
+            Some(session_context.build_system_prompt()).filter(|system| !system.trim().is_empty());
 
         // resolve thinking request parameter
         let ResolvedThinkingRequest {
@@ -653,14 +592,11 @@ pub async fn query_with_goal_context(
         };
         let mut messages = history
             .for_prompt_with_prefix(&prefetched_user_inputs, &turn_config.model.input_modalities);
-        if let Some(goal_context) = goal_context.filter(|text| !text.trim().is_empty()) {
-            insert_goal_context_message(&mut messages, goal_context);
+        if let Some(goal_context) = session.goal_context_prompt() {
+            insert_goal_context_message(&mut messages, &goal_context);
         }
         if agent_scope == ToolAgentScope::Subagent {
-            insert_subagent_request_reminders(
-                &mut messages,
-                prompt_surface.deferred_reminder.as_deref(),
-            );
+            insert_subagent_request_reminders(&mut messages);
         }
 
         let request = ModelRequest {
@@ -673,7 +609,7 @@ pub async fn query_with_goal_context(
                 .map_or(session.config.token_budget.max_output_tokens, |value| {
                     value as usize
                 }),
-            tools: Some(prompt_surface.tools),
+            tools: Some(request_tools.clone()),
             sampling: SamplingControls {
                 temperature: turn_config.model.temperature,
                 top_p: turn_config.model.top_p,
@@ -690,12 +626,6 @@ pub async fn query_with_goal_context(
             prefix_user_inputs = prefetched_user_inputs.len(),
             request_messages = request.messages.len(),
             exposed_tools = request.tools.as_ref().map_or(0, Vec::len),
-            deferred_tools = deferred_tool_count,
-            loaded_deferred_tools = loaded_deferred_tool_count,
-            baseline_tool_schema_tokens = tool_prompt_metrics.baseline_tool_schema_tokens,
-            exposed_tool_schema_tokens = tool_prompt_metrics.exposed_tool_schema_tokens,
-            deferred_reminder_tokens = tool_prompt_metrics.deferred_reminder_tokens,
-            estimated_tool_tokens_saved = tool_prompt_metrics.estimated_tokens_saved,
             prompt_token_estimate = session.prompt_token_estimate,
             max_tokens = request.max_tokens,
             has_system = request.system.is_some(),
@@ -1172,7 +1102,6 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
-    use super::query_with_goal_context;
     use crate::tools::ToolAgentScope;
     use crate::tools::ToolPreparationFeedback;
     use crate::tools::ToolRegistry;
@@ -1198,6 +1127,8 @@ mod tests {
     use devo_protocol::ResponseMetadata;
     use devo_protocol::StopReason;
     use devo_protocol::StreamEvent;
+    use devo_protocol::ThreadGoal;
+    use devo_protocol::ThreadGoalStatus;
     use devo_protocol::Usage;
     use devo_provider::ModelProviderSDK;
     use devo_safety::PermissionMode;
@@ -1777,7 +1708,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_hides_agent_coordination_tools_and_appends_subagent_warning() {
+    async fn query_exposes_stable_tools_and_appends_subagent_warning() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let provider: Arc<dyn ModelProviderSDK> = Arc::new(CapturingProvider {
             requests: Arc::clone(&requests),
@@ -1786,7 +1717,7 @@ mod tests {
         builder.push_spec_with_exposure(
             ToolSpec::new(
                 "ToolSearch",
-                "Load deferred tools.",
+                "Search available tools.",
                 JsonSchema::object(Default::default(), None, None),
             ),
             ToolExposure::Direct,
@@ -1867,12 +1798,22 @@ mod tests {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(tool_names, vec!["ToolSearch"]);
+        assert_eq!(
+            tool_names,
+            vec![
+                "ToolSearch",
+                "web_search",
+                "spawn_agent",
+                "send_message",
+                "wait_agent",
+                "list_agents",
+                "close_agent"
+            ]
+        );
         let system = request.system.as_deref().expect("system prompt");
-        let build_prompt =
-            crate::collaboration_mode_prompts::active_mode_prompt(CollaborationMode::Build);
+        let mode_prompt = crate::collaboration_mode_prompts::mode_introductions_prompt();
         assert!(system.contains("base system"));
-        assert!(system.contains(&build_prompt));
+        assert!(system.contains(&mode_prompt));
         assert!(
             !request
                 .system
@@ -1888,21 +1829,21 @@ mod tests {
                 .contains("spawn_agent")
         );
 
-        let deferred_reminder_index =
-            request_message_index_containing(request, "web_search: Search the web.");
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|message| !message_contains(message, "web_search: Search the web."))
+        );
         let subagent_reminder_index =
             request_message_index_containing(request, "You are running as a sub-agent");
         let task_index = request_message_index_containing(request, "work on the delegated task");
-        assert!(deferred_reminder_index < subagent_reminder_index);
         assert!(subagent_reminder_index < task_index);
-        let deferred_reminder = &request.messages[deferred_reminder_index];
-        assert!(!message_contains(deferred_reminder, "spawn_agent"));
-        assert_eq!(
-            session.messages,
-            vec![
-                Message::user("work on the delegated task"),
-                Message::assistant_text("done"),
-            ]
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| message_contains(message, "<context_changes>"))
         );
     }
 
@@ -1933,22 +1874,18 @@ mod tests {
             },
         ];
 
-        insert_subagent_request_reminders(
-            &mut messages,
-            Some("<system-reminder>deferred</system-reminder>"),
-        );
+        insert_subagent_request_reminders(&mut messages);
 
-        assert!(message_contains(&messages[0], "deferred"));
         assert!(message_contains(
-            &messages[1],
+            &messages[0],
             "You are running as a sub-agent"
         ));
-        assert!(message_contains(&messages[2], "child task input"));
+        assert!(message_contains(&messages[1], "child task input"));
         assert!(
-            matches!(messages[3].content.as_slice(), [RequestContent::ToolUse { id, .. }] if id == "tool-1")
+            matches!(messages[2].content.as_slice(), [RequestContent::ToolUse { id, .. }] if id == "tool-1")
         );
         assert!(
-            matches!(messages[4].content.as_slice(), [RequestContent::ToolResult { tool_use_id, .. }] if tool_use_id == "tool-1")
+            matches!(messages[3].content.as_slice(), [RequestContent::ToolResult { tool_use_id, .. }] if tool_use_id == "tool-1")
         );
     }
 
@@ -1966,6 +1903,19 @@ mod tests {
         message.content.iter().any(
             |content| matches!(content, RequestContent::Text { text } if text.contains(needle)),
         )
+    }
+
+    fn active_goal(objective: &str) -> ThreadGoal {
+        ThreadGoal {
+            thread_id: devo_protocol::SessionId::new(),
+            objective: objective.to_string(),
+            status: ThreadGoalStatus::Active,
+            token_budget: Some(10_000),
+            tokens_used: 250,
+            time_used_seconds: 0,
+            created_at: 1,
+            updated_at: 1,
+        }
     }
 
     #[tokio::test]
@@ -2189,13 +2139,12 @@ mod tests {
         session.collaboration_mode = CollaborationMode::Plan;
         session.push_message(Message::user("plan this"));
 
-        query_with_goal_context(
+        query(
             &mut session,
             &TurnConfig::new(model, None),
             Arc::clone(&provider),
             registry,
             &runtime,
-            None,
             None,
         )
         .await
@@ -2204,10 +2153,14 @@ mod tests {
         let captured = requests.lock().expect("lock requests");
         assert_eq!(captured.len(), 1);
         let system = captured[0].system.as_deref().expect("system prompt");
-        let plan_prompt =
-            crate::collaboration_mode_prompts::active_mode_prompt(CollaborationMode::Plan);
+        let mode_prompt = crate::collaboration_mode_prompts::mode_introductions_prompt();
         assert!(system.contains("base instructions"));
-        assert!(system.contains(&plan_prompt));
+        assert!(system.contains(&mode_prompt));
+        let mode_index = request_message_index_containing(&captured[0], "<collaboration_mode>");
+        assert!(message_contains(
+            &captured[0].messages[mode_index],
+            "<current>plan</current>"
+        ));
     }
 
     /// Trace: L2-DES-CONTEXT-001
@@ -2229,13 +2182,12 @@ mod tests {
         session.collaboration_mode = CollaborationMode::Plan;
         session.push_message(Message::user("plan this"));
 
-        query_with_goal_context(
+        query(
             &mut session,
             &TurnConfig::new(model.clone(), None),
             Arc::clone(&provider),
             Arc::clone(&registry),
             &runtime,
-            None,
             None,
         )
         .await
@@ -2243,13 +2195,12 @@ mod tests {
 
         session.collaboration_mode = CollaborationMode::Build;
         session.push_message(Message::user("implement this"));
-        query_with_goal_context(
+        query(
             &mut session,
             &TurnConfig::new(model, None),
             Arc::clone(&provider),
             registry,
             &runtime,
-            None,
             None,
         )
         .await
@@ -2257,19 +2208,29 @@ mod tests {
 
         let captured = requests.lock().expect("lock requests");
         assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].system, captured[1].system);
         let system = captured[1].system.as_deref().expect("system prompt");
-        let build_prompt =
-            crate::collaboration_mode_prompts::active_mode_prompt(CollaborationMode::Build);
+        let mode_prompt = crate::collaboration_mode_prompts::mode_introductions_prompt();
         assert!(system.contains("base instructions"));
-        assert!(system.contains(&build_prompt));
+        assert!(system.contains(&mode_prompt));
 
-        let mode_change_index =
-            request_message_index_containing(&captured[1], "collaboration_mode: plan -> build");
+        let mode_change_index = request_message_index_containing(
+            &captured[1],
+            "<transition>plan -> build</transition>",
+        );
         let request_index = request_message_index_containing(&captured[1], "implement this");
         assert!(mode_change_index < request_index);
         assert!(message_contains(
             &captured[1].messages[mode_change_index],
-            "any previous instructions for other modes (e.g. Plan mode) are no longer active."
+            "<previous>plan</previous>"
+        ));
+        assert!(message_contains(
+            &captured[1].messages[mode_change_index],
+            "<current>build</current>"
+        ));
+        assert!(message_contains(
+            &captured[1].messages[mode_change_index],
+            "<note>any previous instructions for other modes (e.g. Plan mode) are no longer active.</note>"
         ));
         assert!(!message_contains(
             &captured[1].messages[mode_change_index],
@@ -2295,16 +2256,16 @@ mod tests {
             ..Model::default()
         };
         let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.set_active_goal(active_goal("ship /goal"));
         session.push_message(Message::user("finish implementation"));
 
-        query_with_goal_context(
+        query(
             &mut session,
             &TurnConfig::new(model, None),
             Arc::clone(&provider),
             registry,
             &runtime,
             None,
-            Some("<goal_context>ship /goal</goal_context>"),
         )
         .await
         .expect("query should succeed");
@@ -2344,17 +2305,17 @@ mod tests {
             ..Model::default()
         };
         let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.set_active_goal(active_goal("continue the active goal"));
         session.push_message(Message::user("older user prompt"));
         session.push_message(Message::assistant_text("older assistant reply"));
 
-        query_with_goal_context(
+        query(
             &mut session,
             &TurnConfig::new(model, None),
             Arc::clone(&provider),
             registry,
             &runtime,
             None,
-            Some("<goal_context>continue the active goal</goal_context>"),
         )
         .await
         .expect("query should succeed");
@@ -2425,9 +2386,8 @@ mod tests {
 
         let captured = requests.lock().expect("lock requests");
         assert_eq!(captured.len(), 2);
-        let build_prompt =
-            crate::collaboration_mode_prompts::active_mode_prompt(CollaborationMode::Build);
-        let expected_system = format!("base-a\n\n{build_prompt}");
+        let mode_prompt = crate::collaboration_mode_prompts::mode_introductions_prompt();
+        let expected_system = format!("base-a\n\n{mode_prompt}");
         assert_eq!(
             captured[0].system.as_deref(),
             Some(expected_system.as_str())
@@ -2500,7 +2460,10 @@ mod tests {
             panic!("expected text diff message");
         };
         assert!(text.contains("<context_changes>"));
-        assert!(text.contains("model: model-a -> model-b"));
+        assert!(text.contains("<metadata>"));
+        assert!(text.contains("<name>model</name>"));
+        assert!(text.contains("<previous>model-a</previous>"));
+        assert!(text.contains("<current>model-b</current>"));
     }
 
     #[tokio::test]

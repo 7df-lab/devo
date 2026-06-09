@@ -27,7 +27,6 @@ mod session;
 mod session_store;
 mod skills;
 mod state;
-mod tool_prompt;
 pub mod tools;
 mod update_check;
 
@@ -88,5 +87,4 @@ pub use skills::SkillRecord as CoreSkillRecord;
 pub use skills::SkillScope as CoreSkillScope;
 pub use skills::SkillSource as CoreSkillSource;
 pub use skills::*;
-pub use tool_prompt::*;
 pub use update_check::*;

@@ -1863,20 +1863,23 @@ impl ServerRuntime {
                 };
                 (Arc::clone(&session.core_session), agent_scope)
             };
-            let goal_context = match &input_mode {
+            let turn_goal = match &input_mode {
                 TurnInputMode::VisibleUserMessage => {
                     let stores = self.goal_stores.lock().await;
                     stores
                         .get(&session_id)
                         .and_then(GoalStore::get)
-                        .and_then(crate::goal::Goal::continuation_prompt)
+                        .map(crate::goal::Goal::to_thread_goal)
                 }
-                TurnInputMode::HiddenGoalContinuation { goal_context } => {
-                    Some(goal_context.clone())
-                }
+                TurnInputMode::HiddenGoalContinuation { goal } => Some(goal.clone()),
             };
             let mut core_session = core_session.lock().await;
             core_session.collaboration_mode = collaboration_mode;
+            if let Some(goal) = turn_goal {
+                core_session.set_active_goal(goal);
+            } else {
+                core_session.clear_active_goal();
+            }
             if input_mode.emits_user_message() {
                 core_session.push_message(Message::user(input.clone()));
             }
@@ -1915,7 +1918,7 @@ impl ServerRuntime {
                     ..ToolExecutionOptions::default()
                 },
             );
-            let result = query_with_goal_context(
+            let result = query(
                 &mut core_session,
                 &turn_config,
                 self.deps
@@ -1923,7 +1926,6 @@ impl ServerRuntime {
                 registry,
                 &runtime,
                 Some(callback),
-                goal_context.as_deref(),
             )
             .await;
             (
