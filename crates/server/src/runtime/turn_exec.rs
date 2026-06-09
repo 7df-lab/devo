@@ -7,6 +7,7 @@ use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 use std::time::Instant;
 
+use super::proposed_plan::{ProposedPlanParser, ProposedPlanSegment};
 use super::*;
 use crate::{FileChangePayload, TurnPlanStepPayload, TurnPlanUpdatedPayload};
 use devo_core::tools::tool_spec::ToolPreparationFeedback;
@@ -287,6 +288,200 @@ async fn complete_assistant_item(
             serde_json::json!({ "title": "Assistant", "text": text }),
         )
         .await;
+}
+
+#[derive(Debug, Default)]
+struct ProposedPlanStreamItem {
+    item_id: Option<ItemId>,
+    item_seq: Option<u64>,
+    text: String,
+}
+
+impl ProposedPlanStreamItem {
+    async fn start(
+        &mut self,
+        runtime: &Arc<ServerRuntime>,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) {
+        if self.item_id.is_some() && self.item_seq.is_some() {
+            return;
+        }
+        let (item_id, item_seq) = runtime
+            .start_item(
+                session_id,
+                turn_id,
+                ItemKind::Plan,
+                serde_json::json!({ "title": "Proposed Plan", "text": "" }),
+            )
+            .await;
+        self.item_id = Some(item_id);
+        self.item_seq = Some(item_seq);
+    }
+
+    async fn push_delta(
+        &mut self,
+        runtime: &Arc<ServerRuntime>,
+        session_id: SessionId,
+        turn_id: TurnId,
+        delta: String,
+    ) {
+        if delta.is_empty() {
+            return;
+        }
+        self.start(runtime, session_id, turn_id).await;
+        self.text.push_str(&delta);
+        runtime
+            .broadcast_event(ServerEvent::ItemDelta {
+                delta_kind: ItemDeltaKind::PlanDelta,
+                payload: ItemDeltaPayload {
+                    context: EventContext {
+                        session_id,
+                        turn_id: Some(turn_id),
+                        item_id: self.item_id,
+                        seq: 0,
+                    },
+                    delta,
+                    stream_index: None,
+                    channel: None,
+                },
+            })
+            .await;
+    }
+
+    async fn complete(
+        &mut self,
+        runtime: &Arc<ServerRuntime>,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) {
+        let (Some(item_id), Some(item_seq)) = (self.item_id.take(), self.item_seq.take()) else {
+            return;
+        };
+        let text = std::mem::take(&mut self.text);
+        runtime
+            .complete_item(
+                session_id,
+                turn_id,
+                item_id,
+                item_seq,
+                ItemKind::Plan,
+                TurnItem::Plan(TextItem { text: text.clone() }),
+                serde_json::json!({ "title": "Proposed Plan", "text": text }),
+            )
+            .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn push_assistant_text_delta(
+    runtime: &Arc<ServerRuntime>,
+    event_session_arc: &Arc<tokio::sync::Mutex<RuntimeSession>>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    assistant_item_id: &mut Option<ItemId>,
+    assistant_item_seq: &mut Option<u64>,
+    assistant_text: &mut String,
+    assistant_delta_seq: &mut u64,
+    text: String,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let (item_id, item_seq) = match (*assistant_item_id, *assistant_item_seq) {
+        (Some(item_id), Some(item_seq)) => (item_id, item_seq),
+        (None, None) => {
+            let (item_id, item_seq) = runtime
+                .start_item(
+                    session_id,
+                    turn_id,
+                    ItemKind::AgentMessage,
+                    serde_json::json!({ "title": "Assistant", "text": "" }),
+                )
+                .await;
+            *assistant_item_id = Some(item_id);
+            *assistant_item_seq = Some(item_seq);
+            (item_id, item_seq)
+        }
+        _ => return,
+    };
+    assistant_text.push_str(&text);
+    *assistant_delta_seq = (*assistant_delta_seq).saturating_add(1);
+    runtime
+        .broadcast_event(ServerEvent::ItemDelta {
+            delta_kind: ItemDeltaKind::AgentMessageDelta,
+            payload: ItemDeltaPayload {
+                context: EventContext {
+                    session_id,
+                    turn_id: Some(turn_id),
+                    item_id: Some(item_id),
+                    seq: 0,
+                },
+                delta: text,
+                stream_index: None,
+                channel: None,
+            },
+        })
+        .await;
+    if let Ok(mut session) = event_session_arc.try_lock() {
+        session.deferred_assistant = Some((item_id, item_seq, assistant_text.clone()));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_proposed_plan_segments(
+    runtime: &Arc<ServerRuntime>,
+    event_session_arc: &Arc<tokio::sync::Mutex<RuntimeSession>>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    segments: Vec<ProposedPlanSegment>,
+    assistant_item_id: &mut Option<ItemId>,
+    assistant_item_seq: &mut Option<u64>,
+    assistant_text: &mut String,
+    assistant_delta_seq: &mut u64,
+    proposed_plan_item: &mut ProposedPlanStreamItem,
+    leading_normal_buffer: &mut String,
+) {
+    for segment in segments {
+        match segment {
+            ProposedPlanSegment::Normal(delta) => {
+                if delta.is_empty() {
+                    continue;
+                }
+                if assistant_item_id.is_none() && delta.chars().all(char::is_whitespace) {
+                    leading_normal_buffer.push_str(&delta);
+                    continue;
+                }
+                let delta = if assistant_item_id.is_none() && !leading_normal_buffer.is_empty() {
+                    format!("{}{}", std::mem::take(leading_normal_buffer), delta)
+                } else {
+                    delta
+                };
+                push_assistant_text_delta(
+                    runtime,
+                    event_session_arc,
+                    session_id,
+                    turn_id,
+                    assistant_item_id,
+                    assistant_item_seq,
+                    assistant_text,
+                    assistant_delta_seq,
+                    delta,
+                )
+                .await;
+            }
+            ProposedPlanSegment::PlanStart => {
+                leading_normal_buffer.clear();
+                proposed_plan_item.start(runtime, session_id, turn_id).await;
+            }
+            ProposedPlanSegment::PlanDelta(delta) => {
+                proposed_plan_item
+                    .push_delta(runtime, session_id, turn_id, delta)
+                    .await;
+            }
+            ProposedPlanSegment::PlanEnd => {}
+        }
+    }
 }
 
 fn is_unified_exec_tool(name: &str) -> bool {
@@ -722,6 +917,7 @@ impl ServerRuntime {
                 turn_id: Some(turn.turn_id.to_string()),
                 cwd,
                 agent_scope: ToolAgentScope::Parent,
+                interaction_mode: devo_protocol::InteractionMode::Build,
                 agent_coordinator: None,
             },
         );
@@ -878,6 +1074,11 @@ impl ServerRuntime {
             let mut reasoning_text = String::new();
             let mut tool_names_by_id = HashMap::new();
             let mut pending_tool_calls: HashMap<String, PendingToolCall> = HashMap::new();
+            let mut proposed_plan_parser = (interaction_mode
+                == devo_protocol::InteractionMode::Plan)
+                .then(ProposedPlanParser::default);
+            let mut proposed_plan_item = ProposedPlanStreamItem::default();
+            let mut proposed_plan_leading_normal = String::new();
             let mut latest_usage: Option<TurnUsage> = None;
             let mut usage_base: Option<(usize, usize, usize)> = None;
             while let Some(event) = event_rx.recv().await {
@@ -903,68 +1104,35 @@ impl ServerRuntime {
                 }
                 match event {
                     QueryEvent::TextDelta(text) => {
-                        let (item_id, item_seq) = match (assistant_item_id, assistant_item_seq) {
-                            (Some(item_id), Some(item_seq)) => (item_id, item_seq),
-                            (None, None) => {
-                                let (item_id, item_seq) = runtime
-                                    .start_item(
-                                        session_id,
-                                        turn_for_events.turn_id,
-                                        ItemKind::AgentMessage,
-                                        serde_json::json!({ "title": "Assistant", "text": "" }),
-                                    )
-                                    .await;
-                                assistant_item_id = Some(item_id);
-                                assistant_item_seq = Some(item_seq);
-                                (item_id, item_seq)
-                            }
-                            _ => continue,
-                        };
-                        assistant_text.push_str(&text);
-                        assistant_delta_seq = assistant_delta_seq.saturating_add(1);
-                        let cumulative_text_len = assistant_text.len();
-                        if let Some(assistant_token_text) = assistant_token_log_preview(&text) {
-                            tracing::debug!(
-                                stream_elapsed_ms = stream_trace_elapsed_ms(),
-                                item_id = %item_id,
-                                assistant_delta_seq,
-                                delta_len = text.len(),
-                                cumulative_text_len,
-                                assistant_token_text = %assistant_token_text,
-                                "server broadcasting assistant item delta"
-                            );
-                        } else {
-                            tracing::debug!(
-                                stream_elapsed_ms = stream_trace_elapsed_ms(),
-                                item_id = %item_id,
-                                assistant_delta_seq,
-                                delta_len = text.len(),
-                                cumulative_text_len,
-                                "server broadcasting assistant item delta"
-                            );
-                        }
-                        runtime
-                            .broadcast_event(ServerEvent::ItemDelta {
-                                delta_kind: ItemDeltaKind::AgentMessageDelta,
-                                payload: ItemDeltaPayload {
-                                    context: EventContext {
-                                        session_id,
-                                        turn_id: Some(turn_for_events.turn_id),
-                                        item_id: Some(item_id),
-                                        seq: 0,
-                                    },
-                                    delta: text,
-                                    stream_index: None,
-                                    channel: None,
-                                },
-                            })
+                        if let Some(parser) = proposed_plan_parser.as_mut() {
+                            let segments = parser.push_str(&text);
+                            handle_proposed_plan_segments(
+                                &runtime,
+                                &event_session_arc,
+                                session_id,
+                                turn_for_events.turn_id,
+                                segments,
+                                &mut assistant_item_id,
+                                &mut assistant_item_seq,
+                                &mut assistant_text,
+                                &mut assistant_delta_seq,
+                                &mut proposed_plan_item,
+                                &mut proposed_plan_leading_normal,
+                            )
                             .await;
-                        let _ = item_seq;
-
-                        // Store deferred completion info for interrupt recovery
-                        if let Ok(mut session) = event_session_arc.try_lock() {
-                            session.deferred_assistant =
-                                Some((item_id, item_seq, assistant_text.clone()));
+                        } else {
+                            push_assistant_text_delta(
+                                &runtime,
+                                &event_session_arc,
+                                session_id,
+                                turn_for_events.turn_id,
+                                &mut assistant_item_id,
+                                &mut assistant_item_seq,
+                                &mut assistant_text,
+                                &mut assistant_delta_seq,
+                                text,
+                            )
+                            .await;
                         }
                     }
                     QueryEvent::ReasoningDelta(text) => {
@@ -1593,6 +1761,26 @@ impl ServerRuntime {
                     QueryEvent::TurnComplete { .. } => {}
                 }
             }
+            if let Some(parser) = proposed_plan_parser.as_mut() {
+                let segments = parser.finish();
+                handle_proposed_plan_segments(
+                    &runtime,
+                    &event_session_arc,
+                    session_id,
+                    turn_for_events.turn_id,
+                    segments,
+                    &mut assistant_item_id,
+                    &mut assistant_item_seq,
+                    &mut assistant_text,
+                    &mut assistant_delta_seq,
+                    &mut proposed_plan_item,
+                    &mut proposed_plan_leading_normal,
+                )
+                .await;
+                proposed_plan_item
+                    .complete(&runtime, session_id, turn_for_events.turn_id)
+                    .await;
+            }
             // Complete any deferred items that the interrupt handler didn't already take.
             // handle_interrupt takes deferred_assistant/deferred_reasoning from the session
             // and completes them; if they're already None we must skip to avoid persisting duplicates.
@@ -1692,6 +1880,7 @@ impl ServerRuntime {
                     turn_id: Some(turn_for_events.turn_id.to_string()),
                     cwd: core_session.cwd.clone(),
                     agent_scope,
+                    interaction_mode,
                     agent_coordinator: Some(Arc::clone(&self) as Arc<dyn AgentToolCoordinator>),
                 },
                 ToolExecutionOptions {

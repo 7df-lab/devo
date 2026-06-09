@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use devo_protocol::InteractionMode;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -45,6 +46,7 @@ pub struct ToolContext {
     pub budgets: ToolBudgets,
     pub cancel_token: CancellationToken,
     pub agent_scope: ToolAgentScope,
+    pub interaction_mode: InteractionMode,
     pub agent_coordinator: Option<Arc<dyn AgentToolCoordinator>>,
 }
 
@@ -58,6 +60,7 @@ impl std::fmt::Debug for ToolContext {
             .field("budgets", &self.budgets)
             .field("cancel_token", &self.cancel_token)
             .field("agent_scope", &self.agent_scope)
+            .field("interaction_mode", &self.interaction_mode)
             .field(
                 "agent_coordinator",
                 &self.agent_coordinator.as_ref().map(|_| "<configured>"),

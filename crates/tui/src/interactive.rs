@@ -859,6 +859,9 @@ fn handle_worker_event(
         | WorkerEvent::TextItemStarted { .. }
         | WorkerEvent::TextItemDelta { .. }
         | WorkerEvent::TextItemCompleted { .. }
+        | WorkerEvent::ProposedPlanStarted { .. }
+        | WorkerEvent::ProposedPlanDelta { .. }
+        | WorkerEvent::ProposedPlanCompleted { .. }
         | WorkerEvent::ReasoningDelta(_)
         | WorkerEvent::AssistantMessageCompleted(_)
         | WorkerEvent::ReasoningCompleted(_)
@@ -880,6 +883,7 @@ fn handle_worker_event(
         | WorkerEvent::InputHistoryLoaded { .. }
         | WorkerEvent::InputQueueUpdated { .. }
         | WorkerEvent::ApprovalRequest { .. }
+        | WorkerEvent::RequestUserInput { .. }
         | WorkerEvent::ApprovalDecision { .. }
         | WorkerEvent::SteerAccepted { .. }
         | WorkerEvent::GoalStatusLoaded { .. }
@@ -953,6 +957,19 @@ fn handle_app_command(
                 approval_id.clone(),
                 decision.clone(),
                 scope.clone(),
+            )?;
+        }
+        AppCommand::RequestUserInputRespond {
+            session_id,
+            turn_id,
+            request_id,
+            response,
+        } => {
+            worker.request_user_input_respond(
+                *session_id,
+                *turn_id,
+                request_id.clone(),
+                response.clone(),
             )?;
         }
         AppCommand::UpdatePermissions { preset } => {

@@ -11,6 +11,7 @@ use devo_protocol::ProviderVendor;
 use devo_protocol::ProviderWireApi;
 use devo_protocol::ReasoningEffort;
 use devo_protocol::ReferenceSearchSnapshot;
+use devo_protocol::RequestUserInputQuestion;
 use devo_protocol::SessionHistoryItem;
 use devo_protocol::SessionRuntimeStatus;
 use devo_protocol::ThreadGoal;
@@ -179,6 +180,12 @@ pub(crate) enum WorkerEvent {
         kind: TextItemKind,
         final_text: String,
     },
+    /// A streamed Plan Mode proposal item started.
+    ProposedPlanStarted { item_id: ItemId },
+    /// Incremental Markdown for the streamed Plan Mode proposal.
+    ProposedPlanDelta { item_id: ItemId, delta: String },
+    /// A streamed Plan Mode proposal item completed.
+    ProposedPlanCompleted { item_id: ItemId, final_text: String },
     /// Incremental assistant text.
     TextDelta(String),
     /// Incremental reasoning text.
@@ -263,6 +270,12 @@ pub(crate) enum WorkerEvent {
         path: Option<String>,
         host: Option<String>,
         target: Option<String>,
+    },
+    RequestUserInput {
+        session_id: SessionId,
+        turn_id: TurnId,
+        request_id: String,
+        questions: Vec<RequestUserInputQuestion>,
     },
     ApprovalDecision {
         approval_id: String,

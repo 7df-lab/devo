@@ -189,6 +189,9 @@ impl ServerRuntime {
             Some(ClientMethod::ApprovalRespond) => {
                 Some(self.handle_approval_respond(id?, params).await)
             }
+            Some(ClientMethod::RequestUserInputRespond) => {
+                Some(self.handle_request_user_input_respond(id?, params).await)
+            }
             Some(ClientMethod::SearchStart) => Some(
                 self.handle_reference_search_start(connection_id, id?, params)
                     .await,

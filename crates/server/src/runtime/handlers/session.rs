@@ -137,6 +137,7 @@ impl ServerRuntime {
                 next_item_seq: 1,
                 first_user_input: None,
                 pending_approvals: std::collections::HashMap::new(),
+                pending_user_inputs: std::collections::HashMap::new(),
                 session_approval_cache: crate::execution::ApprovalGrantCache::default(),
                 turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
             }
@@ -794,6 +795,7 @@ impl ServerRuntime {
                 .unwrap_or(u64::MAX),
             first_user_input: source.first_user_input.clone(),
             pending_approvals: std::collections::HashMap::new(),
+            pending_user_inputs: std::collections::HashMap::new(),
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
         })

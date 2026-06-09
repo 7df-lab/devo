@@ -36,6 +36,7 @@ use devo_protocol::ApprovalDecisionValue;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::PendingInputItem;
+use devo_protocol::RequestUserInputResponse;
 use devo_protocol::SkillDependencies as ProtocolSkillDependencies;
 use devo_protocol::SkillInterface as ProtocolSkillInterface;
 use devo_protocol::SkillScope as ProtocolSkillScope;
@@ -66,6 +67,11 @@ pub(crate) struct PendingApproval {
     pub(crate) host: Option<String>,
     pub(crate) command_prefix: Option<Vec<String>>,
     pub(crate) tx: oneshot::Sender<ApprovalDecisionValue>,
+}
+
+pub(crate) struct PendingUserInput {
+    pub(crate) turn_id: TurnId,
+    pub(crate) tx: oneshot::Sender<RequestUserInputResponse>,
 }
 
 #[derive(Default)]
@@ -583,6 +589,8 @@ pub(crate) struct RuntimeSession {
     pub(crate) first_user_input: Option<String>,
     /// Active approval requests waiting for client decisions.
     pub(crate) pending_approvals: HashMap<String, PendingApproval>,
+    /// Active request_user_input calls waiting for client answers.
+    pub(crate) pending_user_inputs: HashMap<String, PendingUserInput>,
     /// Session-scoped approvals granted through approval/respond.
     pub(crate) session_approval_cache: ApprovalGrantCache,
     /// Turn-scoped approvals granted through approval/respond.

@@ -25,6 +25,7 @@ use crate::render::line_utils::push_owned_lines;
 use crate::render::renderable::Renderable;
 use crate::startup_header::StartupHeaderData;
 use crate::startup_header::build_startup_header;
+use crate::style::proposed_plan_style;
 use crate::style::user_message_style;
 use crate::text_formatting::truncate_text;
 use crate::theme::ThemeSet;
@@ -523,6 +524,51 @@ impl HistoryCell for AgentMarkdownCell {
                 .subsequent_indent(self.subsequent_prefix.clone()),
         ))
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct ProposedPlanCell {
+    plan_markdown: String,
+    cwd: PathBuf,
+}
+
+impl ProposedPlanCell {
+    pub(crate) fn new(plan_markdown: String, cwd: &Path) -> Self {
+        Self {
+            plan_markdown,
+            cwd: cwd.to_path_buf(),
+        }
+    }
+}
+
+impl HistoryCell for ProposedPlanCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let style = proposed_plan_style();
+        let content_width = width.saturating_sub(4).max(1) as usize;
+        let mut body = Vec::new();
+        append_markdown(
+            self.plan_markdown.trim(),
+            Some(content_width),
+            Some(self.cwd.as_path()),
+            &mut body,
+        );
+        if body.is_empty() {
+            body.push(Line::from("(empty)").dim());
+        }
+
+        let mut lines = vec![Line::from("• Proposed Plan").bold(), Line::from("")];
+        lines.extend(
+            prefix_lines(body, Span::styled("  ", style), Span::styled("  ", style))
+                .into_iter()
+                .map(|line| line.style(style)),
+        );
+        lines.push(Line::from("").style(style));
+        lines
+    }
+}
+
+pub(crate) fn new_proposed_plan(plan_markdown: String, cwd: &Path) -> ProposedPlanCell {
+    ProposedPlanCell::new(plan_markdown, cwd)
 }
 
 #[derive(Debug)]

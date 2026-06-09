@@ -127,7 +127,7 @@ pub fn tool_summary(name: &str, input: &serde_json::Value, cwd: &Path) -> String
                 format!("spawn_agent: {message}")
             }
         }
-        "question" => "question".to_string(),
+        "question" | "request_user_input" => "request_user_input".to_string(),
         "update_plan" => "update_plan".to_string(),
         "lsp" => {
             let path = input["filePath"].as_str().unwrap_or("");

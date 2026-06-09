@@ -9,6 +9,8 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 
+use devo_core::ItemId;
+
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
 use crate::events::TranscriptItem;
@@ -30,6 +32,7 @@ impl ChatWidget {
         self.next_history_flush_index = 0;
         self.active_cell = None;
         self.active_cell_revision = 0;
+        self.active_proposed_plan = None;
         self.active_tool_calls.clear();
         self.pending_tool_calls.clear();
         self.active_text_items.clear();
@@ -78,6 +81,62 @@ impl ChatWidget {
         if !lines.is_empty() {
             self.add_to_history(PlainHistoryCell::new(lines));
         }
+        self.frame_requester.schedule_frame();
+    }
+
+    pub(super) fn start_proposed_plan(&mut self, item_id: ItemId) {
+        self.flush_active_cell();
+        self.active_proposed_plan = Some(super::ActiveProposedPlan {
+            item_id,
+            text: String::new(),
+        });
+        self.refresh_active_proposed_plan_cell();
+        self.set_status_message("Planning");
+    }
+
+    pub(super) fn push_proposed_plan_delta(&mut self, item_id: ItemId, delta: String) {
+        if self
+            .active_proposed_plan
+            .as_ref()
+            .is_none_or(|plan| plan.item_id != item_id)
+        {
+            self.start_proposed_plan(item_id);
+        }
+        if let Some(plan) = self.active_proposed_plan.as_mut() {
+            plan.text.push_str(&delta);
+        }
+        self.refresh_active_proposed_plan_cell();
+        self.set_status_message("Planning");
+    }
+
+    pub(super) fn complete_proposed_plan(&mut self, item_id: ItemId, final_text: String) {
+        let active_text = self
+            .active_proposed_plan
+            .take()
+            .filter(|plan| plan.item_id == item_id)
+            .map(|plan| plan.text)
+            .unwrap_or_default();
+        let text = if final_text.trim().is_empty() {
+            active_text
+        } else {
+            final_text
+        };
+        self.active_cell = None;
+        self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+        self.add_to_history(history_cell::new_proposed_plan(text, &self.session.cwd));
+        self.frame_requester.schedule_frame();
+        self.set_status_message("Planning");
+    }
+
+    fn refresh_active_proposed_plan_cell(&mut self) {
+        let Some(plan) = self.active_proposed_plan.as_ref() else {
+            return;
+        };
+        self.active_cell = Some(Box::new(history_cell::new_proposed_plan(
+            plan.text.clone(),
+            &self.session.cwd,
+        )));
+        self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
         self.frame_requester.schedule_frame();
     }
 

@@ -54,6 +54,7 @@ use devo_protocol::ReferenceSearchStartParams;
 use devo_protocol::ReferenceSearchStartResult;
 use devo_protocol::ReferenceSearchUpdateParams;
 use devo_protocol::ReferenceSearchUpdateResult;
+use devo_protocol::RequestUserInputRespondParams;
 use devo_protocol::ServerEvent;
 use devo_protocol::SessionCompactParams;
 use devo_protocol::SessionCompactResult;
@@ -390,6 +391,14 @@ impl StdioServerClient {
 
     pub async fn approval_respond(&mut self, params: ApprovalRespondParams) -> Result<()> {
         let _: serde_json::Value = self.request("approval/respond", params).await?;
+        Ok(())
+    }
+
+    pub async fn request_user_input_respond(
+        &mut self,
+        params: RequestUserInputRespondParams,
+    ) -> Result<()> {
+        let _: serde_json::Value = self.request("request_user_input/respond", params).await?;
         Ok(())
     }
 

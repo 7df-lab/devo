@@ -385,12 +385,60 @@ fn plan_schema() -> JsonSchema {
 }
 
 fn question_schema() -> JsonSchema {
+    let option_schema = JsonSchema::object(
+        BTreeMap::from([
+            (
+                "label".to_string(),
+                JsonSchema::string(Some("Short option label shown to the user")),
+            ),
+            (
+                "description".to_string(),
+                JsonSchema::string(Some("One sentence describing the option tradeoff")),
+            ),
+        ]),
+        Some(vec!["label".to_string(), "description".to_string()]),
+        Some(false),
+    );
+    let question_schema = JsonSchema::object(
+        BTreeMap::from([
+            (
+                "id".to_string(),
+                JsonSchema::string(Some("Stable identifier for mapping answers")),
+            ),
+            (
+                "header".to_string(),
+                JsonSchema::string(Some("Short header label shown in the UI")),
+            ),
+            (
+                "question".to_string(),
+                JsonSchema::string(Some("Single sentence prompt shown to the user")),
+            ),
+            (
+                "isOther".to_string(),
+                JsonSchema::boolean(Some("Whether a free-form Other answer is allowed")),
+            ),
+            (
+                "isSecret".to_string(),
+                JsonSchema::boolean(Some("Whether free-form text should be treated as secret")),
+            ),
+            (
+                "options".to_string(),
+                JsonSchema::array(option_schema, Some("Mutually exclusive answer options")),
+            ),
+        ]),
+        Some(vec![
+            "id".to_string(),
+            "header".to_string(),
+            "question".to_string(),
+        ]),
+        Some(false),
+    );
     JsonSchema::object(
         BTreeMap::from([(
-            "question".to_string(),
-            JsonSchema::string(Some("The question to ask the user")),
+            "questions".to_string(),
+            JsonSchema::array(question_schema, Some("Questions to show the user")),
         )]),
-        Some(vec!["question".to_string()]),
+        Some(vec!["questions".to_string()]),
         Some(false),
     )
 }
@@ -694,12 +742,11 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
 
     plan.push(
         ToolSpec {
-            name: "question".to_string(),
-            description:
-                "Ask the user a question to gather additional information or clarification."
-                    .to_string(),
+            name: "request_user_input".to_string(),
+            description: "Ask the user one or more Plan Mode questions and wait for the response."
+                .to_string(),
             input_schema: question_schema(),
-            output_mode: ToolOutputMode::Text,
+            output_mode: ToolOutputMode::StructuredJson,
             execution_mode: ToolExecutionMode::ReadOnly,
             capability_tags: vec![],
             supports_parallel: true,

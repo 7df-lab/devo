@@ -107,4 +107,19 @@ impl AgentToolCoordinator for ServerRuntime {
     ) -> Result<devo_protocol::CloseAgentResult, ToolCallError> {
         self.close_agent_inner(params).await
     }
+
+    async fn request_user_input(
+        self: Arc<Self>,
+        session_id: String,
+        turn_id: String,
+        tool_call_id: String,
+        args: devo_protocol::RequestUserInputArgs,
+    ) -> Result<devo_protocol::RequestUserInputResponse, ToolCallError> {
+        let session_id = SessionId::try_from(session_id.as_str())
+            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
+        let turn_id = TurnId::try_from(turn_id.as_str())
+            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
+        self.request_user_input_for_tool(session_id, turn_id, tool_call_id, args)
+            .await
+    }
 }

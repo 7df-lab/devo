@@ -581,6 +581,7 @@ mod tests {
             },
             cancel_token,
             agent_scope: crate::contracts::ToolAgentScope::Parent,
+            interaction_mode: devo_protocol::InteractionMode::Build,
             agent_coordinator,
         }
     }

@@ -155,6 +155,7 @@ fn build_registry_from_builder(
         let legacy_alias = match kind {
             ToolHandlerKind::Bash if name == "shell_command" => Some("bash"),
             ToolHandlerKind::Glob if name == "find" => Some("glob"),
+            ToolHandlerKind::Question if name == "request_user_input" => Some("question"),
             _ => None,
         };
         builder.register_handler(&name, Arc::clone(&handler));

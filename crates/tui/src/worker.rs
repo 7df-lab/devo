@@ -48,6 +48,7 @@ use devo_server::InteractionMode;
 use devo_server::ItemEnvelope;
 use devo_server::ItemEventPayload;
 use devo_server::ItemKind;
+use devo_server::RequestUserInputRespondParams;
 use devo_server::ServerEvent;
 use devo_server::SessionCompactParams;
 use devo_server::SessionHistoryItem;
@@ -222,6 +223,12 @@ enum OperationCommand {
         approval_id: String,
         decision: devo_server::ApprovalDecisionValue,
         scope: devo_server::ApprovalScopeValue,
+    },
+    RequestUserInputRespond {
+        session_id: SessionId,
+        turn_id: TurnId,
+        request_id: String,
+        response: devo_protocol::RequestUserInputResponse,
     },
     UpdatePermissions {
         preset: devo_protocol::PermissionPreset,
@@ -548,6 +555,23 @@ impl QueryWorkerHandle {
                 approval_id,
                 decision,
                 scope,
+            })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn request_user_input_respond(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        request_id: String,
+        response: devo_protocol::RequestUserInputResponse,
+    ) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::RequestUserInputRespond {
+                session_id,
+                turn_id,
+                request_id,
+                response,
             })
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
@@ -1720,6 +1744,32 @@ async fn run_worker_inner(
                             });
                         }
                     }
+                    Some(OperationCommand::RequestUserInputRespond {
+                        session_id,
+                        turn_id,
+                        request_id,
+                        response,
+                    }) => {
+                        if let Err(error) = client
+                            .request_user_input_respond(RequestUserInputRespondParams {
+                                session_id,
+                                turn_id,
+                                request_id: request_id.into(),
+                                response,
+                            })
+                            .await
+                        {
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: error.to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cache_read_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
+                            });
+                        }
+                    }
                     Some(OperationCommand::UpdatePermissions { preset }) => {
                         permission_preset = preset;
                         let Some(active_session_id) = session_id else {
@@ -1869,6 +1919,15 @@ async fn run_worker_inner(
                                                 kind: TextItemKind::Reasoning,
                                             });
                                         }
+                                        ItemKind::Plan => {
+                                            if is_proposed_plan_payload(&payload.item.payload) {
+                                                let _ = event_tx.send(
+                                                    WorkerEvent::ProposedPlanStarted {
+                                                        item_id: payload.item.item_id,
+                                                    },
+                                                );
+                                            }
+                                        }
                                         ItemKind::CommandExecution => {
                                             if let Ok(payload) =
                                                 serde_json::from_value::<CommandExecutionPayload>(
@@ -1934,6 +1993,16 @@ async fn run_worker_inner(
                                     } else {
                                         let _ = event_tx.send(WorkerEvent::TextDelta(payload.delta));
                                     }
+                                }
+                            }
+                            "item/plan/delta" => {
+                                if let ServerEvent::ItemDelta { payload, .. } = event
+                                    && let Some(item_id) = payload.context.item_id
+                                {
+                                    let _ = event_tx.send(WorkerEvent::ProposedPlanDelta {
+                                        item_id,
+                                        delta: payload.delta,
+                                    });
                                 }
                             }
                             "item/commandExecution/outputDelta" => {
@@ -2152,6 +2221,18 @@ async fn run_worker_inner(
                                             .explanation
                                             .filter(|text| !text.trim().is_empty()),
                                         steps,
+                                    });
+                                }
+                            }
+                            "item/tool/requestUserInput" => {
+                                if let ServerEvent::RequestUserInput(payload) = event
+                                    && let Some(turn_id) = payload.request.turn_id
+                                {
+                                    let _ = event_tx.send(WorkerEvent::RequestUserInput {
+                                        session_id: payload.request.session_id,
+                                        turn_id,
+                                        request_id: payload.request.request_id.to_string(),
+                                        questions: payload.questions,
                                     });
                                 }
                             }
@@ -2562,6 +2643,16 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
                 .into_iter()
                 .collect::<std::collections::HashMap<_, _>>();
             let _ = event_tx.send(WorkerEvent::PatchApplied { changes });
+        }
+        ItemEnvelope {
+            item_id,
+            item_kind: ItemKind::Plan,
+            payload,
+        } if is_proposed_plan_payload(&payload) => {
+            let _ = event_tx.send(WorkerEvent::ProposedPlanCompleted {
+                item_id,
+                final_text: proposed_plan_text(&payload),
+            });
         }
         ItemEnvelope {
             item_kind: ItemKind::ToolResult,
@@ -3178,6 +3269,21 @@ fn render_json_value_text(value: &serde_json::Value) -> String {
 }
 
 // Legacy compatibility fallback for sessions/items persisted before server-side
+fn is_proposed_plan_payload(payload: &serde_json::Value) -> bool {
+    payload
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|title| title == "Proposed Plan")
+}
+
+fn proposed_plan_text(payload: &serde_json::Value) -> String {
+    payload
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
 // TurnPlanUpdated became the primary live source.
 fn plan_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEvent> {
     let tool_name = payload.tool_name.as_deref()?;

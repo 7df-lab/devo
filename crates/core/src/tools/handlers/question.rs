@@ -1,10 +1,14 @@
 use async_trait::async_trait;
+use devo_protocol::InteractionMode;
+use devo_protocol::RequestUserInputArgs;
+use devo_protocol::RequestUserInputQuestion;
 
 use crate::contracts::{
     ToolCallError, ToolContext, ToolProgressSender, ToolResult, ToolResultContent,
 };
 use crate::json_schema::JsonSchema;
 use crate::tool_handler::ToolHandler;
+use crate::tool_spec::ToolOutputMode;
 use crate::tool_spec::ToolSpec;
 
 pub struct QuestionHandler {
@@ -19,20 +23,17 @@ impl Default for QuestionHandler {
 
 impl QuestionHandler {
     pub fn new() -> Self {
-        Self {
-            spec: ToolSpec::new(
-                "question",
-                "Ask the user a question to get clarification or ask for confirmation before proceeding.",
-                JsonSchema::object(
-                    std::collections::BTreeMap::from([(
-                        "question".to_string(),
-                        JsonSchema::string(Some("The question to ask the user")),
-                    )]),
-                    Some(vec!["question".to_string()]),
-                    None,
-                ),
+        let mut spec = ToolSpec::new(
+            "request_user_input",
+            "Ask the user one or more Plan Mode questions and wait for the response.",
+            JsonSchema::object(
+                std::collections::BTreeMap::from([("questions".to_string(), questions_schema())]),
+                Some(vec!["questions".to_string()]),
+                Some(false),
             ),
-        }
+        );
+        spec.output_mode = ToolOutputMode::StructuredJson;
+        Self { spec }
     }
 }
 
@@ -44,14 +45,113 @@ impl ToolHandler for QuestionHandler {
 
     async fn handle(
         &self,
-        _ctx: ToolContext,
+        ctx: ToolContext,
         input: serde_json::Value,
         _progress: Option<ToolProgressSender>,
     ) -> Result<ToolResult, ToolCallError> {
-        let question = input["question"].as_str().unwrap_or("");
+        if ctx.interaction_mode != InteractionMode::Plan {
+            return Err(ToolCallError::BlockedByMode("plan mode".to_string()));
+        }
+
+        let args = request_user_input_args(input)?;
+        let turn_id = ctx.turn_id.clone().ok_or_else(|| {
+            ToolCallError::ExecutionFailed("request_user_input requires an active turn".to_string())
+        })?;
+        let coordinator = ctx.agent_coordinator.clone().ok_or_else(|| {
+            ToolCallError::ExecutionFailed(
+                "request_user_input is unavailable in this runtime".to_string(),
+            )
+        })?;
+        let response = coordinator
+            .request_user_input(
+                ctx.session_id.clone(),
+                turn_id,
+                ctx.tool_call_id.0.clone(),
+                args,
+            )
+            .await?;
         Ok(ToolResult::success(
-            ToolResultContent::Text(format!("Question for user: {question}")),
-            "Question posed",
+            ToolResultContent::Json(
+                serde_json::to_value(response)
+                    .map_err(|error| ToolCallError::InternalError(error.to_string()))?,
+            ),
+            "User input received",
+        ))
+    }
+}
+
+fn questions_schema() -> JsonSchema {
+    let option_schema = JsonSchema::object(
+        std::collections::BTreeMap::from([
+            (
+                "label".to_string(),
+                JsonSchema::string(Some("Short option label shown to the user")),
+            ),
+            (
+                "description".to_string(),
+                JsonSchema::string(Some("One sentence describing the option tradeoff")),
+            ),
+        ]),
+        Some(vec!["label".to_string(), "description".to_string()]),
+        Some(false),
+    );
+    let question_schema = JsonSchema::object(
+        std::collections::BTreeMap::from([
+            (
+                "id".to_string(),
+                JsonSchema::string(Some("Stable snake_case identifier for this question")),
+            ),
+            (
+                "header".to_string(),
+                JsonSchema::string(Some("Short header label, 12 or fewer characters")),
+            ),
+            (
+                "question".to_string(),
+                JsonSchema::string(Some("Single sentence prompt shown to the user")),
+            ),
+            (
+                "isOther".to_string(),
+                JsonSchema::boolean(Some("Whether a free-form Other answer is allowed")),
+            ),
+            (
+                "isSecret".to_string(),
+                JsonSchema::boolean(Some("Whether free-form text should be treated as secret")),
+            ),
+            (
+                "options".to_string(),
+                JsonSchema::array(option_schema, Some("Mutually exclusive answer options")),
+            ),
+        ]),
+        Some(vec![
+            "id".to_string(),
+            "header".to_string(),
+            "question".to_string(),
+        ]),
+        Some(false),
+    );
+    JsonSchema::array(question_schema, Some("Questions to show the user"))
+}
+
+fn request_user_input_args(
+    input: serde_json::Value,
+) -> Result<RequestUserInputArgs, ToolCallError> {
+    if input.get("questions").is_some() {
+        serde_json::from_value(input)
+            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))
+    } else if let Some(question) = input.get("question").and_then(serde_json::Value::as_str) {
+        Ok(RequestUserInputArgs {
+            questions: vec![RequestUserInputQuestion {
+                id: "question".to_string(),
+                header: "Question".to_string(),
+                question: question.to_string(),
+                is_other: true,
+                is_secret: false,
+                options: None,
+            }],
+        })
+    } else {
+        Err(ToolCallError::InvalidInput(
+            "missing 'questions' field".to_string(),
         ))
     }
 }

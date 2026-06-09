@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use devo_protocol::InteractionMode;
 use serde_json::json;
 
 use crate::contracts::{
@@ -74,10 +75,14 @@ impl ToolHandler for PlanHandler {
 
     async fn handle(
         &self,
-        _ctx: ToolContext,
+        ctx: ToolContext,
         input: serde_json::Value,
         _progress: Option<ToolProgressSender>,
     ) -> Result<ToolResult, ToolCallError> {
+        if ctx.interaction_mode == InteractionMode::Plan {
+            return Err(ToolCallError::BlockedByMode("plan mode".to_string()));
+        }
+
         let explanation = input
             .get("explanation")
             .and_then(|v| v.as_str())

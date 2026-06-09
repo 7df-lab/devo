@@ -3,7 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use devo_protocol::{
     AgentInfo, AgentListParams, AgentMessageParams, AgentMessageResult, CloseAgentParams,
-    CloseAgentResult, SpawnAgentParams, SpawnAgentResult, WaitAgentParams, WaitAgentResult,
+    CloseAgentResult, RequestUserInputArgs, RequestUserInputResponse, SpawnAgentParams,
+    SpawnAgentResult, WaitAgentParams, WaitAgentResult,
 };
 
 use crate::contracts::ToolCallError;
@@ -39,4 +40,16 @@ pub trait AgentToolCoordinator: Send + Sync {
         self: Arc<Self>,
         params: CloseAgentParams,
     ) -> Result<CloseAgentResult, ToolCallError>;
+
+    async fn request_user_input(
+        self: Arc<Self>,
+        _session_id: String,
+        _turn_id: String,
+        _tool_call_id: String,
+        _args: RequestUserInputArgs,
+    ) -> Result<RequestUserInputResponse, ToolCallError> {
+        Err(ToolCallError::ExecutionFailed(
+            "request_user_input is unavailable in this runtime".to_string(),
+        ))
+    }
 }

@@ -7,6 +7,9 @@ use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use devo_protocol::InteractionMode;
 use devo_protocol::ReferenceSearchSnapshot;
+use devo_protocol::RequestUserInputQuestion;
+use devo_protocol::SessionId;
+use devo_protocol::TurnId;
 use devo_protocol::user_input::TextElement;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -32,6 +35,7 @@ mod pending_thread_approvals;
 pub(crate) mod popup_consts;
 mod prompt_args;
 mod reference_popup;
+mod request_user_input_overlay;
 pub(crate) mod scroll_state;
 mod selection_popup_common;
 mod skill_popup;
@@ -54,6 +58,7 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::bottom_pane_view::BottomPaneView;
 use crate::bottom_pane::pending_thread_approvals::PendingThreadApprovals;
+use crate::bottom_pane::request_user_input_overlay::RequestUserInputOverlay;
 use crate::bottom_pane::unified_exec_footer::UnifiedExecFooter;
 use crate::render::line_utils::prefix_lines;
 use crate::render::renderable::Renderable;
@@ -464,6 +469,23 @@ impl BottomPane {
 
     pub(crate) fn open_popup_view(&mut self, view: Box<dyn BottomPaneView>) {
         self.push_view(view);
+    }
+
+    pub(crate) fn open_request_user_input(
+        &mut self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        request_id: String,
+        questions: Vec<RequestUserInputQuestion>,
+    ) {
+        self.push_view(Box::new(RequestUserInputOverlay::new(
+            session_id,
+            turn_id,
+            request_id,
+            questions,
+            self.app_event_tx.clone(),
+            self.accent_color,
+        )));
     }
 
     pub(crate) fn restore_input_from_history(&mut self, text: Option<String>) {

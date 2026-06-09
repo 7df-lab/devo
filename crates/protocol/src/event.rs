@@ -5,6 +5,7 @@ use crate::command_exec::{CommandExecExitedPayload, CommandExecOutputDeltaPayloa
 use crate::parse_command::ParsedCommand;
 use crate::protocol::{ExecCommandSource, FileChange};
 use crate::reference_search::{ReferenceSearchFailedPayload, ReferenceSearchSnapshot};
+use crate::request_user_input::RequestUserInputQuestion;
 use crate::session::{SessionMetadata, SessionRuntimeStatus};
 use crate::turn::TurnMetadata;
 use crate::{ItemId, SessionId, TurnId, TurnUsage};
@@ -228,8 +229,7 @@ pub struct ApprovalDecisionPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestUserInputPayload {
     pub request: PendingServerRequestContext,
-    pub prompt: String,
-    pub schema: Option<serde_json::Value>,
+    pub questions: Vec<RequestUserInputQuestion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +251,7 @@ pub enum ServerEvent {
     TurnPlanUpdated(TurnPlanUpdatedPayload),
     TurnDiffUpdated(TurnEventPayload),
     TurnUsageUpdated(TurnUsageUpdatedPayload),
+    RequestUserInput(RequestUserInputPayload),
     InputQueueUpdated(InputQueueUpdatedPayload),
     SteerAccepted(SteerAcceptedPayload),
     ItemStarted(ItemEventPayload),
@@ -286,6 +287,7 @@ impl ServerEvent {
             | Self::TurnDiffUpdated(payload) => Some(payload.session_id),
             Self::TurnPlanUpdated(payload) => Some(payload.session_id),
             Self::TurnUsageUpdated(payload) => Some(payload.session_id),
+            Self::RequestUserInput(payload) => Some(payload.request.session_id),
             Self::InputQueueUpdated(payload) => Some(payload.session_id),
             Self::SteerAccepted(payload) => Some(payload.session_id),
             Self::ItemStarted(payload) | Self::ItemCompleted(payload) => {
@@ -319,6 +321,7 @@ impl ServerEvent {
             Self::TurnPlanUpdated(_) => "turn/plan/updated",
             Self::TurnDiffUpdated(_) => "turn/diff/updated",
             Self::TurnUsageUpdated(_) => "turn/usage/updated",
+            Self::RequestUserInput(_) => "item/tool/requestUserInput",
             Self::InputQueueUpdated(_) => "inputQueue/updated",
             Self::SteerAccepted(_) => "steer/accepted",
             Self::ItemStarted(_) => "item/started",
@@ -347,6 +350,7 @@ impl ServerEvent {
             }
             Self::ItemDelta { payload, .. } => payload.context.seq = seq,
             Self::TurnUsageUpdated(_)
+            | Self::RequestUserInput(_)
             | Self::InputQueueUpdated(_)
             | Self::SteerAccepted(_)
             | Self::ReferenceSearchUpdated(_)

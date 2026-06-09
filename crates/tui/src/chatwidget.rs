@@ -11,6 +11,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use devo_core::ItemId;
 use devo_protocol::Model;
 use devo_protocol::ProviderWireApi;
 use devo_protocol::ReasoningEffort;
@@ -216,6 +217,12 @@ struct PendingApprovalRequest {
     action_summary: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveProposedPlan {
+    item_id: ItemId,
+    text: String,
+}
+
 pub(crate) struct ChatWidget {
     // App event, such as UserTurn, List Sessions, New Session, Onboard or Browser Input History
     app_event_tx: AppEventSender,
@@ -263,6 +270,7 @@ pub(crate) struct ChatWidget {
     committed_server_assistant_in_turn: bool,
     current_turn_has_user_shell_command: bool,
     pending_approval: Option<PendingApprovalRequest>,
+    active_proposed_plan: Option<ActiveProposedPlan>,
     permission_preset: devo_protocol::PermissionPreset,
     busy: bool,
     selection_mode: bool,
@@ -393,6 +401,7 @@ impl ChatWidget {
             committed_server_assistant_in_turn: false,
             current_turn_has_user_shell_command: false,
             pending_approval: None,
+            active_proposed_plan: None,
             permission_preset: initial_permission_preset,
             busy: false,
             selection_mode: false,

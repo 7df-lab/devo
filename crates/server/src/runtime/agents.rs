@@ -157,6 +157,7 @@ impl ServerRuntime {
             next_item_seq: 1,
             first_user_input: Some(params.message.clone()),
             pending_approvals: HashMap::new(),
+            pending_user_inputs: std::collections::HashMap::new(),
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
         };

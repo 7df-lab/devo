@@ -260,6 +260,7 @@ impl ToolRuntime {
             budgets: self.execution_options.budgets,
             cancel_token: self.execution_options.cancel_token.clone(),
             agent_scope: self.context.agent_scope,
+            interaction_mode: self.context.interaction_mode,
             agent_coordinator: self.context.agent_coordinator.clone(),
         };
 
@@ -409,6 +410,7 @@ pub struct ToolRuntimeContext {
     pub turn_id: Option<String>,
     pub cwd: PathBuf,
     pub agent_scope: ToolAgentScope,
+    pub interaction_mode: devo_protocol::InteractionMode,
     pub agent_coordinator: Option<Arc<dyn AgentToolCoordinator>>,
 }
 
@@ -419,6 +421,7 @@ impl std::fmt::Debug for ToolRuntimeContext {
             .field("turn_id", &self.turn_id)
             .field("cwd", &self.cwd)
             .field("agent_scope", &self.agent_scope)
+            .field("interaction_mode", &self.interaction_mode)
             .field(
                 "agent_coordinator",
                 &self.agent_coordinator.as_ref().map(|_| "<configured>"),
@@ -1034,6 +1037,7 @@ mod tests {
                 turn_id: Some("turn-1".into()),
                 cwd: PathBuf::from("C:/workspace"),
                 agent_scope: ToolAgentScope::Parent,
+                interaction_mode: devo_protocol::InteractionMode::Build,
                 agent_coordinator: None,
             },
         );

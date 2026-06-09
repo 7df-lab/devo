@@ -114,6 +114,7 @@ impl ChatWidget {
                 self.refresh_header_box();
                 self.busy = true;
                 self.active_text_items.clear();
+                self.active_proposed_plan = None;
                 self.stream_chunking_policy.reset();
                 self.bottom_pane.set_task_running(true);
             }
@@ -146,6 +147,18 @@ impl ChatWidget {
                     TextItemKind::Assistant => "Generating",
                     TextItemKind::Reasoning => "Thinking",
                 });
+            }
+            WorkerEvent::ProposedPlanStarted { item_id } => {
+                self.start_proposed_plan(item_id);
+            }
+            WorkerEvent::ProposedPlanDelta { item_id, delta } => {
+                self.push_proposed_plan_delta(item_id, delta);
+            }
+            WorkerEvent::ProposedPlanCompleted {
+                item_id,
+                final_text,
+            } => {
+                self.complete_proposed_plan(item_id, final_text);
             }
             WorkerEvent::TextDelta(text) => {
                 if !self.has_server_active_item(TextItemKind::Assistant) {
@@ -516,6 +529,19 @@ impl ChatWidget {
                 self.busy = true;
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Approval required");
+            }
+            WorkerEvent::RequestUserInput {
+                session_id,
+                turn_id,
+                request_id,
+                questions,
+            } => {
+                self.commit_active_streams(DotStatus::Completed);
+                self.bottom_pane
+                    .open_request_user_input(session_id, turn_id, request_id, questions);
+                self.busy = true;
+                self.bottom_pane.set_task_running(false);
+                self.set_status_message("Input requested");
             }
             WorkerEvent::ApprovalDecision {
                 approval_id: _,
