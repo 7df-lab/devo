@@ -881,7 +881,13 @@ fn handle_worker_event(
         | WorkerEvent::InputQueueUpdated { .. }
         | WorkerEvent::ApprovalRequest { .. }
         | WorkerEvent::ApprovalDecision { .. }
-        | WorkerEvent::SteerAccepted { .. } => {}
+        | WorkerEvent::SteerAccepted { .. }
+        | WorkerEvent::GoalStatusLoaded { .. }
+        | WorkerEvent::GoalUpdated { .. }
+        | WorkerEvent::GoalReplaceConfirmationRequested { .. }
+        | WorkerEvent::GoalEditLoaded { .. }
+        | WorkerEvent::GoalCleared { .. }
+        | WorkerEvent::GoalOperationFailed { .. } => {}
     }
     if matches!(&worker_event, WorkerEvent::SessionsListed { .. }) {
         loop_state.resume_browser_pending = false;
@@ -1076,6 +1082,21 @@ fn handle_app_command(
         }
         AppCommand::Compact => {
             worker.compact_session()?;
+        }
+        AppCommand::ShowGoal => {
+            worker.show_goal()?;
+        }
+        AppCommand::EditGoal => {
+            worker.edit_goal()?;
+        }
+        AppCommand::SetGoalObjective { objective, mode } => {
+            worker.set_goal_objective(objective.clone(), *mode)?;
+        }
+        AppCommand::SetGoalStatus { status } => {
+            worker.set_goal_status(*status)?;
+        }
+        AppCommand::ClearGoal => {
+            worker.clear_goal()?;
         }
         AppCommand::BrowseInputHistory { direction } => {
             worker.browse_input_history(*direction)?;

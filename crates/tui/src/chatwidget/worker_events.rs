@@ -842,6 +842,27 @@ impl ChatWidget {
                 self.busy = false;
                 self.set_status_message("Session switched");
             }
+            WorkerEvent::GoalStatusLoaded { goal } => {
+                self.show_goal_status(goal);
+            }
+            WorkerEvent::GoalUpdated { goal } => {
+                self.show_goal_updated(goal);
+            }
+            WorkerEvent::GoalReplaceConfirmationRequested {
+                current_goal,
+                objective,
+            } => {
+                self.show_goal_replace_confirmation(current_goal, objective);
+            }
+            WorkerEvent::GoalEditLoaded { goal } => {
+                self.show_goal_edit_prompt(goal);
+            }
+            WorkerEvent::GoalCleared { cleared } => {
+                self.show_goal_cleared(cleared);
+            }
+            WorkerEvent::GoalOperationFailed { message } => {
+                self.show_goal_operation_failed(message);
+            }
             WorkerEvent::SessionRenamed { session_id, title } => {
                 self.add_to_history(history_cell::new_info_event(
                     format!("renamed {session_id} to {title}"),

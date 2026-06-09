@@ -5,6 +5,7 @@ use devo_protocol::ApprovalScopeValue;
 use devo_protocol::InputItem;
 use devo_protocol::InteractionMode;
 use devo_protocol::SessionId;
+use devo_protocol::ThreadGoalStatus;
 use devo_protocol::TurnId;
 use devo_protocol::TurnStartParams;
 use serde::Serialize;
@@ -13,6 +14,16 @@ use serde::Serialize;
 pub(crate) enum InputHistoryDirection {
     Previous,
     Next,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum GoalObjectiveMode {
+    ConfirmIfExists,
+    ReplaceExisting,
+    UpdateExisting {
+        status: ThreadGoalStatus,
+        token_budget: Option<i64>,
+    },
 }
 
 /// Command requests emitted by v2 UI components.
@@ -32,6 +43,16 @@ pub(crate) enum AppCommand {
         command: String,
     },
     Compact,
+    ShowGoal,
+    EditGoal,
+    SetGoalObjective {
+        objective: String,
+        mode: GoalObjectiveMode,
+    },
+    SetGoalStatus {
+        status: ThreadGoalStatus,
+    },
+    ClearGoal,
     UserTurn {
         input: Vec<InputItem>,
         cwd: Option<PathBuf>,
@@ -92,6 +113,16 @@ pub(crate) enum AppCommandView<'a> {
         command: &'a str,
     },
     Compact,
+    ShowGoal,
+    EditGoal,
+    SetGoalObjective {
+        objective: &'a str,
+        mode: GoalObjectiveMode,
+    },
+    SetGoalStatus {
+        status: ThreadGoalStatus,
+    },
+    ClearGoal,
     UserTurn {
         input: &'a [InputItem],
         cwd: &'a Option<PathBuf>,
@@ -238,6 +269,26 @@ impl AppCommand {
         Self::Compact
     }
 
+    pub(crate) fn show_goal() -> Self {
+        Self::ShowGoal
+    }
+
+    pub(crate) fn edit_goal() -> Self {
+        Self::EditGoal
+    }
+
+    pub(crate) fn set_goal_objective(objective: String, mode: GoalObjectiveMode) -> Self {
+        Self::SetGoalObjective { objective, mode }
+    }
+
+    pub(crate) fn set_goal_status(status: ThreadGoalStatus) -> Self {
+        Self::SetGoalStatus { status }
+    }
+
+    pub(crate) fn clear_goal() -> Self {
+        Self::ClearGoal
+    }
+
     pub(crate) fn switch_session(session_id: SessionId) -> Self {
         Self::SwitchSession { session_id }
     }
@@ -257,6 +308,11 @@ impl AppCommand {
             Self::SubmitShellInput { .. } => "submit_shell_input",
             Self::ExecuteShellCommand { .. } => "execute_shell_command",
             Self::Compact => "compact",
+            Self::ShowGoal => "show_goal",
+            Self::EditGoal => "edit_goal",
+            Self::SetGoalObjective { .. } => "set_goal_objective",
+            Self::SetGoalStatus { .. } => "set_goal_status",
+            Self::ClearGoal => "clear_goal",
             Self::UserTurn { .. } => "user_turn",
             Self::OverrideTurnContext { .. } => "override_turn_context",
             Self::SteerTurn { .. } => "steer_turn",
@@ -280,6 +336,14 @@ impl AppCommand {
                 AppCommandView::ExecuteShellCommand { command }
             }
             Self::Compact => AppCommandView::Compact,
+            Self::ShowGoal => AppCommandView::ShowGoal,
+            Self::EditGoal => AppCommandView::EditGoal,
+            Self::SetGoalObjective { objective, mode } => AppCommandView::SetGoalObjective {
+                objective,
+                mode: *mode,
+            },
+            Self::SetGoalStatus { status } => AppCommandView::SetGoalStatus { status: *status },
+            Self::ClearGoal => AppCommandView::ClearGoal,
             Self::UserTurn {
                 input,
                 cwd,

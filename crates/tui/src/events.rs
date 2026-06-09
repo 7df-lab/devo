@@ -13,6 +13,7 @@ use devo_protocol::ReasoningEffort;
 use devo_protocol::ReferenceSearchSnapshot;
 use devo_protocol::SessionHistoryItem;
 use devo_protocol::SessionRuntimeStatus;
+use devo_protocol::ThreadGoal;
 use devo_protocol::parse_command::ParsedCommand;
 use devo_protocol::protocol::ExecCommandSource;
 use devo_protocol::protocol::FileChange;
@@ -348,6 +349,38 @@ pub(crate) enum WorkerEvent {
     SessionsListed {
         /// Structured sessions rendered into the bottom picker panel.
         sessions: Vec<SessionListEntry>,
+    },
+    /// Current goal status loaded from the server.
+    GoalStatusLoaded {
+        /// The current goal, if the active session has one.
+        goal: Option<ThreadGoal>,
+    },
+    /// Goal mutation completed on the server.
+    GoalUpdated {
+        /// Updated goal projection.
+        goal: ThreadGoal,
+    },
+    /// A `/goal <objective>` command found an existing goal and needs user confirmation.
+    GoalReplaceConfirmationRequested {
+        /// Existing goal that would be replaced.
+        current_goal: ThreadGoal,
+        /// New objective requested by the user.
+        objective: String,
+    },
+    /// The current goal was loaded for `/goal edit`.
+    GoalEditLoaded {
+        /// Goal to edit.
+        goal: ThreadGoal,
+    },
+    /// Goal clear completed on the server.
+    GoalCleared {
+        /// Whether a goal was actually removed.
+        cleared: bool,
+    },
+    /// Goal operation failed before or during the server RPC.
+    GoalOperationFailed {
+        /// Human-readable failure message.
+        message: String,
     },
     /// A new child agent session was observed from server metadata.
     SubagentDiscovered { agent: SubagentMonitorAgent },

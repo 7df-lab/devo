@@ -37,6 +37,8 @@ mod diff_rules;
 
 mod configuration;
 
+mod goal;
+
 mod input;
 
 mod render;

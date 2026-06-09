@@ -24,7 +24,11 @@ use devo_protocol::CommandExecExitedPayload;
 use devo_protocol::CommandExecOutputDeltaPayload;
 use devo_protocol::CommandExecParams;
 use devo_protocol::CommandExecProgram;
+use devo_protocol::GoalClearParams;
+use devo_protocol::GoalSetParams;
+use devo_protocol::GoalStatusParams;
 use devo_protocol::ProviderModelBinding;
+use devo_protocol::ThreadGoalStatus;
 use devo_protocol::ProviderValidateParams;
 use devo_protocol::ProviderVendor;
 use devo_protocol::ProviderVendorListParams;
@@ -65,6 +69,7 @@ use devo_server::TurnInterruptParams;
 use devo_server::TurnStartParams;
 use devo_server::TurnSteerParams;
 
+use crate::app_command::GoalObjectiveMode;
 use crate::app_command::InputHistoryDirection;
 use crate::bottom_pane::SkillInterfaceMetadata;
 use crate::bottom_pane::SkillMetadata;
@@ -179,6 +184,21 @@ enum OperationCommand {
     },
     /// Request proactive compaction for the active session.
     CompactSession,
+    /// Show the current goal for the active session.
+    ShowGoal,
+    /// Open the current goal in the editor.
+    EditGoal,
+    /// Create or update the current goal objective.
+    SetGoalObjective {
+        objective: String,
+        mode: GoalObjectiveMode,
+    },
+    /// Pause, resume, or complete the current goal.
+    SetGoalStatus {
+        status: ThreadGoalStatus,
+    },
+    /// Clear the current goal.
+    ClearGoal,
     /// Clear the active session so the next prompt starts a fresh one lazily.
     StartNewSession,
     /// Switch the active session to a persisted session identifier.
@@ -422,6 +442,40 @@ impl QueryWorkerHandle {
     pub(crate) fn compact_session(&self) -> Result<()> {
         self.command_tx
             .send(OperationCommand::CompactSession)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn show_goal(&self) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::ShowGoal)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn edit_goal(&self) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::EditGoal)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn set_goal_objective(
+        &self,
+        objective: String,
+        mode: GoalObjectiveMode,
+    ) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::SetGoalObjective { objective, mode })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn set_goal_status(&self, status: ThreadGoalStatus) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::SetGoalStatus { status })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn clear_goal(&self) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::ClearGoal)
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -1046,6 +1100,213 @@ async fn run_worker_inner(
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::ShowGoal) => {
+                        let goal = if let Some(active_session_id) = session_id {
+                            match client
+                                .goal_status(GoalStatusParams {
+                                    session_id: active_session_id,
+                                })
+                                .await
+                            {
+                                Ok(result) => result.goal,
+                                Err(error) => {
+                                    let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                        message: error.to_string(),
+                                    });
+                                    continue;
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let _ = event_tx.send(WorkerEvent::GoalStatusLoaded { goal });
+                    }
+                    Some(OperationCommand::EditGoal) => {
+                        let Some(active_session_id) = session_id else {
+                            let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                message: "No goal is currently set.".to_string(),
+                            });
+                            continue;
+                        };
+                        match client
+                            .goal_status(GoalStatusParams {
+                                session_id: active_session_id,
+                            })
+                            .await
+                        {
+                            Ok(result) => match result.goal {
+                                Some(goal) => {
+                                    let _ = event_tx.send(WorkerEvent::GoalEditLoaded { goal });
+                                }
+                                None => {
+                                    let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                        message: "No goal is currently set.".to_string(),
+                                    });
+                                }
+                            },
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                    message: error.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::SetGoalObjective { objective, mode }) => {
+                        let session_start = ensure_session_started(
+                            &mut client,
+                            &config.cwd,
+                            &model,
+                            &mut session_id,
+                        )
+                        .await?;
+                        if let Some(start_model) = session_start.model.clone() {
+                            model = start_model;
+                        }
+                        thinking_selection = session_start.thinking.clone().or(thinking_selection);
+                        let active_session_id = session_start.session_id;
+                        if session_start.created {
+                            let _ = event_tx.send(WorkerEvent::SessionActivated {
+                                session_id: active_session_id,
+                            });
+                            apply_session_permissions(
+                                &mut client,
+                                active_session_id,
+                                permission_preset,
+                            )
+                            .await?;
+                        }
+
+                        if matches!(mode, GoalObjectiveMode::ConfirmIfExists) {
+                            match client
+                                .goal_status(GoalStatusParams {
+                                    session_id: active_session_id,
+                                })
+                                .await
+                            {
+                                Ok(result) => {
+                                    if let Some(current_goal) = result.goal {
+                                        let _ = event_tx.send(
+                                            WorkerEvent::GoalReplaceConfirmationRequested {
+                                                current_goal,
+                                                objective,
+                                            },
+                                        );
+                                        continue;
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                        message: error.to_string(),
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if matches!(mode, GoalObjectiveMode::ReplaceExisting) {
+                            match client
+                                .goal_clear(GoalClearParams {
+                                    session_id: active_session_id,
+                                })
+                                .await
+                            {
+                                Ok(_) => {}
+                                Err(error) => {
+                                    let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                        message: error.to_string(),
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+
+                        let (status, token_budget) = match mode {
+                            GoalObjectiveMode::ConfirmIfExists | GoalObjectiveMode::ReplaceExisting => {
+                                (Some(ThreadGoalStatus::Active), None)
+                            }
+                            GoalObjectiveMode::UpdateExisting {
+                                status,
+                                token_budget,
+                            } => (Some(status), token_budget),
+                        };
+                        match client
+                            .goal_set(GoalSetParams {
+                                session_id: active_session_id,
+                                objective: Some(objective),
+                                status,
+                                token_budget,
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                let _ = event_tx.send(WorkerEvent::GoalUpdated {
+                                    goal: result.goal,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                    message: error.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::SetGoalStatus { status }) => {
+                        let Some(active_session_id) = session_id else {
+                            let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                message: "no active session exists yet; set a goal first".to_string(),
+                            });
+                            continue;
+                        };
+                        if status == ThreadGoalStatus::BudgetLimited {
+                            let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                message: "budget-limited status is controlled by the system".to_string(),
+                            });
+                            continue;
+                        }
+                        match client
+                            .goal_set(GoalSetParams {
+                                session_id: active_session_id,
+                                objective: None,
+                                status: Some(status),
+                                token_budget: None,
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                let _ = event_tx.send(WorkerEvent::GoalUpdated {
+                                    goal: result.goal,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                    message: error.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::ClearGoal) => {
+                        let Some(active_session_id) = session_id else {
+                            let _ = event_tx.send(WorkerEvent::GoalCleared { cleared: false });
+                            continue;
+                        };
+                        match client
+                            .goal_clear(GoalClearParams {
+                                session_id: active_session_id,
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                let _ = event_tx.send(WorkerEvent::GoalCleared {
+                                    cleared: result.cleared,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::GoalOperationFailed {
+                                    message: error.to_string(),
                                 });
                             }
                         }

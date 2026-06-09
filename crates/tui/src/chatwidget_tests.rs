@@ -1385,6 +1385,57 @@ fn trailing_space_exit_slash_command_exits() {
 }
 
 #[test]
+fn goal_slash_command_emits_set_goal_objective() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_paste("/goal improve benchmark coverage".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app_event_rx.try_recv().expect("goal command event"),
+        AppEvent::Command(AppCommand::SetGoalObjective {
+            objective: "improve benchmark coverage".to_string(),
+            mode: crate::app_command::GoalObjectiveMode::ConfirmIfExists,
+        })
+    );
+}
+
+#[test]
+fn goal_control_slash_commands_emit_goal_app_commands() {
+    fn event_for_slash(input: &str) -> AppEvent {
+        let model = Model {
+            slug: "test-model".to_string(),
+            display_name: "Test Model".to_string(),
+            ..Model::default()
+        };
+        let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+        widget.handle_paste(input.to_string());
+        widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app_event_rx.try_recv().expect("goal command event")
+    }
+
+    assert_eq!(
+        event_for_slash("/goal"),
+        AppEvent::Command(AppCommand::ShowGoal)
+    );
+    assert_eq!(
+        event_for_slash("/goal pause"),
+        AppEvent::Command(AppCommand::SetGoalStatus {
+            status: devo_protocol::ThreadGoalStatus::Paused,
+        })
+    );
+    assert_eq!(
+        event_for_slash("/goal clear"),
+        AppEvent::Command(AppCommand::ClearGoal)
+    );
+}
+
+#[test]
 fn busy_widget_blocks_model_change_with_transcript_message() {
     let model = Model {
         slug: "test-model".to_string(),

@@ -23,6 +23,7 @@ pub(crate) mod bottom_pane_view;
 mod chat_composer;
 mod chat_composer_history;
 mod command_popup;
+mod custom_prompt_view;
 mod footer;
 mod input_mode;
 pub(crate) mod list_selection_view;
@@ -44,6 +45,7 @@ pub(crate) use approval_overlay::ApprovalOverlayRequest;
 pub(crate) use chat_composer::ChatComposer;
 use chat_composer::ChatComposerConfig;
 use chat_composer::InputResult as ComposerInputResult;
+pub(crate) use custom_prompt_view::CustomPromptView;
 pub(crate) use input_mode::InputMode;
 
 use crate::app_command::AppCommand;
