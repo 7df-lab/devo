@@ -657,6 +657,8 @@ impl RuntimeSession {
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
 
     use anyhow::Result;
     use async_trait::async_trait;
@@ -702,11 +704,13 @@ mod tests {
     }
 
     fn unique_temp_dir(name: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        std::env::temp_dir().join(format!("devo-{name}-{nanos}"))
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("devo-{name}-{nanos}-{id}"))
     }
 
     fn test_deps(config: &str) -> ServerRuntimeDependencies {
@@ -772,6 +776,18 @@ model_name = "vendor/model-name"
 invocation_method = "openai_chat_completions"
 "#,
         );
+
+        let loaded = deps
+            .config_store
+            .lock()
+            .expect("config store")
+            .effective_config()
+            .provider
+            .providers
+            .get("openrouter")
+            .and_then(|provider| provider.web_search.as_ref())
+            .cloned();
+        eprintln!("loaded provider web_search: {loaded:?}");
 
         let turn_config =
             deps.resolve_turn_config(Some("vendor/model-name"), /*thinking_selection*/ None);
