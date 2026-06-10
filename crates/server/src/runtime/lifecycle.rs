@@ -6,6 +6,8 @@ impl ServerRuntime {
     pub async fn load_persisted_sessions(self: &Arc<Self>) -> anyhow::Result<()> {
         let sessions = self.rollout_store.load_sessions(&self.deps)?;
         tracing::info!(session_count = sessions.len(), "loaded persisted sessions");
+        let mut restored_goal_stores = std::collections::HashMap::new();
+        let mut active_goal_sessions = Vec::new();
 
         // Restore token stats and pending queues from SQLite
         for (session_id, session_arc) in &sessions {
@@ -112,10 +114,43 @@ impl ServerRuntime {
                     "failed to clear stale btw inputs from database"
                 );
             }
+
+            drop(session);
+            match self.goal_durable_store.replay_goal_store(*session_id).await {
+                Ok(Some(goal_store)) => {
+                    if let Some(goal) = goal_store.get() {
+                        if goal.status == crate::goal::GoalStatus::Active {
+                            active_goal_sessions.push(*session_id);
+                            let core_session = {
+                                let session = session_arc.lock().await;
+                                Arc::clone(&session.core_session)
+                            };
+                            core_session
+                                .lock()
+                                .await
+                                .set_active_goal(goal.to_thread_goal());
+                        }
+                    }
+                    restored_goal_stores.insert(*session_id, goal_store);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %error,
+                        "failed to replay durable goal records"
+                    );
+                }
+            }
         }
 
         let mut runtime_sessions = self.sessions.lock().await;
         runtime_sessions.extend(sessions);
+        drop(runtime_sessions);
+        self.goal_stores.lock().await.extend(restored_goal_stores);
+        for session_id in active_goal_sessions {
+            self.maybe_start_goal_continuation_turn(session_id).await;
+        }
         Ok(())
     }
 

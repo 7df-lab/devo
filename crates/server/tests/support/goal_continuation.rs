@@ -53,6 +53,17 @@ pub struct QueuedPriorityProvider {
     pub release_first: Arc<Notify>,
 }
 
+pub struct UsageProvider {
+    pub requests: AtomicUsize,
+    pub captured_requests: Mutex<Vec<ModelRequest>>,
+    pub usage: Usage,
+}
+
+pub struct FailingProvider {
+    pub requests: AtomicUsize,
+    pub message: String,
+}
+
 #[async_trait]
 impl ModelProviderSDK for CapturingProvider {
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
@@ -118,6 +129,63 @@ impl ModelProviderSDK for QueuedPriorityProvider {
 
     fn name(&self) -> &str {
         "queued-priority-goal-provider"
+    }
+}
+
+#[async_trait]
+impl ModelProviderSDK for UsageProvider {
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        anyhow::bail!("goal continuation test does not use non-streaming completion")
+    }
+
+    async fn completion_stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        self.captured_requests
+            .lock()
+            .expect("lock requests")
+            .push(request);
+        let usage = self.usage.clone();
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::TextDelta {
+                index: 0,
+                text: "Budget usage done.".to_string(),
+            }),
+            Ok(StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "usage-response".to_string(),
+                    content: vec![ResponseContent::Text("Budget usage done.".to_string())],
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage,
+                    metadata: ResponseMetadata::default(),
+                },
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "usage-goal-provider"
+    }
+}
+
+#[async_trait]
+impl ModelProviderSDK for FailingProvider {
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        anyhow::bail!("goal continuation test does not use non-streaming completion")
+    }
+
+    async fn completion_stream(
+        &self,
+        _request: ModelRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        Err(anyhow::anyhow!(self.message.clone()))
+    }
+
+    fn name(&self) -> &str {
+        "failing-goal-provider"
     }
 }
 

@@ -7,6 +7,7 @@ pub mod db;
 mod event;
 mod execution;
 pub mod goal;
+mod goal_durable;
 mod persistence;
 mod projection;
 mod protocol;

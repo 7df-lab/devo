@@ -5,8 +5,14 @@ const BUDGET_LIMIT_TEMPLATE: &str = include_str!("../prompts/goals/budget_limit.
 const OBJECTIVE_UPDATED_TEMPLATE: &str = include_str!("../prompts/goals/objective_updated.md");
 
 pub fn render_goal_continuation_prompt(goal: &ThreadGoal) -> Option<String> {
-    (goal.status == ThreadGoalStatus::Active)
-        .then(|| render_goal_template(CONTINUATION_TEMPLATE, goal))
+    match goal.status {
+        ThreadGoalStatus::Active if token_budget_exhausted(goal) => {
+            Some(render_goal_template(BUDGET_LIMIT_TEMPLATE, goal))
+        }
+        ThreadGoalStatus::Active => Some(render_goal_template(CONTINUATION_TEMPLATE, goal)),
+        ThreadGoalStatus::BudgetLimited => Some(render_goal_template(BUDGET_LIMIT_TEMPLATE, goal)),
+        ThreadGoalStatus::Paused | ThreadGoalStatus::Complete => None,
+    }
 }
 
 pub fn render_goal_budget_limit_prompt(goal: &ThreadGoal) -> String {
@@ -53,6 +59,11 @@ fn escape_xml_text(text: &str) -> String {
     escaped
 }
 
+fn token_budget_exhausted(goal: &ThreadGoal) -> bool {
+    goal.token_budget
+        .is_some_and(|budget| goal.tokens_used >= budget)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +104,17 @@ mod tests {
 
         assert!(prompt.contains("- Token budget: none"));
         assert!(prompt.contains("- Tokens remaining: unlimited"));
+    }
+
+    #[test]
+    fn exhausted_goal_budget_renders_budget_limit_prompt() {
+        // Trace: L2-DES-GOAL-001
+        let mut goal = active_goal("finish goal", Some(17));
+        goal.tokens_used = 17;
+
+        let prompt = render_goal_continuation_prompt(&goal).expect("budget prompt");
+
+        assert!(prompt.contains("has reached its token budget"));
+        assert!(prompt.contains("do not start new substantive work"));
     }
 }

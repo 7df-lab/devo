@@ -449,8 +449,10 @@ mod tests {
 
     #[test]
     fn goal_projection_from_goal() {
+        let durable_goal_id = devo_core::GoalId::new();
         let goal = Goal {
-            goal_id: GoalId::new(),
+            goal_id: GoalId::from_durable(durable_goal_id),
+            durable_goal_id,
             session_id: SessionId::new(),
             prompt: "test".into(),
             description: None,

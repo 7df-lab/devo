@@ -35,12 +35,66 @@ use tempfile::TempDir;
 #[path = "support/goal_continuation.rs"]
 mod support;
 
+use support::CapturingProvider;
+use support::build_runtime;
 use support::build_runtime_with_registry;
+use support::collect_until_turn_completed;
 use support::initialize_connection;
 use support::pause_goal_and_interrupt_turn;
 use support::start_session;
 use support::wait_for_approval_request;
 use support::wait_for_notification;
+
+#[tokio::test]
+async fn goal_set_does_not_start_continuation_in_plan_mode() -> Result<()> {
+    // Trace: L2-DES-GOAL-001
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(CapturingProvider::default());
+    let runtime = build_runtime(data_root.path(), provider.clone())?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
+
+    let _ = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 40,
+                "method": "turn/start",
+                "params": {
+                    "session_id": session_id,
+                    "input": [{ "type": "text", "text": "plan first" }],
+                    "model": null,
+                    "sandbox": null,
+                    "approval_policy": null,
+                    "cwd": null,
+                    "collaboration_mode": "plan"
+                }
+            }),
+        )
+        .await
+        .context("plan turn/start response")?;
+    collect_until_turn_completed(&mut notifications_rx).await?;
+    assert_eq!(provider.requests.lock().expect("lock requests").len(), 1);
+
+    let _ = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 41,
+                "method": "goal/set",
+                "params": {
+                    "sessionId": session_id,
+                    "objective": "do not continue in plan mode",
+                    "status": "active"
+                }
+            }),
+        )
+        .await
+        .context("goal/set response")?;
+    tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+    assert_eq!(provider.requests.lock().expect("lock requests").len(), 1);
+    Ok(())
+}
 
 struct ToolCallProvider {
     requests: AtomicUsize,

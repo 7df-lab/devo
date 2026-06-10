@@ -27,12 +27,20 @@ impl ServerRuntime {
                 let should_continue = goal.status == crate::goal::GoalStatus::Active;
                 let thread_goal = goal.to_thread_goal();
                 let session_goal = should_continue.then(|| thread_goal.clone());
+                let durable_goal = goal.clone();
                 let result = serde_json::to_value(SuccessResponse {
                     id: request_id,
                     result: devo_protocol::GoalCreateResult { goal: thread_goal },
                 })
                 .expect("serialize goal create result");
                 drop(stores);
+                if let Err(error) = self
+                    .goal_durable_store
+                    .append_goal_created(&durable_goal)
+                    .await
+                {
+                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal create record");
+                }
                 self.sync_core_session_goal(session_id, session_goal).await;
                 if should_continue {
                     self.maybe_start_goal_continuation_turn(session_id).await;
@@ -66,17 +74,35 @@ impl ServerRuntime {
 
         let mut stores = self.goal_stores.lock().await;
         let store = stores.entry(session_id).or_insert_with(GoalStore::new);
+        let previous_status = store.get().map(|goal| goal.status);
         match store.set(params) {
             Ok(goal) => {
                 let should_continue = goal.status == crate::goal::GoalStatus::Active;
                 let thread_goal = goal.to_thread_goal();
                 let session_goal = should_continue.then(|| thread_goal.clone());
+                let durable_goal = goal.clone();
                 let result = serde_json::to_value(SuccessResponse {
                     id: request_id,
                     result: devo_protocol::GoalSetResult { goal: thread_goal },
                 })
                 .expect("serialize goal set result");
                 drop(stores);
+                if let Err(error) = self
+                    .goal_durable_store
+                    .append_goal_created(&durable_goal)
+                    .await
+                {
+                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal set record");
+                }
+                let status_record_base = previous_status.unwrap_or(crate::goal::GoalStatus::Active);
+                if status_record_base != durable_goal.status
+                    && let Err(error) = self
+                        .goal_durable_store
+                        .append_status_changed(&durable_goal, status_record_base, None)
+                        .await
+                {
+                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal status record");
+                }
                 self.sync_core_session_goal(session_id, session_goal).await;
                 if should_continue {
                     self.maybe_start_goal_continuation_turn(session_id).await;
@@ -116,9 +142,11 @@ impl ServerRuntime {
                 "no goal store for session",
             );
         };
+        let previous_status = store.get().map(|goal| goal.status);
         match store.set_status(devo_protocol::ThreadGoalStatus::Paused) {
             Ok(goal) => {
                 let thread_goal = goal.to_thread_goal();
+                let durable_goal = goal.clone();
                 let result = serde_json::to_value(SuccessResponse {
                     id: request_id,
                     result: devo_protocol::GoalSetStatusResult { goal: thread_goal },
@@ -126,6 +154,14 @@ impl ServerRuntime {
                 .expect("serialize goal pause result");
                 let session_id = params.session_id;
                 drop(stores);
+                if let Some(previous_status) = previous_status
+                    && let Err(error) = self
+                        .goal_durable_store
+                        .append_status_changed(&durable_goal, previous_status, None)
+                        .await
+                {
+                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal pause record");
+                }
                 self.sync_core_session_goal(session_id, None).await;
                 result
             }
@@ -162,17 +198,27 @@ impl ServerRuntime {
                 "no goal store for session",
             );
         };
+        let previous_status = store.get().map(|goal| goal.status);
         match store.set_status(devo_protocol::ThreadGoalStatus::Active) {
             Ok(goal) => {
                 let should_continue = goal.status == crate::goal::GoalStatus::Active;
                 let thread_goal = goal.to_thread_goal();
                 let session_goal = should_continue.then(|| thread_goal.clone());
+                let durable_goal = goal.clone();
                 let result = serde_json::to_value(SuccessResponse {
                     id: request_id,
                     result: devo_protocol::GoalSetStatusResult { goal: thread_goal },
                 })
                 .expect("serialize goal resume result");
                 drop(stores);
+                if let Some(previous_status) = previous_status
+                    && let Err(error) = self
+                        .goal_durable_store
+                        .append_status_changed(&durable_goal, previous_status, None)
+                        .await
+                {
+                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal resume record");
+                }
                 self.sync_core_session_goal(session_id, session_goal).await;
                 if should_continue {
                     self.maybe_start_goal_continuation_turn(session_id).await;
@@ -212,9 +258,11 @@ impl ServerRuntime {
                 "no goal store for session",
             );
         };
+        let previous_status = store.get().map(|goal| goal.status);
         match store.set_status(devo_protocol::ThreadGoalStatus::Complete) {
             Ok(goal) => {
                 let thread_goal = goal.to_thread_goal();
+                let durable_goal = goal.clone();
                 let result = serde_json::to_value(SuccessResponse {
                     id: request_id,
                     result: devo_protocol::GoalSetStatusResult { goal: thread_goal },
@@ -222,6 +270,14 @@ impl ServerRuntime {
                 .expect("serialize goal complete result");
                 let session_id = params.session_id;
                 drop(stores);
+                if let Some(previous_status) = previous_status
+                    && let Err(error) = self
+                        .goal_durable_store
+                        .append_status_changed(&durable_goal, previous_status, None)
+                        .await
+                {
+                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal complete record");
+                }
                 self.sync_core_session_goal(session_id, None).await;
                 result
             }
@@ -258,12 +314,14 @@ impl ServerRuntime {
                 "no goal store for session",
             );
         };
+        let previous_status = store.get().map(|goal| goal.status);
         match store.mutate(GoalMutation {
             goal_id: GoalId(params.goal_id),
             action: GoalAction::Cancel,
         }) {
             Ok(goal) => {
                 let thread_goal = goal.to_thread_goal();
+                let durable_goal = goal.clone();
                 let result = serde_json::to_value(SuccessResponse {
                     id: request_id,
                     result: devo_protocol::GoalSetStatusResult { goal: thread_goal },
@@ -271,6 +329,14 @@ impl ServerRuntime {
                 .expect("serialize goal cancel result");
                 let session_id = params.session_id;
                 drop(stores);
+                if let Some(previous_status) = previous_status
+                    && let Err(error) = self
+                        .goal_durable_store
+                        .append_status_changed(&durable_goal, previous_status, None)
+                        .await
+                {
+                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal cancel record");
+                }
                 self.sync_core_session_goal(session_id, None).await;
                 result
             }
@@ -300,11 +366,23 @@ impl ServerRuntime {
         };
 
         let mut stores = self.goal_stores.lock().await;
+        let cleared_goal_id = stores
+            .get(&params.session_id)
+            .and_then(GoalStore::get)
+            .map(|goal| goal.durable_goal_id);
         let cleared = stores
             .get_mut(&params.session_id)
             .is_some_and(GoalStore::clear);
         drop(stores);
         if cleared {
+            if let Some(goal_id) = cleared_goal_id
+                && let Err(error) = self
+                    .goal_durable_store
+                    .append_goal_cleared(params.session_id, goal_id, Some("user clear".to_string()))
+                    .await
+            {
+                tracing::warn!(session_id = %params.session_id, error = %error, "failed to persist goal clear record");
+            }
             self.sync_core_session_goal(params.session_id, None).await;
         }
 

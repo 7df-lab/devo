@@ -150,7 +150,7 @@ Conceptual persistent goal fields:
 
 The session JSONL rollout remains the authoritative durable source of truth. Every goal state that must survive restart must be representable by append-only JSONL records. The v1 goal design is JSONL-only for durable goal state; it does not introduce SQLite as the authoritative goal projection.
 
-Implementation status as of 2026-06-10: the core durable replay projection includes goal records and context snapshot metadata. The server runtime still needs a follow-up migration from its current in-memory `GoalStore` projection to end-to-end `RolloutLine`/`DurableRecord` append and replay before goal state is fully restart-durable.
+Implementation status as of 2026-06-10: the core durable replay projection includes goal records and context snapshot metadata. The server runtime writes goal lifecycle, status, turn-accounting, clear, and hidden-context snapshot events to a DurableRecord JSONL sidecar and replays that sidecar into the in-memory `GoalStore` projection during session load. A later migration may fold these records into the primary `RolloutLine` schema so one rollout file contains both transcript and goal records.
 
 SQLite may be introduced as a rebuildable projection and operational index:
 
@@ -203,7 +203,7 @@ Conceptual runtime fields:
 - Last accounted token and time counters.
 - Continuation semaphore or lock.
 - Reserved active-turn slot for autonomous continuation.
-- Whether budget-limit guidance has already been injected for the current turn.
+- Whether the budget-limit wrap-up turn has already been reserved for the current budget exhaustion.
 - Whether the last autonomous continuation did no useful work.
 - Pending continuation reason.
 
@@ -232,7 +232,7 @@ goal_token_delta = non_cached_input_tokens + output_tokens
 
 Cached input tokens are excluded because they represent reused context rather than newly consumed context cost for the current goal. If a provider reports reasoning tokens separately, the model usage normalization layer must state whether they are already included in `output_tokens`. Goal accounting must not double-count reasoning tokens.
 
-Budget transitions should be atomic at the projection layer. A successful accounting operation should increment usage and switch `active` to `budget_limited` in one logical operation when a configured limit is reached.
+When a configured token budget is reached, the server should allow one final hidden budget-limit wrap-up turn. That wrap-up prompt must tell the model not to start new substantive work and to summarize useful progress, remaining work, or blockers. The runtime should switch the goal to `budget_limited` when the wrap-up turn is reserved, preventing any further autonomous continuation after the wrap-up.
 
 ## Continuation Loop
 

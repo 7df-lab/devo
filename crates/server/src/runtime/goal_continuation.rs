@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 
 struct GoalContinuationCandidate {
     goal_id: GoalId,
-    goal: devo_protocol::ThreadGoal,
+    goal: Goal,
 }
 
 impl ServerRuntime {
@@ -84,7 +84,7 @@ impl ServerRuntime {
                 turn
             };
             if !self
-                .mark_goal_continuation_turn_started(session_id, &candidate.goal_id)
+                .mark_goal_continuation_turn_started(session_id, &candidate.goal_id, turn.turn_id)
                 .await
             {
                 self.clear_goal_continuation_turn_reservation(&session_arc, turn.turn_id)
@@ -138,7 +138,7 @@ impl ServerRuntime {
                         input: String::new(),
                         collaboration_mode: devo_protocol::CollaborationMode::Build,
                         input_mode: TurnInputMode::HiddenGoalContinuation {
-                            goal: candidate.goal,
+                            goal: candidate.goal.to_thread_goal(),
                         },
                     })
                     .await;
@@ -155,13 +155,13 @@ impl ServerRuntime {
         session_id: SessionId,
     ) -> Option<GoalContinuationCandidate> {
         let stores = self.goal_stores.lock().await;
-        let goal = stores.get(&session_id)?.get()?;
+        let goal = stores.get(&session_id)?.get()?.clone();
         if !goal.check_continuation().should_continue {
             return None;
         }
         Some(GoalContinuationCandidate {
             goal_id: goal.goal_id.clone(),
-            goal: goal.to_thread_goal(),
+            goal,
         })
     }
 
@@ -170,9 +170,13 @@ impl ServerRuntime {
         session_id: SessionId,
         session_arc: &Arc<Mutex<RuntimeSession>>,
     ) -> bool {
-        let latest_turn = {
+        let (latest_turn, failure_message) = {
             let session = session_arc.lock().await;
-            session.latest_turn.clone()
+            let latest_turn = session.latest_turn.clone();
+            let failure_message = latest_turn.as_ref().and_then(|turn| {
+                latest_failed_turn_error_message(&session.persisted_turn_items, turn)
+            });
+            (latest_turn, failure_message)
         };
 
         let mut stores = self.goal_stores.lock().await;
@@ -185,14 +189,24 @@ impl ServerRuntime {
             return false;
         }
 
+        let previous_status = goal.status;
         goal.status = GoalStatus::Paused;
-        goal.blocker_summary = Some(
-            "Goal continuation paused because the previous turn failed before the goal could continue."
-                .to_string(),
-        );
+        goal.blocker_summary = Some(goal_failure_blocker_summary(failure_message.as_deref()));
         goal.updated_at = Utc::now();
+        let durable_goal = goal.clone();
         drop(stores);
 
+        if let Err(error) = self
+            .goal_durable_store
+            .append_status_changed(
+                &durable_goal,
+                previous_status,
+                durable_goal.blocker_summary.clone(),
+            )
+            .await
+        {
+            tracing::warn!(session_id = %session_id, error = %error, "failed to persist failed-turn goal pause record");
+        }
         self.sync_core_session_goal(session_id, None).await;
         tracing::warn!(
             session_id = %session_id,
@@ -224,6 +238,19 @@ impl ServerRuntime {
                 build_turn_record(turn, session_context, turn_context),
             )?;
         }
+        let goal = {
+            let stores = self.goal_stores.lock().await;
+            stores.get(&session_id).and_then(GoalStore::get).cloned()
+        };
+        if let Some(goal) = goal
+            && let Some(prompt) = goal.continuation_prompt()
+            && let Err(error) = self
+                .goal_durable_store
+                .append_context_snapshot(&goal, format!("turn-{}", turn.turn_id), prompt)
+                .await
+        {
+            tracing::warn!(session_id = %session_id, turn_id = %turn.turn_id, error = %error, "failed to persist goal context snapshot");
+        }
         Ok(())
     }
 
@@ -231,18 +258,53 @@ impl ServerRuntime {
         &self,
         session_id: SessionId,
         goal_id: &GoalId,
+        turn_id: TurnId,
     ) -> bool {
         let mut stores = self.goal_stores.lock().await;
-        stores
+        let goal = stores
             .get_mut(&session_id)
             .and_then(GoalStore::get_mut)
             .filter(|goal| &goal.goal_id == goal_id)
             .filter(|goal| goal.check_continuation().should_continue)
             .map(|goal| {
+                let previous_status = goal.status;
                 goal.usage.record_turn();
-                true
-            })
-            .unwrap_or(false)
+                if goal.token_budget_exhausted() {
+                    goal.status = GoalStatus::BudgetLimited;
+                    goal.blocker_summary = Some(
+                        "Goal token budget reached; launched a budget-limit wrap-up turn."
+                            .to_string(),
+                    );
+                }
+                goal.updated_at = Utc::now();
+                (goal.clone(), previous_status)
+            });
+        drop(stores);
+
+        let Some((goal, previous_status)) = goal else {
+            return false;
+        };
+        if let Err(error) = self
+            .goal_durable_store
+            .append_budget_accounted(
+                &goal, turn_id, /*token_delta*/ 0, /*turn_delta*/ 1,
+                /*duration_delta_seconds*/ 0,
+            )
+            .await
+        {
+            tracing::warn!(session_id = %session_id, turn_id = %turn_id, error = %error, "failed to persist goal turn accounting record");
+        }
+        if goal.status != previous_status {
+            if let Err(error) = self
+                .goal_durable_store
+                .append_status_changed(&goal, previous_status, goal.blocker_summary.clone())
+                .await
+            {
+                tracing::warn!(session_id = %session_id, turn_id = %turn_id, error = %error, "failed to persist goal budget-limit status record");
+            }
+            self.sync_core_session_goal(session_id, None).await;
+        }
+        true
     }
 
     async fn clear_goal_continuation_turn_reservation(
@@ -274,6 +336,12 @@ fn session_allows_goal_continuation_locked(session: &RuntimeSession) -> bool {
     {
         return false;
     }
+    let Ok(core_session) = session.core_session.try_lock() else {
+        return false;
+    };
+    if core_session.collaboration_mode == devo_protocol::CollaborationMode::Plan {
+        return false;
+    }
     session
         .pending_turn_queue
         .lock()
@@ -292,6 +360,93 @@ fn failed_turn_should_suppress_goal(
         return false;
     }
     turn.completed_at.unwrap_or(turn.started_at) > goal_updated_at
+}
+
+fn latest_failed_turn_error_message(
+    items: &[crate::execution::PersistedTurnItem],
+    latest_turn: &TurnMetadata,
+) -> Option<String> {
+    if latest_turn.status != TurnStatus::Failed {
+        return None;
+    }
+    items.iter().rev().find_map(|item| {
+        match (&item.turn_id == &latest_turn.turn_id, &item.turn_item) {
+            (true, TurnItem::AgentMessage(TextItem { text })) if !text.trim().is_empty() => {
+                Some(text.clone())
+            }
+            _ => None,
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoalFailureClass {
+    ToolCallAdjacency,
+    ProviderParameter,
+    Authentication,
+    Permission,
+    Other,
+}
+
+fn classify_goal_failure(message: Option<&str>) -> GoalFailureClass {
+    let Some(message) = message else {
+        return GoalFailureClass::Other;
+    };
+    let normalized = message.to_ascii_lowercase();
+    if (normalized.contains("tool_calls") || normalized.contains("tool calls"))
+        && (normalized.contains("tool_call_id")
+            || normalized.contains("tool messages")
+            || normalized.contains("insufficient tool messages"))
+    {
+        return GoalFailureClass::ToolCallAdjacency;
+    }
+    if normalized.contains("401")
+        || normalized.contains("unauthorized")
+        || normalized.contains("authentication")
+        || normalized.contains("api key")
+        || normalized.contains("token timeout")
+    {
+        return GoalFailureClass::Authentication;
+    }
+    if normalized.contains("403")
+        || normalized.contains("434")
+        || normalized.contains("forbidden")
+        || normalized.contains("permission")
+        || normalized.contains("no api permission")
+    {
+        return GoalFailureClass::Permission;
+    }
+    if normalized.contains("400")
+        || normalized.contains("bad request")
+        || normalized.contains("invalid request")
+        || normalized.contains("invalid_request_error")
+        || normalized.contains("invalid parameter")
+        || normalized.contains("parameter error")
+    {
+        return GoalFailureClass::ProviderParameter;
+    }
+    GoalFailureClass::Other
+}
+
+fn goal_failure_blocker_summary(message: Option<&str>) -> String {
+    match classify_goal_failure(message) {
+        GoalFailureClass::ToolCallAdjacency => {
+            "Goal continuation paused after an unrecoverable provider/protocol error: the provider rejected a tool-call transcript because assistant tool_calls were not followed by matching tool messages."
+        }
+        GoalFailureClass::ProviderParameter => {
+            "Goal continuation paused after an unrecoverable provider parameter error, such as a 400 Bad Request or invalid request payload."
+        }
+        GoalFailureClass::Authentication => {
+            "Goal continuation paused after an authentication error. Fix the provider credentials before resuming the goal."
+        }
+        GoalFailureClass::Permission => {
+            "Goal continuation paused after a provider permission error. Fix model or account permissions before resuming the goal."
+        }
+        GoalFailureClass::Other => {
+            "Goal continuation paused because the previous turn failed before the goal could continue."
+        }
+    }
+    .to_string()
 }
 
 #[cfg(test)]
@@ -357,5 +512,39 @@ mod tests {
             goal_updated_at,
             Some(&latest_turn)
         ));
+    }
+
+    #[test]
+    fn classifies_tool_call_adjacency_failure() {
+        // Trace: L2-DES-GOAL-001
+        let message = "Invalid status code: 400 Bad Request; response body: assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'";
+
+        assert_eq!(
+            classify_goal_failure(Some(message)),
+            GoalFailureClass::ToolCallAdjacency
+        );
+        assert!(goal_failure_blocker_summary(Some(message)).contains("assistant tool_calls"),);
+    }
+
+    #[test]
+    fn classifies_provider_parameter_failure() {
+        // Trace: L2-DES-GOAL-001
+        assert_eq!(
+            classify_goal_failure(Some("400 Bad Request invalid_request_error")),
+            GoalFailureClass::ProviderParameter
+        );
+    }
+
+    #[test]
+    fn classifies_authentication_and_permission_failures() {
+        // Trace: L2-DES-GOAL-001
+        assert_eq!(
+            classify_goal_failure(Some("401 unauthorized invalid api key")),
+            GoalFailureClass::Authentication
+        );
+        assert_eq!(
+            classify_goal_failure(Some("403 forbidden no api permission")),
+            GoalFailureClass::Permission
+        );
     }
 }

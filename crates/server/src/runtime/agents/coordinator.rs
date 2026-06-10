@@ -140,12 +140,22 @@ impl AgentToolCoordinator for ServerRuntime {
         let store = stores.get_mut(&session_id).ok_or_else(|| {
             ToolCallError::InvalidInput("no active goal exists for this session".to_string())
         })?;
+        let previous_status = store.get().map(|goal| goal.status).ok_or_else(|| {
+            ToolCallError::InvalidInput("no active goal exists for this session".to_string())
+        })?;
         let goal = store
             .set_status(devo_protocol::ThreadGoalStatus::Complete)
             .map_err(|error| ToolCallError::ExecutionFailed(error.to_string()))?;
         let thread_goal = goal.to_thread_goal();
         drop(stores);
 
+        if let Err(error) = self
+            .goal_durable_store
+            .append_status_changed(&goal, previous_status, None)
+            .await
+        {
+            tracing::warn!(session_id = %session_id, error = %error, "failed to persist update_goal status record");
+        }
         self.sync_core_session_goal(session_id, None).await;
         Ok(serde_json::json!({
             "status": "complete",

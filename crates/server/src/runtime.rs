@@ -132,11 +132,12 @@ use crate::goal::Goal;
 use crate::goal::GoalAction;
 use crate::goal::GoalId;
 use crate::goal::GoalMutation;
+use crate::goal_durable::GoalDurableStore;
 use crate::persistence::RolloutStore;
 use crate::persistence::build_item_record;
 use crate::persistence::build_turn_record;
 use crate::projection::history_item_from_turn_item;
-use crate::runtime::handlers::goal::GoalStore;
+pub(crate) use crate::runtime::handlers::goal::GoalStore;
 use crate::subagent::AgentPath;
 use crate::subagent::AgentRegistry;
 use crate::subagent::SubagentMailbox;
@@ -151,6 +152,7 @@ mod agents;
 mod approval;
 mod command_exec;
 mod connection;
+mod goal_accounting;
 mod goal_continuation;
 mod goal_handlers;
 mod handlers;
@@ -174,6 +176,7 @@ pub struct ServerRuntime {
     metadata: InitializeResult,
     deps: ServerRuntimeDependencies,
     rollout_store: RolloutStore,
+    goal_durable_store: GoalDurableStore,
     /// Thread safe hashmap as sessions container, there are allowed multiple sessions.
     sessions: Mutex<HashMap<SessionId, Arc<Mutex<RuntimeSession>>>>,
     connections: Mutex<HashMap<u64, ConnectionRuntime>>,
@@ -210,6 +213,7 @@ impl TurnInputMode {
 impl ServerRuntime {
     pub fn new(server_home: PathBuf, deps: ServerRuntimeDependencies) -> Arc<Self> {
         let rollout_store = RolloutStore::new(server_home.clone());
+        let goal_durable_store = GoalDurableStore::new(server_home.clone());
         Arc::new(Self {
             metadata: InitializeResult {
                 server_name: "devo-server".into(),
@@ -220,6 +224,7 @@ impl ServerRuntime {
             },
             deps,
             rollout_store,
+            goal_durable_store,
             sessions: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
             active_tasks: Mutex::new(HashMap::new()),

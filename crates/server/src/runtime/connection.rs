@@ -317,6 +317,9 @@ impl ServerRuntime {
     }
 
     pub(super) async fn broadcast_event(&self, event: ServerEvent) {
+        if let ServerEvent::TurnCompleted(payload) = &event {
+            self.account_goal_turn_completed(&payload.turn).await;
+        }
         self.record_subagent_output_event(&event).await;
         let method = event.method_name();
         let session_id = event.session_id();
