@@ -182,11 +182,12 @@ impl GoalDurableStore {
                             devo_core::GoalStatus::Completed => {
                                 goal.verification_summary = record.reason;
                             }
-                            devo_core::GoalStatus::Blocked | devo_core::GoalStatus::Failed => {
+                            devo_core::GoalStatus::Paused
+                            | devo_core::GoalStatus::Blocked
+                            | devo_core::GoalStatus::Failed => {
                                 goal.blocker_summary = record.reason;
                             }
                             devo_core::GoalStatus::Active
-                            | devo_core::GoalStatus::Paused
                             | devo_core::GoalStatus::Canceled
                             | devo_core::GoalStatus::Cleared => {}
                         }
@@ -436,5 +437,39 @@ mod tests {
         let replayed = store.replay_goal_store(session_id).await.expect("replay");
 
         assert!(replayed.is_none());
+    }
+
+    #[tokio::test]
+    async fn goal_durable_store_replays_paused_reason_as_blocker() {
+        // Trace: L2-DES-GOAL-001
+        let temp = TempDir::new().expect("temp dir");
+        let store = GoalDurableStore::new(temp.path().to_path_buf());
+        let session_id = SessionId::new();
+        let mut goal = active_goal(session_id);
+        goal.created_turn_id = Some(TurnRef {
+            turn_id: TurnId::new(),
+            sequence: 0,
+        });
+
+        store
+            .append_goal_created(&goal)
+            .await
+            .expect("append created");
+        let previous_status = goal.status;
+        goal.status = GoalStatus::Paused;
+        goal.blocker_summary = Some("provider 400 bad request".to_string());
+        goal.updated_at = Utc::now();
+        store
+            .append_status_changed(&goal, previous_status, goal.blocker_summary.clone())
+            .await
+            .expect("append status");
+
+        let replayed = store
+            .replay_goal_store(session_id)
+            .await
+            .expect("replay")
+            .expect("store");
+
+        assert_eq!(replayed.active_goal, Some(goal));
     }
 }
