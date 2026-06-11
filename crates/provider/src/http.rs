@@ -4,10 +4,13 @@ use anyhow::Context;
 use anyhow::Result;
 use reqwest::Client;
 use reqwest::RequestBuilder;
+use reqwest::Response;
+use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
 use serde_json::Value;
+use tracing::warn;
 
 /// HTTP options shared by model-provider adapters.
 #[derive(Clone, Debug, Default)]
@@ -52,6 +55,32 @@ impl ProviderHttpOptions {
             builder.headers(self.custom_headers.clone())
         }
     }
+}
+
+pub(crate) async fn invalid_status_error(
+    provider: &'static str,
+    model: &str,
+    operation: &str,
+    status: StatusCode,
+    response: Response,
+    request_body: &Value,
+) -> anyhow::Error {
+    let response_body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
+    warn!(
+        provider,
+        model,
+        operation,
+        status = %status,
+        http_body = %request_body,
+        response_body = %response_body,
+        "provider request failed"
+    );
+    anyhow::anyhow!(
+        "{provider} {operation} error for model {model}: Invalid status code: {status}; response body: {response_body}"
+    )
 }
 
 fn parse_custom_headers(headers: Option<String>) -> Result<HeaderMap> {

@@ -14,13 +14,14 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::hosted_tools::append_openai_responses_hosted_tools;
+use crate::http::invalid_status_error;
 use crate::text_normalization::{TaggedTextFragment, TaggedTextParser, split_tagged_text};
 use crate::{ModelProviderSDK, ProviderHttpOptions, merge_extra_body};
 
 use super::capabilities::{OpenAITransport, resolve_request_profile};
 use super::{
     OpenAIRole,
-    shared::{invalid_status_error, request_role, tool_definitions},
+    shared::{request_role, tool_definitions},
 };
 
 /// OpenAI Responses API provider.
