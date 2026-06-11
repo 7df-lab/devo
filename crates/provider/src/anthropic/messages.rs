@@ -34,6 +34,7 @@ use crate::ModelProviderSDK;
 use crate::ProviderAdapter;
 use crate::ProviderCapabilities;
 use crate::ProviderHttpOptions;
+use crate::http::invalid_status_error;
 use crate::merge_extra_body;
 
 /// <https://platform.claude.com/docs/en/api/messages>
@@ -120,6 +121,8 @@ struct AnthropicInputMessage {
 enum AnthropicInputContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -268,9 +271,22 @@ impl ModelProviderSDK for AnthropicProvider {
             .request_builder(&body)
             .send()
             .await
-            .context("failed to send anthropic request")?
-            .error_for_status()
-            .context("anthropic request failed")?;
+            .context("failed to send anthropic request")?;
+        let response = match response.error_for_status_ref() {
+            Ok(_) => response,
+            Err(_) => {
+                let status = response.status();
+                return Err(invalid_status_error(
+                    "anthropic",
+                    &request.model,
+                    "request",
+                    status,
+                    response,
+                    &body,
+                )
+                .await);
+            }
+        };
 
         let value: Value = response
             .json()
@@ -307,9 +323,24 @@ impl ModelProviderSDK for AnthropicProvider {
 
             futures::pin_mut!(event_source);
             while let Some(event) = event_source.next().await {
-                let event = event.map_err(|error| {
-                    anyhow::anyhow!("anthropic stream error for model {}: {error}", request.model)
-                })?;
+                let event = match event {
+                    Ok(event) => event,
+                    Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)) => {
+                        Err(invalid_status_error(
+                            "anthropic",
+                            &request.model,
+                            "stream",
+                            status,
+                            response,
+                            &body,
+                        )
+                        .await)?
+                    }
+                    Err(error) => Err(anyhow::anyhow!(
+                        "anthropic stream error for model {}: {error}",
+                        request.model
+                    ))?,
+                };
 
                 match event {
                     Event::Open => {}
@@ -836,9 +867,9 @@ fn build_message(message: &RequestMessage) -> AnthropicInputMessage {
 fn build_content_block(block: &RequestContent) -> AnthropicInputContentBlock {
     match block {
         RequestContent::Text { text } => AnthropicInputContentBlock::Text { text: text.clone() },
-        RequestContent::Reasoning { text } => {
-            AnthropicInputContentBlock::Text { text: text.clone() }
-        }
+        RequestContent::Reasoning { text } => AnthropicInputContentBlock::Thinking {
+            thinking: text.clone(),
+        },
         RequestContent::ToolUse { id, name, input } => AnthropicInputContentBlock::ToolUse {
             id: id.clone(),
             name: name.clone(),
@@ -1040,6 +1071,58 @@ mod tests {
             json!("tool_result")
         );
         assert_eq!(body["tools"][0]["name"], json!("get_weather"));
+    }
+
+    #[test]
+    fn build_request_serializes_reasoning_as_thinking_block() {
+        let request = ModelRequest {
+            model: "deepseek-v4-flash".to_string(),
+            system: None,
+            messages: vec![RequestMessage {
+                role: "assistant".to_string(),
+                content: vec![
+                    RequestContent::Reasoning {
+                        text: "Need to inspect the file first.".to_string(),
+                    },
+                    RequestContent::Text {
+                        text: "I'll read the README.".to_string(),
+                    },
+                    RequestContent::ToolUse {
+                        id: "toolu_123".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"path": "README.md"}),
+                    },
+                ],
+            }],
+            max_tokens: 1024,
+            tools: None,
+            sampling: SamplingControls::default(),
+            thinking: Some("enabled".to_string()),
+            reasoning_effort: None,
+            extra_body: None,
+        };
+
+        let body = build_request(&request, true);
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                {
+                    "type": "thinking",
+                    "thinking": "Need to inspect the file first."
+                },
+                {
+                    "type": "text",
+                    "text": "I'll read the README."
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_123",
+                    "name": "read",
+                    "input": { "path": "README.md" }
+                }
+            ])
+        );
     }
 
     #[test]

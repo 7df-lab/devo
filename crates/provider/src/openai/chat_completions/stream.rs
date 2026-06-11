@@ -12,7 +12,6 @@ use reqwest_eventsource::{Event, EventSource};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::super::shared::invalid_status_error;
 use super::{
     OpenAIChatCompletionChoice, OpenAIChatCompletionCustomToolCall,
     OpenAIChatCompletionFunctionCall, OpenAIChatCompletionMessage,
@@ -20,6 +19,7 @@ use super::{
     OpenAIProvider, build_provider_specific_response_payload, build_request, parse_finish_reason,
     parse_tool_use,
 };
+use crate::http::invalid_status_error;
 use crate::text_normalization::{TaggedTextFragment, TaggedTextParser};
 
 /// <https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events>

@@ -27,7 +27,6 @@ use devo_protocol::Usage;
 use super::capabilities::OpenAIReasoningMode;
 use super::capabilities::OpenAITransport;
 use super::capabilities::resolve_request_profile;
-use super::shared::invalid_status_error;
 use super::shared::reasoning_value;
 use super::shared::request_role;
 use super::shared::tool_definitions;
@@ -35,6 +34,7 @@ use crate::ModelProviderSDK;
 use crate::ProviderAdapter;
 use crate::ProviderCapabilities;
 use crate::ProviderHttpOptions;
+use crate::http::invalid_status_error;
 use crate::merge_extra_body;
 use crate::text_normalization::split_tagged_text;
 

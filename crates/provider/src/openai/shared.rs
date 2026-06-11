@@ -1,7 +1,5 @@
 use devo_protocol::RequestRole;
 use devo_protocol::ToolDefinition;
-use reqwest::Response;
-use reqwest::StatusCode;
 use serde_json::Value;
 use serde_json::json;
 use tracing::warn;
@@ -95,31 +93,5 @@ pub(crate) fn tool_definitions(tools: &[ToolDefinition]) -> Value {
                 })
             })
             .collect(),
-    )
-}
-
-pub(crate) async fn invalid_status_error(
-    provider: &'static str,
-    model: &str,
-    operation: &str,
-    status: StatusCode,
-    response: Response,
-    request_body: &Value,
-) -> anyhow::Error {
-    let response_body = response
-        .text()
-        .await
-        .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
-    warn!(
-        provider,
-        model,
-        operation,
-        status = %status,
-        http_body = %request_body,
-        response_body = %response_body,
-        "provider request failed"
-    );
-    anyhow::anyhow!(
-        "{provider} {operation} error for model {model}: Invalid status code: {status}; response body: {response_body}"
     )
 }
