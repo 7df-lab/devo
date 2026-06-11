@@ -9,8 +9,14 @@ use pretty_assertions::assert_eq;
 use super::AppConfig;
 use super::AppConfigLoader;
 use super::AppConfigStore;
+use super::CommandHookConfig;
 use super::ExperimentalConfig;
 use super::FileSystemAppConfigLoader;
+use super::HookCommandConfig;
+use super::HookEvent;
+use super::HookMatcherConfig;
+use super::HookShell;
+use super::HooksConfig;
 use super::LogRotation;
 use super::LoggingConfig;
 use super::ModelBindingConfig;
@@ -122,6 +128,7 @@ check_interval_hours = 48
             mcp_oauth_credentials_store: Some(OAuthCredentialsStoreMode::default()),
             mcp: super::McpConfig::default(),
             tools: ToolsConfig::default(),
+            hooks: HooksConfig::default(),
             provider: ProviderConfigSection::default(),
             provider_http: super::ProviderHttpConfig::default(),
             updates: UpdatesConfig {
@@ -221,6 +228,53 @@ fn loader_merges_experimental_config_in_normal_precedence_order() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[test]
+fn loader_reads_hook_command_config() {
+    let root = unique_temp_dir("config-hooks");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        r#"
+[[hooks.PreToolUse]]
+matcher = "exec_command"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "hooks/pre_tool.sh"
+shell = "powershell"
+timeout = 5
+statusMessage = "Checking tool use"
+"#,
+    )
+    .expect("write user config");
+
+    let loader = FileSystemAppConfigLoader::new(home);
+    let config = loader.load(None).expect("load config");
+
+    assert_eq!(
+        config.hooks,
+        HooksConfig(BTreeMap::from([(
+            HookEvent::PreToolUse,
+            vec![HookMatcherConfig {
+                matcher: Some("exec_command".to_string()),
+                hooks: vec![HookCommandConfig::Command(CommandHookConfig {
+                    command: "hooks/pre_tool.sh".to_string(),
+                    shell: Some(HookShell::PowerShell),
+                    condition: None,
+                    timeout: Some(5),
+                    status_message: Some("Checking tool use".to_string()),
+                    once: None,
+                    async_hook: None,
+                    async_rewake: None,
+                })],
+            }],
+        )]))
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Trace: L2-DES-APP-005
 /// Verifies: provider HTTP proxy settings and provider header fields follow user/workspace merge precedence.
 #[test]
@@ -297,6 +351,7 @@ invocation_method = "openai_responses"
                     headers: Some(r#"{"X-User":"yes"}"#.to_string()),
                     wire_apis: vec![ProviderWireApi::OpenAIResponses],
                     web_search: None,
+                    web_fetch: None,
                     enabled: true,
                 },
             )]),

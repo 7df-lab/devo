@@ -82,6 +82,18 @@ pub(crate) async fn run_prompt(
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
             local_web_search: None,
+            hooks: (!app_config.hooks.is_empty()).then(|| devo_core::HookRuntimeContext {
+                runner: devo_core::HookRunner::new(app_config.hooks.clone()),
+                base: devo_core::HookBaseInput {
+                    session_id: session_state.id.clone(),
+                    transcript_path: String::new(),
+                    cwd: cwd.clone(),
+                    permission_mode: Some("auto-approve".to_string()),
+                    agent_id: None,
+                    agent_type: None,
+                },
+            }),
+            network_proxy: None,
         },
     );
     let model_catalog = PresetModelCatalog::load_from_config(&home_dir, Some(&cwd))?;

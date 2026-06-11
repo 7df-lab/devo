@@ -227,6 +227,9 @@ impl ServerRuntime {
                     session: start_summary,
                 }))
                 .await;
+            start_runtime
+                .run_subagent_start_hook(child_session_id)
+                .await;
             if start_runtime
                 .agent_close_requested(parent_session_id, child_session_id)
                 .await
@@ -685,6 +688,16 @@ impl ServerRuntime {
             turn.turn_id,
         )
         .await;
+        if matches!(
+            status,
+            SubagentStatus::Completed
+                | SubagentStatus::Failed
+                | SubagentStatus::Interrupted
+                | SubagentStatus::Canceled
+                | SubagentStatus::Closed
+        ) {
+            self.run_subagent_stop_hook(child_session_id).await;
+        }
     }
 
     pub(super) async fn child_parent_and_path(
@@ -874,6 +887,7 @@ impl ServerRuntime {
             TurnId::new(),
         )
         .await;
+        self.run_subagent_stop_hook(child_session_id).await;
     }
 
     async fn generate_unique_agent_name(

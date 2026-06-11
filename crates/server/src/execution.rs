@@ -20,6 +20,7 @@ use devo_core::AppConfig;
 use devo_core::Model;
 use devo_core::ModelCatalog;
 use devo_core::ResolvedSkill;
+use devo_core::ResolvedWebFetchConfig;
 use devo_core::ResolvedWebSearchConfig;
 use devo_core::SessionConfig;
 use devo_core::SessionId;
@@ -30,12 +31,14 @@ use devo_core::SkillError;
 use devo_core::SkillSelector;
 use devo_core::TurnConfig;
 use devo_core::TurnId;
+use devo_core::WebFetchConfig;
 use devo_core::WebSearchConfig;
 use devo_core::default_base_instructions;
 use devo_core::normalize_canonical_path;
 use devo_core::provider_request_model_map_for_binding;
 use devo_core::read_user_auth_config;
 use devo_core::resolve_enabled_model_binding;
+use devo_core::resolve_web_fetch_config;
 use devo_core::resolve_web_search_config;
 use devo_core::tools::ToolRegistry;
 use devo_protocol::ApprovalDecisionValue;
@@ -273,6 +276,11 @@ impl ServerRuntimeDependencies {
                 provider.and_then(|provider| provider.web_search.as_ref()),
                 binding_config.and_then(|binding| binding.web_search.as_ref()),
             );
+            let web_fetch = self.resolve_turn_web_fetch(
+                &config,
+                provider.and_then(|provider| provider.web_fetch.as_ref()),
+                binding_config.and_then(|binding| binding.web_fetch.as_ref()),
+            );
             // Variant request models are scoped to the selected provider. If
             // both OpenRouter and a custom provider configure
             // `model_slug = "kimi-k2.5-thinking"`, a turn selected through
@@ -280,20 +288,23 @@ impl ServerRuntimeDependencies {
             let provider_request_models = ProviderRequestModelMap::new(
                 provider_request_model_map_for_binding(&provider_config, &binding),
             );
-            return TurnConfig::with_provider_route_and_web_search(
+            return TurnConfig::with_provider_route_and_web_tools(
                 self.catalog_model_or_fallback(&binding.model_slug),
                 binding.model_name,
                 provider_request_models,
                 ProviderRoute::binding(binding.provider_id, binding.invocation_method),
                 web_search,
+                web_fetch,
                 thinking_selection,
             );
         }
 
         let model = self.resolve_turn_model(requested_model);
         let web_search = self.resolve_turn_web_search(&config, &user_config_dir, None, None);
+        let web_fetch = self.resolve_turn_web_fetch(&config, None, None);
         let mut turn_config = TurnConfig::new(model, thinking_selection);
         turn_config.web_search = web_search;
+        turn_config.web_fetch = web_fetch;
         turn_config
     }
 
@@ -323,6 +334,15 @@ impl ServerRuntimeDependencies {
                 ResolvedWebSearchConfig::Disabled
             }
         }
+    }
+
+    fn resolve_turn_web_fetch(
+        &self,
+        config: &AppConfig,
+        provider_override: Option<&WebFetchConfig>,
+        binding_override: Option<&WebFetchConfig>,
+    ) -> ResolvedWebFetchConfig {
+        resolve_web_fetch_config(&config.tools.web_fetch, provider_override, binding_override)
     }
 
     /// Should move the discover skill main logic to skills crate, and server just keep a simple wrapper.

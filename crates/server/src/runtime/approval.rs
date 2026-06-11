@@ -121,7 +121,12 @@ impl ServerRuntime {
         request: ToolPermissionRequest,
     ) -> Result<(), String> {
         if let Some(result) = permission_mode_authorization(permission_mode) {
-            return result;
+            if let Err(reason) = result {
+                self.run_permission_denied_hook(session_id, &request, &reason)
+                    .await;
+                return Err(reason);
+            }
+            return Ok(());
         }
         if self.approval_cache_allows(session_id, &request).await {
             return Ok(());
@@ -129,6 +134,15 @@ impl ServerRuntime {
         match self.policy_decision(&permission_profile, &request) {
             PolicyAuthorization::Allow => Ok(()),
             PolicyAuthorization::Ask => {
+                if let Some(reason) = self
+                    .permission_request_hook_block_reason(session_id, &request)
+                    .await
+                {
+                    let message = format!("blocked by PermissionRequest hook: {reason}");
+                    self.run_permission_denied_hook(session_id, &request, &message)
+                        .await;
+                    return Err(message);
+                }
                 if matches!(
                     permission_profile.reviewer,
                     devo_safety::ApprovalsReviewer::AutoReview
@@ -139,15 +153,54 @@ impl ServerRuntime {
                     {
                         AutoReviewOutcome::Approve => return Ok(()),
                         AutoReviewOutcome::Deny(reason) => {
+                            self.run_permission_denied_hook(session_id, &request, &reason)
+                                .await;
                             return Err(format!("rejected by auto-reviewer: {reason}"));
                         }
                         AutoReviewOutcome::AskUser => {}
                     }
                 }
-                self.request_tool_approval(session_id, turn_id, request)
-                    .await
+                let result = self
+                    .request_tool_approval(session_id, turn_id, request.clone())
+                    .await;
+                if let Err(reason) = &result {
+                    self.run_permission_denied_hook(session_id, &request, reason)
+                        .await;
+                }
+                result
             }
         }
+    }
+
+    async fn permission_request_hook_block_reason(
+        &self,
+        session_id: SessionId,
+        request: &ToolPermissionRequest,
+    ) -> Option<String> {
+        let report = self
+            .run_session_hook(
+                session_id,
+                devo_core::HookEvent::PermissionRequest,
+                permission_tool_extra(request),
+            )
+            .await;
+        report.first_blocking_reason().map(str::to_string)
+    }
+
+    async fn run_permission_denied_hook(
+        &self,
+        session_id: SessionId,
+        request: &ToolPermissionRequest,
+        reason: &str,
+    ) {
+        let mut extra = permission_tool_extra(request);
+        extra.insert(
+            "tool_use_id".to_string(),
+            serde_json::json!(request.tool_call_id),
+        );
+        extra.insert("reason".to_string(), serde_json::json!(reason));
+        self.run_session_hook(session_id, devo_core::HookEvent::PermissionDenied, extra)
+            .await;
     }
 
     async fn auto_review_tool_request(
@@ -520,6 +573,22 @@ fn cache_allows(
 
 fn request_forces_approval(request: &ToolPermissionRequest) -> bool {
     request.requests_escalation
+}
+
+fn permission_tool_extra(
+    request: &ToolPermissionRequest,
+) -> serde_json::Map<String, serde_json::Value> {
+    serde_json::Map::from_iter([
+        (
+            "tool_name".to_string(),
+            serde_json::Value::String(request.tool_name.clone()),
+        ),
+        ("tool_input".to_string(), request.input.clone()),
+        (
+            "tool_use_id".to_string(),
+            serde_json::Value::String(request.tool_call_id.clone()),
+        ),
+    ])
 }
 
 fn permission_mode_authorization(mode: PermissionMode) -> Option<Result<(), String>> {

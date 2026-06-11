@@ -70,6 +70,15 @@ impl ServerRuntime {
             session: started_summary,
         }))
         .await;
+        self.run_session_hook(
+            session_id,
+            devo_core::HookEvent::PreCompact,
+            serde_json::Map::from_iter([
+                ("trigger".to_string(), serde_json::json!("manual")),
+                ("custom_instructions".to_string(), serde_json::Value::Null),
+            ]),
+        )
+        .await;
 
         let result = {
             let runtime_session = session_arc.lock().await;
@@ -221,9 +230,13 @@ impl ServerRuntime {
                     }))
                     .await;
 
+                    let summary_turn_item =
+                        Self::summary_turn_item_from_compacted(&compacted_items);
+                    let compact_summary = match &summary_turn_item {
+                        TurnItem::ContextCompaction(TextItem { text }) => text.clone(),
+                        _ => String::new(),
+                    };
                     if let Some(record) = runtime_session.record.clone() {
-                        let summary_turn_item =
-                            Self::summary_turn_item_from_compacted(&compacted_items);
                         runtime_session.latest_compaction_snapshot =
                             Some(devo_core::CompactionSnapshotLine {
                                 timestamp: Utc::now(),
@@ -270,6 +283,26 @@ impl ServerRuntime {
                             );
                         }
                     }
+                    let summary = runtime_session.summary.clone();
+                    drop(runtime_session);
+                    self.run_session_hook(
+                        session_id,
+                        devo_core::HookEvent::PostCompact,
+                        serde_json::Map::from_iter([
+                            ("trigger".to_string(), serde_json::json!("manual")),
+                            (
+                                "compact_summary".to_string(),
+                                serde_json::Value::String(compact_summary),
+                            ),
+                        ]),
+                    )
+                    .await;
+                    tracing::info!(session_id = %session_id, "session compaction completed with replacement");
+                    self.broadcast_event(ServerEvent::SessionCompactionCompleted(
+                        SessionEventPayload { session: summary },
+                    ))
+                    .await;
+                    return;
                 }
 
                 let summary = runtime_session.summary.clone();

@@ -12,11 +12,13 @@ use crate::UserAuthConfigFile;
 pub struct ToolsConfig {
     #[serde(default, skip_serializing_if = "WebSearchConfig::is_default")]
     pub web_search: WebSearchConfig,
+    #[serde(default, skip_serializing_if = "WebFetchConfig::is_default")]
+    pub web_fetch: WebFetchConfig,
 }
 
 impl ToolsConfig {
     pub fn is_empty(&self) -> bool {
-        self.web_search.is_default()
+        self.web_search.is_default() && self.web_fetch.is_default()
     }
 }
 
@@ -46,6 +48,29 @@ impl WebSearchConfig {
         self.mode == WebSearchMode::Provider
             && self.local_provider.is_none()
             && self.local_providers.is_empty()
+    }
+}
+
+/// Selects how Devo exposes web fetch for a provider/model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WebFetchMode {
+    Disabled,
+    Provider,
+    #[default]
+    Local,
+}
+
+/// Configures the effective `web_fetch` capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WebFetchConfig {
+    #[serde(default, skip_serializing_if = "is_default_web_fetch_mode")]
+    pub mode: WebFetchMode,
+}
+
+impl WebFetchConfig {
+    pub fn is_default(&self) -> bool {
+        self.mode == WebFetchMode::Local
     }
 }
 
@@ -88,6 +113,26 @@ impl ResolvedWebSearchConfig {
     }
 }
 
+/// Fully resolved web fetch behavior for one model invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ResolvedWebFetchConfig {
+    Disabled,
+    Provider,
+    #[default]
+    Local,
+}
+
+impl ResolvedWebFetchConfig {
+    pub fn is_local(self) -> bool {
+        matches!(self, Self::Local)
+    }
+
+    pub fn is_provider(self) -> bool {
+        matches!(self, Self::Provider)
+    }
+}
+
 /// Local search service plus user-scoped API key for one turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedLocalWebSearchConfig {
@@ -111,6 +156,19 @@ pub fn resolve_web_search_config(
         WebSearchMode::Local => {
             resolve_local_web_search(global, effective, auth).map(ResolvedWebSearchConfig::Local)
         }
+    }
+}
+
+pub fn resolve_web_fetch_config(
+    global: &WebFetchConfig,
+    provider_override: Option<&WebFetchConfig>,
+    binding_override: Option<&WebFetchConfig>,
+) -> ResolvedWebFetchConfig {
+    let effective = binding_override.or(provider_override).unwrap_or(global);
+    match effective.mode {
+        WebFetchMode::Disabled => ResolvedWebFetchConfig::Disabled,
+        WebFetchMode::Provider => ResolvedWebFetchConfig::Provider,
+        WebFetchMode::Local => ResolvedWebFetchConfig::Local,
     }
 }
 
@@ -165,6 +223,10 @@ fn resolve_local_web_search(
 
 fn is_default_web_search_mode(mode: &WebSearchMode) -> bool {
     *mode == WebSearchMode::Provider
+}
+
+fn is_default_web_fetch_mode(mode: &WebFetchMode) -> bool {
+    *mode == WebFetchMode::Local
 }
 
 #[cfg(test)]

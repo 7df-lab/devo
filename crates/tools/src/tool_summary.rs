@@ -107,9 +107,9 @@ pub fn tool_summary(name: &str, input: &serde_json::Value, cwd: &Path) -> String
             format!("{name}: {pattern} in {rel}")
         }
         "apply_patch" => "apply_patch".to_string(),
-        "webfetch" => {
+        "webfetch" | "web_fetch" | "web-fetch" | "fetch_url" | "fetch-url" => {
             let url = input["url"].as_str().unwrap_or("");
-            format!("webfetch: {url}")
+            format!("web_fetch: {url}")
         }
         "web_search" | "websearch" | "web-search" => {
             let q = input["query"].as_str().unwrap_or("");

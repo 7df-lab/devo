@@ -34,7 +34,7 @@ pub(super) struct SessionHeaderParams<'a> {
 }
 
 pub(super) fn is_web_search_title(title: &str) -> bool {
-    title.starts_with("Web Search(")
+    title.starts_with("Web Search(") || title.starts_with("Web Fetch(")
 }
 
 impl ChatWidget {

@@ -1,0 +1,23 @@
+[package]
+description = "Network proxy helpers for Devo HTTP clients"
+name = "devo-network-proxy"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "devo_network_proxy"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

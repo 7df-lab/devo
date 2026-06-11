@@ -48,6 +48,7 @@ pub struct ToolContext {
     pub agent_scope: ToolAgentScope,
     pub collaboration_mode: CollaborationMode,
     pub agent_coordinator: Option<Arc<dyn AgentToolCoordinator>>,
+    pub network_proxy: Option<String>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -64,6 +65,10 @@ impl std::fmt::Debug for ToolContext {
             .field(
                 "agent_coordinator",
                 &self.agent_coordinator.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "network_proxy",
+                &self.network_proxy.as_ref().map(|_| "<configured>"),
             )
             .finish_non_exhaustive()
     }

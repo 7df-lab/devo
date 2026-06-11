@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use devo_config::ResolvedWebFetchConfig;
 use devo_config::ResolvedWebSearchConfig;
 use devo_provider::ProviderRoute;
 use devo_safety::PermissionMode;
@@ -78,6 +79,8 @@ pub struct TurnConfig {
     pub provider_route: ProviderRoute,
     /// Effective web search behavior for this turn.
     pub web_search: ResolvedWebSearchConfig,
+    /// Effective web fetch behavior for this turn.
+    pub web_fetch: ResolvedWebFetchConfig,
     pub thinking_selection: Option<String>,
 }
 
@@ -117,6 +120,7 @@ impl TurnConfig {
             provider_request_models: ProviderRequestModelMap::default(),
             provider_route: ProviderRoute::Default,
             web_search: ResolvedWebSearchConfig::Disabled,
+            web_fetch: ResolvedWebFetchConfig::Local,
             thinking_selection,
         }
     }
@@ -161,6 +165,26 @@ impl TurnConfig {
         web_search: ResolvedWebSearchConfig,
         thinking_selection: Option<String>,
     ) -> Self {
+        Self::with_provider_route_and_web_tools(
+            model,
+            request_model,
+            provider_request_models,
+            provider_route,
+            web_search,
+            ResolvedWebFetchConfig::Local,
+            thinking_selection,
+        )
+    }
+
+    pub fn with_provider_route_and_web_tools(
+        model: Model,
+        request_model: String,
+        provider_request_models: ProviderRequestModelMap,
+        provider_route: ProviderRoute,
+        web_search: ResolvedWebSearchConfig,
+        web_fetch: ResolvedWebFetchConfig,
+        thinking_selection: Option<String>,
+    ) -> Self {
         let thinking_selection = model.normalize_thinking_selection(thinking_selection.as_deref());
         Self {
             model,
@@ -168,6 +192,7 @@ impl TurnConfig {
             provider_request_models,
             provider_route,
             web_search,
+            web_fetch,
             thinking_selection,
         }
     }

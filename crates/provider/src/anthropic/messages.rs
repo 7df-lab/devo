@@ -35,6 +35,7 @@ use crate::ProviderAdapter;
 use crate::ProviderCapabilities;
 use crate::ProviderHttpOptions;
 use crate::hosted_tools::append_anthropic_hosted_tools;
+use crate::http::invalid_status_error;
 use crate::merge_extra_body;
 
 /// <https://platform.claude.com/docs/en/api/messages>
@@ -121,6 +122,8 @@ struct AnthropicInputMessage {
 enum AnthropicInputContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -271,9 +274,22 @@ impl ModelProviderSDK for AnthropicProvider {
             .request_builder(&body)
             .send()
             .await
-            .context("failed to send anthropic request")?
-            .error_for_status()
-            .context("anthropic request failed")?;
+            .context("failed to send anthropic request")?;
+        let response = match response.error_for_status_ref() {
+            Ok(_) => response,
+            Err(_) => {
+                let status = response.status();
+                return Err(invalid_status_error(
+                    "anthropic",
+                    &request.model,
+                    "request",
+                    status,
+                    response,
+                    &body,
+                )
+                .await);
+            }
+        };
 
         let value: Value = response
             .json()
@@ -307,12 +323,28 @@ impl ModelProviderSDK for AnthropicProvider {
             let mut content_blocks: BTreeMap<usize, ResponseContent> = BTreeMap::new();
             let mut reasoning_blocks: BTreeMap<usize, String> = BTreeMap::new();
             let mut tool_json: HashMap<usize, String> = HashMap::new();
+            let mut hosted_tool_inputs: HashMap<String, Value> = HashMap::new();
 
             futures::pin_mut!(event_source);
             while let Some(event) = event_source.next().await {
-                let event = event.map_err(|error| {
-                    anyhow::anyhow!("anthropic stream error for model {}: {error}", request.model)
-                })?;
+                let event = match event {
+                    Ok(event) => event,
+                    Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)) => {
+                        Err(invalid_status_error(
+                            "anthropic",
+                            &request.model,
+                            "stream",
+                            status,
+                            response,
+                            &body,
+                        )
+                        .await)?
+                    }
+                    Err(error) => Err(anyhow::anyhow!(
+                        "anthropic stream error for model {}: {error}",
+                        request.model
+                    ))?,
+                };
 
                 match event {
                     Event::Open => {}
@@ -410,21 +442,18 @@ impl ModelProviderSDK for AnthropicProvider {
                                             },
                                         );
                                         tool_json.insert(index as usize, String::new());
-                                        yield StreamEvent::HostedToolCallStart {
-                                            index: index as usize,
-                                            id,
-                                            name,
-                                            input,
-                                        };
                                     }
-                                    "web_search_tool_result" => {
+                                    "web_search_tool_result" | "web_fetch_tool_result" => {
                                         let id = block
                                             .tool_use_id
                                             .clone()
                                             .or_else(|| block.id.clone())
                                             .unwrap_or_default();
-                                        let name = "web_search".to_string();
-                                        let input = Value::Object(serde_json::Map::new());
+                                        let name = hosted_result_tool_name(&block.kind);
+                                        let input = hosted_tool_inputs
+                                            .get(&id)
+                                            .cloned()
+                                            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
                                         let output = block.content.clone();
                                         let status = Some(
                                             block
@@ -518,6 +547,7 @@ impl ModelProviderSDK for AnthropicProvider {
                             "content_block_stop" => {
                                 let index = data.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                                 if let Some(json_str) = tool_json.remove(&index)
+                                    && !json_str.is_empty()
                                     && let Ok(parsed) = serde_json::from_str(&json_str)
                                     && let Some(block) = content_blocks.get_mut(&index)
                                 {
@@ -528,6 +558,24 @@ impl ModelProviderSDK for AnthropicProvider {
                                         }
                                         ResponseContent::Text(_) => {}
                                     }
+                                }
+                                if let Some(ResponseContent::HostedToolUse {
+                                    id,
+                                    name,
+                                    input,
+                                    output,
+                                    status,
+                                }) = content_blocks.get(&index)
+                                    && output.is_none()
+                                    && status.is_none()
+                                {
+                                    hosted_tool_inputs.insert(id.clone(), input.clone());
+                                    yield StreamEvent::HostedToolCallStart {
+                                        index,
+                                        id: id.clone(),
+                                        name: name.clone(),
+                                        input: input.clone(),
+                                    };
                                 }
                             }
                             "message_delta" => {
@@ -869,8 +917,25 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
     let mut content = Vec::new();
     let mut metadata = ResponseMetadata::default();
 
+    let mut hosted_tool_inputs: HashMap<String, Value> = HashMap::new();
     for block in &response.content {
-        if let Some(parsed) = parse_response_content_block(block, &mut metadata) {
+        if let Some(mut parsed) = parse_response_content_block(block, &mut metadata) {
+            if let ResponseContent::HostedToolUse {
+                id,
+                input,
+                output,
+                status,
+                ..
+            } = &mut parsed
+            {
+                if output.is_none() && status.is_none() {
+                    hosted_tool_inputs.insert(id.clone(), input.clone());
+                } else if matches!(input, Value::Object(map) if map.is_empty())
+                    && let Some(previous_input) = hosted_tool_inputs.get(id)
+                {
+                    *input = previous_input.clone();
+                }
+            }
             content.push(parsed);
         }
     }
@@ -910,9 +975,9 @@ fn build_message(message: &RequestMessage) -> AnthropicInputMessage {
 fn build_content_block(block: &RequestContent) -> AnthropicInputContentBlock {
     match block {
         RequestContent::Text { text } => AnthropicInputContentBlock::Text { text: text.clone() },
-        RequestContent::Reasoning { text } => {
-            AnthropicInputContentBlock::Text { text: text.clone() }
-        }
+        RequestContent::Reasoning { text } => AnthropicInputContentBlock::Thinking {
+            thinking: text.clone(),
+        },
         RequestContent::ToolUse { id, name, input } => AnthropicInputContentBlock::ToolUse {
             id: id.clone(),
             name: name.clone(),
@@ -927,6 +992,14 @@ fn build_content_block(block: &RequestContent) -> AnthropicInputContentBlock {
             content: content.clone(),
             is_error: *is_error,
         },
+    }
+}
+
+fn hosted_result_tool_name(kind: &str) -> String {
+    match kind {
+        "web_fetch_tool_result" => "web_fetch".to_string(),
+        "web_search_tool_result" => "web_search".to_string(),
+        _ => "web_search".to_string(),
     }
 }
 
@@ -959,18 +1032,20 @@ fn parse_response_content_block(
             output: None,
             status: None,
         }),
-        "web_search_tool_result" => Some(ResponseContent::HostedToolUse {
-            id: block.tool_use_id.clone().or_else(|| block.id.clone())?,
-            name: "web_search".to_string(),
-            input: Value::Object(serde_json::Map::new()),
-            output: block.content.clone(),
-            status: Some(
-                block
-                    .status
-                    .clone()
-                    .unwrap_or_else(|| "completed".to_string()),
-            ),
-        }),
+        "web_search_tool_result" | "web_fetch_tool_result" => {
+            Some(ResponseContent::HostedToolUse {
+                id: block.tool_use_id.clone().or_else(|| block.id.clone())?,
+                name: hosted_result_tool_name(&block.kind),
+                input: Value::Object(serde_json::Map::new()),
+                output: block.content.clone(),
+                status: Some(
+                    block
+                        .status
+                        .clone()
+                        .unwrap_or_else(|| "completed".to_string()),
+                ),
+            })
+        }
         "thinking" => {
             if let Some(thinking) = &block.thinking
                 && !thinking.is_empty()
@@ -1143,6 +1218,59 @@ mod tests {
     }
 
     #[test]
+    fn build_request_serializes_reasoning_as_thinking_block() {
+        let request = ModelRequest {
+            model: "deepseek-v4-flash".to_string(),
+            system: None,
+            messages: vec![RequestMessage {
+                role: "assistant".to_string(),
+                content: vec![
+                    RequestContent::Reasoning {
+                        text: "Need to inspect the file first.".to_string(),
+                    },
+                    RequestContent::Text {
+                        text: "I'll read the README.".to_string(),
+                    },
+                    RequestContent::ToolUse {
+                        id: "toolu_123".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"path": "README.md"}),
+                    },
+                ],
+            }],
+            max_tokens: 1024,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: SamplingControls::default(),
+            thinking: Some("enabled".to_string()),
+            reasoning_effort: None,
+            extra_body: None,
+        };
+
+        let body = build_request(&request, true);
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                {
+                    "type": "thinking",
+                    "thinking": "Need to inspect the file first."
+                },
+                {
+                    "type": "text",
+                    "text": "I'll read the README."
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_123",
+                    "name": "read",
+                    "input": { "path": "README.md" }
+                }
+            ])
+        );
+    }
+
+    #[test]
     fn parse_response_extracts_text_tool_use_reasoning_and_usage() {
         let response = parse_response(json!({
             "id": "msg_123",
@@ -1274,6 +1402,126 @@ mod tests {
             }
             other => panic!("expected hosted tool completion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_response_carries_hosted_web_search_input_into_completion() {
+        let response = parse_response(json!({
+            "id": "msg_789",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtool_1",
+                    "name": "web_search",
+                    "input": { "query": "DeepSeek official website" }
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtool_1",
+                    "content": [
+                        {
+                            "type": "web_search_result",
+                            "title": "DeepSeek",
+                            "url": "https://www.deepseek.com/"
+                        }
+                    ],
+                    "status": "completed"
+                }
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 4,
+                "output_tokens": 2
+            }
+        }))
+        .expect("parse response");
+
+        assert_eq!(
+            response.content,
+            vec![
+                ResponseContent::HostedToolUse {
+                    id: "srvtool_1".to_string(),
+                    name: "web_search".to_string(),
+                    input: json!({"query": "DeepSeek official website"}),
+                    output: None,
+                    status: None,
+                },
+                ResponseContent::HostedToolUse {
+                    id: "srvtool_1".to_string(),
+                    name: "web_search".to_string(),
+                    input: json!({"query": "DeepSeek official website"}),
+                    output: Some(json!([
+                        {
+                            "type": "web_search_result",
+                            "title": "DeepSeek",
+                            "url": "https://www.deepseek.com/"
+                        }
+                    ])),
+                    status: Some("completed".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_response_extracts_web_fetch_tool_result_as_hosted_completion() {
+        let response = parse_response(json!({
+            "id": "msg_fetch",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtool_fetch",
+                    "name": "web_fetch",
+                    "input": { "url": "https://example.test/docs" }
+                },
+                {
+                    "type": "web_fetch_tool_result",
+                    "tool_use_id": "srvtool_fetch",
+                    "content": {
+                        "type": "web_fetch_result",
+                        "url": "https://example.test/docs",
+                        "title": "Docs"
+                    },
+                    "status": "completed"
+                }
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 4,
+                "output_tokens": 2
+            }
+        }))
+        .expect("parse response");
+
+        assert_eq!(
+            response.content,
+            vec![
+                ResponseContent::HostedToolUse {
+                    id: "srvtool_fetch".to_string(),
+                    name: "web_fetch".to_string(),
+                    input: json!({"url": "https://example.test/docs"}),
+                    output: None,
+                    status: None,
+                },
+                ResponseContent::HostedToolUse {
+                    id: "srvtool_fetch".to_string(),
+                    name: "web_fetch".to_string(),
+                    input: json!({"url": "https://example.test/docs"}),
+                    output: Some(json!({
+                        "type": "web_fetch_result",
+                        "url": "https://example.test/docs",
+                        "title": "Docs"
+                    })),
+                    status: Some("completed".to_string()),
+                },
+            ]
+        );
     }
 
     #[test]

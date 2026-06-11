@@ -7,6 +7,7 @@ members = [
     "crates/safety",
     "crates/tasks",
     "crates/mcp",
+    "crates/network-proxy",
     "crates/protocol",
     "crates/client",
     "crates/config",
@@ -58,6 +59,7 @@ devo-core = { path = "crates/core" }
 devo-file-search = { path = "crates/file-search" }
 devo-keyring-store = { path = "crates/keyring-store" }
 devo-mcp = { path = "crates/mcp" }
+devo-network-proxy = { path = "crates/network-proxy" }
 devo-protocol = { path = "crates/protocol" }
 devo-provider = { path = "crates/provider" }
 devo-rmcp-client = { path = "crates/rmcp-client" }
@@ -103,6 +105,7 @@ regex-lite = "0.1.8"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
+    "socks",
     "stream",
 ] }
 reqwest-eventsource = "0.6"

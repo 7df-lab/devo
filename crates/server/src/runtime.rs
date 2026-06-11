@@ -156,6 +156,7 @@ mod goal_accounting;
 mod goal_continuation;
 mod goal_handlers;
 mod handlers;
+mod hooks;
 mod items;
 mod lifecycle;
 mod model_api;

@@ -80,6 +80,29 @@ impl ServerRuntime {
             );
         };
 
+        let config_file = {
+            let store = self
+                .deps
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned");
+            store
+                .user_config_dir()
+                .join("config.toml")
+                .display()
+                .to_string()
+        };
+        if let Some(reason) = self
+            .config_change_hook_block_reason("user_settings", Some(config_file))
+            .await
+        {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::PolicyDenied,
+                format!("config change blocked by hook: {reason}"),
+            );
+        }
+
         let mut store = self
             .deps
             .config_store
@@ -250,6 +273,7 @@ fn resolve_validation_api_key(
         headers: params.provider_vendor.headers.clone(),
         wire_apis: params.provider_vendor.wire_apis.clone(),
         web_search: None,
+        web_fetch: None,
         enabled: params.provider_vendor.enabled,
     };
     resolve_provider_api_key(

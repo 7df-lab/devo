@@ -71,7 +71,7 @@ impl ToolHandler for WebFetchHandler {
 
     async fn handle(
         &self,
-        _ctx: ToolContext,
+        ctx: ToolContext,
         input: serde_json::Value,
         _progress: Option<ToolProgressSender>,
     ) -> Result<ToolResult, ToolCallError> {
@@ -102,7 +102,13 @@ impl ToolHandler for WebFetchHandler {
             _ => "*/*",
         };
 
-        let client = reqwest::Client::builder()
+        let client = devo_network_proxy::apply_proxy(
+            reqwest::Client::builder(),
+            ctx.network_proxy.as_deref(),
+        )
+        .map_err(|e| {
+            ToolCallError::ExecutionFailed(format!("Failed to configure HTTP proxy: {e}"))
+        })?
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
             .build()
             .map_err(|e| ToolCallError::ExecutionFailed(format!("Failed to create HTTP client: {e}")))?;

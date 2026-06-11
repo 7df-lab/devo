@@ -3101,6 +3101,11 @@ fn summarize_tool_call(payload: &ToolCallPayload) -> String {
     {
         return format!("Web Search({})", serde_json::Value::String(query));
     }
+    if is_web_fetch_tool_name(&payload.tool_name)
+        && let Some(url) = web_fetch_url(&payload.parameters)
+    {
+        return format!("Web Fetch({})", serde_json::Value::String(url));
+    }
 
     let detail = summarize_tool_input(&payload.tool_name, &payload.parameters);
     if detail.is_empty() {
@@ -3116,11 +3121,26 @@ fn is_web_search_tool_name(tool_name: &str) -> bool {
     matches!(tool_name, "web_search" | "websearch" | "web-search")
 }
 
+fn is_web_fetch_tool_name(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "webfetch" | "web_fetch" | "web-fetch" | "fetch_url" | "fetch-url"
+    )
+}
+
 fn web_search_query(input: &serde_json::Value) -> Option<String> {
     input
         .get("query")
         .and_then(serde_json::Value::as_str)
         .filter(|query| !query.is_empty())
+        .map(ToString::to_string)
+}
+
+fn web_fetch_url(input: &serde_json::Value) -> Option<String> {
+    input
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .filter(|url| !url.is_empty())
         .map(ToString::to_string)
 }
 
@@ -3411,11 +3431,8 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             }
         }
         "code_search" => Some(code_search_summary_from_input(input)),
-        "webfetch" | "web_search" | "websearch" | "web-search" => input
-            .get("url")
-            .and_then(serde_json::Value::as_str)
-            .map(|s| s.to_string())
-            .or_else(|| web_search_query(input)),
+        "webfetch" | "web_fetch" | "web-fetch" | "fetch_url" | "fetch-url" => web_fetch_url(input),
+        "web_search" | "websearch" | "web-search" => web_search_query(input),
         "lsp" => {
             let path = input
                 .get("filePath")
@@ -3828,6 +3845,23 @@ mod tests {
         assert_eq!(
             summarize_tool_call(&payload),
             "Web Search(\"current Rust docs\")"
+        );
+    }
+
+    #[test]
+    fn web_fetch_tool_summary_uses_url_text() {
+        let payload = ToolCallPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "web_fetch".to_string(),
+            parameters: serde_json::json!({
+                "url": "https://example.test/docs"
+            }),
+            command_actions: Vec::new(),
+        };
+
+        assert_eq!(
+            summarize_tool_call(&payload),
+            "Web Fetch(\"https://example.test/docs\")"
         );
     }
 

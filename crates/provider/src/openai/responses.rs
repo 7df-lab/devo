@@ -14,13 +14,14 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::hosted_tools::append_openai_responses_hosted_tools;
+use crate::http::invalid_status_error;
 use crate::text_normalization::{TaggedTextFragment, TaggedTextParser, split_tagged_text};
 use crate::{ModelProviderSDK, ProviderHttpOptions, merge_extra_body};
 
 use super::capabilities::{OpenAITransport, resolve_request_profile};
 use super::{
     OpenAIRole,
-    shared::{invalid_status_error, request_role, tool_definitions},
+    shared::{request_role, tool_definitions},
 };
 
 /// OpenAI Responses API provider.
@@ -273,6 +274,7 @@ fn parse_output_item(item: &Value) -> Vec<ResponseContent> {
             vec![ResponseContent::ToolUse { id, name, input }]
         }
         Some("web_search_call") => vec![parse_hosted_web_search_call(item)],
+        Some("web_fetch_call") => vec![parse_hosted_web_fetch_call(item)],
         Some("reasoning") => Vec::new(),
         _ => Vec::new(),
     }
@@ -308,6 +310,7 @@ fn parse_message_content(item: &Value) -> Option<ResponseContent> {
                 .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
         }),
         Some("web_search_call") => Some(parse_hosted_web_search_call(item)),
+        Some("web_fetch_call") => Some(parse_hosted_web_fetch_call(item)),
         _ => None,
     }
 }
@@ -348,6 +351,55 @@ fn hosted_web_search_input(item: &Value) -> Value {
 
 fn hosted_web_search_output(item: &Value) -> Option<Value> {
     item.get("results")
+        .or_else(|| item.get("result"))
+        .or_else(|| item.get("content"))
+        .cloned()
+}
+
+fn parse_hosted_web_fetch_call(item: &Value) -> ResponseContent {
+    ResponseContent::HostedToolUse {
+        id: item
+            .get("call_id")
+            .or_else(|| item.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        name: "web_fetch".to_string(),
+        input: hosted_web_fetch_input(item),
+        output: hosted_web_fetch_output(item),
+        status: item
+            .get("status")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    }
+}
+
+fn hosted_web_fetch_input(item: &Value) -> Value {
+    if let Some(url) = item
+        .get("action")
+        .and_then(|action| action.get("url"))
+        .and_then(Value::as_str)
+    {
+        return json!({ "url": url });
+    }
+    if let Some(url) = item.get("url").and_then(Value::as_str) {
+        return json!({ "url": url });
+    }
+    if let Some(url) = item
+        .get("input")
+        .and_then(|input| input.get("url"))
+        .and_then(Value::as_str)
+    {
+        return json!({ "url": url });
+    }
+    item.get("action")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
+}
+
+fn hosted_web_fetch_output(item: &Value) -> Option<Value> {
+    item.get("output")
+        .or_else(|| item.get("results"))
         .or_else(|| item.get("result"))
         .or_else(|| item.get("content"))
         .cloned()
@@ -903,6 +955,48 @@ mod tests {
                         "url": "https://example.test/rust-async"
                     }
                 ])),
+                status: Some("completed".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_response_extracts_web_fetch_call_as_hosted_tool_use() {
+        let response = parse_response(json!({
+            "id": "resp_fetch",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "web_fetch_call",
+                    "id": "wf_1",
+                    "status": "completed",
+                    "action": {
+                        "type": "fetch",
+                        "url": "https://example.test/docs"
+                    },
+                    "output": {
+                        "title": "Docs",
+                        "url": "https://example.test/docs"
+                    }
+                }
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5
+            }
+        }))
+        .expect("parse response");
+
+        assert_eq!(
+            response.content,
+            vec![ResponseContent::HostedToolUse {
+                id: "wf_1".to_string(),
+                name: "web_fetch".to_string(),
+                input: json!({"url": "https://example.test/docs"}),
+                output: Some(json!({
+                    "title": "Docs",
+                    "url": "https://example.test/docs"
+                })),
                 status: Some("completed".to_string()),
             }]
         );

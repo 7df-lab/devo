@@ -137,6 +137,12 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
             config_store,
         ),
     );
+    runtime
+        .run_global_hook(
+            devo_core::HookEvent::Setup,
+            serde_json::Map::from_iter([("trigger".to_string(), serde_json::json!("init"))]),
+        )
+        .await;
     tracing::info!("starting persisted session restore");
     runtime.load_persisted_sessions().await?;
     tracing::info!("persisted session restore completed");

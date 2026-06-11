@@ -16,6 +16,7 @@ use devo_util_paths::FileSystemConfigPathResolver;
 use crate::AUTH_CONFIG_FILE_NAME;
 use crate::AppConfigError;
 use crate::ExperimentalConfig;
+use crate::HooksConfig;
 use crate::LogRotation;
 use crate::LoggingConfig;
 use crate::LoggingFileConfig;
@@ -65,6 +66,9 @@ pub struct AppConfig {
     /// Tool-specific runtime configuration.
     #[serde(default, skip_serializing_if = "ToolsConfig::is_empty")]
     pub tools: ToolsConfig,
+    /// External lifecycle hooks keyed by event name.
+    #[serde(default, skip_serializing_if = "HooksConfig::is_empty")]
+    pub hooks: HooksConfig,
     /// Provider, model, and active model defaults.
     #[serde(flatten)]
     pub provider: ProviderConfigSection,
@@ -154,6 +158,7 @@ impl Default for AppConfig {
             mcp_oauth_credentials_store: Some(OAuthCredentialsStoreMode::default()),
             mcp: McpConfig::default(),
             tools: ToolsConfig::default(),
+            hooks: HooksConfig::default(),
             provider: ProviderConfigSection::default(),
             provider_http: ProviderHttpConfig::default(),
             updates: UpdatesConfig {
@@ -286,6 +291,7 @@ impl AppConfigStore {
                         .as_deref()
                         .and_then(non_empty_string),
                     web_search: None,
+                    web_fetch: None,
                     enabled: binding.enabled,
                 },
             );

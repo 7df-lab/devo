@@ -172,6 +172,15 @@ impl ServerRuntime {
             session: summary.clone(),
         }))
         .await;
+        self.run_session_hook(
+            session_id,
+            devo_core::HookEvent::SessionStart,
+            serde_json::Map::from_iter([
+                ("source".to_string(), serde_json::json!("startup")),
+                ("model".to_string(), serde_json::json!(model)),
+            ]),
+        )
+        .await;
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -451,6 +460,12 @@ impl ServerRuntime {
         drop(session);
         self.subscribe_connection_to_session(connection_id, params.session_id, None)
             .await;
+        self.run_session_hook(
+            params.session_id,
+            devo_core::HookEvent::SessionStart,
+            serde_json::Map::from_iter([("source".to_string(), serde_json::json!("resume"))]),
+        )
+        .await;
         tracing::info!(
             connection_id,
             session_id = %params.session_id,

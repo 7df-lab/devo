@@ -1,6 +1,7 @@
 mod app;
 mod error;
 mod experimental;
+mod hooks;
 mod logging;
 mod mcp;
 mod oauth;
@@ -12,6 +13,7 @@ mod tools;
 pub use app::*;
 pub use error::*;
 pub use experimental::*;
+pub use hooks::*;
 pub use logging::*;
 pub use mcp::*;
 pub use oauth::*;

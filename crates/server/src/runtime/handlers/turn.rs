@@ -82,8 +82,26 @@ impl ServerRuntime {
                 "turn input is empty",
             );
         };
+        let prompt_hook_report = self
+            .run_session_hook(
+                params.session_id,
+                devo_core::HookEvent::UserPromptSubmit,
+                serde_json::Map::from_iter([(
+                    "prompt".to_string(),
+                    serde_json::Value::String(input_text.clone()),
+                )]),
+            )
+            .await;
+        if let Some(reason) = prompt_hook_report.first_blocking_reason() {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::PolicyDenied,
+                format!("prompt blocked by hook: {reason}"),
+            );
+        }
 
         let now = Utc::now();
+        let mut cwd_change = None;
         let turn = {
             let mut session = session_arc.lock().await;
             if let Some(active_turn) = session.active_turn.as_ref() {
@@ -129,6 +147,10 @@ impl ServerRuntime {
                 return serde_json::Value::Null;
             }
             if let Some(cwd) = params.cwd.clone() {
+                let old_cwd = session.summary.cwd.clone();
+                if old_cwd != cwd {
+                    cwd_change = Some((old_cwd, cwd.clone()));
+                }
                 session.summary.cwd = cwd.clone();
                 session.core_session.lock().await.cwd = cwd;
             }
@@ -217,6 +239,23 @@ impl ServerRuntime {
                 .insert(params.session_id, task.abort_handle());
             turn
         };
+        if let Some((old_cwd, new_cwd)) = cwd_change {
+            self.run_session_hook(
+                params.session_id,
+                devo_core::HookEvent::CwdChanged,
+                serde_json::Map::from_iter([
+                    (
+                        "old_cwd".to_string(),
+                        serde_json::Value::String(old_cwd.display().to_string()),
+                    ),
+                    (
+                        "new_cwd".to_string(),
+                        serde_json::Value::String(new_cwd.display().to_string()),
+                    ),
+                ]),
+            )
+            .await;
+        }
         self.maybe_assign_provisional_title(params.session_id, &display_input)
             .await;
         {
@@ -329,6 +368,7 @@ impl ServerRuntime {
         };
 
         let now = Utc::now();
+        let mut cwd_change = None;
         let (turn, cwd) = {
             let mut session = session_arc.lock().await;
             if session.active_turn.is_some() {
@@ -343,6 +383,10 @@ impl ServerRuntime {
                 .clone()
                 .unwrap_or_else(|| session.summary.cwd.clone());
             if let Some(cwd) = params.cwd.clone() {
+                let old_cwd = session.summary.cwd.clone();
+                if old_cwd != cwd {
+                    cwd_change = Some((old_cwd, cwd.clone()));
+                }
                 session.summary.cwd = cwd.clone();
                 session.core_session.lock().await.cwd = cwd;
             }
@@ -370,6 +414,23 @@ impl ServerRuntime {
             session.active_turn = Some(turn.clone());
             (turn, cwd)
         };
+        if let Some((old_cwd, new_cwd)) = cwd_change {
+            self.run_session_hook(
+                params.session_id,
+                devo_core::HookEvent::CwdChanged,
+                serde_json::Map::from_iter([
+                    (
+                        "old_cwd".to_string(),
+                        serde_json::Value::String(old_cwd.display().to_string()),
+                    ),
+                    (
+                        "new_cwd".to_string(),
+                        serde_json::Value::String(new_cwd.display().to_string()),
+                    ),
+                ]),
+            )
+            .await;
+        }
 
         {
             let session = session_arc.lock().await;

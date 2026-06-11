@@ -14,6 +14,7 @@ consumer crates.
 - `server.rs` defines server transport and connection defaults.
 - `logging.rs` defines logging and rolling file-log settings.
 - `skills.rs` defines skill discovery settings.
+- `hooks.rs` defines external hook event and command configuration.
 - `experimental.rs` defines opt-in experimental feature gates.
 - `error.rs` defines app and provider config error types.
 - `provider.rs` re-exports provider config APIs and contains provider-focused
@@ -88,6 +89,7 @@ without clearing every omitted provider field from user config.
 - `updates.enabled = true`
 - `updates.check_on_startup = true`
 - `updates.check_interval_hours = 24`
+- `hooks = {}`
 - `project_root_markers = [".git"]`
 - `projects = {}`
 
@@ -154,6 +156,14 @@ check_interval_hours = 24
 
 [projects."/path/to/project"]
 permission_preset = "default" # read-only, default, auto-review, or full-access
+
+[[hooks.PreToolUse]]
+matcher = "exec_command"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "hooks/pre-tool-use.sh"
+timeout = 30
 ```
 
 `logging.file.directory` is optional. Relative logging directories resolve under
@@ -175,6 +185,105 @@ permission_preset = "default" # read-only, default, auto-review, or full-access
 
 Provider-specific validation happens while resolving or mutating provider
 config.
+
+## Hooks
+
+External hooks are configured under the top-level `[hooks]` table. Each hook
+event contains matcher entries, and each matcher entry contains one or more hook
+commands:
+
+```toml
+[[hooks.PostToolUse]]
+matcher = "exec_command|read_file"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "hooks/post-tool-use.sh"
+shell = "bash"
+timeout = 30
+
+[[hooks.UserPromptSubmit]]
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "hooks/check-prompt.sh"
+async = false
+```
+
+Command hooks receive one JSON object on stdin. The common fields are
+`hook_event_name`, `session_id`, `transcript_path`, and `cwd`. Runtime contexts
+may also include `permission_mode`, `agent_id`, and `agent_type`, followed by
+event-specific fields such as `tool_name`, `tool_input`, `tool_use_id`,
+`tool_response`, `prompt`, `source`, `trigger`, `reason`, `file_path`, `event`,
+`old_cwd`, and `new_cwd`.
+
+Hook command results follow Claude Code-style blocking semantics:
+
+- Exit status `0` succeeds unless stdout contains a blocking JSON decision.
+- Exit status `2` blocks the triggering action. The block reason is read from
+  stdout JSON or stderr.
+- Stdout JSON shaped as `{"decision":"block","reason":"..."}` blocks even when
+  the process exits successfully.
+- Claude-style `hookSpecificOutput` denial JSON blocks for `PreToolUse` and
+  `PermissionRequest`.
+- Stdout JSON shaped as `{"continue":false,"stopReason":"..."}` is treated as a
+  blocking stop for lifecycle events that consume blocking decisions.
+- Other non-zero exits are logged as non-blocking hook failures.
+
+The `command` hook type is executed by the runtime. `prompt`, `agent`, and
+`http` hook definitions are parsed so config files remain forward compatible,
+but they are currently logged as unsupported and not executed. `shell` accepts
+`bash` and `powershell`. `timeout` is in seconds and defaults to `600`.
+`async = true` and `asyncRewake = true` spawn the command in the background and
+do not wait for a blocking decision. `if`, `status_message`, and `once` are
+preserved in config but are not interpreted by the current runtime.
+
+All 27 hook event names are accepted by config:
+
+- `PreToolUse`, `PostToolUse`, `PostToolUseFailure`
+- `Notification`, `UserPromptSubmit`
+- `SessionStart`, `SessionEnd`, `Stop`, `StopFailure`
+- `SubagentStart`, `SubagentStop`
+- `PreCompact`, `PostCompact`
+- `PermissionRequest`, `PermissionDenied`
+- `Setup`, `TeammateIdle`, `TaskCreated`, `TaskCompleted`
+- `Elicitation`, `ElicitationResult`
+- `ConfigChange`, `WorktreeCreate`, `WorktreeRemove`
+- `InstructionsLoaded`, `CwdChanged`, `FileChanged`
+
+The current runtime triggers hooks where Devo has a matching lifecycle point:
+tool execution, prompt submission, server setup, session start and resume,
+session shutdown, turn stop and failure, subagent start and stop, manual
+compaction, permission request and denial, config writes through `provider/upsert`
+and `skills/set_enabled`, per-turn cwd changes, and file changes reported by
+`write`/`apply_patch` tool metadata.
+
+Runtime-triggered events:
+
+- `PreToolUse`, `PostToolUse`, `PostToolUseFailure`
+- `UserPromptSubmit`
+- `SessionStart`, `SessionEnd`
+- `Stop`, `StopFailure`
+- `SubagentStart`, `SubagentStop`
+- `PreCompact`, `PostCompact`
+- `PermissionRequest`, `PermissionDenied`
+- `Setup`
+- `ConfigChange`
+- `CwdChanged`, `FileChanged`
+
+Config-ready but not currently triggered:
+
+- `Notification`: Devo has protocol notifications, but no single user-facing
+  notification lifecycle equivalent to Claude's external notification hook.
+- `TeammateIdle`, `TaskCreated`, `TaskCompleted`: the standalone `devo-tasks`
+  crate is not wired into the server runtime task lifecycle.
+- `Elicitation`, `ElicitationResult`: MCP elicitation is currently handled
+  inside the MCP manager with an automatic response and no server-session hook
+  bridge.
+- `WorktreeCreate`, `WorktreeRemove`: Devo currently has no worktree lifecycle
+  API.
+- `InstructionsLoaded`: Devo discovers AGENTS-style instructions during context
+  assembly, but does not expose a hookable per-file instruction-load event.
 
 ## Provider Config
 
@@ -274,6 +383,26 @@ Local providers currently support `kind = "exa"` and `kind = "tavily"`. Their
 the provider default endpoint and result count. Compatibility aliases
 `websearch` and `web-search` route to `web_search`, but aliases are not exposed
 to the model.
+
+## Web Fetch
+
+`[tools.web_fetch]` controls whether a turn exposes URL fetching to the model.
+It resolves with the same priority as web search:
+
+1. `[model_bindings.<id>.web_fetch]`
+2. `[providers.<id>.web_fetch]`
+3. `[tools.web_fetch]`
+
+Supported modes:
+
+- `disabled`: do not provide provider-hosted web fetch and do not expose the
+  local `webfetch` function tool.
+- `provider`: let the active provider adapter inject provider-hosted fetch into
+  the request. OpenAI Responses uses hosted tool `{"type":"web_fetch"}`;
+  OpenAI Chat Completions uses `web_fetch_options`; Anthropic Messages uses
+  server tool `{"type":"web_fetch_20250910","name":"web_fetch"}`.
+- `local`: expose the existing local `webfetch` function tool. This is the
+  default to preserve the existing local fetch behavior.
 
 ## Provider Resolution
 

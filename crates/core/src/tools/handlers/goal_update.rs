@@ -147,6 +147,7 @@ mod tests {
             agent_scope: crate::contracts::ToolAgentScope::Parent,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
+            network_proxy: None,
         };
 
         let error = handler

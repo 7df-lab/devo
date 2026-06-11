@@ -7,11 +7,13 @@ use devo_protocol::ModelResponse;
 use devo_protocol::RequestContent;
 use devo_protocol::RequestMessage;
 use devo_protocol::ResponseContent;
+use devo_protocol::StreamEvent;
 use devo_provider::ModelProviderSDK;
 use devo_provider::ProviderHttpOptions;
 use devo_provider::anthropic::AnthropicProvider;
 use devo_provider::openai::OpenAIProvider;
 use devo_provider::openai::OpenAIResponsesProvider;
+use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -178,6 +180,30 @@ async fn deepseek_anthropic_messages_provider_hosted_web_search_live_when_api_ke
         .expect("DeepSeek Anthropic Messages hosted web_search response");
 
     assert_response_includes_source_url(&response);
+    assert_response_includes_hosted_web_search(&response);
+}
+
+#[tokio::test]
+async fn deepseek_anthropic_messages_hosted_web_search_stream_live_when_api_key_is_configured() {
+    let Some(api_key) = deepseek_api_key() else {
+        eprintln!(
+            "skipping DeepSeek Anthropic Messages hosted web_search stream live test: DEEPSEEK_API_KEY is not set"
+        );
+        return;
+    };
+    let provider =
+        AnthropicProvider::new("https://api.deepseek.com/anthropic").with_api_key(api_key);
+
+    let mut stream = provider
+        .completion_stream(deepseek_provider_hosted_web_search_request())
+        .await
+        .expect("DeepSeek Anthropic Messages hosted web_search stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+
+    assert_stream_includes_hosted_web_search_query(&events);
 }
 
 async fn spawn_json_server(
@@ -284,6 +310,52 @@ fn assert_response_includes_source_url(response: &ModelResponse) {
     assert!(
         text.contains("https://") || text.contains("http://"),
         "response should include a source URL: {response:?}"
+    );
+}
+
+fn assert_response_includes_hosted_web_search(response: &ModelResponse) {
+    assert!(
+        response.content.iter().any(|content| matches!(
+            content,
+            ResponseContent::HostedToolUse {
+                name,
+                input,
+                status: Some(status),
+                ..
+            } if name == "web_search"
+                && status == "completed"
+                && input.get("query").and_then(serde_json::Value::as_str).is_some()
+        )),
+        "response should include a completed hosted web_search use with query input: {response:?}"
+    );
+}
+
+fn assert_stream_includes_hosted_web_search_query(events: &[StreamEvent]) {
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            StreamEvent::HostedToolCallStart {
+                name,
+                input,
+                ..
+            } if name == "web_search"
+                && input.get("query").and_then(serde_json::Value::as_str).is_some()
+        )),
+        "stream should include hosted web_search start with query input: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            StreamEvent::HostedToolCallDone {
+                name,
+                input,
+                status: Some(status),
+                ..
+            } if name == "web_search"
+                && status == "completed"
+                && input.get("query").and_then(serde_json::Value::as_str).is_some()
+        )),
+        "stream should include hosted web_search completion with query input: {events:?}"
     );
 }
 

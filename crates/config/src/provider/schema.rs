@@ -4,6 +4,7 @@ use devo_protocol::ProviderWireApi;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::WebFetchConfig;
 use crate::WebSearchConfig;
 
 pub(crate) const AUTH_CONFIG_VERSION: u32 = 1;
@@ -58,6 +59,8 @@ pub struct ProviderVendorConfig {
     pub wire_apis: Vec<ProviderWireApi>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search: Option<WebSearchConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_fetch: Option<WebFetchConfig>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -71,6 +74,7 @@ impl ProviderVendorConfig {
             && self.headers.is_none()
             && self.wire_apis.is_empty()
             && self.web_search.is_none()
+            && self.web_fetch.is_none()
             && self.enabled
     }
 }
@@ -92,6 +96,8 @@ pub struct ModelBindingConfig {
     pub default_reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search: Option<WebSearchConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_fetch: Option<WebFetchConfig>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -106,6 +112,7 @@ impl Default for ModelBindingConfig {
             invocation_method: default_provider_wire_api(),
             default_reasoning_effort: None,
             web_search: None,
+            web_fetch: None,
             enabled: true,
         }
     }
@@ -251,6 +258,9 @@ impl ProviderConfigSection {
             if overlay_provider.web_search.is_some() {
                 provider.web_search = overlay_provider.web_search;
             }
+            if overlay_provider.web_fetch.is_some() {
+                provider.web_fetch = overlay_provider.web_fetch;
+            }
             provider.enabled = overlay_provider.enabled;
         }
         for (binding_id, overlay_binding) in overlay.model_bindings {
@@ -273,6 +283,9 @@ impl ProviderConfigSection {
             }
             if overlay_binding.web_search.is_some() {
                 binding.web_search = overlay_binding.web_search;
+            }
+            if overlay_binding.web_fetch.is_some() {
+                binding.web_fetch = overlay_binding.web_fetch;
             }
             binding.enabled = overlay_binding.enabled;
         }

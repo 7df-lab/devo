@@ -227,6 +227,22 @@ impl ToolRuntime {
                 "sub-agents cannot use parent-agent coordination tools",
             );
         }
+        if let Some(reason) = super::hook_events::pre_tool_use_block_reason(
+            self.context.hooks.as_ref(),
+            call,
+            tool_name,
+        )
+        .await
+        {
+            super::hook_events::post_tool_use_failure(
+                self.context.hooks.as_ref(),
+                call,
+                tool_name,
+                &reason,
+            )
+            .await;
+            return ToolCallResult::error(&call.id, &format!("blocked by hook: {reason}"));
+        }
         let tool = match self
             .registry
             .get(tool_name)
@@ -235,7 +251,15 @@ impl ToolRuntime {
             Some(t) => t.clone(),
             None => {
                 warn!(tool = %call.name, "tool not found");
-                return ToolCallResult::error(&call.id, &format!("unknown tool: {}", call.name));
+                let message = format!("unknown tool: {}", call.name);
+                super::hook_events::post_tool_use_failure(
+                    self.context.hooks.as_ref(),
+                    call,
+                    tool_name,
+                    &message,
+                )
+                .await;
+                return ToolCallResult::error(&call.id, &message);
             }
         };
 
@@ -243,10 +267,15 @@ impl ToolRuntime {
             match self.permission.check(request).await {
                 Ok(()) => {}
                 Err(reason) => {
-                    return ToolCallResult::error(
-                        &call.id,
-                        &format!("permission denied: {reason}"),
-                    );
+                    let message = format!("permission denied: {reason}");
+                    super::hook_events::post_tool_use_failure(
+                        self.context.hooks.as_ref(),
+                        call,
+                        tool_name,
+                        &message,
+                    )
+                    .await;
+                    return ToolCallResult::error(&call.id, &message);
                 }
             }
         }
@@ -263,6 +292,7 @@ impl ToolRuntime {
             agent_scope: self.context.agent_scope,
             collaboration_mode: self.context.collaboration_mode,
             agent_coordinator: self.context.agent_coordinator.clone(),
+            network_proxy: self.context.network_proxy.clone(),
         };
 
         let (progress_sender, progress_task) = match on_progress {
@@ -320,14 +350,42 @@ impl ToolRuntime {
                         | crate::contracts::ToolTerminalStatus::Denied { .. }
                         | crate::contracts::ToolTerminalStatus::BlockedByMode { .. }
                 );
-                ToolCallResult {
+                let result = ToolCallResult {
                     tool_use_id: call.id.clone(),
                     content,
                     is_error,
                     display_content: output.display_content,
+                };
+                if result.is_error {
+                    super::hook_events::post_tool_use_failure(
+                        self.context.hooks.as_ref(),
+                        call,
+                        tool_name,
+                        &result.content.clone().into_string(),
+                    )
+                    .await;
+                } else {
+                    super::hook_events::post_tool_use(
+                        self.context.hooks.as_ref(),
+                        call,
+                        tool_name,
+                        &result,
+                    )
+                    .await;
                 }
+                result
             }
-            Err(e) => ToolCallResult::error(&call.id, &e.to_string()),
+            Err(e) => {
+                let message = e.to_string();
+                super::hook_events::post_tool_use_failure(
+                    self.context.hooks.as_ref(),
+                    call,
+                    tool_name,
+                    &message,
+                )
+                .await;
+                ToolCallResult::error(&call.id, &message)
+            }
         }
     }
 
@@ -393,6 +451,11 @@ fn canonical_tool_name<'a>(registry: &ToolRegistry, tool_name: &'a str) -> &'a s
         "bash" if registry.spec("shell_command").is_some() => "shell_command",
         "glob" if registry.spec("find").is_some() => "find",
         "websearch" | "web-search" if registry.spec("web_search").is_some() => "web_search",
+        "web_fetch" | "web-fetch" | "fetch_url" | "fetch-url"
+            if registry.spec("webfetch").is_some() =>
+        {
+            "webfetch"
+        }
         _ => tool_name,
     }
 }
@@ -430,6 +493,8 @@ pub struct ToolRuntimeContext {
     pub collaboration_mode: devo_protocol::CollaborationMode,
     pub agent_coordinator: Option<Arc<dyn AgentToolCoordinator>>,
     pub local_web_search: Option<ResolvedLocalWebSearchConfig>,
+    pub hooks: Option<crate::hooks::HookRuntimeContext>,
+    pub network_proxy: Option<String>,
 }
 
 impl std::fmt::Debug for ToolRuntimeContext {
@@ -450,6 +515,11 @@ impl std::fmt::Debug for ToolRuntimeContext {
                     .local_web_search
                     .as_ref()
                     .map(|config| &config.provider_id),
+            )
+            .field("hooks", &self.hooks.as_ref().map(|_| "<configured>"))
+            .field(
+                "network_proxy",
+                &self.network_proxy.as_ref().map(|_| "<configured>"),
             )
             .finish()
     }
@@ -544,7 +614,7 @@ fn path_for_tool_input(tool_name: &str, input: &serde_json::Value, cwd: &Path) -
 
 fn host_for_tool_input(tool_name: &str, input: &serde_json::Value) -> Option<String> {
     match tool_name {
-        "webfetch" => input
+        "webfetch" | "web_fetch" | "web-fetch" | "fetch_url" | "fetch-url" => input
             .get("url")
             .and_then(serde_json::Value::as_str)
             .and_then(host_from_url),
@@ -576,7 +646,7 @@ fn target_for_tool_input(tool_name: &str, input: &serde_json::Value) -> Option<S
             .or_else(|| input.get("command"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
-        "webfetch" => input
+        "webfetch" | "web_fetch" | "web-fetch" | "fetch_url" | "fetch-url" => input
             .get("url")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
@@ -1065,6 +1135,8 @@ mod tests {
                 collaboration_mode: devo_protocol::CollaborationMode::Build,
                 agent_coordinator: None,
                 local_web_search: None,
+                hooks: None,
+                network_proxy: None,
             },
         );
         let call = ToolCall {

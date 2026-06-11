@@ -84,6 +84,29 @@ impl ServerRuntime {
             }
         };
 
+        let config_file = {
+            let store = self
+                .deps
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned");
+            store
+                .user_config_dir()
+                .join("config.toml")
+                .display()
+                .to_string()
+        };
+        if let Some(reason) = self
+            .config_change_hook_block_reason("skills", Some(config_file))
+            .await
+        {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::PolicyDenied,
+                format!("skill config change blocked by hook: {reason}"),
+            );
+        }
+
         match self
             .deps
             .set_skill_enabled(params.path, params.enabled, None)

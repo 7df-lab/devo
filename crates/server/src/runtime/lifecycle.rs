@@ -168,6 +168,13 @@ impl ServerRuntime {
                 continue;
             };
 
+            self.run_session_hook(
+                session_id,
+                devo_core::HookEvent::SessionEnd,
+                serde_json::Map::from_iter([("reason".to_string(), serde_json::json!("other"))]),
+            )
+            .await;
+
             let (deferred_assistant, deferred_reasoning, turn_id, record) = {
                 let mut session = session_arc.lock().await;
                 let turn_id = session.active_turn.as_ref().map(|t| t.turn_id);

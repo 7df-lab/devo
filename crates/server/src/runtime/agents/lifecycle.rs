@@ -1,6 +1,34 @@
 use super::*;
 
 impl ServerRuntime {
+    pub(super) async fn run_subagent_start_hook(&self, child_session_id: SessionId) {
+        let Some(context) = self.hook_context_for_session(child_session_id).await else {
+            return;
+        };
+        context
+            .runner
+            .run(devo_core::HookInput::new(
+                &context.base,
+                devo_core::HookEvent::SubagentStart,
+                subagent_hook_extra(&context.base, /*stop_hook_active*/ None),
+            ))
+            .await;
+    }
+
+    pub(super) async fn run_subagent_stop_hook(&self, child_session_id: SessionId) {
+        let Some(context) = self.hook_context_for_session(child_session_id).await else {
+            return;
+        };
+        context
+            .runner
+            .run(devo_core::HookInput::new(
+                &context.base,
+                devo_core::HookEvent::SubagentStop,
+                subagent_hook_extra(&context.base, Some(false)),
+            ))
+            .await;
+    }
+
     pub(super) async fn fail_child_agent_startup(
         &self,
         parent_session_id: SessionId,
@@ -29,6 +57,7 @@ impl ServerRuntime {
             Some(format!("failed to start child agent: {error_message}")),
         )
         .await;
+        self.run_subagent_stop_hook(child_session_id).await;
     }
 
     pub(super) async fn interrupt_child_runtime_work(
@@ -57,6 +86,38 @@ impl ServerRuntime {
             turn
         })
     }
+}
+
+fn subagent_hook_extra(
+    base: &devo_core::HookBaseInput,
+    stop_hook_active: Option<bool>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let agent_id = base
+        .agent_id
+        .clone()
+        .unwrap_or_else(|| base.session_id.clone());
+    let agent_type = base
+        .agent_type
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let mut extra = serde_json::Map::from_iter([
+        ("agent_id".to_string(), serde_json::Value::String(agent_id)),
+        (
+            "agent_type".to_string(),
+            serde_json::Value::String(agent_type),
+        ),
+    ]);
+    if let Some(stop_hook_active) = stop_hook_active {
+        extra.insert(
+            "stop_hook_active".to_string(),
+            serde_json::Value::Bool(stop_hook_active),
+        );
+        extra.insert(
+            "agent_transcript_path".to_string(),
+            serde_json::Value::String(base.transcript_path.clone()),
+        );
+    }
+    extra
 }
 
 #[cfg(test)]

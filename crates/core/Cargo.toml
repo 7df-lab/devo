@@ -8,6 +8,7 @@ version.workspace = true
 [dependencies]
 devo-config = { workspace = true }
 devo-code-search = { workspace = true }
+devo-network-proxy = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }
 devo-safety = { workspace = true }
@@ -25,6 +26,7 @@ futures = { workspace = true }
 iana-time-zone = { workspace = true }
 portable-pty = "0.9"
 rand = { workspace = true }
+regex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

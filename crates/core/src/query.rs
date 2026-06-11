@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use devo_protocol::HostedToolDefinition;
+use devo_protocol::HostedWebFetchTool;
 use devo_protocol::HostedWebSearchTool;
 use devo_protocol::ModelRequest;
 use devo_protocol::RequestContent;
@@ -56,16 +57,25 @@ use crate::response_item::message_to_response_items;
 
 const SUBAGENT_MODE_REMINDER: &str = "<system-reminder>\nYou are running as a sub-agent. Complete the delegated task using the available non-agent tools. Do not call agent coordination tools such as spawn_agent, send_message, wait_agent, list_agents, or close_agent; report progress and final results through assistant output.\n</system-reminder>";
 
+fn hosted_tools_for_web_capabilities(
+    web_search: &devo_config::ResolvedWebSearchConfig,
+    web_fetch: devo_config::ResolvedWebFetchConfig,
+) -> Vec<HostedToolDefinition> {
+    let mut hosted_tools = Vec::new();
+    if matches!(web_search, devo_config::ResolvedWebSearchConfig::Provider) {
+        hosted_tools.push(HostedToolDefinition::WebSearch(HostedWebSearchTool::new()));
+    }
+    if web_fetch.is_provider() {
+        hosted_tools.push(HostedToolDefinition::WebFetch(HostedWebFetchTool::new()));
+    }
+    hosted_tools
+}
+
+#[cfg(test)]
 fn hosted_tools_for_web_search(
     web_search: &devo_config::ResolvedWebSearchConfig,
 ) -> Vec<HostedToolDefinition> {
-    match web_search {
-        devo_config::ResolvedWebSearchConfig::Provider => {
-            vec![HostedToolDefinition::WebSearch(HostedWebSearchTool::new())]
-        }
-        devo_config::ResolvedWebSearchConfig::Disabled
-        | devo_config::ResolvedWebSearchConfig::Local(_) => Vec::new(),
-    }
+    hosted_tools_for_web_capabilities(web_search, devo_config::ResolvedWebFetchConfig::Disabled)
 }
 
 fn estimate_request_prompt_tokens(request: &ModelRequest) -> usize {
@@ -427,9 +437,9 @@ fn tool_content_model_bytes(content: &ToolContent) -> usize {
     }
 }
 
-fn normalize_hosted_tool_id(index: usize, id: String) -> String {
+fn normalize_hosted_tool_id(index: usize, id: String, name: &str) -> String {
     if id.is_empty() {
-        format!("hosted_web_search_{index}")
+        format!("hosted_{}_{index}", name.replace('-', "_"))
     } else {
         id
     }
@@ -521,7 +531,7 @@ fn hosted_tool_result_text(
     let status = status
         .filter(|status| !status.is_empty())
         .unwrap_or("completed");
-    format!("└ status: {status}")
+    format!("status: {status}")
 }
 fn hosted_tool_status_is_error(status: Option<&str>) -> bool {
     status
@@ -577,6 +587,9 @@ pub async fn query(
     }
     if !turn_config.web_search.is_local() {
         request_tools.retain(|tool| tool.name != "web_search");
+    }
+    if !turn_config.web_fetch.is_local() {
+        request_tools.retain(|tool| tool.name != "webfetch");
     }
 
     if session.session_context.is_none() {
@@ -766,7 +779,10 @@ pub async fn query(
                     value as usize
                 }),
             tools: Some(request_tools.clone()),
-            hosted_tools: hosted_tools_for_web_search(&turn_config.web_search),
+            hosted_tools: hosted_tools_for_web_capabilities(
+                &turn_config.web_search,
+                turn_config.web_fetch,
+            ),
             sampling: SamplingControls {
                 temperature: turn_config.model.temperature,
                 top_p: turn_config.model.top_p,
@@ -875,7 +891,7 @@ pub async fn query(
                     name,
                     input,
                 }) => {
-                    let id = normalize_hosted_tool_id(index, id);
+                    let id = normalize_hosted_tool_id(index, id, &name);
                     let name = normalize_hosted_tool_name(name);
                     hosted_tool_inputs.insert(id.clone(), (index, name.clone(), input.clone()));
                     emit_hosted_tool_start(
@@ -894,7 +910,7 @@ pub async fn query(
                     output,
                     status,
                 }) => {
-                    let id = normalize_hosted_tool_id(index, id);
+                    let id = normalize_hosted_tool_id(index, id, &name);
                     let name = normalize_hosted_tool_name(name);
                     let previous_input = hosted_tool_inputs
                         .get(&id)
@@ -1053,7 +1069,7 @@ pub async fn query(
                     status,
                 } = block
                 {
-                    let id = normalize_hosted_tool_id(index, id.clone());
+                    let id = normalize_hosted_tool_id(index, id.clone(), name);
                     let name = normalize_hosted_tool_name(name.clone());
                     let previous_input = hosted_tool_inputs
                         .get(&id)
@@ -1710,6 +1726,10 @@ mod tests {
         requests: Arc<Mutex<Vec<ModelRequest>>>,
     }
 
+    struct HostedWebFetchProvider {
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
+    }
+
     struct TransientStreamCreateProvider {
         attempts: AtomicUsize,
     }
@@ -1836,6 +1856,61 @@ mod tests {
     }
 
     #[async_trait]
+    impl devo_provider::ModelProviderSDK for HostedWebFetchProvider {
+        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            unreachable!("tests stream responses only")
+        }
+
+        async fn completion_stream(
+            &self,
+            request: ModelRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            self.requests.lock().expect("lock requests").push(request);
+            let input = json!({ "url": "https://example.test/docs" });
+            let output = Some(json!({
+                "title": "Docs",
+                "url": "https://example.test/docs"
+            }));
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(StreamEvent::HostedToolCallStart {
+                    index: 0,
+                    id: "hosted_wf_1".into(),
+                    name: "web_fetch".into(),
+                    input: input.clone(),
+                }),
+                Ok(StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: "resp".into(),
+                        content: vec![
+                            ResponseContent::HostedToolUse {
+                                id: "hosted_wf_1".into(),
+                                name: "web_fetch".into(),
+                                input: input.clone(),
+                                output: None,
+                                status: None,
+                            },
+                            ResponseContent::HostedToolUse {
+                                id: "hosted_wf_1".into(),
+                                name: "web_fetch".into(),
+                                input,
+                                output,
+                                status: Some("completed".into()),
+                            },
+                        ],
+                        stop_reason: Some(StopReason::ToolUse),
+                        usage: Usage::default(),
+                        metadata: Default::default(),
+                    },
+                }),
+            ])))
+        }
+
+        fn name(&self) -> &str {
+            "hosted-web-fetch-provider"
+        }
+    }
+
+    #[async_trait]
     impl devo_provider::ModelProviderSDK for TransientStreamCreateProvider {
         async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
             unreachable!("tests stream responses only")
@@ -1934,6 +2009,10 @@ mod tests {
         executions: Arc<AtomicUsize>,
     }
 
+    struct CountingWebFetchTool {
+        executions: Arc<AtomicUsize>,
+    }
+
     #[async_trait]
     impl ToolHandler for CountingWebSearchTool {
         fn spec(&self) -> &crate::tools::tool_spec::ToolSpec {
@@ -1955,6 +2034,31 @@ mod tests {
             Ok(crate::tools::contracts::ToolResult::success(
                 crate::tools::contracts::ToolResultContent::Text("local search".into()),
                 "local search",
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl ToolHandler for CountingWebFetchTool {
+        fn spec(&self) -> &crate::tools::tool_spec::ToolSpec {
+            Box::leak(Box::new(crate::tools::tool_spec::ToolSpec::new(
+                "webfetch",
+                "Fetch a URL.",
+                crate::tools::JsonSchema::object(Default::default(), None, None),
+            )))
+        }
+
+        async fn handle(
+            &self,
+            _ctx: crate::tools::contracts::ToolContext,
+            _input: serde_json::Value,
+            _progress: Option<crate::tools::contracts::ToolProgressSender>,
+        ) -> Result<crate::tools::contracts::ToolResult, crate::tools::contracts::ToolCallError>
+        {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::tools::contracts::ToolResult::success(
+                crate::tools::contracts::ToolResultContent::Text("local fetch".into()),
+                "local fetch",
             ))
         }
     }
@@ -2407,7 +2511,7 @@ mod tests {
         assert!(!*is_error);
         assert!(matches!(
             *content,
-            ToolContent::Text(text) if text == "└ status: completed"
+            ToolContent::Text(text) if text == "status: completed"
         ));
         assert!(events.iter().any(|event| matches!(
             event,
@@ -2423,6 +2527,122 @@ mod tests {
                 )
             })
         }));
+    }
+
+    #[tokio::test]
+    async fn provider_hosted_web_fetch_emits_tool_events_without_local_execution() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn ModelProviderSDK> = Arc::new(HostedWebFetchProvider {
+            requests: Arc::clone(&requests),
+        });
+        let executions = Arc::new(AtomicUsize::new(0));
+        let mut builder = ToolRegistryBuilder::new();
+        builder.register_handler(
+            "webfetch",
+            Arc::new(CountingWebFetchTool {
+                executions: Arc::clone(&executions),
+            }),
+        );
+        builder.push_spec(ToolSpec {
+            name: "webfetch".into(),
+            description: "Fetch a URL.".into(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Mixed,
+            execution_mode: ToolExecutionMode::ReadOnly,
+            capability_tags: vec![],
+            supports_parallel: false,
+            preparation_feedback: ToolPreparationFeedback::None,
+            display_name: None,
+            supports_cancellation: None,
+            supports_streaming: None,
+        });
+        let registry = Arc::new(builder.build());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("fetch docs"));
+        let mut turn_config = TurnConfig::new(Model::default(), None);
+        turn_config.web_fetch = devo_config::ResolvedWebFetchConfig::Provider;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = Arc::clone(&seen);
+        let callback = Arc::new(move |event: QueryEvent| {
+            seen_clone.lock().unwrap().push(event);
+        });
+
+        query(
+            &mut session,
+            &turn_config,
+            provider,
+            registry,
+            &runtime,
+            Some(callback),
+        )
+        .await
+        .expect("query should complete");
+
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        let captured = requests.lock().expect("lock requests");
+        assert_eq!(captured.len(), 1);
+        let request = &captured[0];
+        assert!(matches!(
+            request.hosted_tools.as_slice(),
+            [devo_protocol::HostedToolDefinition::WebFetch(_)]
+        ));
+        assert!(
+            request
+                .tools
+                .as_ref()
+                .is_none_or(|tools| tools.iter().all(|tool| tool.name != "webfetch"))
+        );
+
+        let events = seen.lock().unwrap();
+        let starts = events
+            .iter()
+            .filter_map(|event| match event {
+                QueryEvent::ToolUseStart { id, name, input } => {
+                    Some((id.as_str(), name.as_str(), input.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            starts,
+            vec![(
+                "hosted_wf_1",
+                "web_fetch",
+                json!({ "url": "https://example.test/docs" })
+            )]
+        );
+        let results = events
+            .iter()
+            .filter_map(|event| match event {
+                QueryEvent::ToolResult {
+                    tool_use_id,
+                    tool_name,
+                    input,
+                    content,
+                    is_error,
+                    ..
+                } => Some((
+                    tool_use_id.as_str(),
+                    tool_name.as_str(),
+                    input.clone(),
+                    content,
+                    *is_error,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 1);
+        let (tool_use_id, tool_name, input, content, is_error) = &results[0];
+        assert_eq!(*tool_use_id, "hosted_wf_1");
+        assert_eq!(*tool_name, "web_fetch");
+        assert_eq!(input, &json!({ "url": "https://example.test/docs" }));
+        assert!(!*is_error);
+        assert!(matches!(
+            *content,
+            ToolContent::Text(text) if text == "status: completed"
+        ));
     }
 
     #[test]

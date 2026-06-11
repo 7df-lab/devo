@@ -49,12 +49,14 @@ pub struct ToolPlanConfig {
     pub use_unified_exec: bool,
     pub code_search: bool,
     pub web_search: bool,
+    pub web_fetch: bool,
 }
 
 impl ToolPlanConfig {
     pub fn from_app_config(config: &AppConfig) -> Self {
         Self {
             web_search: app_config_uses_local_web_search(config),
+            web_fetch: app_config_uses_local_web_fetch(config),
             code_search: config.experimental.code_search,
             ..Self::default()
         }
@@ -76,6 +78,7 @@ impl Default for ToolPlanConfig {
             use_unified_exec: true,
             code_search: true,
             web_search: false,
+            web_fetch: true,
         }
     }
 }
@@ -488,6 +491,22 @@ fn app_config_uses_local_web_search(config: &AppConfig) -> bool {
         })
 }
 
+fn app_config_uses_local_web_fetch(config: &AppConfig) -> bool {
+    config.tools.web_fetch.mode == devo_config::WebFetchMode::Local
+        || config.provider.providers.values().any(|provider| {
+            provider
+                .web_fetch
+                .as_ref()
+                .is_some_and(|web_fetch| web_fetch.mode == devo_config::WebFetchMode::Local)
+        })
+        || config.provider.model_bindings.values().any(|binding| {
+            binding
+                .web_fetch
+                .as_ref()
+                .is_some_and(|web_fetch| web_fetch.mode == devo_config::WebFetchMode::Local)
+        })
+}
+
 fn websearch_schema() -> JsonSchema {
     JsonSchema::object(
         BTreeMap::from([(
@@ -774,22 +793,24 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
         ToolHandlerKind::Question,
     );
 
-    plan.push(
-        ToolSpec {
-            name: "webfetch".to_string(),
-            description: WEBFETCH_DESCRIPTION.to_string(),
-            input_schema: webfetch_schema(),
-            output_mode: ToolOutputMode::Mixed,
-            execution_mode: ToolExecutionMode::ReadOnly,
-            capability_tags: vec![ToolCapabilityTag::NetworkAccess],
-            supports_parallel: true,
-            preparation_feedback: ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        },
-        ToolHandlerKind::WebFetch,
-    );
+    if config.web_fetch {
+        plan.push(
+            ToolSpec {
+                name: "webfetch".to_string(),
+                description: WEBFETCH_DESCRIPTION.to_string(),
+                input_schema: webfetch_schema(),
+                output_mode: ToolOutputMode::Mixed,
+                execution_mode: ToolExecutionMode::ReadOnly,
+                capability_tags: vec![ToolCapabilityTag::NetworkAccess],
+                supports_parallel: true,
+                preparation_feedback: ToolPreparationFeedback::None,
+                display_name: None,
+                supports_cancellation: None,
+                supports_streaming: None,
+            },
+            ToolHandlerKind::WebFetch,
+        );
+    }
 
     if config.web_search {
         plan.push(
@@ -1022,6 +1043,28 @@ mod tests {
             .find(|spec| spec.name == "web_search")
             .expect("web_search spec");
         assert!(web_search_spec.description.contains("Sources:"));
+    }
+
+    #[test]
+    fn plan_builder_registers_webfetch_only_when_local_enabled() {
+        let local_plan = build_tool_registry_plan(&ToolPlanConfig::default());
+        let local_spec_names: Vec<&str> = local_plan
+            .specs
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect();
+        assert!(local_spec_names.contains(&"webfetch"));
+
+        let provider_plan = build_tool_registry_plan(&ToolPlanConfig {
+            web_fetch: false,
+            ..ToolPlanConfig::default()
+        });
+        let provider_spec_names: Vec<&str> = provider_plan
+            .specs
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect();
+        assert!(!provider_spec_names.contains(&"webfetch"));
     }
 
     #[test]

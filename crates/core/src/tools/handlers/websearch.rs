@@ -62,7 +62,7 @@ impl ToolHandler for WebSearchHandler {
 
     async fn handle(
         &self,
-        _ctx: ToolContext,
+        ctx: ToolContext,
         input: serde_json::Value,
         _progress: Option<ToolProgressSender>,
     ) -> Result<ToolResult, ToolCallError> {
@@ -95,9 +95,11 @@ impl ToolHandler for WebSearchHandler {
             .unwrap_or(DEFAULT_MAX_RESULTS);
 
         let response = match config.kind {
-            LocalWebSearchProviderKind::Exa => search_exa(&config, query, max_results).await?,
+            LocalWebSearchProviderKind::Exa => {
+                search_exa(&config, query, max_results, ctx.network_proxy.as_deref()).await?
+            }
             LocalWebSearchProviderKind::Tavily => {
-                search_tavily(&config, query, max_results).await?
+                search_tavily(&config, query, max_results, ctx.network_proxy.as_deref()).await?
             }
         };
 
@@ -112,9 +114,13 @@ async fn search_exa(
     config: &ResolvedLocalWebSearchConfig,
     query: &str,
     max_results: u32,
+    network_proxy: Option<&str>,
 ) -> Result<String, ToolCallError> {
     let url = config.base_url.as_deref().unwrap_or(DEFAULT_EXA_BASE_URL);
-    let response = reqwest::Client::new()
+    let client = devo_network_proxy::build_client(network_proxy).map_err(|error| {
+        ToolCallError::ExecutionFailed(format!("Failed to create HTTP client: {error}"))
+    })?;
+    let response = client
         .post(url)
         .header("x-api-key", &config.api_key)
         .json(&serde_json::json!({
@@ -135,12 +141,16 @@ async fn search_tavily(
     config: &ResolvedLocalWebSearchConfig,
     query: &str,
     max_results: u32,
+    network_proxy: Option<&str>,
 ) -> Result<String, ToolCallError> {
     let url = config
         .base_url
         .as_deref()
         .unwrap_or(DEFAULT_TAVILY_BASE_URL);
-    let response = reqwest::Client::new()
+    let client = devo_network_proxy::build_client(network_proxy).map_err(|error| {
+        ToolCallError::ExecutionFailed(format!("Failed to create HTTP client: {error}"))
+    })?;
+    let response = client
         .post(url)
         .bearer_auth(&config.api_key)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -385,7 +395,7 @@ mod tests {
             max_results: Some(1),
         };
 
-        let text = search_tavily(&config, "who is Leo Messi?", 1)
+        let text = search_tavily(&config, "who is Leo Messi?", 1, /*network_proxy*/ None)
             .await
             .expect("Tavily search should succeed");
         let request = capture.await.expect("capture request");
@@ -444,9 +454,14 @@ mod tests {
             max_results: Some(2),
         };
 
-        let text = search_exa(&config, "Rust programming language official website", 2)
-            .await
-            .expect("Exa live search should succeed");
+        let text = search_exa(
+            &config,
+            "Rust programming language official website",
+            2,
+            /*network_proxy*/ None,
+        )
+        .await
+        .expect("Exa live search should succeed");
 
         assert!(text.contains("Search results for: Rust programming language official website"));
         assert!(text.contains("]("));
@@ -466,7 +481,7 @@ mod tests {
             max_results: Some(1),
         };
 
-        let text = search_tavily(&config, "who is Leo Messi?", 1)
+        let text = search_tavily(&config, "who is Leo Messi?", 1, /*network_proxy*/ None)
             .await
             .expect("Tavily live search should succeed");
 
