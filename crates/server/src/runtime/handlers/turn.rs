@@ -1,10 +1,27 @@
 use super::super::*;
 
-fn pending_collaboration_mode_metadata(
+fn pending_turn_metadata(
     collaboration_mode: devo_protocol::CollaborationMode,
+    model: Option<String>,
+    model_binding_id: Option<String>,
 ) -> Option<serde_json::Value> {
-    (collaboration_mode != devo_protocol::CollaborationMode::Build)
-        .then(|| serde_json::json!({ "collaboration_mode": collaboration_mode }))
+    let mut metadata = serde_json::Map::new();
+    if collaboration_mode != devo_protocol::CollaborationMode::Build {
+        metadata.insert(
+            "collaboration_mode".to_string(),
+            serde_json::json!(collaboration_mode),
+        );
+    }
+    if let Some(model_binding_id) = model_binding_id {
+        metadata.insert(
+            "model_binding_id".to_string(),
+            serde_json::Value::String(model_binding_id),
+        );
+    }
+    if let Some(model) = model {
+        metadata.insert("model".to_string(), serde_json::Value::String(model));
+    }
+    (!metadata.is_empty()).then_some(serde_json::Value::Object(metadata))
 }
 
 impl ServerRuntime {
@@ -108,6 +125,14 @@ impl ServerRuntime {
                 let pending_turn_queue = Arc::clone(&session.pending_turn_queue);
                 let _active_turn_id = active_turn.turn_id;
                 let is_ephemeral = session.summary.ephemeral;
+                let queued_model = params
+                    .model
+                    .clone()
+                    .or_else(|| session.summary.model.clone());
+                let queued_model_binding_id = params
+                    .model_binding_id
+                    .clone()
+                    .or_else(|| session.summary.model_binding_id.clone());
                 drop(session);
 
                 {
@@ -121,7 +146,11 @@ impl ServerRuntime {
                             display_text: display_input.clone(),
                             prompt_text: input_text.clone(),
                         },
-                        metadata: pending_collaboration_mode_metadata(collaboration_mode),
+                        metadata: pending_turn_metadata(
+                            collaboration_mode,
+                            queued_model.clone(),
+                            queued_model_binding_id.clone(),
+                        ),
                         created_at: chrono::Utc::now(),
                     };
                     guard.push_back(item.clone());
@@ -162,7 +191,11 @@ impl ServerRuntime {
                 session.core_session.lock().await.config.permission_mode = permission_mode;
                 session.config.permission_mode = permission_mode;
             }
-            let requested_model = params.model.as_deref().or(session.summary.model.as_deref());
+            let requested_model = requested_model_selection(
+                params.model_binding_id.as_deref(),
+                params.model.as_deref(),
+                &session.summary,
+            );
             let requested_thinking = params
                 .thinking
                 .clone()
@@ -174,8 +207,7 @@ impl ServerRuntime {
                 .model
                 .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
             let request_model = turn_config.provider_request_model(&resolved_request.request_model);
-            session.summary.model = Some(turn_config.model.slug.clone());
-            session.summary.thinking = turn_config.thinking_selection.clone();
+            apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
             let turn = TurnMetadata {
                 turn_id: TurnId::new(),
                 session_id: params.session_id,
@@ -186,6 +218,7 @@ impl ServerRuntime {
                 status: TurnStatus::Running,
                 kind: devo_core::TurnKind::Regular,
                 model: turn_config.model.slug.clone(),
+                model_binding_id: turn_config.model_binding_id.clone(),
                 thinking: turn_config.thinking_selection.clone(),
                 reasoning_effort: resolved_request.effective_reasoning_effort,
                 request_model,
@@ -401,6 +434,7 @@ impl ServerRuntime {
                 status: TurnStatus::Running,
                 kind: devo_core::TurnKind::Other("shell_command".to_string()),
                 model: model.clone(),
+                model_binding_id: session.summary.model_binding_id.clone(),
                 thinking: session.summary.thinking.clone(),
                 reasoning_effort: session.summary.reasoning_effort,
                 request_model: model,

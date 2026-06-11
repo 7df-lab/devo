@@ -2202,6 +2202,7 @@ impl ServerRuntime {
                     text.clone(),
                     text,
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
+                    model_selection_from_pending_metadata(metadata.as_ref()),
                 )),
                 Some(devo_core::PendingInputItem {
                     kind:
@@ -2216,11 +2217,14 @@ impl ServerRuntime {
                     display_text,
                     prompt_text,
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
+                    model_selection_from_pending_metadata(metadata.as_ref()),
                 )),
                 _ => None,
             }
         };
-        let Some((display_input, input_text, queued_collaboration_mode)) = queued_input else {
+        let Some((display_input, input_text, queued_collaboration_mode, queued_model_selection)) =
+            queued_input
+        else {
             self.maybe_start_goal_continuation_turn(session_id).await;
             return;
         };
@@ -2234,7 +2238,9 @@ impl ServerRuntime {
                 None => return,
             };
             let session = session_arc.lock().await;
-            let model_override = session.summary.model.as_deref();
+            let model_override = queued_model_selection
+                .as_deref()
+                .or_else(|| session_model_selection(&session.summary));
             let thinking_override = session.summary.thinking.clone();
             let turn_config = self
                 .deps
@@ -2263,6 +2269,7 @@ impl ServerRuntime {
             status: TurnStatus::Running,
             kind: devo_core::TurnKind::Regular,
             model: turn_config.model.slug.clone(),
+            model_binding_id: turn_config.model_binding_id.clone(),
             thinking: turn_config.thinking_selection.clone(),
             reasoning_effort: resolved_request.effective_reasoning_effort,
             request_model,
@@ -2277,6 +2284,7 @@ impl ServerRuntime {
                 None => return,
             };
             let mut session = session_arc.lock().await;
+            apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
             session.active_turn = Some(turn.clone());
@@ -2305,7 +2313,7 @@ impl ServerRuntime {
     /// its response immediately.
     pub(super) async fn spawn_next_turn_from_queue(self: &Arc<Self>, session_id: SessionId) {
         // Pop one queued input.
-        let (display_input, input_text, queued_collaboration_mode) = {
+        let (display_input, input_text, queued_collaboration_mode, queued_model_selection) = {
             let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
                 Some(s) => s,
                 None => return,
@@ -2326,6 +2334,7 @@ impl ServerRuntime {
                     text.clone(),
                     text,
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
+                    model_selection_from_pending_metadata(metadata.as_ref()),
                 ),
                 Some(devo_core::PendingInputItem {
                     kind:
@@ -2340,6 +2349,7 @@ impl ServerRuntime {
                     display_text,
                     prompt_text,
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
+                    model_selection_from_pending_metadata(metadata.as_ref()),
                 ),
                 _ => return,
             }
@@ -2355,7 +2365,9 @@ impl ServerRuntime {
                 None => return,
             };
             let session = session_arc.lock().await;
-            let model = session.summary.model.as_deref();
+            let model = queued_model_selection
+                .as_deref()
+                .or_else(|| session_model_selection(&session.summary));
             let thinking = session.summary.thinking.clone();
             let tc = self.deps.resolve_turn_config(model, thinking);
             let rr = tc
@@ -2382,6 +2394,7 @@ impl ServerRuntime {
             status: TurnStatus::Running,
             kind: devo_core::TurnKind::Regular,
             model: turn_config.model.slug.clone(),
+            model_binding_id: turn_config.model_binding_id.clone(),
             thinking: turn_config.thinking_selection.clone(),
             reasoning_effort: resolved_request.effective_reasoning_effort,
             request_model,
@@ -2396,6 +2409,7 @@ impl ServerRuntime {
                 None => return,
             };
             let mut session = session_arc.lock().await;
+            apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
             session.active_turn = Some(turn.clone());

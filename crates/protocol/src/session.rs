@@ -43,6 +43,8 @@ pub struct SessionMetadata {
     pub agent_role: Option<String>,
     pub ephemeral: bool,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding_id: Option<String>,
     pub thinking: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub total_input_tokens: usize,
@@ -67,6 +69,8 @@ pub struct SessionStartParams {
     pub ephemeral: bool,
     pub title: Option<String>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +212,8 @@ pub struct SessionTitleUpdateResult {
 pub struct SessionMetadataUpdateParams {
     pub session_id: SessionId,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding_id: Option<String>,
     pub thinking: Option<String>,
 }
 
@@ -366,6 +372,7 @@ mod tests {
             agent_role: None,
             ephemeral: false,
             model: Some("test-model".to_string()),
+            model_binding_id: Some("test-binding".to_string()),
             thinking: Some("medium".to_string()),
             reasoning_effort: Some(crate::ReasoningEffort::Medium),
             total_input_tokens: 12,

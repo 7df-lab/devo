@@ -120,6 +120,49 @@ impl ModelProviderSDK for UnusedProvider {
 }
 
 #[tokio::test]
+async fn duplicate_slug_session_binding_routes_turn_and_title_to_selected_binding() -> Result<()> {
+    let data_root = TempDir::new()?;
+    write_duplicate_slug_provider_config(data_root.path())?;
+    let router = Arc::new(RecordingRouter::default());
+    let runtime = build_runtime_with_models(
+        data_root.path(),
+        router.clone(),
+        "deepseek-v4-flash",
+        vec![Model {
+            slug: "deepseek-v4-flash".to_string(),
+            display_name: "DeepSeek V4 Flash".to_string(),
+            ..Model::default()
+        }],
+    )?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+
+    let session_id = start_session_with_binding(
+        &runtime,
+        connection_id,
+        data_root.path(),
+        "deepseek-v4-flash",
+        Some("deepseek-v4-flash-deepseek-ac"),
+    )
+    .await?;
+    start_turn(&runtime, connection_id, session_id).await?;
+
+    wait_for_notification_value(&mut notifications_rx, "turn/completed").await?;
+    wait_for_complete_request(&router).await?;
+
+    let expected_route = ProviderRoute::binding("deepseek-ac", ProviderWireApi::AnthropicMessages);
+    assert_eq!(
+        router.stream_requests(),
+        vec![(expected_route.clone(), "deepseek-v4-flash".to_string())]
+    );
+    assert_eq!(
+        router.complete_requests(),
+        vec![(expected_route, "deepseek-v4-flash".to_string())]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn session_model_switch_routes_turn_and_title_to_selected_provider_binding() -> Result<()> {
     let data_root = TempDir::new()?;
     write_provider_config(data_root.path())?;
@@ -145,6 +188,41 @@ async fn session_model_switch_routes_turn_and_title_to_selected_provider_binding
         vec![(expected_route, "vendor/alt-model".to_string())]
     );
 
+    Ok(())
+}
+
+fn write_duplicate_slug_provider_config(data_root: &std::path::Path) -> Result<()> {
+    std::fs::write(
+        data_root.join("config.toml"),
+        r#"
+[defaults]
+model_binding = "deepseek-v4-flash-deepseek-ac"
+
+[providers.deepseek]
+enabled = true
+name = "DeepSeek"
+wire_apis = ["openai_chat_completions"]
+
+[providers.deepseek-ac]
+enabled = true
+name = "DeepSeek Anthropic"
+wire_apis = ["anthropic_messages"]
+
+[model_bindings.deepseek-v4-flash-deepseek]
+enabled = true
+model_slug = "deepseek-v4-flash"
+provider = "deepseek"
+model_name = "deepseek-v4-flash"
+invocation_method = "openai_chat_completions"
+
+[model_bindings.deepseek-v4-flash-deepseek-ac]
+enabled = true
+model_slug = "deepseek-v4-flash"
+provider = "deepseek-ac"
+model_name = "deepseek-v4-flash"
+invocation_method = "anthropic_messages"
+"#,
+    )?;
     Ok(())
 }
 
@@ -187,6 +265,31 @@ fn build_runtime(
     data_root: &std::path::Path,
     router: Arc<RecordingRouter>,
 ) -> Result<Arc<ServerRuntime>> {
+    build_runtime_with_models(
+        data_root,
+        router,
+        "default-model",
+        vec![
+            Model {
+                slug: "default-model".to_string(),
+                display_name: "Default Model".to_string(),
+                ..Model::default()
+            },
+            Model {
+                slug: "alt-model".to_string(),
+                display_name: "Alt Model".to_string(),
+                ..Model::default()
+            },
+        ],
+    )
+}
+
+fn build_runtime_with_models(
+    data_root: &std::path::Path,
+    router: Arc<RecordingRouter>,
+    default_model: &str,
+    models: Vec<Model>,
+) -> Result<Arc<ServerRuntime>> {
     let provider: Arc<dyn ModelProviderSDK> = Arc::new(UnusedProvider);
     let provider_router: Arc<dyn ProviderRouter> = router;
     let db = Arc::new(devo_server::db::Database::open(
@@ -198,19 +301,8 @@ fn build_runtime(
             provider,
             provider_router,
             Arc::new(ToolRegistry::new()),
-            "default-model".to_string(),
-            Arc::new(PresetModelCatalog::new(vec![
-                Model {
-                    slug: "default-model".to_string(),
-                    display_name: "Default Model".to_string(),
-                    ..Model::default()
-                },
-                Model {
-                    slug: "alt-model".to_string(),
-                    display_name: "Alt Model".to_string(),
-                    ..Model::default()
-                },
-            ])),
+            default_model.to_string(),
+            Arc::new(PresetModelCatalog::new(models)),
             Arc::new(ProviderVendorCatalog::default()),
             None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
@@ -271,6 +363,23 @@ async fn start_session(
     connection_id: u64,
     cwd: &std::path::Path,
 ) -> Result<SessionId> {
+    start_session_with_binding(
+        runtime,
+        connection_id,
+        cwd,
+        "default-model",
+        /*model_binding_id*/ None,
+    )
+    .await
+}
+
+async fn start_session_with_binding(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    cwd: &std::path::Path,
+    model: &str,
+    model_binding_id: Option<&str>,
+) -> Result<SessionId> {
     let response = runtime
         .handle_incoming(
             connection_id,
@@ -281,7 +390,8 @@ async fn start_session(
                     "cwd": cwd,
                     "ephemeral": false,
                     "title": null,
-                    "model": "default-model"
+                    "model": model,
+                    "model_binding_id": model_binding_id
                 }
             }),
         )
@@ -307,6 +417,7 @@ async fn update_session_model(
                 "params": {
                     "session_id": session_id,
                     "model": model,
+                    "model_binding_id": null,
                     "thinking": null
                 }
             }),
@@ -323,16 +434,31 @@ async fn start_turn(
     connection_id: u64,
     session_id: SessionId,
 ) -> Result<()> {
-    let response = runtime
+    let response = send_turn_start(runtime, connection_id, session_id, 4)
+        .await?
+        .context("turn/start response")?;
+    let _: devo_server::SuccessResponse<devo_server::TurnStartResult> =
+        serde_json::from_value(response)?;
+    Ok(())
+}
+
+async fn send_turn_start(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: SessionId,
+    id: u64,
+) -> Result<Option<serde_json::Value>> {
+    Ok(runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
-                "id": 4,
+                "id": id,
                 "method": "turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [{ "type": "text", "text": "use the selected provider" }],
                     "model": null,
+                    "model_binding_id": null,
                     "thinking": null,
                     "sandbox": null,
                     "approval_policy": null,
@@ -340,11 +466,7 @@ async fn start_turn(
                 }
             }),
         )
-        .await
-        .context("turn/start response")?;
-    let _: devo_server::SuccessResponse<devo_server::TurnStartResult> =
-        serde_json::from_value(response)?;
-    Ok(())
+        .await)
 }
 
 async fn wait_for_notification_value(

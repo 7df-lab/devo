@@ -72,6 +72,7 @@ impl ServerRuntime {
                 params.cwd.clone(),
                 params.title.clone(),
                 Some(model.clone()),
+                params.model_binding_id.clone(),
                 None,
                 self.deps.provider.name().to_string(),
                 None,
@@ -94,6 +95,7 @@ impl ServerRuntime {
             agent_role: None,
             ephemeral: params.ephemeral,
             model: Some(model.clone()),
+            model_binding_id: params.model_binding_id.clone(),
             thinking: None,
             reasoning_effort: None,
             total_input_tokens: 0,
@@ -247,11 +249,13 @@ impl ServerRuntime {
         let updated_session = {
             let mut session = session_arc.lock().await;
             session.summary.model = params.model.clone();
+            session.summary.model_binding_id = params.model_binding_id.clone();
             session.summary.thinking = params.thinking.clone();
             let updated_at = Utc::now();
             session.summary.updated_at = updated_at;
             if let Some(record) = session.record.as_mut() {
                 record.model = params.model;
+                record.model_binding_id = params.model_binding_id;
                 record.thinking = params.thinking;
                 record.updated_at = updated_at;
                 if let Err(error) = self.rollout_store.append_session_meta(record) {
@@ -546,6 +550,7 @@ impl ServerRuntime {
                     forked_session.summary.cwd.clone(),
                     forked_session.summary.title.clone(),
                     forked_session.summary.model.clone(),
+                    forked_session.summary.model_binding_id.clone(),
                     forked_session.summary.thinking.clone(),
                     self.deps.provider.name().to_string(),
                     Some(params.session_id),
@@ -734,7 +739,14 @@ impl ServerRuntime {
                     // is recomputed from the active provider binding.
                     let request_model = self
                         .deps
-                        .resolve_turn_config(Some(&model), source.summary.thinking.clone())
+                        .resolve_turn_config(
+                            source
+                                .summary
+                                .model_binding_id
+                                .as_deref()
+                                .or(Some(model.as_str())),
+                            source.summary.thinking.clone(),
+                        )
                         .request_model;
                     let sequence = kept_items
                         .iter()
@@ -747,6 +759,7 @@ impl ServerRuntime {
                         status: TurnStatus::Completed,
                         kind: devo_protocol::TurnKind::Regular,
                         model,
+                        model_binding_id: source.summary.model_binding_id.clone(),
                         thinking: source.summary.thinking.clone(),
                         reasoning_effort: source.summary.reasoning_effort,
                         request_model,
@@ -774,6 +787,7 @@ impl ServerRuntime {
             agent_role: None,
             ephemeral: source.summary.ephemeral,
             model: source.summary.model.clone(),
+            model_binding_id: source.summary.model_binding_id.clone(),
             thinking: source.summary.thinking.clone(),
             reasoning_effort: source.summary.reasoning_effort,
             total_input_tokens: source_core_session.total_input_tokens,

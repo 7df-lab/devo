@@ -407,6 +407,7 @@ impl SessionProjector for DefaultProjection {
             agent_role: session.agent_role.clone(),
             ephemeral,
             model: session.model.clone(),
+            model_binding_id: session.model_binding_id.clone(),
             thinking: session.thinking.clone(),
             reasoning_effort: session
                 .latest_turn_context
@@ -438,6 +439,7 @@ impl TurnProjector for DefaultProjection {
             status: turn.status.clone(),
             kind: turn.kind.clone(),
             model: turn.model.clone(),
+            model_binding_id: turn.model_binding_id.clone(),
             thinking: turn.thinking.clone(),
             reasoning_effort: turn
                 .turn_context

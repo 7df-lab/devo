@@ -114,6 +114,7 @@ impl ChatWidget {
             WorkerEvent::SessionActivated { .. } => {}
             WorkerEvent::TurnStarted {
                 model,
+                model_binding_id,
                 thinking,
                 reasoning_effort,
                 turn_id,
@@ -125,7 +126,7 @@ impl ChatWidget {
                 }
                 self.committed_server_assistant_in_turn = false;
                 self.current_turn_has_user_shell_command = false;
-                self.sync_session_catalog_model(model);
+                self.update_session_model_selection(model, model_binding_id);
                 self.thinking_selection = thinking;
                 self.session.reasoning_effort = reasoning_effort;
                 self.refresh_header_box();
@@ -1019,6 +1020,7 @@ impl ChatWidget {
             WorkerEvent::NewSessionPrepared {
                 cwd,
                 model,
+                model_binding_id,
                 thinking,
                 reasoning_effort,
                 active_agent_label,
@@ -1028,7 +1030,7 @@ impl ChatWidget {
             } => {
                 self.resume_browser_loading = false;
                 self.session.cwd = cwd;
-                self.update_session_request_model(model);
+                self.update_session_model_selection(model, model_binding_id);
                 self.thinking_selection = thinking;
                 self.session.reasoning_effort = reasoning_effort;
                 self.session.active_agent_label = active_agent_label.clone();
@@ -1065,6 +1067,7 @@ impl ChatWidget {
                 cwd,
                 title,
                 model,
+                model_binding_id,
                 thinking,
                 reasoning_effort,
                 active_agent_label,
@@ -1082,7 +1085,7 @@ impl ChatWidget {
                 self.resume_browser_loading = false;
                 self.session.cwd = cwd;
                 if let Some(model) = model {
-                    self.update_session_request_model(model);
+                    self.update_session_model_selection(model, model_binding_id);
                 }
                 self.thinking_selection = thinking;
                 self.session.reasoning_effort = reasoning_effort;

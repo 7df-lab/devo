@@ -288,7 +288,8 @@ impl ServerRuntimeDependencies {
             let provider_request_models = ProviderRequestModelMap::new(
                 provider_request_model_map_for_binding(&provider_config, &binding),
             );
-            return TurnConfig::with_provider_route_and_web_tools(
+            let binding_id = binding.binding_id.clone();
+            let mut turn_config = TurnConfig::with_provider_route_and_web_tools(
                 self.catalog_model_or_fallback(&binding.model_slug),
                 binding.model_name,
                 provider_request_models,
@@ -297,6 +298,8 @@ impl ServerRuntimeDependencies {
                 web_fetch,
                 thinking_selection,
             );
+            turn_config.model_binding_id = Some(binding_id);
+            return turn_config;
         }
 
         let model = self.resolve_turn_model(requested_model);

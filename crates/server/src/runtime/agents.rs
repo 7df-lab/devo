@@ -71,6 +71,7 @@ impl ServerRuntime {
             .unwrap_or_else(|| "root".to_string());
         let agent_path = AgentPath::new(parent_path).join(&nickname).0;
         let model = parent_summary.model.clone();
+        let model_binding_id = parent_summary.model_binding_id.clone();
         let thinking = parent_summary.thinking.clone();
 
         let mut record = self.rollout_store.create_session_record(
@@ -79,6 +80,7 @@ impl ServerRuntime {
             parent_summary.cwd.clone(),
             Some(nickname.clone()),
             model.clone(),
+            model_binding_id.clone(),
             thinking.clone(),
             self.deps.provider.name().to_string(),
             Some(parent_session_id),
@@ -139,6 +141,7 @@ impl ServerRuntime {
             agent_role: Some(role.clone()),
             ephemeral: params.ephemeral,
             model: model.clone(),
+            model_binding_id: model_binding_id.clone(),
             thinking,
             reasoning_effort: None,
             total_input_tokens: 0,
@@ -416,7 +419,7 @@ impl ServerRuntime {
         let (turn_config, resolved_request) = {
             let session = session_arc.lock().await;
             let turn_config = self.deps.resolve_turn_config(
-                session.summary.model.as_deref(),
+                session_model_selection(&session.summary),
                 session.summary.thinking.clone(),
             );
             let resolved_request = turn_config
@@ -438,6 +441,7 @@ impl ServerRuntime {
                 status: TurnStatus::Running,
                 kind: devo_core::TurnKind::Regular,
                 model: turn_config.model.slug.clone(),
+                model_binding_id: turn_config.model_binding_id.clone(),
                 thinking: turn_config.thinking_selection.clone(),
                 reasoning_effort: resolved_request.effective_reasoning_effort,
                 request_model,
@@ -448,8 +452,7 @@ impl ServerRuntime {
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
-            session.summary.model = Some(turn_config.model.slug.clone());
-            session.summary.thinking = turn_config.thinking_selection.clone();
+            apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
             session.active_turn = Some(turn.clone());
             turn
         };

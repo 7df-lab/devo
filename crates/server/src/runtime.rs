@@ -211,6 +211,46 @@ impl TurnInputMode {
     }
 }
 
+fn session_model_selection(session: &SessionMetadata) -> Option<&str> {
+    session
+        .model_binding_id
+        .as_deref()
+        .or(session.model.as_deref())
+}
+
+fn requested_model_selection<'a>(
+    model_binding_id: Option<&'a str>,
+    model: Option<&'a str>,
+    session: &'a SessionMetadata,
+) -> Option<&'a str> {
+    model_binding_id
+        .or(model)
+        .or_else(|| session_model_selection(session))
+}
+
+fn apply_turn_config_to_session_summary(summary: &mut SessionMetadata, turn_config: &TurnConfig) {
+    summary.model = Some(turn_config.model.slug.clone());
+    summary.model_binding_id = turn_config.model_binding_id.clone();
+    summary.thinking = turn_config.thinking_selection.clone();
+}
+
+fn string_field_from_pending_metadata(
+    metadata: Option<&serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    metadata?
+        .get(key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn model_selection_from_pending_metadata(metadata: Option<&serde_json::Value>) -> Option<String> {
+    string_field_from_pending_metadata(metadata, "model_binding_id")
+        .or_else(|| string_field_from_pending_metadata(metadata, "model"))
+}
+
 impl ServerRuntime {
     pub fn new(server_home: PathBuf, deps: ServerRuntimeDependencies) -> Arc<Self> {
         let rollout_store = RolloutStore::new(server_home.clone());

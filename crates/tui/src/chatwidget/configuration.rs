@@ -55,6 +55,26 @@ impl ChatWidget {
         self.sync_session_catalog_model(slug);
     }
 
+    pub(super) fn update_session_model_selection(
+        &mut self,
+        slug: String,
+        model_binding_id: Option<String>,
+    ) {
+        if let Some(binding_id) = model_binding_id {
+            self.session.request_model = None;
+            if let Some(entry) = self.saved_model_entry_by_binding_id(&binding_id).cloned() {
+                self.apply_saved_model_entry_to_session(&entry);
+                return;
+            }
+            self.sync_session_catalog_model(slug);
+            self.current_model_binding_id = Some(binding_id.clone());
+            self.session.model_binding_id = Some(binding_id);
+            return;
+        }
+
+        self.update_session_request_model(slug);
+    }
+
     pub(super) fn sync_session_catalog_model(&mut self, slug: String) {
         if let Some(model) = self
             .available_models
@@ -142,6 +162,10 @@ impl ChatWidget {
             .request_model
             .clone()
             .or_else(|| self.session.model.as_ref().map(|model| model.slug.clone()))
+    }
+
+    pub(super) fn user_turn_model_binding_id(&self) -> Option<String> {
+        self.session.model_binding_id.clone()
     }
 
     pub(crate) fn set_thinking_selection(&mut self, selection: Option<String>) {

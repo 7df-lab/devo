@@ -223,6 +223,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
     let mut worker = QueryWorkerHandle::spawn(QueryWorkerConfig {
         initial_session_id: initial_session.session_id,
         model: initial_session.model.clone(),
+        model_binding_id: initial_session.model_binding_id.clone(),
         cwd: initial_session.cwd.clone(),
         server_log_level: config.server_log_level.clone(),
         thinking_selection: initial_session.thinking_selection.clone(),
@@ -918,13 +919,14 @@ fn handle_app_command(
         AppCommand::UserTurn {
             input,
             model,
+            model_binding_id,
             thinking,
             approval_policy,
             collaboration_mode,
             ..
         } => {
             if let Some(model) = model {
-                worker.set_model(model.clone())?;
+                worker.set_model_selection(model.clone(), model_binding_id.clone())?;
             }
             worker.set_thinking(thinking.clone())?;
             worker.submit_input_with_collaboration_mode(

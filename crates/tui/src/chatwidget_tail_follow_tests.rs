@@ -76,6 +76,8 @@ fn overflowing_live_assistant_viewport_follows_latest_tail() {
 
     widget.handle_worker_event(WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),

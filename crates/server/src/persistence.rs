@@ -92,6 +92,7 @@ impl RolloutStore {
         cwd: PathBuf,
         title: Option<String>,
         model: Option<String>,
+        model_binding_id: Option<String>,
         thinking: Option<String>,
         model_provider: String,
         parent_session_id: Option<SessionId>,
@@ -112,6 +113,7 @@ impl RolloutStore {
             agent_path: None,
             model_provider,
             model,
+            model_binding_id,
             thinking,
             cwd,
             cli_version: env!("CARGO_PKG_VERSION").into(),
@@ -391,6 +393,7 @@ impl ReplayState {
                     status: line.turn.status.clone(),
                     kind: line.turn.kind.clone(),
                     model: line.turn.model.clone(),
+                    model_binding_id: line.turn.model_binding_id.clone(),
                     thinking: line.turn.thinking.clone(),
                     reasoning_effort: line
                         .turn
@@ -527,13 +530,19 @@ impl ReplayState {
             .div_ceil(4);
         let pending_turn_queue = std::sync::Arc::clone(&core_session.pending_turn_queue);
         let btw_input_queue = std::sync::Arc::clone(&core_session.btw_input_queue);
-        let summary_model = self
+        let summary_model_selection = self
             .latest_turn_metadata
             .as_ref()
-            .map(|turn| turn.model.clone())
+            .and_then(|turn| turn.model_binding_id.clone())
+            .or_else(|| {
+                self.latest_turn_metadata
+                    .as_ref()
+                    .map(|turn| turn.model.clone())
+            })
+            .or_else(|| record.model_binding_id.clone())
             .or_else(|| record.model.clone())
             .unwrap_or_else(|| deps.default_model.clone());
-        let turn_config = deps.resolve_turn_config(Some(&summary_model), None);
+        let turn_config = deps.resolve_turn_config(Some(&summary_model_selection), None);
         let concrete_selection = |selection: Option<&str>| {
             selection
                 .map(str::trim)
@@ -565,6 +574,7 @@ impl ReplayState {
             .resolve_thinking_selection(summary_thinking.as_deref())
             .effective_reasoning_effort;
         record.model = Some(turn_config.model.slug.clone());
+        record.model_binding_id = turn_config.model_binding_id.clone();
         record.thinking = summary_thinking.clone();
 
         let summary = SessionMetadata {
@@ -580,6 +590,7 @@ impl ReplayState {
             agent_role: record.agent_role.clone(),
             ephemeral: false,
             model: Some(turn_config.model.slug),
+            model_binding_id: turn_config.model_binding_id.clone(),
             thinking: summary_thinking,
             reasoning_effort: summary_reasoning_effort,
             total_input_tokens: self.total_input_tokens,
@@ -1147,6 +1158,7 @@ pub(crate) fn build_turn_record(
         status: turn.status.clone(),
         kind: turn.kind.clone(),
         model: turn.model.clone(),
+        model_binding_id: turn.model_binding_id.clone(),
         thinking: turn.thinking.clone(),
         request_model: turn.request_model.clone(),
         request_thinking: turn.request_thinking.clone(),
@@ -1491,6 +1503,7 @@ mod tests {
                     agent_path: None,
                     model_provider: "test".into(),
                     model: Some("model-a".into()),
+                    model_binding_id: None,
                     thinking: None,
                     cwd: PathBuf::from("/tmp/root"),
                     cli_version: "0.1.0".into(),
@@ -1523,6 +1536,7 @@ mod tests {
                     status: TurnStatus::Completed,
                     kind: devo_core::TurnKind::Regular,
                     model: "model-b".into(),
+                    model_binding_id: None,
                     thinking: Some("enabled".into()),
                     request_model: "model-b".into(),
                     request_thinking: Some("enabled".into()),

@@ -156,6 +156,8 @@ pub(crate) enum WorkerEvent {
     TurnStarted {
         /// The model slug resolved by the server for this turn.
         model: String,
+        /// Stable provider model binding id used by the server for this turn.
+        model_binding_id: Option<String>,
         /// The logical thinking selection used for this turn.
         thinking: Option<String>,
         /// The effective reasoning effort observed for this turn.
@@ -467,6 +469,8 @@ pub(crate) enum WorkerEvent {
         cwd: std::path::PathBuf,
         /// Model currently configured for the next newly-created session.
         model: String,
+        /// Stable provider model binding id configured for the next session.
+        model_binding_id: Option<String>,
         /// Thinking selection currently configured for the next newly-created session.
         thinking: Option<String>,
         /// Effective reasoning effort currently configured for the next session.
@@ -490,6 +494,8 @@ pub(crate) enum WorkerEvent {
         title: Option<String>,
         /// The model restored from the resumed session, when one exists.
         model: Option<String>,
+        /// Stable provider model binding id restored from the resumed session.
+        model_binding_id: Option<String>,
         /// The thinking selection restored from the resumed session, when one exists.
         thinking: Option<String>,
         /// The effective reasoning effort restored from session context, when one exists.

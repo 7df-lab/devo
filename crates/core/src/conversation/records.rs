@@ -29,6 +29,9 @@ pub struct SessionRecord {
     pub model_provider: String,
     /// The latest resolved model slug for the session.
     pub model: Option<String>,
+    /// The latest selected provider model binding id for the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding_id: Option<String>,
     /// The logical thinking selection used as the default for the next turn.
     pub thinking: Option<String>,
     /// The working directory associated with the session.
@@ -87,6 +90,9 @@ pub struct TurnRecord {
     pub kind: TurnKind,
     /// The logical model selection used for the turn.
     pub model: String,
+    /// The selected provider model binding id used for the turn, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding_id: Option<String>,
     /// The logical thinking selection used for the turn.
     pub thinking: Option<String>,
     /// The concrete request model used to execute the turn.
@@ -413,6 +419,7 @@ mod tests {
             agent_path: None,
             model_provider: "test".into(),
             model: None,
+            model_binding_id: None,
             thinking: None,
             cwd: ".".into(),
             cli_version: "0.1.0".into(),
@@ -868,6 +875,7 @@ mod tests {
             agent_path: None,
             model_provider: "test-provider".into(),
             model: Some("test-model".into()),
+            model_binding_id: Some("test-binding".into()),
             thinking: None,
             cwd: "/tmp/test".into(),
             cli_version: "0.1.0".into(),
@@ -898,6 +906,7 @@ mod tests {
             status,
             kind: crate::TurnKind::Regular,
             model: "test-model".into(),
+            model_binding_id: Some("test-binding".into()),
             thinking: None,
             request_model: "test-model".into(),
             request_thinking: None,

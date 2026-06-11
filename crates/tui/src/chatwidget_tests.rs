@@ -1204,6 +1204,7 @@ fn turn_summary_uses_submitted_mode_after_composer_mode_changes() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
@@ -1241,6 +1242,8 @@ fn queued_prompt_keeps_submitted_mode_when_promoted_to_history() {
     widget.handle_app_event(AppEvent::ClearTranscript);
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
@@ -1260,6 +1263,8 @@ fn queued_prompt_keeps_submitted_mode_when_promoted_to_history() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
@@ -1421,6 +1426,7 @@ fn permissions_command_opens_bottom_pane_picker_and_updates_default() {
     let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
@@ -1568,6 +1574,8 @@ fn typed_clear_slash_command_clears_history_and_active_streams() {
     paste_and_submit(&mut widget, "old prompt");
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
@@ -1617,6 +1625,8 @@ fn clear_transcript_event_uses_same_visual_clear_path() {
     widget.submit_text("event old prompt".to_string());
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
@@ -1760,6 +1770,8 @@ fn btw_slash_command_clears_composer_and_records_history() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id,
@@ -1849,6 +1861,8 @@ fn busy_widget_blocks_model_change_with_transcript_message() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -1973,6 +1987,8 @@ fn submit_text_emits_user_turn_with_model_and_thinking() {
             }],
             cwd: Some(cwd),
             model: Some("test-model".to_string()),
+
+            model_binding_id: None,
             thinking: Some("disabled".to_string()),
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
@@ -2007,6 +2023,8 @@ fn typed_character_submits_after_paste_burst_flush() {
             }],
             cwd: Some(cwd),
             model: Some("test-model".to_string()),
+
+            model_binding_id: None,
             thinking: None,
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
@@ -2116,6 +2134,8 @@ fn key_release_does_not_duplicate_text_input() {
             }],
             cwd: Some(cwd),
             model: Some("test-model".to_string()),
+
+            model_binding_id: None,
             thinking: None,
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
@@ -2186,6 +2206,8 @@ fn session_switch_restores_plan_metadata_into_progress() {
         cwd,
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -2239,6 +2261,8 @@ fn session_switch_restores_explored_metadata_into_history() {
         cwd: std::env::current_dir().expect("current directory is available"),
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -2303,6 +2327,8 @@ fn session_switch_restores_edited_metadata_into_history() {
         cwd: std::env::current_dir().expect("current directory is available"),
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -2348,6 +2374,8 @@ fn session_switch_merges_consecutive_explored_items() {
         cwd: std::env::current_dir().expect("current directory is available"),
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -2425,6 +2453,8 @@ fn session_switch_restores_error_via_tool_result_cell_style() {
         cwd: std::env::current_dir().expect("current directory is available"),
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -2487,6 +2517,8 @@ fn live_and_resume_error_share_same_rendering_chain() {
         cwd: std::env::current_dir().expect("current directory is available"),
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -3005,6 +3037,8 @@ fn session_switch_restores_header_and_spacing_before_user_input() {
         cwd: resumed_cwd.clone(),
         title: Some("Resumed".to_string()),
         model: Some("resumed-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -3333,6 +3367,8 @@ fn active_response_renders_generating_status_without_devo_title() {
     let _ = widget.drain_scrollback_lines(80);
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -3357,6 +3393,8 @@ fn streaming_pending_ai_reply_respects_wrap_limit_before_finalize() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -3385,6 +3423,8 @@ fn active_assistant_markdown_does_not_double_wrap() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -3410,6 +3450,8 @@ fn active_assistant_multiline_text_has_no_extra_blank_rows() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -3438,6 +3480,8 @@ fn active_assistant_renders_resume_like_markdown_without_fragment_gaps() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -3492,6 +3536,8 @@ fn committed_assistant_markdown_does_not_double_wrap() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -3538,6 +3584,8 @@ fn committed_assistant_multiline_text_has_no_extra_blank_rows() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -3588,6 +3636,8 @@ fn tool_call_start_and_finish_are_both_visible_in_history() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -3641,6 +3691,8 @@ fn web_search_tool_call_renders_title_and_status_without_running_prefix() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -3709,6 +3761,8 @@ fn web_fetch_tool_call_renders_title_and_status_without_running_prefix() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -3881,6 +3935,8 @@ fn interrupted_turn_flushes_explored_cell_before_summary() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "deepseek-v4-flash".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -4088,6 +4144,8 @@ fn reasoning_text_commits_to_history_when_turn_finishes() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -4132,6 +4190,8 @@ fn restored_reasoning_text_is_visible_in_transcript() {
         cwd,
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -4167,6 +4227,8 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -4255,6 +4317,8 @@ fn lifecycle_text_items_render_as_ordered_sibling_cells() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -4324,6 +4388,8 @@ fn lifecycle_text_items_keep_reasoning_before_assistant_when_events_arrive_out_o
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -4402,6 +4468,8 @@ fn assistant_stream_commit_tick_runs_while_reasoning_is_pending() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -4526,6 +4594,8 @@ fn session_switch_updates_session_identity_projection() {
         cwd: resumed_cwd.clone(),
         title: Some("Resumed".to_string()),
         model: Some("resumed-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -4566,6 +4636,8 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
         cwd: std::env::current_dir().expect("current directory is available"),
         title: Some("Resumed".to_string()),
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -4589,6 +4661,8 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -4635,6 +4709,8 @@ fn streaming_controller_is_initialized_and_commit_ticks_drain_lines() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -4671,6 +4747,8 @@ fn fragmented_random_assistant_stream_keeps_rendering_without_queue_stall() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -4986,6 +5064,8 @@ fn session_switch_sets_active_agent_footer_label() {
         cwd: std::env::current_dir().expect("current directory is available"),
         title: Some("Agent Session".to_string()),
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: Some("Agent: cr".to_string()),
@@ -5025,6 +5105,8 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
         cwd: resumed_cwd,
         title: None,
         model: Some("resumed-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -5047,6 +5129,8 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
     widget.handle_worker_event(crate::events::WorkerEvent::NewSessionPrepared {
         cwd: initial_cwd.clone(),
         model: "new-session-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -5096,6 +5180,8 @@ fn new_session_prepared_does_not_duplicate_startup_header_without_history() {
     widget.handle_worker_event(crate::events::WorkerEvent::NewSessionPrepared {
         cwd,
         model: "new-session-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -5174,6 +5260,8 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
             }],
             cwd: Some(widget.current_cwd().to_path_buf()),
             model: Some("second-model".to_string()),
+
+            model_binding_id: None,
             thinking: Some("high".to_string()),
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
@@ -5302,6 +5390,8 @@ fn flushed_assistant_lines_after_reasoning_are_in_one_cell() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -5372,6 +5462,8 @@ fn completed_streaming_assistant_consolidates_to_source_backed_cell() {
     let _ = widget.drain_scrollback_lines(80);
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -5421,6 +5513,8 @@ fn reasoning_appears_exactly_once_after_full_turn() {
     let _ = widget.drain_scrollback_lines(80);
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -5470,6 +5564,8 @@ fn live_reasoning_cell_renders_without_duplication() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         turn_id: Default::default(),
@@ -5792,6 +5888,8 @@ fn restored_session_transcript_overlay_preserves_paired_tool_io() {
         cwd,
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -5867,6 +5965,8 @@ fn legacy_restored_session_without_tool_io_keeps_existing_tool_result_rendering(
         cwd,
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -7012,6 +7112,8 @@ fn session_switch_without_rich_edited_metadata_degrades_to_tool_result_path() {
         cwd: std::env::current_dir().expect("current directory is available"),
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -7059,6 +7161,8 @@ fn session_switch_restores_added_file_content_in_edited_block() {
         cwd: std::env::current_dir().expect("current directory is available"),
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,
@@ -7108,6 +7212,8 @@ fn session_switch_without_rich_edited_metadata_still_restores_edited_block() {
         cwd: std::env::current_dir().expect("current directory is available"),
         title: None,
         model: Some("test-model".to_string()),
+
+        model_binding_id: None,
         thinking: None,
         reasoning_effort: None,
         active_agent_label: None,

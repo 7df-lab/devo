@@ -96,14 +96,16 @@ impl ServerRuntime {
                 output_tokens: core_session.total_output_tokens,
             };
 
+            let model_selection = session_model_selection(&runtime_session.summary)
+                .unwrap_or(&self.deps.default_model);
             let model_slug = runtime_session
                 .summary
                 .model
                 .as_deref()
-                .unwrap_or(&self.deps.default_model);
+                .unwrap_or(model_selection);
             let turn_config = self
                 .deps
-                .resolve_turn_config(Some(model_slug), /*thinking_selection*/ None);
+                .resolve_turn_config(Some(model_selection), /*thinking_selection*/ None);
             let request_model = turn_config.request_model.clone();
             let max_tokens = self
                 .deps

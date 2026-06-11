@@ -40,7 +40,7 @@ impl ServerRuntime {
 
             let (turn_config, resolved_request) = {
                 let session = session_arc.lock().await;
-                let requested_model = session.summary.model.as_deref();
+                let requested_model = session_model_selection(&session.summary);
                 let requested_thinking = session.summary.thinking.clone();
                 let turn_config = self
                     .deps
@@ -68,6 +68,7 @@ impl ServerRuntime {
                     status: TurnStatus::Running,
                     kind: devo_core::TurnKind::Regular,
                     model: turn_config.model.slug.clone(),
+                    model_binding_id: turn_config.model_binding_id.clone(),
                     thinking: turn_config.thinking_selection.clone(),
                     reasoning_effort: resolved_request.effective_reasoning_effort,
                     request_model,
@@ -78,8 +79,7 @@ impl ServerRuntime {
                 };
                 session.summary.status = SessionRuntimeStatus::ActiveTurn;
                 session.summary.updated_at = now;
-                session.summary.model = Some(turn_config.model.slug.clone());
-                session.summary.thinking = turn_config.thinking_selection.clone();
+                apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
                 session.active_turn = Some(turn.clone());
                 turn
             };
@@ -461,6 +461,7 @@ mod tests {
             status,
             kind: devo_core::TurnKind::Regular,
             model: "model-a".into(),
+            model_binding_id: None,
             thinking: None,
             reasoning_effort: None,
             request_model: "provider/model-a".into(),

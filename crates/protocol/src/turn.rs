@@ -13,6 +13,8 @@ pub struct TurnMetadata {
     pub status: TurnStatus,
     pub kind: TurnKind,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding_id: Option<String>,
     pub thinking: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub request_model: String,
@@ -86,6 +88,8 @@ pub struct TurnStartParams {
     pub session_id: SessionId,
     pub input: Vec<InputItem>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding_id: Option<String>,
     pub thinking: Option<String>,
     pub sandbox: Option<String>,
     pub approval_policy: Option<String>,
@@ -200,6 +204,7 @@ mod tests {
             status: TurnStatus::Completed,
             kind: TurnKind::Regular,
             model: "logical-model".to_string(),
+            model_binding_id: Some("provider-binding".to_string()),
             thinking: Some("high".to_string()),
             reasoning_effort: Some(ReasoningEffort::High),
             request_model: "provider-model".to_string(),

@@ -62,16 +62,14 @@ impl ServerRuntime {
         first_user_input: String,
     ) {
         for attempt in 1..=Self::MAX_TITLE_RETRIES {
-            let (model, thinking, should_skip) = {
+            let (model_selection, thinking, should_skip) = {
                 let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
                     return;
                 };
                 let session = session_arc.lock().await;
                 (
-                    session
-                        .summary
-                        .model
-                        .clone()
+                    session_model_selection(&session.summary)
+                        .map(str::to_string)
                         .unwrap_or_else(|| self.deps.default_model.clone()),
                     session.summary.thinking.clone(),
                     matches!(session.summary.title_state, SessionTitleState::Final(_)),
@@ -84,7 +82,7 @@ impl ServerRuntime {
 
             let turn_config = self
                 .deps
-                .resolve_turn_config(Some(model.as_str()), thinking);
+                .resolve_turn_config(Some(model_selection.as_str()), thinking);
             let resolved_request = turn_config
                 .model
                 .resolve_thinking_selection(turn_config.thinking_selection.as_deref());

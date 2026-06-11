@@ -72,6 +72,9 @@ pub struct TurnConfig {
     /// Provider wire model name from the selected binding's `model_name`.
     /// This is the string sent as `ModelRequest.model` for the base model.
     pub request_model: String,
+    /// Provider model binding id selected for this turn, when the request was
+    /// resolved through configured provider bindings.
+    pub model_binding_id: Option<String>,
     /// Provider-scoped variant lookup used when thinking resolves to another
     /// catalog slug before the request is built.
     pub provider_request_models: ProviderRequestModelMap,
@@ -117,6 +120,7 @@ impl TurnConfig {
         Self {
             model,
             request_model,
+            model_binding_id: None,
             provider_request_models: ProviderRequestModelMap::default(),
             provider_route: ProviderRoute::Default,
             web_search: ResolvedWebSearchConfig::Disabled,
@@ -189,6 +193,7 @@ impl TurnConfig {
         Self {
             model,
             request_model,
+            model_binding_id: None,
             provider_request_models,
             provider_route,
             web_search,
