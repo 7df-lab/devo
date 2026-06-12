@@ -7,6 +7,7 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -280,9 +281,11 @@ pub(crate) struct ChatWidget {
     active_turn_id: Option<TurnId>,
     current_turn_mode: InputMode,
     committed_server_assistant_in_turn: bool,
+    boundary_committed_assistant_items: HashSet<ItemId>,
     current_turn_has_user_shell_command: bool,
     pending_approval: Option<PendingApprovalRequest>,
     active_proposed_plan: Option<ActiveProposedPlan>,
+    pending_proposed_plan_actions: bool,
     permission_preset: devo_protocol::PermissionPreset,
     busy: bool,
     selection_mode: bool,
@@ -424,9 +427,11 @@ impl ChatWidget {
             active_turn_id: None,
             current_turn_mode: InputMode::Build,
             committed_server_assistant_in_turn: false,
+            boundary_committed_assistant_items: HashSet::new(),
             current_turn_has_user_shell_command: false,
             pending_approval: None,
             active_proposed_plan: None,
+            pending_proposed_plan_actions: false,
             permission_preset: initial_permission_preset,
             busy: false,
             selection_mode: false,

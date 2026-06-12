@@ -559,11 +559,21 @@ impl HistoryCell for ProposedPlanCell {
             body.push(Line::from("(empty)").dim());
         }
 
-        let mut lines = vec![Line::from("• Proposed Plan").bold(), Line::from("")];
+        let mut lines = vec![Line::from("Proposed Plan").bold(), Line::from("")];
         lines.extend(
             prefix_lines(body, Span::styled("  ", style), Span::styled("  ", style))
                 .into_iter()
                 .map(|line| line.style(style)),
+        );
+        lines.push(Line::from("").style(style));
+        lines.push(
+            Line::from(vec![
+                Span::styled("  ", style),
+                Span::styled("Implement Plan", style).bold(),
+                Span::styled("  |  ", style.dim()),
+                Span::styled("修改建议", style).bold(),
+            ])
+            .style(style),
         );
         lines.push(Line::from("").style(style));
         lines

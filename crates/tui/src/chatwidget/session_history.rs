@@ -10,8 +10,17 @@ use ratatui::text::Line;
 use ratatui::text::Span;
 
 use devo_core::ItemId;
+use devo_protocol::CollaborationMode;
+use devo_protocol::InputItem;
 
+use crate::app_command::AppCommand;
+use crate::app_event::AppEvent;
+use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::InputMode;
+use crate::bottom_pane::list_selection_view::ListSelectionView;
+use crate::bottom_pane::list_selection_view::SelectionItem;
+use crate::bottom_pane::list_selection_view::SelectionViewParams;
+use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
 use crate::events::TranscriptItem;
@@ -34,9 +43,11 @@ impl ChatWidget {
         self.active_cell = None;
         self.active_cell_revision = 0;
         self.active_proposed_plan = None;
+        self.pending_proposed_plan_actions = false;
         self.active_tool_calls.clear();
         self.pending_tool_calls.clear();
         self.active_text_items.clear();
+        self.boundary_committed_assistant_items.clear();
         self.queued_input_modes.clear();
         self.promoted_input_modes.clear();
         self.current_turn_mode = InputMode::Build;
@@ -51,7 +62,9 @@ impl ChatWidget {
         self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
         self.last_terminal_assistant_visible_hash = None;
         self.active_text_items.clear();
+        self.boundary_committed_assistant_items.clear();
         self.active_proposed_plan = None;
+        self.pending_proposed_plan_actions = false;
         self.stream_chunking_policy.reset();
         self.selection_mode = false;
         self.selected_user_cell_index = None;
@@ -105,6 +118,7 @@ impl ChatWidget {
 
     pub(super) fn start_proposed_plan(&mut self, item_id: ItemId) {
         self.flush_active_cell();
+        self.commit_assistant_text_before_proposed_plan();
         self.active_proposed_plan = Some(super::ActiveProposedPlan {
             item_id,
             text: String::new(),
@@ -143,8 +157,67 @@ impl ChatWidget {
         self.active_cell = None;
         self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
         self.add_to_history(history_cell::new_proposed_plan(text, &self.session.cwd));
-        self.frame_requester.schedule_frame();
         self.set_status_message("Planning");
+        self.pending_proposed_plan_actions = true;
+        self.maybe_open_proposed_plan_actions();
+        self.frame_requester.schedule_frame();
+    }
+
+    pub(super) fn maybe_open_proposed_plan_actions(&mut self) {
+        if !self.pending_proposed_plan_actions || self.busy {
+            return;
+        }
+
+        self.pending_proposed_plan_actions = false;
+        let cwd = Some(self.session.cwd.clone());
+        let model = self.user_turn_model();
+        let model_binding_id = self.user_turn_model_binding_id();
+        let thinking = self.thinking_selection.clone();
+        let implement_item = SelectionItem {
+            name: "Implement Plan".to_string(),
+            description: Some("Switch to Build mode and start implementing this plan.".to_string()),
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::Command(
+                    AppCommand::user_turn_with_collaboration_mode(
+                        vec![InputItem::Text {
+                            text: "Implement Plan".to_string(),
+                        }],
+                        cwd.clone(),
+                        model.clone(),
+                        model_binding_id.clone(),
+                        thinking.clone(),
+                        /*sandbox*/ None,
+                        Some("on-request".to_string()),
+                        CollaborationMode::Build,
+                    ),
+                ));
+            })],
+            dismiss_on_select: true,
+            ..SelectionItem::default()
+        };
+        let revise_item = SelectionItem {
+            name: "修改建议".to_string(),
+            description: Some("Keep Plan mode and type feedback in the input.".to_string()),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::PreparePlanSuggestionInput);
+            })],
+            dismiss_on_select: true,
+            ..SelectionItem::default()
+        };
+
+        self.bottom_pane
+            .open_popup_view(Box::new(ListSelectionView::new(
+                SelectionViewParams {
+                    title: Some("Proposed Plan".to_string()),
+                    subtitle: Some("Choose how to continue.".to_string()),
+                    footer_hint: Some(standard_popup_hint_line()),
+                    items: vec![implement_item, revise_item],
+                    ..SelectionViewParams::default()
+                },
+                self.app_event_tx.clone(),
+                self.active_accent_color(),
+            )));
+        self.set_status_message("Choose plan action");
     }
 
     fn refresh_active_proposed_plan_cell(&mut self) {
