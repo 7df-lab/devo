@@ -265,6 +265,111 @@ async fn anthropic_messages_stream_uses_proxy_friendly_sse_headers() {
 }
 
 #[tokio::test]
+async fn anthropic_messages_stream_uses_nested_message_start_usage() {
+    let (base_url, _capture) = spawn_sse_server(ANTHROPIC_TEXT_SSE_RESPONSE).await;
+    let provider = AnthropicProvider::new(base_url);
+
+    let mut stream = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("anthropic stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+
+    assert_eq!(
+        events,
+        vec![
+            StreamEvent::UsageDelta(Usage {
+                input_tokens: 85_937,
+                output_tokens: 0,
+                cache_creation_input_tokens: Some(0),
+                cache_read_input_tokens: Some(85_888),
+            }),
+            StreamEvent::TextStart { index: 0 },
+            StreamEvent::TextDelta {
+                index: 0,
+                text: "ok".to_string()
+            },
+            StreamEvent::UsageDelta(Usage {
+                input_tokens: 85_937,
+                output_tokens: 3_211,
+                cache_creation_input_tokens: Some(0),
+                cache_read_input_tokens: Some(85_888),
+            }),
+            StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "msg_test".to_string(),
+                    content: vec![ResponseContent::Text("ok".to_string())],
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: Usage {
+                        input_tokens: 85_937,
+                        output_tokens: 3_211,
+                        cache_creation_input_tokens: Some(0),
+                        cache_read_input_tokens: Some(85_888),
+                    },
+                    metadata: ResponseMetadata::default(),
+                },
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn anthropic_messages_stream_keeps_legacy_top_level_start_usage() {
+    let (base_url, _capture) =
+        spawn_sse_server(ANTHROPIC_LEGACY_TOP_LEVEL_USAGE_SSE_RESPONSE).await;
+    let provider = AnthropicProvider::new(base_url);
+
+    let mut stream = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("anthropic stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+
+    assert_eq!(
+        events,
+        vec![
+            StreamEvent::UsageDelta(Usage {
+                input_tokens: 3,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(1),
+            }),
+            StreamEvent::TextStart { index: 0 },
+            StreamEvent::TextDelta {
+                index: 0,
+                text: "legacy".to_string()
+            },
+            StreamEvent::UsageDelta(Usage {
+                input_tokens: 3,
+                output_tokens: 3,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(1),
+            }),
+            StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "msg_legacy".to_string(),
+                    content: vec![ResponseContent::Text("legacy".to_string())],
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: Usage {
+                        input_tokens: 3,
+                        output_tokens: 3,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: Some(1),
+                    },
+                    metadata: ResponseMetadata::default(),
+                },
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
     let (base_url, _capture) = spawn_sse_server(ANTHROPIC_THINKING_THEN_TEXT_SSE_RESPONSE).await;
     let provider = AnthropicProvider::new(base_url);
@@ -281,6 +386,12 @@ async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
     assert_eq!(
         events,
         vec![
+            StreamEvent::UsageDelta(Usage {
+                input_tokens: 1,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            }),
             StreamEvent::ReasoningStart { index: 0 },
             StreamEvent::ReasoningDelta {
                 index: 0,
@@ -361,13 +472,31 @@ const ANTHROPIC_TEXT_SSE_RESPONSE: &str = concat!(
     "connection: close\r\n",
     "\r\n",
     "event: message_start\n",
-    "data: {\"message\":{\"id\":\"msg_test\"},\"usage\":{\"input_tokens\":1}}\n\n",
+    "data: {\"message\":{\"id\":\"msg_test\",\"usage\":{\"input_tokens\":49,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":85888,\"output_tokens\":0,\"service_tier\":\"standard\"}}}\n\n",
     "event: content_block_start\n",
     "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
     "event: content_block_delta\n",
     "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
     "event: message_delta\n",
-    "data: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+    "data: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":49,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":85888,\"output_tokens\":3211,\"service_tier\":\"standard\"}}\n\n",
+    "event: message_stop\n",
+    "data: {}\n\n",
+);
+
+const ANTHROPIC_LEGACY_TOP_LEVEL_USAGE_SSE_RESPONSE: &str = concat!(
+    "HTTP/1.1 200 OK\r\n",
+    "content-type: text/event-stream\r\n",
+    "cache-control: no-cache\r\n",
+    "connection: close\r\n",
+    "\r\n",
+    "event: message_start\n",
+    "data: {\"message\":{\"id\":\"msg_legacy\"},\"usage\":{\"input_tokens\":2,\"cache_read_input_tokens\":1}}\n\n",
+    "event: content_block_start\n",
+    "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"legacy\"}}\n\n",
+    "event: message_delta\n",
+    "data: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
     "event: message_stop\n",
     "data: {}\n\n",
 );
@@ -379,7 +508,7 @@ const ANTHROPIC_THINKING_THEN_TEXT_SSE_RESPONSE: &str = concat!(
     "connection: close\r\n",
     "\r\n",
     "event: message_start\n",
-    "data: {\"message\":{\"id\":\"msg_test\"},\"usage\":{\"input_tokens\":1}}\n\n",
+    "data: {\"message\":{\"id\":\"msg_test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
     "event: content_block_start\n",
     "data: {\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
     "event: content_block_delta\n",

@@ -37,6 +37,7 @@ use serde_json::json;
 use tracing::debug;
 
 use super::AnthropicAIRole;
+use super::stream_usage::AnthropicStreamUsage;
 use crate::ModelProviderSDK;
 use crate::ProviderAdapter;
 use crate::ProviderCapabilities;
@@ -363,8 +364,7 @@ impl ModelProviderSDK for AnthropicProvider {
             .context("failed to create anthropic event source")?;
         let stream = async_stream::try_stream! {
             let mut message_id = String::new();
-            let mut input_tokens = 0usize;
-            let mut output_tokens = 0usize;
+            let mut stream_usage = AnthropicStreamUsage::default();
             let mut stop_reason: Option<StopReason> = None;
             let mut content_blocks: BTreeMap<usize, ResponseContent> = BTreeMap::new();
             let mut reasoning_blocks: BTreeMap<usize, String> = BTreeMap::new();
@@ -412,12 +412,9 @@ impl ModelProviderSDK for AnthropicProvider {
                                 {
                                     message_id = id.to_string();
                                 }
-                                if let Some(usage) = data.get("usage")
-                                    && let Some(input) =
-                                        usage.get("input_tokens").and_then(Value::as_u64)
-                                    {
-                                        input_tokens = input as usize;
-                                    }
+                                if let Some(usage) = stream_usage.update_from_message_start(&data) {
+                                    yield StreamEvent::UsageDelta(usage);
+                                }
                             }
                             "content_block_start" => {
                                 let Some(index) = data.get("index").and_then(Value::as_u64) else {
@@ -696,17 +693,8 @@ impl ModelProviderSDK for AnthropicProvider {
                                     {
                                         stop_reason = Some(parse_stop_reason(reason));
                                     }
-                                if let Some(usage) = data.get("usage") {
-                                    if let Some(output) = usage.get("output_tokens").and_then(Value::as_u64)
-                                    {
-                                        output_tokens = output as usize;
-                                    }
-                                    yield StreamEvent::UsageDelta(Usage {
-                                        input_tokens,
-                                        output_tokens,
-                                        cache_creation_input_tokens: None,
-                                        cache_read_input_tokens: None,
-                                    });
+                                if let Some(usage) = stream_usage.update_from_message_delta(&data) {
+                                    yield StreamEvent::UsageDelta(usage);
                                 }
                             }
                             "message_stop" => {
@@ -732,12 +720,7 @@ impl ModelProviderSDK for AnthropicProvider {
                                     content: dsml_healer
                                         .heal_response_content(content_blocks.into_values().collect()),
                                     stop_reason: stop_reason.clone(),
-                                    usage: Usage {
-                                        input_tokens,
-                                        output_tokens,
-                                        cache_creation_input_tokens: None,
-                                        cache_read_input_tokens: None,
-                                    },
+                                    usage: stream_usage.snapshot(),
                                     metadata: ResponseMetadata {
                                         extras: reasoning_blocks
                                             .values()
@@ -777,12 +760,7 @@ impl ModelProviderSDK for AnthropicProvider {
                 id: message_id,
                 content: dsml_healer.heal_response_content(content_blocks.into_values().collect()),
                 stop_reason,
-                usage: Usage {
-                    input_tokens,
-                    output_tokens,
-                    cache_creation_input_tokens: None,
-                    cache_read_input_tokens: None,
-                },
+                usage: stream_usage.snapshot(),
                 metadata: ResponseMetadata {
                     extras: reasoning_blocks
                         .into_values()
@@ -1302,8 +1280,13 @@ fn insert_provider_reasoning_blocks(
 }
 
 fn map_usage(usage: &AnthropicUsage) -> Usage {
+    let cache_creation_input_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
+    let cache_read_input_tokens = usage.cache_read_input_tokens.unwrap_or(0);
     Usage {
-        input_tokens: usage.input_tokens,
+        input_tokens: usage
+            .input_tokens
+            .saturating_add(cache_creation_input_tokens)
+            .saturating_add(cache_read_input_tokens),
         output_tokens: usage.output_tokens,
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         cache_read_input_tokens: usage.cache_read_input_tokens,
@@ -1772,7 +1755,7 @@ mod tests {
 
         assert_eq!(response.id, "msg_123");
         assert_eq!(response.stop_reason, Some(StopReason::ToolUse));
-        assert_eq!(response.usage.input_tokens, 11);
+        assert_eq!(response.usage.input_tokens, 19);
         assert_eq!(response.usage.output_tokens, 7);
         assert_eq!(response.usage.cache_creation_input_tokens, Some(3));
         assert_eq!(response.usage.cache_read_input_tokens, Some(5));
