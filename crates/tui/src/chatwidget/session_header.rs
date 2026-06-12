@@ -228,15 +228,13 @@ impl ChatWidget {
 
     pub(super) fn context_usage(&self) -> Option<(usize, usize, usize)> {
         let model = self.session.model.as_ref()?;
-        let total = (model
-            .context_window
-            .saturating_mul(model.effective_context_window_percent() as u32)
-            / 100) as usize;
-        let used = self.last_query_input_tokens.min(total);
+        let total = model.context_window as usize;
+        let used = self.last_query_total_tokens;
+        let capped_used = used.min(total);
         let percent = if total == 0 {
             0
         } else {
-            used.saturating_mul(100) / total
+            capped_used.saturating_mul(100) / total
         };
         Some((used, total, percent))
     }
@@ -562,6 +560,7 @@ mod tests {
         widget.total_cache_read_tokens = 82_000;
         widget.total_output_tokens = 9_600;
         widget.last_query_input_tokens = 157_000;
+        widget.last_query_total_tokens = 157_000;
         widget
     }
 
@@ -606,22 +605,31 @@ mod tests {
 
         assert_eq!(
             widget.status_summary_text(),
-            "Test Model default  ↑124k  (cached 82k 66%)  ↓10k  ▰▰▰▰▰▰▰▰▱▱ 83% 157k/190k"
+            "Test Model default  ↑124k  (cached 82k 66%)  ↓10k  ▰▰▰▰▰▰▰▰▱▱ 79% 157k/200k"
         );
+    }
+
+    #[test]
+    fn context_usage_uses_latest_turn_total_tokens() {
+        let mut widget = widget_for_summary_bench();
+        widget.last_query_input_tokens = 7;
+        widget.last_query_total_tokens = 9;
+
+        assert_eq!(widget.context_usage(), Some((9, 200_000, 0)));
     }
 
     #[test]
     #[ignore]
     fn bench_render_progress_bar() {
         let iterations = 500_000;
-        let expected_len = ChatWidget::render_progress_bar(157_000, 190_000, 10).len();
+        let expected_len = ChatWidget::render_progress_bar(157_000, 200_000, 10).len();
         let started = Instant::now();
         let mut total_len = 0usize;
 
         for _ in 0..iterations {
             total_len += black_box(ChatWidget::render_progress_bar(
                 black_box(157_000),
-                black_box(190_000),
+                black_box(200_000),
                 black_box(10),
             ))
             .len();

@@ -4826,7 +4826,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
     assert!(idle_summary.contains("↑12"));
     assert!(idle_summary.contains("cached 4 33%"));
     assert!(idle_summary.contains("↓18"));
-    assert!(idle_summary.contains("42/190k"));
+    assert!(idle_summary.contains("42/200k"));
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
@@ -4847,7 +4847,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
     let busy_summary = widget.status_summary_text();
     assert!(busy_summary.contains("↑7"));
     assert!(busy_summary.contains("cached 6 86%"));
-    assert!(busy_summary.contains("7/190k"));
+    assert!(busy_summary.contains("9/200k"));
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
         stop_reason: "stop".to_string(),
@@ -4863,7 +4863,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
     let finished_summary = widget.status_summary_text();
     assert!(finished_summary.contains("↑19"));
     assert!(finished_summary.contains("cached 6 32%"));
-    assert!(finished_summary.contains("7/190k"));
+    assert!(finished_summary.contains("9/200k"));
 }
 
 #[test]
@@ -5318,7 +5318,7 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
     assert!(summary.contains("↑0"));
     assert!(summary.contains("cached 0 0%"));
     assert!(summary.contains("↓0"));
-    assert!(summary.contains("0/190k"));
+    assert!(summary.contains("0/200k"));
 
     let transcript_lines = scrollback_plain_lines(
         &widget
