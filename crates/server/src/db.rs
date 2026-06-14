@@ -367,11 +367,13 @@ impl Database {
                 input,
                 display_text,
                 prompt_text,
+                prompt_messages,
             } => {
                 let content = serde_json::json!({
                     "input": input,
                     "display_text": display_text,
                     "prompt_text": prompt_text,
+                    "prompt_messages": prompt_messages,
                 });
                 ("user_input", content.to_string())
             }
@@ -450,6 +452,12 @@ impl Database {
                                         .as_str()
                                         .unwrap_or_default()
                                         .to_string(),
+                                    prompt_messages: value
+                                        .get("prompt_messages")
+                                        .and_then(|messages| {
+                                            serde_json::from_value(messages.clone()).ok()
+                                        })
+                                        .unwrap_or_default(),
                                 })
                             })
                             .unwrap_or(PendingInputKind::UserText { text: content }),

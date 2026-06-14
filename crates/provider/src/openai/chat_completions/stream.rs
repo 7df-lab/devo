@@ -19,6 +19,8 @@ use super::{
     OpenAIProvider, build_provider_specific_response_payload, build_request, parse_finish_reason,
     parse_tool_use,
 };
+use crate::dsml::DsmlTextStreamFilter;
+use crate::dsml::DsmlToolCallHealer;
 use crate::http::invalid_status_error;
 use crate::text_normalization::{TaggedTextFragment, TaggedTextParser};
 
@@ -80,7 +82,7 @@ pub(super) async fn completion_stream(
     let event_source = EventSource::new(provider.request_builder(&body))
         .context("failed to create openai event source")?;
     let stream = async_stream::try_stream! {
-        let mut state = ChatCompletionStreamState::default();
+        let mut state = ChatCompletionStreamState::for_request(&request);
 
         futures::pin_mut!(event_source);
         while let Some(event) = event_source.next().await {
@@ -152,6 +154,9 @@ pub(super) async fn completion_stream(
             }
         }
 
+        for stream_event in state.finish_pending_text() {
+            yield stream_event;
+        }
         yield StreamEvent::MessageDone {
             response: state.into_response(),
         };
@@ -229,9 +234,28 @@ struct ChatCompletionStreamState {
     choice_metadata: BTreeMap<u32, StreamChoiceMetadata>,
     finish_reason: Option<StopReason>,
     usage: Option<Usage>,
+    dsml_healer: DsmlToolCallHealer,
+    dsml_text_filter: Option<DsmlTextStreamFilter>,
 }
 
 impl ChatCompletionStreamState {
+    fn for_request(request: &ModelRequest) -> Self {
+        Self::with_healer(DsmlToolCallHealer::for_request(request))
+    }
+
+    #[cfg(test)]
+    fn for_model(model: &str) -> Self {
+        Self::with_healer(DsmlToolCallHealer::for_model(model))
+    }
+
+    fn with_healer(dsml_healer: DsmlToolCallHealer) -> Self {
+        Self {
+            dsml_text_filter: dsml_healer.text_stream_filter(),
+            dsml_healer,
+            ..Self::default()
+        }
+    }
+
     fn apply_chunk(&mut self, chunk: ChatCompletionStreamChunk) -> Vec<StreamEvent> {
         let mut events = Vec::new();
 
@@ -317,6 +341,7 @@ impl ChatCompletionStreamState {
                     TaggedTextFragment::Reasoning(text) => self.push_reasoning_delta(text, events),
                 }
             }
+            self.finish_pending_text_into(events);
             self.finish_reason = Some(parse_finish_reason(&reason));
             self.choice_metadata
                 .entry(choice_index)
@@ -329,12 +354,40 @@ impl ChatCompletionStreamState {
         if text.is_empty() {
             return;
         }
-        if !self.text.started {
-            self.text.started = true;
-            events.push(StreamEvent::TextStart { index: 0 });
-        }
         self.text.value.push_str(&text);
-        events.push(StreamEvent::TextDelta { index: 0, text });
+        let text_chunks = if let Some(filter) = &mut self.dsml_text_filter {
+            filter.consume(&text)
+        } else {
+            vec![text]
+        };
+        self.push_visible_text_delta(text_chunks, events);
+    }
+
+    fn push_visible_text_delta(&mut self, text_chunks: Vec<String>, events: &mut Vec<StreamEvent>) {
+        for text in text_chunks {
+            if text.is_empty() {
+                continue;
+            }
+            if !self.text.started {
+                self.text.started = true;
+                events.push(StreamEvent::TextStart { index: 0 });
+            }
+            events.push(StreamEvent::TextDelta { index: 0, text });
+        }
+    }
+
+    fn finish_pending_text(&mut self) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
+        self.finish_pending_text_into(&mut events);
+        events
+    }
+
+    fn finish_pending_text_into(&mut self, events: &mut Vec<StreamEvent>) {
+        let Some(filter) = &mut self.dsml_text_filter else {
+            return;
+        };
+        let text_chunks = filter.finish();
+        self.push_visible_text_delta(text_chunks, events);
     }
 
     fn push_reasoning_delta(&mut self, text: String, events: &mut Vec<StreamEvent>) {
@@ -567,9 +620,10 @@ impl ChatCompletionStreamState {
             finish_reason,
             text,
             tool_calls,
+            dsml_healer,
             ..
         } = self;
-        let content = Self::ordered_content(text, tool_calls);
+        let content = dsml_healer.heal_response_content(Self::ordered_content(text, tool_calls));
 
         ModelResponse {
             id: response_id,
@@ -1108,6 +1162,48 @@ mod tests {
             }
             other => panic!("expected custom tool content, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn deepseek_v4_stream_heals_dsml_text_tool_calls() {
+        let mut state = ChatCompletionStreamState::for_model("deepseek-v4-pro");
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "content": "<｜DSML｜tool_calls><｜DSML｜invoke name=\"web_search\">"
+                    }
+                }
+            ]
+        })));
+        assert!(events.is_empty());
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "content": "<｜DSML｜parameter name=\"query\" string=\"true\">DeepSeek V4</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"
+                    },
+                    "finish_reason": "tool_calls"
+                }
+            ]
+        })));
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, StreamEvent::TextDelta { .. }))
+        );
+
+        let response = state.into_response();
+        assert_eq!(
+            response.content,
+            vec![ResponseContent::ToolUse {
+                id: "dsml_0_0".to_string(),
+                name: "web_search".to_string(),
+                input: json!({"query": "DeepSeek V4"}),
+            }]
+        );
     }
 
     fn parse_chunk(value: Value) -> ChatCompletionStreamChunk {

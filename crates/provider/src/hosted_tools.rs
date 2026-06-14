@@ -5,8 +5,8 @@ use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
 
-const DEFAULT_ANTHROPIC_WEB_SEARCH_TOOL_TYPE: &str = "web_search_20250305";
-const DEFAULT_ANTHROPIC_WEB_FETCH_TOOL_TYPE: &str = "web_fetch_20250910";
+const DEFAULT_ANTHROPIC_WEB_SEARCH_TOOL_TYPE: &str = "web_search_20260209";
+const DEFAULT_ANTHROPIC_WEB_FETCH_TOOL_TYPE: &str = "web_fetch_20260209";
 
 pub(crate) fn append_openai_responses_hosted_tools(
     root: &mut Value,
@@ -187,7 +187,7 @@ mod tests {
 
         assert_eq!(
             root["tools"],
-            json!([{ "type": "web_search_20250305", "name": "web_search" }])
+            json!([{ "type": DEFAULT_ANTHROPIC_WEB_SEARCH_TOOL_TYPE, "name": "web_search" }])
         );
     }
 
@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(
             root["tools"],
             json!([{
-                "type": "web_fetch_20250910",
+                "type": DEFAULT_ANTHROPIC_WEB_FETCH_TOOL_TYPE,
                 "name": "web_fetch",
                 "allowed_domains": ["docs.example"],
                 "citations": true

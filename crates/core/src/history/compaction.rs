@@ -354,7 +354,10 @@ fn estimate_item_tokens(item: &ResponseItem) -> usize {
                 let text = match block {
                     devo_protocol::ContentBlock::Text { text }
                     | devo_protocol::ContentBlock::Reasoning { text } => text,
-                    _ => continue,
+                    devo_protocol::ContentBlock::ProviderReasoning { .. }
+                    | devo_protocol::ContentBlock::ToolUse { .. }
+                    | devo_protocol::ContentBlock::HostedToolUse { .. }
+                    | devo_protocol::ContentBlock::ToolResult { .. } => continue,
                 };
                 if text_blocks > 0 {
                     bytes += 1;

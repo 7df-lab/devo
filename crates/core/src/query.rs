@@ -56,6 +56,7 @@ use crate::response_item::ResponseItem;
 use crate::response_item::message_to_response_items;
 
 const SUBAGENT_MODE_REMINDER: &str = "<system-reminder>\nYou are running as a sub-agent. Complete the delegated task using the available non-agent tools. Do not call agent coordination tools such as spawn_agent, send_message, wait_agent, list_agents, or close_agent; report progress and final results through assistant output.\n</system-reminder>";
+const DEEPSEEK_THINKING_ONLY_CONTINUATION_PROMPT: &str = "Your previous response contained only hidden reasoning and no user-visible answer. Provide the final answer to the user's original request now. Do not reveal or summarize hidden reasoning; return only user-visible content.";
 
 fn hosted_tools_for_web_capabilities(
     web_search: &devo_config::ResolvedWebSearchConfig,
@@ -405,11 +406,15 @@ fn is_injected_context_message(message: &RequestMessage) -> bool {
             RequestContent::Text { text } => {
                 let trimmed = text.trim_start();
                 trimmed.starts_with("<environment_context>")
+                    || trimmed.starts_with("<available_skills>")
+                    || trimmed.starts_with("<language_preference>")
                     || trimmed.starts_with("<context_changes>")
                     || trimmed.starts_with("<user_instructions_updates>")
                     || trimmed.starts_with("<user_instructions>")
             }
             RequestContent::Reasoning { .. }
+            | RequestContent::ProviderReasoning { .. }
+            | RequestContent::HostedToolUse { .. }
             | RequestContent::ToolUse { .. }
             | RequestContent::ToolResult { .. } => false,
         })
@@ -598,6 +603,7 @@ pub async fn query(
             turn_config.thinking_selection.as_deref(),
             &session.cwd,
             current_agents_snapshot.clone(),
+            session.config.available_skills_instructions.clone(),
         ));
     }
     let current_turn_context =
@@ -623,6 +629,10 @@ pub async fn query(
     let mut retry_count: usize = 0;
     let mut context_compacted = false;
     let mut budget_steer_injected = false;
+    let deepseek_v4_thinking_only_continuation_enabled =
+        turn_config.model.slug.starts_with("deepseek-v4-")
+            || turn_config.request_model.starts_with("deepseek-v4-");
+    let mut deepseek_v4_thinking_only_continuation_used = false;
 
     if session.turn_state.is_none() {
         session.start_turn(devo_protocol::TurnKind::Regular);
@@ -649,8 +659,18 @@ pub async fn query(
                 devo_protocol::PendingInputKind::UserText { text } => {
                     session.push_message(Message::user(text.clone()));
                 }
-                devo_protocol::PendingInputKind::UserInput { prompt_text, .. } => {
-                    session.push_message(Message::user(prompt_text.clone()));
+                devo_protocol::PendingInputKind::UserInput {
+                    prompt_text,
+                    prompt_messages,
+                    ..
+                } => {
+                    if prompt_messages.is_empty() {
+                        session.push_message(Message::user(prompt_text.clone()));
+                    } else {
+                        for prompt_message in prompt_messages {
+                            session.push_message(Message::user(prompt_message.clone()));
+                        }
+                    }
                 }
                 devo_protocol::PendingInputKind::ToolCallBlockedByHook {
                     tool_use_id,
@@ -671,11 +691,11 @@ pub async fn query(
         }
 
         // 1.3 + 1.7: Check token budget and compact before building the request
-        if session.last_input_tokens > 0
+        if session.last_turn_tokens > 0
             && session
                 .config
                 .token_budget
-                .should_compact(session.last_input_tokens)
+                .should_compact(session.last_turn_tokens)
         {
             if !budget_steer_injected {
                 if let Some(turn) = session.turn_state.as_mut() {
@@ -962,6 +982,10 @@ pub async fn query(
                     session.total_cache_read_tokens +=
                         response.usage.cache_read_input_tokens.unwrap_or(0);
                     session.last_input_tokens = response.usage.input_tokens;
+                    session.last_turn_tokens = response
+                        .usage
+                        .input_tokens
+                        .saturating_add(response.usage.output_tokens);
 
                     emit(QueryEvent::Usage {
                         input_tokens: response.usage.input_tokens,
@@ -1029,16 +1053,24 @@ pub async fn query(
         retry_count = 0;
         context_compacted = false;
 
+        let mut response_assistant_content = Vec::new();
+        let mut final_response_tool_use_ids = HashSet::new();
+        let mut has_provider_reasoning_content = false;
+        let mut has_hosted_tool_uses = false;
         if let Some(response) = &final_response {
+            let has_provider_reasoning = response
+                .content
+                .iter()
+                .any(|block| matches!(block, ResponseContent::ProviderReasoning { .. }));
             if assistant_text.is_empty() {
                 assistant_text = response
                     .content
                     .iter()
                     .filter_map(|block| match block {
                         ResponseContent::Text(text) => Some(text.as_str()),
-                        ResponseContent::ToolUse { .. } | ResponseContent::HostedToolUse { .. } => {
-                            None
-                        }
+                        ResponseContent::ToolUse { .. }
+                        | ResponseContent::HostedToolUse { .. }
+                        | ResponseContent::ProviderReasoning { .. } => None,
                     })
                     .collect();
             }
@@ -1056,50 +1088,102 @@ pub async fn query(
                             String::new(),
                             false,
                         )),
-                        ResponseContent::Text(_) | ResponseContent::HostedToolUse { .. } => None,
+                        ResponseContent::Text(_)
+                        | ResponseContent::HostedToolUse { .. }
+                        | ResponseContent::ProviderReasoning { .. } => None,
                     })
                     .collect();
             }
             for (index, block) in response.content.iter().enumerate() {
-                if let ResponseContent::HostedToolUse {
-                    id,
-                    name,
-                    input,
-                    output,
-                    status,
-                } = block
-                {
-                    let id = normalize_hosted_tool_id(index, id.clone(), name);
-                    let name = normalize_hosted_tool_name(name.clone());
-                    let previous_input = hosted_tool_inputs
-                        .get(&id)
-                        .map(|(_, _, previous_input)| previous_input);
-                    let input = hosted_tool_input_or_previous(input.clone(), previous_input);
-                    hosted_tool_inputs.insert(id.clone(), (index, name.clone(), input.clone()));
-                    emit_hosted_tool_start(
-                        &emit,
-                        &mut emitted_hosted_tool_starts,
-                        &id,
-                        &name,
-                        &input,
-                    );
-                    if output.is_some() || status.is_some() {
-                        emit_hosted_tool_result(
+                match block {
+                    ResponseContent::Text(text) => {
+                        if !text.is_empty() {
+                            response_assistant_content
+                                .push(ContentBlock::Text { text: text.clone() });
+                        }
+                    }
+                    ResponseContent::ToolUse { id, name, input } => {
+                        final_response_tool_use_ids.insert(id.clone());
+                        response_assistant_content.push(ContentBlock::ToolUse {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                        });
+                    }
+                    ResponseContent::HostedToolUse {
+                        id,
+                        name,
+                        input,
+                        output,
+                        status,
+                    } => {
+                        let id = normalize_hosted_tool_id(index, id.clone(), name);
+                        let name = normalize_hosted_tool_name(name.clone());
+                        let previous_input = hosted_tool_inputs
+                            .get(&id)
+                            .map(|(_, _, previous_input)| previous_input);
+                        let input = hosted_tool_input_or_previous(input.clone(), previous_input);
+                        has_hosted_tool_uses = true;
+                        response_assistant_content.push(ContentBlock::HostedToolUse {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                            output: output.clone(),
+                            status: status.clone(),
+                        });
+                        hosted_tool_inputs.insert(id.clone(), (index, name.clone(), input.clone()));
+                        emit_hosted_tool_start(
                             &emit,
-                            &mut emitted_hosted_tool_results,
-                            &session.cwd,
-                            HostedToolResultEvent {
-                                id: &id,
-                                name: &name,
-                                input: &input,
-                                output: output.clone(),
-                                status: status.clone(),
-                            },
+                            &mut emitted_hosted_tool_starts,
+                            &id,
+                            &name,
+                            &input,
                         );
+                        if output.is_some() || status.is_some() {
+                            emit_hosted_tool_result(
+                                &emit,
+                                &mut emitted_hosted_tool_results,
+                                &session.cwd,
+                                HostedToolResultEvent {
+                                    id: &id,
+                                    name: &name,
+                                    input: &input,
+                                    output: output.clone(),
+                                    status: status.clone(),
+                                },
+                            );
+                        }
+                    }
+                    ResponseContent::ProviderReasoning { provider, payload } => {
+                        has_provider_reasoning_content = true;
+                        response_assistant_content.push(ContentBlock::ProviderReasoning {
+                            provider: provider.clone(),
+                            payload: payload.clone(),
+                        });
                     }
                 }
             }
-            if reasoning_text.is_empty() {
+            if reasoning_text.is_empty() && has_provider_reasoning {
+                let final_reasoning = response_assistant_content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::ProviderReasoning { payload, .. } => {
+                            payload.get("thinking").and_then(serde_json::Value::as_str)
+                        }
+                        ContentBlock::Text { .. }
+                        | ContentBlock::Reasoning { .. }
+                        | ContentBlock::ToolUse { .. }
+                        | ContentBlock::HostedToolUse { .. }
+                        | ContentBlock::ToolResult { .. } => None,
+                    })
+                    .collect::<String>();
+                if !final_reasoning.is_empty() {
+                    emit(QueryEvent::ReasoningDelta(final_reasoning.clone()));
+                    emit(QueryEvent::ReasoningCompleted);
+                    reasoning_text = final_reasoning;
+                }
+            }
+            if reasoning_text.is_empty() && !has_provider_reasoning {
                 let final_reasoning = response
                     .metadata
                     .extras
@@ -1111,6 +1195,7 @@ pub async fn query(
                     .collect::<String>();
                 if !final_reasoning.is_empty() {
                     emit(QueryEvent::ReasoningDelta(final_reasoning.clone()));
+                    emit(QueryEvent::ReasoningCompleted);
                     reasoning_text = final_reasoning;
                 }
             }
@@ -1137,19 +1222,31 @@ pub async fn query(
         }
 
         // Build assistant message
-        let mut assistant_content: Vec<ContentBlock> = Vec::new();
+        let mut assistant_content: Vec<ContentBlock> = response_assistant_content;
 
-        if !reasoning_text.is_empty() {
+        if assistant_content.is_empty()
+            && !reasoning_text.is_empty()
+            && !has_provider_reasoning_content
+        {
             assistant_content.push(ContentBlock::Reasoning {
                 text: reasoning_text,
             });
         }
 
-        if !assistant_text.is_empty() {
+        let assistant_text_has_visible_content = !assistant_text.trim().is_empty();
+
+        if assistant_content.is_empty() && !assistant_text.is_empty() {
             assistant_content.push(ContentBlock::Text {
                 text: assistant_text,
             });
         }
+
+        let deepseek_v4_thinking_only_end_turn = deepseek_v4_thinking_only_continuation_enabled
+            && stop_reason == Some(StopReason::EndTurn)
+            && !assistant_text_has_visible_content
+            && tool_uses.is_empty()
+            && !has_hosted_tool_uses
+            && has_provider_reasoning_content;
 
         let final_tool_inputs: HashMap<String, serde_json::Value> = final_response
             .as_ref()
@@ -1161,7 +1258,9 @@ pub async fn query(
                         ResponseContent::ToolUse { id, input, .. } => {
                             Some((id.clone(), input.clone()))
                         }
-                        ResponseContent::Text(_) | ResponseContent::HostedToolUse { .. } => None,
+                        ResponseContent::Text(_)
+                        | ResponseContent::HostedToolUse { .. }
+                        | ResponseContent::ProviderReasoning { .. } => None,
                     })
                     .collect()
             })
@@ -1184,11 +1283,13 @@ pub async fn query(
                         input: input.clone(),
                     });
                 }
-                assistant_content.push(ContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                });
+                if !final_response_tool_use_ids.contains(&id) {
+                    assistant_content.push(ContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                    });
+                }
                 ToolCall { id, name, input }
             })
             .collect();
@@ -1198,8 +1299,25 @@ pub async fn query(
             content: assistant_content,
         });
 
+        if deepseek_v4_thinking_only_end_turn {
+            if deepseek_v4_thinking_only_continuation_used {
+                return Err(AgentError::Provider(anyhow::anyhow!(
+                    "deepseek-v4 returned thinking-only end_turn after continuation; no user-visible text was produced"
+                )));
+            }
+            debug!("deepseek-v4 returned thinking-only end_turn; injecting continuation prompt");
+            deepseek_v4_thinking_only_continuation_used = true;
+            session.push_message(Message::user(DEEPSEEK_THINKING_ONLY_CONTINUATION_PROMPT));
+            continue;
+        }
+
         // If no tool calls, check stop reason
         if tool_calls.is_empty() {
+            if has_hosted_tool_uses && stop_reason == Some(StopReason::ToolUse) {
+                debug!("hosted tool use returned without local calls, continuing query loop");
+                continue;
+            }
+
             // MaxOutputTokens auto-continue
             if stop_reason == Some(StopReason::MaxTokens) {
                 debug!("max_tokens reached injecting continuation prompt");
@@ -1730,6 +1848,18 @@ mod tests {
         requests: Arc<Mutex<Vec<ModelRequest>>>,
     }
 
+    fn final_text_stream(text: &str) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
+        Box::pin(futures::stream::iter(vec![Ok(StreamEvent::MessageDone {
+            response: ModelResponse {
+                id: "resp-final".into(),
+                content: vec![ResponseContent::Text(text.to_string())],
+                stop_reason: Some(StopReason::EndTurn),
+                usage: Usage::default(),
+                metadata: Default::default(),
+            },
+        })]))
+    }
+
     struct TransientStreamCreateProvider {
         attempts: AtomicUsize,
     }
@@ -1806,7 +1936,14 @@ mod tests {
             &self,
             request: ModelRequest,
         ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-            self.requests.lock().expect("lock requests").push(request);
+            let request_count = {
+                let mut requests = self.requests.lock().expect("lock requests");
+                requests.push(request);
+                requests.len()
+            };
+            if request_count > 1 {
+                return Ok(final_text_stream("done"));
+            }
             let input = json!({ "query": "current Rust docs" });
             let output = Some(json!({
                 "results": [
@@ -1865,7 +2002,14 @@ mod tests {
             &self,
             request: ModelRequest,
         ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-            self.requests.lock().expect("lock requests").push(request);
+            let request_count = {
+                let mut requests = self.requests.lock().expect("lock requests");
+                requests.push(request);
+                requests.len()
+            };
+            if request_count > 1 {
+                return Ok(final_text_stream("done"));
+            }
             let input = json!({ "url": "https://example.test/docs" });
             let output = Some(json!({
                 "title": "Docs",
@@ -2452,7 +2596,7 @@ mod tests {
 
         assert_eq!(executions.load(Ordering::SeqCst), 0);
         let captured = requests.lock().expect("lock requests");
-        assert_eq!(captured.len(), 1);
+        assert_eq!(captured.len(), 2);
         let request = &captured[0];
         assert!(matches!(
             request.hosted_tools.as_slice(),
@@ -2464,6 +2608,24 @@ mod tests {
                 .as_ref()
                 .is_none_or(|tools| tools.iter().all(|tool| tool.name != "web_search"))
         );
+        let continuation = &captured[1];
+        assert!(continuation.messages.iter().any(|message| {
+            message.content.iter().any(|content| {
+                matches!(
+                    content,
+                    RequestContent::HostedToolUse {
+                        id,
+                        name,
+                        input,
+                        output: Some(_),
+                        status,
+                    } if id == "hosted_ws_1"
+                        && name == "web_search"
+                        && input == &json!({ "query": "current Rust docs" })
+                        && status.as_deref() == Some("completed")
+                )
+            })
+        }));
 
         let events = seen.lock().unwrap();
         let starts = events
@@ -2516,7 +2678,7 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             QueryEvent::TurnComplete {
-                stop_reason: StopReason::ToolUse
+                stop_reason: StopReason::EndTurn
             }
         )));
         assert!(session.messages.iter().all(|message| {
@@ -2582,7 +2744,7 @@ mod tests {
 
         assert_eq!(executions.load(Ordering::SeqCst), 0);
         let captured = requests.lock().expect("lock requests");
-        assert_eq!(captured.len(), 1);
+        assert_eq!(captured.len(), 2);
         let request = &captured[0];
         assert!(matches!(
             request.hosted_tools.as_slice(),
@@ -2594,6 +2756,24 @@ mod tests {
                 .as_ref()
                 .is_none_or(|tools| tools.iter().all(|tool| tool.name != "webfetch"))
         );
+        let continuation = &captured[1];
+        assert!(continuation.messages.iter().any(|message| {
+            message.content.iter().any(|content| {
+                matches!(
+                    content,
+                    RequestContent::HostedToolUse {
+                        id,
+                        name,
+                        input,
+                        output: Some(_),
+                        status,
+                    } if id == "hosted_wf_1"
+                        && name == "web_fetch"
+                        && input == &json!({ "url": "https://example.test/docs" })
+                        && status.as_deref() == Some("completed")
+                )
+            })
+        }));
 
         let events = seen.lock().unwrap();
         let starts = events
@@ -3432,6 +3612,516 @@ mod tests {
                     },
                 ],
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn query_round_trips_provider_reasoning_without_plain_reasoning() {
+        struct SignedReasoningProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl devo_provider::ModelProviderSDK for SignedReasoningProvider {
+            async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+                unreachable!("tests stream responses only")
+            }
+
+            async fn completion_stream(
+                &self,
+                request: ModelRequest,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+                self.requests.lock().expect("lock requests").push(request);
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let content = if call == 0 {
+                    vec![
+                        ResponseContent::ProviderReasoning {
+                            provider: "anthropic".into(),
+                            payload: json!({
+                                "type": "thinking",
+                                "thinking": "signed plan",
+                                "signature": "sig_123"
+                            }),
+                        },
+                        ResponseContent::Text("first".into()),
+                    ]
+                } else {
+                    vec![ResponseContent::Text("second".into())]
+                };
+                Ok(Box::pin(futures::stream::iter(vec![Ok(
+                    StreamEvent::MessageDone {
+                        response: ModelResponse {
+                            id: format!("resp-{call}"),
+                            content,
+                            stop_reason: Some(StopReason::EndTurn),
+                            usage: Usage::default(),
+                            metadata: ResponseMetadata::default(),
+                        },
+                    },
+                )])))
+            }
+
+            fn name(&self) -> &str {
+                "signed-reasoning-provider"
+            }
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(SignedReasoningProvider {
+            requests: Arc::clone(&requests),
+            calls: AtomicUsize::new(0),
+        });
+        let registry = Arc::new(ToolRegistry::new());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("hello"));
+        let seen_events = Arc::new(Mutex::new(Vec::new()));
+        let callback_events = Arc::clone(&seen_events);
+        let callback = Arc::new(move |event: QueryEvent| {
+            callback_events.lock().expect("lock callback").push(event);
+        });
+
+        query(
+            &mut session,
+            &TurnConfig::new(Model::default(), None),
+            provider.clone(),
+            Arc::clone(&registry),
+            &runtime,
+            Some(callback),
+        )
+        .await
+        .expect("first query should succeed");
+
+        {
+            let events = seen_events.lock().expect("lock events");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                QueryEvent::ReasoningDelta(text) if text == "signed plan"
+            )));
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, QueryEvent::ReasoningCompleted))
+            );
+        }
+
+        let assistant_message = session
+            .messages
+            .iter()
+            .find(|message| matches!(message.role, Role::Assistant))
+            .expect("assistant message");
+        assert_eq!(
+            assistant_message,
+            &Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ProviderReasoning {
+                        provider: "anthropic".into(),
+                        payload: json!({
+                            "type": "thinking",
+                            "thinking": "signed plan",
+                            "signature": "sig_123"
+                        }),
+                    },
+                    ContentBlock::Text {
+                        text: "first".into(),
+                    },
+                ],
+            }
+        );
+
+        session.push_message(Message::user("follow up"));
+        query(
+            &mut session,
+            &TurnConfig::new(Model::default(), None),
+            provider,
+            registry,
+            &runtime,
+            None,
+        )
+        .await
+        .expect("second query should succeed");
+
+        let captured = requests.lock().expect("lock requests");
+        assert_eq!(captured.len(), 2);
+        let second_request_content = captured[1]
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .collect::<Vec<_>>();
+        assert!(second_request_content.iter().any(|content| matches!(
+            content,
+            RequestContent::ProviderReasoning { provider, payload }
+            if provider == "anthropic"
+                && payload["thinking"] == json!("signed plan")
+                && payload["signature"] == json!("sig_123")
+        )));
+        assert!(
+            second_request_content
+                .iter()
+                .all(|content| !matches!(content, RequestContent::Reasoning { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn query_continues_deepseek_v4_thinking_only_end_turn_once() {
+        struct ThinkingOnlyThenTextProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl devo_provider::ModelProviderSDK for ThinkingOnlyThenTextProvider {
+            async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+                unreachable!("tests stream responses only")
+            }
+
+            async fn completion_stream(
+                &self,
+                request: ModelRequest,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+                self.requests.lock().expect("lock requests").push(request);
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let content = if call == 0 {
+                    vec![ResponseContent::ProviderReasoning {
+                        provider: "anthropic".into(),
+                        payload: json!({
+                            "type": "thinking",
+                            "thinking": "internal plan",
+                            "signature": "sig_plan"
+                        }),
+                    }]
+                } else {
+                    vec![ResponseContent::Text("visible answer".into())]
+                };
+                let message_done = Ok(StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: format!("resp-{call}"),
+                        content,
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage: Usage::default(),
+                        metadata: ResponseMetadata::default(),
+                    },
+                });
+                let events = if call == 0 {
+                    vec![message_done]
+                } else {
+                    vec![
+                        Ok(StreamEvent::TextDelta {
+                            index: 0,
+                            text: "visible answer".into(),
+                        }),
+                        message_done,
+                    ]
+                };
+                Ok(Box::pin(futures::stream::iter(events)))
+            }
+
+            fn name(&self) -> &str {
+                "thinking-only-then-text-provider"
+            }
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(ThinkingOnlyThenTextProvider {
+            requests: Arc::clone(&requests),
+            calls: AtomicUsize::new(0),
+        });
+        let registry = Arc::new(ToolRegistry::new());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+        let model = Model {
+            slug: "deepseek-v4-pro".into(),
+            provider: devo_protocol::ProviderWireApi::AnthropicMessages,
+            ..Model::default()
+        };
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("hello"));
+        let seen_events = Arc::new(Mutex::new(Vec::new()));
+        let callback_events = Arc::clone(&seen_events);
+        let callback = Arc::new(move |event: QueryEvent| {
+            callback_events.lock().expect("lock callback").push(event);
+        });
+
+        query(
+            &mut session,
+            &TurnConfig::new(model, None),
+            provider,
+            registry,
+            &runtime,
+            Some(callback),
+        )
+        .await
+        .expect("query should continue once and finish with text");
+
+        let session_message_tail = session.messages[session.messages.len() - 4..].to_vec();
+        assert_eq!(
+            session_message_tail,
+            vec![
+                Message::user("hello"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ProviderReasoning {
+                        provider: "anthropic".into(),
+                        payload: json!({
+                            "type": "thinking",
+                            "thinking": "internal plan",
+                            "signature": "sig_plan"
+                        }),
+                    }],
+                },
+                Message::user(super::DEEPSEEK_THINKING_ONLY_CONTINUATION_PROMPT),
+                Message::assistant_text("visible answer"),
+            ]
+        );
+
+        let captured = requests.lock().expect("lock requests");
+        assert_eq!(captured.len(), 2);
+        let second_request_messages = &captured[1].messages;
+        let second_request_tail = &second_request_messages[second_request_messages.len() - 3..];
+        assert_eq!(
+            serde_json::to_value(second_request_tail).expect("serialize second request messages"),
+            json!([
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "hello"
+                    }]
+                },
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "provider_reasoning",
+                        "provider": "anthropic",
+                        "payload": {
+                            "type": "thinking",
+                            "thinking": "internal plan",
+                            "signature": "sig_plan"
+                        }
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": super::DEEPSEEK_THINKING_ONLY_CONTINUATION_PROMPT
+                    }]
+                }
+            ])
+        );
+
+        let events = seen_events.lock().expect("lock events");
+        let turn_complete_count = events
+            .iter()
+            .filter(|event| matches!(event, QueryEvent::TurnComplete { .. }))
+            .count();
+        assert_eq!(turn_complete_count, 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            QueryEvent::TextDelta(text) if text == "visible answer"
+        )));
+    }
+
+    #[tokio::test]
+    async fn query_preserves_provider_reasoning_and_hosted_tool_order() {
+        struct OrderedHostedProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl devo_provider::ModelProviderSDK for OrderedHostedProvider {
+            async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+                unreachable!("tests stream responses only")
+            }
+
+            async fn completion_stream(
+                &self,
+                request: ModelRequest,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+                self.requests.lock().expect("lock requests").push(request);
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let content = if call == 0 {
+                    vec![
+                        ResponseContent::ProviderReasoning {
+                            provider: "anthropic".into(),
+                            payload: json!({
+                                "type": "thinking",
+                                "thinking": "before tool",
+                                "signature": "sig_before"
+                            }),
+                        },
+                        ResponseContent::HostedToolUse {
+                            id: "srvtool_1".into(),
+                            name: "web_search".into(),
+                            input: json!({"query": "desktop gui 2026"}),
+                            output: None,
+                            status: None,
+                        },
+                        ResponseContent::HostedToolUse {
+                            id: "srvtool_1".into(),
+                            name: "web_search".into(),
+                            input: json!({}),
+                            output: Some(json!([{"title": "result"}])),
+                            status: Some("completed".into()),
+                        },
+                        ResponseContent::ProviderReasoning {
+                            provider: "anthropic".into(),
+                            payload: json!({
+                                "type": "thinking",
+                                "thinking": "after tool",
+                                "signature": "sig_after"
+                            }),
+                        },
+                        ResponseContent::Text("final".into()),
+                    ]
+                } else {
+                    vec![ResponseContent::Text("second".into())]
+                };
+                Ok(Box::pin(futures::stream::iter(vec![Ok(
+                    StreamEvent::MessageDone {
+                        response: ModelResponse {
+                            id: format!("resp-{call}"),
+                            content,
+                            stop_reason: Some(StopReason::EndTurn),
+                            usage: Usage::default(),
+                            metadata: ResponseMetadata::default(),
+                        },
+                    },
+                )])))
+            }
+
+            fn name(&self) -> &str {
+                "ordered-hosted-provider"
+            }
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(OrderedHostedProvider {
+            requests: Arc::clone(&requests),
+            calls: AtomicUsize::new(0),
+        });
+        let registry = Arc::new(ToolRegistry::new());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("hello"));
+
+        query(
+            &mut session,
+            &TurnConfig::new(Model::default(), None),
+            provider.clone(),
+            Arc::clone(&registry),
+            &runtime,
+            None,
+        )
+        .await
+        .expect("first query should succeed");
+
+        let assistant_message = session
+            .messages
+            .iter()
+            .find(|message| matches!(message.role, Role::Assistant))
+            .expect("assistant message");
+        assert_eq!(
+            assistant_message.content,
+            vec![
+                ContentBlock::ProviderReasoning {
+                    provider: "anthropic".into(),
+                    payload: json!({
+                        "type": "thinking",
+                        "thinking": "before tool",
+                        "signature": "sig_before"
+                    }),
+                },
+                ContentBlock::HostedToolUse {
+                    id: "srvtool_1".into(),
+                    name: "web_search".into(),
+                    input: json!({"query": "desktop gui 2026"}),
+                    output: None,
+                    status: None,
+                },
+                ContentBlock::HostedToolUse {
+                    id: "srvtool_1".into(),
+                    name: "web_search".into(),
+                    input: json!({"query": "desktop gui 2026"}),
+                    output: Some(json!([{"title": "result"}])),
+                    status: Some("completed".into()),
+                },
+                ContentBlock::ProviderReasoning {
+                    provider: "anthropic".into(),
+                    payload: json!({
+                        "type": "thinking",
+                        "thinking": "after tool",
+                        "signature": "sig_after"
+                    }),
+                },
+                ContentBlock::Text {
+                    text: "final".into(),
+                },
+            ]
+        );
+
+        session.push_message(Message::user("follow up"));
+        query(
+            &mut session,
+            &TurnConfig::new(Model::default(), None),
+            provider,
+            registry,
+            &runtime,
+            None,
+        )
+        .await
+        .expect("second query should succeed");
+
+        let captured = requests.lock().expect("lock requests");
+        let replayed_content = captured[1]
+            .messages
+            .iter()
+            .find(|message| message.role == "assistant")
+            .expect("assistant replay")
+            .content
+            .clone();
+        assert_eq!(
+            serde_json::to_value(&replayed_content).expect("serialize replayed content"),
+            json!([
+                {
+                    "type": "provider_reasoning",
+                    "provider": "anthropic",
+                    "payload": {
+                        "type": "thinking",
+                        "thinking": "before tool",
+                        "signature": "sig_before"
+                    }
+                },
+                {
+                    "type": "hosted_tool_use",
+                    "id": "srvtool_1",
+                    "name": "web_search",
+                    "input": { "query": "desktop gui 2026" }
+                },
+                {
+                    "type": "hosted_tool_use",
+                    "id": "srvtool_1",
+                    "name": "web_search",
+                    "input": { "query": "desktop gui 2026" },
+                    "output": [{ "title": "result" }],
+                    "status": "completed"
+                },
+                {
+                    "type": "provider_reasoning",
+                    "provider": "anthropic",
+                    "payload": {
+                        "type": "thinking",
+                        "thinking": "after tool",
+                        "signature": "sig_after"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "final"
+                }
+            ])
         );
     }
 

@@ -136,6 +136,7 @@ impl ServerRuntime {
                         turn_config: task_turn_config,
                         display_input: String::new(),
                         input: String::new(),
+                        input_messages: Vec::new(),
                         collaboration_mode: devo_protocol::CollaborationMode::Build,
                         input_mode: TurnInputMode::HiddenGoalContinuation {
                             goal: candidate.goal.to_thread_goal(),

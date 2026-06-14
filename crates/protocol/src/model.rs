@@ -99,11 +99,28 @@ pub enum RequestContent {
     #[serde(rename = "reasoning")]
     Reasoning { text: String },
 
+    #[serde(rename = "provider_reasoning")]
+    ProviderReasoning {
+        provider: String,
+        payload: serde_json::Value,
+    },
+
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+    },
+
+    #[serde(rename = "hosted_tool_use")]
+    HostedToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
     },
 
     #[serde(rename = "tool_result")]

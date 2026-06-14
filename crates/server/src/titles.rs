@@ -1,6 +1,8 @@
-use devo_protocol::{
-    ModelRequest, RequestContent, RequestMessage, ResponseContent, SamplingControls,
-};
+use devo_protocol::ModelRequest;
+use devo_protocol::RequestContent;
+use devo_protocol::RequestMessage;
+use devo_protocol::ResponseContent;
+use devo_protocol::SamplingControls;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GeneratedTitleError {
@@ -63,13 +65,10 @@ pub(crate) fn build_title_generation_request(model: String, user_input: &str) ->
                 ),
             }],
         }],
-        max_tokens: 24,
+        max_tokens: 1024,
         tools: None,
         hosted_tools: Vec::new(),
-        sampling: SamplingControls {
-            temperature: Some(0.0),
-            ..SamplingControls::default()
-        },
+        sampling: SamplingControls { temperature: None, top_p: None, top_k: None },
         thinking: Some("disabled".to_string()),
         reasoning_effort: None,
         extra_body: None,
@@ -209,7 +208,9 @@ mod tests {
     use devo_protocol::ResponseContent;
     use pretty_assertions::assert_eq;
 
-    use super::{GeneratedTitleError, derive_provisional_title, normalize_generated_title};
+    use super::GeneratedTitleError;
+    use super::derive_provisional_title;
+    use super::normalize_generated_title;
 
     #[test]
     fn derives_title_from_plain_text_prompt() {

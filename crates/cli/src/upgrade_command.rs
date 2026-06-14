@@ -1,10 +1,26 @@
+//! Platform-specific self-upgrade launcher.
+//!
+//! On Unix, `devo upgrade` runs a short shell script in the current process
+//! tree: it downloads `install.sh` into a temporary directory and executes it,
+//! then reports the installer's exit status back to the caller. Unix systems can
+//! generally replace an executable file while the old process is still running,
+//! so no detached helper is needed.
+//!
+//! On Windows, the running `devo.exe` file is locked by the current process, so
+//! it cannot be replaced in-place. The Windows path starts a detached PowerShell
+//! process, passes it the current process id, and returns immediately. The
+//! PowerShell script waits for this `devo.exe` process to exit, then downloads
+//! and runs `install.ps1`, which can safely copy the new binary over the old one
+//! after the lock has been released.
+
 use std::process::Command;
 
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(unix)]
 use anyhow::bail;
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 const INSTALL_SH_URL: &str = "https://raw.githubusercontent.com/7df-lab/devo/main/install.sh";
 #[cfg(windows)]
 const INSTALL_PS1_URL: &str = "https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1";
@@ -13,7 +29,7 @@ pub fn run_upgrade() -> Result<()> {
     run_platform_upgrade()
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn run_platform_upgrade() -> Result<()> {
     println!("Downloading install.sh from {INSTALL_SH_URL} ...");
 
@@ -30,7 +46,7 @@ fn run_platform_upgrade() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn unix_upgrade_script() -> String {
     format!(
         r#"set -eu

@@ -704,6 +704,7 @@ impl ServerRuntime {
         core_session.total_cache_creation_tokens = source_core_session.total_cache_creation_tokens;
         core_session.total_cache_read_tokens = source_core_session.total_cache_read_tokens;
         core_session.last_input_tokens = source_core_session.last_input_tokens;
+        core_session.last_turn_tokens = source_core_session.last_turn_tokens;
 
         let mut rebuilt_history_items = Vec::new();
         let mut rebuilt_messages = Vec::new();

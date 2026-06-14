@@ -1,11 +1,14 @@
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
+#[cfg(unix)]
 use base64::Engine;
+#[cfg(unix)]
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use devo_core::AgentsMdConfig;
 use devo_core::AppConfigStore;
@@ -15,9 +18,11 @@ use devo_core::PresetModelCatalog;
 use devo_core::ProviderVendorCatalog;
 use devo_core::SkillsConfig;
 use devo_core::tools::ToolRegistry;
+#[cfg(unix)]
 use devo_protocol::CommandExecResult;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
+#[cfg(unix)]
 use devo_protocol::SessionId;
 use devo_protocol::StreamEvent;
 use devo_provider::ModelProviderSDK;
@@ -30,6 +35,7 @@ use futures::Stream;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
+#[cfg(unix)]
 use tokio::time::timeout;
 
 struct UnusedProvider;
@@ -259,6 +265,7 @@ async fn initialize_connection(
     Ok((connection_id, notifications_rx))
 }
 
+#[cfg(unix)]
 async fn start_session(
     runtime: &Arc<ServerRuntime>,
     connection_id: u64,
@@ -285,6 +292,7 @@ async fn start_session(
     Ok(response.result.session.session_id)
 }
 
+#[cfg(unix)]
 async fn wait_for_command_exec_exit(
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
     process_id: &str,
@@ -325,6 +333,7 @@ async fn wait_for_command_exec_exit(
     }
 }
 
+#[cfg(unix)]
 fn assert_notification_session(params: &serde_json::Value, session_id: Option<SessionId>) {
     match session_id {
         Some(session_id) => {
@@ -339,6 +348,7 @@ fn assert_notification_session(params: &serde_json::Value, session_id: Option<Se
     }
 }
 
+#[cfg(unix)]
 async fn assert_no_notification(
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
 ) -> Result<()> {

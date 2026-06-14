@@ -1180,7 +1180,9 @@ async fn compacted_session_next_query_uses_compaction_summary_after_restart() ->
                 | devo_protocol::RequestContent::Reasoning { text } => {
                     text.contains("<compaction_summary>")
                 }
-                devo_protocol::RequestContent::ToolUse { .. }
+                devo_protocol::RequestContent::ProviderReasoning { .. }
+                | devo_protocol::RequestContent::ToolUse { .. }
+                | devo_protocol::RequestContent::HostedToolUse { .. }
                 | devo_protocol::RequestContent::ToolResult { .. } => false,
             })
         }),

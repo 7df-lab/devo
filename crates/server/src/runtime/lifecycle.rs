@@ -37,6 +37,7 @@ impl ServerRuntime {
                         core.total_cache_creation_tokens = stats.total_cache_creation_tokens;
                         core.total_cache_read_tokens = stats.total_cache_read_tokens;
                         core.last_input_tokens = stats.last_input_tokens;
+                        core.last_turn_tokens = core.last_turn_tokens.max(stats.last_input_tokens);
                         core.prompt_token_estimate = stats.prompt_token_estimate;
                     }
                     tracing::debug!(

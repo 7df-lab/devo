@@ -34,6 +34,7 @@ use crate::ModelProviderSDK;
 use crate::ProviderAdapter;
 use crate::ProviderCapabilities;
 use crate::ProviderHttpOptions;
+use crate::dsml::DsmlToolCallHealer;
 use crate::hosted_tools::apply_openai_chat_completions_hosted_tools;
 use crate::http::invalid_status_error;
 use crate::merge_extra_body;
@@ -588,6 +589,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                     match block {
                         RequestContent::Text { text } => text_parts.push(text.clone()),
                         RequestContent::Reasoning { text } => reasoning_parts.push(text.clone()),
+                        RequestContent::ProviderReasoning { .. } => {}
                         RequestContent::ToolUse { id, name, input } => tool_calls.push(json!({
                             "id": id,
                             "type": "function",
@@ -596,6 +598,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                                 "arguments": input.to_string(),
                             }
                         })),
+                        RequestContent::HostedToolUse { .. } => {}
                         RequestContent::ToolResult { .. } => {}
                     }
                 }
@@ -620,6 +623,8 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                             messages.push(json!({ "role": role, "content": text }));
                         }
                         RequestContent::Reasoning { .. } => {}
+                        RequestContent::ProviderReasoning { .. } => {}
+                        RequestContent::HostedToolUse { .. } => {}
                         RequestContent::ToolResult {
                             tool_use_id,
                             content,
@@ -798,7 +803,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
 /// - Other documented response fields such as `created`, `model`, `object`,
 ///   `service_tier`, `annotations`, `audio`, `logprobs`, and deprecated
 ///   `function_call` are not currently mapped into `ModelResponse`.
-fn parse_response(value: Value) -> Result<ModelResponse> {
+fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<ModelResponse> {
     let response: OpenAIChatCompletionResponse = serde_json::from_value(value.clone())
         .context("failed to deserialize openai chat-completion response")?;
     let mut content = Vec::new();
@@ -833,6 +838,7 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
             stop_reason = Some(parse_finish_reason(reason));
         }
     }
+    let content = dsml_healer.heal_response_content(content);
 
     let usage = response
         .usage
@@ -1107,7 +1113,7 @@ impl ModelProviderSDK for OpenAIProvider {
             .json()
             .await
             .context("failed to decode openai response")?;
-        parse_response(value)
+        parse_response(value, &DsmlToolCallHealer::for_request(&request))
     }
 
     /// --------- Here is an example of stream response ------------------------
@@ -1153,6 +1159,7 @@ impl ProviderAdapter for OpenAIProvider {
 
 #[cfg(test)]
 mod tests {
+    use crate::dsml::DsmlToolCallHealer;
     use devo_protocol::ModelRequest;
     use devo_protocol::RequestContent;
     use devo_protocol::RequestMessage;
@@ -1333,42 +1340,45 @@ mod tests {
 
     #[test]
     fn parse_response_extracts_text_tool_calls_and_usage() {
-        let response = parse_response(json!({
-            "id": "chatcmpl-123",
-            "object": "chat.completion",
-            "created": 1741569952,
-            "model": "gpt-5.4",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": null,
-                        "tool_calls": [
-                            {
-                                "id": "call_abc123",
-                                "type": "function",
-                                "function": {
-                                    "name": "get_weather",
-                                    "arguments": "{\"location\":\"Boston, MA\"}"
+        let response = parse_response(
+            json!({
+                "id": "chatcmpl-123",
+                "object": "chat.completion",
+                "created": 1741569952,
+                "model": "gpt-5.4",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [
+                                {
+                                    "id": "call_abc123",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": "{\"location\":\"Boston, MA\"}"
+                                    }
                                 }
-                            }
-                        ]
-                    },
-                    "finish_reason": "tool_calls"
-                }
-            ],
-            "usage": {
-                "prompt_tokens": 82,
-                "completion_tokens": 17,
-                "total_tokens": 99,
-                "prompt_tokens_details": {
-                    "cached_tokens": 12,
-                    "audio_tokens": 0
-                }
-            },
-            "service_tier": "default"
-        }))
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 82,
+                    "completion_tokens": 17,
+                    "total_tokens": 99,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 12,
+                        "audio_tokens": 0
+                    }
+                },
+                "service_tier": "default"
+            }),
+            &DsmlToolCallHealer::for_model("gpt-5.4"),
+        )
         .expect("parse response");
 
         assert_eq!(response.id, "chatcmpl-123");
@@ -1393,23 +1403,26 @@ mod tests {
 
     #[test]
     fn parse_response_preserves_text_content() {
-        let response = parse_response(json!({
-            "id": "chatcmpl-456",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "Hello! How can I assist you today?"
-                    },
-                    "finish_reason": "stop"
+        let response = parse_response(
+            json!({
+                "id": "chatcmpl-456",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Hello! How can I assist you today?"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 8
                 }
-            ],
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 8
-            }
-        }))
+            }),
+            &DsmlToolCallHealer::for_model("gpt-5.4"),
+        )
         .expect("parse response");
 
         assert_eq!(response.stop_reason, Some(StopReason::EndTurn));
@@ -1420,6 +1433,40 @@ mod tests {
             }
             other => panic!("expected text response, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_response_heals_deepseek_v4_dsml_text_tool_calls() {
+        let response = parse_response(
+            json!({
+                "id": "chatcmpl-dsml",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<｜DSML｜tool_calls><｜DSML｜invoke name=\"web_search\"><｜DSML｜parameter name=\"query\" string=\"true\">DeepSeek V4 DSML</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 8
+                }
+            }),
+            &DsmlToolCallHealer::for_model("deepseek-v4-pro"),
+        )
+        .expect("parse response");
+
+        assert_eq!(
+            response.content,
+            vec![ResponseContent::ToolUse {
+                id: "dsml_0_0".to_string(),
+                name: "web_search".to_string(),
+                input: json!({"query": "DeepSeek V4 DSML"}),
+            }]
+        );
     }
 
     #[test]
@@ -1461,51 +1508,54 @@ mod tests {
 
     #[test]
     fn parse_response_preserves_provider_specific_response_fields() {
-        let response = parse_response(json!({
-            "id": "chatcmpl-789",
-            "object": "chat.completion",
-            "created": 1741569952,
-            "model": "gpt-5.4",
-            "service_tier": "default",
-            "system_fingerprint": "fp_123",
-            "choices": [
-                {
-                    "index": 0,
-                    "logprobs": {
-                        "content": [],
-                        "refusal": []
-                    },
-                    "message": {
-                        "role": "assistant",
-                        "content": "hello",
-                        "refusal": "none",
-                        "annotations": [
-                            {
-                                "type": "url_citation",
-                                "url_citation": {
-                                    "start_index": 0,
-                                    "end_index": 5,
-                                    "title": "Example",
-                                    "url": "https://example.com"
+        let response = parse_response(
+            json!({
+                "id": "chatcmpl-789",
+                "object": "chat.completion",
+                "created": 1741569952,
+                "model": "gpt-5.4",
+                "service_tier": "default",
+                "system_fingerprint": "fp_123",
+                "choices": [
+                    {
+                        "index": 0,
+                        "logprobs": {
+                            "content": [],
+                            "refusal": []
+                        },
+                        "message": {
+                            "role": "assistant",
+                            "content": "hello",
+                            "refusal": "none",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url_citation": {
+                                        "start_index": 0,
+                                        "end_index": 5,
+                                        "title": "Example",
+                                        "url": "https://example.com"
+                                    }
                                 }
+                            ],
+                            "audio": {
+                                "id": "aud_1",
+                                "data": "Zm9v",
+                                "expires_at": 1741569999u64,
+                                "transcript": "hello"
                             }
-                        ],
-                        "audio": {
-                            "id": "aud_1",
-                            "data": "Zm9v",
-                            "expires_at": 1741569999u64,
-                            "transcript": "hello"
-                        }
-                    },
-                    "finish_reason": "stop"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 8,
+                    "total_tokens": 18
                 }
-            ],
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 8,
-                "total_tokens": 18
-            }
-        }))
+            }),
+            &DsmlToolCallHealer::for_model("gpt-5.4"),
+        )
         .expect("parse response");
 
         let provider_payload = response

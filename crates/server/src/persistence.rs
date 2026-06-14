@@ -331,6 +331,7 @@ struct ReplayState {
     total_cache_creation_tokens: usize,
     total_cache_read_tokens: usize,
     last_input_tokens: usize,
+    last_turn_tokens: usize,
     session_context: Option<devo_core::SessionContext>,
     latest_turn_context: Option<devo_core::TurnContext>,
     messages: Vec<Message>,
@@ -385,6 +386,8 @@ impl ReplayState {
                     self.total_cache_read_tokens +=
                         usage.cache_read_input_tokens.unwrap_or(0) as usize;
                     self.last_input_tokens = usage.input_tokens as usize;
+                    self.last_turn_tokens =
+                        usage.input_tokens as usize + usage.output_tokens as usize;
                 }
                 self.latest_turn_metadata = Some(TurnMetadata {
                     turn_id: line.turn.id,
@@ -522,6 +525,7 @@ impl ReplayState {
         core_session.total_cache_creation_tokens = self.total_cache_creation_tokens;
         core_session.total_cache_read_tokens = self.total_cache_read_tokens;
         core_session.last_input_tokens = self.last_input_tokens;
+        core_session.last_turn_tokens = self.last_turn_tokens;
         core_session.prompt_token_estimate = core_session
             .prompt_source_messages()
             .iter()
@@ -1215,6 +1219,7 @@ mod tests {
     use devo_core::ItemId;
     use devo_core::ItemLine;
     use devo_core::ItemRecord;
+    use devo_core::LanguageContext;
     use devo_core::Message;
     use devo_core::Model;
     use devo_core::Persona;
@@ -1454,6 +1459,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 4, 27, 8, 0, 0).unwrap();
         let session_context = SessionContext {
             base_instructions: "base".into(),
+            available_skills: None,
             workspace_instructions: Some("workspace".into()),
             locked_agents_snapshot: None,
             environment: EnvironmentContext {
@@ -1462,6 +1468,7 @@ mod tests {
                 current_date: "2026-04-27".into(),
                 timezone: "UTC".into(),
             },
+            language: LanguageContext::default(),
             persona: Persona::Default,
             model: Model {
                 slug: "model-a".into(),

@@ -440,7 +440,9 @@ impl ServerRuntime {
                     message.content.iter().find_map(|block| match block {
                         devo_core::ContentBlock::Text { text } => Some(text.clone()),
                         devo_core::ContentBlock::Reasoning { .. }
+                        | devo_core::ContentBlock::ProviderReasoning { .. }
                         | devo_core::ContentBlock::ToolUse { .. }
+                        | devo_core::ContentBlock::HostedToolUse { .. }
                         | devo_core::ContentBlock::ToolResult { .. } => None,
                     })
                 }

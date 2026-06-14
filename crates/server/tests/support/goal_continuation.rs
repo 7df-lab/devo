@@ -452,7 +452,10 @@ pub fn request_contains_text(request: &ModelRequest, needle: &str) -> bool {
             RequestContent::Text { text } | RequestContent::Reasoning { text } => {
                 text.contains(needle)
             }
-            RequestContent::ToolUse { .. } | RequestContent::ToolResult { .. } => false,
+            RequestContent::ProviderReasoning { .. }
+            | RequestContent::ToolUse { .. }
+            | RequestContent::HostedToolUse { .. }
+            | RequestContent::ToolResult { .. } => false,
         })
     })
 }
@@ -463,7 +466,10 @@ pub fn request_last_message_contains_text(request: &ModelRequest, needle: &str) 
             RequestContent::Text { text } | RequestContent::Reasoning { text } => {
                 text.contains(needle)
             }
-            RequestContent::ToolUse { .. } | RequestContent::ToolResult { .. } => false,
+            RequestContent::ProviderReasoning { .. }
+            | RequestContent::ToolUse { .. }
+            | RequestContent::HostedToolUse { .. }
+            | RequestContent::ToolResult { .. } => false,
         })
     })
 }

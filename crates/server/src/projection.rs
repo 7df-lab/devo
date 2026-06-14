@@ -69,6 +69,40 @@ impl DefaultProjection {
                             }),
                         );
                     }
+                    ContentBlock::HostedToolUse {
+                        id,
+                        name,
+                        input,
+                        output,
+                        status,
+                    } => {
+                        history.push(
+                            SessionHistoryItem::new(
+                                Some(id.clone()),
+                                SessionHistoryItemKind::ToolCall,
+                                summarize_tool_call(name, input),
+                                String::new(),
+                            )
+                            .with_tool_io(SessionHistoryToolIo {
+                                tool_name: name.clone(),
+                                input: input.clone(),
+                                output: output.clone(),
+                                display_content: None,
+                            }),
+                        );
+                        if output.is_some() || status.is_some() {
+                            let content = output.as_ref().map_or_else(
+                                || format!("status: {}", status.as_deref().unwrap_or("completed")),
+                                ToString::to_string,
+                            );
+                            history.push(SessionHistoryItem::new(
+                                Some(id.clone()),
+                                SessionHistoryItemKind::ToolResult,
+                                "Tool output".to_string(),
+                                content,
+                            ));
+                        }
+                    }
                     ContentBlock::ToolResult {
                         tool_use_id,
                         content,
@@ -99,6 +133,7 @@ impl DefaultProjection {
                         ));
                     }
                     ContentBlock::Reasoning { .. } => {}
+                    ContentBlock::ProviderReasoning { .. } => {}
                     ContentBlock::Text { .. } => {}
                 }
             }

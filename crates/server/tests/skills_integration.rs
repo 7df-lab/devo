@@ -303,7 +303,10 @@ fn all_user_request_texts(request: &ModelRequest) -> Vec<String> {
             message.content.iter().filter_map(|content| match content {
                 RequestContent::Reasoning { text } => Some(text.clone()),
                 RequestContent::Text { text } => Some(text.clone()),
-                RequestContent::ToolUse { .. } | RequestContent::ToolResult { .. } => None,
+                RequestContent::ProviderReasoning { .. }
+                | RequestContent::ToolUse { .. }
+                | RequestContent::HostedToolUse { .. }
+                | RequestContent::ToolResult { .. } => None,
             })
         })
         .collect()

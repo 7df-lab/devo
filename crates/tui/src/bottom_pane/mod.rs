@@ -293,7 +293,7 @@ impl BottomPane {
         self.input_mode
     }
 
-    fn set_input_mode(&mut self, mode: InputMode) {
+    pub(crate) fn set_input_mode(&mut self, mode: InputMode) {
         if self.input_mode == mode {
             return;
         }

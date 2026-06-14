@@ -77,8 +77,28 @@ impl From<ContentBlock> for ResponseItem {
                 role: Role::Assistant,
                 content: vec![ContentBlock::Text { text }],
             }),
+            ContentBlock::ProviderReasoning { provider, payload } => Self::Message(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ProviderReasoning { provider, payload }],
+            }),
             ContentBlock::Reasoning { text } => Self::Reason { text },
             ContentBlock::ToolUse { id, name, input } => Self::ToolCall { id, name, input },
+            ContentBlock::HostedToolUse {
+                id,
+                name,
+                input,
+                output,
+                status,
+            } => Self::Message(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::HostedToolUse {
+                    id,
+                    name,
+                    input,
+                    output,
+                    status,
+                }],
+            }),
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
@@ -183,8 +203,32 @@ pub fn message_to_response_items(msg: Message) -> Vec<ResponseItem> {
             ContentBlock::Reasoning { text } => {
                 items.push(ResponseItem::Reason { text });
             }
+            ContentBlock::ProviderReasoning { provider, payload } => {
+                items.push(ResponseItem::Message(Message {
+                    role,
+                    content: vec![ContentBlock::ProviderReasoning { provider, payload }],
+                }));
+            }
             ContentBlock::ToolUse { id, name, input } => {
                 items.push(ResponseItem::ToolCall { id, name, input });
+            }
+            ContentBlock::HostedToolUse {
+                id,
+                name,
+                input,
+                output,
+                status,
+            } => {
+                items.push(ResponseItem::Message(Message {
+                    role,
+                    content: vec![ContentBlock::HostedToolUse {
+                        id,
+                        name,
+                        input,
+                        output,
+                        status,
+                    }],
+                }));
             }
             ContentBlock::ToolResult {
                 tool_use_id,

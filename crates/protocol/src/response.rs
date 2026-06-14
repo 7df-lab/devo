@@ -18,6 +18,10 @@ pub enum ResponseContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
+    ProviderReasoning {
+        provider: String,
+        payload: serde_json::Value,
+    },
 }
 
 /// Token usage statistics.

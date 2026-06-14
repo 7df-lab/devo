@@ -180,6 +180,8 @@ pub enum PendingInputKind {
         input: Vec<InputItem>,
         display_text: String,
         prompt_text: String,
+        #[serde(default)]
+        prompt_messages: Vec<String>,
     },
     ToolCallBlockedByHook {
         tool_use_id: String,

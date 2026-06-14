@@ -444,14 +444,18 @@ fn latest_assistant_text(messages: &[devo_core::Message]) -> Option<&str> {
             .find_map(|block| match block {
                 devo_core::ContentBlock::Text { text } => Some(text.as_str()),
                 devo_core::ContentBlock::Reasoning { .. }
+                | devo_core::ContentBlock::ProviderReasoning { .. }
                 | devo_core::ContentBlock::ToolUse { .. }
+                | devo_core::ContentBlock::HostedToolUse { .. }
                 | devo_core::ContentBlock::ToolResult { .. } => None,
             })
             .or_else(|| {
                 message.content.iter().find_map(|block| match block {
                     devo_core::ContentBlock::Reasoning { text } => Some(text.as_str()),
                     devo_core::ContentBlock::Text { .. }
+                    | devo_core::ContentBlock::ProviderReasoning { .. }
                     | devo_core::ContentBlock::ToolUse { .. }
+                    | devo_core::ContentBlock::HostedToolUse { .. }
                     | devo_core::ContentBlock::ToolResult { .. } => None,
                 })
             })

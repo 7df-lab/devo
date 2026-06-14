@@ -146,31 +146,33 @@ fn build_input(request: &ModelRequest) -> Vec<Value> {
 fn build_input_message(role: OpenAIRole, content: &[RequestContent]) -> Value {
     let content = content
         .iter()
-        .map(|block| match block {
-            RequestContent::Text { text } => json!({
+        .filter_map(|block| match block {
+            RequestContent::Text { text } => Some(json!({
                 "type": "input_text",
                 "text": text,
-            }),
-            RequestContent::Reasoning { text } => json!({
+            })),
+            RequestContent::Reasoning { text } => Some(json!({
                 "type": "reasoning",
                 "text": text,
-            }),
-            RequestContent::ToolUse { id, name, input } => json!({
+            })),
+            RequestContent::ProviderReasoning { .. } => None,
+            RequestContent::ToolUse { id, name, input } => Some(json!({
                 "type": "tool_call",
                 "id": id,
                 "name": name,
                 "input": input,
-            }),
+            })),
+            RequestContent::HostedToolUse { .. } => None,
             RequestContent::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
-            } => json!({
+            } => Some(json!({
                 "type": "function_call_output",
                 "call_id": tool_use_id,
                 "output": content,
                 "is_error": is_error,
-            }),
+            })),
         })
         .collect::<Vec<_>>();
 
@@ -632,7 +634,8 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                                                     };
                                                 }
                                             }
-                                            ResponseContent::Text(_) => {}
+                                            ResponseContent::Text(_)
+                                            | ResponseContent::ProviderReasoning { .. } => {}
                                         }
                                     }
                                 }

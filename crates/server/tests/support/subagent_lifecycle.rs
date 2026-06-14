@@ -560,7 +560,9 @@ pub fn message_texts(request: &ModelRequest) -> Vec<String> {
             message.content.iter().filter_map(|content| match content {
                 RequestContent::Text { text } => Some(text.clone()),
                 RequestContent::Reasoning { .. }
+                | RequestContent::ProviderReasoning { .. }
                 | RequestContent::ToolUse { .. }
+                | RequestContent::HostedToolUse { .. }
                 | RequestContent::ToolResult { .. } => None,
             })
         })

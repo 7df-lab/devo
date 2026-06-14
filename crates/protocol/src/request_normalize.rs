@@ -40,6 +40,8 @@ fn tool_use_ids(message: &RequestMessage) -> Vec<String> {
             RequestContent::ToolUse { id, .. } => Some(id.clone()),
             RequestContent::Text { .. }
             | RequestContent::Reasoning { .. }
+            | RequestContent::ProviderReasoning { .. }
+            | RequestContent::HostedToolUse { .. }
             | RequestContent::ToolResult { .. } => None,
         })
         .collect()
@@ -74,6 +76,8 @@ fn collect_tool_result_followup(
                 }
                 RequestContent::Text { .. }
                 | RequestContent::Reasoning { .. }
+                | RequestContent::ProviderReasoning { .. }
+                | RequestContent::HostedToolUse { .. }
                 | RequestContent::ToolUse { .. } => other_content.push(content.clone()),
             }
         }
@@ -122,6 +126,8 @@ fn reorder_user_tool_results(mut message: RequestMessage) -> RequestMessage {
             RequestContent::ToolResult { .. } => tool_results.push(content),
             RequestContent::Text { .. }
             | RequestContent::Reasoning { .. }
+            | RequestContent::ProviderReasoning { .. }
+            | RequestContent::HostedToolUse { .. }
             | RequestContent::ToolUse { .. } => other_content.push(content),
         }
     }

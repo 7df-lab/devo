@@ -68,11 +68,11 @@ impl ServerRuntime {
                 .clone()
                 .unwrap_or_else(|| session.summary.cwd.clone())
         };
-        let Some(input_text) = (match self
+        let Some(resolved_input) = (match self
             .deps
             .resolve_input_items(&params.input, Some(workspace_root.as_path()))
         {
-            Ok(input_text) => input_text,
+            Ok(resolved_input) => resolved_input,
             Err(error) => {
                 let code = match error {
                     devo_core::SkillError::SkillNotFound { .. }
@@ -105,7 +105,7 @@ impl ServerRuntime {
                 devo_core::HookEvent::UserPromptSubmit,
                 serde_json::Map::from_iter([(
                     "prompt".to_string(),
-                    serde_json::Value::String(input_text.clone()),
+                    serde_json::Value::String(resolved_input.prompt_text.clone()),
                 )]),
             )
             .await;
@@ -144,7 +144,8 @@ impl ServerRuntime {
                         kind: devo_core::PendingInputKind::UserInput {
                             input: params.input.clone(),
                             display_text: display_input.clone(),
-                            prompt_text: input_text.clone(),
+                            prompt_text: resolved_input.prompt_text.clone(),
+                            prompt_messages: resolved_input.prompt_messages.clone(),
                         },
                         metadata: pending_turn_metadata(
                             collaboration_mode,
@@ -246,7 +247,8 @@ impl ServerRuntime {
             let runtime = Arc::clone(self);
             let turn_for_task = turn.clone();
             let display_input_for_task = display_input.clone();
-            let input_for_task = input_text.clone();
+            let input_for_task = resolved_input.prompt_text.clone();
+            let input_messages_for_task = resolved_input.prompt_messages.clone();
             let turn_config_for_task = turn_config.clone();
             let cancel_token = CancellationToken::new();
             self.active_turn_cancellations
@@ -261,6 +263,7 @@ impl ServerRuntime {
                         turn_config: turn_config_for_task,
                         display_input: display_input_for_task,
                         input: input_for_task,
+                        input_messages: input_messages_for_task,
                         collaboration_mode: params.collaboration_mode,
                         input_mode: TurnInputMode::VisibleUserMessage,
                     })
@@ -342,7 +345,7 @@ impl ServerRuntime {
             turn_id = %turn.turn_id,
             sequence = turn.sequence,
             request_model = %turn.request_model,
-            input_chars = input_text.len(),
+            input_chars = resolved_input.prompt_text.len(),
             "started turn"
         );
         self.broadcast_event(ServerEvent::SessionStatusChanged(
@@ -761,11 +764,11 @@ impl ServerRuntime {
                 Arc::clone(&session.btw_input_queue),
             )
         };
-        let prompt_text = match self
+        let resolved_input = match self
             .deps
             .resolve_input_items(&params.input, Some(workspace_root.as_path()))
         {
-            Ok(Some(input_text)) => input_text,
+            Ok(Some(resolved_input)) => resolved_input,
             Ok(None) => {
                 return self.error_response(
                     request_id,
@@ -808,7 +811,8 @@ impl ServerRuntime {
             kind: devo_core::PendingInputKind::UserInput {
                 input: params.input.clone(),
                 display_text: display_input,
-                prompt_text,
+                prompt_text: resolved_input.prompt_text,
+                prompt_messages: resolved_input.prompt_messages,
             },
             metadata: None,
             created_at: chrono::Utc::now(),

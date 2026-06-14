@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::error::Error as StdError;
 use std::pin::Pin;
 
 use anyhow::Context;
@@ -8,6 +10,7 @@ use async_trait::async_trait;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::ProviderWireApi;
+use devo_protocol::ReasoningEffort;
 use devo_protocol::RequestContent;
 use devo_protocol::RequestMessage;
 use devo_protocol::ResponseContent;
@@ -20,21 +23,26 @@ use devo_protocol::normalize_tool_result_messages;
 use futures::Stream;
 use futures::StreamExt;
 use reqwest::Client;
+use reqwest::header::ACCEPT_ENCODING;
+use reqwest::header::CACHE_CONTROL;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderValue;
 use reqwest_eventsource::Event;
 use reqwest_eventsource::EventSource;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
 use tracing::debug;
 
 use super::AnthropicAIRole;
+use super::stream_usage::AnthropicStreamUsage;
 use crate::ModelProviderSDK;
 use crate::ProviderAdapter;
 use crate::ProviderCapabilities;
 use crate::ProviderHttpOptions;
+use crate::dsml::DsmlToolCallHealer;
 use crate::hosted_tools::append_anthropic_hosted_tools;
 use crate::http::invalid_status_error;
 use crate::merge_extra_body;
@@ -90,6 +98,12 @@ impl AnthropicProvider {
         };
         self.http_options.apply_custom_headers(builder).json(body)
     }
+
+    fn streaming_request_builder(&self, body: &Value) -> reqwest::RequestBuilder {
+        self.request_builder(body)
+            .header(CACHE_CONTROL, HeaderValue::from_static("no-cache"))
+            .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +118,8 @@ struct AnthropicMessagesRequest {
     tools: Option<Vec<AnthropicToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<AnthropicThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<AnthropicOutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -124,12 +140,36 @@ enum AnthropicInputContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        thinking: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: Value,
+    },
+    #[serde(rename = "server_tool_use")]
+    ServerToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    #[serde(rename = "web_search_tool_result")]
+    WebSearchToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+    #[serde(rename = "web_fetch_tool_result")]
+    WebFetchToolResult {
+        tool_use_id: String,
+        content: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
@@ -149,9 +189,12 @@ struct AnthropicToolDefinition {
 
 #[derive(Debug, Serialize)]
 struct AnthropicThinkingConfig {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    budget_tokens: usize,
+    r#type: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicOutputConfig {
+    effort: &'static str,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -238,6 +281,8 @@ struct AnthropicResponseContentBlock {
     #[serde(default)]
     thinking: Option<String>,
     #[serde(default)]
+    signature: Option<String>,
+    #[serde(default)]
     data: Option<String>,
     #[serde(default)]
     id: Option<String>,
@@ -296,7 +341,7 @@ impl ModelProviderSDK for AnthropicProvider {
             .json()
             .await
             .context("failed to decode anthropic response")?;
-        parse_response(value)
+        parse_response(value, &DsmlToolCallHealer::for_request(&request))
     }
 
     async fn completion_stream(
@@ -314,17 +359,20 @@ impl ModelProviderSDK for AnthropicProvider {
             "sending anthropic streaming request"
         );
 
-        let event_source = EventSource::new(self.request_builder(&body))
+        let dsml_healer = DsmlToolCallHealer::for_request(&request);
+        let event_source = EventSource::new(self.streaming_request_builder(&body))
             .context("failed to create anthropic event source")?;
         let stream = async_stream::try_stream! {
             let mut message_id = String::new();
-            let mut input_tokens = 0usize;
-            let mut output_tokens = 0usize;
+            let mut stream_usage = AnthropicStreamUsage::default();
             let mut stop_reason: Option<StopReason> = None;
             let mut content_blocks: BTreeMap<usize, ResponseContent> = BTreeMap::new();
             let mut reasoning_blocks: BTreeMap<usize, String> = BTreeMap::new();
+            let mut provider_reasoning_blocks: BTreeMap<usize, Map<String, Value>> = BTreeMap::new();
+            let mut completed_reasoning_blocks: HashSet<usize> = HashSet::new();
             let mut tool_json: HashMap<usize, String> = HashMap::new();
             let mut hosted_tool_inputs: HashMap<String, Value> = HashMap::new();
+            let mut dsml_text_filters = BTreeMap::new();
 
             futures::pin_mut!(event_source);
             while let Some(event) = event_source.next().await {
@@ -342,8 +390,9 @@ impl ModelProviderSDK for AnthropicProvider {
                         .await)?
                     }
                     Err(error) => Err(anyhow::anyhow!(
-                        "anthropic stream error for model {}: {error}",
-                        request.model
+                        "anthropic stream error for model {}: {}",
+                        request.model,
+                        format_eventsource_error(&error)
                     ))?,
                 };
 
@@ -363,12 +412,9 @@ impl ModelProviderSDK for AnthropicProvider {
                                 {
                                     message_id = id.to_string();
                                 }
-                                if let Some(usage) = data.get("usage")
-                                    && let Some(input) =
-                                        usage.get("input_tokens").and_then(Value::as_u64)
-                                    {
-                                        input_tokens = input as usize;
-                                    }
+                                if let Some(usage) = stream_usage.update_from_message_start(&data) {
+                                    yield StreamEvent::UsageDelta(usage);
+                                }
                             }
                             "content_block_start" => {
                                 let Some(index) = data.get("index").and_then(Value::as_u64) else {
@@ -385,6 +431,9 @@ impl ModelProviderSDK for AnthropicProvider {
                                     })?;
                                 match block.kind.as_str() {
                                     "text" => {
+                                        if let Some(filter) = dsml_healer.text_stream_filter() {
+                                            dsml_text_filters.insert(index as usize, filter);
+                                        }
                                         content_blocks.insert(
                                             index as usize,
                                             ResponseContent::Text(String::new()),
@@ -483,6 +532,10 @@ impl ModelProviderSDK for AnthropicProvider {
                                     }
                                     "thinking" => {
                                         reasoning_blocks.insert(index as usize, String::new());
+                                        provider_reasoning_blocks.insert(
+                                            index as usize,
+                                            anthropic_thinking_payload_map(&block),
+                                        );
                                         yield StreamEvent::ReasoningStart {
                                             index: index as usize,
                                         };
@@ -509,10 +562,20 @@ impl ModelProviderSDK for AnthropicProvider {
                                         {
                                             value.push_str(text);
                                         }
-                                        yield StreamEvent::TextDelta {
-                                            index: index as usize,
-                                            text: text.to_string(),
+                                        let index = index as usize;
+                                        let text_chunks = if let Some(filter) =
+                                            dsml_text_filters.get_mut(&index)
+                                        {
+                                            filter.consume(text)
+                                        } else {
+                                            vec![text.to_string()]
                                         };
+                                        for text in text_chunks {
+                                            yield StreamEvent::TextDelta {
+                                                index,
+                                                text,
+                                            };
+                                        }
                                     }
                                     Some("thinking_delta") => {
                                         let text = delta
@@ -524,10 +587,40 @@ impl ModelProviderSDK for AnthropicProvider {
                                         {
                                             value.push_str(text);
                                         }
+                                        append_json_string_field(
+                                            provider_reasoning_blocks
+                                                .entry(index as usize)
+                                                .or_insert_with(|| {
+                                                    let mut payload = Map::new();
+                                                    payload
+                                                        .insert("type".to_string(), json!("thinking"));
+                                                    payload
+                                                }),
+                                            "thinking",
+                                            text,
+                                        );
                                         yield StreamEvent::ReasoningDelta {
                                             index: index as usize,
                                             text: text.to_string(),
                                         };
+                                    }
+                                    Some("signature_delta") => {
+                                        let signature = delta
+                                            .get("signature")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or_default();
+                                        append_json_string_field(
+                                            provider_reasoning_blocks
+                                                .entry(index as usize)
+                                                .or_insert_with(|| {
+                                                    let mut payload = Map::new();
+                                                    payload
+                                                        .insert("type".to_string(), json!("thinking"));
+                                                    payload
+                                                }),
+                                            "signature",
+                                            signature,
+                                        );
                                     }
                                     Some("input_json_delta") => {
                                         let partial_json = delta
@@ -547,6 +640,14 @@ impl ModelProviderSDK for AnthropicProvider {
                             }
                             "content_block_stop" => {
                                 let index = data.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                                if let Some(mut filter) = dsml_text_filters.remove(&index) {
+                                    for text in filter.finish() {
+                                        yield StreamEvent::TextDelta {
+                                            index,
+                                            text,
+                                        };
+                                    }
+                                }
                                 if let Some(json_str) = tool_json.remove(&index)
                                     && !json_str.is_empty()
                                     && let Ok(parsed) = serde_json::from_str(&json_str)
@@ -557,7 +658,8 @@ impl ModelProviderSDK for AnthropicProvider {
                                         | ResponseContent::HostedToolUse { input, .. } => {
                                             *input = parsed;
                                         }
-                                        ResponseContent::Text(_) => {}
+                                        ResponseContent::Text(_)
+                                        | ResponseContent::ProviderReasoning { .. } => {}
                                     }
                                 }
                                 if let Some(ResponseContent::HostedToolUse {
@@ -578,6 +680,11 @@ impl ModelProviderSDK for AnthropicProvider {
                                         input: input.clone(),
                                     };
                                 }
+                                if reasoning_blocks.contains_key(&index)
+                                    && completed_reasoning_blocks.insert(index)
+                                {
+                                    yield StreamEvent::ReasoningDone { index };
+                                }
                             }
                             "message_delta" => {
                                 if let Some(delta) = data.get("delta").and_then(Value::as_object)
@@ -586,30 +693,34 @@ impl ModelProviderSDK for AnthropicProvider {
                                     {
                                         stop_reason = Some(parse_stop_reason(reason));
                                     }
-                                if let Some(usage) = data.get("usage") {
-                                    if let Some(output) = usage.get("output_tokens").and_then(Value::as_u64)
-                                    {
-                                        output_tokens = output as usize;
-                                    }
-                                    yield StreamEvent::UsageDelta(Usage {
-                                        input_tokens,
-                                        output_tokens,
-                                        cache_creation_input_tokens: None,
-                                        cache_read_input_tokens: None,
-                                    });
+                                if let Some(usage) = stream_usage.update_from_message_delta(&data) {
+                                    yield StreamEvent::UsageDelta(usage);
                                 }
                             }
                             "message_stop" => {
+                                for (index, mut filter) in std::mem::take(&mut dsml_text_filters) {
+                                    for text in filter.finish() {
+                                        yield StreamEvent::TextDelta {
+                                            index,
+                                            text,
+                                        };
+                                    }
+                                }
+                                for index in reasoning_blocks.keys().copied().collect::<Vec<_>>() {
+                                    if completed_reasoning_blocks.insert(index) {
+                                        yield StreamEvent::ReasoningDone { index };
+                                    }
+                                }
+                                insert_provider_reasoning_blocks(
+                                    &mut content_blocks,
+                                    std::mem::take(&mut provider_reasoning_blocks),
+                                );
                                 let response = ModelResponse {
                                     id: message_id.clone(),
-                                    content: content_blocks.into_values().collect(),
+                                    content: dsml_healer
+                                        .heal_response_content(content_blocks.into_values().collect()),
                                     stop_reason: stop_reason.clone(),
-                                    usage: Usage {
-                                        input_tokens,
-                                        output_tokens,
-                                        cache_creation_input_tokens: None,
-                                        cache_read_input_tokens: None,
-                                    },
+                                    usage: stream_usage.snapshot(),
                                     metadata: ResponseMetadata {
                                         extras: reasoning_blocks
                                             .values()
@@ -628,16 +739,28 @@ impl ModelProviderSDK for AnthropicProvider {
                 }
             }
 
+            for (index, mut filter) in std::mem::take(&mut dsml_text_filters) {
+                for text in filter.finish() {
+                    yield StreamEvent::TextDelta {
+                        index,
+                        text,
+                    };
+                }
+            }
+            for index in reasoning_blocks.keys().copied().collect::<Vec<_>>() {
+                if completed_reasoning_blocks.insert(index) {
+                    yield StreamEvent::ReasoningDone { index };
+                }
+            }
+            insert_provider_reasoning_blocks(
+                &mut content_blocks,
+                provider_reasoning_blocks,
+            );
             let response = ModelResponse {
                 id: message_id,
-                content: content_blocks.into_values().collect(),
+                content: dsml_healer.heal_response_content(content_blocks.into_values().collect()),
                 stop_reason,
-                usage: Usage {
-                    input_tokens,
-                    output_tokens,
-                    cache_creation_input_tokens: None,
-                    cache_read_input_tokens: None,
-                },
+                usage: stream_usage.snapshot(),
                 metadata: ResponseMetadata {
                     extras: reasoning_blocks
                         .into_values()
@@ -737,6 +860,8 @@ impl ProviderAdapter for AnthropicProvider {
 ///   - `ThinkingConfigEnabled = object { budget_tokens, type, display }`
 ///   - `ThinkingConfigDisabled = object { type }`
 ///   - `ThinkingConfigAdaptive = object { type, display }`
+///     This implementation sends `type: "enabled"` for enabled thinking and
+///     uses `output_config.effort` for effort control.
 /// - `tool_choice: optional ToolChoice`
 ///   Controls how the model uses available tools.
 /// - `tools: optional array of ToolUnion`
@@ -749,12 +874,12 @@ impl ProviderAdapter for AnthropicProvider {
 /// Notes about this implementation:
 /// - This builder currently emits the subset represented by the crate's
 ///   `ModelRequest`: `model`, `max_tokens`, `stream`, `messages`, optional
-///   `system`, optional `tools`, optional `thinking`, and any merged
-///   `extra_body`.
+///   `system`, optional `tools`, optional `thinking`, optional
+///   `output_config.effort`, and any merged `extra_body`.
 /// - Request message content is currently serialized from shared IR blocks into
 ///   Anthropic `text`, `tool_use`, and `tool_result` blocks.
 /// - More advanced Anthropic request features documented above, such as image
-///   blocks, document blocks, `tool_choice`, `output_config`, `cache_control`,
+///   blocks, document blocks, `tool_choice`, `cache_control`,
 ///   `metadata`, `service_tier`, `stop_sequences`, `top_k`, and `top_p`, are
 ///   not constructed directly here unless supplied through `extra_body`.
 fn build_request(request: &ModelRequest, stream: bool) -> Value {
@@ -777,6 +902,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                 .collect::<Vec<_>>()
         }),
         thinking: request.thinking.as_deref().and_then(build_thinking),
+        output_config: build_output_config(request.thinking.as_deref(), request.reasoning_effort),
         temperature: request.sampling.temperature,
         top_p: request.sampling.top_p,
         top_k: request.sampling.top_k,
@@ -851,12 +977,11 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
 /// Notes about this implementation:
 /// - `parse_response` currently reads `id`, `content`, `stop_reason`, and
 ///   `usage`.
-/// - Response content is currently mapped only for Anthropic `text` and
-///   `tool_use` blocks.
+/// - Response content maps Anthropic `text`, local `tool_use`, hosted tool,
+///   and signed `thinking` blocks.
 /// - Other documented response fields such as `container`, `model`, `role`,
-///   `stop_details`, `stop_sequence`, `type`, server-tool result blocks,
-///   thinking blocks, citations, and the richer usage breakdown are not
-///   currently projected into `ModelResponse`.
+///   `stop_details`, `stop_sequence`, `type`, citations, and the richer usage
+///   breakdown are not currently projected into shared `ModelResponse` fields.
 ///   -------------------------- Below is an example -------------------------
 /// ```json
 /// {
@@ -910,7 +1035,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
 ///  }
 ///}
 /// ```
-fn parse_response(value: Value) -> Result<ModelResponse> {
+fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<ModelResponse> {
     let response: AnthropicMessageResponse = serde_json::from_value(value.clone())
         .context("failed to deserialize anthropic messages response")?;
     let mut content = Vec::new();
@@ -938,6 +1063,7 @@ fn parse_response(value: Value) -> Result<ModelResponse> {
             content.push(parsed);
         }
     }
+    let content = dsml_healer.heal_response_content(content);
     let stop_reason = response.stop_reason.as_deref().map(parse_stop_reason);
     let usage = response.usage.as_ref().map(map_usage).unwrap_or_default();
 
@@ -965,31 +1091,78 @@ fn build_message(message: &RequestMessage) -> AnthropicInputMessage {
     let content = message
         .content
         .iter()
-        .map(build_content_block)
+        .filter_map(build_content_block)
         .collect::<Vec<_>>();
 
     AnthropicInputMessage { role, content }
 }
 
-fn build_content_block(block: &RequestContent) -> AnthropicInputContentBlock {
+fn build_content_block(block: &RequestContent) -> Option<AnthropicInputContentBlock> {
     match block {
-        RequestContent::Text { text } => AnthropicInputContentBlock::Text { text: text.clone() },
-        RequestContent::Reasoning { text } => AnthropicInputContentBlock::Thinking {
-            thinking: text.clone(),
-        },
-        RequestContent::ToolUse { id, name, input } => AnthropicInputContentBlock::ToolUse {
+        RequestContent::Text { text } => {
+            Some(AnthropicInputContentBlock::Text { text: text.clone() })
+        }
+        RequestContent::Reasoning { .. } => None,
+        RequestContent::ProviderReasoning { provider, payload } if provider == "anthropic" => {
+            Some(AnthropicInputContentBlock::Thinking {
+                thinking: payload
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                signature: payload
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        }
+        RequestContent::ProviderReasoning { .. } => None,
+        RequestContent::ToolUse { id, name, input } => Some(AnthropicInputContentBlock::ToolUse {
             id: id.clone(),
             name: name.clone(),
             input: input.clone(),
-        },
+        }),
+        RequestContent::HostedToolUse {
+            id,
+            name,
+            input,
+            output,
+            status,
+        } => Some(build_hosted_content_block(id, name, input, output, status)),
         RequestContent::ToolResult {
             tool_use_id,
             content,
             is_error,
-        } => AnthropicInputContentBlock::ToolResult {
+        } => Some(AnthropicInputContentBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),
             content: content.clone(),
             is_error: *is_error,
+        }),
+    }
+}
+
+fn build_hosted_content_block(
+    id: &str,
+    name: &str,
+    input: &Value,
+    output: &Option<Value>,
+    status: &Option<String>,
+) -> AnthropicInputContentBlock {
+    match output {
+        None => AnthropicInputContentBlock::ServerToolUse {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: input.clone(),
+        },
+        Some(content) if name == "web_fetch" => AnthropicInputContentBlock::WebFetchToolResult {
+            tool_use_id: id.to_string(),
+            content: content.clone(),
+            status: status.clone(),
+        },
+        Some(content) => AnthropicInputContentBlock::WebSearchToolResult {
+            tool_use_id: id.to_string(),
+            content: content.clone(),
+            status: status.clone(),
         },
     }
 }
@@ -1053,15 +1226,67 @@ fn parse_response_content_block(
                     text: thinking.clone(),
                 });
             }
-            None
+            Some(ResponseContent::ProviderReasoning {
+                provider: "anthropic".to_string(),
+                payload: anthropic_thinking_payload(block),
+            })
         }
         _ => None,
     }
 }
 
+fn anthropic_thinking_payload(block: &AnthropicResponseContentBlock) -> Value {
+    Value::Object(anthropic_thinking_payload_map(block))
+}
+
+fn anthropic_thinking_payload_map(block: &AnthropicResponseContentBlock) -> Map<String, Value> {
+    let mut payload = block.extra.clone();
+    payload.insert("type".to_string(), json!("thinking"));
+    payload.insert(
+        "thinking".to_string(),
+        json!(block.thinking.clone().unwrap_or_default()),
+    );
+    if let Some(signature) = &block.signature {
+        payload.insert("signature".to_string(), json!(signature));
+    }
+    payload
+}
+
+fn append_json_string_field(payload: &mut Map<String, Value>, key: &str, value: &str) {
+    if value.is_empty() {
+        return;
+    }
+    match payload.get_mut(key) {
+        Some(Value::String(existing)) => existing.push_str(value),
+        _ => {
+            payload.insert(key.to_string(), json!(value));
+        }
+    }
+}
+
+fn insert_provider_reasoning_blocks(
+    content_blocks: &mut BTreeMap<usize, ResponseContent>,
+    provider_reasoning_blocks: BTreeMap<usize, Map<String, Value>>,
+) {
+    for (index, payload) in provider_reasoning_blocks {
+        content_blocks.insert(
+            index,
+            ResponseContent::ProviderReasoning {
+                provider: "anthropic".to_string(),
+                payload: Value::Object(payload),
+            },
+        );
+    }
+}
+
 fn map_usage(usage: &AnthropicUsage) -> Usage {
+    let cache_creation_input_tokens = usage.cache_creation_input_tokens.unwrap_or(0);
+    let cache_read_input_tokens = usage.cache_read_input_tokens.unwrap_or(0);
     Usage {
-        input_tokens: usage.input_tokens,
+        input_tokens: usage
+            .input_tokens
+            .saturating_add(cache_creation_input_tokens)
+            .saturating_add(cache_read_input_tokens),
         output_tokens: usage.output_tokens,
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         cache_read_input_tokens: usage.cache_read_input_tokens,
@@ -1113,25 +1338,69 @@ fn parse_stop_reason(value: &str) -> StopReason {
     }
 }
 
+fn format_eventsource_error(error: &reqwest_eventsource::Error) -> String {
+    let mut message = format!("{error}; debug={error:?}");
+    let mut source = error.source();
+    while let Some(error) = source {
+        message.push_str("; source=");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    message
+}
+
 fn build_thinking(level: &str) -> Option<AnthropicThinkingConfig> {
-    let budget_tokens = match level.trim().to_ascii_lowercase().as_str() {
-        "disabled" => return None,
-        "enabled" | "medium" => 4_096,
-        "low" => 1_024,
-        "high" => 8_192,
-        "xhigh" => 16_384,
-        _ => 4_096,
+    match level.trim().to_ascii_lowercase().as_str() {
+        "" | "default" => None,
+        "disabled" => Some(AnthropicThinkingConfig { r#type: "disabled" }),
+        "enabled" | "low" | "medium" | "high" | "xhigh" | "max" => {
+            Some(AnthropicThinkingConfig { r#type: "enabled" })
+        }
+        _ => None,
+    }
+}
+
+fn build_output_config(
+    thinking: Option<&str>,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Option<AnthropicOutputConfig> {
+    if matches!(
+        thinking
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "" | "default" | "disabled"
+    ) {
+        return None;
+    }
+
+    let effort = match reasoning_effort {
+        Some(ReasoningEffort::Low) => "low",
+        Some(ReasoningEffort::Medium) => "medium",
+        Some(ReasoningEffort::High) => "high",
+        Some(ReasoningEffort::XHigh) => "xhigh",
+        Some(ReasoningEffort::Max) => "max",
+        Some(ReasoningEffort::None | ReasoningEffort::Minimal) => return None,
+        None => match thinking?.trim().to_ascii_lowercase().as_str() {
+            "enabled" => "high",
+            "low" => "low",
+            "medium" => "medium",
+            "high" => "high",
+            "xhigh" => "xhigh",
+            "max" => "max",
+            _ => return None,
+        },
     };
 
-    Some(AnthropicThinkingConfig {
-        kind: "enabled",
-        budget_tokens,
-    })
+    Some(AnthropicOutputConfig { effort })
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::dsml::DsmlToolCallHealer;
     use devo_protocol::ModelRequest;
+    use devo_protocol::ReasoningEffort;
     use devo_protocol::RequestContent;
     use devo_protocol::RequestMessage;
     use devo_protocol::SamplingControls;
@@ -1206,7 +1475,7 @@ mod tests {
         assert_eq!(body["top_p"], json!(0.9));
         assert_eq!(body["top_k"], json!(32));
         assert_eq!(body["thinking"]["type"], json!("enabled"));
-        assert_eq!(body["thinking"]["budget_tokens"], json!(4096));
+        assert_eq!(body["output_config"]["effort"], json!("medium"));
         assert_eq!(body["messages"][0]["role"], json!("assistant"));
         assert_eq!(body["messages"][0]["content"][1]["type"], json!("tool_use"));
         assert_eq!(
@@ -1217,7 +1486,7 @@ mod tests {
     }
 
     #[test]
-    fn build_request_serializes_reasoning_as_thinking_block() {
+    fn build_request_skips_unsigned_reasoning_blocks() {
         let request = ModelRequest {
             model: "deepseek-v4-flash".to_string(),
             system: None,
@@ -1252,10 +1521,6 @@ mod tests {
             body["messages"][0]["content"],
             json!([
                 {
-                    "type": "thinking",
-                    "thinking": "Need to inspect the file first."
-                },
-                {
                     "type": "text",
                     "text": "I'll read the README."
                 },
@@ -1270,56 +1535,252 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_extracts_text_tool_use_reasoning_and_usage() {
-        let response = parse_response(json!({
-            "id": "msg_123",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-sonnet-4-6",
-            "content": [
-                {
-                    "type": "thinking",
-                    "thinking": "Need to call the weather tool first.",
-                    "signature": "sig_123"
-                },
-                {
-                    "type": "text",
-                    "text": "Let me check that."
-                },
+    fn build_request_serializes_provider_reasoning_with_signature() {
+        let request = ModelRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: vec![RequestMessage {
+                role: "assistant".to_string(),
+                content: vec![RequestContent::ProviderReasoning {
+                    provider: "anthropic".to_string(),
+                    payload: json!({
+                        "type": "thinking",
+                        "thinking": "Need to inspect the file first.",
+                        "signature": "sig_123"
+                    }),
+                }],
+            }],
+            max_tokens: 1024,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: SamplingControls::default(),
+            thinking: Some("enabled".to_string()),
+            reasoning_effort: None,
+            extra_body: None,
+        };
+
+        let body = build_request(&request, true);
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{
+                "type": "thinking",
+                "thinking": "Need to inspect the file first.",
+                "signature": "sig_123"
+            }])
+        );
+    }
+
+    #[test]
+    fn build_request_serializes_hosted_tool_use_blocks() {
+        let request = ModelRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: vec![RequestMessage {
+                role: "assistant".to_string(),
+                content: vec![
+                    RequestContent::HostedToolUse {
+                        id: "srvtool_1".to_string(),
+                        name: "web_search".to_string(),
+                        input: json!({"query": "Rust docs"}),
+                        output: None,
+                        status: None,
+                    },
+                    RequestContent::HostedToolUse {
+                        id: "srvtool_1".to_string(),
+                        name: "web_search".to_string(),
+                        input: json!({"query": "Rust docs"}),
+                        output: Some(json!([{
+                            "title": "Rust documentation",
+                            "url": "https://example.test/rust"
+                        }])),
+                        status: Some("completed".to_string()),
+                    },
+                ],
+            }],
+            max_tokens: 1024,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: SamplingControls::default(),
+            thinking: None,
+            reasoning_effort: None,
+            extra_body: None,
+        };
+
+        let body = build_request(&request, true);
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
                 {
                     "type": "server_tool_use",
                     "id": "srvtool_1",
                     "name": "web_search",
-                    "input": { "query": "Boston weather" },
-                    "caller": { "type": "direct" }
+                    "input": { "query": "Rust docs" }
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtool_1",
+                    "content": [{
+                        "title": "Rust documentation",
+                        "url": "https://example.test/rust"
+                    }],
+                    "status": "completed"
                 }
-            ],
-            "stop_reason": "tool_use",
-            "usage": {
-                "input_tokens": 11,
-                "output_tokens": 7,
-                "cache_creation_input_tokens": 3,
-                "cache_read_input_tokens": 5,
-                "service_tier": "standard",
-                "inference_geo": "us"
-            }
-        }))
+            ])
+        );
+    }
+
+    #[test]
+    fn build_request_sends_disabled_thinking_without_output_config() {
+        let mut request = ModelRequest {
+            model: "deepseek-v4-flash".to_string(),
+            system: None,
+            messages: vec![RequestMessage {
+                role: "user".to_string(),
+                content: vec![RequestContent::Text {
+                    text: "Reply with OK only.".to_string(),
+                }],
+            }],
+            max_tokens: 1024,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: SamplingControls::default(),
+            thinking: Some("disabled".to_string()),
+            reasoning_effort: None,
+            extra_body: None,
+        };
+
+        let disabled = build_request(&request, true);
+        request.thinking = Some("bogus".to_string());
+        let unknown = build_request(&request, true);
+
+        assert_eq!(disabled["thinking"]["type"], json!("disabled"));
+        assert_eq!(disabled.get("output_config"), None);
+        assert_eq!(unknown.get("thinking"), None);
+        assert_eq!(unknown.get("output_config"), None);
+    }
+
+    #[test]
+    fn build_request_maps_max_thinking_to_output_config_effort() {
+        let request = ModelRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: vec![RequestMessage {
+                role: "user".to_string(),
+                content: vec![RequestContent::Text {
+                    text: "Reply with OK only.".to_string(),
+                }],
+            }],
+            max_tokens: 1024,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: SamplingControls::default(),
+            thinking: Some("max".to_string()),
+            reasoning_effort: None,
+            extra_body: None,
+        };
+
+        let body = build_request(&request, true);
+
+        assert_eq!(body["thinking"]["type"], json!("enabled"));
+        assert_eq!(body["output_config"]["effort"], json!("max"));
+    }
+
+    #[test]
+    fn build_request_prefers_reasoning_effort_for_output_config_effort() {
+        let request = ModelRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: vec![RequestMessage {
+                role: "user".to_string(),
+                content: vec![RequestContent::Text {
+                    text: "Reply with OK only.".to_string(),
+                }],
+            }],
+            max_tokens: 1024,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: SamplingControls::default(),
+            thinking: Some("enabled".to_string()),
+            reasoning_effort: Some(ReasoningEffort::Max),
+            extra_body: None,
+        };
+
+        let body = build_request(&request, true);
+
+        assert_eq!(body["thinking"]["type"], json!("enabled"));
+        assert_eq!(body["output_config"]["effort"], json!("max"));
+    }
+
+    #[test]
+    fn parse_response_extracts_text_tool_use_reasoning_and_usage() {
+        let response = parse_response(
+            json!({
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Need to call the weather tool first.",
+                        "signature": "sig_123"
+                    },
+                    {
+                        "type": "text",
+                        "text": "Let me check that."
+                    },
+                    {
+                        "type": "server_tool_use",
+                        "id": "srvtool_1",
+                        "name": "web_search",
+                        "input": { "query": "Boston weather" },
+                        "caller": { "type": "direct" }
+                    }
+                ],
+                "stop_reason": "tool_use",
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 7,
+                    "cache_creation_input_tokens": 3,
+                    "cache_read_input_tokens": 5,
+                    "service_tier": "standard",
+                    "inference_geo": "us"
+                }
+            }),
+            &DsmlToolCallHealer::for_model("claude-sonnet-4-6"),
+        )
         .expect("parse response");
 
         assert_eq!(response.id, "msg_123");
         assert_eq!(response.stop_reason, Some(StopReason::ToolUse));
-        assert_eq!(response.usage.input_tokens, 11);
+        assert_eq!(response.usage.input_tokens, 19);
         assert_eq!(response.usage.output_tokens, 7);
         assert_eq!(response.usage.cache_creation_input_tokens, Some(3));
         assert_eq!(response.usage.cache_read_input_tokens, Some(5));
-        assert_eq!(response.content.len(), 2);
+        assert_eq!(response.content.len(), 3);
         match &response.content[0] {
+            ResponseContent::ProviderReasoning { provider, payload } => {
+                assert_eq!(provider, "anthropic");
+                assert_eq!(
+                    payload,
+                    &json!({
+                        "type": "thinking",
+                        "thinking": "Need to call the weather tool first.",
+                        "signature": "sig_123"
+                    })
+                );
+            }
+            other => panic!("expected provider reasoning block, got {other:?}"),
+        }
+        match &response.content[1] {
             ResponseContent::Text(text) => {
                 assert_eq!(text, "Let me check that.");
             }
             other => panic!("expected text block, got {other:?}"),
         }
-        match &response.content[1] {
+        match &response.content[2] {
             ResponseContent::HostedToolUse {
                 id,
                 name,
@@ -1347,32 +1808,72 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_extracts_web_search_tool_result_as_hosted_completion() {
-        let response = parse_response(json!({
-            "id": "msg_456",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-sonnet-4-6",
-            "content": [
-                {
-                    "type": "web_search_tool_result",
-                    "tool_use_id": "srvtool_1",
-                    "content": [
-                        {
-                            "type": "web_search_result",
-                            "title": "Boston weather",
-                            "url": "https://example.test/weather"
-                        }
-                    ],
-                    "status": "completed"
+    fn parse_response_heals_deepseek_v4_dsml_text_tool_calls() {
+        let response = parse_response(
+            json!({
+                "id": "msg_dsml",
+                "type": "message",
+                "role": "assistant",
+                "model": "deepseek-v4-pro",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"web_search\">\n<｜｜DSML｜｜parameter name=\"query\" string=\"true\">electron-vite npm package 2026</｜｜DSML｜｜parameter>\n<｜｜DSML｜｜parameter name=\"limit\" string=\"false\">3</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>"
+                    }
+                ],
+                "stop_reason": "tool_use",
+                "usage": {
+                    "input_tokens": 4,
+                    "output_tokens": 2
                 }
-            ],
-            "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 4,
-                "output_tokens": 2
-            }
-        }))
+            }),
+            &DsmlToolCallHealer::for_model("deepseek-v4-pro"),
+        )
+        .expect("parse response");
+
+        assert_eq!(
+            response.content,
+            vec![ResponseContent::ToolUse {
+                id: "dsml_0_0".to_string(),
+                name: "web_search".to_string(),
+                input: json!({
+                    "query": "electron-vite npm package 2026",
+                    "limit": 3
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_response_extracts_web_search_tool_result_as_hosted_completion() {
+        let response = parse_response(
+            json!({
+                "id": "msg_456",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [
+                    {
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srvtool_1",
+                        "content": [
+                            {
+                                "type": "web_search_result",
+                                "title": "Boston weather",
+                                "url": "https://example.test/weather"
+                            }
+                        ],
+                        "status": "completed"
+                    }
+                ],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 4,
+                    "output_tokens": 2
+                }
+            }),
+            &DsmlToolCallHealer::for_model("claude-sonnet-4-6"),
+        )
         .expect("parse response");
 
         assert_eq!(response.content.len(), 1);
@@ -1405,37 +1906,40 @@ mod tests {
 
     #[test]
     fn parse_response_carries_hosted_web_search_input_into_completion() {
-        let response = parse_response(json!({
-            "id": "msg_789",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-sonnet-4-6",
-            "content": [
-                {
-                    "type": "server_tool_use",
-                    "id": "srvtool_1",
-                    "name": "web_search",
-                    "input": { "query": "DeepSeek official website" }
-                },
-                {
-                    "type": "web_search_tool_result",
-                    "tool_use_id": "srvtool_1",
-                    "content": [
-                        {
-                            "type": "web_search_result",
-                            "title": "DeepSeek",
-                            "url": "https://www.deepseek.com/"
-                        }
-                    ],
-                    "status": "completed"
+        let response = parse_response(
+            json!({
+                "id": "msg_789",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "id": "srvtool_1",
+                        "name": "web_search",
+                        "input": { "query": "DeepSeek official website" }
+                    },
+                    {
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srvtool_1",
+                        "content": [
+                            {
+                                "type": "web_search_result",
+                                "title": "DeepSeek",
+                                "url": "https://www.deepseek.com/"
+                            }
+                        ],
+                        "status": "completed"
+                    }
+                ],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 4,
+                    "output_tokens": 2
                 }
-            ],
-            "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 4,
-                "output_tokens": 2
-            }
-        }))
+            }),
+            &DsmlToolCallHealer::for_model("claude-sonnet-4-6"),
+        )
         .expect("parse response");
 
         assert_eq!(
@@ -1467,35 +1971,38 @@ mod tests {
 
     #[test]
     fn parse_response_extracts_web_fetch_tool_result_as_hosted_completion() {
-        let response = parse_response(json!({
-            "id": "msg_fetch",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-sonnet-4-6",
-            "content": [
-                {
-                    "type": "server_tool_use",
-                    "id": "srvtool_fetch",
-                    "name": "web_fetch",
-                    "input": { "url": "https://example.test/docs" }
-                },
-                {
-                    "type": "web_fetch_tool_result",
-                    "tool_use_id": "srvtool_fetch",
-                    "content": {
-                        "type": "web_fetch_result",
-                        "url": "https://example.test/docs",
-                        "title": "Docs"
+        let response = parse_response(
+            json!({
+                "id": "msg_fetch",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "id": "srvtool_fetch",
+                        "name": "web_fetch",
+                        "input": { "url": "https://example.test/docs" }
                     },
-                    "status": "completed"
+                    {
+                        "type": "web_fetch_tool_result",
+                        "tool_use_id": "srvtool_fetch",
+                        "content": {
+                            "type": "web_fetch_result",
+                            "url": "https://example.test/docs",
+                            "title": "Docs"
+                        },
+                        "status": "completed"
+                    }
+                ],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 4,
+                    "output_tokens": 2
                 }
-            ],
-            "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 4,
-                "output_tokens": 2
-            }
-        }))
+            }),
+            &DsmlToolCallHealer::for_model("claude-sonnet-4-6"),
+        )
         .expect("parse response");
 
         assert_eq!(

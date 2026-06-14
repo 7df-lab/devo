@@ -123,11 +123,26 @@ pub enum ContentBlock {
     Text { text: String },
     #[serde(rename = "reasoning")]
     Reasoning { text: String },
+    #[serde(rename = "provider_reasoning")]
+    ProviderReasoning {
+        provider: String,
+        payload: serde_json::Value,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+    },
+    #[serde(rename = "hosted_tool_use")]
+    HostedToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
@@ -175,6 +190,8 @@ impl Message {
                 }
                 ContentBlock::Text { .. }
                 | ContentBlock::Reasoning { .. }
+                | ContentBlock::ProviderReasoning { .. }
+                | ContentBlock::HostedToolUse { .. }
                 | ContentBlock::ToolResult { .. } => None,
             })
             .collect()
@@ -189,10 +206,29 @@ impl Message {
                 ContentBlock::Reasoning { text } => {
                     RequestContent::Reasoning { text: text.clone() }
                 }
+                ContentBlock::ProviderReasoning { provider, payload } => {
+                    RequestContent::ProviderReasoning {
+                        provider: provider.clone(),
+                        payload: payload.clone(),
+                    }
+                }
                 ContentBlock::ToolUse { id, name, input } => RequestContent::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
+                },
+                ContentBlock::HostedToolUse {
+                    id,
+                    name,
+                    input,
+                    output,
+                    status,
+                } => RequestContent::HostedToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    output: output.clone(),
+                    status: status.clone(),
                 },
                 ContentBlock::ToolResult {
                     tool_use_id,

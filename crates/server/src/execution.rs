@@ -207,11 +207,33 @@ impl ServerRuntimeDependencies {
             devo_safety::PermissionPreset::Default,
             cwd.clone(),
         );
+        let available_skills_instructions = {
+            let mut skill_catalog = self
+                .skill_catalog
+                .lock()
+                .expect("skill catalog mutex should not be poisoned");
+            match skill_catalog.available_skills_instructions(Some(&cwd), None) {
+                Ok(Some(instructions)) if !instructions.trim().is_empty() => Some(format!(
+                    "<available_skills>\n{}\n</available_skills>",
+                    instructions.trim()
+                )),
+                Ok(_) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        cwd = %cwd.display(),
+                        "failed to render available skills instructions"
+                    );
+                    None
+                }
+            }
+        };
         let mut state = SessionState::new(
             SessionConfig {
                 permission_mode: permission_profile.permission_mode(),
                 permission_profile,
                 agents_md: self.agents_md.clone(),
+                available_skills_instructions,
                 ..SessionConfig::default()
             },
             cwd,
@@ -401,12 +423,12 @@ impl ServerRuntimeDependencies {
             .map_err(|error| anyhow::anyhow!(error))
     }
 
-    /// Renders turn input items and resolves any referenced skills into prompt-visible text.
+    /// Renders turn input items and resolves any referenced skills into prompt-visible messages.
     pub(crate) fn resolve_input_items(
         &self,
         input: &[InputItem],
         workspace_root: Option<&Path>,
-    ) -> Result<Option<String>, SkillError> {
+    ) -> Result<Option<ResolvedInput>, SkillError> {
         let workspace_root = workspace_root.or(self.skill_workspace_root.as_deref());
         let mut skill_catalog = self
             .skill_catalog
@@ -415,12 +437,6 @@ impl ServerRuntimeDependencies {
         let discovered_skills = skill_catalog.discover(workspace_root, false)?;
 
         let mut parts = Vec::new();
-        if let Some(instructions) =
-            skill_catalog.available_skills_instructions(workspace_root, None)?
-        {
-            parts.push(instructions.trim().to_string());
-        }
-
         let structured_skill_names = input
             .iter()
             .filter_map(|item| match item {
@@ -501,8 +517,17 @@ impl ServerRuntimeDependencies {
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>();
         parts.extend(item_parts);
-        Ok((!parts.is_empty()).then(|| parts.join("\n")))
+        Ok((!parts.is_empty()).then(|| ResolvedInput {
+            prompt_text: parts.join("\n"),
+            prompt_messages: parts,
+        }))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedInput {
+    pub(crate) prompt_text: String,
+    pub(crate) prompt_messages: Vec<String>,
 }
 
 fn core_skill_record_to_protocol(record: devo_core::CoreSkillRecord) -> SkillRecord {
@@ -697,6 +722,7 @@ mod tests {
     use devo_core::ProviderVendorCatalog;
     use devo_core::SkillsConfig;
     use devo_core::tools::ToolRegistry;
+    use devo_protocol::InputItem;
     use devo_protocol::ModelRequest;
     use devo_protocol::ModelResponse;
     use devo_protocol::ProviderWireApi;
@@ -776,6 +802,33 @@ mod tests {
                 AppConfigStore::load(root, /*workspace_root*/ None).expect("load config"),
             )),
         )
+    }
+
+    #[test]
+    fn resolve_input_items_preserves_prompt_message_boundaries() {
+        let deps = test_deps("");
+        let resolved = deps
+            .resolve_input_items(
+                &[
+                    InputItem::Text {
+                        text: "first question".to_string(),
+                    },
+                    InputItem::Text {
+                        text: "second context".to_string(),
+                    },
+                ],
+                None,
+            )
+            .expect("resolve input")
+            .expect("resolved input");
+
+        assert_eq!(
+            resolved,
+            ResolvedInput {
+                prompt_text: "first question\nsecond context".to_string(),
+                prompt_messages: vec!["first question".to_string(), "second context".to_string()],
+            }
+        );
     }
 
     #[test]

@@ -125,6 +125,8 @@ impl ChatWidget {
                     self.current_turn_mode = input_mode;
                 }
                 self.committed_server_assistant_in_turn = false;
+                self.boundary_committed_assistant_items.clear();
+                self.pending_proposed_plan_actions = false;
                 self.current_turn_has_user_shell_command = false;
                 self.update_session_model_selection(model, model_binding_id);
                 self.thinking_selection = thinking;
@@ -874,6 +876,7 @@ impl ChatWidget {
                 self.add_to_history(cell);
                 self.current_turn_has_user_shell_command = false;
                 self.current_turn_mode = InputMode::Build;
+                self.maybe_open_proposed_plan_actions();
             }
             WorkerEvent::TurnFailed {
                 message,
@@ -922,6 +925,7 @@ impl ChatWidget {
                 self.set_status_message("Query failed; see error above");
                 self.current_turn_has_user_shell_command = false;
                 self.current_turn_mode = InputMode::Build;
+                self.pending_proposed_plan_actions = false;
             }
             WorkerEvent::ProviderValidationSucceeded { reply_preview } => {
                 if let Some(onboarding) = self.onboarding.as_mut() {

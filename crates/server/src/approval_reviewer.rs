@@ -42,7 +42,9 @@ pub(crate) fn build_approval_review_request(
 pub(crate) fn parse_reviewer_decision(content: &[ResponseContent]) -> Option<ReviewerDecision> {
     let raw = content.iter().find_map(|block| match block {
         ResponseContent::Text(text) => Some(text.as_str()),
-        ResponseContent::ToolUse { .. } | ResponseContent::HostedToolUse { .. } => None,
+        ResponseContent::ToolUse { .. }
+        | ResponseContent::HostedToolUse { .. }
+        | ResponseContent::ProviderReasoning { .. } => None,
     })?;
     parse_reviewer_text(raw)
 }

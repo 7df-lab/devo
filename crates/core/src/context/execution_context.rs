@@ -1,9 +1,15 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
-use devo_protocol::{CollaborationMode, Message, Model, ReasoningEffort, UserInput};
+use devo_protocol::CollaborationMode;
+use devo_protocol::Message;
+use devo_protocol::Model;
+use devo_protocol::ReasoningEffort;
+use devo_protocol::UserInput;
 
 use crate::SessionState;
 use crate::TurnConfig;
@@ -59,12 +65,38 @@ impl EnvironmentContext {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageContext {
+    pub language_preference: String,
+}
+
+impl Default for LanguageContext {
+    fn default() -> Self {
+        Self {
+            language_preference: "Reply in the same natural language as the user's latest message. If the latest user message mixes languages, use the primary language of that message. Preserve technical terms, code identifiers, file paths, commands, API names, and quoted text in their original form unless the user explicitly asks to translate them. This language rule also applies to Proposed Plan: any content inside <proposed_plan></proposed_plan> must follow the same natural language as the user's latest message.".to_string(),
+        }
+    }
+}
+
+impl LanguageContext {
+    pub fn render(&self) -> String {
+        format!(
+            "<language_preference>{}</language_preference>",
+            self.language_preference
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionContext {
     pub base_instructions: String,
+    #[serde(default)]
+    pub available_skills: Option<String>,
     pub workspace_instructions: Option<String>,
     pub locked_agents_snapshot: Option<AgentsMdSnapshot>,
     pub environment: EnvironmentContext,
+    #[serde(default)]
+    pub language: LanguageContext,
     pub persona: Persona,
     pub model: Model,
     pub thinking_selection: Option<String>,
@@ -77,6 +109,7 @@ impl SessionContext {
         thinking_selection: Option<&str>,
         cwd: &Path,
         locked_agents_snapshot: Option<AgentsMdSnapshot>,
+        available_skills: Option<String>,
     ) -> Self {
         let normalized_thinking_selection = model.normalize_thinking_selection(thinking_selection);
         let resolved = model.resolve_thinking_selection(normalized_thinking_selection.as_deref());
@@ -85,9 +118,11 @@ impl SessionContext {
             .map(|snapshot| snapshot.rendered_instructions.clone());
         Self {
             base_instructions: model.base_instructions.clone(),
+            available_skills,
             workspace_instructions,
             locked_agents_snapshot,
             environment: EnvironmentContext::capture(cwd),
+            language: LanguageContext::default(),
             persona: Persona::Default,
             model: model.clone(),
             thinking_selection: normalized_thinking_selection,
@@ -108,6 +143,16 @@ impl SessionContext {
     pub fn prefix_user_inputs(&self) -> Vec<UserInput> {
         let mut inputs = Vec::new();
         if let Some(text) = self
+            .available_skills
+            .as_ref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            inputs.push(UserInput::Text {
+                text: text.trim().to_string(),
+                text_elements: Vec::new(),
+            });
+        }
+        if let Some(text) = self
             .workspace_instructions
             .as_ref()
             .filter(|text| !text.trim().is_empty())
@@ -123,6 +168,10 @@ impl SessionContext {
         }
         inputs.push(UserInput::Text {
             text: self.environment.render(),
+            text_elements: Vec::new(),
+        });
+        inputs.push(UserInput::Text {
+            text: self.language.render(),
             text_elements: Vec::new(),
         });
         inputs
@@ -371,15 +420,22 @@ fn shell_basename() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    use std::path::PathBuf;
 
     use devo_protocol::UserInput;
     use pretty_assertions::assert_eq;
 
-    use super::{EnvironmentContext, SessionContext, TurnContext};
-    use crate::{
-        AgentsMdSnapshot, ContextualUserFragment, Model, ReasoningEffort, ThinkingCapability,
-    };
+    use super::EnvironmentContext;
+    use super::LanguageContext;
+    use super::SessionContext;
+    use super::TurnContext;
+    use crate::AgentsMdSnapshot;
+    use crate::ContextualUserFragment;
+    use crate::Model;
+    use crate::ReasoningEffort;
+    use crate::ThinkingCapability;
+    use crate::context::user_instructions::UserInstructions;
 
     #[test]
     fn session_context_prefix_contains_locked_environment() {
@@ -396,16 +452,45 @@ mod tests {
                 documents: Vec::new(),
                 rendered_instructions: "workspace".into(),
             }),
+            Some("<available_skills>skills</available_skills>".to_string()),
         );
 
         let prefix = context.prefix_user_inputs();
-        assert_eq!(prefix.len(), 2);
-        let rendered = match &prefix[1] {
-            UserInput::Text { text, .. } => text.clone(),
-            _ => String::new(),
-        };
-        assert!(rendered.contains("<environment_context>"));
-        assert!(rendered.contains("/tmp/project"));
+        assert_eq!(
+            prefix,
+            vec![
+                UserInput::Text {
+                    text: "<available_skills>skills</available_skills>".to_string(),
+                    text_elements: Vec::new(),
+                },
+                UserInput::Text {
+                    text: UserInstructions {
+                        directory: "/tmp/project".to_string(),
+                        text: "workspace".to_string(),
+                    }
+                    .render(),
+                    text_elements: Vec::new(),
+                },
+                UserInput::Text {
+                    text: context.environment.render(),
+                    text_elements: Vec::new(),
+                },
+                UserInput::Text {
+                    text: context.language.render(),
+                    text_elements: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn language_context_renders_language_preference() {
+        let context = LanguageContext::default();
+
+        assert_eq!(
+            context.render(),
+            "<language_preference>Reply in the same natural language as the user's latest message. If the latest user message mixes languages, use the primary language of that message. Preserve technical terms, code identifiers, file paths, commands, API names, and quoted text in their original form unless the user explicitly asks to translate them.</language_preference>"
+        );
     }
 
     #[test]
@@ -531,6 +616,7 @@ mod tests {
             None,
             Path::new("/tmp/a"),
             None,
+            /*available_skills*/ None,
         );
 
         assert_eq!(

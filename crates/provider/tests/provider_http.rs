@@ -7,7 +7,11 @@ use devo_protocol::ModelResponse;
 use devo_protocol::RequestContent;
 use devo_protocol::RequestMessage;
 use devo_protocol::ResponseContent;
+use devo_protocol::ResponseExtra;
+use devo_protocol::ResponseMetadata;
+use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
+use devo_protocol::Usage;
 use devo_provider::ModelProviderSDK;
 use devo_provider::ProviderHttpOptions;
 use devo_provider::anthropic::AnthropicProvider;
@@ -240,6 +244,202 @@ async fn deepseek_anthropic_messages_hosted_web_search_stream_live_when_api_key_
     assert_stream_includes_hosted_web_search_query(&events);
 }
 
+#[tokio::test]
+async fn anthropic_messages_stream_uses_proxy_friendly_sse_headers() {
+    let (base_url, capture) = spawn_sse_server(ANTHROPIC_TEXT_SSE_RESPONSE).await;
+    let provider = AnthropicProvider::new(base_url);
+
+    let mut stream = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("anthropic stream");
+    while let Some(event) = stream.next().await {
+        event.expect("stream event");
+    }
+    let request = capture.await.expect("capture request");
+
+    assert_eq!(request.lines().next(), Some("POST /v1/messages HTTP/1.1"));
+    assert_eq!(header_value(&request, "accept"), Some("text/event-stream"));
+    assert_eq!(header_value(&request, "cache-control"), Some("no-cache"));
+    assert_eq!(header_value(&request, "accept-encoding"), Some("identity"));
+}
+
+#[tokio::test]
+async fn anthropic_messages_stream_uses_nested_message_start_usage() {
+    let (base_url, _capture) = spawn_sse_server(ANTHROPIC_TEXT_SSE_RESPONSE).await;
+    let provider = AnthropicProvider::new(base_url);
+
+    let mut stream = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("anthropic stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+
+    assert_eq!(
+        events,
+        vec![
+            StreamEvent::UsageDelta(Usage {
+                input_tokens: 85_937,
+                output_tokens: 0,
+                cache_creation_input_tokens: Some(0),
+                cache_read_input_tokens: Some(85_888),
+            }),
+            StreamEvent::TextStart { index: 0 },
+            StreamEvent::TextDelta {
+                index: 0,
+                text: "ok".to_string()
+            },
+            StreamEvent::UsageDelta(Usage {
+                input_tokens: 85_937,
+                output_tokens: 3_211,
+                cache_creation_input_tokens: Some(0),
+                cache_read_input_tokens: Some(85_888),
+            }),
+            StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "msg_test".to_string(),
+                    content: vec![ResponseContent::Text("ok".to_string())],
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: Usage {
+                        input_tokens: 85_937,
+                        output_tokens: 3_211,
+                        cache_creation_input_tokens: Some(0),
+                        cache_read_input_tokens: Some(85_888),
+                    },
+                    metadata: ResponseMetadata::default(),
+                },
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn anthropic_messages_stream_keeps_legacy_top_level_start_usage() {
+    let (base_url, _capture) =
+        spawn_sse_server(ANTHROPIC_LEGACY_TOP_LEVEL_USAGE_SSE_RESPONSE).await;
+    let provider = AnthropicProvider::new(base_url);
+
+    let mut stream = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("anthropic stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+
+    assert_eq!(
+        events,
+        vec![
+            StreamEvent::UsageDelta(Usage {
+                input_tokens: 3,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(1),
+            }),
+            StreamEvent::TextStart { index: 0 },
+            StreamEvent::TextDelta {
+                index: 0,
+                text: "legacy".to_string()
+            },
+            StreamEvent::UsageDelta(Usage {
+                input_tokens: 3,
+                output_tokens: 3,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(1),
+            }),
+            StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "msg_legacy".to_string(),
+                    content: vec![ResponseContent::Text("legacy".to_string())],
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: Usage {
+                        input_tokens: 3,
+                        output_tokens: 3,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: Some(1),
+                    },
+                    metadata: ResponseMetadata::default(),
+                },
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
+    let (base_url, _capture) = spawn_sse_server(ANTHROPIC_THINKING_THEN_TEXT_SSE_RESPONSE).await;
+    let provider = AnthropicProvider::new(base_url);
+
+    let mut stream = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("anthropic stream");
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+
+    assert_eq!(
+        events,
+        vec![
+            StreamEvent::UsageDelta(Usage {
+                input_tokens: 1,
+                output_tokens: 0,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            }),
+            StreamEvent::ReasoningStart { index: 0 },
+            StreamEvent::ReasoningDelta {
+                index: 0,
+                text: "plan".to_string()
+            },
+            StreamEvent::ReasoningDone { index: 0 },
+            StreamEvent::TextStart { index: 1 },
+            StreamEvent::TextDelta {
+                index: 1,
+                text: "final".to_string()
+            },
+            StreamEvent::UsageDelta(Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            }),
+            StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "msg_test".to_string(),
+                    content: vec![
+                        ResponseContent::ProviderReasoning {
+                            provider: "anthropic".to_string(),
+                            payload: serde_json::json!({
+                                "type": "thinking",
+                                "thinking": "plan"
+                            }),
+                        },
+                        ResponseContent::Text("final".to_string()),
+                    ],
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: Usage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                    },
+                    metadata: ResponseMetadata {
+                        extras: vec![ResponseExtra::ReasoningText {
+                            text: "plan".to_string(),
+                        }],
+                    },
+                },
+            },
+        ]
+    );
+}
+
 async fn spawn_json_server(
     response_body: &'static str,
 ) -> (String, tokio::task::JoinHandle<String>) {
@@ -255,6 +455,84 @@ async fn spawn_json_server(
             response_body.len(),
             response_body
         );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+        request
+    });
+
+    (format!("http://{addr}"), handle)
+}
+
+const ANTHROPIC_TEXT_SSE_RESPONSE: &str = concat!(
+    "HTTP/1.1 200 OK\r\n",
+    "content-type: text/event-stream\r\n",
+    "cache-control: no-cache\r\n",
+    "connection: close\r\n",
+    "\r\n",
+    "event: message_start\n",
+    "data: {\"message\":{\"id\":\"msg_test\",\"usage\":{\"input_tokens\":49,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":85888,\"output_tokens\":0,\"service_tier\":\"standard\"}}}\n\n",
+    "event: content_block_start\n",
+    "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+    "event: message_delta\n",
+    "data: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":49,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":85888,\"output_tokens\":3211,\"service_tier\":\"standard\"}}\n\n",
+    "event: message_stop\n",
+    "data: {}\n\n",
+);
+
+const ANTHROPIC_LEGACY_TOP_LEVEL_USAGE_SSE_RESPONSE: &str = concat!(
+    "HTTP/1.1 200 OK\r\n",
+    "content-type: text/event-stream\r\n",
+    "cache-control: no-cache\r\n",
+    "connection: close\r\n",
+    "\r\n",
+    "event: message_start\n",
+    "data: {\"message\":{\"id\":\"msg_legacy\"},\"usage\":{\"input_tokens\":2,\"cache_read_input_tokens\":1}}\n\n",
+    "event: content_block_start\n",
+    "data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"legacy\"}}\n\n",
+    "event: message_delta\n",
+    "data: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+    "event: message_stop\n",
+    "data: {}\n\n",
+);
+
+const ANTHROPIC_THINKING_THEN_TEXT_SSE_RESPONSE: &str = concat!(
+    "HTTP/1.1 200 OK\r\n",
+    "content-type: text/event-stream\r\n",
+    "cache-control: no-cache\r\n",
+    "connection: close\r\n",
+    "\r\n",
+    "event: message_start\n",
+    "data: {\"message\":{\"id\":\"msg_test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+    "event: content_block_start\n",
+    "data: {\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}\n\n",
+    "event: content_block_stop\n",
+    "data: {\"index\":0}\n\n",
+    "event: content_block_start\n",
+    "data: {\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    "event: content_block_delta\n",
+    "data: {\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"final\"}}\n\n",
+    "event: message_delta\n",
+    "data: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+    "event: message_stop\n",
+    "data: {}\n\n",
+);
+
+async fn spawn_sse_server(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept request");
+        let request = read_http_request(&mut socket).await.expect("read request");
         socket
             .write_all(response.as_bytes())
             .await
@@ -482,7 +760,9 @@ fn response_text(response: &ModelResponse) -> String {
         .iter()
         .filter_map(|content| match content {
             ResponseContent::Text(text) => Some(text.as_str()),
-            ResponseContent::ToolUse { .. } | ResponseContent::HostedToolUse { .. } => None,
+            ResponseContent::ToolUse { .. }
+            | ResponseContent::HostedToolUse { .. }
+            | ResponseContent::ProviderReasoning { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n")

@@ -32,6 +32,7 @@ pub struct SessionConfig {
     pub permission_mode: PermissionMode,
     pub permission_profile: RuntimePermissionProfile,
     pub agents_md: AgentsMdConfig,
+    pub available_skills_instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +60,7 @@ impl Default for SessionConfig {
             permission_mode: permission_profile.permission_mode(),
             permission_profile,
             agents_md: AgentsMdConfig::default(),
+            available_skills_instructions: None,
         }
     }
 }
@@ -114,6 +116,10 @@ impl From<HashMap<String, String>> for ProviderRequestModelMap {
 }
 
 impl TurnConfig {
+    pub fn token_budget(&self) -> TokenBudget {
+        TokenBudget::for_model(&self.model)
+    }
+
     pub fn new(model: Model, thinking_selection: Option<String>) -> Self {
         let request_model = model.slug.clone();
         let thinking_selection = model.normalize_thinking_selection(thinking_selection.as_deref());
@@ -237,8 +243,10 @@ pub struct SessionState {
     pub total_cache_read_tokens: usize,     // TODO: same with `total_input_cached_tokens`.
     pub prompt_token_estimate: usize,
     /// Input tokens reported by the model for the most recent turn.
-    /// Used by `TokenBudget::should_compact()` to decide when to compact.
     pub last_input_tokens: usize,
+    /// Total context tokens reported by the model for the most recent turn.
+    /// This includes input plus output and drives automatic compaction.
+    pub last_turn_tokens: usize,
     /// Thread-safe queue for pending turn inputs.
     /// - Source: user sends `turn/start` while a turn is active.
     /// - Lifecycle: preserved across turns; unconsumed items are pushed back
@@ -271,6 +279,7 @@ impl SessionState {
             total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
             last_input_tokens: 0,
+            last_turn_tokens: 0,
             pending_turn_queue: Arc::new(Mutex::new(VecDeque::new())),
             btw_input_queue: Arc::new(Mutex::new(VecDeque::new())),
             turn_state: None,
@@ -479,6 +488,29 @@ mod tests {
     }
 
     #[test]
+    fn turn_config_token_budget_uses_model_effective_context() {
+        let model = Model {
+            slug: "deepseek-v4-pro".to_string(),
+            display_name: "deepseek-v4-pro".to_string(),
+            context_window: 1_000_000,
+            effective_context_window_percent: Some(95),
+            max_tokens: Some(384_000),
+            ..Model::default()
+        };
+        let turn_config = TurnConfig::new(model, None);
+
+        assert_eq!(
+            turn_config.token_budget(),
+            TokenBudget {
+                context_window: 950_000,
+                max_output_tokens: 384_000,
+                compact_threshold: 1.0,
+                auto_compact_token_limit: Some(950_000),
+            }
+        );
+    }
+
+    #[test]
     fn session_config_default_values() {
         let config = SessionConfig::default();
         assert_eq!(config.permission_profile.preset, PermissionPreset::Default);
@@ -503,6 +535,7 @@ mod tests {
         assert_eq!(state.turn_count, 0);
         assert_eq!(state.total_input_tokens, 0);
         assert_eq!(state.total_output_tokens, 0);
+        assert_eq!(state.last_turn_tokens, 0);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{ItemId, ResponseItem, SessionId, SummaryModelSelection, TurnId};
-use devo_protocol::{ContentBlock, Message, Role};
+use devo_protocol::{ContentBlock, Message, Model, Role};
 
 // ---------------------------------------------------------------------------
 // Contextual user fragment traits and registration
@@ -120,6 +120,10 @@ pub struct TokenBudget {
     pub max_output_tokens: usize,
     /// The threshold at which automatic compaction should trigger.
     pub compact_threshold: f64,
+    /// Absolute token limit for automatic compaction, when model metadata
+    /// provides a more precise context boundary than the default ratio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_token_limit: Option<usize>,
 }
 
 impl TokenBudget {
@@ -129,6 +133,22 @@ impl TokenBudget {
             context_window,
             max_output_tokens,
             compact_threshold: 0.9,
+            auto_compact_token_limit: None,
+        }
+    }
+
+    /// Creates a token budget aligned with the active model's effective context window.
+    pub fn for_model(model: &Model) -> Self {
+        let default_budget = Self::default();
+        let context_window = model.effective_context_window() as usize;
+        let max_output_tokens = model
+            .max_tokens
+            .map_or(default_budget.max_output_tokens, |value| value as usize);
+        Self {
+            context_window,
+            max_output_tokens,
+            compact_threshold: 1.0,
+            auto_compact_token_limit: Some(context_window),
         }
     }
 
@@ -139,6 +159,9 @@ impl TokenBudget {
 
     /// Returns whether compaction should run for the supplied prompt token count.
     pub fn should_compact(&self, current_tokens: usize) -> bool {
+        if let Some(limit) = self.auto_compact_token_limit {
+            return current_tokens > limit;
+        }
         current_tokens as f64 > self.input_budget() as f64 * self.compact_threshold
     }
 }
@@ -383,6 +406,8 @@ mod tests {
         ByteTokenEstimator, ContextualUserFragment, PromptAssemblyInput, SnapshotPersistFailure,
         TokenBudget, TokenEstimator,
     };
+    use devo_protocol::Model;
+    use pretty_assertions::assert_eq;
     use std::hint::black_box;
     use std::time::Instant;
 
@@ -403,9 +428,50 @@ mod tests {
     #[test]
     fn token_budget_default_values() {
         let budget = TokenBudget::default();
-        assert_eq!(budget.context_window, 200_000);
-        assert_eq!(budget.max_output_tokens, 8192);
+        assert_eq!(
+            budget,
+            TokenBudget {
+                context_window: 200_000,
+                max_output_tokens: 8192,
+                compact_threshold: 0.9,
+                auto_compact_token_limit: None,
+            }
+        );
         assert!((budget.compact_threshold - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn token_budget_for_model_uses_effective_context_as_auto_compact_limit() {
+        let model = Model {
+            context_window: 1_000_000,
+            effective_context_window_percent: Some(95),
+            max_tokens: Some(384_000),
+            ..Model::default()
+        };
+
+        assert_eq!(
+            TokenBudget::for_model(&model),
+            TokenBudget {
+                context_window: 950_000,
+                max_output_tokens: 384_000,
+                compact_threshold: 1.0,
+                auto_compact_token_limit: Some(950_000),
+            }
+        );
+    }
+
+    #[test]
+    fn model_token_budget_does_not_compact_before_effective_context_limit() {
+        let model = Model {
+            context_window: 1_000_000,
+            effective_context_window_percent: Some(95),
+            max_tokens: Some(384_000),
+            ..Model::default()
+        };
+        let budget = TokenBudget::for_model(&model);
+
+        assert_eq!(budget.should_compact(950_000), false);
+        assert_eq!(budget.should_compact(950_001), true);
     }
 
     #[test]

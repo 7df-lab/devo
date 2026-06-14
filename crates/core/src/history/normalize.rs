@@ -91,7 +91,9 @@ pub fn filter_by_modality(
                     .filter(|block| match block {
                         devo_protocol::ContentBlock::Text { .. } => supports_text,
                         devo_protocol::ContentBlock::Reasoning { .. } => supports_text,
+                        devo_protocol::ContentBlock::ProviderReasoning { .. } => true,
                         devo_protocol::ContentBlock::ToolUse { .. } => true,
+                        devo_protocol::ContentBlock::HostedToolUse { .. } => true,
                         devo_protocol::ContentBlock::ToolResult { .. } => true,
                     })
                     .cloned()
@@ -117,7 +119,9 @@ pub(crate) fn text_modality_keeps_all_items(items: &[ResponseItem]) -> bool {
         ResponseItem::Message(msg) => msg.content.iter().all(|block| match block {
             devo_protocol::ContentBlock::Text { .. }
             | devo_protocol::ContentBlock::Reasoning { .. }
+            | devo_protocol::ContentBlock::ProviderReasoning { .. }
             | devo_protocol::ContentBlock::ToolUse { .. }
+            | devo_protocol::ContentBlock::HostedToolUse { .. }
             | devo_protocol::ContentBlock::ToolResult { .. } => true,
         }),
         ResponseItem::Reason { .. }

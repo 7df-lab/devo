@@ -60,6 +60,23 @@ impl ChatWidget {
         }
     }
 
+    pub(super) fn commit_assistant_text_before_proposed_plan(&mut self) {
+        let mut index = 0;
+        while index < self.active_text_items.len() {
+            let item = &self.active_text_items[index];
+            if item.kind != TextItemKind::Assistant {
+                index += 1;
+                continue;
+            }
+            if let ActiveTextItemId::Server(item_id) = item.item_id {
+                self.boundary_committed_assistant_items.insert(item_id);
+                self.committed_server_assistant_in_turn = true;
+            }
+            self.commit_text_item_at(index, DotStatus::Completed);
+        }
+        self.frame_requester.schedule_frame();
+    }
+
     pub(super) fn start_text_item(&mut self, item_id: ActiveTextItemId, kind: TextItemKind) {
         if self
             .active_text_items
@@ -187,7 +204,24 @@ impl ChatWidget {
         kind: TextItemKind,
         final_text: String,
     ) {
-        let index = self.ensure_text_item(item_id, kind);
+        let boundary_committed = matches!(
+            (item_id, kind),
+            (ActiveTextItemId::Server(item_id), TextItemKind::Assistant)
+                if self.boundary_committed_assistant_items.contains(&item_id)
+        );
+        let index = if boundary_committed {
+            let Some(index) = self
+                .active_text_items
+                .iter()
+                .position(|item| item.item_id == item_id)
+            else {
+                self.committed_server_assistant_in_turn = true;
+                return;
+            };
+            index
+        } else {
+            self.ensure_text_item(item_id, kind)
+        };
         tracing::debug!(
             item_id = %item_id.log_label(),
             kind = ?kind,
@@ -196,7 +230,7 @@ impl ChatWidget {
             "completed active text item"
         );
         self.active_text_items[index].status = DotStatus::Completed;
-        if !final_text.trim().is_empty() {
+        if !boundary_committed && !final_text.trim().is_empty() {
             self.active_text_items[index].raw_text = final_text;
         }
         self.sync_text_item_cell(index);

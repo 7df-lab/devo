@@ -57,6 +57,7 @@ pub(super) struct ExecuteTurnRequest {
     pub(super) turn_config: TurnConfig,
     pub(super) display_input: String,
     pub(super) input: String,
+    pub(super) input_messages: Vec<String>,
     pub(super) collaboration_mode: devo_protocol::CollaborationMode,
     pub(super) input_mode: TurnInputMode,
 }
@@ -1058,6 +1059,7 @@ impl ServerRuntime {
             turn_config,
             display_input,
             input,
+            input_messages,
             collaboration_mode,
             input_mode,
         } = request;
@@ -1900,14 +1902,19 @@ impl ServerRuntime {
                 TurnInputMode::HiddenGoalContinuation { goal } => Some(goal.clone()),
             };
             let mut core_session = core_session.lock().await;
+            core_session.config.token_budget = turn_config.token_budget();
             core_session.collaboration_mode = collaboration_mode;
             if let Some(goal) = turn_goal {
                 core_session.set_active_goal(goal);
             } else {
                 core_session.clear_active_goal();
             }
-            if input_mode.emits_user_message() {
+            if input_mode.emits_user_message() && input_messages.is_empty() {
                 core_session.push_message(Message::user(input.clone()));
+            } else if input_mode.emits_user_message() {
+                for input_message in &input_messages {
+                    core_session.push_message(Message::user(input_message.clone()));
+                }
             }
             let event_callback_tx = event_tx.clone();
             let callback = std::sync::Arc::new(move |event: QueryEvent| {
@@ -2201,6 +2208,7 @@ impl ServerRuntime {
                 }) => Some((
                     text.clone(),
                     text,
+                    Vec::new(),
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
                     model_selection_from_pending_metadata(metadata.as_ref()),
                 )),
@@ -2209,6 +2217,7 @@ impl ServerRuntime {
                         devo_core::PendingInputKind::UserInput {
                             display_text,
                             prompt_text,
+                            prompt_messages,
                             ..
                         },
                     metadata,
@@ -2216,14 +2225,20 @@ impl ServerRuntime {
                 }) => Some((
                     display_text,
                     prompt_text,
+                    prompt_messages,
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
                     model_selection_from_pending_metadata(metadata.as_ref()),
                 )),
                 _ => None,
             }
         };
-        let Some((display_input, input_text, queued_collaboration_mode, queued_model_selection)) =
-            queued_input
+        let Some((
+            display_input,
+            input_text,
+            input_messages,
+            queued_collaboration_mode,
+            queued_model_selection,
+        )) = queued_input
         else {
             self.maybe_start_goal_continuation_turn(session_id).await;
             return;
@@ -2302,6 +2317,7 @@ impl ServerRuntime {
             turn_config,
             display_input,
             input: input_text,
+            input_messages,
             collaboration_mode: queued_collaboration_mode,
             input_mode: TurnInputMode::VisibleUserMessage,
         }))
@@ -2313,7 +2329,13 @@ impl ServerRuntime {
     /// its response immediately.
     pub(super) async fn spawn_next_turn_from_queue(self: &Arc<Self>, session_id: SessionId) {
         // Pop one queued input.
-        let (display_input, input_text, queued_collaboration_mode, queued_model_selection) = {
+        let (
+            display_input,
+            input_text,
+            input_messages,
+            queued_collaboration_mode,
+            queued_model_selection,
+        ) = {
             let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
                 Some(s) => s,
                 None => return,
@@ -2333,6 +2355,7 @@ impl ServerRuntime {
                 }) => (
                     text.clone(),
                     text,
+                    Vec::new(),
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
                     model_selection_from_pending_metadata(metadata.as_ref()),
                 ),
@@ -2341,6 +2364,7 @@ impl ServerRuntime {
                         devo_core::PendingInputKind::UserInput {
                             display_text,
                             prompt_text,
+                            prompt_messages,
                             ..
                         },
                     metadata,
@@ -2348,6 +2372,7 @@ impl ServerRuntime {
                 }) => (
                     display_text,
                     prompt_text,
+                    prompt_messages,
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
                     model_selection_from_pending_metadata(metadata.as_ref()),
                 ),
@@ -2431,6 +2456,7 @@ impl ServerRuntime {
                     turn_config,
                     display_input,
                     input: input_text,
+                    input_messages,
                     collaboration_mode: queued_collaboration_mode,
                     input_mode: TurnInputMode::VisibleUserMessage,
                 })

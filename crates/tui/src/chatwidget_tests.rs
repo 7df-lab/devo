@@ -34,6 +34,8 @@ use crate::chatwidget::TuiSessionState;
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
 use crate::events::SavedModelEntry;
+use crate::events::TextItemKind;
+use crate::history_cell::HistoryCell;
 use crate::render::renderable::Renderable;
 use crate::slash_command::built_in_slash_commands;
 use crate::tui::frame_requester::FrameRequester;
@@ -2189,6 +2191,173 @@ fn plan_update_updates_progress_and_history() {
             .any(|line| line.contains("  ✔ Inspect implementation"))
     );
     assert!(lines.iter().any(|line| line.contains("  → Patch runtime")));
+}
+
+#[test]
+fn proposed_plan_keeps_assistant_preamble_before_plan() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let assistant_id = ItemId::new();
+    let plan_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: assistant_id,
+        kind: TextItemKind::Assistant,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: assistant_id,
+        kind: TextItemKind::Assistant,
+        delta: "现在我已经了解了代码库。以下是计划：\n".to_string(),
+    });
+    widget
+        .handle_worker_event(crate::events::WorkerEvent::ProposedPlanStarted { item_id: plan_id });
+    widget.handle_worker_event(crate::events::WorkerEvent::ProposedPlanDelta {
+        item_id: plan_id,
+        delta: "## Summary\n\nBuild the feature.".to_string(),
+    });
+
+    let mut lines = scrollback_plain_lines(&widget.drain_scrollback_lines(100));
+    lines.extend(line_texts(widget.active_viewport_lines_for_test(100)));
+    let preamble_index = lines
+        .iter()
+        .position(|line| line.contains("现在我已经了解了代码库"))
+        .expect("assistant preamble is rendered");
+    let plan_index = lines
+        .iter()
+        .position(|line| line.contains("Proposed Plan"))
+        .expect("proposed plan is rendered");
+    assert!(
+        preamble_index < plan_index,
+        "assistant preamble should render before proposed plan:\n{}",
+        lines.join("\n")
+    );
+}
+
+#[test]
+fn proposed_plan_completion_does_not_duplicate_boundary_preamble() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let assistant_id = ItemId::new();
+    let plan_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: assistant_id,
+        kind: TextItemKind::Assistant,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: assistant_id,
+        kind: TextItemKind::Assistant,
+        delta: "Intro before plan.\n".to_string(),
+    });
+    widget
+        .handle_worker_event(crate::events::WorkerEvent::ProposedPlanStarted { item_id: plan_id });
+    widget.handle_worker_event(crate::events::WorkerEvent::ProposedPlanCompleted {
+        item_id: plan_id,
+        final_text: "## Summary\n\nBuild the feature.".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id: assistant_id,
+        kind: TextItemKind::Assistant,
+        final_text: "Intro before plan.\n".to_string(),
+    });
+
+    let rendered = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
+    assert_eq!(rendered.matches("Intro before plan.").count(), 1);
+}
+
+#[test]
+fn proposed_plan_cell_header_has_actions_without_bullet() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let cell = crate::history_cell::new_proposed_plan(
+        "## Summary\n\nBuild the feature.".to_string(),
+        &cwd,
+    );
+    let lines = line_texts(cell.display_lines(100));
+    let rendered = lines.join("\n");
+
+    assert!(lines.first().is_some_and(|line| line == "Proposed Plan"));
+    assert!(!rendered.contains("• Proposed Plan"));
+    assert!(rendered.contains("Implement Plan"));
+    assert!(rendered.contains("修改建议"));
+}
+
+#[test]
+fn proposed_plan_implement_action_sends_build_turn() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, cwd.clone());
+    let plan_id = ItemId::new();
+
+    widget
+        .handle_worker_event(crate::events::WorkerEvent::ProposedPlanStarted { item_id: plan_id });
+    widget.handle_worker_event(crate::events::WorkerEvent::ProposedPlanCompleted {
+        item_id: plan_id,
+        final_text: "## Summary\n\nBuild the feature.".to_string(),
+    });
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let event = app_event_rx.try_recv().expect("implement event is emitted");
+    let AppEvent::Command(AppCommand::UserTurn {
+        input,
+        cwd: event_cwd,
+        collaboration_mode,
+        ..
+    }) = event
+    else {
+        panic!("expected build user turn");
+    };
+    assert_eq!(event_cwd, Some(cwd));
+    assert_eq!(collaboration_mode, devo_protocol::CollaborationMode::Build);
+    assert_eq!(
+        input,
+        vec![InputItem::Text {
+            text: "Implement Plan".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn proposed_plan_revise_action_switches_composer_to_plan_mode() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, cwd);
+    let plan_id = ItemId::new();
+
+    widget
+        .handle_worker_event(crate::events::WorkerEvent::ProposedPlanStarted { item_id: plan_id });
+    widget.handle_worker_event(crate::events::WorkerEvent::ProposedPlanCompleted {
+        item_id: plan_id,
+        final_text: "## Summary\n\nBuild the feature.".to_string(),
+    });
+    widget.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let event = app_event_rx.try_recv().expect("revise event is emitted");
+    assert_eq!(event, AppEvent::PreparePlanSuggestionInput);
+    widget.handle_app_event(event);
+    assert_eq!(
+        widget.input_mode_for_test(),
+        crate::bottom_pane::InputMode::Plan
+    );
+    assert!(app_event_rx.try_recv().is_err());
 }
 
 #[test]
@@ -4657,7 +4826,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
     assert!(idle_summary.contains("↑12"));
     assert!(idle_summary.contains("cached 4 33%"));
     assert!(idle_summary.contains("↓18"));
-    assert!(idle_summary.contains("42/190k"));
+    assert!(idle_summary.contains("42/200k"));
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
@@ -4678,7 +4847,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
     let busy_summary = widget.status_summary_text();
     assert!(busy_summary.contains("↑7"));
     assert!(busy_summary.contains("cached 6 86%"));
-    assert!(busy_summary.contains("7/190k"));
+    assert!(busy_summary.contains("9/200k"));
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
         stop_reason: "stop".to_string(),
@@ -4694,7 +4863,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
     let finished_summary = widget.status_summary_text();
     assert!(finished_summary.contains("↑19"));
     assert!(finished_summary.contains("cached 6 32%"));
-    assert!(finished_summary.contains("7/190k"));
+    assert!(finished_summary.contains("9/200k"));
 }
 
 #[test]
@@ -5149,7 +5318,7 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
     assert!(summary.contains("↑0"));
     assert!(summary.contains("cached 0 0%"));
     assert!(summary.contains("↓0"));
-    assert!(summary.contains("0/190k"));
+    assert!(summary.contains("0/200k"));
 
     let transcript_lines = scrollback_plain_lines(
         &widget

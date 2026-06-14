@@ -485,6 +485,7 @@ impl ServerRuntime {
                     turn_config: turn_config_for_task,
                     display_input,
                     input: input_text,
+                    input_messages: Vec::new(),
                     collaboration_mode: devo_protocol::CollaborationMode::Build,
                     input_mode: TurnInputMode::VisibleUserMessage,
                 })
