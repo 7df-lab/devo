@@ -1,0 +1,73 @@
+---
+title: MCP
+description: 通过 Model Context Protocol 连接外部上下文和工具。
+---
+
+MCP 通过配置的 Model Context Protocol servers，将 Devo 连接到外部工具、resources 和 prompts。
+
+当模型需要访问本地仓库之外的系统时使用 MCP，例如文档服务器、browser tools、databases、issue trackers 或内部知识系统。
+
+## MCP Server 能添加什么
+
+MCP server 可以暴露：
+
+- tools；
+- resources；
+- resource templates；
+- prompts。
+
+Devo 在 runtime setup 中发现 MCP tools，并将它们规范化为 model-callable tool names。MCP tool names 内部使用 `mcp__` 前缀，避免与 built-in tools 冲突。
+
+## 配置形状
+
+MCP 配置属于 Devo config，而不是 prompts。每个 configured server 有：
+
+- stable server id；
+- display name；
+- transport；
+- startup policy；
+- enabled flag；
+- trust policy；
+- allowed capabilities；
+- roots policy；
+- output limits；
+- optional auth reference。
+
+支持的 transports：
+
+| Transport | 用途 |
+| --- | --- |
+| `stdio` | 用 command、cwd 和 environment settings 启动本地 MCP server process。 |
+| `streamable_http` | 连接 remote MCP endpoint URL，可带 auth 和 headers。 |
+
+Startup policy 控制 enabled server 是 eager start、首次使用 lazy start，还是只在显式请求时启动。
+
+## 列出 Servers
+
+在 TUI 中使用 `/mcp` 列出 configured MCP servers。
+
+Transcript output 会显示每个 server 的 id、display name、enabled state、startup policy、transport kind 和 target command 或 URL。没有配置 servers 时，Devo 显示：
+
+```text
+No MCP servers configured.
+```
+
+## Mentions
+
+`@` reference popup 包含 MCP servers。选择一个会插入稳定 MCP reference token，例如：
+
+```text
+@mcp:docs
+```
+
+Mention target 使用内部 `mcp://server/<id>` path，让 Devo 可以在 turn 中携带该 reference。
+
+## Tool Exposure
+
+如果 server 暴露较小 tool set，Devo 可以直接向模型暴露可见 MCP tools。当可用 MCP tools 很多时，Devo 延迟暴露，让 tool search 按需加载相关 tools。
+
+MCP tool metadata 也可以将 tool 标记为对 model-facing tool declarations 隐藏。Devo 在 discovery 时遵守该 visibility metadata。
+
+## Safety
+
+把 MCP servers 当作任何其他 tool source 对待。Server 可能暴露读写外部系统的 actions。保持 output limits、roots policy、auth 和 trust policy 窄范围。允许 network、filesystem 或 external-system operations 前，审阅 permission prompts。

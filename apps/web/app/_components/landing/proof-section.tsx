@@ -1,4 +1,5 @@
 import { type LandingCopy } from "./data";
+import { renderWithDevoMark } from "./devo-word";
 
 type ProofSectionProps = {
   rows: LandingCopy["proofRows"];
@@ -17,9 +18,11 @@ export function ProofSection({ rows }: ProofSectionProps) {
               {item.eyebrow}
             </p>
             <h2 className="mt-4 text-2xl font-semibold tracking-normal text-white">
-              {item.title}
+              {renderWithDevoMark(item.title)}
             </h2>
-            <p className="mt-4 text-base leading-7 text-white/58">{item.body}</p>
+            <p className="mt-4 text-base leading-7 text-white/58">
+              {renderWithDevoMark(item.body)}
+            </p>
           </article>
         ))}
       </div>

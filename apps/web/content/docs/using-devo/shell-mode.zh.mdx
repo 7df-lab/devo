@@ -1,0 +1,70 @@
+---
+title: "! Shell 模式"
+description: 在 composer 中用 ! 从 Devo 运行 shell 命令。
+---
+
+当你想自己运行 shell 命令，而不是让模型决定运行什么命令时，在 composer 中输入 `!`。
+
+Shell mode 用于直接终端工作：检查文件、运行测试、列出状态，或执行你已经知道确切文本的命令。
+
+## 三种使用 `!` 的方式
+
+### 进入 Shell Mode
+
+Composer 为空时，按 `!`。
+
+Devo 将 input mode indicator 切到 `SHELL`。输入命令并按 `Enter`：
+
+```text
+cargo test -p devo-tui status_indicator -- --nocapture
+```
+
+该命令会作为 shell input 提交，而不是聊天消息。
+
+### 运行一次性命令
+
+输入 `!` 加命令并按 `Enter`：
+
+```text
+!git status --short
+```
+
+Devo 会去掉开头的 `!`，运行 `git status --short`，然后回到 `BUILD` mode。
+
+### 发送以 `!` 开头的聊天消息
+
+用反斜杠转义开头的 bang：
+
+```text
+\!important: explain why this shell command failed
+```
+
+Devo 会把消息作为普通聊天文本发送，内容以 `!important` 开头。
+
+前置空格也会让 `!` 成为普通聊天文本，因为一次性 shell 命令只在原始文本以 `!` 开头时触发。
+
+## 何时使用 Shell Mode
+
+当命令本身就是任务时，使用 shell mode：
+
+- `git status --short`
+- `npm run lint`
+- `cargo test -p devo-core`
+- `rg "ProviderWireApi" crates apps`
+- `ls -la <DEVO_HOME>`
+
+如果希望执行前先让 Devo 推理，使用普通聊天：
+
+```text
+Which tests should I run for this provider config change?
+```
+
+这样模型会参与命令选择。
+
+## 限制
+
+Devo 正在生成时不能提交 shell commands。如果任务正在运行，Devo 会报告现在还不能运行 shell command。
+
+`Tab` 不会提交一次性 `!command`。Shell submission 使用 `Enter`。
+
+Shell mode 与终端一样严肃。按 `Enter` 前先审查破坏性命令。

@@ -1,31 +1,36 @@
 ---
 title: Devo
-description: Install, configure, and understand Devo model/provider support.
+description: Open source, lightweight, model-neutral coding agent documentation.
 ---
 
-## Overview
+Devo is an open source coding agent for developers who want a local,
+terminal-first workflow and the ability to connect to their own model provider.
 
-Devo is an open coding agent for developers who want a terminal-first workflow,
-provider flexibility, and an inspectable alternative to closed agent tools.
+The docs are organized for new users, Codex CLI and Claude Code users,
+provider integrators, and contributors who need to understand the runtime before
+changing it.
 
-The model system is built from three separate concepts:
+## Documentation Areas
 
-- Supported model definitions: built-in capability metadata shipped with Devo.
-- Provider entries: reusable user-defined connection records.
-- Model bindings: invocable links between a supported model and a provider.
+- Product docs: Get Started and Core Concepts explain what Devo is, how to
+  install it, how models/providers work, and which features exist.
+- User guide: Using Devo explains the TUI workflows you use day to day.
+- Developer reference: Configuration, Reference, and Contributors document
+  provider wiring, commands, config fields, runtime flow, and contribution
+  paths.
 
-## Documentation
+## Start Here
 
-Start with the installation guide, then configure providers and model bindings.
+- [Quickstart](/docs/get-started/quickstart)
+- [Install Devo](/docs/get-started/install)
+- [Connect DeepSeek](/docs/get-started/connect-deepseek)
+- [TUI overview](/docs/using-devo/tui-overview)
+- [Architecture overview](/docs/contributors/architecture-overview)
 
-- [Coding examples](/docs/coding-examples)
-- [Install Devo](/docs/install)
-- [Configuration](/docs/configuration)
-- [Supported models](/docs/supported-models)
-- [Provider wire APIs](/docs/provider-wire-apis)
-- [Model resolution](/docs/model-resolution)
+## Reader Paths
 
-## Links
-
-- [GitHub](https://github.com/7df-lab/devo)
-- [Contact](mailto:devo@devo.7df.ai)
+- New users should start with Get Started.
+- Codex CLI and Claude Code users should read the migration pages after the
+  quickstart.
+- Provider integrators should start with Configuration and Providers.
+- Contributors should start with the architecture and runtime flow pages.

@@ -1,0 +1,91 @@
+---
+title: CLI Reference
+description: Common Devo command examples.
+---
+
+This page lists the common command forms. For option details, see
+[Command Line Options](./command-line-options).
+
+## Interactive Session
+
+Start Devo in the current repository:
+
+```bash
+devo
+```
+
+Force onboarding:
+
+```bash
+devo onboard
+```
+
+Start with a specific configured model binding or model name:
+
+```bash
+devo --model deepseek-v4-pro
+```
+
+Set process logging level:
+
+```bash
+devo --log-level debug
+```
+
+## Resume
+
+When Devo exits, it prints a command for continuing the session:
+
+```bash
+devo resume <session-id>
+```
+
+You can also browse saved sessions from inside the TUI:
+
+```text
+/resume
+```
+
+## Non-Interactive Prompt
+
+Send one prompt and print the final answer:
+
+```bash
+devo prompt "Explain this repository's main runtime path."
+```
+
+Emit a JSON object:
+
+```bash
+devo prompt --format json "Summarize the last commit."
+```
+
+Emit streaming JSONL events:
+
+```bash
+devo prompt --format jsonl "List the main config files."
+```
+
+`devo prompt` runs with an always-allow permission checker. Use it for trusted
+automation where the prompt and working tree are controlled.
+
+## Health Check
+
+Diagnose config, provider connectivity, and system health:
+
+```bash
+devo doctor
+```
+
+Run this after changing provider config, credentials, or local tool setup.
+
+## Upgrade
+
+Upgrade Devo to the latest released version:
+
+```bash
+devo upgrade
+```
+
+Offline installations should upgrade from a copied release artifact instead.
+See [Install](../get-started/install).

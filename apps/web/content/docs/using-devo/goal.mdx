@@ -1,0 +1,131 @@
+---
+title: /goal
+description: Let Devo continue a bounded objective across turns.
+---
+
+`/goal` gives the current session a persistent objective. Devo keeps that
+objective in context across turns and can continue working toward it after a
+turn finishes.
+
+Use it for work that should not be treated as a single prompt, such as a
+multi-page docs rewrite, a cross-crate refactor, or a long bug investigation.
+
+## Set A Goal
+
+Type `/goal` followed by the objective:
+
+```text
+/goal Rebuild the docs structure under apps/web/content/docs and verify every
+page before stopping.
+```
+
+The objective can be long, but it must fit within the current objective limit
+of 4,000 characters.
+
+If no session exists yet, setting a goal starts one. If a goal already exists,
+Devo asks whether to replace the current goal or keep it.
+
+## View Or Change The Goal
+
+Use `/goal` with no argument to show the current goal. The status view includes:
+
+- status;
+- objective;
+- time used;
+- tokens used;
+- token budget, if one is configured.
+
+Use these subcommands to manage the goal:
+
+| Command | Effect |
+| --- | --- |
+| `/goal edit` | Open an editor for the current objective. |
+| `/goal pause` | Pause continuation. |
+| `/goal resume` | Resume an active objective. |
+| `/goal clear` | Remove the goal from the session. |
+
+When the goal is active, the status view suggests `/goal edit`, `/goal pause`,
+and `/goal clear`. When paused, it suggests `/goal edit`, `/goal resume`, and
+`/goal clear`.
+
+## How Continuation Works
+
+An active goal is inserted into Build-mode turns as goal context. Devo receives
+the objective, current usage, token budget, and remaining tokens, then uses that
+context to keep moving toward the same end state.
+
+After a turn completes, the server may start an internal continuation turn for
+the active goal. This continuation is a normal Build-mode turn, but it is
+started by the runtime instead of a new typed user message.
+
+Continuation only starts when the session is idle. It does not start while:
+
+- another turn is running;
+- approval is waiting for a response;
+- Devo is waiting for user input;
+- a user turn is queued;
+- the session is currently in Plan Mode.
+
+If the previous turn failed after the goal was last updated, Devo pauses the
+goal instead of continuing blindly.
+
+## Completion
+
+Devo should only mark a goal complete after verifying the full objective against
+the current state. Partial progress, an easy subset, or a green check that does
+not cover the whole objective is not enough.
+
+When Devo determines the objective is complete, it uses the internal
+`update_goal` tool with `status: "complete"`. That records final usage and
+changes the goal status to complete.
+
+You can still use `/goal clear` afterward if you want to remove the goal display
+from the session.
+
+## Budgets
+
+Goal state supports an optional token budget. When a budget is present, `/goal`
+status shows both tokens used and the configured budget.
+
+The current TUI command only sets or edits the objective. It does not expose
+syntax for creating a budget from the composer. If a goal has a budget, it was
+configured by the runtime/API path rather than by `/goal <objective>`.
+
+When the token budget is reached, the runtime marks the goal as limited by
+budget and starts a wrap-up turn. That turn should not begin new substantive
+work. It should summarize progress, identify what remains, and leave a clear
+next step.
+
+## Goal Mode And Plan Mode
+
+Goals apply to Build-mode work. Plan Mode suppresses goal continuation context
+so planning does not accidentally execute a long-running objective.
+
+Use Plan Mode first when the objective itself needs discussion:
+
+```text
+Shift+Tab to PLAN
+Plan how to split the docs rebuild into product docs, user guide, contributor
+docs, and provider reference.
+```
+
+Then switch back to Build mode and set the goal once the desired outcome is
+clear:
+
+```text
+/goal Rebuild the docs in the agreed structure and verify the rendered site.
+```
+
+## When To Use `/goal`
+
+Use `/goal` when the desired end state matters more than a single immediate
+answer:
+
+- rebuilding a docs section page by page;
+- finishing a refactor that spans crates;
+- investigating and fixing a bug through multiple test runs;
+- implementing a feature that needs repeated verification;
+- continuing work after compaction or a resumed session.
+
+For one-off tasks, use a normal prompt. A goal adds persistence, accounting, and
+continuation behavior, so it is best reserved for work with a clear end state.

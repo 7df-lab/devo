@@ -1,0 +1,92 @@
+---
+title: 从 Claude Code 迁移
+description: 将熟悉的 Claude Code 用法映射到 Devo。
+---
+
+这页把 Claude Code 风格用法映射到 Devo。它只比较常用表面，用来先跑起来，再补 Devo 概念。
+
+## 主要差异
+
+Devo 是模型中立的。它不绑定到某一个托管模型家族，而是使用 provider record 和 model binding：
+
+- provider：端点、credential 和支持的 wire API；
+- model binding：Devo 本地模型 id 加 provider model name；
+- active model：由配置或 `/model` 选择的 binding。
+
+所以先配置 provider。许多用户可以从 Anthropic 兼容 provider method 接 [DeepSeek 官方 API](./connect-deepseek) 开始。
+
+## 首次配置
+
+安装 Devo 后运行：
+
+```bash
+devo onboard
+```
+
+Onboarding 会收集 provider 信息、保存 credentials，并创建 model bindings。配置后：
+
+```bash
+cd /path/to/project
+devo
+```
+
+要求 Devo 修改代码前，先给一个小的只读任务：
+
+```text
+Explain this repository's structure. Do not edit files yet.
+```
+
+## 用法映射
+
+| 熟悉的用法 | Devo 表面 |
+| --- | --- |
+| 在当前仓库打开 Agent | `devo` |
+| 选择模型 | `/model` |
+| 设置任务目标 | `/goal <objective>` |
+| 提旁路问题 | `/btw <question>` |
+| 控制命令和编辑权限 | `/permissions` |
+| 启动规划 | plan mode |
+| prompt 时搜索文件 | `@` |
+| 从 composer 运行 shell 命令 | `!` |
+| 恢复之前的工作 | `devo resume` 或 `/resume` |
+| 列出 MCP servers | `/mcp` |
+| 列出 skills | `/skills` |
+
+TUI 使用页面见 [Using Devo](../using-devo)。
+
+## 权限
+
+Devo 在 TUI 中显示 permission decisions。使用：
+
+```text
+/permissions
+```
+
+具体 approval flow 取决于所选 preset 和请求的 action。新仓库中，保持 approval 可见，直到熟悉项目命令模式。
+
+见 [Permissions](../using-devo/permissions)。
+
+## 规划和旁路问题
+
+要让 Devo 先推理方案再编辑，使用 plan mode。Plan mode 适合范围不确定、迁移有风险或需求含糊的任务。
+
+当你想要一个不打断主会话的旁路答案时，使用 `/btw`：
+
+```text
+/btw Which files define provider routing?
+```
+
+旁路问题通过 subagent 路径运行，并把信息返回主 transcript。
+
+## 配置和可移植性
+
+Devo 使用文件配置。用户级配置位于 `DEVO_HOME`，必要时 workspace 可以添加仓库本地配置。
+
+默认 `DEVO_HOME`：
+
+| 平台 | 默认值 |
+| --- | --- |
+| macOS/Linux | `~/.devo` |
+| Windows | `C:/Users/your-username/.devo` |
+
+手动编辑配置前，先读 [Config Basics](../configuration/config-basics)。

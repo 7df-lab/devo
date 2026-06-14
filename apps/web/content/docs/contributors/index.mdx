@@ -1,0 +1,38 @@
+---
+title: Contributors
+description: Understand Devo before changing it.
+---
+
+Read this section before making non-trivial runtime, TUI, provider, or config
+changes.
+
+The docs are ordered from architecture to concrete validation:
+
+1. [Architecture Overview](./architecture-overview) maps crates and ownership
+   boundaries.
+2. [Runtime Flow](./runtime-flow) follows one user turn through server, core,
+   tools, provider calls, and TUI rendering.
+3. [CLI And TUI Flow](./cli-and-tui-flow) explains startup and terminal UI
+   command dispatch.
+4. [Provider Runtime](./provider-runtime) explains provider resolution and wire
+   API routing.
+5. [Development Setup](./development-setup) covers local toolchains and docs
+   workflow.
+6. [Testing](./testing) gives targeted validation commands.
+
+## Working Rule
+
+Keep ownership boundaries clear:
+
+| Layer | Owns |
+| --- | --- |
+| `devo-cli` | Process entrypoints and command-line parsing. |
+| `devo-tui` | Terminal UI state, composer behavior, overlays, and rendering. |
+| `devo-server` | Session runtime, persistence, event protocol, goals, subagents, and command execution. |
+| `devo-core` | Agent loop, tools, context, compaction, permissions, hooks, and instruction discovery. |
+| `devo-provider` | Provider request and streaming adapters. |
+| `devo-config` | Serialized config schema and effective config loading. |
+| `devo-protocol` | Shared DTOs that cross crate boundaries. |
+
+When a feature crosses the TUI/server boundary, update protocol types first,
+then server handling, worker mapping, and TUI rendering.

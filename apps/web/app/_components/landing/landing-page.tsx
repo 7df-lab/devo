@@ -3,9 +3,10 @@
 import { useEffect, useState } from "react";
 
 import { ClosingSection } from "./closing-section";
+import { ComparisonSection } from "./comparison-section";
+import { EnterpriseSection } from "./enterprise-section";
 import { landingCopy, localeCookieName, type Locale } from "./data";
 import { HeroSection } from "./hero-section";
-import { InstallSection } from "./install-section";
 import { ProofSection } from "./proof-section";
 import { WorkflowSection } from "./workflow-section";
 
@@ -36,9 +37,10 @@ export function LandingPage({ initialLocale }: LandingPageProps) {
         locale={locale}
         onLocaleChange={selectLocale}
       />
+      <ComparisonSection copy={copy.comparison} />
       <ProofSection rows={copy.proofRows} />
       <WorkflowSection copy={copy.workflow} />
-      <InstallSection copy={copy.install} docsHref={docsHref} />
+      <EnterpriseSection copy={copy.enterprise} />
       <ClosingSection copy={copy.closing} docsHref={docsHref} />
     </main>
   );

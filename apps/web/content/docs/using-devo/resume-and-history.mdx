@@ -1,0 +1,107 @@
+---
+title: Resume and History
+description: Continue saved sessions and understand session history.
+---
+
+Devo persists interactive sessions so you can leave a task and continue it
+later.
+
+When you exit a session, Devo prints a resume command when a session id is
+available:
+
+```bash
+devo resume <session-id>
+```
+
+Run that command from a terminal to reopen the saved session.
+
+## Resume From The CLI
+
+Use the exact command printed at exit:
+
+```bash
+devo resume 00000000-0000-0000-0000-000000000000
+```
+
+Replace the example id with your real session id. The resumed session restores
+the saved workspace, model state, token counters, visible transcript history,
+and pending text state where available.
+
+## Resume From The TUI
+
+Use `/resume` to browse persisted sessions from inside Devo.
+
+The resume browser opens in the bottom pane. It selects the active session when
+that session appears in the list.
+
+| Key | Effect |
+| --- | --- |
+| `Up` / `Down` | Move through sessions. |
+| `PageUp` / `PageDown` | Page through long lists. |
+| `Home` / `End` | Jump to the first or last session. |
+| `Enter` | Resume the selected session. |
+| `q` or `Esc` | Close the browser. |
+
+When you select a session, Devo clears the current visible state and switches
+to the selected session.
+
+## What History Contains
+
+Restored history is replay-friendly. It includes visible transcript items such
+as:
+
+- user prompts;
+- assistant responses;
+- reasoning or thinking summaries;
+- tool calls and tool results;
+- file-change summaries;
+- permission and status events;
+- turn summaries.
+
+The restored transcript is not only a text dump. Devo rebuilds rich history
+cells where possible so tool output and edited-file summaries remain readable.
+
+## Input History
+
+The composer also has input history for previous prompts. Use it to recall
+recent text without reopening a full session browser.
+
+| Key | Effect |
+| --- | --- |
+| `Up` | Recall the previous input. |
+| `Down` | Move toward newer recalled input; clears the composer after the newest entry. |
+| `Ctrl+P` | Same as `Up`. |
+| `Ctrl+N` | Same as `Down`. |
+
+History navigation is enabled when the composer is empty. After you recall an
+entry, repeated `Up` or `Down` continues history navigation when the cursor is
+at the start or end of the recalled text. If the cursor is in the middle of
+multiline input, `Up` and `Down` move inside the text instead.
+
+Input history is separate from session resume. Session resume changes which
+persisted session is active; input history is a local composer convenience for
+reusing prompt text.
+
+## Rollback And Fork
+
+Devo can rebuild session history around a selected user turn. Internally this
+supports rollback and fork operations:
+
+- rollback keeps the current session but truncates work after a selected user
+  turn;
+- fork creates a new session starting from a selected user turn and resumes it.
+
+Use these operations when Devo exposes them from a history action. They are for
+changing the active session timeline, so read the selected turn carefully before
+confirming.
+
+## Compaction And Resume
+
+Context compaction and session resume are different features.
+
+Compaction reduces the active model context so a long session can continue
+within the model's context window. Resume reloads a persisted session from disk
+or the runtime's session store.
+
+You can use both in the same long-running project: compact when the active
+context gets large, then resume later when you reopen Devo.

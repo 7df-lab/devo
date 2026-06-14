@@ -1,0 +1,14 @@
+{
+  "title": "Get Started",
+  "icon": "Rocket",
+  "pages": [
+    "index",
+    "quickstart",
+    "install",
+    "connect-deepseek",
+    "first-task",
+    "coming-from-codex",
+    "coming-from-claude-code"
+  ],
+  "defaultOpen": true
+}

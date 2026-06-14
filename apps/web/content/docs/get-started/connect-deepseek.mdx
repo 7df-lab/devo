@@ -1,0 +1,209 @@
+---
+title: Connect DeepSeek
+description: Configure DeepSeek official API as the first model provider.
+---
+
+DeepSeek official API is the recommended first provider for a new Devo setup.
+Use the Anthropic-compatible path first: it works with DeepSeek's Anthropic API
+format and lets Devo route provider-hosted `web_search` and `web_fetch` through
+the model provider instead of requiring a separate third-party search service.
+
+Use the OpenAI-compatible path when you specifically want OpenAI Chat
+Completions compatibility. With that path, you may need to configure local or
+third-party web search separately.
+
+DeepSeek publishes the current base URLs and model names in its official docs:
+
+- [Your First API Call](https://api-docs.deepseek.com/)
+- [Anthropic API](https://api-docs.deepseek.com/guides/anthropic_api)
+- [Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing)
+
+Last checked against DeepSeek official docs: 2026-06-14.
+
+## Before You Start
+
+Create a DeepSeek API key in the
+[DeepSeek Platform](https://platform.deepseek.com/api_keys).
+
+Use current model names from the official DeepSeek docs. As of the check above,
+the main API model names were:
+
+| Model name | Use when |
+| --- | --- |
+| `deepseek-v4-pro` | You want the stronger model for coding, reasoning, and agent workflows. |
+| `deepseek-v4-flash` | You want the lower-cost model for routine or high-volume work. |
+
+Do not use older names such as `deepseek-chat` or `deepseek-reasoner` for new
+configuration. DeepSeek marks those names as compatibility aliases scheduled
+for deprecation on July 24, 2026.
+
+## Recommended: Anthropic-Compatible DeepSeek
+
+Run onboarding from the repository where you want to use Devo:
+
+```bash
+cd /path/to/your/repo
+devo onboard
+```
+
+When onboarding asks for provider details, choose the Anthropic-compatible
+provider method:
+
+| Prompt | Value |
+| --- | --- |
+| Invocation method | `Anthropic Messages` |
+| Base URL | `https://api.deepseek.com/anthropic` |
+| API key | Your DeepSeek API key |
+| Model name | A current DeepSeek model name, such as `deepseek-v4-pro` or `deepseek-v4-flash` |
+
+If onboarding offers validation, keep it enabled. Validation confirms that Devo
+can reach the provider with the selected base URL, API key, and model name.
+
+After onboarding completes, start Devo in the same repository:
+
+```bash
+devo
+```
+
+## Manual Anthropic-Compatible Config
+
+`devo onboard` is easier, but manual configuration is useful when provisioning
+a machine or reviewing exactly what Devo stores.
+
+Put provider and model binding settings in:
+
+```text
+<DEVO_HOME>/config.toml
+```
+
+If `DEVO_HOME` is not set, Devo uses the default user config directory:
+
+| Platform | Default `DEVO_HOME` |
+| --- | --- |
+| macOS/Linux | `~/.devo` |
+| Windows | `C:/Users/your-username/.devo` |
+
+```toml
+[defaults]
+model_binding = "deepseek-v4-pro-deepseek-anthropic"
+
+[providers.deepseek-anthropic]
+enabled = true
+name = "DeepSeek Anthropic"
+base_url = "https://api.deepseek.com/anthropic"
+credential = "deepseek_api_key"
+wire_apis = ["anthropic_messages"]
+
+[providers.deepseek-anthropic.web_search]
+mode = "provider"
+
+[providers.deepseek-anthropic.web_fetch]
+mode = "provider"
+
+[model_bindings.deepseek-v4-pro-deepseek-anthropic]
+enabled = true
+model_slug = "deepseek-v4-pro"
+provider = "deepseek-anthropic"
+model_name = "deepseek-v4-pro"
+display_name = "DeepSeek V4 Pro"
+invocation_method = "anthropic_messages"
+default_reasoning_effort = "high"
+```
+
+Store the API key in:
+
+```text
+<DEVO_HOME>/auth.json
+```
+
+```json
+{
+  "version": 1,
+  "credentials": {
+    "deepseek_api_key": {
+      "kind": "api_key",
+      "value": "sk-your-deepseek-api-key"
+    }
+  }
+}
+```
+
+The important fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `base_url` | The DeepSeek Anthropic-format endpoint. |
+| `credential` | The id of the API key stored in `auth.json`. |
+| `wire_apis` | Protocols the provider entry supports. |
+| `model_slug` | Devo's local model metadata id. |
+| `model_name` | The model string sent to DeepSeek. |
+| `invocation_method` | The protocol Devo uses for this binding. |
+
+## OpenAI-Compatible DeepSeek
+
+Use the OpenAI-compatible path when you want DeepSeek through the OpenAI Chat
+Completions wire format.
+
+Onboarding values:
+
+| Prompt | Value |
+| --- | --- |
+| Invocation method | `OpenAI Chat Completions` |
+| Base URL | `https://api.deepseek.com` |
+| API key | Your DeepSeek API key |
+| Model name | A current DeepSeek model name, such as `deepseek-v4-pro` or `deepseek-v4-flash` |
+
+Manual config:
+
+```toml
+[defaults]
+model_binding = "deepseek-v4-pro-deepseek-openai"
+
+[providers.deepseek-openai]
+enabled = true
+name = "DeepSeek OpenAI Compatible"
+base_url = "https://api.deepseek.com"
+credential = "deepseek_api_key"
+wire_apis = ["openai_chat_completions"]
+
+[model_bindings.deepseek-v4-pro-deepseek-openai]
+enabled = true
+model_slug = "deepseek-v4-pro"
+provider = "deepseek-openai"
+model_name = "deepseek-v4-pro"
+display_name = "DeepSeek V4 Pro"
+invocation_method = "openai_chat_completions"
+default_reasoning_effort = "high"
+```
+
+This path can run Devo against DeepSeek, but provider-hosted search behavior is
+not the reason to choose it. If you need web search with OpenAI-compatible
+DeepSeek, plan to configure Devo's local or third-party `web_search` path.
+
+## Check The Setup
+
+Run:
+
+```bash
+devo doctor
+```
+
+Then start an interactive session:
+
+```bash
+devo
+```
+
+Use a first prompt that proves both repository context and provider access:
+
+```text
+Explain this repository's main runtime path. Do not edit files yet.
+```
+
+If the request fails, check:
+
+- The API key exists in `auth.json`.
+- `credential` in `config.toml` matches the credential id in `auth.json`.
+- `base_url` matches the selected invocation method.
+- `model_name` is a currently supported DeepSeek model name.
+- `invocation_method` is listed in the provider's `wire_apis`.

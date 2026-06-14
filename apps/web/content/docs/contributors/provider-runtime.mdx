@@ -1,0 +1,123 @@
+---
+title: Provider Runtime
+description: Understand provider routing and request adapters.
+---
+
+This page explains how Devo turns config into provider requests.
+
+## Config Inputs
+
+Provider runtime starts from effective app config:
+
+- `[providers.<id>]` describes endpoint, credential, headers, enabled state,
+  wire APIs, and web tool behavior.
+- `[model_bindings.<id>]` describes the local model slug, provider id, provider
+  model name, invocation method, display name, reasoning defaults, and optional
+  web tool overrides.
+- `[defaults].model_binding` selects the default binding.
+- `auth.json` stores credentials by id.
+
+The serialized schema lives in `crates/config/src/provider/schema.rs`.
+
+## Resolution
+
+Interactive startup and server bootstrap both resolve provider settings from
+effective config.
+
+Resolution validates that:
+
+- the requested binding exists and is enabled;
+- the referenced provider exists and is enabled;
+- the binding invocation method is supported by the provider's `wire_apis`;
+- required credentials exist in `auth.json`;
+- local web search config points to a known local provider and credential.
+
+If a CLI or runtime model override is present, Devo first tries to match it as a
+binding id, then a model slug, then a provider model name.
+
+## Router
+
+`crates/server/src/provider_config.rs` builds the provider runtime view.
+
+The provider crate exposes a `ProviderRouter` trait. The server depends on that
+trait instead of individual provider implementations.
+
+Two router shapes are used:
+
+| Router | Use |
+| --- | --- |
+| `SingleProviderRouter` | One configured provider path. |
+| `MultiProviderRouter` | Multiple enabled model bindings routed by model or binding metadata. |
+
+The selected route is passed into turn execution so one session can keep using
+the intended binding even when several providers are configured.
+
+## Wire APIs
+
+The supported wire API strings are defined in protocol model code:
+
+| Config value | Provider adapter |
+| --- | --- |
+| `anthropic_messages` | Anthropic-compatible Messages API. |
+| `openai_chat_completions` | OpenAI-compatible Chat Completions API. |
+| `openai_responses` | OpenAI Responses-compatible API. |
+
+Provider-specific HTTP streaming behavior belongs in `devo-provider`, not in
+the TUI or server runtime.
+
+## Request Model
+
+Model binding separates local identity from provider request name:
+
+```toml
+[model_bindings.deepseek-v4-pro-deepseek-anthropic]
+model_slug = "deepseek-v4-pro"
+provider = "deepseek-anthropic"
+model_name = "deepseek-v4-pro"
+invocation_method = "anthropic_messages"
+```
+
+If `model_name` differs from `model_slug`, Devo can show the local slug in UI
+while sending the provider-specific model string to the API.
+
+## Web Search And Fetch
+
+Web search and fetch are resolved from global, provider-level, and binding-level
+config.
+
+Precedence:
+
+1. binding override;
+2. provider override;
+3. global `tools` config.
+
+Search modes:
+
+| Mode | Meaning |
+| --- | --- |
+| `provider` | Expose provider-hosted web search when the provider path supports it. |
+| `local` | Use a configured local third-party search provider. |
+| `disabled` | Do not expose web search. |
+
+Fetch modes are `provider`, `local`, and `disabled`.
+
+## Validation API
+
+Onboarding and provider editing can validate a provider before saving it. The
+TUI sends provider validation through the worker, the server creates a
+short-lived provider route, and the runtime attempts a small probe request.
+
+Use validation when changing provider schema, auth handling, or onboarding
+behavior. It catches many config errors before a user starts a real task.
+
+## Where To Change Code
+
+| Change | Start here |
+| --- | --- |
+| Config field shape | `crates/config/src/provider/schema.rs` |
+| Config loading or validation | `crates/config/src/provider` |
+| Server provider bootstrap | `crates/server/src/provider_config.rs` |
+| Provider routing behavior | `crates/provider/src/router.rs` |
+| Anthropic-compatible requests | `crates/provider/src/anthropic` |
+| OpenAI-compatible requests | `crates/provider/src/openai` |
+| Provider validation API | `crates/server/src/runtime/provider_vendor_api.rs` |

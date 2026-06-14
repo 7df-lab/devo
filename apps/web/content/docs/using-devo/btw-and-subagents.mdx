@@ -1,0 +1,126 @@
+---
+title: /btw And Subagents
+description: Split side work into subagents without losing the main thread.
+---
+
+Use `/btw` for a quick side question that should not interrupt the main task.
+Use subagents when Devo needs to delegate independent work and collect the
+result later.
+
+These are related but not identical workflows.
+
+## `/btw`
+
+Type `/btw` followed by the side question:
+
+```text
+/btw What does the current Plan Mode page say about update_plan?
+```
+
+Devo records the `/btw` prompt in the transcript and starts a lightweight child
+agent to answer it. The answer returns to the main transcript under a `BTW`
+heading.
+
+If you submit `/btw` without a question, Devo shows:
+
+```text
+Usage: /btw <your question>
+```
+
+If no session exists yet, `/btw` fails with a message telling you to send a
+normal message first. Start a session, then ask the side question.
+
+## What `/btw` Can Do
+
+`/btw` is intentionally narrow.
+
+The child agent:
+
+- inherits completed parent-session context;
+- gets exactly one turn;
+- cannot use tools;
+- cannot read files, run commands, search, or modify code;
+- is closed after it answers or fails.
+
+Use `/btw` for context-light questions:
+
+- "What did we decide about screenshots?"
+- "Summarize the current provider recommendation."
+- "What should I check before editing this page?"
+- "Does this wording sound too broad?"
+
+Do not use `/btw` for work that needs repository inspection or edits. Ask Devo
+in normal chat for that.
+
+## Subagents
+
+Subagents are child Devo sessions that can run independently from the parent
+session. Devo can spawn them when work is independent enough to split out, then
+wait for their results.
+
+A spawned subagent has its own session id, generated nickname, role, status, and
+agent path. Depending on how it was launched, it can inherit completed parent
+history or start from a clean task message.
+
+Subagents are useful for:
+
+- independent investigations;
+- parallel review of separate files or subsystems;
+- long research tasks where the parent should stay focused;
+- collecting a concise finding before the parent makes the final decision.
+
+Subagents are not useful for:
+
+- reading one known file;
+- searching for one symbol or string;
+- replacing direct code search;
+- delegating vague "understand this and fix it" work without a clear task.
+
+The parent still owns synthesis. A subagent result is input to the parent, not a
+replacement for parent judgment.
+
+## Monitoring Subagents
+
+When live direct subagents exist, the footer shows a `ctrl + x agents` hint.
+
+Press `Ctrl+X` to open the `Sub-agents` selector. Use `Up` and `Down` to choose
+a live child, `Enter` to open its transcript overlay, and `q` or `Esc` to close
+the selector.
+
+The subagent transcript overlay is read-only. It lets you inspect child output,
+tool activity, plan updates, and terminal status without mixing the child
+transcript into the parent transcript.
+
+The hint disappears when no live child agents remain.
+
+## `/btw` Versus Subagents
+
+| Workflow | Best For | Tool Access | Result |
+| --- | --- | --- | --- |
+| `/btw` | Quick side answers. | No tools. | Direct `BTW` answer in the parent transcript. |
+| Subagent | Independent investigation or delegated work. | Depends on the launch policy. | Parent waits, reviews, and summarizes the result. |
+
+Use `/btw` when the answer should be quick and conversational. Use normal Devo
+work when the answer depends on the current repository. Let Devo spawn subagents
+when the task is broad enough that separate workers can make progress without
+stepping on each other.
+
+## Good `/btw` Prompts
+
+Keep `/btw` prompts specific and bounded:
+
+```text
+/btw In one paragraph, explain the difference between Plan Mode and update_plan.
+```
+
+```text
+/btw What should the next docs page be after /goal?
+```
+
+Avoid prompts that require tools:
+
+```text
+/btw Search the repo for every permission preset and list their behavior.
+```
+
+That should be a normal prompt because it needs file search.

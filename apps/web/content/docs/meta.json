@@ -1,12 +1,13 @@
 {
   "title": "Devo",
+  "icon": "Bot",
   "pages": [
     "index",
-    "coding-examples",
-    "install",
+    "get-started",
+    "using-devo",
+    "core-concepts",
     "configuration",
-    "supported-models",
-    "provider-wire-apis",
-    "model-resolution"
+    "contributors",
+    "reference"
   ]
 }

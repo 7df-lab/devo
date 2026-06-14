@@ -1,0 +1,123 @@
+---
+title: Testing
+description: Choose validation commands for Devo changes.
+---
+
+Use the narrowest validation that covers the changed behavior, then broaden
+when the change crosses crate boundaries.
+
+## Rust Formatting
+
+Format changed Rust packages:
+
+```bash
+cargo fmt --package devo-tui
+```
+
+Use the package that owns the changed files.
+
+## Focused Rust Tests
+
+Run package tests when a change is scoped:
+
+```bash
+cargo test -p devo-config
+cargo test -p devo-server
+cargo test -p devo-tui
+```
+
+Run one test by name:
+
+```bash
+cargo test -p devo-tui status_indicator -- --nocapture
+```
+
+Prefer focused tests while iterating, then run broader tests before finishing a
+cross-cutting change.
+
+## Config And Provider Changes
+
+For provider schema, resolution, or onboarding changes, include tests around:
+
+- config parsing and overlay behavior;
+- provider validation;
+- model binding resolution;
+- disabled providers and bindings;
+- credential lookup;
+- provider wire API compatibility.
+
+Useful starting commands:
+
+```bash
+cargo test -p devo-config provider
+cargo test -p devo-server provider
+cargo test -p devo-provider
+```
+
+## TUI Changes
+
+For TUI rendering or command behavior, test the owning package and manually
+exercise the interaction in a terminal:
+
+```bash
+cargo test -p devo-tui
+cargo run -p devo-cli
+```
+
+Check rendered behavior for:
+
+- transcript cells;
+- status lines;
+- bottom pane layout;
+- overlays;
+- model picker;
+- permissions picker;
+- slash commands;
+- `@` file search;
+- `!` shell mode.
+
+## Server Runtime Changes
+
+For session, turn, persistence, goal, subagent, or command-exec changes, start
+with `devo-server` tests:
+
+```bash
+cargo test -p devo-server
+```
+
+If the change affects shared DTOs, also test downstream crates that consume
+those protocol types.
+
+## Docs App
+
+For docs changes:
+
+```bash
+cd apps/web
+npm run lint
+npm run build
+```
+
+Then open the local docs app and verify navigation, page rendering, and links.
+
+## Full Workspace
+
+For broad Rust changes, run:
+
+```bash
+cargo test
+```
+
+This can be slow. Let it complete.
+
+## Patch Hygiene
+
+Before handing off a change, check for whitespace and accidental edits:
+
+```bash
+git diff --check
+git status --short
+```
+
+If a change only touches docs, do not run expensive Rust suites unless the docs
+claim behavior you need to verify from code.

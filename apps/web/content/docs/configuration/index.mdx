@@ -1,0 +1,34 @@
+---
+title: Configuration and Providers
+description: Configure model providers before reading deep protocol reference.
+---
+
+This section starts from the user configuration model, then moves into provider
+and wire API details.
+
+Use onboarding first when possible:
+
+```bash
+devo onboard
+```
+
+Edit config files directly when you need reproducible setup, provisioning, or a
+provider shape that onboarding does not cover yet.
+
+## Reading Order
+
+1. [Config Basics](./config-basics) explains `DEVO_HOME`, user config,
+   workspace config, `auth.json`, and precedence.
+2. [Provider Setup](./provider-setup) explains provider records and
+   credentials.
+3. [Model Bindings](./model-bindings) explains how a Devo model slug is bound
+   to a provider model name.
+4. [DeepSeek Official API](./deepseek-official-api) gives the recommended
+   DeepSeek official API configuration.
+5. [Other Providers](./other-providers) sketches additional provider shapes.
+6. [Model Resolution](./model-resolution) explains how Devo selects the active
+   model binding.
+7. [Provider Wire APIs](./provider-wire-apis) documents supported wire API
+   values.
+
+For a full field list, see [Config Reference](../reference/config-reference).

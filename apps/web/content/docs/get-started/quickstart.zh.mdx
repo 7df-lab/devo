@@ -1,0 +1,129 @@
+---
+title: 快速开始
+description: 最快启动一个可工作的 Devo 会话。
+---
+
+这页用于在已有代码仓库中启动 Devo，并连接一个模型提供商。
+
+第一次配置 provider 时，先用 DeepSeek 官方 API 的 Anthropic 兼容路径。Devo 可以通过这条 provider route 使用 `web_search` 和 `web_fetch` 等 provider-hosted 工具。
+
+## 1. 安装 Devo
+
+Linux 或 macOS：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh
+```
+
+Windows PowerShell：
+
+```powershell
+irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
+```
+
+源码构建和离线机器见 [安装](/zh/docs/get-started/install)。
+
+确认二进制可用：
+
+```bash
+devo --version
+```
+
+## 2. 创建 DeepSeek API Key
+
+在 [DeepSeek Platform](https://platform.deepseek.com/api_keys) 创建 API key。
+
+最后一次核对 DeepSeek 官方文档：2026-06-14。
+
+模型名称应以 DeepSeek 官方文档为准。截至上面的核对时间，主要选择是：
+
+| 模型名称 | 适用场景 |
+| --- | --- |
+| `deepseek-v4-pro` | 更复杂的编程、推理和 Agent 任务。 |
+| `deepseek-v4-flash` | 需要更低成本的常规任务。 |
+
+DeepSeek 在官方文档中列出当前 base URL 和模型名称：
+
+- [Your First API Call](https://api-docs.deepseek.com/)
+- [Anthropic API](https://api-docs.deepseek.com/guides/anthropic_api)
+- [Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing)
+
+## 3. 运行 Onboarding
+
+进入希望 Devo 操作的仓库：
+
+```bash
+cd /path/to/your/repo
+devo onboard
+```
+
+onboarding 询问提供商信息时，选择：
+
+| 提示 | 值 |
+| --- | --- |
+| Invocation method | `Anthropic Messages` |
+| Base URL | `https://api.deepseek.com/anthropic` |
+| API key | 你的 DeepSeek API key |
+| Model name | `deepseek-v4-pro` 或 `deepseek-v4-flash` |
+
+手动配置和 OpenAI 兼容的 DeepSeek 路径见 [连接 DeepSeek](/zh/docs/get-started/connect-deepseek)。
+
+## 4. 启动 Devo
+
+从仓库根目录运行：
+
+```bash
+devo
+```
+
+如果 onboarding 已配置提供商，Devo 会直接打开 TUI。未配置提供商时，Devo 会进入 onboarding。
+
+启动后，屏幕底部应显示 composer，上方是 transcript 区域。
+
+## 5. 先问一个只读问题
+
+先验证 Devo 能读懂仓库，再要求它修改文件：
+
+```text
+Explain this repository's main runtime path. Do not edit files yet.
+```
+
+如果回答明显不对，先停下来修复配置。常见原因包括工作目录错误、模型名称错误、base URL 错误或 API key 缺失。
+
+## 6. 做一个小范围修改
+
+提出一个具体改动：
+
+```text
+Update the install docs to mention offline installation. Keep the change scoped to docs only.
+```
+
+如果已经知道文件，用 `@` 附加：
+
+```text
+Update @apps/web/content/docs/get-started/install.mdx to mention offline installation.
+```
+
+如果知道确切命令，用 `!` SHELL 模式：
+
+```text
+!npm run lint
+```
+
+`@` 和 `!` 的行为见 [@ 模糊文件搜索](/zh/docs/using-devo/fuzzy-file-search) 和 [! Shell 模式](/zh/docs/using-devo/shell-mode)。
+
+## 7. 验证修改
+
+要求 Devo 运行相关检查：
+
+```text
+Run the checks for this docs change and tell me what passed or failed.
+```
+
+然后检查工作树：
+
+```text
+!git status --short
+```
+
+提交或继续之前先审阅 diff。Devo 可以解释 diff，但是否接受当前仓库状态由你决定。

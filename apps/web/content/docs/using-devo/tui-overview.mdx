@@ -1,0 +1,90 @@
+---
+title: TUI Overview
+description: Understand the main Devo terminal UI surfaces.
+---
+
+The Devo TUI is a terminal workspace for agentic coding. It keeps the current
+conversation, tool activity, model state, permissions, and local command
+surface in one process.
+
+## Transcript
+
+The transcript is the main scrollback area. It shows your prompts, Devo's
+answers, reasoning summaries, tool calls, tool results, permission events,
+session status, and restored history.
+
+When onboarding completes, Devo adds a provider setup message to the transcript
+and enables the composer. When you resume a session, Devo rebuilds the visible
+history from persisted session items.
+
+## Composer
+
+The composer is the input area at the bottom of the TUI. It accepts normal
+prompts and command-like triggers:
+
+| Input | Behavior |
+| --- | --- |
+| normal text | Send a user turn to Devo. |
+| `/model` | Open the model picker. |
+| `/permissions` | Open permission preset selection. |
+| `/status` | Add a session status block to the transcript. |
+| `@` | Open fuzzy search for files, skills, and MCP resources. |
+| `!` | Enter or use shell mode. |
+| `Shift+Tab` | Toggle Build mode and Plan Mode. |
+
+Some configuration actions are blocked while Devo is generating. For example,
+changing the model, permissions, theme, session, or compaction state waits until
+the current task is idle.
+
+## Header And Status Surfaces
+
+The TUI keeps model and session state visible while you work. Depending on your
+status-line configuration, it can show:
+
+- current model name;
+- model name with reasoning or thinking level;
+- current workspace;
+- token usage and context pressure;
+- active mode;
+- permission state;
+- live task status.
+
+When Devo is working, the status surface shows that the task is active and that
+`Esc` can interrupt.
+
+## Tool Activity
+
+Tool use appears inline. File edits, shell commands, MCP calls, search results,
+and other tool results are rendered as transcript cells instead of hidden logs.
+
+If a tool request needs approval, Devo opens a permission overlay. The request
+shows the action summary, reason, resource, and any path, host, or target that
+the tool wants to access.
+
+## Session Lifecycle
+
+A Devo session starts when you launch `devo`, resume with `devo resume
+<session-id>`, or create a new session from the TUI.
+
+At exit, Devo prints a resume command when the session has an id:
+
+```bash
+devo resume <session-id>
+```
+
+Use that command to continue the saved interactive session later. You can also
+use `/resume` in the TUI to browse saved sessions.
+
+## Side Surfaces
+
+The bottom pane can temporarily switch away from the normal composer to show:
+
+- model and thinking-mode pickers;
+- permission preset picker;
+- approval overlays;
+- resume browser;
+- onboarding;
+- subagent monitor and transcript overlays.
+
+These views keep the main transcript intact. Close them with `Esc` or the
+footer shortcut shown by the active view.

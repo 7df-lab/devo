@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { type LandingCopy } from "./data";
+import { renderWithDevoMark } from "./devo-word";
 import { ArrowIcon } from "./icons";
 
 type ClosingSectionProps = {
@@ -23,7 +24,7 @@ export function ClosingSection({ copy, docsHref }: ClosingSectionProps) {
             {copy.title}
           </h2>
           <p className="mt-5 max-w-xl text-lg leading-8 text-white/58">
-            {copy.bodyBeforeEmail}{" "}
+            {renderWithDevoMark(copy.bodyBeforeEmail)}{" "}
             <a
               className="text-orange-200 underline-offset-4 hover:underline"
               href="mailto:devo@devo.7df.ai"

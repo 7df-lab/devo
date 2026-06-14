@@ -1,0 +1,86 @@
+---
+title: Resume 和 History
+description: 继续保存的会话并理解 session history。
+---
+
+Devo 会持久化交互会话，所以你可以离开一个任务，稍后继续。
+
+退出 session 时，如果有 session id，Devo 会打印 resume 命令：
+
+```bash
+devo resume <session-id>
+```
+
+在终端中运行该命令即可重新打开保存的 session。
+
+## 从 CLI 恢复
+
+使用退出时打印的确切命令：
+
+```bash
+devo resume 00000000-0000-0000-0000-000000000000
+```
+
+把示例 id 替换为真实 session id。恢复后的 session 会尽可能还原保存的 workspace、model state、token counters、visible transcript history 和 pending text state。
+
+## 从 TUI 恢复
+
+在 Devo 中使用 `/resume` 浏览 persisted sessions。
+
+Resume browser 在 bottom pane 中打开。当 active session 出现在列表里时，它会被选中。
+
+| Key | Effect |
+| --- | --- |
+| `Up` / `Down` | 在 sessions 间移动。 |
+| `PageUp` / `PageDown` | 在长列表中翻页。 |
+| `Home` / `End` | 跳到第一个或最后一个 session。 |
+| `Enter` | 恢复所选 session。 |
+| `q` 或 `Esc` | 关闭 browser。 |
+
+选择 session 后，Devo 会清空当前可见状态并切换到所选 session。
+
+## History 包含什么
+
+恢复的 history 适合 replay。它包括可见 transcript items，例如：
+
+- user prompts；
+- assistant responses；
+- reasoning 或 thinking summaries；
+- tool calls 和 tool results；
+- file-change summaries；
+- permission 和 status events；
+- turn summaries。
+
+恢复的 transcript 不是纯文本 dump。Devo 会尽可能重建 rich history cells，让 tool output 和 edited-file summaries 保持可读。
+
+## Input History
+
+Composer 也有 previous prompts 的 input history。用它可以不打开整个 session browser 就召回近期文本。
+
+| Key | Effect |
+| --- | --- |
+| `Up` | 召回上一条 input。 |
+| `Down` | 向更新的 recalled input 移动；超过最新条目后清空 composer。 |
+| `Ctrl+P` | 等同于 `Up`。 |
+| `Ctrl+N` | 等同于 `Down`。 |
+
+Composer 为空时启用 history navigation。召回一条记录后，如果光标在 recalled text 的开头或结尾，重复 `Up` 或 `Down` 会继续 history navigation。如果光标在多行输入中间，`Up` 和 `Down` 会在文本内部移动。
+
+Input history 和 session resume 是不同功能。Session resume 改变当前 active persisted session；input history 是复用 prompt text 的本地 composer 便利功能。
+
+## Rollback 和 Fork
+
+Devo 可以围绕选定 user turn 重建 session history。内部支持 rollback 和 fork：
+
+- rollback 保留当前 session，但截断所选 user turn 之后的工作；
+- fork 从所选 user turn 创建新 session 并恢复它。
+
+当 Devo 从 history action 暴露这些操作时使用。它们会改变 active session timeline，因此确认前仔细阅读所选 turn。
+
+## Compaction 和 Resume
+
+Context compaction 和 session resume 是不同功能。
+
+Compaction 会减少 active model context，让长 session 在模型上下文窗口内继续。Resume 会从磁盘或 runtime session store 重新加载 persisted session。
+
+长项目可以同时使用两者：active context 变大时 compact，稍后重新打开 Devo 时 resume。

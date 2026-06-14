@@ -1,0 +1,142 @@
+---
+title: Other Providers
+description: Add OpenRouter, Anthropic, OpenAI-compatible, or local providers.
+---
+
+Use the same provider and model-binding model for any compatible provider.
+
+The exact base URL and model names come from the provider you choose. Devo
+needs the provider endpoint, credential id, supported wire API, and a binding
+that maps a Devo model slug to the provider model name.
+
+## Anthropic
+
+```toml
+[defaults]
+model_binding = "claude-sonnet-anthropic"
+
+[providers.anthropic]
+enabled = true
+name = "Anthropic"
+base_url = "https://api.anthropic.com"
+credential = "anthropic_api_key"
+wire_apis = ["anthropic_messages"]
+
+[model_bindings.claude-sonnet-anthropic]
+enabled = true
+model_slug = "claude-sonnet"
+provider = "anthropic"
+model_name = "claude-sonnet-provider-name"
+display_name = "Claude Sonnet"
+invocation_method = "anthropic_messages"
+```
+
+Replace `model_slug` and `model_name` with the model profile and provider model
+name you actually use.
+
+## OpenAI Responses-Compatible
+
+```toml
+[defaults]
+model_binding = "gpt-openai"
+
+[providers.openai]
+enabled = true
+name = "OpenAI"
+base_url = "https://api.openai.com"
+credential = "openai_api_key"
+wire_apis = ["openai_responses"]
+
+[model_bindings.gpt-openai]
+enabled = true
+model_slug = "gpt-5"
+provider = "openai"
+model_name = "gpt-5"
+display_name = "GPT-5"
+invocation_method = "openai_responses"
+```
+
+Use the Responses wire API when the provider endpoint supports it and the model
+behavior you need depends on Responses features.
+
+## OpenAI Chat Completions-Compatible
+
+```toml
+[defaults]
+model_binding = "gateway-main"
+
+[providers.gateway]
+enabled = true
+name = "OpenAI-Compatible Gateway"
+base_url = "https://gateway.example.com"
+credential = "gateway_api_key"
+wire_apis = ["openai_chat_completions"]
+
+[model_bindings.gateway-main]
+enabled = true
+model_slug = "custom-main"
+provider = "gateway"
+model_name = "provider/model-name"
+display_name = "Gateway Main"
+invocation_method = "openai_chat_completions"
+```
+
+This pattern covers many gateways and local proxies.
+
+## OpenRouter-Style Gateway
+
+OpenRouter-like providers often use provider-qualified model names:
+
+```toml
+[providers.openrouter]
+enabled = true
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+credential = "openrouter_api_key"
+wire_apis = ["openai_chat_completions"]
+
+[model_bindings.kimi-openrouter]
+enabled = true
+model_slug = "kimi-k2.5"
+provider = "openrouter"
+model_name = "moonshotai/kimi-k2.5"
+display_name = "Kimi K2.5"
+invocation_method = "openai_chat_completions"
+```
+
+The `model_slug` can stay Devo-local while `model_name` follows the gateway's
+required naming convention.
+
+## Local Provider Or Proxy
+
+For a local OpenAI-compatible server:
+
+```toml
+[providers.local]
+enabled = true
+name = "Local Provider"
+base_url = "http://127.0.0.1:11434/v1"
+wire_apis = ["openai_chat_completions"]
+
+[model_bindings.local-main]
+enabled = true
+model_slug = "local-main"
+provider = "local"
+model_name = "local-main"
+display_name = "Local Main"
+invocation_method = "openai_chat_completions"
+```
+
+If the local provider does not require an API key, omit `credential`. If it
+does, store the key in `auth.json` and reference it as usual.
+
+## Choosing A Wire API
+
+Choose based on the endpoint protocol:
+
+- Anthropic-compatible endpoint: `anthropic_messages`.
+- OpenAI Responses-compatible endpoint: `openai_responses`.
+- OpenAI Chat Completions-compatible endpoint: `openai_chat_completions`.
+
+Provider names and model brand names are not enough. The wire API must match the
+request format the endpoint accepts.

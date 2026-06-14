@@ -1,0 +1,71 @@
+---
+title: Model Picker
+description: Switch between configured model bindings.
+---
+
+Use `/model` to switch the active model for the current session.
+
+```text
+/model
+```
+
+The picker opens in the bottom pane. Use `Up` and `Down` to move, `Enter` to
+select, and `Esc` to close without changing the model.
+
+## What The Picker Shows
+
+The picker is built from saved model bindings. Each entry shows the display
+name and, when available, a provider hint on the right.
+
+The current model is marked in the list. If the configured binding has a
+display name, Devo uses that display name. Otherwise it falls back to the
+catalog model display name or the raw model slug.
+
+## Direct Selection
+
+You can also pass a model or binding name directly:
+
+```text
+/model gpt-5-codex
+```
+
+When the argument matches a saved model binding, Devo uses that binding,
+including its provider, request model name, wire API, and display name. When it
+matches a catalog model slug, Devo applies that catalog model. If it does not
+match either, Devo still sets the requested model name for the turn context.
+
+## Thinking Mode
+
+Some models expose thinking or reasoning options. When you select one of those
+models, Devo may open a second picker for the thinking mode before finalizing
+the model change.
+
+The thinking picker uses the model's configured capability and reasoning-effort
+options. If the model does not expose options, Devo applies the model
+immediately.
+
+After selection, Devo updates the header and sends the model and thinking
+selection to the runtime as turn context.
+
+## Session Scope
+
+`/model` changes the active session context. It does not rewrite your provider
+configuration file.
+
+To add a new provider or model binding, use:
+
+```bash
+devo onboard
+```
+
+To make a binding the default at startup, update the provider configuration
+instead of relying on an in-session `/model` change.
+
+## While Devo Is Working
+
+Devo blocks model changes while a task is generating. If you try to change the
+model during a running turn, the transcript shows that the model cannot be
+changed while generating.
+
+Wait for the current turn to finish, interrupt it with `Esc`, or start a new
+session before switching.

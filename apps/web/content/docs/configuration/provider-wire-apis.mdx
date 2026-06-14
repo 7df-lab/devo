@@ -1,0 +1,67 @@
+---
+title: Provider Wire APIs
+description: Reference Devo provider protocol options.
+---
+
+Provider wire APIs describe the HTTP request format Devo uses for a model
+binding.
+
+They are configured in two places:
+
+- provider `wire_apis`, the set of protocols a provider record supports;
+- binding `invocation_method`, the protocol used by one model binding.
+
+## Values
+
+| Value | Request Family | Use When |
+| --- | --- | --- |
+| `openai_chat_completions` | OpenAI-compatible Chat Completions | The endpoint accepts chat-completions style requests. |
+| `openai_responses` | OpenAI-compatible Responses | The endpoint accepts Responses API requests. |
+| `anthropic_messages` | Anthropic-compatible Messages | The endpoint accepts Anthropic Messages-style requests. |
+
+## Provider And Binding Must Match
+
+This is valid:
+
+```toml
+[providers.deepseek-anthropic]
+wire_apis = ["anthropic_messages"]
+
+[model_bindings.main]
+provider = "deepseek-anthropic"
+invocation_method = "anthropic_messages"
+```
+
+This is invalid:
+
+```toml
+[providers.deepseek-anthropic]
+wire_apis = ["anthropic_messages"]
+
+[model_bindings.main]
+provider = "deepseek-anthropic"
+invocation_method = "openai_chat_completions"
+```
+
+When a provider lists `wire_apis`, Devo validates that the selected binding uses
+one of them.
+
+## Default Behavior
+
+`ModelBindingConfig` defaults `invocation_method` to
+`openai_chat_completions` when the field is omitted. Do not rely on that for
+new config. Set the value explicitly so future readers know which protocol the
+binding uses.
+
+## Choosing Correctly
+
+Choose the wire API from the provider's endpoint docs:
+
+- If the docs say Anthropic Messages compatible, use `anthropic_messages`.
+- If the docs say OpenAI Responses compatible, use `openai_responses`.
+- If the docs say OpenAI Chat Completions compatible, use
+  `openai_chat_completions`.
+
+For DeepSeek official API, use `anthropic_messages` with
+`https://api.deepseek.com/anthropic` unless you intentionally want the
+OpenAI-compatible path.

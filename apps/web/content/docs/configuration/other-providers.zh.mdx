@@ -1,0 +1,135 @@
+---
+title: 其他提供商
+description: 添加 OpenRouter、Anthropic、OpenAI-compatible 或本地 provider。
+---
+
+任何兼容 provider 都使用同一套 provider 和 model-binding 模型。
+
+具体 base URL 和模型名来自你选择的 provider。Devo 需要 provider endpoint、credential id、支持的 wire API，以及一个把 Devo model slug 映射到 provider model name 的 binding。
+
+## Anthropic
+
+```toml
+[defaults]
+model_binding = "claude-sonnet-anthropic"
+
+[providers.anthropic]
+enabled = true
+name = "Anthropic"
+base_url = "https://api.anthropic.com"
+credential = "anthropic_api_key"
+wire_apis = ["anthropic_messages"]
+
+[model_bindings.claude-sonnet-anthropic]
+enabled = true
+model_slug = "claude-sonnet"
+provider = "anthropic"
+model_name = "claude-sonnet-provider-name"
+display_name = "Claude Sonnet"
+invocation_method = "anthropic_messages"
+```
+
+将 `model_slug` 和 `model_name` 替换为你实际使用的模型 profile 和 provider model name。
+
+## OpenAI Responses-Compatible
+
+```toml
+[defaults]
+model_binding = "gpt-openai"
+
+[providers.openai]
+enabled = true
+name = "OpenAI"
+base_url = "https://api.openai.com"
+credential = "openai_api_key"
+wire_apis = ["openai_responses"]
+
+[model_bindings.gpt-openai]
+enabled = true
+model_slug = "gpt-5"
+provider = "openai"
+model_name = "gpt-5"
+display_name = "GPT-5"
+invocation_method = "openai_responses"
+```
+
+当 provider endpoint 支持 Responses，并且你需要的模型行为依赖 Responses 能力时，使用 Responses wire API。
+
+## OpenAI Chat Completions-Compatible
+
+```toml
+[defaults]
+model_binding = "gateway-main"
+
+[providers.gateway]
+enabled = true
+name = "OpenAI-Compatible Gateway"
+base_url = "https://gateway.example.com"
+credential = "gateway_api_key"
+wire_apis = ["openai_chat_completions"]
+
+[model_bindings.gateway-main]
+enabled = true
+model_slug = "custom-main"
+provider = "gateway"
+model_name = "provider/model-name"
+display_name = "Gateway Main"
+invocation_method = "openai_chat_completions"
+```
+
+这个模式覆盖很多 gateway 和本地 proxy。
+
+## OpenRouter-Style Gateway
+
+OpenRouter-like provider 通常使用带 provider 前缀的模型名：
+
+```toml
+[providers.openrouter]
+enabled = true
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+credential = "openrouter_api_key"
+wire_apis = ["openai_chat_completions"]
+
+[model_bindings.kimi-openrouter]
+enabled = true
+model_slug = "kimi-k2.5"
+provider = "openrouter"
+model_name = "moonshotai/kimi-k2.5"
+display_name = "Kimi K2.5"
+invocation_method = "openai_chat_completions"
+```
+
+`model_slug` 可以保持 Devo-local，而 `model_name` 遵循 gateway 要求的命名规则。
+
+## 本地 Provider 或 Proxy
+
+本地 OpenAI-compatible server 示例：
+
+```toml
+[providers.local]
+enabled = true
+name = "Local Provider"
+base_url = "http://127.0.0.1:11434/v1"
+wire_apis = ["openai_chat_completions"]
+
+[model_bindings.local-main]
+enabled = true
+model_slug = "local-main"
+provider = "local"
+model_name = "local-main"
+display_name = "Local Main"
+invocation_method = "openai_chat_completions"
+```
+
+如果本地 provider 不需要 API key，就省略 `credential`。如果需要，照常把 key 放入 `auth.json` 并引用。
+
+## 选择 Wire API
+
+根据 endpoint 协议选择：
+
+- Anthropic-compatible endpoint：`anthropic_messages`。
+- OpenAI Responses-compatible endpoint：`openai_responses`。
+- OpenAI Chat Completions-compatible endpoint：`openai_chat_completions`。
+
+Provider 名称和模型品牌名不够。Wire API 必须匹配 endpoint 接受的请求格式。

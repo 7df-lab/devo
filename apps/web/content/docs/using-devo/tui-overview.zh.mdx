@@ -1,0 +1,73 @@
+---
+title: TUI 概览
+description: 理解 Devo 终端 UI 的主要区域。
+---
+
+Devo TUI 是一个用于 agentic coding 的终端 workspace。它在同一个进程中维护当前 conversation、tool activity、model state、permissions 和本地命令 surface。
+
+## Transcript
+
+Transcript 是主要的 scrollback 区域。它显示你的 prompts、Devo 的回答、reasoning summaries、tool calls、tool results、permission events、session status 和 restored history。
+
+Onboarding 完成后，Devo 会把 provider setup 消息加入 transcript，并启用 composer。恢复会话时，Devo 会从持久化 session items 重建可见历史。
+
+## Composer
+
+Composer 是 TUI 底部的输入区域。它接受普通 prompts 和命令式 triggers：
+
+| 输入 | 行为 |
+| --- | --- |
+| 普通文本 | 发送一个 user turn 给 Devo。 |
+| `/model` | 打开 model picker。 |
+| `/permissions` | 打开 permission preset selection。 |
+| `/status` | 在 transcript 中加入 session status block。 |
+| `@` | 打开 files、skills 和 MCP resources 的模糊搜索。 |
+| `!` | 进入或使用 shell mode。 |
+| `Shift+Tab` | 切换 Build mode 和 Plan Mode。 |
+
+Devo 正在生成时，某些配置动作会被阻止。例如切换模型、权限、主题、会话或 compaction state，都要等当前任务 idle。
+
+## Header 和 Status Surfaces
+
+TUI 会在工作时保持 model 和 session state 可见。根据 status-line 配置，它可以显示：
+
+- 当前模型名称；
+- 模型名称及 reasoning 或 thinking level；
+- 当前 workspace；
+- token usage 和 context pressure；
+- 当前模式；
+- permission state；
+- live task status。
+
+Devo 工作时，status surface 会显示任务正在 active，并提示 `Esc` 可中断。
+
+## Tool Activity
+
+Tool use 会内联显示。文件编辑、shell commands、MCP calls、search results 和其他 tool results 会渲染为 transcript cells，而不是隐藏日志。
+
+如果 tool request 需要 approval，Devo 会打开 permission overlay。请求会显示 action summary、reason、resource，以及工具要访问的 path、host 或 target。
+
+## Session Lifecycle
+
+运行 `devo`、用 `devo resume <session-id>` 恢复，或在 TUI 中创建新会话，都会启动一个 Devo session。
+
+退出时，如果 session 有 id，Devo 会打印 resume 命令：
+
+```bash
+devo resume <session-id>
+```
+
+稍后用该命令继续保存的交互会话。也可以在 TUI 中用 `/resume` 浏览保存会话。
+
+## Side Surfaces
+
+底部 pane 可以临时从正常 composer 切到：
+
+- model 和 thinking-mode pickers；
+- permission preset picker；
+- approval overlays；
+- resume browser；
+- onboarding；
+- subagent monitor 和 transcript overlays。
+
+这些 view 会保持 main transcript 不变。使用 `Esc` 或 active view footer 中显示的快捷键关闭。

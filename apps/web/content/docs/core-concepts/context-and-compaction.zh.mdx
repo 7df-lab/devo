@@ -1,0 +1,66 @@
+---
+title: Context and Compaction
+description: 理解 Devo 如何管理长会话上下文。
+---
+
+每个 Devo turn 都会向所选模型发送一个 context package。它可以包含 instructions、workspace context、available skills、active goal state、conversation history、tool results 和最新 user message。
+
+所选模型的 context window 限制了可容纳的内容。
+
+## Context Window
+
+Model profiles 包含 context window，并可配置 effective usable percentage。Devo 用这些值估算当前 session 的填充程度，以及何时可能需要 compaction。
+
+TUI 可以在 status surfaces 中显示 token usage、context-window size 和 context pressure。这些数字是估算值，用来判断 session 是否已经变大。
+
+## 会发送什么
+
+Devo 从多种来源构建 context：
+
+- runtime 和 developer instructions；
+- discovered project instructions；
+- active skill information；
+- memory 和 goal context，如果适用；
+- conversation history；
+- tool-call 和 tool-result records；
+- 当前 user turn。
+
+不是每一条可见 transcript line 对未来 turns 都同等有用。例如，compaction 会在总结旧 history 前过滤掉 reasoning items。
+
+## 自动 Compaction
+
+当 Devo 判断 session 超过配置 token budget 时，会运行 automatic compaction。如果 session 仍在 budget 内，则跳过。
+
+Compaction 运行时，Devo 会：
+
+1. 将 history 过滤成适合 summarization 的形式；
+2. 将要 compact 的旧 items 与要保留的 recent items 分开；
+3. 请求模型总结旧 history；
+4. 创建 compaction summary item；
+5. 保留 summary 加 preserved recent items 作为 model-facing history。
+
+用户可见 transcript 仍会为 resume 和 review 保留。Summary 用于未来 model context，不替代可见 history。
+
+## 手动 Compaction
+
+主动 compact 当前 session 时使用 `/compact`。
+
+Manual compaction 总是尝试运行，即使当前 context 没超过自动阈值。已有 turn 正在进行时，Devo 会阻止 compaction。
+
+TUI 会报告 compaction lifecycle events：
+
+- compaction started；
+- compaction completed；
+- compaction failed。
+
+## Failure 和 Retry
+
+Compaction summarizer 是另一次 model call。如果 summarizer 达到自己的 context limit，Devo 会通过保留更多 recent items 缩小 summarizer input 并重试。临时失败会用 backoff 重试。
+
+如果 compaction 仍失败，session 会继续使用现有 history。你可以稍后重试、缩小任务范围，或开始新 session。
+
+## 实用建议
+
+大型调查后，在要求 Devo 实现改动前使用 `/compact`。当更大 objective 需要跨 compaction 或 resumed turns 保持明确时，使用 `/goal`。
+
+重要会话里，在 compaction 前用普通聊天明确关键决策。Transcript 中有清楚的 decisions 和 constraints 时，summary 更容易保留意图。

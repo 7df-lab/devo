@@ -1,0 +1,114 @@
+---
+title: Coming From Codex CLI
+description: Map familiar Codex CLI workflows to Devo.
+---
+
+This page maps common Codex-style terminal workflows to Devo. It is not a
+feature comparison. Use it to find the Devo command, config, or TUI surface
+that matches what you already know.
+
+## What Carries Over
+
+The core workflow is familiar:
+
+- start the agent from a repository root;
+- give a task in natural language;
+- inspect proposed commands and file edits;
+- keep context inside the current working tree;
+- resume or start over when a session gets too large.
+
+The biggest Devo difference is provider setup. Devo is model-neutral: you bind
+model names to provider records in config, then switch between those bindings
+inside the TUI.
+
+## First Setup
+
+Install Devo, then run onboarding:
+
+```bash
+devo onboard
+```
+
+For the fastest first provider, use [Connect DeepSeek](./connect-deepseek).
+DeepSeek official API is configured as a provider plus one or more model
+bindings.
+
+After onboarding, start Devo in a repository:
+
+```bash
+cd /path/to/project
+devo
+```
+
+## Workflow Map
+
+| Familiar workflow | Devo surface |
+| --- | --- |
+| Start an interactive coding session | `devo` |
+| Run a one-shot prompt | `devo prompt "..."` |
+| Resume a previous session | `devo resume` or `/resume` |
+| Switch models | `/model` |
+| Set a durable objective | `/goal` |
+| Ask a side question without disrupting the main task | `/btw <question>` |
+| Review current status | `/status` |
+| Review repository changes | `/diff` |
+| Compact context | `/compact` |
+| Open provider and model config | `devo onboard`, then config files under `DEVO_HOME` |
+
+See [Slash Commands](../reference/slash-commands) for the full command list.
+
+## Model And Provider Setup
+
+Devo separates these concepts:
+
+- a provider describes a service endpoint, credential, and wire API;
+- a model binding connects a local model id to one provider model name;
+- the active model is selected from enabled bindings.
+
+This makes Devo useful when you want the same coding workflow against different
+providers. You can keep a strong model as the default and add cheaper or faster
+bindings for routine work.
+
+Read these pages next:
+
+- [Provider Setup](../configuration/provider-setup)
+- [Model Bindings](../configuration/model-bindings)
+- [Model Resolution](../configuration/model-resolution)
+
+## Permissions
+
+Devo asks before running commands or applying changes according to the current
+permission preset. Open the picker with:
+
+```text
+/permissions
+```
+
+Start conservatively in an unfamiliar repository. Relax permissions only after
+you understand what Devo is trying to do and which commands are expected.
+
+See [Permissions](../using-devo/permissions).
+
+## Context
+
+Devo keeps a transcript for the current session and can compact it when the
+conversation grows. Run:
+
+```text
+/compact
+```
+
+Compaction asks the model to preserve useful project context while reducing the
+active transcript. Use it before a long task continues into a new phase.
+
+See [Context And Compaction](../core-concepts/context-and-compaction).
+
+## File And Shell Shortcuts
+
+Two composer triggers matter during everyday use:
+
+- type `@` to fuzzy-search files and insert a path into the prompt;
+- type `!` to enter shell mode and run a command from the prompt area.
+
+See [Fuzzy File Search](../using-devo/fuzzy-file-search) and
+[Shell Mode](../using-devo/shell-mode).

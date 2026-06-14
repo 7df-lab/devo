@@ -1,0 +1,108 @@
+---
+title: /btw 和 Subagents
+description: 将旁路工作拆给 subagents，同时保留主线程。
+---
+
+使用 `/btw` 询问不应打断主任务的快速旁路问题。需要 Devo 委派独立工作并稍后收集结果时，用 subagents。
+
+它们相关，但不是同一种机制。
+
+## `/btw`
+
+输入 `/btw` 加旁路问题：
+
+```text
+/btw What does the current Plan Mode page say about update_plan?
+```
+
+Devo 会把 `/btw` prompt 记录到 transcript，并启动轻量 child agent 回答。答案会在主 transcript 中以 `BTW` heading 返回。
+
+如果提交没有问题的 `/btw`，Devo 显示：
+
+```text
+Usage: /btw <your question>
+```
+
+如果还没有 session，`/btw` 会失败并提示先发送普通消息。先启动 session，再问旁路问题。
+
+## `/btw` 能做什么
+
+`/btw` 的范围很窄。
+
+Child agent：
+
+- 继承已完成的 parent-session context；
+- 只有一个 turn；
+- 不能使用 tools；
+- 不能读文件、运行命令、搜索或修改代码；
+- 回答或失败后关闭。
+
+用 `/btw` 处理轻上下文问题：
+
+- "What did we decide about screenshots?"
+- "Summarize the current provider recommendation."
+- "What should I check before editing this page?"
+- "Does this wording sound too broad?"
+
+不要用 `/btw` 做需要仓库检查或编辑的工作。那应在普通聊天中问 Devo。
+
+## Subagents
+
+Subagents 是 parent session 之外可独立运行的 child Devo sessions。Devo 可以在工作足够独立时 spawn 它们，然后等待结果。
+
+Spawned subagent 有自己的 session id、generated nickname、role、status 和 agent path。根据启动方式，它可以继承已完成 parent history，也可以从干净 task message 开始。
+
+Subagents 适合：
+
+- 独立调查；
+- 并行 review 不同文件或子系统；
+- parent 需要保持聚焦的长 research tasks；
+- 在 parent 做最终决策前收集简洁 finding。
+
+Subagents 不适合：
+
+- 读取一个已知文件；
+- 搜索一个 symbol 或 string；
+- 替代直接 code search；
+- 在任务不明确时委派 "understand this and fix it"。
+
+Parent 仍负责综合判断。Subagent result 是 parent 的输入，不替代 parent judgment。
+
+## 监控 Subagents
+
+存在 live direct subagents 时，footer 会显示 `ctrl + x agents` 提示。
+
+按 `Ctrl+X` 打开 `Sub-agents` selector。使用 `Up` 和 `Down` 选择 live child，`Enter` 打开 transcript overlay，`q` 或 `Esc` 关闭 selector。
+
+Subagent transcript overlay 是只读的。它允许你查看 child output、tool activity、plan updates 和 terminal status，而不会把 child transcript 混入 parent transcript。
+
+没有 live child agents 时，该提示会消失。
+
+## `/btw` 与 Subagents
+
+| 用法 | 适用场景 | 工具访问 | 结果 |
+| --- | --- | --- | --- |
+| `/btw` | 快速旁路回答。 | 无 tools。 | parent transcript 中的直接 `BTW` answer。 |
+| Subagent | 独立调查或委派工作。 | 取决于启动策略。 | Parent 等待、审阅并总结结果。 |
+
+想要快速、对话式答案时用 `/btw`。答案依赖当前仓库时用普通 Devo 工作。任务足够大，而且分开的 workers 不会互相踩踏时，让 Devo spawn subagents。
+
+## 好的 `/btw` Prompt
+
+保持 `/btw` prompt 具体且有边界：
+
+```text
+/btw In one paragraph, explain the difference between Plan Mode and update_plan.
+```
+
+```text
+/btw What should the next docs page be after /goal?
+```
+
+避免需要 tools 的 prompt：
+
+```text
+/btw Search the repo for every permission preset and list their behavior.
+```
+
+这应是普通 prompt，因为它需要文件搜索。

@@ -1,0 +1,78 @@
+---
+title: Permissions
+description: 审阅并控制工具执行。
+---
+
+Permissions 控制 Devo 哪些工具可以不询问直接运行，哪些必须先获得 approval。
+
+用以下命令打开 permission preset picker：
+
+```text
+/permissions
+```
+
+使用 `Up` 和 `Down` 选择 preset，`Enter` 确认，`Esc` 返回。
+
+## Presets
+
+| Preset | Devo 无需询问可做什么 | 仍会询问什么 |
+| --- | --- | --- |
+| Read Only | 读取当前 workspace 中的文件。 | 编辑、shell commands 和 internet access。 |
+| Default | 读取和编辑当前 workspace 中的文件，并运行 shell commands。 | Internet access 和 workspace 外编辑。 |
+| Auto-review | 与 Default 相同的 workspace-write policy。 | 合格 approval 先给 auto-reviewer；不确定请求仍询问你。 |
+| Full Access | 不询问即可编辑 workspace 外文件并访问 internet。 | 正常 tool policy 下不再询问。 |
+
+`Default` 是正常编程 preset。`Read Only` 适合 audits 和提问。`Full Access` 很方便，但只应在你信任任务、workspace 和 tool calls 时使用。
+
+## Approval Prompts
+
+Devo 需要 approval 时，bottom pane 打开标题为：
+
+```text
+Permission approval required
+```
+
+Prompt 包含 action summary，可能还包括：
+
+- reason；
+- resource；
+- path；
+- host；
+- target。
+
+使用显示的选项响应：
+
+| Option | Shortcut | Effect |
+| --- | --- | --- |
+| Approve once | `y` | 只允许当前 pending tool execution。 |
+| Approve for session | `s` | 当请求支持 session scope 时，允许本 session 后续匹配请求。 |
+| Deny | `n` | 拒绝当前 tool execution。 |
+
+`Esc` 取消 approval request。
+
+## Auto-review
+
+`Auto-review` preset 使用与 `Default` 相同的基础权限，但 eligible approval requests 会先发送给 Devo 的 automatic approval reviewer。
+
+Reviewer 可以：
+
+- approve 明确低风险且限定在目标范围内的 actions；
+- deny destructive、credential-related、privilege-escalating 或 ambiguous high-impact actions；
+- 当 user intent 或 risk 不清楚时返回 uncertain。
+
+Uncertain requests 仍会展示给你。Auto-review 是减少打断的过滤器，不替代你的判断。
+
+## 审阅习惯
+
+批准前检查 resource 和 target：
+
+- 文件编辑：确认 path 在预期 workspace 内。
+- Shell commands：阅读确切 command target。
+- Network access：确认 host 符合预期。
+- Broad session approvals：确认未来匹配请求仍然安全。
+
+如果请求让人意外，deny 并要求 Devo 解释或选择更窄 action。
+
+## 项目权限记忆
+
+修改 permissions 时，Devo 会在用户配置中为 active project 记录所选 preset。这样同一项目的未来 sessions 会从预期 policy 启动，不必每次重新选择。

@@ -1,0 +1,71 @@
+---
+title: Slash Commands
+description: Devo slash commands 和 composer triggers 参考。
+---
+
+Slash commands 在 TUI composer 中输入。有些命令在模型生成时仍可使用；会改变配置的命令会等待当前任务 idle。
+
+## Commands
+
+| Command | Purpose | Notes |
+| --- | --- | --- |
+| `/theme` | 切换 UI theme。 | Generation 期间不可用。 |
+| `/model` | 选择当前模型。 | Generation 期间不可用。接受 inline model text。 |
+| `/skills` | 显示可用 skills。 | 运行 `skills list`。 |
+| `/mcp` | 显示已配置 MCP servers。 | 运行 `mcp list`。 |
+| `/compact` | Compact 当前 session context。 | Generation 期间不可用。 |
+| `/resume` | 恢复保存的 chat。 | Generation 期间不可用。 |
+| `/new` | 开始新的 chat。 | Generation 期间不可用。 |
+| `/status` | 显示当前 session config 和 token usage。 | 包含 model、thinking、cwd、turns 和 tokens。 |
+| `/permissions` | 选择 Devo 被允许做什么。 | Alias：`/approvals`。 |
+| `/clear` | 清空 transcript view。 | 不修改文件。 |
+| `/diff` | 显示 git diff，包括 untracked files。 | Generation 期间不可用。 |
+| `/goal` | 设置或查看长时间任务的 goal。 | 接受 subcommands 和 inline objective text。 |
+| `/btw` | 在不中断主对话的情况下提 side question。 | 需要 question。 |
+| `/exit` | 退出 Devo。 | 关闭 interactive session。 |
+
+## `/goal`
+
+不带参数时，`/goal` 显示当前 goal：
+
+```text
+/goal
+```
+
+设置或替换 objective：
+
+```text
+/goal Rebuild the docs structure one page at a time.
+```
+
+Subcommands：
+
+| Command | Meaning |
+| --- | --- |
+| `/goal edit` | 打开 goal editor。 |
+| `/goal pause` | 暂停 active goal。 |
+| `/goal resume` | 恢复 paused goal。 |
+| `/goal clear` | 清除 goal。 |
+
+Goal text 有 protocol 限制长度。如果过长，Devo 会报告限制，而不是设置 goal。
+
+## `/btw`
+
+使用 `/btw` 提 side question：
+
+```text
+/btw Which module handles provider resolution?
+```
+
+Side question 会通过 child-agent path 运行，并把答案返回主 transcript。
+
+## Composer Triggers
+
+这些不是 slash commands，但属于同一个 prompt surface。
+
+| Trigger | Purpose |
+| --- | --- |
+| `@` | 打开 fuzzy file search，并将选中的 path 插入 prompt。 |
+| `!` | 进入 SHELL mode，并从 composer 运行 shell command。 |
+
+触发器细节见 [Fuzzy File Search](../using-devo/fuzzy-file-search) 和 [Shell Mode](../using-devo/shell-mode)。

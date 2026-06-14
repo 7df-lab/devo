@@ -1,0 +1,59 @@
+---
+title: Provider Wire APIs
+description: Devo provider 协议选项参考。
+---
+
+Provider wire API 描述 Devo 为一个 model binding 使用的 HTTP 请求格式。
+
+它们配置在两个位置：
+
+- provider `wire_apis`：一个 provider 记录支持的协议集合；
+- binding `invocation_method`：一个 model binding 实际使用的协议。
+
+## 值
+
+| 值 | 请求族 | 适用情况 |
+| --- | --- | --- |
+| `openai_chat_completions` | OpenAI-compatible Chat Completions | Endpoint 接受 chat-completions 风格请求。 |
+| `openai_responses` | OpenAI-compatible Responses | Endpoint 接受 Responses API 请求。 |
+| `anthropic_messages` | Anthropic-compatible Messages | Endpoint 接受 Anthropic Messages 风格请求。 |
+
+## Provider 和 Binding 必须匹配
+
+下面是有效配置：
+
+```toml
+[providers.deepseek-anthropic]
+wire_apis = ["anthropic_messages"]
+
+[model_bindings.main]
+provider = "deepseek-anthropic"
+invocation_method = "anthropic_messages"
+```
+
+下面是无效配置：
+
+```toml
+[providers.deepseek-anthropic]
+wire_apis = ["anthropic_messages"]
+
+[model_bindings.main]
+provider = "deepseek-anthropic"
+invocation_method = "openai_chat_completions"
+```
+
+当 provider 列出 `wire_apis` 时，Devo 会校验选中的 binding 是否使用其中一个值。
+
+## 默认行为
+
+当字段省略时，`ModelBindingConfig` 会将 `invocation_method` 默认为 `openai_chat_completions`。新配置不要依赖这个默认值。请显式设置该值，让后续读者知道 binding 使用哪种协议。
+
+## 正确选择
+
+从 provider 的 endpoint 文档选择 wire API：
+
+- 如果文档说明兼容 Anthropic Messages，使用 `anthropic_messages`。
+- 如果文档说明兼容 OpenAI Responses，使用 `openai_responses`。
+- 如果文档说明兼容 OpenAI Chat Completions，使用 `openai_chat_completions`。
+
+对 DeepSeek 官方 API，除非你明确要使用 OpenAI-compatible path，否则使用 `anthropic_messages` 和 `https://api.deepseek.com/anthropic`。

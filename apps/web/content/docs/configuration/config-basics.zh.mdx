@@ -1,0 +1,75 @@
+---
+title: 配置基础
+description: 理解 Devo 配置文件和优先级。
+---
+
+Devo 从 `DEVO_HOME` 读取用户配置，并从当前工作区读取项目配置。
+
+## `DEVO_HOME`
+
+`DEVO_HOME` 是 Devo 的用户配置目录。
+
+| 平台 | 默认 `DEVO_HOME` |
+| --- | --- |
+| macOS/Linux | `~/.devo` |
+| Windows | `C:/Users/your-username/.devo` |
+
+如果你设置了 `DEVO_HOME`，该路径必须已经存在，并且必须是目录。Devo 会在使用前将其规范化。如果没有设置 `DEVO_HOME`，Devo 使用默认路径，并且不要求该目录预先存在。
+
+## 文件
+
+| 文件 | 作用域 | 用途 |
+| --- | --- | --- |
+| `<DEVO_HOME>/config.toml` | 用户 | 主要用户配置：providers、model bindings、skills、MCP、hooks、tools、logging、updates，以及记住的项目设置。 |
+| `<DEVO_HOME>/auth.json` | 用户 | provider 和 tool 配置引用的密钥值。 |
+| `<workspace>/.devo/config.toml` | 项目 | 工作区级覆盖项；当 Devo 带工作区根目录启动时读取。 |
+
+Provider API key 应存放在 `auth.json`，并在 `config.toml` 中通过 credential id 引用。
+
+## 优先级
+
+Devo 按以下顺序合并配置：
+
+1. Devo 内置默认值；
+2. `<DEVO_HOME>/config.toml` 中的用户配置；
+3. `<workspace>/.devo/config.toml` 中的项目配置；
+4. 命令行覆盖项。
+
+后面的来源会覆盖前面的来源。因此项目配置可以只为某个仓库覆盖用户默认值，而 CLI 覆盖项优先级最高。
+
+Provider 配置中的 provider 表和 model binding 表有自己的合并行为。用户配置通常放 provider credential 和可复用的 model binding。项目配置更适合放项目特定默认值。
+
+## 凭据
+
+`auth.json` 当前存储 API key 凭据：
+
+```json
+{
+  "version": 1,
+  "credentials": {
+    "deepseek_api_key": {
+      "kind": "api_key",
+      "value": "sk-your-key"
+    }
+  }
+}
+```
+
+Provider 配置通过 id 引用 credential：
+
+```toml
+[providers.deepseek-anthropic]
+credential = "deepseek_api_key"
+```
+
+如果 provider 引用了不存在的 credential id，Devo 会在 provider 解析阶段报错，并指出 `auth.json`。
+
+## 检查配置
+
+运行：
+
+```bash
+devo doctor
+```
+
+`devo doctor` 会输出 config home、配置状态、provider 状态和模型目录状态。手动编辑配置后应运行它。

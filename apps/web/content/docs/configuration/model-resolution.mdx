@@ -1,0 +1,89 @@
+---
+title: Model Resolution
+description: Understand how Devo selects the active model binding.
+---
+
+Model resolution is the process that turns a user request like `/model
+deepseek-v4-pro` into a concrete provider, model name, wire API, and credential.
+
+## Resolution Order
+
+When a requested model value is present, Devo checks enabled model bindings in
+this order:
+
+1. binding id equals the requested value;
+2. `model_slug` equals the requested value;
+3. `model_name` equals the requested value.
+
+When no requested model value is present, Devo checks:
+
+1. `[defaults].model_binding`, if it names an enabled binding;
+2. the first enabled binding in config.
+
+The resolved binding gives Devo:
+
+- binding id;
+- model slug;
+- provider id;
+- provider model name;
+- invocation method;
+- default reasoning effort.
+
+## Requested Model Sources
+
+A requested model can come from:
+
+- startup CLI `--model`;
+- `/model <value>` in the TUI;
+- a resumed session's saved model binding id;
+- a direct turn-context override.
+
+`/model` without an argument opens the picker and selects from configured saved
+models. `/model <value>` applies the value directly.
+
+## Enabled Versus Configured
+
+Runtime turn selection only uses enabled bindings. Disabled bindings can still
+be visible to configuration validation so Devo can explain that a selected
+binding is disabled instead of silently selecting a different model.
+
+Providers are checked too. If a binding points to a disabled provider, Devo
+reports that the provider is disabled.
+
+## Provider Settings
+
+After a binding resolves, Devo resolves provider settings:
+
+1. find the provider named by the binding;
+2. confirm the provider is enabled;
+3. confirm the binding is enabled;
+4. confirm the binding's `invocation_method` is allowed by provider
+   `wire_apis`;
+5. read the provider credential id from `auth.json`;
+6. merge provider base URL, headers, selected model name, thinking selection,
+   context settings, and HTTP proxy settings.
+
+If no provider can be resolved, Devo reports:
+
+```text
+No provider configured. Run `devo onboard` to complete setup.
+```
+
+## Thinking Selection
+
+The active thinking selection can come from config or model selection. Devo
+stores it as a user-facing value such as `disabled`, `enabled`, `high`, or
+`max`, then resolves it into provider-specific request fields for the selected
+wire API.
+
+`default_reasoning_effort` on a binding is used when no stronger session or
+turn selection is present.
+
+## Request Model Map
+
+For models with variants, Devo builds a provider request model map scoped to the
+selected provider. This prevents another provider with the same local slug from
+changing the wire model name for the active provider.
+
+This matters when a thinking variant has a different provider-side model name
+than the base model.

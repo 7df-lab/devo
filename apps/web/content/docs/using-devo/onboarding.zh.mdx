@@ -1,0 +1,82 @@
+---
+title: Onboarding
+description: 从终端 UI 配置 Devo。
+---
+
+Onboarding 配置 Devo 应使用的 provider 和 model。首次启动且没有 provider 配置时会自动运行，也可以随时手动运行：
+
+```bash
+devo onboard
+```
+
+添加第一个 provider、从 TUI 修改 provider setup，或创建新的 model binding 而不手动编辑 `config.toml` 时，用 onboarding。
+
+## Onboarding 会创建什么
+
+Onboarding 会在 Devo 用户配置中保存 provider vendor 和 model binding。如果输入 API key，Devo 会把它存为 credential，而不会在 transcript 中回显。
+
+保存后的配置让 Devo 知道：
+
+- UI 中显示哪个 model slug；
+- 请求应发送给哪个 provider vendor；
+- 发给 provider 的 request model name 是什么；
+- 使用哪个 wire API；
+- 模型支持 reasoning 时的默认 reasoning effort；
+- provider 的 base URL 和 credential。
+
+## 流程
+
+Onboarding widget 在 TUI 中内联运行。
+
+1. 选择 model profile。模型列表可搜索：输入过滤，使用 `Up` 和 `Down` 移动，按 `Enter` 选择。
+2. 选择已有 provider vendor，或选择 `Add provider...`。
+3. 输入 provider fields。新 provider 会询问 provider name、base URL、API key、request model name 和 display name。
+4. 选择 wire API：
+   - `OpenAI Chat Completions`
+   - `OpenAI Responses`
+   - `Anthropic Messages`
+5. 如果所选模型支持 reasoning，选择默认 reasoning effort。
+6. Devo 通过 server-side validation request 验证 provider。
+7. 验证成功后，Devo 保存 provider binding，并启用 composer。
+
+成功后 transcript 显示：
+
+```text
+Provider configured successfully
+```
+
+## 已有 Providers
+
+如果 provider vendor 已存在，onboarding 可以复用它。Provider selection step 会在 `Add provider...` 前显示已有 provider vendors。
+
+对于已有 provider，Devo 会复用已保存的 credential id 和 base URL。你仍可在验证前确认 request model name、display name、wire API 和 reasoning effort。
+
+## 验证失败
+
+如果验证失败，Devo 不会丢弃设置。它会显示错误并询问下一步：
+
+| 动作 | 使用场景 |
+| --- | --- |
+| Add model anyway | 你知道 provider 可用，但验证无法证明。 |
+| Retry with current settings | provider 可能临时失败。 |
+| Edit settings | base URL、API key、model name 或 wire API 错误。 |
+| Choose different model | 选错了 model profile。 |
+
+跳过验证保存会记录 provider 和 model binding，但 transcript 会标记 validation was skipped。
+
+## 取消
+
+按 `Esc` 可以回到 onboarding 上一步。从第一步 model selection 按 `Esc` 会取消 onboarding。
+
+如果 onboarding 是首次运行 gate，取消会退出 Devo，因为没有配置 provider 时普通 composer 无法运行。
+
+## DeepSeek 推荐
+
+DeepSeek 官方 API 建议在 Devo 中使用 Anthropic 兼容路径：
+
+- base URL: `https://api.deepseek.com/anthropic`
+- wire API: `Anthropic Messages`
+
+API key 流程和模型名称以 DeepSeek 官方文档为准。Devo 推荐 Anthropic 兼容路径，因为该 provider path 可使用 hosted `web_search` 和 `web_fetch` tools。OpenAI 兼容的 DeepSeek endpoint 也可以工作，但 web search 通常需要单独配置第三方 tool。
+
+详细步骤见 [连接 DeepSeek](../get-started/connect-deepseek)。

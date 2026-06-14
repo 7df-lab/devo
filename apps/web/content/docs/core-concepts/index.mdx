@@ -1,0 +1,31 @@
+---
+title: Core Concepts
+description: Concepts behind Devo's agent runtime.
+---
+
+This section explains the runtime ideas behind Devo before you read the
+configuration and contributor reference pages.
+
+Devo is model-neutral, but the runtime still needs clear answers to a few
+questions:
+
+- Which model profile is active?
+- Which provider connection serves that model?
+- Which context should be sent to the model?
+- Which tools are available, and which require permission?
+- Which local extension systems are active?
+
+## Concepts
+
+| Page | Use It To Understand |
+| --- | --- |
+| [Models and Providers](./models-and-providers) | How model metadata, provider connections, and model bindings fit together. |
+| [Context and Compaction](./context-and-compaction) | How Devo keeps long sessions within a model context window. |
+| [Code Search](./code-search) | How the built-in semantic `code_search` tool differs from shell search. |
+| [MCP](./mcp) | How external tools and resources are connected through Model Context Protocol servers. |
+| [Skills](./skills) | How reusable workflows and references are discovered and activated. |
+| [Hooks](./hooks) | How configured commands run around lifecycle events. |
+
+Read these pages before editing `config.toml` directly. The configuration
+section gives exact TOML shapes; this section explains the concepts those
+settings control.

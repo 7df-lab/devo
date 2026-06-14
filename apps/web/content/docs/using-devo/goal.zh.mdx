@@ -1,0 +1,104 @@
+---
+title: /goal
+description: 让 Devo 跨 turns 继续一个有边界的目标。
+---
+
+`/goal` 为当前 session 设置一个持久目标。Devo 会在多个 turns 中保留该目标上下文，并能在一个 turn 结束后继续朝目标工作。
+
+它用于不该塞进单个 prompt 的工作，例如多页文档重写、跨 crate refactor 或较长的 bug investigation。
+
+## 设置目标
+
+输入 `/goal` 加 objective：
+
+```text
+/goal Rebuild the docs structure under apps/web/content/docs and verify every
+page before stopping.
+```
+
+Objective 可以较长，但必须在当前 4,000 字符限制内。
+
+如果还没有 session，设置 goal 会启动一个 session。如果已有 goal，Devo 会询问是替换当前 goal 还是保留。
+
+## 查看或修改目标
+
+不带参数运行 `/goal` 会显示当前 goal。Status view 包括：
+
+- status；
+- objective；
+- time used；
+- tokens used；
+- token budget，如果配置了。
+
+使用这些 subcommands 管理 goal：
+
+| Command | Effect |
+| --- | --- |
+| `/goal edit` | 打开当前 objective 的编辑器。 |
+| `/goal pause` | 暂停 continuation。 |
+| `/goal resume` | 恢复 active objective。 |
+| `/goal clear` | 从 session 中移除 goal。 |
+
+goal active 时，status view 会建议 `/goal edit`、`/goal pause` 和 `/goal clear`。paused 时会建议 `/goal edit`、`/goal resume` 和 `/goal clear`。
+
+## Continuation 如何工作
+
+Active goal 会作为 goal context 插入 Build-mode turns。Devo 接收 objective、当前 usage、token budget 和 remaining tokens，然后继续朝同一最终状态推进。
+
+一个 turn 完成后，server 可能为 active goal 启动内部 continuation turn。该 continuation 是普通 Build-mode turn，但由 runtime 启动，而不是新的用户输入。
+
+只有 session idle 时 continuation 才会启动。以下情况不会启动：
+
+- 另一个 turn 正在运行；
+- approval 正在等待响应；
+- Devo 正在等待用户输入；
+- 有 user turn 排队；
+- session 当前处于 Plan Mode。
+
+如果上一个 turn 在 goal 最后更新后失败，Devo 会暂停 goal，而不是盲目继续。
+
+## 完成
+
+Devo 应先根据当前状态验证整个 objective，然后才标记 goal complete。部分进展、简单子集，或不能覆盖全部 objective 的绿色检查都不够。
+
+当 Devo 判断 objective 完成时，会使用内部 `update_goal` 工具并设置 `status: "complete"`。这会记录最终 usage，并把 goal status 改为 complete。
+
+如果之后不想显示 goal，可以继续用 `/goal clear`。
+
+## Budgets
+
+Goal state 支持可选 token budget。有 budget 时，`/goal` status 会同时显示 tokens used 和 configured budget。
+
+当前 TUI command 只设置或编辑 objective。它不暴露从 composer 创建 budget 的语法。如果一个 goal 有 budget，它来自 runtime/API 路径，而不是 `/goal <objective>`。
+
+达到 token budget 时，runtime 会将 goal 标记为受 budget 限制，并启动 wrap-up turn。该 turn 不应开始新的实质性工作，而应总结进展、指出剩余事项并留下明确下一步。
+
+## Goal Mode 和 Plan Mode
+
+Goals 应用于 Build-mode 工作。Plan Mode 会抑制 goal continuation context，避免规划时意外执行长期目标。
+
+当 objective 本身需要讨论时，先使用 Plan Mode：
+
+```text
+Shift+Tab to PLAN
+Plan how to split the docs rebuild into product docs, user guide, contributor
+docs, and provider reference.
+```
+
+期望结果明确后，切回 Build mode 并设置 goal：
+
+```text
+/goal Rebuild the docs in the agreed structure and verify the rendered site.
+```
+
+## 何时使用 `/goal`
+
+如果任务的最终状态比单次回答更重要，使用 `/goal`：
+
+- 逐页重建 docs section；
+- 完成跨 crates 的 refactor；
+- 通过多轮测试调查并修复 bug；
+- 实现需要反复验证的 feature；
+- compaction 或恢复 session 后继续工作。
+
+一次性任务使用普通 prompt。Goal 会增加 persistence、accounting 和 continuation behavior，最好留给有明确最终状态的工作。

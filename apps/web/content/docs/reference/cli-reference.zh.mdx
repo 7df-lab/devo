@@ -1,0 +1,88 @@
+---
+title: CLI Reference
+description: 常见 Devo command 示例。
+---
+
+本页列出常见 command 形式。选项细节见 [Command Line Options](./command-line-options)。
+
+## 交互式会话
+
+在当前仓库启动 Devo：
+
+```bash
+devo
+```
+
+强制 onboarding：
+
+```bash
+devo onboard
+```
+
+使用特定的已配置 model binding 或 model name 启动：
+
+```bash
+devo --model deepseek-v4-pro
+```
+
+设置进程日志级别：
+
+```bash
+devo --log-level debug
+```
+
+## Resume
+
+Devo 退出时会打印继续该 session 的命令：
+
+```bash
+devo resume <session-id>
+```
+
+你也可以在 TUI 内浏览保存的 sessions：
+
+```text
+/resume
+```
+
+## 非交互 Prompt
+
+发送一个 prompt 并打印最终答案：
+
+```bash
+devo prompt "Explain this repository's main runtime path."
+```
+
+输出 JSON object：
+
+```bash
+devo prompt --format json "Summarize the last commit."
+```
+
+输出 streaming JSONL events：
+
+```bash
+devo prompt --format jsonl "List the main config files."
+```
+
+`devo prompt` 使用 always-allow permission checker。只在 prompt 和 working tree 都受控的可信 automation 中使用它。
+
+## Health Check
+
+诊断配置、provider connectivity 和系统健康：
+
+```bash
+devo doctor
+```
+
+修改 provider config、credentials 或本地 tool setup 后运行它。
+
+## Upgrade
+
+将 Devo 升级到最新发布版本：
+
+```bash
+devo upgrade
+```
+
+Offline installation 应从复制过来的 release artifact 升级。见[安装](../get-started/install)。

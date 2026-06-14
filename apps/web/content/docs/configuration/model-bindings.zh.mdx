@@ -1,0 +1,86 @@
+---
+title: 模型绑定
+description: 将一个支持的模型绑定到已配置的 provider。
+---
+
+Model binding 把 Devo 本地的模型身份连接到实际发送给 provider 的模型名。
+
+Binding 位于 `[model_bindings.<id>]` 下。
+
+## 示例
+
+```toml
+[model_bindings.deepseek-v4-pro-deepseek-anthropic]
+enabled = true
+model_slug = "deepseek-v4-pro"
+provider = "deepseek-anthropic"
+model_name = "deepseek-v4-pro"
+display_name = "DeepSeek V4 Pro"
+invocation_method = "anthropic_messages"
+default_reasoning_effort = "high"
+```
+
+| 字段 | 必需 | 含义 |
+| --- | --- | --- |
+| `model_slug` | 是 | Devo 的本地模型元数据 id。 |
+| `provider` | 是 | `[providers.<id>]` 中的 provider id。 |
+| `model_name` | 是 | 发送给 provider 的模型字符串。 |
+| `display_name` | 否 | TUI 模型选择器和 header 中显示的标签。 |
+| `invocation_method` | 是 | 该 binding 使用的 wire API。 |
+| `default_reasoning_effort` | 否 | 对支持的模型设置默认 reasoning effort。 |
+| `web_search` | 否 | Binding 特定的 web search 覆盖项。 |
+| `web_fetch` | 否 | Binding 特定的 web fetch 覆盖项。 |
+| `enabled` | 否 | 该 binding 是否可被选择。默认 `true`。 |
+
+## Slug 与模型名
+
+`model_slug` 是 Devo 侧的身份。它映射到本地模型元数据，例如 context window、thinking 支持和显示默认值。
+
+`model_name` 是 provider 侧的值，会放进 API 请求。
+
+两者通常相同，但不必须相同。当 gateway 需要 `openai/gpt-5.2` 这样的名称，而 Devo 仍应使用稳定本地 slug 时，可以使用不同值。
+
+## Binding Id
+
+表名就是 binding id：
+
+```toml
+[model_bindings.main]
+```
+
+Binding id 是 `[defaults]` 指向的值，也是用户运行 `/model <value>` 时首先匹配的值。
+
+## 默认 Binding
+
+在 `[defaults]` 下设置启动默认值：
+
+```toml
+[defaults]
+model_binding = "deepseek-v4-pro-deepseek-anthropic"
+```
+
+如果默认 binding 被禁用，运行时模型解析会跳过它，并使用能找到的第一个 enabled binding。
+
+## Provider 兼容性
+
+Binding 的 `invocation_method` 必须被 provider 的 `wire_apis` 支持。下面是有效配置：
+
+```toml
+[providers.deepseek-anthropic]
+wire_apis = ["anthropic_messages"]
+
+[model_bindings.deepseek-v4-pro-deepseek-anthropic]
+provider = "deepseek-anthropic"
+invocation_method = "anthropic_messages"
+```
+
+下面是无效配置，因为 binding 请求了 provider 未声明支持的 wire API：
+
+```toml
+[providers.deepseek-anthropic]
+wire_apis = ["anthropic_messages"]
+
+[model_bindings.bad]
+provider = "deepseek-anthropic"
+invocation_method = "openai_chat_completions"
+```

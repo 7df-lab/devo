@@ -1,0 +1,90 @@
+---
+title: MCP
+description: Connect external context and tools through Model Context Protocol.
+---
+
+MCP connects Devo to external tools, resources, and prompts through configured
+Model Context Protocol servers.
+
+Use MCP when the model needs access to systems outside the local repository,
+such as documentation servers, browser tools, databases, issue trackers, or
+internal knowledge systems.
+
+## What An MCP Server Adds
+
+An MCP server can expose:
+
+- tools;
+- resources;
+- resource templates;
+- prompts.
+
+Devo discovers MCP tools during runtime setup and normalizes them into
+model-callable tool names. MCP tool names use the `mcp__` prefix internally so
+they do not collide with built-in tools.
+
+## Configuration Shape
+
+MCP configuration belongs in Devo config, not in prompts. Each configured server
+has:
+
+- stable server id;
+- display name;
+- transport;
+- startup policy;
+- enabled flag;
+- trust policy;
+- allowed capabilities;
+- roots policy;
+- output limits;
+- optional auth reference.
+
+Supported transports are:
+
+| Transport | Use |
+| --- | --- |
+| `stdio` | Launch a local MCP server process with command, cwd, and environment settings. |
+| `streamable_http` | Connect to a remote MCP endpoint URL with optional auth and headers. |
+
+Startup policy controls whether an enabled server starts eagerly, lazily on
+first use, or only by explicit request.
+
+## Listing Servers
+
+Use `/mcp` in the TUI to list configured MCP servers.
+
+The transcript output shows each server's id, display name, enabled state,
+startup policy, transport kind, and target command or URL. If no servers are
+configured, Devo shows:
+
+```text
+No MCP servers configured.
+```
+
+## Mentions
+
+The `@` reference popup includes MCP servers. Selecting one inserts a stable
+MCP reference token such as:
+
+```text
+@mcp:docs
+```
+
+The mention target uses an internal `mcp://server/<id>` path so Devo can carry
+the reference through the turn.
+
+## Tool Exposure
+
+If a server exposes a small tool set, Devo can expose visible MCP tools directly
+to the model. When many MCP tools are available, Devo defers exposure so tool
+search can load the relevant tools on demand.
+
+MCP tool metadata can also mark a tool as hidden from model-facing tool
+declarations. Devo respects that visibility metadata during discovery.
+
+## Safety
+
+Treat MCP servers like any other tool source. A server can expose actions that
+read or mutate external systems. Keep output limits, roots policy, auth, and
+trust policy narrow. Review permission prompts before allowing network,
+filesystem, or external-system operations.

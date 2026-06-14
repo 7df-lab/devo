@@ -1,0 +1,65 @@
+---
+title: Skills
+description: 为 Devo 打包可复用 instructions 和 references。
+---
+
+Skills 为 Devo 打包可复用 instructions、references、scripts 和操作指导。
+
+当任务需要超过一行 prompt 的指导，但又不应写死在 Devo 本体时，使用 skill。
+
+## Skill 是什么
+
+Skill 是一个包含 `SKILL.md` entrypoint 的目录。Entrypoint 说明 skill 何时适用，以及 Devo 应如何使用旁边的文件。
+
+Skill 可以包含：
+
+- instructions；
+- reference files；
+- scripts；
+- examples；
+- templates；
+- assets。
+
+Skill 内的相对路径从 skill base directory 解析。
+
+## Discovery
+
+Skill discovery 默认启用。Devo 默认扫描名为 `skills` 的 user 和 workspace skill roots，在启用时包含 bundled system skills，并可 watch roots 的变化。
+
+Skill list 可以包含 user、workspace、plugin、system 和 admin skills。使用 `/skills` 在 transcript 中渲染当前 skill list。
+
+## Available Skills Context
+
+配置后，turns 会收到 available-skills instruction block。该 block 告诉模型有哪些 skills，而不把每个完整 `SKILL.md` 都放进 context。
+
+模型随后可以在相关时显式加载 skill。加载 skill 会把它的内容和抽样 file list 加入 model-visible context。
+
+## 手动激活
+
+`@` reference popup 可以显示 skills。Skill references 会在 composer 中插入 `$skill` 风格 token。
+
+当你知道某类任务应该适用时，使用显式 skill mentions：
+
+```text
+$openai-docs Check the current OpenAI docs before answering this API question.
+```
+
+实际可用 skill names 取决于安装的 system、plugin、user 和 workspace skills。
+
+## Enablement
+
+Skill configuration 可以按 path 或 name 启用/禁用 skills。Path-based rules 最精确。Name-based rules 要求名称无歧义。
+
+当 workspace 有应忽略的 experimental skill，或某个 personal skill 不应应用于特定 setup 时使用。
+
+## 好的 Skill 边界
+
+为这些内容创建 skill：
+
+- 可重复 documentation 流程；
+- provider-specific integration guide；
+- domain review checklist；
+- local script 流程；
+- 太长不适合放进每个 prompt 的 project convention。
+
+不要为一次性事实、很小的 alias，或应属于 project documentation 的 instructions 创建 skill。

@@ -1,0 +1,14 @@
+{
+  "title": "Core Concepts",
+  "icon": "Layers",
+  "pages": [
+    "index",
+    "models-and-providers",
+    "context-and-compaction",
+    "code-search",
+    "mcp",
+    "skills",
+    "hooks"
+  ],
+  "defaultOpen": true
+}

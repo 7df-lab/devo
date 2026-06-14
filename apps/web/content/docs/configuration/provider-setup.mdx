@@ -1,0 +1,114 @@
+---
+title: Provider Setup
+description: Add provider connection records.
+---
+
+A provider record tells Devo how to reach one model service. It does not decide
+which model is active by itself; a model binding does that.
+
+Provider records live under `[providers.<id>]` in `config.toml`.
+
+## Provider Fields
+
+```toml
+[providers.deepseek-anthropic]
+enabled = true
+name = "DeepSeek Anthropic"
+base_url = "https://api.deepseek.com/anthropic"
+credential = "deepseek_api_key"
+wire_apis = ["anthropic_messages"]
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `name` | Yes | Human-readable provider name. |
+| `enabled` | No | Whether this provider can be used. Defaults to `true`. |
+| `base_url` | Usually | Provider endpoint. Some built-in providers can supply defaults. |
+| `credential` | Usually | Credential id in `<DEVO_HOME>/auth.json`. |
+| `headers` | No | Raw JSON object string for provider-specific HTTP headers. |
+| `wire_apis` | Recommended | Wire APIs this provider entry supports. |
+| `web_search` | No | Provider-specific web search override. |
+| `web_fetch` | No | Provider-specific web fetch override. |
+
+If `wire_apis` is empty, Devo can still default some paths, but explicit
+`wire_apis` makes validation and future maintenance clearer.
+
+## Credentials
+
+Store API keys in `auth.json`, not in `config.toml`:
+
+```json
+{
+  "version": 1,
+  "credentials": {
+    "deepseek_api_key": {
+      "kind": "api_key",
+      "value": "sk-your-key"
+    }
+  }
+}
+```
+
+Then reference the id:
+
+```toml
+credential = "deepseek_api_key"
+```
+
+Onboarding does this for you when you enter an API key.
+
+## Web Search And Web Fetch
+
+Devo has two web capability layers:
+
+- provider-hosted web tools, when the selected provider path supports them;
+- local third-party web search providers configured under `[tools.web_search]`.
+
+Provider and binding overrides can set web behavior:
+
+```toml
+[providers.deepseek-anthropic.web_search]
+mode = "provider"
+
+[providers.deepseek-anthropic.web_fetch]
+mode = "provider"
+```
+
+For DeepSeek's official API, prefer the Anthropic-compatible provider path when
+you want provider-hosted `web_search` and `web_fetch`.
+
+## Local Web Search
+
+When provider-hosted search is not available, configure local search:
+
+```toml
+[tools.web_search]
+mode = "local"
+local_provider = "exa"
+
+[tools.web_search.local_providers.exa]
+kind = "exa"
+credential = "exa_api_key"
+max_results = 5
+```
+
+The local provider credential must also exist in `auth.json`.
+
+Supported local search provider kinds are:
+
+- `exa`
+- `tavily`
+
+## Disabling A Provider
+
+Set `enabled = false` to keep a provider in config without letting model
+resolution use it:
+
+```toml
+[providers.old-provider]
+enabled = false
+name = "Old Provider"
+```
+
+If a selected binding points to a disabled provider, Devo reports that the
+provider is disabled.

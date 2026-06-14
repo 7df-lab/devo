@@ -1,0 +1,84 @@
+---
+title: Config Basics
+description: Understand Devo config files and precedence.
+---
+
+Devo reads user config from `DEVO_HOME` and project config from the active
+workspace.
+
+## `DEVO_HOME`
+
+`DEVO_HOME` is Devo's user config directory.
+
+| Platform | Default `DEVO_HOME` |
+| --- | --- |
+| macOS/Linux | `~/.devo` |
+| Windows | `C:/Users/your-username/.devo` |
+
+If you set `DEVO_HOME`, the path must already exist and must be a directory.
+Devo canonicalizes it before use. If `DEVO_HOME` is unset, Devo uses the
+default path and does not require that directory to already exist.
+
+## Files
+
+| File | Scope | Purpose |
+| --- | --- | --- |
+| `<DEVO_HOME>/config.toml` | User | Main user config: providers, model bindings, skills, MCP, hooks, tools, logging, updates, and remembered project settings. |
+| `<DEVO_HOME>/auth.json` | User | Secret credential values referenced by provider and tool config. |
+| `<workspace>/.devo/config.toml` | Project | Workspace-level overrides checked when Devo is launched with a workspace root. |
+
+Provider API keys should be stored in `auth.json` and referenced by credential
+id from `config.toml`.
+
+## Precedence
+
+Devo merges config in this order:
+
+1. defaults built into Devo;
+2. user config at `<DEVO_HOME>/config.toml`;
+3. project config at `<workspace>/.devo/config.toml`;
+4. command-line overrides.
+
+Later sources override earlier sources. This means project config can override
+user defaults for one repository, and CLI overrides win over both.
+
+Provider config has its own merge behavior for provider and model binding
+tables. User config is the usual place for provider credentials and reusable
+model bindings. Project config is best for project-specific defaults.
+
+## Credentials
+
+`auth.json` currently stores API-key credentials:
+
+```json
+{
+  "version": 1,
+  "credentials": {
+    "deepseek_api_key": {
+      "kind": "api_key",
+      "value": "sk-your-key"
+    }
+  }
+}
+```
+
+Provider config references a credential by id:
+
+```toml
+[providers.deepseek-anthropic]
+credential = "deepseek_api_key"
+```
+
+If a provider references a missing credential id, Devo fails provider resolution
+with an error that names `auth.json`.
+
+## Inspecting Setup
+
+Run:
+
+```bash
+devo doctor
+```
+
+`devo doctor` prints the config home, config status, provider status, and model
+catalog status. Use it after editing config manually.

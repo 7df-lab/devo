@@ -1,0 +1,124 @@
+---
+title: Plan Mode
+description: Use planning before implementation.
+---
+
+Plan Mode is for shaping the work before Devo changes files.
+
+Use it when the task is ambiguous, risky, large enough to split into phases, or
+important enough that you want to review the approach before implementation.
+
+In the current TUI, Plan Mode is entered from the composer with `Shift+Tab`.
+
+## Switch Modes
+
+The composer has three input modes:
+
+| Mode | Use For |
+| --- | --- |
+| `BUILD` | Normal work. Devo can implement, edit files, run tools, and update task progress. |
+| `PLAN` | Planning work. Devo should inspect and discuss, then produce a proposed plan. |
+| `SHELL` | Direct shell input from you. See [Shell Mode](/docs/using-devo/shell-mode). |
+
+Press `Shift+Tab` to toggle between `BUILD` and `PLAN`. The mode label at the
+bottom of the composer changes color and text so you can see which mode the
+next submitted message will use.
+
+Plan Mode is not a slash command. Do not type `/plan`; switch the composer to
+`PLAN`, then write the planning prompt:
+
+```text
+Plan a safe refactor for provider configuration loading. Inspect the current
+code first, then ask if any product choices are unclear.
+```
+
+## What Changes In Plan Mode
+
+Plan Mode changes how Devo treats your next turn.
+
+Devo should:
+
+- inspect the repository before asking questions when the answer is discoverable
+  from files, manifests, schemas, or tests;
+- ask for product or implementation preferences when they cannot be discovered
+  from the repo;
+- avoid mutating tracked files;
+- produce a decision-complete `Proposed Plan` when the approach is ready.
+
+Devo may still run non-mutating checks that help the plan, such as searching
+files, reading configuration, running static inspection, or running tests/builds
+that only write build artifacts or caches.
+
+Devo should not edit files, apply patches, run formatters that rewrite tracked
+files, apply migrations, or otherwise do the implementation while the submitted
+turn is in `PLAN`.
+
+## Proposed Plans
+
+When Devo finishes a Plan Mode turn, it can render a `Proposed Plan` cell in the
+transcript. The plan is meant to be handed to an engineer or another agent
+without leaving major decisions open.
+
+A good proposed plan usually includes:
+
+- a short title and summary;
+- the intended implementation changes;
+- public API, configuration, or data-shape changes if any;
+- tests and acceptance checks;
+- assumptions that were chosen during planning.
+
+The proposed plan should be concise by default. It should not be a raw dump of
+every file Devo inspected.
+
+## Implement Or Revise
+
+After a `Proposed Plan` appears, Devo opens a small action menu.
+
+Choose `Implement Plan` when the plan is ready. Devo switches back to `BUILD`
+mode and submits an implementation turn using that plan.
+
+Choose `修改建议` when the plan needs changes. This is the current TUI label for
+the revise-plan action. It keeps the composer in `PLAN` mode and lets you type
+feedback such as:
+
+```text
+Keep the config migration out of scope. Add a test for Windows paths.
+```
+
+Devo should then revise the plan instead of editing files.
+
+## Plan Mode And Task Progress
+
+Plan Mode is different from the `update_plan` progress checklist you may see
+during normal work.
+
+`PLAN` mode is a collaboration mode for deciding what to do. It can produce a
+`Proposed Plan`.
+
+`update_plan` is a Build-mode progress surface. It appears as `Updated Plan` in
+the transcript and tracks implementation steps such as completed, current, and
+pending work. It does not enter Plan Mode, and Devo does not use it while a turn
+is running in `PLAN`.
+
+## When To Use It
+
+Use Plan Mode for:
+
+- architecture or runtime-flow changes;
+- provider, model, or permission behavior changes;
+- docs structure changes before writing many pages;
+- migrations or compatibility-sensitive edits;
+- work that needs clear review before implementation.
+
+Stay in `BUILD` for small, obvious edits:
+
+```text
+Update the install page to mention the Windows DEVO_HOME path.
+```
+
+Switch to `PLAN` when the important question is what should be built:
+
+```text
+Plan how the docs should explain provider wire APIs without overwhelming new
+users.
+```

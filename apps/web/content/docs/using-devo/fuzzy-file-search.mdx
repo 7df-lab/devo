@@ -1,0 +1,92 @@
+---
+title: "@ Fuzzy File Search"
+description: Use @ in the composer to find and insert repository context.
+---
+
+Type `@` in the composer to open reference search. Devo searches the token under
+the cursor and shows matching references while you type.
+
+This is the fastest way to point Devo at specific context before you ask for an
+edit, review, explanation, or plan.
+
+## Basic Use
+
+Start a prompt and type `@` followed by part of a path:
+
+```text
+Explain how @crates/tui/chat_composer handles shell mode.
+```
+
+The popup opens as soon as the composer sees an `@` token. A bare `@` opens the
+popup with an empty query. Typing after `@` narrows the query:
+
+```text
+@src
+@docs/install
+@Cargo
+```
+
+Use `Up` and `Down` to move through results. Press `Enter` or `Tab` to insert
+the selected reference. Press `Esc` to close the popup.
+
+## Where It Works
+
+`@` search is token-local. The cursor can be anywhere inside the token, not only
+at the end.
+
+It works in normal prompts:
+
+```text
+Review @apps/web/content/docs/get-started/install.mdx for missing install paths.
+```
+
+It also works inside slash command arguments:
+
+```text
+/review @crates/core/src/config_resolution.rs
+```
+
+This lets you combine command workflows with explicit files.
+
+## Result Types
+
+The reference popup can show multiple categories:
+
+| Prefix | Meaning |
+| --- | --- |
+| `FILE` | A repository file path. |
+| `Skill` | An installed skill that can add instructions for the turn. |
+| `MCP` | A connected MCP server or resource reference. |
+
+For file results, Devo replaces the active `@token` with the selected path. If
+the path contains whitespace, Devo wraps it in quotes so the prompt parser keeps
+it as one argument.
+
+## When To Use It
+
+Use `@` when the file or reference is already known:
+
+- Asking Devo to edit a specific file.
+- Asking for a review of one module.
+- Passing a file to `/review`.
+- Comparing a small number of known files.
+- Pointing at a config, spec, or log file that should anchor the answer.
+
+Use normal language or `code_search` when you do not know the file yet:
+
+```text
+Find where provider-hosted web search is configured.
+```
+
+That asks Devo to investigate. `@` tells Devo exactly what context you want in
+the current prompt.
+
+## Popup Behavior
+
+If you press `Esc`, Devo dismisses the popup for the current token and does not
+reopen it until the token changes. This keeps the popup from fighting you while
+you continue typing.
+
+If you press `Enter` while the popup has no selected result, Devo closes the
+popup instead of submitting the prompt. This prevents accidental submissions
+while reference search is still active.

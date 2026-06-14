@@ -1,0 +1,109 @@
+---
+title: Development Setup
+description: Build and run Devo locally as a contributor.
+---
+
+This page covers the local setup needed to work on Devo code and docs.
+
+## Toolchains
+
+Devo is a Rust workspace plus a Next.js docs app.
+
+| Area | Toolchain |
+| --- | --- |
+| Rust crates | Rust 1.85 or newer, edition 2024. |
+| Docs app | Node.js/npm compatible with the `apps/web/package-lock.json` lockfile. |
+
+The workspace version and Rust version are declared in the root `Cargo.toml`.
+
+## Rust Workspace
+
+Build the workspace:
+
+```bash
+cargo build
+```
+
+Run the CLI from source:
+
+```bash
+cargo run -p devo-cli -- --help
+cargo run -p devo-cli
+```
+
+Run a focused package test:
+
+```bash
+cargo test -p devo-config
+```
+
+Format a changed Rust package:
+
+```bash
+cargo fmt --package devo-config
+```
+
+If a Rust command is slow because another Rust command is holding a build lock,
+let it finish. Do not kill cargo processes just because they are waiting.
+
+## Docs App
+
+The docs live in `apps/web/content/docs`.
+
+Install docs dependencies:
+
+```bash
+cd apps/web
+npm install
+```
+
+Run the docs app:
+
+```bash
+npm run dev
+```
+
+Use a specific port when another process is already using the default:
+
+```bash
+PORT=3011 npm run dev
+```
+
+Validate docs changes:
+
+```bash
+npm run lint
+npm run build
+```
+
+## Config For Local Testing
+
+Use a separate `DEVO_HOME` when testing config migrations or onboarding:
+
+```bash
+mkdir -p /tmp/devo-dev-home
+DEVO_HOME=/tmp/devo-dev-home cargo run -p devo-cli -- onboard
+```
+
+`DEVO_HOME` must point to an existing directory when set.
+
+## Repository Conventions
+
+Follow the repository conventions in `AGENTS.md`:
+
+- crate names use the `devo-` prefix;
+- prefer inline `format!` arguments;
+- collapse nested `if` statements when clippy would flag them;
+- make match expressions exhaustive when practical;
+- document newly introduced traits;
+- avoid trivial wrapper functions;
+- keep modules reasonably sized;
+- use `pretty_assertions::assert_eq` in tests when adding assertions.
+
+When changing public config, CLI, or runtime behavior, update the docs in the
+same change.
+
+## Dirty Worktrees
+
+Assume the working tree may contain unrelated user changes. Keep edits scoped to
+the files required for the task, and do not revert files you did not change.

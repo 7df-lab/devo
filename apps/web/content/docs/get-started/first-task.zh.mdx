@@ -1,0 +1,121 @@
+---
+title: 第一个任务
+description: 用 Devo 运行一个实际的第一个编程任务。
+---
+
+第一个任务用于验证三件事：
+
+1. Devo 在你期望的仓库中运行。
+2. 模型能读取并理解项目。
+3. Devo 能做一个小范围修改，并运行正确检查。
+
+先从只读上下文开始。只有当回答与仓库匹配后，再让 Devo 修改文件。
+
+## 从仓库中启动
+
+启动 Devo 前先进入仓库：
+
+```bash
+cd /path/to/your/repo
+devo
+```
+
+Devo 使用当前工作目录作为会话 workspace。如果从错误目录启动，文件搜索、上下文和验证命令都会指向错误项目。
+
+## 询问运行时路径
+
+使用只读 prompt：
+
+```text
+Explain this repository's main runtime path. Do not edit files yet.
+```
+
+Web app 可以询问请求流程：
+
+```text
+Explain how a docs page is loaded and rendered. Include the files I should read first. Do not edit files yet.
+```
+
+Rust crate 可以询问 crate 边界：
+
+```text
+Explain the crates involved in provider configuration. Do not edit files yet.
+```
+
+继续之前先读回答。如果回答提到无关文件或漏掉明显入口，先修正工作目录或模型配置。
+
+## 指向已知文件
+
+如果已经知道文件，用 `@` 附加：
+
+```text
+Review @apps/web/content/docs/get-started/install.mdx for missing install paths. Do not edit yet.
+```
+
+当你希望 Devo 检查特定上下文，而不是从零搜索时，使用 `@`。
+
+## 要求一个小范围修改
+
+第一次编辑应保持小范围：
+
+```text
+Update @apps/web/content/docs/get-started/install.mdx so it covers offline installation. Keep the change scoped to this page.
+```
+
+好的第一个任务应有窄文件范围、明确期望行为和明显验证命令。
+
+避免宽泛首个 prompt，例如：
+
+```text
+Improve the docs.
+```
+
+这会在你验证配置前给 Devo 太多自由度。
+
+## 运行验证
+
+要求 Devo 运行相关检查：
+
+```text
+Run the docs lint and build checks for this change.
+```
+
+如果知道确切命令，使用 `!`：
+
+```text
+!npm run lint
+```
+
+Rust 修改优先使用 package 级检查：
+
+```text
+!cargo test -p devo-tui status_indicator -- --nocapture
+```
+
+只有当改动触及共享行为时，再扩大检查范围。
+
+## 审阅 diff
+
+检查工作树：
+
+```text
+!git status --short
+```
+
+要求 Devo 总结 diff：
+
+```text
+Summarize the docs changes and call out anything unrelated.
+```
+
+如果有无关文件变脏，先弄清原因再 stage。Devo 应配合现有工作树，并避免 revert 无关改动。
+
+## 继续或停止
+
+第一个任务后：
+
+- 如果配置表现正确，可以继续做另一个小范围修改。
+- 扩大范围前，先修复 provider、model、working directory 或 permission 问题。
+- 已知文件使用 [@ 模糊文件搜索](/zh/docs/using-devo/fuzzy-file-search)。
+- 精确命令使用 [! Shell 模式](/zh/docs/using-devo/shell-mode)。
+- 修改运行时代码前先读 [架构概览](/zh/docs/contributors/architecture-overview)。

@@ -1,0 +1,103 @@
+---
+title: Plan Mode
+description: 实现前先规划。
+---
+
+Plan Mode 用于先定方案，再让 Devo 改文件。
+
+任务范围含糊、有风险、需要拆阶段，或你想先审计划时，使用它。
+
+当前 TUI 中，Plan Mode 通过 composer 中的 `Shift+Tab` 进入。
+
+## 切换模式
+
+Composer 有三种 input modes：
+
+| Mode | 用途 |
+| --- | --- |
+| `BUILD` | 正常工作。Devo 可以实现、编辑文件、运行工具并更新任务进度。 |
+| `PLAN` | 规划工作。Devo 应检查并讨论，然后给出 proposed plan。 |
+| `SHELL` | 你直接输入 shell。见 [Shell 模式](/zh/docs/using-devo/shell-mode)。 |
+
+按 `Shift+Tab` 在 `BUILD` 和 `PLAN` 之间切换。Composer 底部的 mode label 会改变颜色和文本，提示下一条消息将使用的模式。
+
+Plan Mode 不是 slash command。不要输入 `/plan`；先把 composer 切到 `PLAN`，再写 planning prompt：
+
+```text
+Plan a safe refactor for provider configuration loading. Inspect the current
+code first, then ask if any product choices are unclear.
+```
+
+## Plan Mode 改变什么
+
+Plan Mode 改变 Devo 对下一 turn 的处理方式。
+
+Devo 应该：
+
+- 当答案可从文件、manifest、schema 或测试中发现时，先检查仓库再提问；
+- 当产品或实现偏好无法从仓库发现时，询问用户；
+- 避免修改 tracked files；
+- 方案就绪时输出能直接执行的 `Proposed Plan`。
+
+Devo 仍可运行有助于规划的非修改性检查，例如搜索文件、读取配置、静态检查，或只写 build artifacts/cache 的 tests/builds。
+
+Devo 不应在 `PLAN` turn 中编辑文件、apply patches、运行会改写 tracked files 的 formatter、apply migrations，或执行实现工作。
+
+## Proposed Plans
+
+Plan Mode turn 完成后，Devo 可以在 transcript 中渲染 `Proposed Plan` cell。该计划应能交给工程师或另一个 agent 执行，不留下主要决策空缺。
+
+一个可执行的 proposed plan 通常包括：
+
+- 简短标题和 summary；
+- 预期实现改动；
+- public API、configuration 或 data-shape 改动；
+- tests 和 acceptance checks；
+- 规划时选定的 assumptions。
+
+计划默认应简洁，不应是 Devo 检查过的文件原始列表。
+
+## 实现或修改建议
+
+`Proposed Plan` 出现后，Devo 会打开一个小 action menu。
+
+选择 `Implement Plan` 表示计划可执行。Devo 切回 `BUILD` mode，并使用该计划提交实现 turn。
+
+选择 `修改建议` 表示计划需要修改。这是当前 TUI 对 revise-plan action 的标签。它会保持 composer 在 `PLAN` mode，并让你输入反馈，例如：
+
+```text
+Keep the config migration out of scope. Add a test for Windows paths.
+```
+
+随后 Devo 应修改计划，而不是编辑文件。
+
+## Plan Mode 和任务进度
+
+Plan Mode 不同于正常工作中可能看到的 `update_plan` progress checklist。
+
+`PLAN` mode 是用于决定做什么的 collaboration mode。它可以产出 `Proposed Plan`。
+
+`update_plan` 是 Build-mode 的进度表面。在 transcript 中显示为 `Updated Plan`，跟踪 completed、current 和 pending 等实现步骤。它不会进入 Plan Mode，Devo 也不会在 `PLAN` turn 中使用它。
+
+## 何时使用
+
+使用 Plan Mode 处理：
+
+- 架构或 runtime-flow 改动；
+- provider、model 或 permission 行为改动；
+- 写很多页面前的 docs structure 改动；
+- migrations 或兼容性敏感编辑；
+- 需要先明确 review 的工作。
+
+小而明显的编辑保持在 `BUILD`：
+
+```text
+Update the install page to mention the Windows DEVO_HOME path.
+```
+
+如果问题在于该做什么，切到 `PLAN`：
+
+```text
+Plan how the docs should explain provider wire APIs without overwhelming new
+users.
+```

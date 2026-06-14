@@ -245,7 +245,7 @@ invocation_method = "openai_chat_completions"
     assert_eq!(title_request.thinking.as_deref(), Some("disabled"));
     assert!(title_request.tools.is_none());
     assert_eq!(title_request.reasoning_effort, None);
-    assert_eq!(title_request.max_tokens, 24);
+    assert_eq!(title_request.max_tokens, 1024);
 
     Ok(())
 }

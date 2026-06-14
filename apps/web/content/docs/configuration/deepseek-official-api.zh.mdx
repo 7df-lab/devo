@@ -1,0 +1,153 @@
+---
+title: DeepSeek 官方 API
+description: 使用推荐 provider path 配置 DeepSeek 官方 API。
+---
+
+第一次配置 DeepSeek 时，优先用官方 API 的 Anthropic-compatible API path。
+
+最后一次对照 DeepSeek 官方文档：2026-06-14。
+
+DeepSeek 官方文档给出的 Anthropic-format base URL 是：
+
+```text
+https://api.deepseek.com/anthropic
+```
+
+DeepSeek 当前 V4 model parameter 是 `deepseek-v4-pro` 和 `deepseek-v4-flash`。提交配置前请检查 DeepSeek 官方文档，因为 provider model name 可能变化。
+
+官方参考：
+
+- [DeepSeek API docs](https://api-docs.deepseek.com/)
+- [DeepSeek Anthropic API](https://api-docs.deepseek.com/guides/anthropic_api)
+- [DeepSeek Models and Pricing](https://api-docs.deepseek.com/quick_start/pricing)
+- [DeepSeek change log](https://api-docs.deepseek.com/updates)
+
+## 推荐 Provider
+
+当你希望通过 Anthropic Messages wire API 使用 DeepSeek 时，用这个 provider：
+
+```toml
+[defaults]
+model_binding = "deepseek-v4-pro-deepseek-anthropic"
+
+[providers.deepseek-anthropic]
+enabled = true
+name = "DeepSeek Anthropic"
+base_url = "https://api.deepseek.com/anthropic"
+credential = "deepseek_api_key"
+wire_apis = ["anthropic_messages"]
+
+[providers.deepseek-anthropic.web_search]
+mode = "provider"
+
+[providers.deepseek-anthropic.web_fetch]
+mode = "provider"
+
+[model_bindings.deepseek-v4-pro-deepseek-anthropic]
+enabled = true
+model_slug = "deepseek-v4-pro"
+provider = "deepseek-anthropic"
+model_name = "deepseek-v4-pro"
+display_name = "DeepSeek V4 Pro"
+invocation_method = "anthropic_messages"
+default_reasoning_effort = "high"
+```
+
+将 API key 存入 `<DEVO_HOME>/auth.json`：
+
+```json
+{
+  "version": 1,
+  "credentials": {
+    "deepseek_api_key": {
+      "kind": "api_key",
+      "value": "sk-your-deepseek-api-key"
+    }
+  }
+}
+```
+
+## Flash Binding
+
+如果你希望 `/model` 选择器同时出现 DeepSeek V4 Pro 和 DeepSeek V4 Flash，添加第二个 binding：
+
+```toml
+[model_bindings.deepseek-v4-flash-deepseek-anthropic]
+enabled = true
+model_slug = "deepseek-v4-flash"
+provider = "deepseek-anthropic"
+model_name = "deepseek-v4-flash"
+display_name = "DeepSeek V4 Flash"
+invocation_method = "anthropic_messages"
+default_reasoning_effort = "high"
+```
+
+让 `[defaults].model_binding` 指向你希望默认启动的 binding。
+
+## 为什么先用 Anthropic-Compatible
+
+先使用 Anthropic-compatible provider method，因为这条路径让 Devo 可以使用 provider-hosted `web_search` 和 `web_fetch`。
+
+OpenAI-compatible path 可以运行模型请求，但 web search 通常需要额外的本地或第三方配置。
+
+## OpenAI-Compatible 替代路径
+
+只有当你明确希望使用 DeepSeek 的 OpenAI Chat Completions-compatible path 时，才使用这个配置：
+
+```toml
+[defaults]
+model_binding = "deepseek-v4-pro-deepseek-openai"
+
+[providers.deepseek-openai]
+enabled = true
+name = "DeepSeek OpenAI Compatible"
+base_url = "https://api.deepseek.com"
+credential = "deepseek_api_key"
+wire_apis = ["openai_chat_completions"]
+
+[model_bindings.deepseek-v4-pro-deepseek-openai]
+enabled = true
+model_slug = "deepseek-v4-pro"
+provider = "deepseek-openai"
+model_name = "deepseek-v4-pro"
+display_name = "DeepSeek V4 Pro"
+invocation_method = "openai_chat_completions"
+default_reasoning_effort = "high"
+```
+
+如果使用这条路径还需要 search，另配本地 provider：
+
+```toml
+[tools.web_search]
+mode = "local"
+local_provider = "exa"
+
+[tools.web_search.local_providers.exa]
+kind = "exa"
+credential = "exa_api_key"
+max_results = 5
+```
+
+然后将 `exa_api_key` 添加到 `auth.json`。
+
+## 校验清单
+
+运行：
+
+```bash
+devo doctor
+```
+
+然后启动 Devo，并发送一个只读的第一条 prompt：
+
+```text
+Explain the project structure. Do not edit files yet.
+```
+
+如果配置失败，检查：
+
+- `credential` 是否匹配 `auth.json` 中的 id；
+- `base_url` 是否匹配选中的 wire API；
+- `wire_apis` 是否包含 binding 的 `invocation_method`；
+- `model_name` 是否列在当前 DeepSeek 官方文档中；
+- API key 是否有权限访问选中的模型。

@@ -1,0 +1,57 @@
+---
+title: 使用 Devo
+description: 在终端 UI 中使用 Devo。
+---
+
+安装 Devo 并配置至少一个 provider 后，读这里。
+
+这里覆盖会话驱动、模型切换、工具控制和恢复。
+
+## 阅读顺序
+
+1. [TUI 概览](./tui-overview)：transcript、composer、status line、model state 和 tool activity。
+2. [Onboarding](./onboarding)：首次配置和 `devo onboard`。
+3. [Model Picker](./model-picker)：`/model` 和 thinking-mode selection。
+4. [模糊文件搜索](./fuzzy-file-search)：用 `@` 搜索 file、skill 和 MCP reference。
+5. [Shell 模式](./shell-mode)：用 `!` 运行本地 shell 命令。
+6. [Plan Mode](./plan-mode)：编辑文件前让 Devo 探索并提出计划。
+7. [/goal](./goal)：长任务的持续目标。
+8. [/btw 和 Subagents](./btw-and-subagents)：旁路问题和 child agents。
+9. [Permissions](./permissions)：approval prompts 和 permission presets。
+10. [Resume and History](./resume-and-history)：保存会话和历史恢复。
+
+## 主循环
+
+一次常见会话通常是：
+
+1. 用 `devo` 打开 workspace。
+2. 在 composer 中输入请求。
+3. 在 transcript 中审阅 Devo 的计划、工具活动或问题。
+4. Devo 请求时，批准或拒绝 tool requests。
+5. 继续输入 prompt、切换模式，或退出后稍后恢复。
+
+Composer 同时承担聊天输入、slash commands、model selection、file references、shell mode 和 plan-mode toggling。
+
+## 常用入口
+
+| 任务 | 使用 |
+| --- | --- |
+| 重新配置 Devo | `devo onboard` |
+| 切换模型 | `/model` |
+| 显示会话状态 | `/status` |
+| 清空可见 transcript | `/clear` |
+| 压缩长上下文 | `/compact` |
+| 开始新会话 | `/new` |
+| 浏览保存的会话 | `/resume` |
+| 修改权限 | `/permissions` |
+| 列出 MCP servers | `/mcp` |
+| 列出 skills | `/skills` |
+| 退出 | `/exit` |
+
+## 模式和触发器
+
+`Shift+Tab` 在 Build mode 和 Plan Mode 之间切换。Build mode 允许 Devo 在权限约束下修改文件。Plan Mode 用于调查并提出计划，不先编辑文件。
+
+在 composer 中使用 `@` 搜索 files、skills 和 MCP resources。使用开头的 `!` 通过 Devo 的 shell surface 运行 shell 命令。
+
+目标需要跨 turns 保留时，使用 `/goal`。

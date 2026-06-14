@@ -1,0 +1,99 @@
+---
+title: CLI 与 TUI 流程
+description: 理解命令分发和终端 UI 生命周期。
+---
+
+这里记录启动和 TUI 命令分发。普通 turn path 见[运行时流程](./runtime-flow)。
+
+## 进程入口
+
+Binary 从 `crates/cli/src/main.rs` 启动。
+
+`devo_arg0::run_as` 包装 async CLI runner，使同一个 binary 可以支持普通 `devo` 执行和 server-style entrypoints。`Cli` parser 定义：
+
+| Surface | Source behavior |
+| --- | --- |
+| no subcommand | 启动交互式 TUI |
+| `onboard` | 强制 onboarding 并启动交互式 TUI |
+| `resume <session-id>` | 使用已有 session 启动交互式 TUI |
+| `prompt` | 运行一次非交互模型请求 |
+| `doctor` | 运行诊断 |
+| `upgrade` | 运行升级命令 |
+| hidden `server` | 启动 runtime server process |
+
+Global `--model` 和 `--log-level` 在这一层解析。
+
+## Interactive Startup
+
+Interactive startup 实现在 `crates/cli/src/agent_command.rs`。
+
+路径：
+
+1. 解析当前工作目录。
+2. 解析 `DEVO_HOME`。
+3. 加载 preset model catalog。
+4. 加载当前工作区的 effective app config。
+5. 解析 project permission preset。
+6. 决定是否显示 onboarding。
+7. 解析 provider settings，或使用 onboarding fallback model。
+8. 将存储的 model bindings 转换成 TUI `SavedModelEntry` values。
+9. 调用 `devo_tui::run_interactive_tui`。
+
+TUI 接收 `InitialTuiSession`：
+
+| Field | Meaning |
+| --- | --- |
+| `session_id` | 可选的待恢复 session。 |
+| `model` | 新 turn 使用的 local model slug。 |
+| `request_model` | 当 provider model name 与 `model` 不同时使用。 |
+| `model_binding_id` | 当模型来自 binding 时的 stable binding id。 |
+| `provider` | 选中的 provider wire API。 |
+| `thinking_selection` | 新 turn 的可选 thinking mode。 |
+| `permission_preset` | 初始 tool approval preset。 |
+| `cwd` | Session 的工作目录。 |
+
+## TUI Worker
+
+可见 TUI 不直接调用 model provider。它将 `AppCommand` 值发送给 `crates/tui/src/worker.rs` 中的后台 worker。
+
+Worker 拥有 server client loop，并接受内部 `OperationCommand` messages，包括：
+
+- 提交用户输入；
+- 执行或继续 shell command；
+- 设置 model 或 thinking mode；
+- validate 或 upsert provider config；
+- 列出 sessions、skills 和 provider vendors；
+- 运行 reference search；
+- compact 当前 session；
+- show、set、pause、resume 或 clear goal；
+- switch、rename、roll back 或 fork sessions；
+- interrupt 或 steer 正在运行的 turn；
+- 提交 `/btw` side question；
+- 响应 approvals 和 user-input requests；
+- 更新 permissions。
+
+如果添加新的用户可见 TUI action，通常按这个顺序修改 command path：
+
+1. input handling 或 slash-command parsing；
+2. `AppCommand`；
+3. worker `OperationCommand`；
+4. server client method 或现有 server call；
+5. `WorkerEvent` mapping；
+6. chat widget rendering。
+
+## Slash Commands
+
+Slash command 定义位于 `crates/tui/src/slash_command.rs`。Dispatch 位于 `crates/tui/src/chatwidget/slash_commands.rs`。
+
+会改变配置的命令，例如 `/model`、`/theme`、`/compact`、`/diff`、`/new` 和 `/resume`，会在 generation 活跃时被阻止。
+
+任务期间仍可使用的命令包括 `/goal`、`/btw`、`/permissions`、`/status`、`/mcp`、`/skills`、`/clear` 和 `/exit`。
+
+## Composer Triggers
+
+Composer-specific triggers 在 slash-command layer 下面处理：
+
+- `@` 启动 reference search 并渲染 fuzzy picker；
+- `!` 进入 shell mode，并通过 command-exec runtime paths 发送命令。
+
+不要把这些实现为 slash commands。它们有不同的状态和渲染行为。

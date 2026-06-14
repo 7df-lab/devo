@@ -1,0 +1,89 @@
+---
+title: Code Search
+description: Understand Devo's local semantic code search.
+---
+
+`code_search` is Devo's built-in read-only retrieval tool for finding relevant
+code by meaning, identifiers, and related locations.
+
+It is different from shell search. Shell search is exact text search. Code
+search builds a local index of the workspace and ranks chunks with hybrid
+semantic and sparse matching.
+
+## What It Does
+
+The code-search engine handles:
+
+- workspace file discovery;
+- code chunking;
+- dense embeddings;
+- sparse BM25-style matching;
+- hybrid ranking;
+- related-code lookup;
+- warm in-memory indexes;
+- disk cache refresh.
+
+It only reads the workspace. Its writes are cache files under Devo's cache
+directory.
+
+## Operations
+
+`code_search` supports two operations:
+
+| Operation | Use |
+| --- | --- |
+| `search` | Find chunks matching a natural-language or identifier query. |
+| `find_related` | Find chunks related to a source file and 1-indexed line number. |
+
+Search requests can be scoped by:
+
+- path;
+- content kind: `code`, `docs`, `config`, or `all`;
+- language filters;
+- `top_k` result count.
+
+The default result count is 5 and the maximum is 20.
+
+## Local Model
+
+Production code search uses a local model2vec embedding provider with the
+`minishlab/potion-code-16M` model. The model is loaded lazily on first embedding
+call.
+
+If the model files are missing, Devo tries to fetch them on first use. In an
+offline environment, pre-populate the local model cache before relying on
+`code_search`; otherwise the tool reports a recoverable model-unavailable
+configuration error.
+
+## Cache Behavior
+
+Devo keeps one in-memory index per workspace root, content filter, and embedding
+model identity. It also stores disk cache metadata and embedding rows so repeat
+queries do not always rebuild the whole index.
+
+The service prefers correctness over speed:
+
+1. reuse a clean warm index when the watcher says the workspace is unchanged;
+2. otherwise walk the manifest;
+3. reuse matching memory or disk cache;
+4. re-read and re-embed changed files only.
+
+## When To Use It
+
+Use code search when:
+
+- you know the concept but not the exact symbol;
+- identifier search returns too many results;
+- you want related code near a specific line;
+- a repository has several similar implementations;
+- natural-language intent is easier than exact grep text.
+
+Use shell search when:
+
+- you know the exact string;
+- you need a regex;
+- you want a full list of matches;
+- you need command-line flags or file-glob control.
+
+Devo may use both in the same task: shell search for exact confirmation and
+code search for broader navigation.

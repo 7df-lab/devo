@@ -1,0 +1,119 @@
+---
+title: Command Line Options
+description: Reference top-level Devo CLI flags and commands.
+---
+
+The `devo` binary starts the interactive TUI when no subcommand is provided.
+Global flags can be used with interactive mode and subcommands.
+
+## Global Flags
+
+| Flag | Value | Meaning |
+| --- | --- | --- |
+| `--model` | string | Override the model used for this process. |
+| `--log-level` | `trace`, `debug`, `info`, `warn`, `error` | Override process logging level. |
+| `--help` | none | Print command help. |
+| `--version` | none | Print Devo version. |
+
+Example:
+
+```bash
+devo --model deepseek-v4-pro --log-level debug
+```
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `devo` | Start the interactive TUI. |
+| `devo onboard` | Launch onboarding and configure a model provider. |
+| `devo resume <session-id>` | Resume a saved interactive session by id. |
+| `devo prompt [--format <format>] <input>` | Send one prompt and print the response. |
+| `devo doctor` | Diagnose configuration, provider connectivity, and system health. |
+| `devo upgrade` | Upgrade Devo to the latest released version. |
+
+There is also a hidden `server` command used by the runtime. It is not part of
+the user-facing CLI contract.
+
+## `devo`
+
+Starts an interactive session in the current working directory:
+
+```bash
+devo
+```
+
+Use this for normal coding-agent work.
+
+## `devo onboard`
+
+Forces the onboarding flow:
+
+```bash
+devo onboard
+```
+
+Use this when setting up a provider for the first time or replacing the current
+provider setup.
+
+## `devo resume`
+
+Resumes a saved interactive session:
+
+```bash
+devo resume <session-id>
+```
+
+The session id is printed when an interactive session exits. Inside the TUI,
+`/resume` opens the session browser.
+
+## `devo prompt`
+
+Runs one non-interactive prompt:
+
+```bash
+devo prompt "Explain this repository."
+```
+
+Output formats:
+
+| Format | Meaning |
+| --- | --- |
+| `text` | Print final assistant text. This is the default. |
+| `json` | Print one JSON result object with message and usage. |
+| `jsonl` | Print JSONL lifecycle, delta, tool, result, and error events. |
+
+Examples:
+
+```bash
+devo prompt --format text "List the main crates."
+devo prompt --format json "Summarize current config."
+devo prompt --format jsonl "Inspect project structure."
+```
+
+`--model` also applies to `devo prompt`:
+
+```bash
+devo --model deepseek-v4-flash prompt "Summarize this file tree."
+```
+
+## `devo doctor`
+
+Runs local diagnostics:
+
+```bash
+devo doctor
+```
+
+Run this after editing config files, credentials, or provider endpoints.
+
+## `devo upgrade`
+
+Runs the built-in upgrade command:
+
+```bash
+devo upgrade
+```
+
+For offline machines, use the offline install or upgrade process instead of
+expecting this command to fetch artifacts from the network.

@@ -1,0 +1,79 @@
+---
+title: Skills
+description: Package repeatable workflows and references for Devo.
+---
+
+Skills package reusable instructions, references, scripts, and workflow
+guidance for Devo.
+
+Use a skill when a task needs more than a one-line prompt, but should not be
+hard-coded into Devo itself.
+
+## What A Skill Is
+
+A skill is a directory with a `SKILL.md` entrypoint. The entrypoint explains
+when the skill applies and how Devo should use any files next to it.
+
+A skill can include:
+
+- instructions;
+- reference files;
+- scripts;
+- examples;
+- templates;
+- assets.
+
+Relative paths inside a skill are resolved from the skill's base directory.
+
+## Discovery
+
+Skill discovery is enabled by default. Devo scans user and workspace skill roots
+named `skills` by default, includes bundled system skills when enabled, and can
+watch roots for changes.
+
+The skill list can include user, workspace, plugin, system, and admin skills.
+Use `/skills` to render the current skill list in the transcript.
+
+## Available Skills Context
+
+When configured, turns receive an available-skills instruction block. That block
+lets the model know which skills exist without loading every full `SKILL.md`
+file into context.
+
+The model can then load a skill explicitly when it is relevant. Loading a skill
+adds its content and a sampled file list to the model-visible context.
+
+## Manual Activation
+
+The `@` reference popup can show skills. Skill references insert a `$skill`
+style token in the composer.
+
+Use explicit skill mentions when you know a particular workflow should apply:
+
+```text
+$openai-docs Check the current OpenAI docs before answering this API question.
+```
+
+The exact available skill names depend on your installed system, plugin, user,
+and workspace skills.
+
+## Enablement
+
+Skill configuration can enable or disable skills by path or name. Path-based
+rules are the most precise. Name-based rules require the name to be unambiguous.
+
+Use this when a workspace has an experimental skill that should be ignored, or
+when a personal skill should not apply to a particular setup.
+
+## Good Skill Boundaries
+
+Create a skill for:
+
+- a repeatable documentation workflow;
+- a provider-specific integration guide;
+- a domain review checklist;
+- a local script workflow;
+- a project convention that would be too long for every prompt.
+
+Do not create a skill for one-off facts, tiny aliases, or instructions that
+belong in project documentation.

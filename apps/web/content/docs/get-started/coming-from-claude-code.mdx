@@ -1,0 +1,104 @@
+---
+title: Coming From Claude Code
+description: Map familiar Claude Code workflows to Devo.
+---
+
+This page maps Claude Code-style workflows to Devo. It keeps the comparison to
+workflow surfaces so you can get started without learning every Devo concept
+first.
+
+## Main Difference
+
+Devo is model-neutral. Instead of being tied to one hosted model family, Devo
+uses provider records and model bindings:
+
+- provider: endpoint, credential, and supported wire API;
+- model binding: local Devo model id plus provider model name;
+- active model: the binding selected by config or `/model`.
+
+This means your first important setup choice is provider configuration. For many
+users, the recommended first path is [DeepSeek official API](./connect-deepseek)
+through the Anthropic-compatible provider method.
+
+## First Setup
+
+Install Devo, then run:
+
+```bash
+devo onboard
+```
+
+Onboarding collects provider details, stores credentials, and creates model
+bindings. After setup:
+
+```bash
+cd /path/to/project
+devo
+```
+
+Give Devo a small read-only first task before asking it to edit code:
+
+```text
+Explain this repository's structure. Do not edit files yet.
+```
+
+## Workflow Map
+
+| Familiar workflow | Devo surface |
+| --- | --- |
+| Open an agent in the current repository | `devo` |
+| Choose a model | `/model` |
+| Set a task objective | `/goal <objective>` |
+| Ask a side question | `/btw <question>` |
+| Control command and edit permissions | `/permissions` |
+| Start a planning pass | plan mode |
+| Search for files while prompting | `@` |
+| Run shell commands from the composer | `!` |
+| Resume previous work | `devo resume` or `/resume` |
+| List MCP servers | `/mcp` |
+| List skills | `/skills` |
+
+See [Using Devo](../using-devo) for the TUI workflow pages.
+
+## Permissions
+
+Devo surfaces permission decisions in the TUI. Use:
+
+```text
+/permissions
+```
+
+The exact approval flow depends on the selected preset and the requested action.
+For a new repository, keep approvals visible until the project command patterns
+are familiar.
+
+See [Permissions](../using-devo/permissions).
+
+## Planning And Side Questions
+
+Use plan mode when you want Devo to reason about the approach before editing.
+Plan mode is useful for tasks with uncertain scope, risky migrations, or
+ambiguous requirements.
+
+Use `/btw` when you want a side answer without interrupting the main session:
+
+```text
+/btw Which files define provider routing?
+```
+
+The side question runs through the subagent path and returns information to the
+main transcript.
+
+## Config And Portability
+
+Devo config is file-based. User-level config lives under `DEVO_HOME`, and a
+workspace can add repository-local config when needed.
+
+Default `DEVO_HOME` paths:
+
+| Platform | Default |
+| --- | --- |
+| macOS/Linux | `~/.devo` |
+| Windows | `C:/Users/your-username/.devo` |
+
+Read [Config Basics](../configuration/config-basics) before hand-editing config.

@@ -1,0 +1,110 @@
+---
+title: Provider Runtime
+description: 理解 provider routing 和 request adapters。
+---
+
+本页说明 Devo 如何把配置转换成 provider requests。
+
+## Config Inputs
+
+Provider runtime 从 effective app config 开始：
+
+- `[providers.<id>]` 描述 endpoint、credential、headers、enabled state、wire APIs 和 web tool behavior。
+- `[model_bindings.<id>]` 描述 local model slug、provider id、provider model name、invocation method、display name、reasoning defaults，以及可选 web tool overrides。
+- `[defaults].model_binding` 选择默认 binding。
+- `auth.json` 按 id 存储 credentials。
+
+序列化 schema 位于 `crates/config/src/provider/schema.rs`。
+
+## Resolution
+
+Interactive startup 和 server bootstrap 都会从 effective config 解析 provider settings。
+
+Resolution 会校验：
+
+- 请求的 binding 是否存在并启用；
+- 引用的 provider 是否存在并启用；
+- binding invocation method 是否被 provider 的 `wire_apis` 支持；
+- required credentials 是否存在于 `auth.json`；
+- local web search config 是否指向已知 local provider 和 credential。
+
+如果存在 CLI 或 runtime model override，Devo 会先按 binding id 匹配，然后按 model slug 匹配，最后按 provider model name 匹配。
+
+## Router
+
+`crates/server/src/provider_config.rs` 构建 provider runtime view。
+
+Provider crate 暴露 `ProviderRouter` trait。Server 依赖该 trait，而不是依赖各个 provider implementation。
+
+使用两种 router 形态：
+
+| Router | Use |
+| --- | --- |
+| `SingleProviderRouter` | 单个已配置 provider path。 |
+| `MultiProviderRouter` | 多个 enabled model bindings，按 model 或 binding metadata 路由。 |
+
+选中的 route 会传入 turn execution，因此即使配置了多个 providers，一个 session 也可以继续使用预期 binding。
+
+## Wire APIs
+
+支持的 wire API string 在 protocol model code 中定义：
+
+| Config value | Provider adapter |
+| --- | --- |
+| `anthropic_messages` | Anthropic-compatible Messages API。 |
+| `openai_chat_completions` | OpenAI-compatible Chat Completions API。 |
+| `openai_responses` | OpenAI Responses-compatible API。 |
+
+Provider-specific HTTP streaming behavior 属于 `devo-provider`，不属于 TUI 或 server runtime。
+
+## Request Model
+
+Model binding 将本地身份和 provider request name 分开：
+
+```toml
+[model_bindings.deepseek-v4-pro-deepseek-anthropic]
+model_slug = "deepseek-v4-pro"
+provider = "deepseek-anthropic"
+model_name = "deepseek-v4-pro"
+invocation_method = "anthropic_messages"
+```
+
+如果 `model_name` 与 `model_slug` 不同，Devo 可以在 UI 中显示 local slug，同时向 API 发送 provider-specific model string。
+
+## Web Search 和 Fetch
+
+Web search 和 fetch 从 global、provider-level 和 binding-level config 解析。
+
+优先级：
+
+1. binding override；
+2. provider override；
+3. global `tools` config。
+
+Search modes：
+
+| Mode | Meaning |
+| --- | --- |
+| `provider` | 当 provider path 支持时，暴露 provider-hosted web search。 |
+| `local` | 使用已配置的本地第三方 search provider。 |
+| `disabled` | 不暴露 web search。 |
+
+Fetch modes 是 `provider`、`local` 和 `disabled`。
+
+## Validation API
+
+Onboarding 和 provider editing 可以在保存前验证 provider。TUI 通过 worker 发送 provider validation，server 创建一个短生命周期 provider route，runtime 尝试一次小的 probe request。
+
+修改 provider schema、auth handling 或 onboarding behavior 时应使用 validation。它能在用户开始真实任务前捕获许多配置错误。
+
+## 从哪里改代码
+
+| Change | Start here |
+| --- | --- |
+| Config field shape | `crates/config/src/provider/schema.rs` |
+| Config loading or validation | `crates/config/src/provider` |
+| Server provider bootstrap | `crates/server/src/provider_config.rs` |
+| Provider routing behavior | `crates/provider/src/router.rs` |
+| Anthropic-compatible requests | `crates/provider/src/anthropic` |
+| OpenAI-compatible requests | `crates/provider/src/openai` |
+| Provider validation API | `crates/server/src/runtime/provider_vendor_api.rs` |

@@ -1,0 +1,101 @@
+---
+title: 从 Codex CLI 迁移
+description: 将熟悉的 Codex CLI 用法映射到 Devo。
+---
+
+这页把常见 Codex 风格终端用法映射到 Devo。它不是功能对比，只列对应的命令、配置和 TUI 表面。
+
+## 保持不变的部分
+
+你已经熟悉的部分：
+
+- 从仓库根目录启动 Agent；
+- 用自然语言给出任务；
+- 检查拟运行的命令和文件修改；
+- 将上下文保持在当前工作树内；
+- 会话过大时继续、恢复或重新开始。
+
+Devo 最大的差异是 provider setup。Devo 是模型中立的：你在配置中把模型名称绑定到 provider record，然后在 TUI 中切换这些 binding。
+
+## 首次配置
+
+安装 Devo 后运行 onboarding：
+
+```bash
+devo onboard
+```
+
+第一个 provider 可以按 [连接 DeepSeek](./connect-deepseek) 配置。DeepSeek 官方 API 会保存为一个 provider 加一个或多个 model binding。
+
+onboarding 后，从仓库中启动 Devo：
+
+```bash
+cd /path/to/project
+devo
+```
+
+## 用法映射
+
+| 熟悉的用法 | Devo 表面 |
+| --- | --- |
+| 启动交互式编程会话 | `devo` |
+| 运行一次性 prompt | `devo prompt "..."` |
+| 恢复之前的会话 | `devo resume` 或 `/resume` |
+| 切换模型 | `/model` |
+| 设置持续目标 | `/goal` |
+| 提一个不打断主任务的旁路问题 | `/btw <question>` |
+| 查看当前状态 | `/status` |
+| 查看仓库改动 | `/diff` |
+| 压缩上下文 | `/compact` |
+| 打开 provider 和 model 配置 | `devo onboard`，然后查看 `DEVO_HOME` 下的配置文件 |
+
+命令列表见 [Slash Commands](../reference/slash-commands)。
+
+## 模型和提供商配置
+
+Devo 将这些概念分开：
+
+- provider 描述服务端点、credential 和 wire API；
+- model binding 将本地模型 id 连接到一个 provider model name；
+- active model 从启用的 binding 中选择。
+
+同一套编程方式可以连接不同提供商。你可以把强模型作为默认值，同时添加更便宜或更快的 binding 处理常规工作。
+
+接下来阅读：
+
+- [Provider Setup](../configuration/provider-setup)
+- [Model Bindings](../configuration/model-bindings)
+- [Model Resolution](../configuration/model-resolution)
+
+## 权限
+
+Devo 根据当前 permission preset，在运行命令或应用改动前请求确认。打开 picker：
+
+```text
+/permissions
+```
+
+陌生仓库中从保守设置开始。只有理解 Devo 准备做什么、哪些命令是预期命令后，再放宽权限。
+
+见 [Permissions](../using-devo/permissions)。
+
+## 上下文
+
+Devo 为当前会话保留 transcript，并在对话变长时压缩上下文。运行：
+
+```text
+/compact
+```
+
+Compaction 会让模型保留有用项目上下文，同时减少活跃 transcript。长任务进入下一阶段前使用它。
+
+见 [Context And Compaction](../core-concepts/context-and-compaction)。
+
+## 文件和 Shell 快捷方式
+
+composer 里常用两个 trigger：
+
+- 输入 `@` 进行模糊文件搜索，并把路径插入 prompt；
+- 输入 `!` 进入 shell mode，从 prompt 区域运行命令。
+
+见 [模糊文件搜索](../using-devo/fuzzy-file-search) 和 [Shell 模式](../using-devo/shell-mode)。

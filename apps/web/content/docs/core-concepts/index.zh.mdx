@@ -1,0 +1,27 @@
+---
+title: 核心概念
+description: Devo Agent runtime 背后的概念。
+---
+
+配置 provider 或改代码前，先读这里。
+
+Devo 是模型中立的，但 runtime 仍要回答这些问题：
+
+- 当前 active model profile 是哪个？
+- 哪个 provider connection 为该模型服务？
+- 哪些 context 应发送给模型？
+- 哪些 tools 可用，哪些需要 permission？
+- 哪些本地 extension systems 处于 active 状态？
+
+## Concepts
+
+| 页面 | 看什么 |
+| --- | --- |
+| [Models and Providers](./models-and-providers) | model metadata、provider connections 和 model bindings 如何组合。 |
+| [Context and Compaction](./context-and-compaction) | Devo 如何让长 session 留在模型 context window 内。 |
+| [Code Search](./code-search) | 内置语义 `code_search` 与 shell search 的差异。 |
+| [MCP](./mcp) | 如何通过 Model Context Protocol servers 连接外部工具和 resources。 |
+| [Skills](./skills) | 可复用 instructions 和 references 如何被发现和启用。 |
+| [Hooks](./hooks) | 配置命令如何围绕 lifecycle events 运行。 |
+
+直接编辑 `config.toml` 前先读这些页面。Configuration section 给出精确 TOML 形状；这里说明这些设置控制什么。

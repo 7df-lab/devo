@@ -1,0 +1,31 @@
+---
+title: 贡献者
+description: 修改 Devo 前先理解它。
+---
+
+改 runtime、TUI、provider 或 config 前，先读这里。
+
+阅读顺序：
+
+1. [架构概览](./architecture-overview) 映射 crate 和所有权边界。
+2. [运行时流程](./runtime-flow) 跟踪一次用户 turn 如何经过 server、core、tools、provider 调用和 TUI 渲染。
+3. [CLI 与 TUI 流程](./cli-and-tui-flow) 说明启动和终端 UI 命令分发。
+4. [Provider Runtime](./provider-runtime) 说明 provider 解析和 wire API 路由。
+5. [开发环境](./development-setup) 说明本地工具链和 docs 开发流程。
+6. [测试](./testing) 给出有针对性的验证命令。
+
+## 工作规则
+
+按 crate 边界改：
+
+| Layer | Owns |
+| --- | --- |
+| `devo-cli` | 进程入口和命令行解析。 |
+| `devo-tui` | 终端 UI 状态、composer 行为、overlay 和渲染。 |
+| `devo-server` | Session runtime、持久化、事件协议、goals、subagents 和命令执行。 |
+| `devo-core` | Agent loop、tools、context、compaction、permissions、hooks 和 instruction discovery。 |
+| `devo-provider` | Provider request 和 streaming adapter。 |
+| `devo-config` | 序列化配置 schema 和 effective config loading。 |
+| `devo-protocol` | 跨 crate 边界共享的 DTO。 |
+
+功能跨越 TUI/server 边界时，先更新 protocol types，再更新 server handling、worker mapping 和 TUI rendering。

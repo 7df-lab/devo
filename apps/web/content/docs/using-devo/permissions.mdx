@@ -1,0 +1,90 @@
+---
+title: Permissions
+description: Review and control tool execution.
+---
+
+Permissions control what tools Devo can run without asking and what must be
+approved first.
+
+Open the permission preset picker with:
+
+```text
+/permissions
+```
+
+Use `Up` and `Down` to choose a preset, `Enter` to confirm, and `Esc` to go
+back.
+
+## Presets
+
+| Preset | What Devo Can Do Without Asking | What Still Asks |
+| --- | --- | --- |
+| Read Only | Read files in the current workspace. | Edits, shell commands, and internet access. |
+| Default | Read and edit files in the current workspace, and run shell commands. | Internet access and edits outside the workspace. |
+| Auto-review | Same workspace-write policy as Default. | Eligible approvals go to the auto-reviewer first; uncertain requests still ask you. |
+| Full Access | Edit files outside the workspace and access the internet without asking. | Nothing under the normal tool policy. |
+
+`Default` is the normal coding preset. `Read Only` is useful for audits and
+questions. `Full Access` is convenient but should only be used when you trust
+the task, workspace, and tool calls.
+
+## Approval Prompts
+
+When Devo needs approval, the bottom pane opens a prompt titled:
+
+```text
+Permission approval required
+```
+
+The prompt includes the action summary and may include:
+
+- reason;
+- resource;
+- path;
+- host;
+- target.
+
+Use the shown options to respond:
+
+| Option | Shortcut | Effect |
+| --- | --- | --- |
+| Approve once | `y` | Allow only this pending tool execution. |
+| Approve for session | `s` | Allow matching requests for the rest of this session, when the request supports session scope. |
+| Deny | `n` | Reject this tool execution. |
+
+`Esc` cancels the approval request.
+
+## Auto-review
+
+The `Auto-review` preset uses the same base permissions as `Default`, but
+approval requests that are eligible for review are first sent to Devo's
+automatic approval reviewer.
+
+The reviewer can:
+
+- approve clearly low-risk actions scoped to the stated target;
+- deny destructive, credential-related, privilege-escalating, or ambiguous
+  high-impact actions;
+- return uncertain when user intent or risk is unclear.
+
+Uncertain requests are still shown to you. Auto-review is a filter before user
+interruption, not a replacement for your judgment.
+
+## Review Habits
+
+Before approving, check the resource and target:
+
+- For file edits, confirm the path is inside the intended workspace.
+- For shell commands, read the exact command target.
+- For network access, confirm the host is expected.
+- For broad session approvals, make sure future matching requests would still
+  be safe.
+
+If the request is surprising, deny it and ask Devo to explain or choose a
+narrower action.
+
+## Project Permission Memory
+
+When you change permissions, Devo records the selected preset for the active
+project in user config. That lets future sessions for the same project start
+with the expected policy instead of asking you to reselect it every time.

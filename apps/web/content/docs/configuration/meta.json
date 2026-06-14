@@ -1,0 +1,15 @@
+{
+  "title": "Configuration And Providers",
+  "icon": "Settings2",
+  "pages": [
+    "index",
+    "config-basics",
+    "provider-setup",
+    "model-bindings",
+    "deepseek-official-api",
+    "other-providers",
+    "provider-wire-apis",
+    "model-resolution"
+  ],
+  "defaultOpen": true
+}

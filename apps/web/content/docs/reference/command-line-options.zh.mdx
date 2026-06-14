@@ -1,0 +1,114 @@
+---
+title: Command Line Options
+description: Devo 顶层 CLI flags 和 commands 参考。
+---
+
+当未提供 subcommand 时，`devo` binary 会启动交互式 TUI。Global flags 可用于 interactive mode 和 subcommands。
+
+## Global Flags
+
+| Flag | Value | Meaning |
+| --- | --- | --- |
+| `--model` | string | 覆盖本进程使用的 model。 |
+| `--log-level` | `trace`, `debug`, `info`, `warn`, `error` | 覆盖进程日志级别。 |
+| `--help` | none | 打印 command help。 |
+| `--version` | none | 打印 Devo version。 |
+
+示例：
+
+```bash
+devo --model deepseek-v4-pro --log-level debug
+```
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `devo` | 启动交互式 TUI。 |
+| `devo onboard` | 启动 onboarding 并配置 model provider。 |
+| `devo resume <session-id>` | 按 id 恢复保存的 interactive session。 |
+| `devo prompt [--format <format>] <input>` | 发送一个 prompt 并打印 response。 |
+| `devo doctor` | 诊断 configuration、provider connectivity 和 system health。 |
+| `devo upgrade` | 将 Devo 升级到最新发布版本。 |
+
+还有一个 runtime 使用的隐藏 `server` command。它不是用户可见 CLI contract 的一部分。
+
+## `devo`
+
+在当前工作目录启动 interactive session：
+
+```bash
+devo
+```
+
+用于普通 coding-agent 工作。
+
+## `devo onboard`
+
+强制进入 onboarding flow：
+
+```bash
+devo onboard
+```
+
+首次设置 provider 或替换当前 provider setup 时使用。
+
+## `devo resume`
+
+恢复保存的 interactive session：
+
+```bash
+devo resume <session-id>
+```
+
+Interactive session 退出时会打印 session id。在 TUI 内，`/resume` 会打开 session browser。
+
+## `devo prompt`
+
+运行一次非交互 prompt：
+
+```bash
+devo prompt "Explain this repository."
+```
+
+输出格式：
+
+| Format | Meaning |
+| --- | --- |
+| `text` | 打印最终 assistant text。默认值。 |
+| `json` | 打印一个包含 message 和 usage 的 JSON result object。 |
+| `jsonl` | 打印 JSONL lifecycle、delta、tool、result 和 error events。 |
+
+示例：
+
+```bash
+devo prompt --format text "List the main crates."
+devo prompt --format json "Summarize current config."
+devo prompt --format jsonl "Inspect project structure."
+```
+
+`--model` 同样适用于 `devo prompt`：
+
+```bash
+devo --model deepseek-v4-flash prompt "Summarize this file tree."
+```
+
+## `devo doctor`
+
+运行本地诊断：
+
+```bash
+devo doctor
+```
+
+编辑配置文件、credentials 或 provider endpoints 后运行它。
+
+## `devo upgrade`
+
+运行内置升级命令：
+
+```bash
+devo upgrade
+```
+
+对于 offline machines，使用 offline install 或 upgrade process，不要期望此命令从网络获取 artifacts。

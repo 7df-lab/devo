@@ -1,0 +1,106 @@
+---
+title: 开发环境
+description: 作为贡献者在本地构建和运行 Devo。
+---
+
+本页覆盖修改 Devo 代码和文档所需的本地环境。
+
+## 工具链
+
+Devo 是一个 Rust workspace 加一个 Next.js docs app。
+
+| Area | Toolchain |
+| --- | --- |
+| Rust crates | Rust 1.85 或更新版本，edition 2024。 |
+| Docs app | 与 `apps/web/package-lock.json` lockfile 兼容的 Node.js/npm。 |
+
+Workspace version 和 Rust version 在根目录 `Cargo.toml` 中声明。
+
+## Rust Workspace
+
+构建 workspace：
+
+```bash
+cargo build
+```
+
+从源码运行 CLI：
+
+```bash
+cargo run -p devo-cli -- --help
+cargo run -p devo-cli
+```
+
+运行聚焦 package test：
+
+```bash
+cargo test -p devo-config
+```
+
+格式化变更过的 Rust package：
+
+```bash
+cargo fmt --package devo-config
+```
+
+如果 Rust command 因另一个 Rust command 持有 build lock 而变慢，让它完成。不要因为 cargo 进程在等待就 kill 它。
+
+## Docs App
+
+Docs 位于 `apps/web/content/docs`。
+
+安装 docs dependencies：
+
+```bash
+cd apps/web
+npm install
+```
+
+运行 docs app：
+
+```bash
+npm run dev
+```
+
+当默认端口已被占用时，使用指定端口：
+
+```bash
+PORT=3011 npm run dev
+```
+
+验证 docs changes：
+
+```bash
+npm run lint
+npm run build
+```
+
+## 本地测试配置
+
+测试 config migration 或 onboarding 时使用独立 `DEVO_HOME`：
+
+```bash
+mkdir -p /tmp/devo-dev-home
+DEVO_HOME=/tmp/devo-dev-home cargo run -p devo-cli -- onboard
+```
+
+设置 `DEVO_HOME` 时，它必须指向已经存在的目录。
+
+## 仓库约定
+
+遵循 `AGENTS.md` 中的仓库约定：
+
+- crate names 使用 `devo-` 前缀；
+- 优先使用 inline `format!` arguments；
+- 当 clippy 会提示时折叠 nested `if` statements；
+- 尽量让 match expressions exhaustive；
+- 为新增 trait 编写文档；
+- 避免 trivial wrapper functions；
+- 保持 modules 尺寸合理；
+- 添加测试断言时使用 `pretty_assertions::assert_eq`。
+
+修改 public config、CLI 或 runtime behavior 时，在同一变更中更新 docs。
+
+## Dirty Worktrees
+
+假设 working tree 可能包含无关的用户变更。只编辑任务所需文件，不要 revert 你没有改动的文件。

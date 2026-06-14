@@ -1,0 +1,239 @@
+---
+title: Install
+description: Install Devo online, from source, or in an offline environment.
+---
+
+Devo installs as a user-local binary. The installer also installs the `rg`
+sidecar used by fast repository search. If you want local semantic
+`code_search`, install the small local model during setup or use the offline
+asset bundle described below.
+
+## Linux And macOS
+
+Run the online installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh
+```
+
+Install a specific release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --version v0.1.2
+```
+
+Install the local `code_search` model at the same time:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --install-code-search-model
+```
+
+The Unix installer accepts these options:
+
+| Option | Use when |
+| --- | --- |
+| `--version <version>` | Pin the Devo release instead of installing the latest release. |
+| `--binary <path>` | Install a local `devo` binary instead of downloading a release archive. |
+| `--install-dir <dir>` | Install into a custom directory. |
+| `--install-code-search-model` | Download the local Hugging Face model used by `code_search`. |
+| `--offline` | Install from files placed next to `install.sh`. |
+| `--no-modify-path` | Skip shell profile updates. |
+
+Useful environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `VERSION` | Same as `--version`. |
+| `DEVO_INSTALL_DIR` | Same as `--install-dir`. |
+| `DEVO_SKIP_RG_INSTALL=1` | Skip installing the bundled `rg` sidecar. |
+| `DEVO_INSTALL_CODE_SEARCH_MODEL=1` | Same as `--install-code-search-model`. |
+
+## Windows
+
+Run the online installer in PowerShell:
+
+```powershell
+irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
+```
+
+Install a specific release:
+
+```powershell
+$env:VERSION = "v0.1.2"; irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
+```
+
+Install the local `code_search` model at the same time:
+
+```powershell
+$env:DEVO_INSTALL_CODE_SEARCH_MODEL = "1"; irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
+```
+
+The Windows installer installs to the current user's local program directory
+and updates the user `Path`. It does not require an administrator shell.
+
+## Build From Source
+
+Use this path when you are contributing to Devo or testing unreleased changes:
+
+```bash
+git clone https://github.com/7df-lab/devo.git
+cd devo
+cargo build --release
+./target/release/devo --version
+```
+
+On Linux and macOS, you can install that local binary with the installer:
+
+```bash
+./install.sh --binary ./target/release/devo
+```
+
+## Upgrade
+
+Upgrade an existing online installation:
+
+```bash
+devo upgrade
+```
+
+On Linux and macOS, `devo upgrade` downloads `install.sh` and runs it. On
+Windows, it starts a detached PowerShell installer because Windows cannot
+replace the running `devo.exe` while the current process still owns the file.
+
+## Install Without Internet Access
+
+Use offline installation for enterprise machines, intranet hosts, or any
+machine that cannot reach GitHub and Hugging Face during setup.
+
+Prepare the files on a machine that has internet access, then move them to the
+target machine. Put every file next to the installer script.
+
+Download sources:
+
+| Asset | Source |
+| --- | --- |
+| Unix installer | `https://raw.githubusercontent.com/7df-lab/devo/main/install.sh` |
+| Windows installer | `https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1` |
+| Devo release archive | `https://github.com/7df-lab/devo/releases` |
+| ripgrep release archive | `https://github.com/BurntSushi/ripgrep/releases` |
+| `code_search` model files | `https://huggingface.co/minishlab/potion-code-16M/tree/main` |
+
+Required files for Linux and macOS:
+
+| File | Pattern |
+| --- | --- |
+| Installer | `install.sh` |
+| Devo release archive or binary | `devo-*-${target}.tar.gz` or `devo` |
+| ripgrep archive or binary | `ripgrep-*-${rg_target}.tar.gz` or `rg` |
+| `code_search` model files | `config.json`, `model.safetensors`, `tokenizer.json` |
+
+Required files for Windows:
+
+| File | Pattern |
+| --- | --- |
+| Installer | `install.ps1` |
+| Devo release archive or binary | `devo-*-${target}.zip` or `devo.exe` |
+| ripgrep archive or binary | `ripgrep-*-${rg_target}.zip` or `rg.exe` |
+| `code_search` model files | `config.json`, `model.safetensors`, `tokenizer.json` |
+
+The `code_search` files come from the `minishlab/potion-code-16M` Hugging Face
+model. They can sit next to the installer script directly, or under a
+`minishlab--potion-code-16M/` subdirectory. Offline installers currently install
+these model files unconditionally; they are the local semantic-search model used
+by `code_search`.
+
+## Offline Bundle Targets
+
+Use the target strings below when choosing release archives.
+
+| Machine | Devo `${target}` | ripgrep `${rg_target}` |
+| --- | --- | --- |
+| Linux x86_64 | `x86_64-unknown-linux-musl` | `x86_64-unknown-linux-musl` |
+| Linux arm64 | `aarch64-unknown-linux-musl` | `aarch64-unknown-linux-gnu` |
+| macOS Intel | `x86_64-apple-darwin` | `x86_64-apple-darwin` |
+| macOS Apple Silicon | `aarch64-apple-darwin` | `aarch64-apple-darwin` |
+| Windows 64-bit | `x86_64-pc-windows-msvc` | `x86_64-pc-windows-msvc` |
+
+Example Unix bundle for Devo `v0.1.2` and ripgrep `14.1.1` on macOS Apple
+Silicon:
+
+```text
+install.sh
+devo-v0.1.2-aarch64-apple-darwin.tar.gz
+ripgrep-14.1.1-aarch64-apple-darwin.tar.gz
+minishlab--potion-code-16M/config.json
+minishlab--potion-code-16M/model.safetensors
+minishlab--potion-code-16M/tokenizer.json
+```
+
+Example Windows bundle:
+
+```text
+install.ps1
+devo-v0.1.2-x86_64-pc-windows-msvc.zip
+ripgrep-14.1.1-x86_64-pc-windows-msvc.zip
+minishlab--potion-code-16M/config.json
+minishlab--potion-code-16M/model.safetensors
+minishlab--potion-code-16M/tokenizer.json
+```
+
+Archive URL patterns:
+
+```text
+https://github.com/7df-lab/devo/releases/download/<version>/devo-<version>-<target>.tar.gz
+https://github.com/7df-lab/devo/releases/download/<version>/devo-<version>-<target>.zip
+https://github.com/BurntSushi/ripgrep/releases/download/<rg_version>/ripgrep-<rg_version>-<rg_target>.tar.gz
+https://github.com/BurntSushi/ripgrep/releases/download/<rg_version>/ripgrep-<rg_version>-<rg_target>.zip
+https://huggingface.co/minishlab/potion-code-16M/resolve/main/config.json
+https://huggingface.co/minishlab/potion-code-16M/resolve/main/model.safetensors
+https://huggingface.co/minishlab/potion-code-16M/resolve/main/tokenizer.json
+```
+
+Run offline install on Linux or macOS:
+
+```bash
+sh ./install.sh --offline
+```
+
+Run offline install on Windows:
+
+```powershell
+.\install.ps1 -Offline
+```
+
+Offline mode installs the model into:
+
+```text
+<DEVO_HOME>/local-models/minishlab--potion-code-16M
+```
+
+If `DEVO_HOME` is not set, Devo uses the default user config directory:
+
+| Platform | Default `DEVO_HOME` |
+| --- | --- |
+| macOS/Linux | `~/.devo` |
+| Windows | `C:/Users/your-username/.devo` |
+
+For fully offline machines, disable startup update checks in
+`<DEVO_HOME>/config.toml`:
+
+```toml
+[updates]
+enabled = false
+check_on_startup = false
+```
+
+See [Config Reference](/docs/reference/config-reference#update-checks).
+
+## Verify
+
+Open a new terminal and run:
+
+```bash
+devo --version
+devo doctor
+```
+
+If `devo` is not found, add the install directory to `PATH` and reopen the
+terminal. If repository search fails with an `rg` error, rerun the installer or
+install `rg` next to the `devo` binary.

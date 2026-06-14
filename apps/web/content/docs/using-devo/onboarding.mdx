@@ -1,0 +1,103 @@
+---
+title: Onboarding
+description: Configure Devo from the terminal UI.
+---
+
+Onboarding configures the provider and model Devo should use. It runs on first
+launch when no provider is configured, and you can run it again at any time:
+
+```bash
+devo onboard
+```
+
+Use onboarding when you want to add your first provider, change the provider
+setup from the TUI, or create a new model binding without editing
+`config.toml` by hand.
+
+## What Onboarding Creates
+
+Onboarding saves a provider vendor and a model binding in Devo's user config.
+If you enter an API key, Devo stores it as a credential instead of printing it
+back in the transcript.
+
+The saved setup lets Devo know:
+
+- which model slug appears in the UI;
+- which provider vendor should receive requests;
+- which request model name should be sent to the provider;
+- which wire API to use;
+- which default reasoning effort to use when the model supports it;
+- which base URL and credential belong to the provider.
+
+## Flow
+
+The onboarding widget runs inline in the TUI.
+
+1. Choose a model profile. The model list is searchable: type to filter, use
+   `Up` and `Down` to move, and press `Enter` to select.
+2. Choose an existing provider vendor or choose `Add provider...`.
+3. Enter provider fields. New providers ask for provider name, base URL, API
+   key, request model name, and display name.
+4. Choose the wire API:
+   - `OpenAI Chat Completions`
+   - `OpenAI Responses`
+   - `Anthropic Messages`
+5. If the selected model supports reasoning, choose the default reasoning
+   effort.
+6. Devo validates the provider by sending a server-side validation request.
+7. If validation succeeds, Devo saves the provider binding and enables the
+   composer.
+
+When the setup succeeds, the transcript shows:
+
+```text
+Provider configured successfully
+```
+
+## Existing Providers
+
+If a provider vendor already exists, onboarding can reuse it. The provider
+selection step shows configured provider vendors before `Add provider...`.
+
+For an existing provider, Devo reuses the saved credential id and base URL when
+available. You can still confirm the request model name, display name, wire
+API, and reasoning effort before validation.
+
+## Validation Failures
+
+If validation fails, Devo does not drop the setup. It shows the error and asks
+what to do next:
+
+| Action | Use When |
+| --- | --- |
+| Add model anyway | You know the provider works but validation cannot prove it. |
+| Retry with current settings | The provider may have failed temporarily. |
+| Edit settings | The base URL, API key, model name, or wire API is wrong. |
+| Choose different model | You selected the wrong model profile. |
+
+Saving without validation records the provider and model binding, but the
+transcript marks that validation was skipped.
+
+## Canceling
+
+Press `Esc` to move back through onboarding steps. Pressing `Esc` from the
+first model selection step cancels onboarding.
+
+When onboarding is the first-run gate, canceling exits Devo because the normal
+composer cannot run without a configured provider.
+
+## DeepSeek Recommendation
+
+For DeepSeek's official API, prefer the Anthropic-compatible path in Devo:
+
+- base URL: `https://api.deepseek.com/anthropic`
+- wire API: `Anthropic Messages`
+
+Use DeepSeek's official documentation for the current API key workflow and
+model names. The Anthropic-compatible path is the recommended Devo setup
+because hosted `web_search` and `web_fetch` tools are available through that
+provider path. The OpenAI-compatible DeepSeek endpoint can work, but web search
+usually requires a separate third-party tool configuration.
+
+See [Connect DeepSeek](../get-started/connect-deepseek) for a full setup
+walkthrough.

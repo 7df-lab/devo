@@ -1,0 +1,72 @@
+---
+title: Using Devo
+description: Work with Devo in the terminal UI.
+---
+
+This section covers the day-to-day Devo terminal UI. Read it after you have
+installed Devo and configured at least one provider.
+
+Start here if you want to understand how to drive a session, switch models,
+control tools, and resume work later.
+
+## Reading Order
+
+1. [TUI Overview](./tui-overview) explains the main surfaces: transcript,
+   composer, status line, model state, and tool activity.
+2. [Onboarding](./onboarding) explains first-run setup and `devo onboard`.
+3. [Model Picker](./model-picker) explains `/model` and thinking-mode
+   selection.
+4. [Fuzzy File Search](./fuzzy-file-search) explains the `@` trigger for file,
+   skill, and MCP references.
+5. [Shell Mode](./shell-mode) explains the `!` trigger for local shell commands.
+6. [Plan Mode](./plan-mode) explains how to ask Devo to explore and propose a
+   plan before editing files.
+7. [/goal](./goal) explains persistent objectives for longer work.
+8. [/btw And Subagents](./btw-and-subagents) explains side questions and child
+   agents.
+9. [Permissions](./permissions) explains approval prompts and permission
+   presets.
+10. [Resume and History](./resume-and-history) explains saved sessions and
+    history restoration.
+
+## Main Loop
+
+Most Devo work follows this loop:
+
+1. Open a workspace with `devo`.
+2. Type a request in the composer.
+3. Review Devo's plan, tool activity, or questions in the transcript.
+4. Approve or deny tool requests when Devo asks.
+5. Continue with another prompt, switch modes, or exit and resume later.
+
+The composer is not only a chat input. It also supports slash commands, model
+selection, file references, shell mode, and plan-mode toggling.
+
+## Common Entry Points
+
+| Task | Use |
+| --- | --- |
+| Configure Devo again | `devo onboard` |
+| Switch model | `/model` |
+| Show session status | `/status` |
+| Clear the visible transcript | `/clear` |
+| Compact long context | `/compact` |
+| Start a fresh session | `/new` |
+| Browse saved sessions | `/resume` |
+| Change permissions | `/permissions` |
+| List MCP servers | `/mcp` |
+| List skills | `/skills` |
+| Exit | `/exit` |
+
+## Modes And Triggers
+
+`Shift+Tab` switches between Build mode and Plan Mode. Build mode lets Devo
+make changes subject to permissions. Plan Mode is for investigation and proposed
+plans before file edits.
+
+Use `@` inside the composer to search for files, skills, and MCP resources.
+Use `!` at the start of the composer to run shell commands through Devo's shell
+surface.
+
+Use `/goal` when the work has a larger end state that should persist across
+turns.

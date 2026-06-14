@@ -1,0 +1,77 @@
+---
+title: "! Shell Mode"
+description: Use ! in the composer to run shell commands from Devo.
+---
+
+Type `!` in the composer when you want to run a shell command yourself instead
+of asking the model to decide what command to run.
+
+Shell mode is for direct terminal work: checking files, running tests, listing
+state, or executing a command whose exact text you already know.
+
+## Three Ways To Use `!`
+
+### Enter Shell Mode
+
+With an empty composer, press `!`.
+
+Devo switches the input mode indicator to `SHELL`. Type a command and press
+`Enter`:
+
+```text
+cargo test -p devo-tui status_indicator -- --nocapture
+```
+
+The command is submitted as shell input, not as a chat message.
+
+### Run A One-Shot Command
+
+Type `!` followed by the command and press `Enter`:
+
+```text
+!git status --short
+```
+
+Devo strips the leading `!`, runs `git status --short`, and returns the composer
+to `BUILD` mode.
+
+### Send A Chat Message That Starts With `!`
+
+Escape the leading bang with a backslash:
+
+```text
+\!important: explain why this shell command failed
+```
+
+Devo sends the message as normal chat text beginning with `!important`.
+
+Leading whitespace also keeps `!` as normal chat text because one-shot shell
+commands only trigger when the raw text starts with `!`.
+
+## When To Use Shell Mode
+
+Use shell mode when the command is the task:
+
+- `git status --short`
+- `npm run lint`
+- `cargo test -p devo-core`
+- `rg "ProviderWireApi" crates apps`
+- `ls -la <DEVO_HOME>`
+
+Ask Devo in normal chat when you want reasoning before command execution:
+
+```text
+Which tests should I run for this provider config change?
+```
+
+That keeps the model in the loop for command selection.
+
+## Limits
+
+Shell commands cannot be submitted while Devo is already generating. If a task
+is running, Devo reports that it cannot run the shell command yet.
+
+`Tab` does not submit a one-shot `!command`. Use `Enter` for shell submissions.
+
+Shell mode runs commands with the same seriousness as a terminal. Review
+destructive commands before you press `Enter`.

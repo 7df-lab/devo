@@ -1,0 +1,12 @@
+{
+  "title": "Reference",
+  "icon": "BookOpen",
+  "pages": [
+    "index",
+    "cli-reference",
+    "command-line-options",
+    "slash-commands",
+    "config-reference"
+  ],
+  "defaultOpen": true
+}

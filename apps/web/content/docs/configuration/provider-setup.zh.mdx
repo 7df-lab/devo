@@ -1,0 +1,109 @@
+---
+title: 提供商配置
+description: 添加 provider 连接记录。
+---
+
+Provider 记录告诉 Devo 如何连接某个模型服务。它本身不会决定当前使用哪个模型；这个决定由 model binding 完成。
+
+Provider 记录位于 `config.toml` 的 `[providers.<id>]` 下。
+
+## Provider 字段
+
+```toml
+[providers.deepseek-anthropic]
+enabled = true
+name = "DeepSeek Anthropic"
+base_url = "https://api.deepseek.com/anthropic"
+credential = "deepseek_api_key"
+wire_apis = ["anthropic_messages"]
+```
+
+| 字段 | 必需 | 含义 |
+| --- | --- | --- |
+| `name` | 是 | 用户可读的 provider 名称。 |
+| `enabled` | 否 | 该 provider 是否可用。默认 `true`。 |
+| `base_url` | 通常需要 | Provider endpoint。有些内置 provider 可以提供默认值。 |
+| `credential` | 通常需要 | `<DEVO_HOME>/auth.json` 中的 credential id。 |
+| `headers` | 否 | Provider 特定 HTTP header 的原始 JSON object 字符串。 |
+| `wire_apis` | 建议设置 | 该 provider 记录支持的 wire API。 |
+| `web_search` | 否 | Provider 特定的 web search 覆盖项。 |
+| `web_fetch` | 否 | Provider 特定的 web fetch 覆盖项。 |
+
+如果 `wire_apis` 为空，Devo 在部分路径上仍可使用默认值，但显式写出 `wire_apis` 会让校验和后续维护更清楚。
+
+## 凭据
+
+API key 放在 `auth.json`，不要放在 `config.toml`：
+
+```json
+{
+  "version": 1,
+  "credentials": {
+    "deepseek_api_key": {
+      "kind": "api_key",
+      "value": "sk-your-key"
+    }
+  }
+}
+```
+
+然后引用该 id：
+
+```toml
+credential = "deepseek_api_key"
+```
+
+Onboarding 会在你输入 API key 时替你完成这一步。
+
+## Web Search 和 Web Fetch
+
+Devo 的 web search 有两种来源：
+
+- provider-hosted web tools：当选中的 provider path 支持时使用；
+- 本地第三方 web search provider：在 `[tools.web_search]` 下配置。
+
+Provider 和 binding 覆盖项可以设置 web 行为：
+
+```toml
+[providers.deepseek-anthropic.web_search]
+mode = "provider"
+
+[providers.deepseek-anthropic.web_fetch]
+mode = "provider"
+```
+
+对 DeepSeek 官方 API，如果你需要 provider-hosted `web_search` 和 `web_fetch`，优先使用 Anthropic-compatible provider path。
+
+## 本地 Web Search
+
+当 provider-hosted search 不可用时，配置本地 search：
+
+```toml
+[tools.web_search]
+mode = "local"
+local_provider = "exa"
+
+[tools.web_search.local_providers.exa]
+kind = "exa"
+credential = "exa_api_key"
+max_results = 5
+```
+
+本地 provider 的 credential 也必须存在于 `auth.json`。
+
+支持的本地 search provider kind：
+
+- `exa`
+- `tavily`
+
+## 禁用 Provider
+
+设置 `enabled = false` 可以保留 provider 配置，但不让模型解析使用它：
+
+```toml
+[providers.old-provider]
+enabled = false
+name = "Old Provider"
+```
+
+如果选中的 binding 指向被禁用的 provider，Devo 会报告该 provider 已禁用。

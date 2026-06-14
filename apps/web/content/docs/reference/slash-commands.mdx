@@ -1,0 +1,76 @@
+---
+title: Slash Commands
+description: Reference Devo slash commands and composer triggers.
+---
+
+Slash commands are entered in the TUI composer. Some commands are available
+while a model is generating; configuration-changing commands wait until the
+current task is idle.
+
+## Commands
+
+| Command | Purpose | Notes |
+| --- | --- | --- |
+| `/theme` | Switch the UI theme. | Not available during generation. |
+| `/model` | Choose the active model. | Not available during generation. Accepts inline model text. |
+| `/skills` | Show available skills. | Runs `skills list`. |
+| `/mcp` | Show configured MCP servers. | Runs `mcp list`. |
+| `/compact` | Compact current session context. | Not available during generation. |
+| `/resume` | Resume a saved chat. | Not available during generation. |
+| `/new` | Start a new chat. | Not available during generation. |
+| `/status` | Show current session config and token usage. | Includes model, thinking, cwd, turns, and tokens. |
+| `/permissions` | Choose what Devo is allowed to do. | Alias: `/approvals`. |
+| `/clear` | Clear the transcript view. | Does not change files. |
+| `/diff` | Show git diff, including untracked files. | Not available during generation. |
+| `/goal` | Set or view the goal for long-running work. | Accepts subcommands and inline objective text. |
+| `/btw` | Ask a side question without interrupting the main conversation. | Requires a question. |
+| `/exit` | Exit Devo. | Shuts down the interactive session. |
+
+## `/goal`
+
+Without arguments, `/goal` shows the current goal:
+
+```text
+/goal
+```
+
+Set or replace the objective:
+
+```text
+/goal Rebuild the docs structure one page at a time.
+```
+
+Subcommands:
+
+| Command | Meaning |
+| --- | --- |
+| `/goal edit` | Open the goal editor. |
+| `/goal pause` | Pause the active goal. |
+| `/goal resume` | Resume a paused goal. |
+| `/goal clear` | Clear the goal. |
+
+Goal text is length-limited by the protocol. If it is too long, Devo reports the
+limit instead of setting it.
+
+## `/btw`
+
+Use `/btw` for a side question:
+
+```text
+/btw Which module handles provider resolution?
+```
+
+The side question goes through the child-agent path and returns an answer to the
+main transcript.
+
+## Composer Triggers
+
+These are not slash commands, but they are part of the same prompt surface.
+
+| Trigger | Purpose |
+| --- | --- |
+| `@` | Open fuzzy file search and insert a selected path into the prompt. |
+| `!` | Enter SHELL mode and run a shell command from the composer. |
+
+See [Fuzzy File Search](../using-devo/fuzzy-file-search) and
+[Shell Mode](../using-devo/shell-mode) for workflow details.

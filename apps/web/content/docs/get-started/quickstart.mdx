@@ -1,0 +1,142 @@
+---
+title: Quickstart
+description: The fastest path to a working Devo session.
+---
+
+This page gets Devo running in an existing repository with a model provider
+connected.
+
+For a first setup, use DeepSeek official API through Devo's
+Anthropic-compatible provider path. That path is the simplest default when you
+want provider-hosted tools such as `web_search` and `web_fetch`.
+
+## 1. Install Devo
+
+Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
+```
+
+For source builds and offline machines, see [Install](/docs/get-started/install).
+
+Check that the binary is available:
+
+```bash
+devo --version
+```
+
+## 2. Create A DeepSeek API Key
+
+Create an API key in the
+[DeepSeek Platform](https://platform.deepseek.com/api_keys).
+
+Last checked against DeepSeek official docs: 2026-06-14.
+
+Use a current DeepSeek model name from the official docs. As of the check above,
+the main choices were:
+
+| Model name | Use when |
+| --- | --- |
+| `deepseek-v4-pro` | You want the stronger model for coding and agent workflows. |
+| `deepseek-v4-flash` | You want the lower-cost model for routine work. |
+
+DeepSeek lists current base URLs and model names in its official docs:
+
+- [Your First API Call](https://api-docs.deepseek.com/)
+- [Anthropic API](https://api-docs.deepseek.com/guides/anthropic_api)
+- [Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing)
+
+## 3. Run Onboarding
+
+Open the repository you want Devo to work in:
+
+```bash
+cd /path/to/your/repo
+devo onboard
+```
+
+When onboarding asks for provider details, choose:
+
+| Prompt | Value |
+| --- | --- |
+| Invocation method | `Anthropic Messages` |
+| Base URL | `https://api.deepseek.com/anthropic` |
+| API key | Your DeepSeek API key |
+| Model name | `deepseek-v4-pro` or `deepseek-v4-flash` |
+
+For manual config and the OpenAI-compatible DeepSeek path, see
+[Connect DeepSeek](/docs/get-started/connect-deepseek).
+
+## 4. Start Devo
+
+Run Devo from the repository root:
+
+```bash
+devo
+```
+
+If onboarding has already configured a provider, Devo opens the TUI directly. If
+no provider is configured, Devo starts onboarding.
+
+The first screen should give you a composer at the bottom and a transcript area
+above it.
+
+## 5. Ask A Read-Only First Prompt
+
+Start with a prompt that proves Devo can read the repository before asking it to
+edit files:
+
+```text
+Explain this repository's main runtime path. Do not edit files yet.
+```
+
+If the answer looks wrong, stop and fix the setup before asking for changes.
+Typical causes are the wrong working directory, wrong model name, wrong base
+URL, or a missing API key.
+
+## 6. Run A Scoped Change
+
+Ask for one concrete change:
+
+```text
+Update the install docs to mention offline installation. Keep the change scoped to docs only.
+```
+
+When you already know the file, attach it with `@`:
+
+```text
+Update @apps/web/content/docs/get-started/install.mdx to mention offline installation.
+```
+
+When you know the exact command, use `!` shell mode:
+
+```text
+!npm run lint
+```
+
+See [@ Fuzzy File Search](/docs/using-devo/fuzzy-file-search) and
+[! Shell Mode](/docs/using-devo/shell-mode) for the exact composer behavior.
+
+## 7. Verify The Change
+
+Ask Devo to run the relevant checks:
+
+```text
+Run the checks for this docs change and tell me what passed or failed.
+```
+
+Then inspect the working tree:
+
+```text
+!git status --short
+```
+
+Review the diff before committing or continuing. Devo can help explain the diff,
+but the repository state is still yours to accept.

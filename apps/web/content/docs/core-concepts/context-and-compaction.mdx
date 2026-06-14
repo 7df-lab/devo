@@ -1,0 +1,87 @@
+---
+title: Context and Compaction
+description: Understand how Devo manages long-running context.
+---
+
+Every Devo turn sends a context package to the selected model. That package can
+include instructions, workspace context, available skills, active goal state,
+conversation history, tool results, and the latest user message.
+
+The selected model's context window limits how much can fit.
+
+## Context Window
+
+Model profiles include a context window and, when configured, an effective
+usable percentage. Devo uses those values to estimate how full the current
+session is and when compaction may be needed.
+
+The TUI can show token usage, context-window size, and context pressure in the
+status surfaces. These numbers are estimates, but they are useful for spotting a
+session that is getting large.
+
+## What Gets Sent
+
+Devo builds context from multiple sources:
+
+- runtime and developer instructions;
+- discovered project instructions;
+- active skill information;
+- memory and goal context when applicable;
+- conversation history;
+- tool-call and tool-result records;
+- the current user turn.
+
+Not every visible transcript line is equally useful for future turns. For
+example, compaction filters out reasoning items before summarizing older
+history.
+
+## Automatic Compaction
+
+Automatic compaction runs when Devo decides the session is over the configured
+token budget. If the session is still within budget, automatic compaction is
+skipped.
+
+When compaction runs, Devo:
+
+1. filters history into a form suitable for summarization;
+2. separates older items to compact from recent items to preserve;
+3. asks a model to summarize the older history;
+4. creates a compaction summary item;
+5. keeps the summary plus the preserved recent items as the model-facing
+   history.
+
+The user-visible transcript is still preserved for resume and review. The
+summary is for future model context, not a replacement for your visible history.
+
+## Manual Compaction
+
+Use `/compact` when you want to compact the current session proactively.
+
+Manual compaction always attempts to run, even if the current context is not
+over the automatic threshold. Devo blocks compaction while a turn is already in
+progress.
+
+The TUI reports compaction lifecycle events:
+
+- compaction started;
+- compaction completed;
+- compaction failed.
+
+## Failure And Retry
+
+The compaction summarizer is another model call. If the summarizer hits its own
+context limit, Devo shrinks the summarizer input by preserving more recent items
+and retrying. Transient failures are retried with backoff.
+
+If compaction still fails, the session continues with the existing history. You
+can retry later, reduce the task scope, or start a fresh session.
+
+## Practical Guidance
+
+Use `/compact` after a large investigation before asking Devo to implement a
+change. Use `/goal` when the larger objective should remain explicit across
+compaction or resumed turns.
+
+When a session is important, make key decisions explicit in normal chat before
+compaction. Summaries preserve intent best when the transcript contains clear
+decisions and constraints.

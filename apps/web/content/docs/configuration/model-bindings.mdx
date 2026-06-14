@@ -1,0 +1,94 @@
+---
+title: Model Bindings
+description: Bind a supported model to a configured provider.
+---
+
+A model binding connects Devo's local model identity to the provider model name
+that should be sent over the wire.
+
+Bindings live under `[model_bindings.<id>]`.
+
+## Example
+
+```toml
+[model_bindings.deepseek-v4-pro-deepseek-anthropic]
+enabled = true
+model_slug = "deepseek-v4-pro"
+provider = "deepseek-anthropic"
+model_name = "deepseek-v4-pro"
+display_name = "DeepSeek V4 Pro"
+invocation_method = "anthropic_messages"
+default_reasoning_effort = "high"
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `model_slug` | Yes | Devo's local model metadata id. |
+| `provider` | Yes | Provider id from `[providers.<id>]`. |
+| `model_name` | Yes | Model string sent to the provider. |
+| `display_name` | No | Label shown in the TUI model picker and header. |
+| `invocation_method` | Yes | Wire API used for this binding. |
+| `default_reasoning_effort` | No | Default reasoning effort for capable models. |
+| `web_search` | No | Binding-specific web search override. |
+| `web_fetch` | No | Binding-specific web fetch override. |
+| `enabled` | No | Whether this binding can be selected. Defaults to `true`. |
+
+## Slug Versus Model Name
+
+`model_slug` is the Devo-side identity. It maps to local model metadata such as
+context window, thinking support, and display defaults.
+
+`model_name` is the provider-side value sent in the API request.
+
+They are often the same, but they do not have to be. Use different values when
+a gateway expects names like `openai/gpt-5.2` while Devo should still use a
+stable local slug.
+
+## Binding Id
+
+The table name is the binding id:
+
+```toml
+[model_bindings.main]
+```
+
+The binding id is what `[defaults]` points to, and it is also the first match
+checked when a user runs `/model <value>`.
+
+## Default Binding
+
+Set the startup default under `[defaults]`:
+
+```toml
+[defaults]
+model_binding = "deepseek-v4-pro-deepseek-anthropic"
+```
+
+If the default binding is disabled, runtime model resolution skips it and uses
+the first enabled binding it can find.
+
+## Provider Compatibility
+
+The binding `invocation_method` must be supported by the provider's
+`wire_apis`. This is valid:
+
+```toml
+[providers.deepseek-anthropic]
+wire_apis = ["anthropic_messages"]
+
+[model_bindings.deepseek-v4-pro-deepseek-anthropic]
+provider = "deepseek-anthropic"
+invocation_method = "anthropic_messages"
+```
+
+This is invalid because the binding asks for a wire API the provider does not
+advertise:
+
+```toml
+[providers.deepseek-anthropic]
+wire_apis = ["anthropic_messages"]
+
+[model_bindings.bad]
+provider = "deepseek-anthropic"
+invocation_method = "openai_chat_completions"
+```

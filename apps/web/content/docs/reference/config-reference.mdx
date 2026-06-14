@@ -1,0 +1,170 @@
+---
+title: Config Reference
+description: Reference Devo config fields after user-facing guides are stable.
+---
+
+This page lists the main config files and fields. For guided setup, start with
+[Config Basics](../configuration/config-basics), [Provider Setup](../configuration/provider-setup),
+and [Model Bindings](../configuration/model-bindings).
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `<DEVO_HOME>/config.toml` | User-level Devo config. |
+| `<DEVO_HOME>/auth.json` | User-level secrets and credentials. |
+| `<workspace>/.devo/config.toml` | Workspace-level config overlay. |
+
+Default `DEVO_HOME` paths:
+
+| Platform | Default |
+| --- | --- |
+| macOS/Linux | `~/.devo` |
+| Windows | `C:/Users/your-username/.devo` |
+
+If `DEVO_HOME` is set, it must point to an existing directory.
+
+## Precedence
+
+Effective config is resolved in this order, highest priority first:
+
+1. command-line startup arguments;
+2. `<workspace>/.devo/config.toml`;
+3. `<DEVO_HOME>/config.toml`;
+4. built-in defaults.
+
+`auth.json` is user-scoped and is not intended to be committed to a repository.
+
+## Top-Level Fields
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `summary_model` | enum | Selects the model used for context summaries. |
+| `server` | table | Server runtime defaults. |
+| `logging` | table | Diagnostic logging behavior. |
+| `skills` | table | Skill discovery roots and behavior. |
+| `experimental` | table | Experimental feature gates. |
+| `mcp_oauth_credentials_store` | `auto`, `keyring`, `file` | Storage backend for MCP OAuth credentials. |
+| `mcp` | table | MCP server discovery and runtime config. |
+| `tools` | table | Tool-specific runtime config. |
+| `hooks` | table | External lifecycle hooks. |
+| `provider_http` | table | Shared provider HTTP transport settings. |
+| `updates` | table | Startup update-check defaults. |
+| `project_root_markers` | string array | Markers used to discover project root for instructions. Defaults to `.git`. |
+| `projects` | table | User-level settings remembered per project key. |
+
+Provider-related fields are flattened into the top level:
+
+| Field | Meaning |
+| --- | --- |
+| `defaults` | Durable default selections, including active model binding. |
+| `providers` | Provider records keyed by provider id. |
+| `model_bindings` | Invocable model bindings keyed by binding id. |
+| `model_provider`, `model`, `model_providers` | Legacy provider config compatibility fields. |
+| `model_thinking_selection` | User-facing thinking selection for the active model. |
+| `model_auto_compact_token_limit` | Optional automatic compaction token threshold. |
+| `model_context_window` | Optional context-window override. |
+| `disable_response_storage` | Optional response-storage switch. |
+| `preferred_auth_method` | Preferred provider auth method. Currently API key based. |
+
+## `[defaults]`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `model_binding` | string | Binding id used when no CLI or runtime model override is provided. |
+
+## `[providers.<id>]`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `name` | string | Human-readable provider name. |
+| `enabled` | bool | Whether the provider can be used. Defaults to `true`. |
+| `base_url` | string | Provider endpoint. |
+| `credential` | string | Credential id in `auth.json`. |
+| `headers` | JSON object string | Extra HTTP headers for provider requests. |
+| `wire_apis` | string array | Supported wire APIs for this provider. |
+| `web_search` | table | Provider-level web search override. |
+| `web_fetch` | table | Provider-level web fetch override. |
+
+Supported wire API values:
+
+- `anthropic_messages`
+- `openai_chat_completions`
+- `openai_responses`
+
+## `[model_bindings.<id>]`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `enabled` | bool | Whether the binding appears in model resolution and picker surfaces. Defaults to `true`. |
+| `model_slug` | string | Local model metadata id. |
+| `provider` | string | Provider id from `[providers]`. |
+| `model_name` | string | Model name sent to the provider. |
+| `display_name` | string | Optional label shown in UI. |
+| `invocation_method` | wire API | Wire API used by this binding. Defaults to `openai_chat_completions` if omitted. |
+| `default_reasoning_effort` | string | Optional default reasoning effort. |
+| `web_search` | table | Binding-level web search override. |
+| `web_fetch` | table | Binding-level web fetch override. |
+
+## `[tools.web_search]`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `mode` | `disabled`, `provider`, `local` | Effective web search mode. Default is `provider`. |
+| `local_provider` | string | Selected local provider id. Required when multiple local providers exist. |
+| `local_providers` | table | Local search provider definitions. |
+
+Local provider fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `kind` | `exa`, `tavily` | Search service kind. |
+| `credential` | string | Credential id in `auth.json`. |
+| `base_url` | string | Optional service endpoint override. |
+| `max_results` | integer | Optional result limit. |
+
+## `[tools.web_fetch]`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `mode` | `disabled`, `provider`, `local` | Effective web fetch mode. Default is `local`. |
+
+## `auth.json`
+
+`auth.json` stores user-scoped credentials:
+
+```json
+{
+  "version": 1,
+  "credentials": {
+    "deepseek_api_key": {
+      "kind": "api_key",
+      "value": "sk-your-key"
+    }
+  }
+}
+```
+
+Credential fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `version` | integer | Credential file schema version. Current value is `1`. |
+| `credentials.<id>.kind` | `api_key` | Credential kind. |
+| `credentials.<id>.value` | string | Secret value. |
+
+Do not commit `auth.json`.
+
+## Update Checks
+
+The default update config enables startup checks with a 24-hour minimum
+interval:
+
+```toml
+[updates]
+enabled = true
+check_on_startup = true
+check_interval_hours = 24
+```
+
+Disable startup checks in environments that require fully offline operation.

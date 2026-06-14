@@ -1,30 +1,29 @@
 ---
 title: Devo
-description: 安装、配置并了解 Devo 的模型与提供方支持。
+description: Devo 文档：安装、配置模型、使用 TUI、参与开发。
 ---
 
-## 概览
+Devo 是一个开源编程 Agent。它跑在本地终端里，可以接 DeepSeek、Anthropic、OpenAI-compatible gateway，或你自己的模型服务。
 
-Devo 是面向开发者的开源编码代理，保留终端优先的工作方式、灵活的提供方配置，以及可检查的代理工作流。
+先把 Devo 跑起来。然后再看 TUI、模型配置、上下文、MCP、skills、hooks 和贡献入口。
 
-模型系统由三个独立概念组成：
+## 文档结构
 
-- 支持的模型定义：Devo 内置的能力元数据。
-- 提供方条目：用户定义的可复用连接记录。
-- 模型绑定：把支持的模型和提供方连接成可调用模型。
+- Get Started 和 Core Concepts：安装、模型、上下文和扩展机制。
+- Using Devo：TUI 里的日常操作。
+- Configuration、Reference 和 Contributors：配置字段、provider 接入和运行时结构。
 
-## 文档
+## 从这里开始
 
-先从安装开始，然后配置提供方和模型绑定。
+- [快速开始](/zh/docs/get-started/quickstart)
+- [安装 Devo](/zh/docs/get-started/install)
+- [连接 DeepSeek](/zh/docs/get-started/connect-deepseek)
+- [TUI 概览](/zh/docs/using-devo/tui-overview)
+- [架构概览](/zh/docs/contributors/architecture-overview)
 
-- [编码示例](/zh/docs/coding-examples)
-- [安装 Devo](/zh/docs/install)
-- [配置](/zh/docs/configuration)
-- [支持的模型](/zh/docs/supported-models)
-- [提供方 Wire API](/zh/docs/provider-wire-apis)
-- [模型解析](/zh/docs/model-resolution)
+## 按目的阅读
 
-## 链接
-
-- [GitHub](https://github.com/7df-lab/devo)
-- [联系](mailto:devo@devo.7df.ai)
+- 第一次用：从 Get Started 开始。
+- 从 Codex CLI 或 Claude Code 过来：先跑 Quickstart，再看迁移页。
+- 接模型：从 Configuration And Providers 开始。
+- 改代码：先读架构概览和运行时流程。

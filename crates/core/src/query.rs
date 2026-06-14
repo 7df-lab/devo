@@ -3603,14 +3603,9 @@ mod tests {
             assistant_message,
             &Message {
                 role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Reasoning {
-                        text: "plan".into(),
-                    },
-                    ContentBlock::Text {
-                        text: "final".into(),
-                    },
-                ],
+                content: vec![ContentBlock::Text {
+                    text: "final".into(),
+                }],
             }
         );
     }

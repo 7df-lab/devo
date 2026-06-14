@@ -1,0 +1,67 @@
+---
+title: Hooks
+description: 围绕 Devo events 运行配置命令。
+---
+
+Hooks 会围绕 Devo lifecycle events 运行配置命令。
+
+当本地 policy、audit、notification 和 integration tasks 应发生在模型推理之外时，使用 hooks。
+
+## 当前 Runtime 支持
+
+Config format 可以 parse command、prompt、agent 和 HTTP hooks。当前 runtime 执行 command hooks。其他 hook types 会被 parse，但 runtime 会报告 unsupported。
+
+Command hooks 通过 stdin 接收 JSON payload，并可写 stdout 或 stderr。默认 timeout 是 600 秒。
+
+## Events
+
+Hook configuration 按 event name 组织。Devo 识别的 events 包括：
+
+| Event | Example Use |
+| --- | --- |
+| `Setup` | Runtime 启动时运行 bootstrap checks。 |
+| `SessionStart` / `SessionEnd` | 记录 session lifecycle events。 |
+| `UserPromptSubmit` | 验证或记录 submitted prompts。 |
+| `PreToolUse` | 在 risky tools 运行前阻止。 |
+| `PostToolUse` | Audit successful tool calls。 |
+| `PostToolUseFailure` | 捕获 tool errors。 |
+| `PermissionRequest` | 在询问用户前添加 policy。 |
+| `PermissionDenied` | 记录 denied actions。 |
+| `PreCompact` / `PostCompact` | 跟踪 context compaction。 |
+| `SubagentStart` / `SubagentStop` | 跟踪 child-agent lifecycle。 |
+| `ConfigChange` | 验证 configuration mutations。 |
+| `FileChanged` | 响应 edited files。 |
+| `CwdChanged` | Session workspace 改变时响应。 |
+
+完整 config reference 列出 event names 和 TOML shape。
+
+## Matching
+
+每个 event 可以有一个或多个 matchers。Matcher 可以包含 `matcher` 字符串和一个或多个 hooks。
+
+Tool-related events 中，matcher 会针对 `tool_name` 等字段求值。File changes 中，它可以匹配 changed file path。不暴露 match query 的 events 会直接运行配置的 hooks。
+
+同一 event 下重复的 command hooks 会按 shell、command 和 condition 去重。
+
+## Blocking
+
+Command hook 可以用两种方式 block：
+
+- 以 status code `2` 退出；
+- 打印带 blocking decision 的 JSON，例如 `{"decision":"block","reason":"..."}`。
+
+Hook block 时，Devo 会显示 reason 并停止受保护 action。例如，blocked prompt 会在 turn start 前被拒绝，blocked tool call 会返回 tool error 而不执行。
+
+Blocking path 以外的 non-zero statuses 会作为 non-blocking hook errors 记录。
+
+## Async Hooks
+
+当 command hook 应在后台运行时，将它设置为 async。Async hooks 会被 spawn，不阻塞关联的 Devo operation。
+
+Notifications 和 telemetry 适合 async hooks。必须阻止 unsafe actions 的 policy checks 不应使用 async hooks。
+
+## Safety
+
+Hooks 执行本地命令。保持它们小、确定且易于审计。避免大范围修改文件系统，或不经验证就依赖不可信 prompt text 的命令。
+
+如果 hook 用于执行 policy，明确 blocking reason，让用户和 Devo 都能理解发生了什么。

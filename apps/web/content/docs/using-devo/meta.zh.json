@@ -1,0 +1,18 @@
+{
+  "title": "Using Devo",
+  "icon": "Terminal",
+  "pages": [
+    "index",
+    "tui-overview",
+    "onboarding",
+    "model-picker",
+    "fuzzy-file-search",
+    "shell-mode",
+    "plan-mode",
+    "goal",
+    "btw-and-subagents",
+    "permissions",
+    "resume-and-history"
+  ],
+  "defaultOpen": true
+}

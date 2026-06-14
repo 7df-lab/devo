@@ -1,0 +1,83 @@
+---
+title: Hooks
+description: Run configured commands around Devo events.
+---
+
+Hooks run configured commands around Devo lifecycle events.
+
+Use hooks for local policy, audit, notification, and integration tasks that
+should happen outside the model's reasoning.
+
+## Current Runtime Support
+
+The config format can parse command, prompt, agent, and HTTP hooks. The current
+runtime executes command hooks. Other hook types are parsed but reported as
+unsupported by the runtime.
+
+Command hooks receive a JSON payload on stdin and may write to stdout or stderr.
+By default, a hook runs with a 600-second timeout.
+
+## Events
+
+Hook configuration is keyed by event name. Devo recognizes events including:
+
+| Event | Example Use |
+| --- | --- |
+| `Setup` | Run bootstrap checks when the runtime starts. |
+| `SessionStart` / `SessionEnd` | Record session lifecycle events. |
+| `UserPromptSubmit` | Validate or log submitted prompts. |
+| `PreToolUse` | Block risky tools before they run. |
+| `PostToolUse` | Audit successful tool calls. |
+| `PostToolUseFailure` | Capture tool errors. |
+| `PermissionRequest` | Add policy before asking the user. |
+| `PermissionDenied` | Log denied actions. |
+| `PreCompact` / `PostCompact` | Track context compaction. |
+| `SubagentStart` / `SubagentStop` | Track child-agent lifecycle. |
+| `ConfigChange` | Validate configuration mutations. |
+| `FileChanged` | React to edited files. |
+| `CwdChanged` | React when the session workspace changes. |
+
+The full config reference lists the event names and TOML shape.
+
+## Matching
+
+Each event can have one or more matchers. A matcher can include a `matcher`
+string and one or more hooks.
+
+For tool-related events, the matcher is evaluated against fields such as
+`tool_name`. For file changes, it can match the changed file path. Events that
+do not expose a match query run their configured hooks without that filter.
+
+Duplicate command hooks for the same event are deduplicated by shell, command,
+and condition.
+
+## Blocking
+
+A command hook can block in two ways:
+
+- exit with status code `2`;
+- print JSON with a blocking decision, such as `{"decision":"block","reason":"..."}`.
+
+When a hook blocks, Devo surfaces the reason and stops the protected action.
+For example, a blocked prompt is rejected before the turn starts, and a blocked
+tool call returns a tool error instead of executing.
+
+Non-zero statuses other than the blocking path are treated as non-blocking hook
+errors and are logged.
+
+## Async Hooks
+
+Set a command hook as async when it should run in the background. Async hooks
+are spawned and do not block the Devo operation they are attached to.
+
+Use async hooks for notifications and telemetry. Do not use them for policy
+checks that must prevent unsafe actions.
+
+## Safety
+
+Hooks execute local commands. Keep them small, deterministic, and easy to audit.
+Avoid commands that mutate broad filesystem areas or depend on untrusted prompt
+text without validation.
+
+If a hook is meant to enforce policy, make the blocking reason explicit so the
+user and Devo can understand what happened.

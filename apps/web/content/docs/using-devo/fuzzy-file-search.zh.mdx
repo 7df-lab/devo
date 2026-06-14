@@ -1,0 +1,80 @@
+---
+title: "@ 模糊文件搜索"
+description: 在 composer 中用 @ 查找并插入仓库上下文。
+---
+
+在 composer 中输入 `@` 会打开 reference search。Devo 搜索光标所在 token，并在你输入时显示匹配 references。
+
+这是在要求编辑、review、解释或规划前，把 Devo 指向特定上下文的最快方式。
+
+## 基本用法
+
+开始输入 prompt，并在 `@` 后输入路径片段：
+
+```text
+Explain how @crates/tui/chat_composer handles shell mode.
+```
+
+Composer 看到 `@` token 后会打开 popup。单独的 `@` 会用空查询打开 popup。继续输入会缩小查询：
+
+```text
+@src
+@docs/install
+@Cargo
+```
+
+使用 `Up` 和 `Down` 移动结果。按 `Enter` 或 `Tab` 插入选中 reference。按 `Esc` 关闭 popup。
+
+## 适用位置
+
+`@` search 是 token-local 的。光标可以在 token 内任意位置，不必在末尾。
+
+普通 prompt 中可用：
+
+```text
+Review @apps/web/content/docs/get-started/install.mdx for missing install paths.
+```
+
+Slash command arguments 中也可用：
+
+```text
+/review @crates/core/src/config_resolution.rs
+```
+
+这允许你把 command 流程和显式文件结合。
+
+## 结果类型
+
+Reference popup 可显示多类结果：
+
+| 前缀 | 含义 |
+| --- | --- |
+| `FILE` | 仓库文件路径。 |
+| `Skill` | 已安装 skill，可为当前 turn 添加 instructions。 |
+| `MCP` | 已连接 MCP server 或 resource reference。 |
+
+对 file result，Devo 会用选中路径替换当前 `@token`。如果路径包含空格，Devo 会加引号，让 prompt parser 将其作为一个参数。
+
+## 何时使用
+
+当文件或 reference 已知时使用 `@`：
+
+- 要求 Devo 编辑特定文件。
+- 要求 review 一个 module。
+- 把文件传给 `/review`。
+- 比较少量已知文件。
+- 指向 config、spec 或 log 文件，让回答有锚点。
+
+如果还不知道文件，使用自然语言或 `code_search`：
+
+```text
+Find where provider-hosted web search is configured.
+```
+
+这会让 Devo 调查。`@` 则明确告诉 Devo 当前 prompt 要使用哪些上下文。
+
+## Popup 行为
+
+按 `Esc` 后，Devo 会对当前 token dismiss popup，直到 token 改变才重新打开。这样 popup 不会在你继续输入时干扰你。
+
+如果 popup 没有选中结果时按 `Enter`，Devo 会关闭 popup，而不是提交 prompt。这样可以避免 reference search 活跃时误提交。

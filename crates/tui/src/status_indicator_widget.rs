@@ -1,8 +1,8 @@
 //! A live task status row rendered above the composer while the agent is busy.
 //!
-//! The row owns spinner timing, the optional interrupt hint, and short inline
-//! context (for example, the unified-exec background-process summary). Keeping
-//! these pieces on one line avoids vertical layout churn in the bottom pane.
+//! The row owns spinner timing, the optional interrupt hint, short inline
+//! context (for example, the unified-exec background-process summary), and a
+//! single rotating tip line.
 
 use std::time::Duration;
 use std::time::Instant;
@@ -34,6 +34,20 @@ use crate::wrapping::word_wrap_lines;
 pub(crate) const STATUS_DETAILS_DEFAULT_MAX_LINES: usize = 3;
 const DETAILS_PREFIX: &str = "  └ ";
 const STATUS_ANIMATION_INTERVAL: Duration = Duration::from_millis(80);
+const TIP_ROTATION_INTERVAL: Duration = Duration::from_secs(6);
+const WORKING_TIPS: &[&str] = &[
+    "You can type your next message while Devo is working; it will be queued.",
+    "Press ESC twice to stop the current turn.",
+    "Use /model to switch models for the next turn.",
+    "Use /compact when a long session starts losing focus.",
+    "Enter '@' to mention file paths when you want Devo to edit specific files.",
+    "Queue follow-up instructions while Devo is working; they will run next.",
+    "Use /resume to continue a previous session.",
+    "Use /new to start fresh when the current session has too much context.",
+    "Keep prompts narrow when you want a small, low-risk code change.",
+    "Press SHIFT+TAB to switch modes.",
+    "Enter '!' to enter SHELL mode; press SHIFT+TAB to switch modes.",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusDetailsCapitalization {
@@ -230,6 +244,28 @@ impl StatusIndicatorWidget {
 
         out
     }
+
+    fn working_tip_at(&self, elapsed: Duration) -> Option<&'static str> {
+        if WORKING_TIPS.is_empty() {
+            return None;
+        }
+
+        let interval_secs = TIP_ROTATION_INTERVAL.as_secs().max(1);
+        let index = (elapsed.as_secs() / interval_secs) as usize % WORKING_TIPS.len();
+        Some(WORKING_TIPS[index])
+    }
+
+    fn working_tip_line(&self, width: u16, elapsed: Duration) -> Option<Line<'static>> {
+        if width == 0 {
+            return None;
+        }
+
+        let tip = self.working_tip_at(elapsed)?;
+        Some(truncate_line_with_ellipsis_if_overflow(
+            Line::from(vec![DETAILS_PREFIX.dim(), "Tip: ".dim(), tip.dim()]),
+            usize::from(width),
+        ))
+    }
 }
 
 impl Renderable for StatusIndicatorWidget {
@@ -237,7 +273,13 @@ impl Renderable for StatusIndicatorWidget {
         let content_width = width.saturating_sub(LIVE_PREFIX_COLS);
         let details_height =
             u16::try_from(self.wrapped_details_lines(content_width).len()).unwrap_or(0);
-        1 + details_height
+        let tip_height = u16::from(
+            content_width > 0
+                && self
+                    .working_tip_at(self.elapsed_duration_at(Instant::now()))
+                    .is_some(),
+        );
+        1 + details_height + tip_height
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -294,6 +336,12 @@ impl Renderable for StatusIndicatorWidget {
             let max_details = usize::from(area.height.saturating_sub(1));
             lines.extend(details.into_iter().take(max_details));
         }
+        let remaining_height = usize::from(area.height).saturating_sub(lines.len());
+        if remaining_height > 0
+            && let Some(tip_line) = self.working_tip_line(content_width, elapsed_duration)
+        {
+            lines.push(tip_line);
+        }
 
         debug_assert_eq!(LIVE_PREFIX_COLS, 2);
         let left_padding = Span::raw("  ");
@@ -311,8 +359,12 @@ mod tests {
     use crate::tui::frame_requester::FrameRequester;
     use pretty_assertions::assert_eq;
 
+    fn row_text(buf: &Buffer, width: u16, row: u16) -> String {
+        (0..width).map(|col| buf[(col, row)].symbol()).collect()
+    }
+
     #[test]
-    fn status_indicator_renders_single_header_row_without_details() {
+    fn status_indicator_renders_header_and_working_tip() {
         let (app_event_tx, _app_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let widget = StatusIndicatorWidget::new(
             AppEventSender::new(app_event_tx),
@@ -320,16 +372,38 @@ mod tests {
             false,
         );
 
-        assert_eq!(widget.desired_height(80), 1);
+        assert_eq!(widget.desired_height(80), 2);
 
-        let area = Rect::new(0, 0, 20, 1);
+        let area = Rect::new(0, 0, 100, 2);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 
-        let top_row: String = (0..area.width).map(|col| buf[(col, 0)].symbol()).collect();
+        let top_row = row_text(&buf, area.width, 0);
+        let tip_row = row_text(&buf, area.width, 1);
 
         assert_eq!(top_row.get(..2), Some("  "));
         assert!(top_row.contains("Working"));
+        assert!(tip_row.contains("└ Tip: "));
+        assert!(tip_row.contains(WORKING_TIPS[0]));
+    }
+
+    #[test]
+    fn status_indicator_rotates_working_tip_every_six_seconds() {
+        let (app_event_tx, _app_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let widget = StatusIndicatorWidget::new(
+            AppEventSender::new(app_event_tx),
+            FrameRequester::test_dummy(),
+            false,
+        );
+
+        assert_eq!(
+            widget.working_tip_at(Duration::from_secs(5)),
+            Some(WORKING_TIPS[0])
+        );
+        assert_eq!(
+            widget.working_tip_at(Duration::from_secs(6)),
+            Some(WORKING_TIPS[1])
+        );
     }
 
     #[test]

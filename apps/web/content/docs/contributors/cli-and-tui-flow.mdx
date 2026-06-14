@@ -1,0 +1,108 @@
+---
+title: CLI And TUI Flow
+description: Understand command dispatch and terminal UI lifecycle.
+---
+
+This page describes startup and TUI command dispatch. For the full turn path,
+read [Runtime Flow](./runtime-flow).
+
+## Process Entrypoint
+
+The binary starts in `crates/cli/src/main.rs`.
+
+`devo_arg0::run_as` wraps the async CLI runner so the same binary can support
+normal `devo` execution and server-style entrypoints. The `Cli` parser defines:
+
+| Surface | Source behavior |
+| --- | --- |
+| no subcommand | start interactive TUI |
+| `onboard` | start interactive TUI with onboarding forced |
+| `resume <session-id>` | start interactive TUI against an existing session |
+| `prompt` | run one non-interactive model request |
+| `doctor` | run diagnostics |
+| `upgrade` | run upgrade command |
+| hidden `server` | start runtime server process |
+
+Global `--model` and `--log-level` are parsed at this layer.
+
+## Interactive Startup
+
+Interactive startup is implemented in `crates/cli/src/agent_command.rs`.
+
+The path:
+
+1. Resolve current working directory.
+2. Resolve `DEVO_HOME`.
+3. Load the preset model catalog.
+4. Load effective app config for the current workspace.
+5. Resolve project permission preset.
+6. Decide whether onboarding should be shown.
+7. Resolve provider settings or use an onboarding fallback model.
+8. Convert stored model bindings into TUI `SavedModelEntry` values.
+9. Call `devo_tui::run_interactive_tui`.
+
+The TUI receives an `InitialTuiSession` with:
+
+| Field | Meaning |
+| --- | --- |
+| `session_id` | Optional session to resume. |
+| `model` | Local model slug used for new turns. |
+| `request_model` | Provider model name when it differs from `model`. |
+| `model_binding_id` | Stable binding id, when the model came from a binding. |
+| `provider` | Selected provider wire API. |
+| `thinking_selection` | Optional thinking mode for new turns. |
+| `permission_preset` | Initial tool approval preset. |
+| `cwd` | Working directory for the session. |
+
+## TUI Worker
+
+The visible TUI does not call the model provider directly. It sends
+`AppCommand` values to the background worker in `crates/tui/src/worker.rs`.
+
+The worker owns the server client loop and accepts internal `OperationCommand`
+messages, including:
+
+- submit user input;
+- execute or continue a shell command;
+- set model or thinking mode;
+- validate or upsert provider config;
+- list sessions, skills, and provider vendors;
+- run reference search;
+- compact the active session;
+- show, set, pause, resume, or clear a goal;
+- switch, rename, roll back, or fork sessions;
+- interrupt or steer a running turn;
+- ask a `/btw` side question;
+- respond to approvals and user-input requests;
+- update permissions.
+
+If you add a new user-facing TUI action, expect to touch the command path in
+this order:
+
+1. input handling or slash-command parsing;
+2. `AppCommand`;
+3. worker `OperationCommand`;
+4. server client method or existing server call;
+5. `WorkerEvent` mapping;
+6. chat widget rendering.
+
+## Slash Commands
+
+Slash command definitions live in `crates/tui/src/slash_command.rs`.
+Dispatch lives in `crates/tui/src/chatwidget/slash_commands.rs`.
+
+Configuration-changing commands such as `/model`, `/theme`, `/compact`,
+`/diff`, `/new`, and `/resume` are blocked while a generation is active.
+
+Commands that remain available during a task include `/goal`, `/btw`,
+`/permissions`, `/status`, `/mcp`, `/skills`, `/clear`, and `/exit`.
+
+## Composer Triggers
+
+Composer-specific triggers are handled below the slash-command layer:
+
+- `@` starts reference search and renders a fuzzy picker;
+- `!` enters shell mode and sends commands through command-exec runtime paths.
+
+Do not implement these as slash commands. They have different state and
+rendering behavior.

@@ -1,0 +1,117 @@
+---
+title: 测试
+description: 为 Devo 变更选择验证命令。
+---
+
+先使用能覆盖变更行为的最窄验证；当变更跨 crate 边界时，再扩大验证范围。
+
+## Rust Formatting
+
+格式化变更过的 Rust package：
+
+```bash
+cargo fmt --package devo-tui
+```
+
+使用拥有相关文件的 package。
+
+## 聚焦 Rust Tests
+
+当变更作用域清晰时，运行 package tests：
+
+```bash
+cargo test -p devo-config
+cargo test -p devo-server
+cargo test -p devo-tui
+```
+
+按名称运行单个 test：
+
+```bash
+cargo test -p devo-tui status_indicator -- --nocapture
+```
+
+迭代时优先跑聚焦测试；跨模块变更完成前，再运行更广的测试。
+
+## Config 和 Provider 变更
+
+Provider schema、resolution 或 onboarding 变更应包含以下测试：
+
+- config parsing 和 overlay behavior；
+- provider validation；
+- model binding resolution；
+- disabled providers 和 bindings；
+- credential lookup；
+- provider wire API compatibility。
+
+有用的起始命令：
+
+```bash
+cargo test -p devo-config provider
+cargo test -p devo-server provider
+cargo test -p devo-provider
+```
+
+## TUI 变更
+
+对 TUI rendering 或 command behavior，测试拥有代码的 package，并在终端中手动操作交互：
+
+```bash
+cargo test -p devo-tui
+cargo run -p devo-cli
+```
+
+检查 rendered behavior：
+
+- transcript cells；
+- status lines；
+- bottom pane layout；
+- overlays；
+- model picker；
+- permissions picker；
+- slash commands；
+- `@` file search；
+- `!` shell mode。
+
+## Server Runtime 变更
+
+Session、turn、persistence、goal、subagent 或 command-exec 变更，从 `devo-server` tests 开始：
+
+```bash
+cargo test -p devo-server
+```
+
+如果变更影响 shared DTOs，也测试消费这些 protocol types 的 downstream crates。
+
+## Docs App
+
+Docs 变更运行：
+
+```bash
+cd apps/web
+npm run lint
+npm run build
+```
+
+然后打开本地 docs app，验证 navigation、page rendering 和 links。
+
+## Full Workspace
+
+广泛 Rust 变更运行：
+
+```bash
+cargo test
+```
+
+这可能较慢。让它完成。
+
+## Patch Hygiene
+
+交付变更前检查 whitespace 和意外编辑：
+
+```bash
+git diff --check
+git status --short
+```
+
+如果变更只触及 docs，不需要运行昂贵 Rust suites，除非 docs 声称的行为需要从代码验证。
