@@ -58,4 +58,6 @@ pub struct InteractiveTuiConfig {
     pub saved_models: Vec<SavedModelEntry>,
     /// Whether to open the model picker on startup.
     pub show_model_onboarding: bool,
+    /// Non-fatal startup warnings to show in the transcript before user input.
+    pub startup_warnings: Vec<String>,
 }
