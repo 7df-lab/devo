@@ -32,6 +32,7 @@ use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
 use devo_server::ServerRuntimeDependencies;
 use futures::Stream;
+use futures::StreamExt;
 use futures::stream;
 use pretty_assertions::assert_eq;
 use tokio::sync::Notify;
@@ -54,6 +55,12 @@ pub struct QueuedPriorityProvider {
 }
 
 pub struct UsageProvider {
+    pub requests: AtomicUsize,
+    pub captured_requests: Mutex<Vec<ModelRequest>>,
+    pub usage: Usage,
+}
+
+pub struct BudgetWrapupPendingProvider {
     pub requests: AtomicUsize,
     pub captured_requests: Mutex<Vec<ModelRequest>>,
     pub usage: Usage,
@@ -167,6 +174,54 @@ impl ModelProviderSDK for UsageProvider {
 
     fn name(&self) -> &str {
         "usage-goal-provider"
+    }
+}
+
+#[async_trait]
+impl ModelProviderSDK for BudgetWrapupPendingProvider {
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        anyhow::bail!("goal continuation test does not use non-streaming completion")
+    }
+
+    async fn completion_stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        let request_number = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+        self.captured_requests
+            .lock()
+            .expect("lock requests")
+            .push(request);
+        if request_number == 1 {
+            let usage = self.usage.clone();
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(StreamEvent::TextDelta {
+                    index: 0,
+                    text: "Budget usage done.".to_string(),
+                }),
+                Ok(StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: "budget-usage-response".to_string(),
+                        content: vec![ResponseContent::Text("Budget usage done.".to_string())],
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage,
+                        metadata: ResponseMetadata::default(),
+                    },
+                }),
+            ])));
+        }
+
+        Ok(Box::pin(
+            stream::iter(vec![Ok(StreamEvent::TextDelta {
+                index: 0,
+                text: "Budget wrap-up started.".to_string(),
+            })])
+            .chain(stream::pending()),
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "budget-wrapup-pending-goal-provider"
     }
 }
 

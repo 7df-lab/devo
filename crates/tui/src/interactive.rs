@@ -28,6 +28,7 @@ use crate::chatwidget::ChatWidgetInit;
 use crate::chatwidget::MCP_SERVERS_TRANSCRIPT_TITLE;
 use crate::chatwidget::TuiSessionState;
 use crate::events::WorkerEvent;
+use crate::history_cell;
 use crate::host_overlay::OverlayState;
 use crate::onboarding::OnboardingModelBinding;
 use crate::onboarding::onboarding_provider_model_binding;
@@ -285,6 +286,11 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
         initial_theme_name,
     });
+
+    for warning in &config.startup_warnings {
+        chat_widget.add_to_history(history_cell::new_warning_event(warning.clone()));
+    }
+
     // tui events, such as `[TuiEvent::Draw]`, `[TuiEvent::Key]`, `TuiEvent::Paste`
     let events = tui.event_stream();
     tokio::pin!(events);

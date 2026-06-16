@@ -48,7 +48,7 @@ pub(super) fn route_server_event(
     if child_agent_sessions.contains(&event_session_id) {
         return RoutedServerEvent::Child;
     }
-    if active_session_id == Some(event_session_id) || active_session_id.is_none() {
+    if active_session_id == Some(event_session_id) {
         RoutedServerEvent::Parent
     } else {
         RoutedServerEvent::Ignore

@@ -7,7 +7,6 @@ impl ServerRuntime {
         let sessions = self.rollout_store.load_sessions(&self.deps)?;
         tracing::info!(session_count = sessions.len(), "loaded persisted sessions");
         let mut restored_goal_stores = std::collections::HashMap::new();
-        let mut active_goal_sessions = Vec::new();
 
         // Restore token stats and pending queues from SQLite
         for (session_id, session_arc) in &sessions {
@@ -118,19 +117,40 @@ impl ServerRuntime {
 
             drop(session);
             match self.goal_durable_store.replay_goal_store(*session_id).await {
-                Ok(Some(goal_store)) => {
+                Ok(Some(mut goal_store)) => {
                     if let Some(goal) = goal_store.get()
                         && goal.status == crate::goal::GoalStatus::Active
                     {
-                        active_goal_sessions.push(*session_id);
-                        let core_session = {
-                            let session = session_arc.lock().await;
-                            Arc::clone(&session.core_session)
-                        };
-                        core_session
-                            .lock()
-                            .await
-                            .set_active_goal(goal.to_thread_goal());
+                        let previous_status = goal.status;
+                        match goal_store.set_status(devo_protocol::ThreadGoalStatus::Paused) {
+                            Ok(paused_goal) => {
+                                if let Err(error) = self
+                                    .goal_durable_store
+                                    .append_status_changed(
+                                        &paused_goal,
+                                        previous_status,
+                                        Some(
+                                            "Goal paused because the session was restored without explicit resume."
+                                                .to_string(),
+                                        ),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        error = %error,
+                                        "failed to persist restored goal pause record"
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    error = %error,
+                                    "failed to pause restored active goal"
+                                );
+                            }
+                        }
                     }
                     restored_goal_stores.insert(*session_id, goal_store);
                 }
@@ -149,9 +169,6 @@ impl ServerRuntime {
         runtime_sessions.extend(sessions);
         drop(runtime_sessions);
         self.goal_stores.lock().await.extend(restored_goal_stores);
-        for session_id in active_goal_sessions {
-            self.maybe_start_goal_continuation_turn(session_id).await;
-        }
         Ok(())
     }
 

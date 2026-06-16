@@ -55,7 +55,7 @@ impl ServerRuntime {
             let now = Utc::now();
             let turn = {
                 let mut session = session_arc.lock().await;
-                if !session_allows_goal_continuation_locked(&session) {
+                if !session_has_goal_continuation_capacity_locked(&session) {
                     return;
                 }
                 let turn = TurnMetadata {
@@ -83,6 +83,14 @@ impl ServerRuntime {
                 session.active_turn = Some(turn.clone());
                 turn
             };
+            self.active_goal_continuation_turns
+                .lock()
+                .await
+                .insert(session_id, turn.turn_id);
+            self.goal_continuation_turn_goals
+                .lock()
+                .await
+                .insert(turn.turn_id, candidate.goal_id.clone());
             if !self
                 .mark_goal_continuation_turn_started(session_id, &candidate.goal_id, turn.turn_id)
                 .await
@@ -106,6 +114,19 @@ impl ServerRuntime {
                     .await;
                 return;
             }
+            if !goal_continuation_turn_still_current(
+                self,
+                &session_arc,
+                session_id,
+                turn.turn_id,
+                &candidate.goal_id,
+            )
+            .await
+            {
+                self.clear_goal_continuation_turn_reservation(&session_arc, turn.turn_id)
+                    .await;
+                return;
+            }
 
             self.broadcast_event(ServerEvent::SessionStatusChanged(
                 SessionStatusChangedPayload {
@@ -114,40 +135,89 @@ impl ServerRuntime {
                 },
             ))
             .await;
+            if !goal_continuation_turn_still_current(
+                self,
+                &session_arc,
+                session_id,
+                turn.turn_id,
+                &candidate.goal_id,
+            )
+            .await
+            {
+                self.clear_goal_continuation_turn_reservation(&session_arc, turn.turn_id)
+                    .await;
+                return;
+            }
             self.broadcast_event(ServerEvent::TurnStarted(TurnEventPayload {
                 session_id,
                 turn: turn.clone(),
             }))
             .await;
+            if !goal_continuation_turn_still_current(
+                self,
+                &session_arc,
+                session_id,
+                turn.turn_id,
+                &candidate.goal_id,
+            )
+            .await
+            {
+                self.clear_goal_continuation_turn_reservation(&session_arc, turn.turn_id)
+                    .await;
+                return;
+            }
 
             let cancel_token = CancellationToken::new();
-            self.active_turn_cancellations
-                .lock()
-                .await
-                .insert(session_id, cancel_token);
             let runtime = Arc::clone(self);
             let task_turn = turn.clone();
             let task_turn_config = turn_config.clone();
-            let task = tokio::spawn(async move {
-                runtime
-                    .execute_turn(ExecuteTurnRequest {
-                        session_id,
-                        turn: task_turn,
-                        turn_config: task_turn_config,
-                        display_input: String::new(),
-                        input: String::new(),
-                        input_messages: Vec::new(),
-                        collaboration_mode: devo_protocol::CollaborationMode::Build,
-                        input_mode: TurnInputMode::HiddenGoalContinuation {
-                            goal: candidate.goal.to_thread_goal(),
-                        },
-                    })
+            let task_goal = candidate.goal.to_thread_goal();
+            let task_started = {
+                let tracked_turns = self.active_goal_continuation_turns.lock().await;
+                let still_reserved = tracked_turns
+                    .get(&session_id)
+                    .is_some_and(|tracked_turn_id| *tracked_turn_id == turn.turn_id);
+                if !still_reserved {
+                    false
+                } else {
+                    let mut cancellations = self.active_turn_cancellations.lock().await;
+                    let mut active_tasks = self.active_tasks.lock().await;
+                    let still_active_turn = {
+                        let session = session_arc.lock().await;
+                        session
+                            .active_turn
+                            .as_ref()
+                            .is_some_and(|active_turn| active_turn.turn_id == turn.turn_id)
+                    };
+                    if !still_active_turn {
+                        false
+                    } else {
+                        cancellations.insert(session_id, cancel_token);
+                        let task = tokio::spawn(async move {
+                            runtime
+                                .execute_turn(ExecuteTurnRequest {
+                                    session_id,
+                                    turn: task_turn,
+                                    turn_config: task_turn_config,
+                                    display_input: String::new(),
+                                    input: String::new(),
+                                    input_messages: Vec::new(),
+                                    collaboration_mode: devo_protocol::CollaborationMode::Build,
+                                    input_mode: TurnInputMode::HiddenGoalContinuation {
+                                        goal: task_goal,
+                                    },
+                                })
+                                .await;
+                        });
+                        active_tasks.insert(session_id, task.abort_handle());
+                        true
+                    }
+                }
+            };
+            if !task_started {
+                self.clear_goal_continuation_turn_reservation(&session_arc, turn.turn_id)
                     .await;
-            });
-            self.active_tasks
-                .lock()
-                .await
-                .insert(session_id, task.abort_handle());
+            }
         })
     }
 
@@ -313,6 +383,29 @@ impl ServerRuntime {
         session_arc: &Arc<Mutex<RuntimeSession>>,
         turn_id: TurnId,
     ) {
+        let session_id = {
+            let mut tracked_turns = self.active_goal_continuation_turns.lock().await;
+            let session_id = tracked_turns
+                .iter()
+                .find_map(|(session_id, tracked_turn_id)| {
+                    (*tracked_turn_id == turn_id).then_some(*session_id)
+                });
+            if let Some(session_id) = session_id {
+                tracked_turns.remove(&session_id);
+            }
+            session_id
+        };
+        if let Some(session_id) = session_id {
+            self.active_turn_cancellations
+                .lock()
+                .await
+                .remove(&session_id);
+            self.active_tasks.lock().await.remove(&session_id);
+        }
+        self.goal_continuation_turn_goals
+            .lock()
+            .await
+            .remove(&turn_id);
         let mut session = session_arc.lock().await;
         if session
             .active_turn
@@ -323,24 +416,226 @@ impl ServerRuntime {
             session.summary.status = SessionRuntimeStatus::Idle;
         }
     }
+
+    async fn complete_deferred_items_for_goal_turn(
+        &self,
+        session_arc: &Arc<Mutex<RuntimeSession>>,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) {
+        let (deferred_assistant, deferred_reasoning) = {
+            let mut session = session_arc.lock().await;
+            (
+                session.deferred_assistant.take(),
+                session.deferred_reasoning.take(),
+            )
+        };
+        if let Some((item_id, item_seq, text)) = deferred_assistant {
+            self.complete_item(
+                session_id,
+                turn_id,
+                item_id,
+                item_seq,
+                ItemKind::AgentMessage,
+                TurnItem::AgentMessage(TextItem { text: text.clone() }),
+                serde_json::json!({ "title": "Assistant", "text": text }),
+            )
+            .await;
+        }
+        if let Some((item_id, item_seq, text)) = deferred_reasoning {
+            self.complete_item(
+                session_id,
+                turn_id,
+                item_id,
+                item_seq,
+                ItemKind::Reasoning,
+                TurnItem::Reasoning(TextItem { text: text.clone() }),
+                serde_json::json!({ "title": "Reasoning", "text": text }),
+            )
+            .await;
+        }
+    }
+
+    pub(super) async fn interrupt_active_goal_continuation_turn(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        reason: &str,
+    ) -> bool {
+        let Some(turn_id) = self
+            .active_goal_continuation_turns
+            .lock()
+            .await
+            .remove(&session_id)
+        else {
+            return false;
+        };
+        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+            self.goal_continuation_turn_goals
+                .lock()
+                .await
+                .remove(&turn_id);
+            return false;
+        };
+        let active_turn_matches = {
+            let session = session_arc.lock().await;
+            session
+                .active_turn
+                .as_ref()
+                .is_some_and(|active_turn| active_turn.turn_id == turn_id)
+        };
+        if !active_turn_matches {
+            self.goal_continuation_turn_goals
+                .lock()
+                .await
+                .remove(&turn_id);
+            return false;
+        }
+        self.complete_deferred_items_for_goal_turn(&session_arc, session_id, turn_id)
+            .await;
+
+        let interrupted_turn = {
+            let mut session = session_arc.lock().await;
+            let Some(active_turn) = session.active_turn.as_ref() else {
+                return false;
+            };
+            if active_turn.turn_id != turn_id {
+                return false;
+            }
+            let mut turn = session
+                .active_turn
+                .take()
+                .expect("active turn checked above");
+            turn.status = TurnStatus::Interrupted;
+            turn.completed_at = Some(Utc::now());
+            session.latest_turn = Some(turn.clone());
+            session.summary.status = SessionRuntimeStatus::Idle;
+            session.summary.updated_at = Utc::now();
+            let totals = session.core_session.try_lock().ok().map(|core_session| {
+                (
+                    core_session.total_input_tokens,
+                    core_session.total_output_tokens,
+                    core_session.total_cache_creation_tokens,
+                    core_session.total_cache_read_tokens,
+                    core_session.prompt_token_estimate,
+                )
+            });
+            if let Some((
+                total_input_tokens,
+                total_output_tokens,
+                total_cache_creation_tokens,
+                total_cache_read_tokens,
+                prompt_token_estimate,
+            )) = totals
+            {
+                session.summary.total_input_tokens = total_input_tokens;
+                session.summary.total_output_tokens = total_output_tokens;
+                session.summary.total_cache_creation_tokens = total_cache_creation_tokens;
+                session.summary.total_cache_read_tokens = total_cache_read_tokens;
+                session.summary.prompt_token_estimate = prompt_token_estimate;
+            }
+            turn
+        };
+
+        if let Some(cancel_token) = self
+            .active_turn_cancellations
+            .lock()
+            .await
+            .remove(&session_id)
+        {
+            cancel_token.cancel();
+        }
+        if let Some(task) = self.active_tasks.lock().await.remove(&session_id) {
+            task.abort();
+        }
+
+        let (record, session_context, turn_context) = {
+            let session = session_arc.lock().await;
+            let core_session_lock = session.core_session.try_lock();
+            if let Ok(core_session) = core_session_lock {
+                (
+                    session.record.clone(),
+                    core_session.session_context.clone(),
+                    core_session.latest_turn_context.clone(),
+                )
+            } else {
+                (session.record.clone(), None, None)
+            }
+        };
+        if let Some(record) = record
+            && let Err(error) = self.rollout_store.append_turn(
+                &record,
+                build_turn_record(&interrupted_turn, session_context, turn_context),
+            )
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                turn_id = %interrupted_turn.turn_id,
+                error = %error,
+                "failed to persist interrupted goal continuation turn"
+            );
+        }
+
+        tracing::info!(
+            session_id = %session_id,
+            turn_id = %interrupted_turn.turn_id,
+            reason,
+            "interrupted active goal continuation turn"
+        );
+        self.broadcast_event(ServerEvent::TurnInterrupted(TurnEventPayload {
+            session_id,
+            turn: interrupted_turn.clone(),
+        }))
+        .await;
+        self.broadcast_event(ServerEvent::TurnCompleted(TurnEventPayload {
+            session_id,
+            turn: interrupted_turn,
+        }))
+        .await;
+        self.broadcast_event(ServerEvent::SessionStatusChanged(
+            SessionStatusChangedPayload {
+                session_id,
+                status: SessionRuntimeStatus::Idle,
+            },
+        ))
+        .await;
+
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            runtime.spawn_next_turn_from_queue(session_id).await;
+        });
+        true
+    }
 }
 
 async fn session_allows_goal_continuation(session_arc: &Arc<Mutex<RuntimeSession>>) -> bool {
-    let session = session_arc.lock().await;
-    session_allows_goal_continuation_locked(&session)
+    let (core_session, pending_turn_queue) = {
+        let session = session_arc.lock().await;
+        if !session_has_goal_continuation_capacity_locked(&session) {
+            return false;
+        }
+        (
+            Arc::clone(&session.core_session),
+            Arc::clone(&session.pending_turn_queue),
+        )
+    };
+    let plan_mode = {
+        let core_session = core_session.lock().await;
+        core_session.collaboration_mode == devo_protocol::CollaborationMode::Plan
+    };
+    if plan_mode {
+        return false;
+    }
+    pending_turn_queue
+        .lock()
+        .expect("pending turn queue mutex should not be poisoned")
+        .is_empty()
 }
 
-fn session_allows_goal_continuation_locked(session: &RuntimeSession) -> bool {
+fn session_has_goal_continuation_capacity_locked(session: &RuntimeSession) -> bool {
     if session.active_turn.is_some()
         || !session.pending_approvals.is_empty()
         || !session.pending_user_inputs.is_empty()
     {
-        return false;
-    }
-    let Ok(core_session) = session.core_session.try_lock() else {
-        return false;
-    };
-    if core_session.collaboration_mode == devo_protocol::CollaborationMode::Plan {
         return false;
     }
     session
@@ -348,6 +643,42 @@ fn session_allows_goal_continuation_locked(session: &RuntimeSession) -> bool {
         .lock()
         .expect("pending turn queue mutex should not be poisoned")
         .is_empty()
+}
+
+async fn goal_continuation_turn_still_current(
+    runtime: &ServerRuntime,
+    session_arc: &Arc<Mutex<RuntimeSession>>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    goal_id: &GoalId,
+) -> bool {
+    let still_reserved = runtime
+        .active_goal_continuation_turns
+        .lock()
+        .await
+        .get(&session_id)
+        .is_some_and(|tracked_turn_id| *tracked_turn_id == turn_id);
+    if !still_reserved {
+        return false;
+    }
+    let still_active_turn = {
+        let session = session_arc.lock().await;
+        session
+            .active_turn
+            .as_ref()
+            .is_some_and(|active_turn| active_turn.turn_id == turn_id)
+    };
+    if !still_active_turn {
+        return false;
+    }
+    let stores = runtime.goal_stores.lock().await;
+    stores
+        .get(&session_id)
+        .and_then(GoalStore::get)
+        .is_some_and(|goal| {
+            &goal.goal_id == goal_id
+                && matches!(goal.status, GoalStatus::Active | GoalStatus::BudgetLimited)
+        })
 }
 
 fn failed_turn_should_suppress_goal(

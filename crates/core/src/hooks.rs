@@ -293,12 +293,33 @@ mod tests {
 
     #[tokio::test]
     async fn command_hook_receives_json_on_stdin() {
+        let command = if cfg!(windows) {
+            concat!(
+                "node -e ",
+                "s='';",
+                "process.stdin.on('data',function(d){s+=d});",
+                "process.stdin.on('end',function(){",
+                "j=JSON.parse(s);",
+                "process.stdout.write(j.tool_name)",
+                "})"
+            )
+        } else {
+            concat!(
+                "node -e \"",
+                "let s='';",
+                "process.stdin.on('data',d=>s+=d);",
+                "process.stdin.on('end',()=>{",
+                "const j=JSON.parse(s);",
+                "process.stdout.write(j.tool_name)",
+                "})\""
+            )
+        };
         let config = HooksConfig(BTreeMap::from([(
             HookEvent::PreToolUse,
             vec![HookMatcherConfig {
                 matcher: Some("exec_command".to_string()),
                 hooks: vec![HookCommandConfig::Command(CommandHookConfig {
-                    command: "node -e \"let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const j=JSON.parse(s);process.stdout.write(j.tool_name)})\"".to_string(),
+                    command: command.to_string(),
                     shell: None,
                     condition: None,
                     timeout: Some(5),
@@ -336,9 +357,19 @@ mod tests {
 
         let report = runner.run(input).await;
 
-        assert_eq!(report.results.len(), 1);
-        assert_eq!(report.results[0].stdout, "exec_command");
-        assert_eq!(report.results[0].outcome, HookCommandOutcome::Success);
+        assert_eq!(
+            report,
+            HookRunReport {
+                results: vec![HookCommandResult {
+                    command: command.to_string(),
+                    status: Some(0),
+                    stdout: "exec_command".to_string(),
+                    stderr: String::new(),
+                    outcome: HookCommandOutcome::Success,
+                }],
+                unsupported: 0,
+            }
+        );
     }
 
     #[test]

@@ -3,6 +3,11 @@ use crate::goal::GoalStatus;
 
 impl ServerRuntime {
     pub(super) async fn account_goal_turn_completed(&self, turn: &TurnMetadata) {
+        let continuation_goal_id = self
+            .goal_continuation_turn_goals
+            .lock()
+            .await
+            .remove(&turn.turn_id);
         let Some(usage) = turn.usage.as_ref() else {
             return;
         };
@@ -26,6 +31,12 @@ impl ServerRuntime {
         else {
             return;
         };
+        if let Some(goal_id) = continuation_goal_id.as_ref()
+            && (&goal.goal_id != goal_id
+                || !matches!(goal.status, GoalStatus::Active | GoalStatus::BudgetLimited))
+        {
+            return;
+        }
         let previous_status = apply_goal_usage_delta(goal, token_delta, duration_delta_seconds);
         let durable_goal = goal.clone();
         drop(stores);

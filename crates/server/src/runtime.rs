@@ -183,6 +183,8 @@ pub struct ServerRuntime {
     connections: Mutex<HashMap<u64, ConnectionRuntime>>,
     active_tasks: Mutex<HashMap<SessionId, tokio::task::AbortHandle>>,
     active_turn_cancellations: Mutex<HashMap<SessionId, CancellationToken>>,
+    active_goal_continuation_turns: Mutex<HashMap<SessionId, TurnId>>,
+    goal_continuation_turn_goals: Mutex<HashMap<TurnId, GoalId>>,
     next_connection_id: AtomicU64,
     /// Per-session goal stores for goal lifecycle management.
     goal_stores: Mutex<HashMap<SessionId, GoalStore>>,
@@ -270,6 +272,8 @@ impl ServerRuntime {
             connections: Mutex::new(HashMap::new()),
             active_tasks: Mutex::new(HashMap::new()),
             active_turn_cancellations: Mutex::new(HashMap::new()),
+            active_goal_continuation_turns: Mutex::new(HashMap::new()),
+            goal_continuation_turn_goals: Mutex::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
             goal_stores: Mutex::new(HashMap::new()),
             agent_registries: Mutex::new(HashMap::new()),

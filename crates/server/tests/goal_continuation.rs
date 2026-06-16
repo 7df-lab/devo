@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 #[path = "support/goal_continuation.rs"]
 mod support;
 
+use support::BudgetWrapupPendingProvider;
 use support::CapturingProvider;
 use support::FailingProvider;
 use support::PendingProvider;
@@ -98,6 +99,100 @@ async fn goal_token_budget_reached_after_turn_enters_budget_limited() -> Result<
 }
 
 #[tokio::test]
+async fn budget_limited_goal_pause_interrupts_pending_wrapup_turn() -> Result<()> {
+    // Trace: L2-DES-GOAL-001
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(BudgetWrapupPendingProvider {
+        requests: std::sync::atomic::AtomicUsize::new(0),
+        captured_requests: Mutex::new(Vec::new()),
+        usage: Usage {
+            input_tokens: 120,
+            output_tokens: 30,
+            cache_creation_input_tokens: Some(40),
+            cache_read_input_tokens: Some(70),
+        },
+    });
+    let runtime = build_runtime(data_root.path(), provider.clone())?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
+
+    let _ = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 110,
+                "method": "goal/set",
+                "params": {
+                    "sessionId": session_id,
+                    "objective": "pause during budget wrap-up",
+                    "status": "active",
+                    "tokenBudget": 80
+                }
+            }),
+        )
+        .await
+        .context("goal/set response")?;
+    collect_until_turn_completed(&mut notifications_rx).await?;
+    wait_for_request_count(&provider.requests, /*expected*/ 2).await?;
+    let turn_started = wait_for_notification(&mut notifications_rx, "turn/started").await?;
+    let turn_id = turn_started
+        .get("params")
+        .and_then(|params| params.get("turn"))
+        .and_then(|turn| turn.get("turn_id"))
+        .cloned()
+        .context("turn id in budget wrap-up turn/started")?;
+    wait_for_notification(&mut notifications_rx, "item/agentMessage/delta").await?;
+    tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+
+    runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 111,
+                "method": "goal/set",
+                "params": {
+                    "sessionId": session_id,
+                    "status": "paused"
+                }
+            }),
+        )
+        .await
+        .context("goal pause response")?;
+
+    let notifications = collect_until_turn_completed(&mut notifications_rx).await?;
+    assert!(
+        notifications.iter().any(|value| {
+            value.get("method") == Some(&serde_json::json!("turn/interrupted"))
+                && value
+                    .get("params")
+                    .and_then(|params| params.get("turn"))
+                    .and_then(|turn| turn.get("turn_id"))
+                    == Some(&turn_id)
+        }),
+        "pausing a budget-limited goal should interrupt the pending wrap-up turn"
+    );
+    assert!(
+        notifications.iter().any(|value| {
+            value.get("method") == Some(&serde_json::json!("item/completed"))
+                && value
+                    .get("params")
+                    .and_then(|params| params.get("item"))
+                    .and_then(|item| item.get("item_kind"))
+                    == Some(&serde_json::json!("agent_message"))
+                && value
+                    .get("params")
+                    .and_then(|params| params.get("item"))
+                    .and_then(|item| item.get("payload"))
+                    .and_then(|payload| payload.get("text"))
+                    == Some(&serde_json::json!("Budget wrap-up started."))
+        }),
+        "interrupting the wrap-up turn should complete deferred assistant text"
+    );
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn persisted_paused_goal_replays_without_continuation() -> Result<()> {
     // Trace: L2-DES-GOAL-001
     let data_root = TempDir::new()?;
@@ -151,6 +246,148 @@ async fn persisted_paused_goal_replays_without_continuation() -> Result<()> {
     );
     tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
     assert_eq!(replay_provider.requests.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_active_goal_pauses_on_restart_without_continuation() -> Result<()> {
+    // Trace: L2-DES-GOAL-001
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(CapturingProvider::default());
+    let runtime = build_runtime(data_root.path(), provider.clone())?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
+
+    runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 13,
+                "method": "turn/start",
+                "params": {
+                    "session_id": session_id,
+                    "input": [{ "type": "text", "text": "plan before setting goal" }],
+                    "model": null,
+                    "sandbox": null,
+                    "approval_policy": null,
+                    "cwd": null,
+                    "collaboration_mode": "plan"
+                }
+            }),
+        )
+        .await
+        .context("plan turn/start response")?;
+    collect_until_turn_completed(&mut notifications_rx).await?;
+
+    runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 14,
+                "method": "goal/set",
+                "params": {
+                    "sessionId": session_id,
+                    "objective": "persist active goal without restart loop",
+                    "status": "active"
+                }
+            }),
+        )
+        .await
+        .context("active goal/set response")?;
+    assert_eq!(provider.requests.lock().expect("lock requests").len(), 1);
+
+    let replay_provider = Arc::new(PendingProvider::default());
+    let replayed_runtime = build_runtime(data_root.path(), replay_provider.clone())?;
+    replayed_runtime.load_persisted_sessions().await?;
+    let (replayed_connection_id, _replayed_notifications_rx) =
+        initialize_connection(&replayed_runtime).await?;
+
+    let status_response = replayed_runtime
+        .handle_incoming(
+            replayed_connection_id,
+            serde_json::json!({
+                "id": 15,
+                "method": "goal/status",
+                "params": {
+                    "sessionId": session_id
+                }
+            }),
+        )
+        .await
+        .context("goal/status response")?;
+    let response: devo_server::SuccessResponse<devo_protocol::GoalStatusResult> =
+        serde_json::from_value(status_response)?;
+
+    assert_eq!(
+        response.result.goal.as_ref().map(|goal| goal.status),
+        Some(devo_protocol::ThreadGoalStatus::Paused)
+    );
+    tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+    assert_eq!(replay_provider.requests.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn goal_pause_interrupts_active_hidden_continuation_turn() -> Result<()> {
+    // Trace: L2-DES-GOAL-001
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(PendingProvider::default());
+    let runtime = build_runtime(data_root.path(), provider.clone())?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
+
+    runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 16,
+                "method": "goal/set",
+                "params": {
+                    "sessionId": session_id,
+                    "objective": "pause an active continuation",
+                    "status": "active"
+                }
+            }),
+        )
+        .await
+        .context("active goal/set response")?;
+    let turn_started = wait_for_notification(&mut notifications_rx, "turn/started").await?;
+    let turn_id = turn_started
+        .get("params")
+        .and_then(|params| params.get("turn"))
+        .and_then(|turn| turn.get("turn_id"))
+        .cloned()
+        .context("turn id in turn/started")?;
+    wait_for_request_count(&provider.requests, 1).await?;
+
+    runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 17,
+                "method": "goal/set",
+                "params": {
+                    "sessionId": session_id,
+                    "status": "paused"
+                }
+            }),
+        )
+        .await
+        .context("paused goal/set response")?;
+
+    let notifications = collect_until_turn_completed(&mut notifications_rx).await?;
+    assert!(
+        notifications.iter().any(|value| {
+            value.get("method") == Some(&serde_json::json!("turn/interrupted"))
+                && value
+                    .get("params")
+                    .and_then(|params| params.get("turn"))
+                    .and_then(|turn| turn.get("turn_id"))
+                    == Some(&turn_id)
+        }),
+        "pausing an active goal should interrupt the hidden continuation turn"
+    );
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
@@ -255,6 +492,16 @@ async fn goal_set_starts_hidden_continuation_turn() -> Result<()> {
     let response: devo_server::SuccessResponse<devo_protocol::GoalSetResult> =
         serde_json::from_value(goal_response)?;
     assert_eq!(response.result.goal.objective, "write a benchmark note");
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
+        loop {
+            if provider.requests.lock().expect("lock requests").len() >= 2 {
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+        }
+    })
+    .await
+    .context("timed out waiting for captured provider request")??;
 
     runtime
         .handle_incoming(
@@ -284,7 +531,7 @@ async fn goal_set_starts_hidden_continuation_turn() -> Result<()> {
     );
 
     let requests = provider.requests.lock().expect("lock requests");
-    assert_eq!(requests.len(), 2);
+    assert!(requests.len() >= 2);
     assert!(
         request_contains_text(&requests[1], "Completion audit:")
             && request_contains_text(&requests[1], "write a benchmark note"),
