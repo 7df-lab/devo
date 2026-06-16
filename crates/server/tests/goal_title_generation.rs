@@ -128,6 +128,82 @@ async fn goal_set_objective_generates_session_title_for_new_session() -> Result<
     Ok(())
 }
 
+#[tokio::test]
+async fn goal_create_rejects_unknown_session() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(GoalTitleProvider::default());
+    let runtime = build_runtime(data_root.path(), provider.clone())?;
+    let (connection_id, _notifications_rx) = initialize_connection(&runtime).await?;
+    let unknown_session_id = SessionId::new();
+
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 5,
+                "method": "goal/create",
+                "params": {
+                    "sessionId": unknown_session_id,
+                    "objective": "unknown session goal",
+                    "replaceExisting": false
+                }
+            }),
+        )
+        .await
+        .context("goal/create response")?;
+
+    assert_session_not_found(response)?;
+    assert_eq!(
+        provider
+            .title_requests
+            .lock()
+            .expect("lock title requests")
+            .len(),
+        0
+    );
+    assert_eq!(provider.stream_requests.load(Ordering::SeqCst), 0);
+    assert_goal_status_empty(&runtime, connection_id, unknown_session_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn goal_set_rejects_unknown_session() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(GoalTitleProvider::default());
+    let runtime = build_runtime(data_root.path(), provider.clone())?;
+    let (connection_id, _notifications_rx) = initialize_connection(&runtime).await?;
+    let unknown_session_id = SessionId::new();
+
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 6,
+                "method": "goal/set",
+                "params": {
+                    "sessionId": unknown_session_id,
+                    "objective": "unknown session goal",
+                    "status": "active"
+                }
+            }),
+        )
+        .await
+        .context("goal/set response")?;
+
+    assert_session_not_found(response)?;
+    assert_eq!(
+        provider
+            .title_requests
+            .lock()
+            .expect("lock title requests")
+            .len(),
+        0
+    );
+    assert_eq!(provider.stream_requests.load(Ordering::SeqCst), 0);
+    assert_goal_status_empty(&runtime, connection_id, unknown_session_id).await?;
+    Ok(())
+}
+
 fn build_runtime(
     data_root: &std::path::Path,
     provider: Arc<GoalTitleProvider>,
@@ -260,4 +336,37 @@ fn title_request_contains(request: &ModelRequest, needle: &str) -> bool {
             | devo_protocol::RequestContent::ToolResult { .. } => false,
         })
     })
+}
+
+fn assert_session_not_found(response: serde_json::Value) -> Result<()> {
+    let response: devo_server::ErrorResponse = serde_json::from_value(response)?;
+    assert_eq!(
+        response.error.code,
+        devo_server::ProtocolErrorCode::SessionNotFound
+    );
+    Ok(())
+}
+
+async fn assert_goal_status_empty(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: SessionId,
+) -> Result<()> {
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 7,
+                "method": "goal/status",
+                "params": {
+                    "sessionId": session_id
+                }
+            }),
+        )
+        .await
+        .context("goal/status response")?;
+    let response: devo_server::SuccessResponse<devo_protocol::GoalStatusResult> =
+        serde_json::from_value(response)?;
+    assert_eq!(response.result.goal, None);
+    Ok(())
 }

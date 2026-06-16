@@ -21,6 +21,13 @@ impl ServerRuntime {
         let session_id = params.session_id;
         let replace_existing = params.replace_existing;
         let title_input = params.objective.trim().to_string();
+        if !self.sessions.lock().await.contains_key(&session_id) {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        }
 
         let mut stores = self.goal_stores.lock().await;
         let store = stores.entry(session_id).or_insert_with(GoalStore::new);
@@ -90,6 +97,13 @@ impl ServerRuntime {
             == Some(devo_protocol::ThreadGoalStatus::Paused)
             && params.objective.is_none()
             && params.token_budget.is_none();
+        if !self.sessions.lock().await.contains_key(&session_id) {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        }
 
         let mut stores = self.goal_stores.lock().await;
         let store = stores.entry(session_id).or_insert_with(GoalStore::new);
