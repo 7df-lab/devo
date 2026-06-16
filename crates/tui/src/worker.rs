@@ -836,11 +836,14 @@ async fn run_worker_inner(
                             collaboration_mode,
                         }).await;
                         match start_result {
-                            Ok(result) => {
-                                if let TurnStartResult::Started { turn_id, .. } = result {
+                            Ok(result) => match result {
+                                TurnStartResult::Started { turn_id, .. } => {
                                     active_turn_id = Some(turn_id);
                                 }
-                            }
+                                TurnStartResult::Queued { active_turn_id: queued_active_turn_id, .. } => {
+                                    active_turn_id = Some(queued_active_turn_id);
+                                }
+                            },
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
                                     message: error.to_string(),
@@ -2416,7 +2419,9 @@ async fn run_worker_inner(
                                     }
                             }
                             "session/compaction/started" => {
-                                let _ = event;
+                                if let ServerEvent::SessionCompactionStarted(_) = event {
+                                    let _ = event_tx.send(WorkerEvent::SessionCompactionStarted);
+                                }
                             }
                             "session/compaction/completed" => {
                                 if let ServerEvent::SessionCompactionCompleted(payload) = event {
@@ -2784,7 +2789,10 @@ async fn close_btw_agent(
         .await;
 }
 
-fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSender<WorkerEvent>) {
+pub(crate) fn handle_completed_item(
+    payload: ItemEventPayload,
+    event_tx: &mpsc::UnboundedSender<WorkerEvent>,
+) {
     match payload.item {
         ItemEnvelope {
             item_id,
@@ -2891,6 +2899,20 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
                 item_id,
                 final_text: proposed_plan_text(&payload),
             });
+        }
+        ItemEnvelope {
+            item_kind: ItemKind::ContextCompaction,
+            payload,
+            ..
+        } => {
+            let title = payload
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .unwrap_or("Context Compaction")
+                .to_string();
+            let _ = event_tx.send(WorkerEvent::ContextCompactionCompleted { title });
         }
         ItemEnvelope {
             item_kind: ItemKind::ToolResult,

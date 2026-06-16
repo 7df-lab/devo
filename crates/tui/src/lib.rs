@@ -70,6 +70,8 @@ mod tui;
 mod ui_consts;
 mod version;
 mod worker;
+#[cfg(test)]
+mod worker_queue_compaction_tests;
 mod wrapping;
 
 pub use interactive::run_interactive_tui;

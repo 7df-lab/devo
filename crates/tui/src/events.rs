@@ -541,6 +541,11 @@ pub(crate) enum WorkerEvent {
         /// Estimated prompt tokens currently visible to the model.
         prompt_token_estimate: usize,
     },
+    /// A context-compaction transcript item was completed.
+    ContextCompactionCompleted {
+        /// Display title for the compaction item.
+        title: String,
+    },
     /// The active session compaction request failed.
     SessionCompactionFailed {
         /// Human-readable failure reason.
