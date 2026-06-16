@@ -1292,6 +1292,67 @@ fn queued_prompt_keeps_submitted_mode_when_promoted_to_history() {
     );
 }
 
+#[test]
+fn queued_prompt_promotes_after_active_assistant_stream() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.handle_app_event(AppEvent::ClearTranscript);
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+    let item_id = ItemId::new();
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id,
+        kind: TextItemKind::Assistant,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id,
+        kind: TextItemKind::Assistant,
+        delta: "assistant before promotion".to_string(),
+    });
+
+    paste_and_submit(&mut widget, "queued prompt");
+    widget.handle_worker_event(crate::events::WorkerEvent::InputQueueUpdated {
+        pending_count: 0,
+        pending_texts: Vec::new(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id,
+        kind: TextItemKind::Assistant,
+        final_text: "assistant before promotion".to_string(),
+    });
+
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100));
+    let assistant_indexes = history
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| line.contains("assistant before promotion").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        assistant_indexes.len(),
+        1,
+        "late item completion should not duplicate assistant cell:\n{}",
+        history.join("\n")
+    );
+    let queued_index = history
+        .iter()
+        .position(|line| line.contains("queued prompt"))
+        .expect("queued prompt should be promoted");
+    assert!(
+        assistant_indexes[0] < queued_index,
+        "assistant stream should stay before queued prompt:\n{}",
+        history.join("\n")
+    );
+}
+
 /// Trace: L2-DES-TUI-003
 /// Verifies: Bare bang enters Shell mode and submits composer text as a shell command.
 #[test]

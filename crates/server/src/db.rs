@@ -9,8 +9,8 @@ use rusqlite::{Connection, params};
 use serde_json;
 
 use devo_protocol::{
-    PendingInputItem, PendingInputKind, SessionId, SessionMetadata, SessionRuntimeStatus,
-    SessionTitleState,
+    PendingInputId, PendingInputItem, PendingInputKind, SessionId, SessionMetadata,
+    SessionRuntimeStatus, SessionTitleState,
 };
 
 /// Queue type for pending messages.
@@ -95,6 +95,7 @@ impl Database {
                 queue_type TEXT NOT NULL CHECK(queue_type IN ('turn', 'btw')),
                 kind TEXT NOT NULL,
                 content TEXT NOT NULL,
+                pending_input_id TEXT,
                 metadata TEXT,
                 created_at INTEGER NOT NULL
             );
@@ -104,6 +105,29 @@ impl Database {
             ",
         )
         .context("failed to run database migrations")?;
+        let has_pending_input_id = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(pending_messages)")
+                .context("failed to inspect pending_messages schema")?;
+            let columns = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .context("failed to read pending_messages schema")?;
+            let mut found = false;
+            for column in columns {
+                if column? == "pending_input_id" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_pending_input_id {
+            conn.execute(
+                "ALTER TABLE pending_messages ADD COLUMN pending_input_id TEXT",
+                [],
+            )
+            .context("failed to add pending_input_id column")?;
+        }
         Ok(())
     }
 
@@ -391,13 +415,14 @@ impl Database {
         };
         let metadata_str = item.metadata.as_ref().map(|v| v.to_string());
         conn.execute(
-            "INSERT INTO pending_messages (session_id, queue_type, kind, content, metadata, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO pending_messages (session_id, queue_type, kind, content, pending_input_id, metadata, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session_id.to_string(),
                 queue.as_str(),
                 kind_str,
                 content,
+                item.id.to_string(),
                 metadata_str,
                 item.created_at.timestamp(),
             ],
@@ -421,7 +446,7 @@ impl Database {
         let items = {
             let mut stmt = tx
                 .prepare(
-                    "SELECT kind, content, metadata, created_at
+                    "SELECT kind, content, pending_input_id, metadata, created_at
                      FROM pending_messages
                      WHERE session_id = ?1 AND queue_type = ?2
                      ORDER BY id ASC",
@@ -431,8 +456,9 @@ impl Database {
                 .query_map(params![session_id.to_string(), queue.as_str()], |row| {
                     let kind_str: String = row.get(0)?;
                     let content: String = row.get(1)?;
-                    let metadata_str: Option<String> = row.get(2)?;
-                    let created_at: i64 = row.get(3)?;
+                    let pending_input_id: Option<String> = row.get(2)?;
+                    let metadata_str: Option<String> = row.get(3)?;
+                    let created_at: i64 = row.get(4)?;
 
                     let kind = match kind_str.as_str() {
                         "user_text" => PendingInputKind::UserText { text: content },
@@ -479,6 +505,9 @@ impl Database {
                     let metadata = metadata_str.and_then(|s| serde_json::from_str(&s).ok());
 
                     Ok(PendingInputItem {
+                        id: pending_input_id
+                            .and_then(|id| PendingInputId::try_from(id).ok())
+                            .unwrap_or_default(),
                         kind,
                         metadata,
                         created_at: Utc
@@ -639,20 +668,20 @@ mod tests {
         let meta = sample_session("session-1");
         db.upsert_session(&meta).expect("upsert");
 
-        let item1 = PendingInputItem {
-            kind: PendingInputKind::UserText {
+        let item1 = PendingInputItem::new(
+            PendingInputKind::UserText {
                 text: "hello".into(),
             },
-            metadata: None,
-            created_at: Utc::now(),
-        };
-        let item2 = PendingInputItem {
-            kind: PendingInputKind::UserText {
+            None,
+            Utc::now(),
+        );
+        let item2 = PendingInputItem::new(
+            PendingInputKind::UserText {
                 text: "world".into(),
             },
-            metadata: None,
-            created_at: Utc::now(),
-        };
+            None,
+            Utc::now(),
+        );
 
         db.push_pending(&meta.session_id, QueueType::Turn, &item1)
             .expect("push");
@@ -668,6 +697,8 @@ mod tests {
             .drain_pending(&meta.session_id, QueueType::Turn)
             .expect("drain");
         assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].id, item1.id);
+        assert_eq!(drained[1].id, item2.id);
         assert!(matches!(&drained[0].kind, PendingInputKind::UserText { text } if text == "hello"));
         assert!(matches!(&drained[1].kind, PendingInputKind::UserText { text } if text == "world"));
 
@@ -683,20 +714,20 @@ mod tests {
         let meta = sample_session("session-1");
         db.upsert_session(&meta).expect("upsert");
 
-        let turn_item = PendingInputItem {
-            kind: PendingInputKind::UserText {
+        let turn_item = PendingInputItem::new(
+            PendingInputKind::UserText {
                 text: "turn msg".into(),
             },
-            metadata: None,
-            created_at: Utc::now(),
-        };
-        let btw_item = PendingInputItem {
-            kind: PendingInputKind::UserText {
+            None,
+            Utc::now(),
+        );
+        let btw_item = PendingInputItem::new(
+            PendingInputKind::UserText {
                 text: "btw msg".into(),
             },
-            metadata: None,
-            created_at: Utc::now(),
-        };
+            None,
+            Utc::now(),
+        );
 
         db.push_pending(&meta.session_id, QueueType::Turn, &turn_item)
             .expect("push");

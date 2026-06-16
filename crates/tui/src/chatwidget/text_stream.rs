@@ -55,6 +55,14 @@ impl ChatWidget {
             active_items = ?self.active_text_item_log_order(),
             "committing all active text items"
         );
+        for item in &self.active_text_items {
+            if item.kind == TextItemKind::Assistant
+                && let ActiveTextItemId::Server(item_id) = item.item_id
+            {
+                self.boundary_committed_assistant_items.insert(item_id);
+                self.committed_server_assistant_in_turn = true;
+            }
+        }
         while !self.active_text_items.is_empty() {
             self.commit_text_item_at(0, status);
         }

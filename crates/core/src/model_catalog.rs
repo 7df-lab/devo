@@ -10,7 +10,7 @@
 //! - catalog loading stays in `devo-core` because the embedded assets live here
 //! - this module is the bridge between raw preset/config data and runtime model consumers
 //! - models are sorted and materialized here so downstream code can work only with resolved `Model`
-//! - the layered merge order is: builtin < ~/.devo/models.json < `<workspace>/.devo/models.json`
+//! - precedence is: `<workspace>/.devo/models.json` > `~/.devo/models.json` > builtin
 //!
 //! Boundary:
 //! - this module should not define the runtime model shape itself; that lives in `devo-protocol`
@@ -50,10 +50,13 @@ impl PresetModelCatalog {
         })
     }
 
-    /// Loads the effective catalog from three layers, merged highest-wins:
-    /// 1. built-in models (embedded)
+    /// Loads the effective catalog from three layers. Precedence is:
+    /// 1. `<workspace_root>/.devo/models.json` (project overrides)
     /// 2. `config_home/models.json` (user overrides)
-    /// 3. `<workspace_root>/.devo/models.json` (project overrides)
+    /// 3. built-in models (embedded fallback)
+    ///
+    /// Implementation loads from fallback to highest precedence so later
+    /// layers can replace entries with the same slug.
     ///
     /// If the user file does not exist it is seeded from the builtin list so
     /// users can discover and customize the catalog.
@@ -436,6 +439,46 @@ mod tests {
         assert_eq!(model.context_window, 333);
         assert_eq!(model.effective_context_window_percent, Some(88));
         assert_eq!(model.max_tokens, Some(444));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_from_config_uses_workspace_user_builtin_precedence_by_slug() {
+        let root = unique_temp_dir("catalog-precedence");
+        let home = root.join("home").join(".devo");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&home).expect("create home");
+        std::fs::create_dir_all(workspace.join(".devo")).expect("create project");
+
+        let user_models = home.join("models.json");
+        let workspace_models = workspace.join(".devo").join("models.json");
+        std::fs::write(
+            &user_models,
+            r#"[{"slug":"qwen3-coder-next","display_name":"User","context_window":111,"effective_context_window_percent":66,"max_tokens":222}]"#,
+        )
+        .expect("write user models");
+        std::fs::write(
+            &workspace_models,
+            r#"[{"slug":"qwen3-coder-next","display_name":"Workspace","context_window":333,"effective_context_window_percent":88,"max_tokens":444}]"#,
+        )
+        .expect("write project models");
+
+        let catalog = PresetModelCatalog::load_from_config(&home, Some(&workspace)).expect("load");
+        let model = model_by_slug(&catalog.into_inner(), "qwen3-coder-next");
+
+        assert_eq!(
+            model,
+            crate::Model::from(ModelPreset {
+                slug: "qwen3-coder-next".into(),
+                display_name: "Workspace".into(),
+                context_window: 333,
+                effective_context_window_percent: Some(88),
+                input_modalities: vec![crate::InputModality::Text, crate::InputModality::Image],
+                max_tokens: Some(444),
+                ..ModelPreset::default()
+            })
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

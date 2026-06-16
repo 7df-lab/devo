@@ -111,7 +111,7 @@ Default selection is not a binding field. It is stored under `[defaults]` so the
 
 The binding must be valid only when:
 
-- The supported model slug exists in the effective model catalog loaded from built-in defaults plus user/workspace `models.json` overrides.
+- The supported model slug exists in the effective model catalog, whose precedence is workspace `models.json`, user `models.json`, then built-in defaults.
 - The provider exists and has sufficient connection details.
 - The invocation method is supported by the program.
 - The reasoning effort is allowed by the selected supported model.

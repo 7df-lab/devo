@@ -408,7 +408,7 @@ Allowed `invocation_method` values for the initial schema:
 
 Rules:
 
-- `model_slug` must exist in the effective model catalog loaded from built-in defaults plus user/workspace `models.json` overrides.
+- `model_slug` must exist in the effective model catalog, whose precedence is workspace `models.json`, user `models.json`, then built-in defaults.
 - `display_name` is display metadata only. It must not be used as a stable identifier, provider API model name, or cross-reference key.
 - Program-created model bindings must persist `display_name`. When the user accepts the default suggestion, that persisted value should be copied from the built-in supported model definition's display name.
 - `provider` must reference an enabled effective provider.

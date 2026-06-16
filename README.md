@@ -251,6 +251,8 @@ User-level model catalog:
 - Windows: `C:\Users\yourname\.devo\models.json`
 
 Project-level overrides can also be placed at `<workspace>/.devo/models.json`.
+Catalog precedence is `<workspace>/.devo/models.json`, then
+`<DEVO_HOME>/models.json`, then the built-in catalog.
 In `models.json`, `provider` is the default wire API metadata for the model; the
 actual endpoint is still selected by the `provider` field in `config.toml`.
 

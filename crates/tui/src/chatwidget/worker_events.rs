@@ -1200,6 +1200,10 @@ impl ChatWidget {
                 ));
                 self.set_status_message("Session compacted");
             }
+            WorkerEvent::ContextCompactionCompleted { title } => {
+                self.add_to_history(history_cell::new_info_event(title, None));
+                self.set_status_message("Context compacted");
+            }
             WorkerEvent::SessionCompactionFailed { message } => {
                 self.busy = false;
                 self.bottom_pane.set_task_running(false);
@@ -1218,10 +1222,26 @@ impl ChatWidget {
             WorkerEvent::InputHistoryLoaded { direction: _, text } => {
                 self.bottom_pane.restore_input_from_history(text);
             }
-            WorkerEvent::InputQueueUpdated { pending_count, .. } => {
+            WorkerEvent::InputQueueUpdated {
+                pending_count,
+                pending_texts,
+            } => {
+                if self.queued_count > pending_count {
+                    self.commit_active_streams(DotStatus::Completed);
+                }
                 // If the queue shrunk, unqueue the oldest queued cells.
                 while self.queued_count > pending_count {
                     self.unqueue_oldest_pending();
+                }
+                // If the queue grew outside the local submit path, add the new
+                // pending cells from the server snapshot using Build mode as the
+                // only safe fallback because queue updates do not carry mode.
+                if self.queued_count < pending_count {
+                    for text in pending_texts.iter().skip(self.queued_count) {
+                        self.bottom_pane.push_pending_cell(text.clone());
+                        self.queued_input_modes.push_back(InputMode::Build);
+                    }
+                    self.queued_count = pending_count;
                 }
                 self.frame_requester.schedule_frame();
             }

@@ -391,11 +391,11 @@ impl ServerRuntime {
             })
         };
         if let Some((active_turn, pending_turn_queue, is_ephemeral)) = queued_active_turn {
-            let item = devo_core::PendingInputItem {
-                kind: devo_core::PendingInputKind::UserText { text: input_text },
-                metadata: None,
-                created_at: Utc::now(),
-            };
+            let item = devo_core::PendingInputItem::new(
+                devo_core::PendingInputKind::UserText { text: input_text },
+                None,
+                Utc::now(),
+            );
             pending_turn_queue
                 .lock()
                 .expect("pending turn queue mutex should not be poisoned")

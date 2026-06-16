@@ -262,7 +262,10 @@ async fn goal_set_does_not_start_continuation_while_approval_is_pending() -> Res
         &runtime,
         connection_id,
         session_id,
-        start_result.result.turn_id,
+        start_result
+            .result
+            .turn_id()
+            .expect("turn/start should start approval turn"),
     )
     .await?;
     Ok(())
@@ -332,7 +335,10 @@ async fn goal_set_does_not_start_continuation_while_user_input_is_pending() -> R
         &runtime,
         connection_id,
         session_id,
-        start_result.result.turn_id,
+        start_result
+            .result
+            .turn_id()
+            .expect("turn/start should start request-user-input turn"),
     )
     .await?;
     Ok(())

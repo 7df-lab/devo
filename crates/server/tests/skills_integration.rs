@@ -386,7 +386,7 @@ async fn start_auto_review_turn(
         .await
         .context("turn/start auto-review response")?;
     let result: SuccessResponse<devo_server::TurnStartResult> = serde_json::from_value(response)?;
-    assert_eq!(result.result.status, devo_core::TurnStatus::Running);
+    assert_eq!(result.result.status(), devo_core::TurnStatus::Running);
     Ok(())
 }
 
@@ -855,7 +855,7 @@ async fn turn_start_resolves_skill_content_into_model_request() -> Result<()> {
         .context("turn/start response")?;
     let start_result: SuccessResponse<devo_server::TurnStartResult> =
         serde_json::from_value(response)?;
-    assert_eq!(start_result.result.status, devo_core::TurnStatus::Running);
+    assert_eq!(start_result.result.status(), devo_core::TurnStatus::Running);
 
     wait_for_turn_completed(&mut notifications_rx).await?;
 
@@ -1076,6 +1076,10 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
         .context("turn/start response for steering test")?;
     let start_result: SuccessResponse<devo_server::TurnStartResult> =
         serde_json::from_value(response)?;
+    let start_turn_id = start_result
+        .result
+        .turn_id()
+        .expect("turn/start should start steering test turn");
 
     timeout(Duration::from_secs(5), started.notified())
         .await
@@ -1089,7 +1093,7 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
                 "method": "turn/steer",
                 "params": {
                     "session_id": session_id,
-                    "expected_turn_id": start_result.result.turn_id,
+                    "expected_turn_id": start_turn_id,
                     "input": [
                         { "type": "text", "text": "Apply this steer now." },
                         { "type": "skill", "id": "steer-rust" }
@@ -1101,7 +1105,11 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
         .context("turn/steer response")?;
     let steer_result: SuccessResponse<devo_server::TurnSteerResult> =
         serde_json::from_value(steer_response)?;
-    assert_eq!(steer_result.result.turn_id, start_result.result.turn_id);
+    assert_eq!(steer_result.result.turn_id, start_turn_id);
+    assert_eq!(
+        steer_result.result.disposition,
+        devo_server::TurnInputDisposition::Steered
+    );
 
     release.notify_one();
     wait_for_turn_completed(&mut notifications_rx).await?;

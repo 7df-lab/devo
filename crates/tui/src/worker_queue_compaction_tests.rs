@@ -1,0 +1,133 @@
+use std::path::PathBuf;
+
+use devo_protocol::ItemId;
+use devo_protocol::Model;
+use devo_protocol::SessionId;
+use devo_protocol::TurnId;
+use devo_server::ItemEnvelope;
+use devo_server::ItemEventPayload;
+use devo_server::ItemKind;
+use pretty_assertions::assert_eq;
+use tokio::sync::mpsc;
+
+use crate::app_event::AppEvent;
+use crate::app_event_sender::AppEventSender;
+use crate::chatwidget::ChatWidget;
+use crate::chatwidget::ChatWidgetInit;
+use crate::chatwidget::TuiSessionState;
+use crate::events::WorkerEvent;
+use crate::history_cell::ScrollbackLine;
+use crate::tui::frame_requester::FrameRequester;
+
+fn widget_with_model() -> ChatWidget {
+    let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
+    ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(
+            PathBuf::from("."),
+            Some(Model {
+                slug: "test-model".to_string(),
+                display_name: "Test Model".to_string(),
+                ..Model::default()
+            }),
+        ),
+        initial_thinking_selection: None,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: Vec::new(),
+        saved_models: Vec::new(),
+        show_model_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+    })
+}
+
+fn scrollback_plain_lines(lines: &[ScrollbackLine]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+#[test]
+fn input_queue_update_growth_adds_pending_cell_from_server_snapshot() {
+    let mut widget = widget_with_model();
+    widget.handle_app_event(AppEvent::ClearTranscript);
+    widget.handle_worker_event(WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+
+    widget.handle_worker_event(WorkerEvent::InputQueueUpdated {
+        pending_count: 1,
+        pending_texts: vec!["remote queued".to_string()],
+    });
+    widget.handle_worker_event(WorkerEvent::InputQueueUpdated {
+        pending_count: 0,
+        pending_texts: Vec::new(),
+    });
+
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
+    assert!(
+        history.contains("remote queued"),
+        "expected queued server snapshot to be promoted into history:\n{history}"
+    );
+}
+
+#[test]
+fn context_compaction_worker_event_adds_history_item() {
+    let mut widget = widget_with_model();
+    widget.handle_app_event(AppEvent::ClearTranscript);
+
+    widget.handle_worker_event(WorkerEvent::ContextCompactionCompleted {
+        title: "Context Compaction".to_string(),
+    });
+
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
+    assert!(
+        history.contains("Context Compaction"),
+        "expected completed context compaction to be visible in history:\n{history}"
+    );
+}
+
+#[test]
+fn completed_context_compaction_item_emits_worker_event() {
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    crate::worker::handle_completed_item(
+        ItemEventPayload {
+            context: devo_server::EventContext {
+                session_id: SessionId::new(),
+                turn_id: Some(TurnId::new()),
+                item_id: None,
+                seq: 1,
+            },
+            item: ItemEnvelope {
+                item_id: ItemId::new(),
+                item_kind: ItemKind::ContextCompaction,
+                payload: serde_json::json!({
+                    "title": "Context Compaction"
+                }),
+            },
+        },
+        &event_tx,
+    );
+
+    assert_eq!(
+        event_rx.try_recv().expect("expected worker event"),
+        WorkerEvent::ContextCompactionCompleted {
+            title: "Context Compaction".to_string()
+        }
+    );
+}

@@ -473,7 +473,7 @@ async fn queued_user_turn_runs_before_goal_continuation() -> Result<()> {
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
 
-    let _ = runtime
+    let active_response = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
@@ -491,10 +491,16 @@ async fn queued_user_turn_runs_before_goal_continuation() -> Result<()> {
         )
         .await
         .context("active turn/start response")?;
+    let active_result: devo_server::SuccessResponse<devo_server::TurnStartResult> =
+        serde_json::from_value(active_response)?;
+    let active_turn_id = active_result
+        .result
+        .turn_id()
+        .expect("active turn/start should start a turn");
     wait_for_captured_request_count(&provider.requests, /*expected*/ 1).await?;
     wait_for_notification(&mut notifications_rx, "turn/started").await?;
 
-    let _ = runtime
+    let queued_response = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
@@ -510,7 +516,23 @@ async fn queued_user_turn_runs_before_goal_continuation() -> Result<()> {
                 }
             }),
         )
-        .await;
+        .await
+        .context("queued turn/start response")?;
+    let queued_result: devo_server::SuccessResponse<devo_server::TurnStartResult> =
+        serde_json::from_value(queued_response)?;
+    let devo_server::TurnStartResult::Queued {
+        active_turn_id: queued_active_turn_id,
+        queued_input_id,
+        status,
+        ..
+    } = queued_result.result
+    else {
+        panic!("expected queued turn/start result");
+    };
+    assert_eq!(queued_active_turn_id, active_turn_id);
+    assert_ne!(queued_input_id.to_string(), active_turn_id.to_string());
+    assert_eq!(status, devo_core::TurnStatus::Pending);
+
     let _ = runtime
         .handle_incoming(
             connection_id,

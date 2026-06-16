@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{ItemId, ReasoningEffort, SessionId, TurnId, TurnStatus, TurnUsage};
+use crate::{ItemId, PendingInputId, ReasoningEffort, SessionId, TurnId, TurnStatus, TurnUsage};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnMetadata {
     pub turn_id: TurnId,
@@ -98,11 +98,62 @@ pub struct TurnStartParams {
     pub collaboration_mode: CollaborationMode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnInputDisposition {
+    #[default]
+    Started,
+    Queued,
+    Steered,
+}
+
+fn default_steered_disposition() -> TurnInputDisposition {
+    TurnInputDisposition::Steered
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnStartResult {
-    pub turn_id: TurnId,
-    pub status: TurnStatus,
-    pub accepted_at: DateTime<Utc>,
+#[serde(tag = "disposition", rename_all = "snake_case")]
+pub enum TurnStartResult {
+    Started {
+        turn_id: TurnId,
+        status: TurnStatus,
+        accepted_at: DateTime<Utc>,
+    },
+    Queued {
+        active_turn_id: TurnId,
+        queued_input_id: PendingInputId,
+        status: TurnStatus,
+        accepted_at: DateTime<Utc>,
+    },
+}
+
+impl TurnStartResult {
+    pub fn turn_id(&self) -> Option<TurnId> {
+        match self {
+            Self::Started { turn_id, .. } => Some(*turn_id),
+            Self::Queued { .. } => None,
+        }
+    }
+
+    pub fn active_turn_id(&self) -> TurnId {
+        match self {
+            Self::Started { turn_id, .. } => *turn_id,
+            Self::Queued { active_turn_id, .. } => *active_turn_id,
+        }
+    }
+
+    pub fn disposition(&self) -> TurnInputDisposition {
+        match self {
+            Self::Started { .. } => TurnInputDisposition::Started,
+            Self::Queued { .. } => TurnInputDisposition::Queued,
+        }
+    }
+
+    pub fn status(&self) -> TurnStatus {
+        match self {
+            Self::Started { status, .. } | Self::Queued { status, .. } => status.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,7 +163,18 @@ pub struct ShellCommandParams {
     pub cwd: Option<PathBuf>,
 }
 
-pub type ShellCommandResult = TurnStartResult;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellCommandResult {
+    pub turn_id: TurnId,
+    pub status: TurnStatus,
+    pub accepted_at: DateTime<Utc>,
+}
+
+impl ShellCommandResult {
+    pub fn status(&self) -> TurnStatus {
+        self.status.clone()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnInterruptParams {
@@ -137,6 +199,8 @@ pub struct TurnSteerParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnSteerResult {
     pub turn_id: TurnId,
+    #[serde(default = "default_steered_disposition")]
+    pub disposition: TurnInputDisposition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -165,9 +229,26 @@ pub struct ActiveTurnSteeringState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingInputItem {
+    #[serde(default)]
+    pub id: PendingInputId,
     pub kind: PendingInputKind,
     pub metadata: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
+}
+
+impl PendingInputItem {
+    pub fn new(
+        kind: PendingInputKind,
+        metadata: Option<serde_json::Value>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id: PendingInputId::new(),
+            kind,
+            metadata,
+            created_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,14 +343,41 @@ mod tests {
     }
 
     #[test]
+    fn turn_steer_result_defaults_to_steered_disposition() {
+        let json = serde_json::json!({
+            "turn_id": TurnId::new()
+        });
+
+        let restored: TurnSteerResult = serde_json::from_value(json).expect("deserialize");
+
+        assert_eq!(restored.disposition, TurnInputDisposition::Steered);
+    }
+
+    #[test]
+    fn shell_command_result_keeps_plain_started_shape() {
+        let result = ShellCommandResult {
+            turn_id: TurnId::new(),
+            status: TurnStatus::Running,
+            accepted_at: Utc::now(),
+        };
+
+        let json = serde_json::to_value(&result).expect("serialize");
+        let turn_id = result.turn_id.to_string();
+
+        assert_eq!(json["turn_id"].as_str(), Some(turn_id.as_str()));
+        assert_eq!(json["status"].as_str(), Some("Running"));
+        assert!(json.get("disposition").is_none());
+    }
+
+    #[test]
     fn pending_input_item_user_text_roundtrips() {
-        let item = PendingInputItem {
-            kind: PendingInputKind::UserText {
+        let item = PendingInputItem::new(
+            PendingInputKind::UserText {
                 text: "hello".into(),
             },
-            metadata: Some(serde_json::json!({"source": "tui"})),
-            created_at: Utc::now(),
-        };
+            Some(serde_json::json!({"source": "tui"})),
+            Utc::now(),
+        );
         let json = serde_json::to_string(&item).expect("serialize");
         let restored: PendingInputItem = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(item.created_at, restored.created_at);
@@ -279,14 +387,14 @@ mod tests {
 
     #[test]
     fn pending_input_item_tool_call_blocked_roundtrips() {
-        let item = PendingInputItem {
-            kind: PendingInputKind::ToolCallBlockedByHook {
+        let item = PendingInputItem::new(
+            PendingInputKind::ToolCallBlockedByHook {
                 tool_use_id: "tool-1".into(),
                 reason: "blocked by safety".into(),
             },
-            metadata: None,
-            created_at: Utc::now(),
-        };
+            None,
+            Utc::now(),
+        );
         let json = serde_json::to_string(&item).expect("serialize");
         let restored: PendingInputItem = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(item.created_at, restored.created_at);
@@ -294,11 +402,7 @@ mod tests {
 
     #[test]
     fn pending_input_item_budget_limit_steering_roundtrips() {
-        let item = PendingInputItem {
-            kind: PendingInputKind::BudgetLimitSteering,
-            metadata: None,
-            created_at: Utc::now(),
-        };
+        let item = PendingInputItem::new(PendingInputKind::BudgetLimitSteering, None, Utc::now());
         let json = serde_json::to_string(&item).expect("serialize");
         let restored: PendingInputItem = serde_json::from_str(&json).expect("deserialize");
         assert!(matches!(

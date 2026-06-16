@@ -1499,7 +1499,8 @@ async fn interrupt_mid_stream_does_not_duplicate_last_item_on_resume() -> Result
         devo_server::SuccessResponse<devo_server::TurnStartResult>,
     >(turn_start_response)?
     .result
-    .turn_id;
+    .turn_id()
+    .expect("turn/start should start a streaming turn");
 
     // Wait until the assistant item has started streaming.  The provider yields
     // one TextDelta, then blocks, so once we see the delta notification we know

@@ -65,6 +65,7 @@ macro_rules! define_id {
 define_id!(SessionId);
 define_id!(TurnId);
 define_id!(ItemId);
+define_id!(PendingInputId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionTitleState {

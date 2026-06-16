@@ -699,11 +699,11 @@ pub async fn query(
         {
             if !budget_steer_injected {
                 if let Some(turn) = session.turn_state.as_mut() {
-                    turn.push_pending_input(devo_protocol::PendingInputItem {
-                        kind: devo_protocol::PendingInputKind::BudgetLimitSteering,
-                        metadata: None,
-                        created_at: chrono::Utc::now(),
-                    });
+                    turn.push_pending_input(devo_protocol::PendingInputItem::new(
+                        devo_protocol::PendingInputKind::BudgetLimitSteering,
+                        None,
+                        chrono::Utc::now(),
+                    ));
                 }
                 budget_steer_injected = true;
             }

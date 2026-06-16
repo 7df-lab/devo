@@ -47,13 +47,13 @@ mod tests {
     use super::*;
 
     fn sample_item() -> PendingInputItem {
-        PendingInputItem {
-            kind: devo_protocol::PendingInputKind::UserText {
+        PendingInputItem::new(
+            devo_protocol::PendingInputKind::UserText {
                 text: "test".into(),
             },
-            metadata: None,
-            created_at: Utc::now(),
-        }
+            None,
+            Utc::now(),
+        )
     }
 
     #[test]
@@ -77,13 +77,13 @@ mod tests {
     fn turn_state_prepend_puts_items_first() {
         let mut state = TurnState::new(TurnKind::Regular);
         state.push_pending_input(sample_item());
-        let extra = vec![PendingInputItem {
-            kind: devo_protocol::PendingInputKind::UserText {
+        let extra = vec![PendingInputItem::new(
+            devo_protocol::PendingInputKind::UserText {
                 text: "extra".into(),
             },
-            metadata: None,
-            created_at: Utc::now(),
-        }];
+            None,
+            Utc::now(),
+        )];
         state.prepend_pending_input(extra);
         let taken = state.take_pending_input();
         assert_eq!(taken.len(), 2);

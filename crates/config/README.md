@@ -436,10 +436,11 @@ response-storage flag, and preferred auth method.
 
 `model_slug` is the local catalog key matching a `slug` in the effective
 `models.json` catalog. `model_name` is the provider-specific model name used for
-the API request. The effective catalog is read at startup from built-in defaults,
-`<DEVO_HOME>/models.json`, then `<workspace>/.devo/models.json`, merged by
-`slug`. Turn metadata records `model` as the catalog slug and `request_model` as
-the provider request model; these values may be identical.
+the API request. The effective catalog precedence is
+`<workspace>/.devo/models.json`, then `<DEVO_HOME>/models.json`, then built-in
+defaults, merged by `slug`. Turn metadata records `model` as the catalog slug
+and `request_model` as the provider request model; these values may be
+identical.
 
 When thinking resolution selects a model variant catalog slug, the provider
 request model is resolved from enabled bindings for the same provider as the
