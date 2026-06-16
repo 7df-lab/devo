@@ -1,0 +1,263 @@
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use anyhow::Context;
+use anyhow::Result;
+use async_trait::async_trait;
+use devo_core::AppConfigStore;
+use devo_core::BundledSkillsConfig;
+use devo_core::FileSystemSkillCatalog;
+use devo_core::PresetModelCatalog;
+use devo_core::ProviderVendorCatalog;
+use devo_core::SkillsConfig;
+use devo_core::tools::ToolRegistry;
+use devo_protocol::Model;
+use devo_protocol::ModelRequest;
+use devo_protocol::ModelResponse;
+use devo_protocol::ResponseContent;
+use devo_protocol::ResponseMetadata;
+use devo_protocol::SessionId;
+use devo_protocol::StopReason;
+use devo_protocol::StreamEvent;
+use devo_protocol::Usage;
+use devo_provider::ModelProviderSDK;
+use devo_provider::SingleProviderRouter;
+use devo_server::ClientTransportKind;
+use devo_server::ServerRuntime;
+use devo_server::ServerRuntimeDependencies;
+use futures::Stream;
+use futures::stream;
+use pretty_assertions::assert_eq;
+use tempfile::TempDir;
+use tokio::sync::mpsc;
+use tokio::time::timeout;
+
+#[derive(Default)]
+struct GoalTitleProvider {
+    title_requests: Mutex<Vec<ModelRequest>>,
+    stream_requests: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProviderSDK for GoalTitleProvider {
+    async fn completion(&self, request: ModelRequest) -> Result<ModelResponse> {
+        self.title_requests
+            .lock()
+            .expect("lock title requests")
+            .push(request);
+        Ok(ModelResponse {
+            id: "goal-title".to_string(),
+            content: vec![ResponseContent::Text("Generated goal title".to_string())],
+            stop_reason: Some(StopReason::EndTurn),
+            usage: Usage::default(),
+            metadata: ResponseMetadata::default(),
+        })
+    }
+
+    async fn completion_stream(
+        &self,
+        _request: ModelRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        self.stream_requests.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::pin(stream::pending()))
+    }
+
+    fn name(&self) -> &str {
+        "goal-title-provider"
+    }
+}
+
+#[tokio::test]
+async fn goal_set_objective_generates_session_title_for_new_session() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(GoalTitleProvider::default());
+    let runtime = build_runtime(data_root.path(), provider.clone())?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_untitled_session(&runtime, connection_id, data_root.path()).await?;
+
+    runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 3,
+                "method": "goal/set",
+                "params": {
+                    "sessionId": session_id,
+                    "objective": "investigate goal title generation",
+                    "status": "active"
+                }
+            }),
+        )
+        .await
+        .context("goal/set response")?;
+
+    wait_for_title_update(&mut notifications_rx, "Generated goal title").await?;
+
+    let list_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 4,
+                "method": "session/list",
+                "params": {}
+            }),
+        )
+        .await
+        .context("session/list response")?;
+    let list_result: devo_server::SuccessResponse<devo_server::SessionListResult> =
+        serde_json::from_value(list_response)?;
+    assert_eq!(
+        list_result.result.sessions[0].title.as_deref(),
+        Some("Generated goal title")
+    );
+
+    let title_requests = provider.title_requests.lock().expect("lock title requests");
+    assert_eq!(title_requests.len(), 1);
+    assert!(
+        title_request_contains(&title_requests[0], "investigate goal title generation"),
+        "title request should use the goal objective"
+    );
+    assert!(
+        !title_request_contains(&title_requests[0], "/goal"),
+        "title request should not include the slash-command wrapper"
+    );
+    Ok(())
+}
+
+fn build_runtime(
+    data_root: &std::path::Path,
+    provider: Arc<GoalTitleProvider>,
+) -> Result<Arc<ServerRuntime>> {
+    let provider: Arc<dyn ModelProviderSDK> = provider;
+    let db = Arc::new(devo_server::db::Database::open(
+        data_root.join("goal_title.db"),
+    )?);
+    Ok(ServerRuntime::new(
+        data_root.to_path_buf(),
+        ServerRuntimeDependencies::new(
+            Arc::clone(&provider),
+            Arc::new(SingleProviderRouter::new(provider)),
+            Arc::new(ToolRegistry::new()),
+            "test-model".to_string(),
+            Arc::new(PresetModelCatalog::new(vec![Model {
+                slug: "test-model".to_string(),
+                display_name: "test-model".to_string(),
+                ..Model::default()
+            }])),
+            Arc::new(ProviderVendorCatalog::default()),
+            None,
+            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
+                bundled: Some(BundledSkillsConfig { enabled: false }),
+                ..SkillsConfig::default()
+            })),
+            devo_core::AgentsMdConfig::default(),
+            db,
+            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
+                data_root.to_path_buf(),
+                None,
+            )?)),
+        ),
+    ))
+}
+
+async fn initialize_connection(
+    runtime: &Arc<ServerRuntime>,
+) -> Result<(u64, mpsc::Receiver<serde_json::Value>)> {
+    let (notifications_tx, notifications_rx) = mpsc::channel(/*buffer*/ 1024);
+    let connection_id = runtime
+        .register_connection(ClientTransportKind::Stdio, notifications_tx)
+        .await;
+    let initialize_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "client_name": "goal-title-test",
+                    "client_version": "1.0.0",
+                    "transport": "stdio",
+                    "supports_streaming": true,
+                    "supports_binary_images": false,
+                    "opt_out_notification_methods": []
+                }
+            }),
+        )
+        .await
+        .context("initialize response")?;
+    let response: devo_server::SuccessResponse<devo_server::InitializeResult> =
+        serde_json::from_value(initialize_response)?;
+    assert_eq!(response.result.server_name, "devo-server");
+    let _ = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "method": "initialized"
+            }),
+        )
+        .await;
+    Ok((connection_id, notifications_rx))
+}
+
+async fn start_untitled_session(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    cwd: &std::path::Path,
+) -> Result<SessionId> {
+    let start_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 2,
+                "method": "session/start",
+                "params": {
+                    "cwd": cwd,
+                    "ephemeral": false,
+                    "title": null,
+                    "model": "test-model"
+                }
+            }),
+        )
+        .await
+        .context("session/start response")?;
+    let response: devo_server::SuccessResponse<devo_server::SessionStartResult> =
+        serde_json::from_value(start_response)?;
+    Ok(response.result.session.session_id)
+}
+
+async fn wait_for_title_update(
+    notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
+    expected_title: &str,
+) -> Result<()> {
+    timeout(Duration::from_secs(/*secs*/ 5), async {
+        while let Some(value) = notifications_rx.recv().await {
+            if value.get("method") != Some(&serde_json::json!("session/title/updated")) {
+                continue;
+            }
+            if value["params"]["session"]["title"] == serde_json::json!(expected_title) {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("notification channel closed before expected session/title/updated")
+    })
+    .await
+    .context("timed out waiting for session/title/updated")??;
+    Ok(())
+}
+
+fn title_request_contains(request: &ModelRequest, needle: &str) -> bool {
+    request.messages.iter().any(|message| {
+        message.content.iter().any(|content| match content {
+            devo_protocol::RequestContent::Text { text }
+            | devo_protocol::RequestContent::Reasoning { text } => text.contains(needle),
+            devo_protocol::RequestContent::ProviderReasoning { .. }
+            | devo_protocol::RequestContent::ToolUse { .. }
+            | devo_protocol::RequestContent::HostedToolUse { .. }
+            | devo_protocol::RequestContent::ToolResult { .. } => false,
+        })
+    })
+}

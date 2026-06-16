@@ -1,6 +1,41 @@
 use super::*;
 
 impl ServerRuntime {
+    pub(super) async fn maybe_start_title_generation_from_user_input(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        user_input: &str,
+    ) {
+        self.maybe_assign_provisional_title(session_id, user_input)
+            .await;
+
+        let needs_title = {
+            let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+                return;
+            };
+            let mut session = session_arc.lock().await;
+            if session.first_user_input.is_none() {
+                session.first_user_input = Some(user_input.to_string());
+            }
+            let first_input = session.first_user_input.clone();
+            let needs = matches!(
+                session.summary.title_state,
+                SessionTitleState::Unset | SessionTitleState::Provisional
+            );
+            (needs, first_input)
+        };
+        if needs_title.0
+            && let Some(first_input) = needs_title.1
+        {
+            let runtime = Arc::clone(self);
+            tokio::spawn(async move {
+                runtime
+                    .maybe_generate_final_title(session_id, first_input)
+                    .await;
+            });
+        }
+    }
+
     pub(super) async fn maybe_assign_provisional_title(
         &self,
         session_id: SessionId,

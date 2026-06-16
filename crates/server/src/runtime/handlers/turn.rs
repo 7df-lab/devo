@@ -304,32 +304,8 @@ impl ServerRuntime {
             )
             .await;
         }
-        self.maybe_assign_provisional_title(params.session_id, &display_input)
+        self.maybe_start_title_generation_from_user_input(params.session_id, &display_input)
             .await;
-        {
-            let mut session = session_arc.lock().await;
-            if session.first_user_input.is_none() {
-                session.first_user_input = Some(display_input.clone());
-            }
-        }
-        let needs_title = {
-            let session = session_arc.lock().await;
-            let first_input = session.first_user_input.clone();
-            let needs = matches!(
-                session.summary.title_state,
-                SessionTitleState::Unset | SessionTitleState::Provisional
-            );
-            (needs, first_input)
-        };
-        if needs_title.0
-            && let Some(first_input) = needs_title.1
-        {
-            let runtime = Arc::clone(self);
-            let sid = params.session_id;
-            tokio::spawn(async move {
-                runtime.maybe_generate_final_title(sid, first_input).await;
-            });
-        }
         let (record, session_context, turn_context) = {
             let session = session_arc.lock().await;
             let core_session = session.core_session.lock().await;

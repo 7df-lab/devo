@@ -20,6 +20,7 @@ impl ServerRuntime {
         };
         let session_id = params.session_id;
         let replace_existing = params.replace_existing;
+        let title_input = params.objective.trim().to_string();
 
         let mut stores = self.goal_stores.lock().await;
         let store = stores.entry(session_id).or_insert_with(GoalStore::new);
@@ -43,6 +44,8 @@ impl ServerRuntime {
                     tracing::warn!(session_id = %session_id, error = %error, "failed to persist goal create record");
                 }
                 self.sync_core_session_goal(session_id, session_goal).await;
+                self.maybe_start_title_generation_from_user_input(session_id, &title_input)
+                    .await;
                 if replace_existing {
                     self.interrupt_active_goal_continuation_turn(session_id, "goal replaced")
                         .await;
@@ -77,6 +80,12 @@ impl ServerRuntime {
         };
         let session_id = params.session_id;
         let requested_status = params.status;
+        let title_input = params
+            .objective
+            .as_deref()
+            .map(str::trim)
+            .filter(|objective| !objective.is_empty())
+            .map(str::to_string);
         let only_pause_budget_limited = requested_status
             == Some(devo_protocol::ThreadGoalStatus::Paused)
             && params.objective.is_none()
@@ -145,6 +154,10 @@ impl ServerRuntime {
                         "goal status changed from active",
                     )
                     .await;
+                }
+                if let Some(title_input) = title_input {
+                    self.maybe_start_title_generation_from_user_input(session_id, &title_input)
+                        .await;
                 }
                 if should_continue {
                     self.maybe_start_goal_continuation_turn(session_id).await;
