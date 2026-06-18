@@ -65,7 +65,7 @@ pub(crate) fn build_title_generation_request(model: String, user_input: &str) ->
                 ),
             }],
         }],
-        max_tokens: 24,
+        max_tokens: 1024,
         tools: None,
         hosted_tools: Vec::new(),
         sampling: SamplingControls { temperature: None, top_p: None, top_k: None },
