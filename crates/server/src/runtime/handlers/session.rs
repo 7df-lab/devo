@@ -1,5 +1,14 @@
 use super::super::*;
 
+pub(crate) struct RuntimeSessionTurnCutOptions {
+    session_id: SessionId,
+    user_turn_index: Option<u32>,
+    rollback_mode: SessionRollbackMode,
+    cwd_override: Option<PathBuf>,
+    title_override: Option<String>,
+    created_at: chrono::DateTime<Utc>,
+}
+
 impl ServerRuntime {
     pub(crate) async fn handle_initialize(
         &self,
@@ -520,12 +529,14 @@ impl ServerRuntime {
         let mut forked_runtime = match self
             .build_runtime_session_from_user_turn_cut(
                 &source,
-                forked_id,
-                params.user_turn_index,
-                SessionRollbackMode::ThroughUserTurn,
-                params.cwd.clone(),
-                params.title.clone(),
-                now,
+                RuntimeSessionTurnCutOptions {
+                    session_id: forked_id,
+                    user_turn_index: params.user_turn_index,
+                    rollback_mode: SessionRollbackMode::ThroughUserTurn,
+                    cwd_override: params.cwd.clone(),
+                    title_override: params.title.clone(),
+                    created_at: now,
+                },
             )
             .await
         {
@@ -614,12 +625,14 @@ impl ServerRuntime {
         let mut rebuilt = match self
             .build_runtime_session_from_user_turn_cut(
                 &source,
-                params.session_id,
-                Some(params.user_turn_index),
-                params.mode,
-                /*cwd_override*/ None,
-                source.summary.title.clone(),
-                source.summary.created_at,
+                RuntimeSessionTurnCutOptions {
+                    session_id: params.session_id,
+                    user_turn_index: Some(params.user_turn_index),
+                    rollback_mode: params.mode,
+                    cwd_override: None,
+                    title_override: source.summary.title.clone(),
+                    created_at: source.summary.created_at,
+                },
             )
             .await
         {
@@ -671,13 +684,16 @@ impl ServerRuntime {
     pub(crate) async fn build_runtime_session_from_user_turn_cut(
         &self,
         source: &RuntimeSession,
-        session_id: SessionId,
-        user_turn_index: Option<u32>,
-        rollback_mode: SessionRollbackMode,
-        cwd_override: Option<PathBuf>,
-        title_override: Option<String>,
-        created_at: chrono::DateTime<Utc>,
+        options: RuntimeSessionTurnCutOptions,
     ) -> Result<RuntimeSession, String> {
+        let RuntimeSessionTurnCutOptions {
+            session_id,
+            user_turn_index,
+            rollback_mode,
+            cwd_override,
+            title_override,
+            created_at,
+        } = options;
         let source_core_session = source.core_session.lock().await;
         let kept_items = kept_items_for_user_turn_cut(
             &source.persisted_turn_items,

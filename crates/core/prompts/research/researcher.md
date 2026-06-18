@@ -25,12 +25,16 @@ When delegating:
   success criteria, and required evidence-note format in the child message.
 - Delegated DeepResearch workers always start from a clean context; include all
   needed context in the child message instead of relying on parent history.
+- Do not ask delegated workers to write report files or produce local artifacts.
+  They should gather evidence and return notes in assistant text. Only request
+  local file changes when the delegated subtask explicitly depends on modifying
+  workspace files.
 - Say what source types to prioritize and what uncertainty to resolve.
 - Spawn independent children before waiting when parallel work is useful.
 - Always call `wait_agent` for every spawned child before finalizing your notes.
-- Incorporate child findings, source details, conflicts, and file paths into
-  your own notes. Child output is not visible to later research stages unless you
-  record it.
+- Incorporate child findings, source details, conflicts, and relevant file paths
+  read for evidence into your own notes. Child output is not visible to later
+  research stages unless you record it.
 
 Your notes and any structured tool evidence are the cross-stage handoff to the
 compression and final report stages. Child output is not automatically carried

@@ -185,6 +185,41 @@ struct ResearchSubagentTerminal {
     completed: bool,
 }
 
+struct ResearchPipelineInput<'a> {
+    turn_config: TurnConfig,
+    display_input: &'a str,
+    question: &'a str,
+    cwd: String,
+    usage_ledger: ResearchUsageLedgerRef,
+}
+
+struct ResearchModelRuntime<'a> {
+    turn_config: &'a TurnConfig,
+    usage_ledger: &'a ResearchUsageLedgerRef,
+    session_id: SessionId,
+    turn_id: TurnId,
+}
+
+struct ResearcherAgentTaskInput<'a> {
+    research_brief: &'a str,
+    research_context: &'a ResearchRequestContext,
+    task_index: usize,
+    total_tasks: usize,
+}
+
+struct ResearchChildWaitTarget<'a> {
+    session_id: SessionId,
+    turn_id: TurnId,
+    artifact_item_id: ItemId,
+    child_session_id: SessionId,
+    agent_path: &'a str,
+}
+
+struct ResearchChildWaitBuffers<'a> {
+    after_sequence: &'a mut u64,
+    notes: &'a mut String,
+}
+
 type ResearchUsageLedgerRef = Arc<Mutex<ResearchUsageLedger>>;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -521,11 +556,13 @@ impl ServerRuntime {
             .run_research_pipeline(
                 session_id,
                 &turn,
-                turn_config.clone(),
-                &display_input,
-                &question,
-                cwd,
-                Arc::clone(&usage_ledger),
+                ResearchPipelineInput {
+                    turn_config: turn_config.clone(),
+                    display_input: &display_input,
+                    question: &question,
+                    cwd,
+                    usage_ledger: Arc::clone(&usage_ledger),
+                },
             )
             .await;
         if result.is_err() {
@@ -576,12 +613,21 @@ impl ServerRuntime {
         self: &Arc<Self>,
         session_id: SessionId,
         turn: &TurnMetadata,
-        turn_config: TurnConfig,
-        display_input: &str,
-        question: &str,
-        cwd: String,
-        usage_ledger: ResearchUsageLedgerRef,
+        input: ResearchPipelineInput<'_>,
     ) -> anyhow::Result<()> {
+        let ResearchPipelineInput {
+            turn_config,
+            display_input,
+            question,
+            cwd,
+            usage_ledger,
+        } = input;
+        let model_runtime = ResearchModelRuntime {
+            turn_config: &turn_config,
+            usage_ledger: &usage_ledger,
+            session_id,
+            turn_id: turn.turn_id,
+        };
         let research_config = self
             .deps
             .config_store
@@ -608,13 +654,10 @@ impl ServerRuntime {
         let clarify_prompt = devo_core::research::prompts::clarify();
         let clarify_text = self
             .model_text(
-                &turn_config,
+                &model_runtime,
                 clarify_prompt,
                 research_context.request_messages(Vec::new()),
-                &usage_ledger,
                 "clarify".to_string(),
-                session_id,
-                turn.turn_id,
             )
             .await?;
         if let Some(decision) = parse_json_object::<ClarifyDecision>(&clarify_text) {
@@ -666,13 +709,10 @@ impl ServerRuntime {
         let brief_prompt = devo_core::research::prompts::research_brief();
         let research_brief = self
             .model_text_artifact(
-                &turn_config,
+                &model_runtime,
                 brief_prompt,
                 research_context.request_messages(Vec::new()),
-                &usage_ledger,
                 "brief".to_string(),
-                session_id,
-                turn.turn_id,
                 ResearchArtifactType::Brief,
                 "Research Brief",
             )
@@ -681,15 +721,12 @@ impl ServerRuntime {
         let plan_prompt = devo_core::research::prompts::supervisor(research_config.max_tasks);
         let plan_text = self
             .model_text(
-                &turn_config,
+                &model_runtime,
                 plan_prompt,
                 research_context.request_messages(vec![
                     devo_core::research::prompts::research_brief_context(&research_brief),
                 ]),
-                &usage_ledger,
                 "plan".to_string(),
-                session_id,
-                turn.turn_id,
             )
             .await?;
         let mut tasks = parse_json_object::<SupervisorPlan>(&plan_text)
@@ -758,10 +795,12 @@ impl ServerRuntime {
                     .run_researcher_agent_task(
                         session_id,
                         turn.turn_id,
-                        &research_brief,
-                        &research_context,
-                        index,
-                        total_tasks,
+                        ResearcherAgentTaskInput {
+                            research_brief: &research_brief,
+                            research_context: &research_context,
+                            task_index: index,
+                            total_tasks,
+                        },
                         task,
                     )
                     .await?;
@@ -779,13 +818,10 @@ impl ServerRuntime {
         for (output_index, output) in outputs {
             let webpage_summaries = self
                 .summarize_oversized_fetches(
-                    &turn_config,
+                    &model_runtime,
                     &output.topic,
                     output.oversized_fetches,
                     research_config.max_summary_chars,
-                    session_id,
-                    turn.turn_id,
-                    &usage_ledger,
                     &research_context,
                     format!("researcher_{output_index}"),
                 )
@@ -802,13 +838,10 @@ impl ServerRuntime {
             ));
             let compressed = self
                 .model_text_artifact(
-                    &turn_config,
+                    &model_runtime,
                     compress_prompt,
                     compress_messages,
-                    &usage_ledger,
                     format!("researcher_{output_index}_compress"),
-                    session_id,
-                    turn.turn_id,
                     ResearchArtifactType::CompressedFinding,
                     format!("Compressed Finding: {}", output.title),
                 )
@@ -819,9 +852,7 @@ impl ServerRuntime {
         let final_prompt = devo_core::research::prompts::final_report();
         let final_report = self
             .stream_final_report(
-                session_id,
-                turn.turn_id,
-                &turn_config,
+                &model_runtime,
                 final_prompt,
                 question,
                 research_context.session_messages(vec![
@@ -830,7 +861,6 @@ impl ServerRuntime {
                         &compressed_findings.join("\n\n"),
                     ),
                 ]),
-                &usage_ledger,
             )
             .await?;
         let context_reference = build_research_context_reference(
@@ -919,12 +949,15 @@ impl ServerRuntime {
         self: Arc<Self>,
         session_id: SessionId,
         turn_id: TurnId,
-        research_brief: &str,
-        research_context: &ResearchRequestContext,
-        task_index: usize,
-        total_tasks: usize,
+        input: ResearcherAgentTaskInput<'_>,
         task: ResearchTask,
     ) -> anyhow::Result<ResearcherOutput> {
+        let ResearcherAgentTaskInput {
+            research_brief,
+            research_context,
+            task_index,
+            total_tasks,
+        } = input;
         let artifact_title = format!("Research Finding: {}", task.title.trim());
         let artifact = ResearchArtifactItem {
             artifact_type: ResearchArtifactType::Finding,
@@ -967,13 +1000,17 @@ impl ServerRuntime {
         let mut after_sequence = 0_u64;
         let mut terminal = self
             .wait_research_child_until_terminal(
-                session_id,
-                turn_id,
-                artifact_item_id,
-                spawn_result.child_session_id,
-                spawn_result.agent_path.as_str(),
-                &mut after_sequence,
-                &mut notes,
+                ResearchChildWaitTarget {
+                    session_id,
+                    turn_id,
+                    artifact_item_id,
+                    child_session_id: spawn_result.child_session_id,
+                    agent_path: spawn_result.agent_path.as_str(),
+                },
+                ResearchChildWaitBuffers {
+                    after_sequence: &mut after_sequence,
+                    notes: &mut notes,
+                },
             )
             .await?;
         self.merge_child_research_output(
@@ -1013,13 +1050,17 @@ impl ServerRuntime {
                 Ok(_) => {
                     terminal = self
                         .wait_research_child_until_terminal(
-                            session_id,
-                            turn_id,
-                            artifact_item_id,
-                            spawn_result.child_session_id,
-                            spawn_result.agent_path.as_str(),
-                            &mut after_sequence,
-                            &mut notes,
+                            ResearchChildWaitTarget {
+                                session_id,
+                                turn_id,
+                                artifact_item_id,
+                                child_session_id: spawn_result.child_session_id,
+                                agent_path: spawn_result.agent_path.as_str(),
+                            },
+                            ResearchChildWaitBuffers {
+                                after_sequence: &mut after_sequence,
+                                notes: &mut notes,
+                            },
                         )
                         .await?;
                     self.merge_child_research_output(
@@ -1072,13 +1113,17 @@ impl ServerRuntime {
             let mut restart_after_sequence = 0_u64;
             terminal = self
                 .wait_research_child_until_terminal(
-                    session_id,
-                    turn_id,
-                    artifact_item_id,
-                    restart_result.child_session_id,
-                    restart_result.agent_path.as_str(),
-                    &mut restart_after_sequence,
-                    &mut notes,
+                    ResearchChildWaitTarget {
+                        session_id,
+                        turn_id,
+                        artifact_item_id,
+                        child_session_id: restart_result.child_session_id,
+                        agent_path: restart_result.agent_path.as_str(),
+                    },
+                    ResearchChildWaitBuffers {
+                        after_sequence: &mut restart_after_sequence,
+                        notes: &mut notes,
+                    },
                 )
                 .await?;
             self.merge_child_research_output(
@@ -1137,14 +1182,20 @@ impl ServerRuntime {
 
     async fn wait_research_child_until_terminal(
         self: &Arc<Self>,
-        session_id: SessionId,
-        turn_id: TurnId,
-        artifact_item_id: ItemId,
-        child_session_id: SessionId,
-        agent_path: &str,
-        after_sequence: &mut u64,
-        notes: &mut String,
+        target: ResearchChildWaitTarget<'_>,
+        buffers: ResearchChildWaitBuffers<'_>,
     ) -> anyhow::Result<ResearchSubagentTerminal> {
+        let ResearchChildWaitTarget {
+            session_id,
+            turn_id,
+            artifact_item_id,
+            child_session_id,
+            agent_path,
+        } = target;
+        let ResearchChildWaitBuffers {
+            after_sequence,
+            notes,
+        } = buffers;
         loop {
             let wait_result = Arc::clone(self)
                 .wait_agent(devo_protocol::WaitAgentParams {
@@ -1499,13 +1550,10 @@ impl ServerRuntime {
 
     async fn summarize_oversized_fetches(
         &self,
-        turn_config: &TurnConfig,
+        runtime: &ResearchModelRuntime<'_>,
         topic: &str,
         fetches: Vec<OversizedFetch>,
         max_summary_chars: usize,
-        session_id: SessionId,
-        turn_id: TurnId,
-        usage_ledger: &ResearchUsageLedgerRef,
         research_context: &ResearchRequestContext,
         usage_prefix: String,
     ) -> anyhow::Result<Vec<String>> {
@@ -1514,7 +1562,7 @@ impl ServerRuntime {
             let prompt = devo_core::research::prompts::summarize_webpage(max_summary_chars);
             let summary = self
                 .model_text_artifact(
-                    turn_config,
+                    runtime,
                     prompt,
                     research_context.request_messages(vec![
                         devo_core::research::prompts::research_topic_context(topic),
@@ -1524,10 +1572,7 @@ impl ServerRuntime {
                             &fetch.content,
                         ),
                     ]),
-                    usage_ledger,
                     format!("{usage_prefix}_webpage_summary_{index}"),
-                    session_id,
-                    turn_id,
                     ResearchArtifactType::WebpageSummary,
                     format!("Webpage Summary {}", index + 1),
                 )
@@ -1744,22 +1789,19 @@ impl ServerRuntime {
 
     async fn stream_final_report(
         self: &Arc<Self>,
-        session_id: SessionId,
-        turn_id: TurnId,
-        turn_config: &TurnConfig,
+        runtime: &ResearchModelRuntime<'_>,
         prompt: String,
         question: &str,
         messages: Vec<devo_core::Message>,
-        usage_ledger: &ResearchUsageLedgerRef,
     ) -> anyhow::Result<String> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let callback = Arc::new(move |event: QueryEvent| {
             let _ = tx.send(event);
         });
-        let mut final_turn_config = turn_config.clone();
+        let mut final_turn_config = runtime.turn_config.clone();
         final_turn_config.web_search = devo_core::ResolvedWebSearchConfig::Disabled;
         final_turn_config.web_fetch = devo_core::ResolvedWebFetchConfig::Disabled;
-        let mut scratch = self.scratch_session(session_id).await?;
+        let mut scratch = self.scratch_session(runtime.session_id).await?;
         scratch.config.token_budget = final_turn_config.token_budget();
         scratch.session_context = Some(research_session_context(
             &scratch,
@@ -1774,10 +1816,10 @@ impl ServerRuntime {
                 .registry
                 .restricted_to_specs(RESEARCH_FILE_TOOL_NAMES),
         );
-        let runtime = self
+        let tool_runtime = self
             .tool_runtime_for_research(
-                session_id,
-                turn_id,
+                runtime.session_id,
+                runtime.turn_id,
                 &final_turn_config,
                 Arc::clone(&registry),
             )
@@ -1790,7 +1832,7 @@ impl ServerRuntime {
                 self.deps
                     .provider_for_route(final_turn_config.provider_route.clone()),
                 Arc::clone(&registry),
-                &runtime,
+                &tool_runtime,
                 Some(callback),
             );
             tokio::pin!(query_future);
@@ -1800,10 +1842,10 @@ impl ServerRuntime {
                     maybe_event = rx.recv(), if !event_channel_closed => {
                         if let Some(event) = maybe_event {
                             self.handle_final_report_query_event(
-                                session_id,
-                                turn_id,
+                                runtime.session_id,
+                                runtime.turn_id,
                                 &mut capture,
-                                usage_ledger,
+                                runtime.usage_ledger,
                                 event,
                             )
                             .await;
@@ -1820,15 +1862,15 @@ impl ServerRuntime {
         query_result?;
         while let Some(event) = rx.recv().await {
             self.handle_final_report_query_event(
-                session_id,
-                turn_id,
+                runtime.session_id,
+                runtime.turn_id,
                 &mut capture,
-                usage_ledger,
+                runtime.usage_ledger,
                 event,
             )
             .await;
         }
-        self.complete_reasoning_item(session_id, turn_id, &mut capture.reasoning)
+        self.complete_reasoning_item(runtime.session_id, runtime.turn_id, &mut capture.reasoning)
             .await;
         if !capture.turn_completed {
             anyhow::bail!("research final report stream ended without message completion");
@@ -1869,7 +1911,13 @@ impl ServerRuntime {
         }
         if report_file_requested && final_report_write.is_none() {
             let path = self
-                .write_final_report_fallback(session_id, turn_id, &runtime, question, &report_text)
+                .write_final_report_fallback(
+                    runtime.session_id,
+                    runtime.turn_id,
+                    &tool_runtime,
+                    question,
+                    &report_text,
+                )
                 .await?;
             final_report_write = Some(FinalReportWrite {
                 path,
@@ -1882,8 +1930,8 @@ impl ServerRuntime {
             .map(|write| final_report_written_response(&write.path, &report_text))
             .unwrap_or(final_text);
         self.complete_agent_message_item(
-            session_id,
-            turn_id,
+            runtime.session_id,
+            runtime.turn_id,
             &mut capture.assistant,
             completed_text,
         )
@@ -1996,22 +2044,16 @@ impl ServerRuntime {
 
     async fn model_text(
         &self,
-        turn_config: &TurnConfig,
+        runtime: &ResearchModelRuntime<'_>,
         prompt: String,
         messages: Vec<devo_protocol::RequestMessage>,
-        usage_ledger: &ResearchUsageLedgerRef,
         usage_key: String,
-        session_id: SessionId,
-        turn_id: TurnId,
     ) -> anyhow::Result<String> {
         self.model_text_with_display(
-            turn_config,
+            runtime,
             prompt,
             messages,
-            usage_ledger,
             usage_key,
-            session_id,
-            turn_id,
             ResearchModelTextDisplay::Hidden,
         )
         .await
@@ -2019,24 +2061,18 @@ impl ServerRuntime {
 
     async fn model_text_artifact(
         &self,
-        turn_config: &TurnConfig,
+        runtime: &ResearchModelRuntime<'_>,
         prompt: String,
         messages: Vec<devo_protocol::RequestMessage>,
-        usage_ledger: &ResearchUsageLedgerRef,
         usage_key: String,
-        session_id: SessionId,
-        turn_id: TurnId,
         artifact_type: ResearchArtifactType,
         title: impl Into<String>,
     ) -> anyhow::Result<String> {
         self.model_text_with_display(
-            turn_config,
+            runtime,
             prompt,
             messages,
-            usage_ledger,
             usage_key,
-            session_id,
-            turn_id,
             ResearchModelTextDisplay::ResearchArtifact(StreamedResearchArtifact {
                 artifact_type,
                 title: title.into(),
@@ -2047,19 +2083,16 @@ impl ServerRuntime {
 
     async fn model_text_with_display(
         &self,
-        turn_config: &TurnConfig,
+        runtime: &ResearchModelRuntime<'_>,
         prompt: String,
         messages: Vec<devo_protocol::RequestMessage>,
-        usage_ledger: &ResearchUsageLedgerRef,
         usage_key: String,
-        session_id: SessionId,
-        turn_id: TurnId,
         display: ResearchModelTextDisplay,
     ) -> anyhow::Result<String> {
-        let request = model_text_request(turn_config, prompt, messages);
+        let request = model_text_request(runtime.turn_config, prompt, messages);
         let mut stream = self
             .deps
-            .provider_for_route(turn_config.provider_route.clone())
+            .provider_for_route(runtime.turn_config.provider_route.clone())
             .completion_stream(request)
             .await?;
         let mut text = String::new();
@@ -2074,8 +2107,8 @@ impl ServerRuntime {
                     text.push_str(&delta);
                     if let ResearchModelTextDisplay::ResearchArtifact(display) = &display {
                         self.push_research_artifact_delta(
-                            session_id,
-                            turn_id,
+                            runtime.session_id,
+                            runtime.turn_id,
                             &mut artifact,
                             display,
                             delta,
@@ -2085,21 +2118,30 @@ impl ServerRuntime {
                 }
                 StreamEvent::ReasoningDelta { text: delta, .. } => {
                     saw_reasoning = true;
-                    self.push_reasoning_delta(session_id, turn_id, &mut reasoning, delta)
-                        .await;
+                    self.push_reasoning_delta(
+                        runtime.session_id,
+                        runtime.turn_id,
+                        &mut reasoning,
+                        delta,
+                    )
+                    .await;
                 }
                 StreamEvent::ReasoningDone { .. } => {
-                    self.complete_reasoning_item(session_id, turn_id, &mut reasoning)
-                        .await;
+                    self.complete_reasoning_item(
+                        runtime.session_id,
+                        runtime.turn_id,
+                        &mut reasoning,
+                    )
+                    .await;
                 }
                 StreamEvent::MessageDone { response } => {
                     final_response = Some(response);
                 }
                 StreamEvent::UsageDelta(usage) => {
                     self.apply_research_usage(
-                        session_id,
-                        turn_id,
-                        usage_ledger,
+                        runtime.session_id,
+                        runtime.turn_id,
+                        runtime.usage_ledger,
                         usage_key.clone(),
                         ResearchUsageTotals::from_usage(&usage),
                     )
@@ -2118,25 +2160,30 @@ impl ServerRuntime {
             if !saw_reasoning {
                 let reasoning_text = response_reasoning_text(response);
                 if !reasoning_text.is_empty() {
-                    self.push_reasoning_delta(session_id, turn_id, &mut reasoning, reasoning_text)
-                        .await;
+                    self.push_reasoning_delta(
+                        runtime.session_id,
+                        runtime.turn_id,
+                        &mut reasoning,
+                        reasoning_text,
+                    )
+                    .await;
                 }
             }
             self.apply_research_usage(
-                session_id,
-                turn_id,
-                usage_ledger,
+                runtime.session_id,
+                runtime.turn_id,
+                runtime.usage_ledger,
                 usage_key,
                 ResearchUsageTotals::from_usage(&response.usage),
             )
             .await;
         }
-        self.complete_reasoning_item(session_id, turn_id, &mut reasoning)
+        self.complete_reasoning_item(runtime.session_id, runtime.turn_id, &mut reasoning)
             .await;
         if let ResearchModelTextDisplay::ResearchArtifact(display) = &display {
             self.complete_research_artifact_item(
-                session_id,
-                turn_id,
+                runtime.session_id,
+                runtime.turn_id,
                 &mut artifact,
                 display,
                 &text,
@@ -2581,7 +2628,7 @@ fn extract_urls(text: &str) -> Vec<String> {
     text.split_whitespace()
         .filter(|part| part.starts_with("http://") || part.starts_with("https://"))
         .map(|part| {
-            part.trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ')' | ']' | '}'))
+            part.trim_end_matches(['.', ',', ';', ')', ']', '}'])
                 .to_string()
         })
         .filter(|url| !url.is_empty())
@@ -2638,7 +2685,7 @@ fn delegated_research_task_message(
     }
     message.push_str("\n</research_topic>\n\n");
     message.push_str(
-        "Return concise evidence notes for the parent researcher, not a final report. Include searches/tool calls performed, key findings, a source table, conflicts or uncertainty, recommended citations, and any local file paths written or modified. Do not fabricate citations, URLs, source titles, dates, quotes, or source access.",
+        "Return concise evidence notes for the parent researcher, not a final report. Do not write files, create local report artifacts, or modify the workspace unless this exact delegated task explicitly requires a local file change. Include searches/tool calls performed, key findings, a source table, conflicts or uncertainty, recommended citations, and any local file paths read for evidence. Do not fabricate citations, URLs, source titles, dates, quotes, or source access.",
     );
     message
 }
@@ -2669,7 +2716,7 @@ fn delegated_research_restart_message(
         message.push_str(detail);
     }
     message.push_str(
-        "\n</previous_worker_failure>\n\nA previous worker could not complete this task. Restart from the task brief, avoid repeating the same failure mode, and return evidence notes with explicit limitations if sources/tools are unavailable.",
+        "\n</previous_worker_failure>\n\nA previous worker could not complete this task. Restart from the task brief, avoid repeating the same failure mode, and return evidence notes with explicit limitations if sources/tools are unavailable. Do not write files or create local report artifacts.",
     );
     message
 }
@@ -2701,7 +2748,7 @@ fn delegated_research_continuation_message(
         message.push_str("\n</partial_notes_already_seen_by_parent>\n\n");
     }
     message.push_str(
-        "Continue from the available context. If a source/tool failed, try an alternate source or report the limitation explicitly. Return only evidence notes, source details, conflicts or uncertainty, and recommended citations.",
+        "Continue from the available context. If a source/tool failed, try an alternate source or report the limitation explicitly. Return only evidence notes, source details, conflicts or uncertainty, and recommended citations. Do not write files or create local report artifacts.",
     );
     message
 }

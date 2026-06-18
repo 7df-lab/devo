@@ -188,6 +188,22 @@ impl ServerRuntime {
         turn_item: TurnItem,
         payload: serde_json::Value,
     ) {
+        if !should_emit_turn_item_events(&turn_item) {
+            let item_id = ItemId::new();
+            let item_seq = self.allocate_item_sequence(session_id).await;
+            self.persist_item(
+                session_id,
+                turn_id,
+                item_id,
+                item_seq,
+                turn_item,
+                Some(TurnStatus::Running),
+                None,
+            )
+            .await;
+            return;
+        }
+
         let (item_id, item_seq) = self
             .start_item(session_id, turn_id, item_kind.clone(), payload.clone())
             .await;
@@ -389,6 +405,16 @@ pub(crate) fn render_input_items(input: &[crate::InputItem]) -> Option<String> {
     (!rendered.is_empty()).then_some(rendered)
 }
 
+fn should_emit_turn_item_events(turn_item: &TurnItem) -> bool {
+    !matches!(
+        turn_item,
+        TurnItem::ResearchArtifact(ResearchArtifactItem {
+            artifact_type: ResearchArtifactType::FinalReportMetadata,
+            ..
+        })
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -440,6 +466,28 @@ mod tests {
                 text: " \n\t ".to_string(),
             }]),
             None
+        );
+    }
+
+    #[test]
+    fn final_report_metadata_is_prompt_only() {
+        let prompt_only = TurnItem::ResearchArtifact(ResearchArtifactItem {
+            artifact_type: ResearchArtifactType::FinalReportMetadata,
+            title: "Research Context Reference".to_string(),
+            content: "compact reference".to_string(),
+        });
+        let visible_artifact = TurnItem::ResearchArtifact(ResearchArtifactItem {
+            artifact_type: ResearchArtifactType::Finding,
+            title: "Research Finding".to_string(),
+            content: "finding body".to_string(),
+        });
+
+        assert_eq!(
+            vec![
+                should_emit_turn_item_events(&prompt_only),
+                should_emit_turn_item_events(&visible_artifact),
+            ],
+            vec![false, true]
         );
     }
 }

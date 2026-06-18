@@ -175,6 +175,10 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
             }
             Some(item)
         }
+        TurnItem::ResearchArtifact(ResearchArtifactItem {
+            artifact_type: devo_core::ResearchArtifactType::FinalReportMetadata,
+            ..
+        }) => None,
         TurnItem::ResearchArtifact(ResearchArtifactItem { title, content, .. }) => {
             Some(SessionHistoryItem::new(
                 None,
@@ -680,6 +684,19 @@ mod tests {
         assert_eq!(history_item.kind, SessionHistoryItemKind::Assistant);
         assert_eq!(history_item.title, "Research Brief");
         assert_eq!(history_item.body, "brief body");
+    }
+
+    #[test]
+    fn final_report_metadata_is_hidden_from_history_projection() {
+        // Trace: L2-DES-RESEARCH-001
+        // Verifies: compact research handoff metadata remains prompt-only.
+        let item = TurnItem::ResearchArtifact(ResearchArtifactItem {
+            artifact_type: ResearchArtifactType::FinalReportMetadata,
+            title: "Research Context Reference".to_string(),
+            content: "compact reference".to_string(),
+        });
+
+        assert_eq!(history_item_from_turn_item(&item), None);
     }
 
     #[test]

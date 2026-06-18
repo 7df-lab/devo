@@ -236,6 +236,8 @@ mod tests {
 
         assert!(prompt.contains("Stage: delegated deep research worker."));
         assert!(prompt.contains("not a final user-facing"));
+        assert!(prompt.contains("Do not write files"));
+        assert!(prompt.contains("assistant text only"));
         assert!(!prompt.contains("{{"));
     }
 
