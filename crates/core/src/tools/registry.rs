@@ -647,7 +647,7 @@ mod tests {
                 .iter()
                 .map(|tool| &tool.name)
                 .collect::<Vec<_>>(),
-            vec!["read", "ToolSearch"]
+            vec!["read", "ToolSearch", "web_search"]
         );
         assert_eq!(
             prompt
@@ -655,7 +655,7 @@ mod tests {
                 .iter()
                 .map(|tool| &tool.name)
                 .collect::<Vec<_>>(),
-            vec!["web_search"]
+            Vec::<&String>::new()
         );
     }
 
@@ -717,7 +717,7 @@ mod tests {
                 &DeferredLoadingConfig::default(),
                 "select:WebSearch",
             )
-            .expect("deferred tool should be available");
+            .expect("preloaded tool should be available");
 
         assert_eq!(
             summary,

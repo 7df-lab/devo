@@ -237,7 +237,8 @@ pub async fn compact_history(
 
         // Build the compacted items using CompactionSummary.
         let summary_fragment = CompactionSummary::new(summary);
-        let mut compacted = vec![summary_fragment.to_response_item()];
+        let mut compacted = Vec::with_capacity(preserved.len().saturating_add(1));
+        compacted.push(summary_fragment.to_response_item());
         compacted.extend(preserved);
 
         return Ok(CompactAction::Replaced(compacted));
@@ -248,12 +249,6 @@ pub async fn compact_history(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Splits items into a "to compact" prefix and a "to preserve" suffix.
-///
-/// The split is based on a token budget for preserving the most recent user
-/// messages. The function walks backward from the end, accumulating user
-/// message tokens until the budget is exhausted, and everything before that
-/// point is marked for compaction.
 /// Splits items into a "to compact" prefix and a "to preserve" suffix.
 ///
 /// Walks backward from the end, accumulating item token estimates until the

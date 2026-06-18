@@ -34,11 +34,12 @@ pub fn system() -> String {
     SYSTEM_TEMPLATE.trim_end().to_string()
 }
 
-pub fn environment_context(current_date: &str, timezone: &str) -> String {
+pub fn environment_context(current_date: &str, timezone: &str, cwd: &str) -> String {
     let current_date = escape_xml_text(current_date);
     let timezone = escape_xml_text(timezone);
+    let cwd = escape_xml_text(cwd);
     format!(
-        "<research_environment>\n<current_date>{current_date}</current_date>\n<timezone>{timezone}</timezone>\n</research_environment>"
+        "<research_environment>\n<current_date>{current_date}</current_date>\n<timezone>{timezone}</timezone>\n<cwd>{cwd}</cwd>\n</research_environment>"
     )
 }
 
@@ -60,10 +61,6 @@ pub fn research_topic_context(research_topic: &str) -> String {
 
 pub fn research_notes_context(research_notes: &str) -> String {
     tagged_block("research_notes", research_notes)
-}
-
-pub fn tool_transcript_context(tool_transcript: &str) -> String {
-    tagged_block("visible_tool_transcript", tool_transcript)
 }
 
 pub fn webpage_summaries_context(webpage_summaries: &str) -> String {
@@ -179,14 +176,14 @@ mod tests {
     }
 
     #[test]
-    fn environment_context_escapes_date_and_timezone() {
+    fn environment_context_escapes_date_timezone_and_cwd() {
         // Trace: L2-DES-RESEARCH-001
         // Verifies: research environment is a separate user-role context block.
-        let context = environment_context("2026-06-17", "Asia/<Shanghai>");
+        let context = environment_context("2026-06-17", "Asia/<Shanghai>", "/tmp/a&b");
 
         assert_eq!(
             context,
-            "<research_environment>\n<current_date>2026-06-17</current_date>\n<timezone>Asia/&lt;Shanghai&gt;</timezone>\n</research_environment>"
+            "<research_environment>\n<current_date>2026-06-17</current_date>\n<timezone>Asia/&lt;Shanghai&gt;</timezone>\n<cwd>/tmp/a&amp;b</cwd>\n</research_environment>"
         );
     }
 
@@ -246,11 +243,11 @@ mod tests {
     fn context_helpers_escape_research_artifacts() {
         // Trace: L2-DES-RESEARCH-001
         // Verifies: generated research artifacts are separate escaped context blocks.
-        let context = tool_transcript_context("web_search <input>");
+        let context = research_notes_context("web_search <input>");
 
         assert_eq!(
             context,
-            "<visible_tool_transcript>\nweb_search &lt;input&gt;\n</visible_tool_transcript>"
+            "<research_notes>\nweb_search &lt;input&gt;\n</research_notes>"
         );
     }
 

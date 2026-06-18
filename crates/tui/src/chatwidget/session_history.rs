@@ -286,7 +286,10 @@ impl ChatWidget {
             if let Some(first_line) = body_lines.first_mut() {
                 first_line.spans.insert(
                     0,
-                    Span::styled("Thinking: ", Self::reasoning_heading_style()),
+                    Span::styled(
+                        reasoning_heading_for_status(status),
+                        Self::reasoning_heading_style(),
+                    ),
                 );
             }
             lines.extend(body_lines);
@@ -486,5 +489,12 @@ impl ChatWidget {
         self.refresh_user_cell_indices();
         self.exit_selection_mode();
         self.frame_requester.schedule_frame();
+    }
+}
+
+fn reasoning_heading_for_status(status: DotStatus) -> &'static str {
+    match status {
+        DotStatus::Completed => "Thought: ",
+        DotStatus::Pending | DotStatus::Failed => "Thinking: ",
     }
 }

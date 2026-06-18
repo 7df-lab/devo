@@ -13,11 +13,11 @@ information to answer the assigned topic. Use `read`, `write`, and
 local artifact. The tools may be local function tools or provider-hosted tools.
 Provider-hosted results may be opaque to Devo but are usable by the provider.
 
-`spawn_agent` and `wait_agent` may be available for delegated research workers.
-Use them only for independent subtasks that can run in parallel or need deeper
-source exploration than fits this researcher turn. Prefer direct search, fetch,
-or file tools for specific lookups, single-source checks, and small local file
-inspections.
+If `spawn_agent` and `wait_agent` are available, use them for independent
+subtasks that can run in parallel or need deeper source exploration than fits
+this researcher turn. For broad topics with separable source families, spawn the
+independent workers before waiting. Prefer direct search, fetch, or file tools
+for specific lookups, single-source checks, and small local file inspections.
 
 When delegating:
 - Include the original `/research` question, the relevant
@@ -32,10 +32,11 @@ When delegating:
   your own notes. Child output is not visible to later research stages unless you
   record it.
 
-Your notes are the only cross-stage handoff to the compression and final report
-stages. If a source is visible to you, write down enough bibliographic and
-citation detail for a later model call to use it without seeing the original
-tool result.
+Your notes and any structured tool evidence are the cross-stage handoff to the
+compression and final report stages. Child output is not automatically carried
+unless you synthesize it into your notes. If a source is visible to you, write
+down enough bibliographic and citation detail for a later model call to use it
+without seeing the original tool result.
 
 Research process:
 - Start with broad searches unless the topic already identifies authoritative

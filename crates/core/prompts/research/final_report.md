@@ -21,6 +21,7 @@ Requirements:
   the `write` tool before the final visible response.
 - If the user did not provide a path, choose a concise topic-based `.md`
   filename.
+- Resolve relative report paths from the cwd in `<research_environment>`.
 - The visible final response should be concise after a successful write: include
   the written file path and a short summary. Do not duplicate the full report
   inline unless the user asked for inline output.
@@ -38,6 +39,6 @@ Requirements:
   in the report.
 - Do not refer to yourself or describe what you are doing.
 - Do not expose the internal research workflow, task names, compression process,
-  or tool transcript mechanics.
+  or provider/tool context mechanics.
 - Do not introduce claims that are not supported by the supplied findings or
   research context.

@@ -1,12 +1,12 @@
 ---
 artifact_id: L2-DES-RESEARCH-001
-revision: 2
+revision: 3
 status: Draft
 active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-06-17
+last_updated: 2026-06-18
 ---
 
 # L2-DES-RESEARCH-001 — Deep Research Workflow
@@ -26,6 +26,7 @@ Define the v1 `/research <question>` workflow as a server-owned multi-stage rese
 - Web tool calls and results are recorded as normal `ToolCall` and `ToolResult` items through the existing turn item and rollout/event replay path. The workflow does not create a separate research evidence database.
 - Provider-hosted encrypted or opaque web results are preserved exactly as received. Devo does not attempt to decrypt them.
 - Local fetched webpage content that exceeds the research threshold is summarized with `summarize_webpage.md` before downstream compression and report stages.
+- Runtime research context includes the effective cwd in `<research_environment>` so local report paths and workspace-relative file operations resolve from the same directory as the research tools.
 - Research cancellation uses the existing `turn/interrupt` active-turn interrupt path.
 
 ## Context Boundary
@@ -87,5 +88,6 @@ All stages reuse the active session model, provider, thinking, web search, and w
 
 | Revision | Date | Author | Change Type | Notes |
 |---:|---|---|---|---|
+| 3 | 2026-06-18 | Assistant | Update | Adds cwd to the prompt-visible research runtime environment for local report output. |
 | 2 | 2026-06-17 | Assistant | Update | Defines the explicit `/research` context-boundary projection contract across live, replay, resume, and compaction paths. |
 | 1 | 2026-06-14 | Assistant | Initial | Initial v1 deep research workflow design. |

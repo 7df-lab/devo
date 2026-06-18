@@ -19,6 +19,7 @@ use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::ProviderWireApi;
 use devo_protocol::ReasoningEffort;
+use devo_protocol::RequestContent;
 use devo_protocol::ResponseContent;
 use devo_protocol::ResponseMetadata;
 use devo_protocol::StopReason;
@@ -59,8 +60,11 @@ impl ModelProviderSDK for UnusedProvider {
 
 struct ScriptedResearchProvider {
     stream_calls: AtomicUsize,
+    final_report_stream_calls: AtomicUsize,
+    delegated_worker_failures_before_success: AtomicUsize,
     researcher_gate: Option<Arc<Notify>>,
     final_report_mode: ScriptedFinalReportMode,
+    expected_cwd: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,27 +74,54 @@ enum ScriptedFinalReportMode {
 }
 
 impl ScriptedResearchProvider {
-    fn new() -> Self {
+    fn new(expected_cwd: &std::path::Path) -> Self {
         Self {
             stream_calls: AtomicUsize::new(0),
+            final_report_stream_calls: AtomicUsize::new(0),
+            delegated_worker_failures_before_success: AtomicUsize::new(0),
             researcher_gate: None,
             final_report_mode: ScriptedFinalReportMode::Text,
+            expected_cwd: expected_cwd.display().to_string(),
         }
     }
 
-    fn with_researcher_gate(researcher_gate: Arc<Notify>) -> Self {
+    fn with_researcher_gate(expected_cwd: &std::path::Path, researcher_gate: Arc<Notify>) -> Self {
         Self {
             stream_calls: AtomicUsize::new(0),
+            final_report_stream_calls: AtomicUsize::new(0),
+            delegated_worker_failures_before_success: AtomicUsize::new(0),
             researcher_gate: Some(researcher_gate),
             final_report_mode: ScriptedFinalReportMode::Text,
+            expected_cwd: expected_cwd.display().to_string(),
         }
     }
 
-    fn with_write_tool_only_final_report() -> Self {
+    fn with_write_tool_only_final_report(expected_cwd: &std::path::Path) -> Self {
         Self {
             stream_calls: AtomicUsize::new(0),
+            final_report_stream_calls: AtomicUsize::new(0),
+            delegated_worker_failures_before_success: AtomicUsize::new(0),
             researcher_gate: None,
             final_report_mode: ScriptedFinalReportMode::WriteToolOnly,
+            expected_cwd: expected_cwd.display().to_string(),
+        }
+    }
+
+    fn with_delegated_worker_failure_once(expected_cwd: &std::path::Path) -> Self {
+        Self::with_delegated_worker_failures_before_success(expected_cwd, 1)
+    }
+
+    fn with_delegated_worker_failures_before_success(
+        expected_cwd: &std::path::Path,
+        failures: usize,
+    ) -> Self {
+        Self {
+            stream_calls: AtomicUsize::new(0),
+            final_report_stream_calls: AtomicUsize::new(0),
+            delegated_worker_failures_before_success: AtomicUsize::new(failures),
+            researcher_gate: None,
+            final_report_mode: ScriptedFinalReportMode::Text,
+            expected_cwd: expected_cwd.display().to_string(),
         }
     }
 }
@@ -99,6 +130,9 @@ impl ScriptedResearchProvider {
 impl ModelProviderSDK for ScriptedResearchProvider {
     async fn completion(&self, request: ModelRequest) -> Result<ModelResponse> {
         let prompt = request_text(&request);
+        if is_research_request(&request) {
+            assert_research_environment_contains_cwd(&request, &self.expected_cwd);
+        }
         let text = if prompt_has_stage(&prompt, "clarification gate")
             || prompt.contains("\"need_clarification\"")
         {
@@ -126,10 +160,7 @@ impl ModelProviderSDK for ScriptedResearchProvider {
             r#"{"tasks":[{"title":"Official website","research_topic":"Find the current official DeepSeek website and citation details.","purpose":"Answer the brief","source_strategy":"Use official and search-result sources","success_criteria":"A visible URL and citation details are captured"}]}"#
                 .to_string()
         } else if prompt_has_stage(&prompt, "evidence pack compression") {
-            assert!(
-                prompt.contains("<visible_tool_transcript>"),
-                "compress prompt should include visible tool transcript"
-            );
+            assert_compress_request_uses_structured_context(&request);
             "Evidence pack: DeepSeek official website is https://www.deepseek.com/".to_string()
         } else {
             "Deep research mock title".to_string()
@@ -142,11 +173,54 @@ impl ModelProviderSDK for ScriptedResearchProvider {
         request: ModelRequest,
     ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
         let prompt = request_text(&request);
-        let call_index = self.stream_calls.fetch_add(1, Ordering::SeqCst);
-        let events = if prompt_has_stage(&prompt, "researcher evidence gathering") {
+        if is_research_request(&request) {
+            assert_research_environment_contains_cwd(&request, &self.expected_cwd);
+        }
+        let _stream_call_index = self.stream_calls.fetch_add(1, Ordering::SeqCst);
+        let events = if prompt_has_stage(&prompt, "clarification gate")
+            || prompt.contains("\"need_clarification\"")
+        {
+            assert!(
+                request.messages.iter().any(|message| {
+                    request_message_text(message)
+                        == "Research the current official DeepSeek website domain. Use web search, keep the final report short, and include source URLs."
+                }),
+                "research question should remain a standalone user-role message: {prompt}"
+            );
+            assert!(
+                !request
+                    .system
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("Research the current official DeepSeek website domain"),
+                "research question should not be injected into system prompt"
+            );
+            streamed_text_events(
+                r#"{"need_clarification":false,"question":"","verification":"Research DeepSeek official website."}"#,
+            )
+        } else if prompt_has_stage(&prompt, "research brief") {
+            streamed_text_events(
+                "## Objective\nResearch DeepSeek official website.\n\n## Scope\nCurrent official website.\n\n## Constraints And Preferences\nKeep it short.\n\n## Source Preferences\nOpen-ended.\n\n## Open Dimensions\nNone.\n\n## Report Language\nEnglish",
+            )
+        } else if prompt_has_stage(&prompt, "supervisor task plan") {
+            streamed_text_events(
+                r#"{"tasks":[{"title":"Official website","research_topic":"Find the current official DeepSeek website and citation details.","purpose":"Answer the brief","source_strategy":"Use official and search-result sources","success_criteria":"A visible URL and citation details are captured"}]}"#,
+            )
+        } else if prompt_has_stage(&prompt, "evidence pack compression") {
+            assert_compress_request_uses_structured_context(&request);
+            streamed_text_events(
+                "Evidence pack: DeepSeek official website is https://www.deepseek.com/",
+            )
+        } else if prompt_has_stage(&prompt, "fetched webpage summarization") {
+            streamed_text_events(r#"{"summary":"DeepSeek official website details."}"#)
+        } else if prompt_has_stage(&prompt, "delegated deep research worker") {
             assert!(
                 prompt.contains("<research_brief>"),
-                "researcher prompt should include overall brief"
+                "delegated worker prompt should include overall brief"
+            );
+            assert!(
+                prompt.contains("<original_research_question>"),
+                "delegated worker prompt should include original question"
             );
             let tool_names = request
                 .tools
@@ -160,23 +234,31 @@ impl ModelProviderSDK for ScriptedResearchProvider {
                 .unwrap_or_default();
             assert_eq!(
                 tool_names,
-                vec![
-                    "read",
-                    "write",
-                    "apply_patch",
-                    "webfetch",
-                    "spawn_agent",
-                    "wait_agent"
-                ],
-                "researcher requests should expose research-scoped local tools"
+                vec!["read", "write", "apply_patch", "webfetch"],
+                "delegated worker requests should expose research worker tools without coordination tools"
             );
             assert!(
                 request
                     .hosted_tools
                     .iter()
                     .any(|tool| matches!(tool, devo_protocol::HostedToolDefinition::WebSearch(_))),
-                "researcher requests should preserve provider-hosted web search"
+                "delegated worker requests should preserve provider-hosted web search"
             );
+            if self
+                .delegated_worker_failures_before_success
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    if remaining > 0 {
+                        Some(remaining - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Ok(Box::pin(stream::iter(vec![Err(anyhow::anyhow!(
+                    "simulated delegated worker failure"
+                ))])));
+            }
             if let Some(researcher_gate) = self.researcher_gate.as_ref().cloned() {
                 return Ok(Box::pin(stream::unfold(
                     (0_u8, researcher_gate),
@@ -217,17 +299,18 @@ impl ModelProviderSDK for ScriptedResearchProvider {
                 }),
                 Ok(StreamEvent::ReasoningDone { index: 0 }),
                 Ok(StreamEvent::MessageDone {
-                    response: model_response(
-                        "Researcher notes: official source https://www.deepseek.com/",
-                    ),
+                    response: hosted_web_search_researcher_response(),
                 }),
             ]
-        } else if prompt_has_stage(&prompt, "final report writing") || call_index == 1 {
+        } else if prompt_has_stage(&prompt, "final report writing") {
+            let final_report_call_index = self
+                .final_report_stream_calls
+                .fetch_add(1, Ordering::SeqCst);
             match self.final_report_mode {
                 ScriptedFinalReportMode::Text => {
                     assert_eq!(
-                        call_index, 1,
-                        "final report should be the second stream call"
+                        final_report_call_index, 0,
+                        "final report should be the first final-report stream call"
                     );
                     vec![
                         Ok(StreamEvent::ReasoningDelta {
@@ -251,7 +334,7 @@ impl ModelProviderSDK for ScriptedResearchProvider {
                         }),
                     ]
                 }
-                ScriptedFinalReportMode::WriteToolOnly if call_index == 1 => {
+                ScriptedFinalReportMode::WriteToolOnly if final_report_call_index == 0 => {
                     let input = serde_json::json!({
                         "filePath": "tool-written-report.md",
                         "content": "Final report: DeepSeek official website is https://www.deepseek.com/.\n\n## Sources\n- https://www.deepseek.com/",
@@ -280,7 +363,7 @@ impl ModelProviderSDK for ScriptedResearchProvider {
                 }
                 ScriptedFinalReportMode::WriteToolOnly => {
                     assert_eq!(
-                        call_index, 2,
+                        final_report_call_index, 1,
                         "final report should complete after the write tool result"
                     );
                     vec![Ok(StreamEvent::MessageDone {
@@ -301,6 +384,15 @@ impl ModelProviderSDK for ScriptedResearchProvider {
                 ),
                 "regular turn should receive final report: {prompt}"
             );
+            assert_eq!(
+                prompt
+                    .matches(
+                        "Final report: DeepSeek official website is https://www.deepseek.com/."
+                    )
+                    .count(),
+                1,
+                "regular turn should not receive a duplicated final report excerpt: {prompt}"
+            );
             assert!(
                 prompt.contains("Research Context Reference"),
                 "regular turn should receive compact research reference: {prompt}"
@@ -311,6 +403,7 @@ impl ModelProviderSDK for ScriptedResearchProvider {
                 "<research_brief>",
                 "You are a research assistant",
                 "Stage: researcher evidence gathering",
+                "Stage: delegated deep research worker",
                 "Stage: evidence pack compression",
                 "checking source",
             ] {
@@ -355,9 +448,17 @@ impl ModelProviderSDK for ClarifyingResearchProvider {
 
     async fn completion_stream(
         &self,
-        _request: ModelRequest,
+        request: ModelRequest,
     ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
-        anyhow::bail!("clarifying provider should be interrupted before streaming")
+        let prompt = request_text(&request);
+        let text = if prompt_has_stage(&prompt, "clarification gate")
+            || prompt.contains("\"need_clarification\"")
+        {
+            r#"{"need_clarification":true,"question":"Which scope should the research use?","verification":""}"#
+        } else {
+            "Deep research mock title"
+        };
+        Ok(Box::pin(stream::iter(streamed_text_events(text))))
     }
 
     fn name(&self) -> &str {
@@ -379,11 +480,20 @@ async fn deep_research_turn_streams_artifact_reasoning_and_final_report() -> Res
     let events = wait_for_research_completion(
         &runtime,
         connection_id,
+        session_id,
         &mut notifications_rx,
         "Use the provided scope.",
     )
     .await?;
 
+    assert!(
+        events.iter().any(|event| {
+            event.get("method") == Some(&serde_json::json!("session/started"))
+                && event["params"]["session"]["parent_session_id"]
+                    == serde_json::json!(session_id.to_string())
+        }),
+        "expected supervisor task to start a delegated child session: {events:#?}"
+    );
     assert!(
         events
             .iter()
@@ -415,18 +525,23 @@ async fn deep_research_turn_streams_artifact_reasoning_and_final_report() -> Res
         .filter(|event| {
             event.get("method") == Some(&serde_json::json!("item/completed"))
                 && event["params"]["item"]["item_kind"] == serde_json::json!("agent_message")
+                && event["params"]["context"]["session_id"]
+                    == serde_json::json!(session_id.to_string())
         })
         .count();
     assert_eq!(final_agent_messages, 1);
     let completed_turn = events
         .iter()
-        .find(|event| event.get("method") == Some(&serde_json::json!("turn/completed")))
+        .find(|event| {
+            event.get("method") == Some(&serde_json::json!("turn/completed"))
+                && event["params"]["session_id"] == serde_json::json!(session_id.to_string())
+        })
         .context("missing research turn completion")?;
     assert_eq!(
         completed_turn["params"]["turn"]["usage"],
         serde_json::json!({
-            "input_tokens": 6,
-            "output_tokens": 6,
+            "input_tokens": 5,
+            "output_tokens": 5,
             "cache_creation_input_tokens": null,
             "cache_read_input_tokens": null
         })
@@ -441,8 +556,9 @@ async fn deep_research_accepts_write_tool_only_final_report() -> Result<()> {
     // Verifies: a final report written only via the write tool is accepted as the report body.
     let workspace = TempDir::new()?;
     write_live_research_config(workspace.path())?;
-    let provider: Arc<dyn ModelProviderSDK> =
-        Arc::new(ScriptedResearchProvider::with_write_tool_only_final_report());
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(
+        ScriptedResearchProvider::with_write_tool_only_final_report(workspace.path()),
+    );
     let runtime = build_scripted_research_runtime_with_provider(workspace.path(), provider)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, workspace.path()).await?;
@@ -451,6 +567,7 @@ async fn deep_research_accepts_write_tool_only_final_report() -> Result<()> {
     let events = wait_for_research_completion(
         &runtime,
         connection_id,
+        session_id,
         &mut notifications_rx,
         "Use the provided scope.",
     )
@@ -483,21 +600,27 @@ async fn deep_research_streams_researcher_delta_before_query_finishes() -> Resul
     let workspace = TempDir::new()?;
     write_live_research_config(workspace.path())?;
     let researcher_gate = Arc::new(Notify::new());
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(
-        ScriptedResearchProvider::with_researcher_gate(Arc::clone(&researcher_gate)),
-    );
+    let provider: Arc<dyn ModelProviderSDK> =
+        Arc::new(ScriptedResearchProvider::with_researcher_gate(
+            workspace.path(),
+            Arc::clone(&researcher_gate),
+        ));
     let runtime = build_scripted_research_runtime_with_provider(workspace.path(), provider)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, workspace.path()).await?;
     start_research_turn(&runtime, connection_id, session_id).await?;
 
-    timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(5), async {
         while let Some(event) = notifications_rx.recv().await {
             let method = event
                 .get("method")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            if method == "item/researchArtifact/delta" {
+            if method == "item/researchArtifact/delta"
+                && event["params"]["payload"]["delta"]
+                    .as_str()
+                    .is_some_and(|delta| delta.contains("Researcher notes before completion"))
+            {
                 return Ok(());
             }
             if method == "turn/failed" {
@@ -517,10 +640,216 @@ async fn deep_research_streams_researcher_delta_before_query_finishes() -> Resul
     wait_for_research_completion(
         &runtime,
         connection_id,
+        session_id,
         &mut notifications_rx,
         "Use the provided scope.",
     )
     .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn deep_research_continues_after_delegated_worker_failure() -> Result<()> {
+    // Trace: L2-DES-RESEARCH-001
+    // Verifies: a failed delegated worker turn is continued instead of failing the whole research turn.
+    let workspace = TempDir::new()?;
+    write_live_research_config(workspace.path())?;
+    let provider: Arc<dyn ModelProviderSDK> =
+        Arc::new(ScriptedResearchProvider::with_delegated_worker_failure_once(workspace.path()));
+    let runtime = build_scripted_research_runtime_with_provider(workspace.path(), provider)?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, workspace.path()).await?;
+    start_research_turn(&runtime, connection_id, session_id).await?;
+
+    let events = wait_for_research_completion(
+        &runtime,
+        connection_id,
+        session_id,
+        &mut notifications_rx,
+        "Use the provided scope.",
+    )
+    .await?;
+
+    assert!(
+        events.iter().any(|event| {
+            event.get("method") == Some(&serde_json::json!("turn/failed"))
+                && event["params"]["session_id"] != serde_json::json!(session_id.to_string())
+        }),
+        "expected child turn failure to be visible before recovery: {events:#?}"
+    );
+    let completed_turn = events
+        .iter()
+        .find(|event| {
+            event.get("method") == Some(&serde_json::json!("turn/completed"))
+                && event["params"]["session_id"] == serde_json::json!(session_id.to_string())
+        })
+        .context("missing parent research turn completion")?;
+    assert_eq!(
+        completed_turn["params"]["turn"]["status"],
+        serde_json::json!("Completed")
+    );
+    let final_report = latest_agent_message(&events).context("expected final report message")?;
+    assert!(
+        final_report.contains("DeepSeek official website"),
+        "expected final report after delegated worker recovery: {final_report}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn deep_research_restarts_worker_when_continuation_fails() -> Result<()> {
+    // Trace: L2-DES-RESEARCH-001
+    // Verifies: if the original delegated worker and its continuation both fail, research restarts a replacement worker.
+    let workspace = TempDir::new()?;
+    write_live_research_config(workspace.path())?;
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(
+        ScriptedResearchProvider::with_delegated_worker_failures_before_success(
+            workspace.path(),
+            2,
+        ),
+    );
+    let runtime = build_scripted_research_runtime_with_provider(workspace.path(), provider)?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, workspace.path()).await?;
+    start_research_turn(&runtime, connection_id, session_id).await?;
+
+    let events = wait_for_research_completion(
+        &runtime,
+        connection_id,
+        session_id,
+        &mut notifications_rx,
+        "Use the provided scope.",
+    )
+    .await?;
+
+    let child_failures = events
+        .iter()
+        .filter(|event| {
+            event.get("method") == Some(&serde_json::json!("turn/failed"))
+                && event["params"]["session_id"] != serde_json::json!(session_id.to_string())
+        })
+        .count();
+    assert_eq!(child_failures, 2);
+    let child_starts = events
+        .iter()
+        .filter(|event| {
+            event.get("method") == Some(&serde_json::json!("session/started"))
+                && event["params"]["session"]["parent_session_id"]
+                    == serde_json::json!(session_id.to_string())
+        })
+        .count();
+    assert_eq!(child_starts, 2);
+    let final_report = latest_agent_message(&events).context("expected final report message")?;
+    assert!(
+        final_report.contains("DeepSeek official website"),
+        "expected final report after replacement worker recovery: {final_report}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn interrupted_research_closes_delegated_child_agent() -> Result<()> {
+    // Trace: L2-DES-RESEARCH-001
+    // Verifies: interrupting a parent research turn closes delegated child agents owned by the pipeline.
+    let workspace = TempDir::new()?;
+    write_live_research_config(workspace.path())?;
+    let researcher_gate = Arc::new(Notify::new());
+    let provider: Arc<dyn ModelProviderSDK> =
+        Arc::new(ScriptedResearchProvider::with_researcher_gate(
+            workspace.path(),
+            Arc::clone(&researcher_gate),
+        ));
+    let runtime = build_scripted_research_runtime_with_provider(workspace.path(), provider)?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, workspace.path()).await?;
+    let turn_id = start_research_turn(&runtime, connection_id, session_id).await?;
+
+    let child_session_id = timeout(Duration::from_secs(5), async {
+        let mut child_session_id = None;
+        let mut saw_researcher_delta = false;
+        while let Some(event) = notifications_rx.recv().await {
+            let method = event
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if method == "session/started"
+                && event["params"]["session"]["parent_session_id"]
+                    == serde_json::json!(session_id.to_string())
+            {
+                child_session_id = event["params"]["session"]["session_id"]
+                    .as_str()
+                    .map(str::to_string);
+            }
+            if method == "item/researchArtifact/delta"
+                && event["params"]["payload"]["delta"]
+                    .as_str()
+                    .is_some_and(|delta| delta.contains("Researcher notes before completion"))
+            {
+                saw_researcher_delta = true;
+            }
+            if saw_researcher_delta && let Some(child_session_id) = child_session_id.clone() {
+                return Ok(child_session_id);
+            }
+            if method == "turn/failed" {
+                anyhow::bail!(
+                    "research turn failed before child was running: {}",
+                    latest_agent_message(&[event])
+                        .unwrap_or_else(|| "no failure message was emitted".to_string())
+                );
+            }
+        }
+        anyhow::bail!("notification channel closed before delegated child started")
+    })
+    .await
+    .context("timed out waiting for delegated child to start")??;
+
+    let interrupt_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 33,
+                "method": "turn/interrupt",
+                "params": {
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "reason": "test interrupt"
+                }
+            }),
+        )
+        .await
+        .context("turn/interrupt response")?;
+    let interrupt_response: devo_server::SuccessResponse<devo_server::TurnInterruptResult> =
+        serde_json::from_value(interrupt_response)?;
+    assert_eq!(
+        interrupt_response.result.status,
+        devo_core::TurnStatus::Interrupted
+    );
+
+    let list_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 34,
+                "method": "agent/list",
+                "params": {
+                    "session_id": session_id
+                }
+            }),
+        )
+        .await
+        .context("agent/list response")?;
+    let list_response: devo_server::SuccessResponse<devo_protocol::AgentListResult> =
+        serde_json::from_value(list_response)?;
+    let child = list_response
+        .result
+        .agents
+        .iter()
+        .find(|agent| agent.session_id.to_string() == child_session_id)
+        .with_context(|| format!("missing delegated child {child_session_id}"))?;
+    assert_eq!(child.status, "closed");
 
     Ok(())
 }
@@ -532,17 +861,23 @@ async fn queued_regular_turn_starts_after_research_completes() -> Result<()> {
     let workspace = TempDir::new()?;
     write_live_research_config(workspace.path())?;
     let researcher_gate = Arc::new(Notify::new());
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(
-        ScriptedResearchProvider::with_researcher_gate(Arc::clone(&researcher_gate)),
-    );
+    let provider: Arc<dyn ModelProviderSDK> =
+        Arc::new(ScriptedResearchProvider::with_researcher_gate(
+            workspace.path(),
+            Arc::clone(&researcher_gate),
+        ));
     let runtime = build_scripted_research_runtime_with_provider(workspace.path(), provider)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, workspace.path()).await?;
     start_research_turn(&runtime, connection_id, session_id).await?;
 
-    timeout(Duration::from_secs(1), async {
+    timeout(Duration::from_secs(5), async {
         while let Some(event) = notifications_rx.recv().await {
-            if event.get("method") == Some(&serde_json::json!("item/researchArtifact/delta")) {
+            if event.get("method") == Some(&serde_json::json!("item/researchArtifact/delta"))
+                && event["params"]["payload"]["delta"]
+                    .as_str()
+                    .is_some_and(|delta| delta.contains("Researcher notes before completion"))
+            {
                 return Ok(());
             }
         }
@@ -553,7 +888,7 @@ async fn queued_regular_turn_starts_after_research_completes() -> Result<()> {
 
     queue_regular_turn_during_research(&runtime, connection_id, session_id).await?;
     researcher_gate.notify_waiters();
-    let events = wait_for_completed_turns(&mut notifications_rx, 2).await?;
+    let events = wait_for_completed_turns(&mut notifications_rx, session_id, 2).await?;
 
     assert!(
         events.iter().any(|event| {
@@ -631,6 +966,7 @@ async fn regular_turn_after_research_receives_only_compact_handoff() -> Result<(
     wait_for_research_completion(
         &runtime,
         connection_id,
+        session_id,
         &mut notifications_rx,
         "Use the provided scope.",
     )
@@ -640,6 +976,7 @@ async fn regular_turn_after_research_receives_only_compact_handoff() -> Result<(
     wait_for_research_completion(
         &runtime,
         connection_id,
+        session_id,
         &mut notifications_rx,
         "Use the provided scope.",
     )
@@ -661,6 +998,7 @@ async fn resumed_regular_turn_after_research_receives_only_compact_handoff() -> 
     wait_for_research_completion(
         &runtime,
         connection_id,
+        session_id,
         &mut notifications_rx,
         "Use the provided scope.",
     )
@@ -675,6 +1013,7 @@ async fn resumed_regular_turn_after_research_receives_only_compact_handoff() -> 
     wait_for_research_completion(
         &rebuilt_runtime,
         rebuilt_connection_id,
+        session_id,
         &mut rebuilt_notifications_rx,
         "Use the provided scope.",
     )
@@ -703,6 +1042,7 @@ async fn deep_research_turn_live_with_deepseek_anthropic_messages() -> Result<()
     let events = wait_for_research_completion(
         &runtime,
         connection_id,
+        session_id,
         &mut notifications_rx,
         "Use the provided scope. Research the current official DeepSeek website domain and include one source URL.",
     )
@@ -783,7 +1123,7 @@ fn build_live_deepseek_runtime(
 }
 
 fn build_scripted_research_runtime(data_root: &std::path::Path) -> Result<Arc<ServerRuntime>> {
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedResearchProvider::new());
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(ScriptedResearchProvider::new(data_root));
     build_scripted_research_runtime_with_provider(data_root, provider)
 }
 
@@ -842,6 +1182,135 @@ fn request_text(request: &ModelRequest) -> String {
     parts.join("\n")
 }
 
+fn is_research_request(request: &ModelRequest) -> bool {
+    request
+        .system
+        .as_deref()
+        .is_some_and(|system| system.contains("You are Devo `/research`"))
+}
+
+fn assert_research_environment_contains_cwd(request: &ModelRequest, expected_cwd: &str) {
+    let expected = format!("<cwd>{expected_cwd}</cwd>");
+    let texts = request
+        .messages
+        .iter()
+        .map(request_message_text)
+        .collect::<Vec<_>>();
+    assert!(
+        texts.iter().any(|text| {
+            text.starts_with("<research_environment>") && text.contains(expected.as_str())
+        }),
+        "research request should include cwd in research environment: expected {expected:?}, texts: {texts:?}"
+    );
+}
+
+fn assert_compress_request_uses_structured_context(request: &ModelRequest) {
+    assert!(
+        request.hosted_tools.is_empty(),
+        "compression must not expose new provider-hosted tools"
+    );
+    let runtime_text = request
+        .messages
+        .iter()
+        .map(request_message_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !runtime_text.contains("<visible_tool_transcript>"),
+        "structured or empty tool evidence must not be flattened into visible tool transcript: {runtime_text}"
+    );
+
+    let hosted_blocks = request
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|content| match content {
+            RequestContent::HostedToolUse {
+                id,
+                name,
+                input,
+                output,
+                status,
+            } => Some((id, name, input, output, status)),
+            RequestContent::Text { .. }
+            | RequestContent::Reasoning { .. }
+            | RequestContent::ProviderReasoning { .. }
+            | RequestContent::ToolUse { .. }
+            | RequestContent::ToolResult { .. } => None,
+        })
+        .collect::<Vec<_>>();
+
+    if hosted_blocks.is_empty() {
+        assert!(
+            runtime_text.contains("Researcher notes before completion"),
+            "default research compression should carry hosted web evidence: {runtime_text}"
+        );
+        return;
+    }
+
+    assert_eq!(
+        hosted_blocks.len(),
+        2,
+        "expected hosted start/result blocks"
+    );
+    let (start_id, start_name, start_input, start_output, start_status) = hosted_blocks[0];
+    assert_eq!(start_id.as_str(), "hosted_ws_1");
+    assert_eq!(start_name.as_str(), "web_search");
+    assert_eq!(
+        start_input,
+        &serde_json::json!({ "query": "DeepSeek official website" })
+    );
+    assert!(start_output.is_none());
+    assert!(start_status.is_none());
+
+    let (done_id, done_name, done_input, done_output, done_status) = hosted_blocks[1];
+    assert_eq!(done_id.as_str(), "hosted_ws_1");
+    assert_eq!(done_name.as_str(), "web_search");
+    assert_eq!(
+        done_input,
+        &serde_json::json!({ "query": "DeepSeek official website" })
+    );
+    assert_eq!(done_status.as_deref(), Some("completed"));
+    assert_eq!(
+        done_output.as_ref(),
+        Some(&serde_json::json!([{
+            "title": "DeepSeek",
+            "url": "https://www.deepseek.com/"
+        }]))
+    );
+}
+
+fn hosted_web_search_researcher_response() -> ModelResponse {
+    ModelResponse {
+        id: "hosted-search-researcher-response".to_string(),
+        content: vec![
+            ResponseContent::Text(
+                "Researcher notes: official source https://www.deepseek.com/".to_string(),
+            ),
+            ResponseContent::HostedToolUse {
+                id: "hosted_ws_1".to_string(),
+                name: "web_search".to_string(),
+                input: serde_json::json!({ "query": "DeepSeek official website" }),
+                output: None,
+                status: None,
+            },
+            ResponseContent::HostedToolUse {
+                id: "hosted_ws_1".to_string(),
+                name: "web_search".to_string(),
+                input: serde_json::json!({}),
+                output: Some(serde_json::json!([{
+                    "title": "DeepSeek",
+                    "url": "https://www.deepseek.com/"
+                }])),
+                status: Some("completed".to_string()),
+            },
+        ],
+        stop_reason: Some(StopReason::EndTurn),
+        usage: Usage::default(),
+        metadata: ResponseMetadata::default(),
+    }
+}
+
 fn request_message_text(message: &devo_protocol::RequestMessage) -> String {
     message
         .content
@@ -877,6 +1346,19 @@ fn model_response(text: impl Into<String>) -> ModelResponse {
         },
         metadata: ResponseMetadata::default(),
     }
+}
+
+fn streamed_text_events(text: impl Into<String>) -> Vec<Result<StreamEvent>> {
+    let text = text.into();
+    vec![
+        Ok(StreamEvent::TextDelta {
+            index: 0,
+            text: text.clone(),
+        }),
+        Ok(StreamEvent::MessageDone {
+            response: model_response(text),
+        }),
+    ]
 }
 
 async fn initialize_connection(
@@ -1075,6 +1557,7 @@ async fn queue_regular_turn_during_research(
 async fn wait_for_research_completion(
     runtime: &Arc<ServerRuntime>,
     connection_id: u64,
+    session_id: devo_core::SessionId,
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
     clarification_answer: &str,
 ) -> Result<Vec<serde_json::Value>> {
@@ -1090,15 +1573,17 @@ async fn wait_for_research_completion(
                 respond_to_clarification(runtime, connection_id, &event, clarification_answer)
                     .await?;
             }
-            events.push(event);
-            if method == "turn/failed" {
+            let is_parent_event =
+                event["params"]["session_id"] == serde_json::json!(session_id.to_string());
+            let done = method == "turn/completed" && is_parent_event;
+            if method == "turn/failed" && is_parent_event {
                 anyhow::bail!(
                     "research turn failed: {}",
                     latest_agent_message(&events)
                         .unwrap_or_else(|| "no failure message was emitted".to_string())
                 );
             }
-            let done = method == "turn/completed";
+            events.push(event);
             if done {
                 return Ok(events);
             }
@@ -1111,6 +1596,7 @@ async fn wait_for_research_completion(
 
 async fn wait_for_completed_turns(
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
+    session_id: devo_core::SessionId,
     expected_completed: usize,
 ) -> Result<Vec<serde_json::Value>> {
     let mut events = Vec::new();
@@ -1122,14 +1608,16 @@ async fn wait_for_completed_turns(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            if method == "turn/failed" {
+            let is_parent_event =
+                event["params"]["session_id"] == serde_json::json!(session_id.to_string());
+            if method == "turn/failed" && is_parent_event {
                 anyhow::bail!(
                     "turn failed while waiting for queued completion: {}",
                     latest_agent_message(&events)
                         .unwrap_or_else(|| "no failure message was emitted".to_string())
                 );
             }
-            if method == "turn/completed" {
+            if method == "turn/completed" && is_parent_event {
                 completed += 1;
             }
             events.push(event);
@@ -1348,6 +1836,8 @@ fn assert_final_report_file_written(events: &[serde_json::Value]) -> std::path::
         })
         .flatten()
     });
-    let path = path.expect("expected final report write tool result");
+    let path = path.unwrap_or_else(|| {
+        panic!("expected final report write tool result: {events:#?}");
+    });
     std::path::PathBuf::from(path)
 }

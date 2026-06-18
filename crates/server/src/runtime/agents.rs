@@ -186,10 +186,12 @@ impl ServerRuntime {
                 &turn_config,
                 research::research_stage_system(devo_core::research::prompts::subagent()),
             ));
+            let cwd = core_session.cwd.display().to_string();
             core_session.push_message(Message::user(
                 devo_core::research::prompts::environment_context(
                     &devo_core::research::prompts::today_string(),
                     &devo_core::research::prompts::timezone_string(),
+                    &cwd,
                 ),
             ));
         }
@@ -730,11 +732,15 @@ impl ServerRuntime {
         };
         self.set_agent_status(parent_session_id, child_session_id, status)
             .await;
-        self.record_subagent_status_event(
+        let detail = self
+            .subagent_terminal_status_detail(child_session_id, turn.turn_id, status)
+            .await;
+        self.record_subagent_status_event_with_text(
             parent_session_id,
             child_session_id,
             status,
             turn.turn_id,
+            detail,
         )
         .await;
         if matches!(
@@ -747,6 +753,46 @@ impl ServerRuntime {
         ) {
             self.run_subagent_stop_hook(child_session_id).await;
         }
+    }
+
+    async fn subagent_terminal_status_detail(
+        &self,
+        child_session_id: SessionId,
+        turn_id: TurnId,
+        status: SubagentStatus,
+    ) -> Option<String> {
+        if status != SubagentStatus::Failed {
+            return None;
+        }
+        let session_arc = self.sessions.lock().await.get(&child_session_id).cloned()?;
+        let session = session_arc.lock().await;
+        session.persisted_turn_items.iter().rev().find_map(|item| {
+            if item.turn_id != turn_id {
+                return None;
+            }
+            match &item.turn_item {
+                TurnItem::AgentMessage(TextItem { text }) if !text.trim().is_empty() => {
+                    Some(text.trim().to_string())
+                }
+                TurnItem::UserMessage(_)
+                | TurnItem::SteerInput(_)
+                | TurnItem::HookPrompt(_)
+                | TurnItem::AgentMessage(_)
+                | TurnItem::Plan(_)
+                | TurnItem::Reasoning(_)
+                | TurnItem::ToolCall(_)
+                | TurnItem::ToolProgress(_)
+                | TurnItem::ToolResult(_)
+                | TurnItem::CommandExecution(_)
+                | TurnItem::ApprovalRequest(_)
+                | TurnItem::ApprovalDecision(_)
+                | TurnItem::WebSearch(_)
+                | TurnItem::ImageGeneration(_)
+                | TurnItem::ContextCompaction(_)
+                | TurnItem::ResearchArtifact(_)
+                | TurnItem::TurnSummary(_) => None,
+            }
+        })
     }
 
     pub(super) async fn child_parent_and_path(

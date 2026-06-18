@@ -51,10 +51,19 @@ pub fn uninstall_system_skills(devo_home: &Path) {
 }
 
 fn read_marker(path: &Path) -> Result<String, SystemSkillsError> {
-    Ok(fs::read_to_string(path)
-        .map_err(|source| SystemSkillsError::io("read system skills marker", source))?
-        .trim()
-        .to_string())
+    let mut marker = fs::read_to_string(path)
+        .map_err(|source| SystemSkillsError::io("read system skills marker", source))?;
+    let start = marker.len() - marker.trim_start().len();
+    let end = marker.trim_end().len();
+    if start >= end {
+        marker.clear();
+        return Ok(marker);
+    }
+    marker.truncate(end);
+    if start > 0 {
+        marker.drain(..start);
+    }
+    Ok(marker)
 }
 
 fn embedded_system_skills_fingerprint() -> String {
@@ -139,10 +148,14 @@ impl SystemSkillsError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use pretty_assertions::assert_eq;
+    use tempfile::NamedTempFile;
 
     use super::SYSTEM_SKILLS_DIR;
     use super::collect_fingerprint_items;
+    use super::read_marker;
 
     #[test]
     fn fingerprint_traverses_nested_entries() {
@@ -162,5 +175,21 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(paths.is_empty(), false);
+    }
+
+    #[test]
+    fn read_marker_trims_surrounding_whitespace() {
+        let file = NamedTempFile::new().expect("marker file");
+        fs::write(file.path(), " \nabc\t\n ").expect("write marker");
+
+        assert_eq!(read_marker(file.path()).expect("marker"), "abc");
+    }
+
+    #[test]
+    fn read_marker_whitespace_only_is_empty() {
+        let file = NamedTempFile::new().expect("marker file");
+        fs::write(file.path(), " \n\t ").expect("write marker");
+
+        assert_eq!(read_marker(file.path()).expect("marker"), "");
     }
 }

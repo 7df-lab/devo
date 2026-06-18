@@ -44,10 +44,9 @@ pub fn enrich_for_bm25(chunk: &Chunk) -> String {
 
 /// Returns normalized query terms used by path reranking.
 pub fn query_terms(query: &str) -> Vec<String> {
-    split_identifier_tokens(query)
-        .into_iter()
-        .filter(|token| token.len() > 2)
-        .collect()
+    let mut terms = split_identifier_tokens(query);
+    terms.retain(|token| token.len() > 2);
+    terms
 }
 
 /// Heuristically detects exact-symbol style queries.

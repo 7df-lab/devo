@@ -201,6 +201,8 @@ pub struct ServerRuntime {
     agent_mailboxes: Mutex<HashMap<SessionId, SubagentMailbox>>,
     /// Per-parent child-output buffers used by wait_agent polling.
     agent_output_buffers: Mutex<HashMap<SessionId, SubagentOutputBuffer>>,
+    /// Child agents owned by an active `/research` pipeline.
+    research_child_agents: Mutex<HashMap<SessionId, HashSet<SessionId>>>,
     /// Live client-owned reference search sessions.
     reference_searches:
         Mutex<HashMap<devo_protocol::ReferenceSearchId, reference_search::ReferenceSearchState>>,
@@ -284,6 +286,7 @@ impl ServerRuntime {
             agent_registries: Mutex::new(HashMap::new()),
             agent_mailboxes: Mutex::new(HashMap::new()),
             agent_output_buffers: Mutex::new(HashMap::new()),
+            research_child_agents: Mutex::new(HashMap::new()),
             reference_searches: Mutex::new(HashMap::new()),
             command_exec_manager: command_exec::CommandExecManager::new(),
         })

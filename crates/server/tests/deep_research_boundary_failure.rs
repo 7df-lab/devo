@@ -60,6 +60,7 @@ impl ModelProviderSDK for UnusedProvider {
 #[derive(Default)]
 struct IncompleteFinalReportProvider {
     stream_calls: AtomicUsize,
+    final_report_stream_calls: AtomicUsize,
 }
 
 #[async_trait]
@@ -90,8 +91,26 @@ impl ModelProviderSDK for IncompleteFinalReportProvider {
         request: ModelRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         let prompt = request_text(&request);
-        let call_index = self.stream_calls.fetch_add(1, Ordering::SeqCst);
-        let events = if prompt_has_stage(&prompt, "researcher evidence gathering") {
+        let _stream_call_index = self.stream_calls.fetch_add(1, Ordering::SeqCst);
+        let events = if prompt_has_stage(&prompt, "clarification gate")
+            || prompt.contains("\"need_clarification\"")
+        {
+            streamed_text_events(
+                r#"{"need_clarification":false,"question":"","verification":"Research DeepSeek official website."}"#,
+            )
+        } else if prompt_has_stage(&prompt, "research brief") {
+            streamed_text_events(
+                "## Objective\nResearch DeepSeek official website.\n\n## Scope\nCurrent official website.\n\n## Report Language\nEnglish",
+            )
+        } else if prompt_has_stage(&prompt, "supervisor task plan") {
+            streamed_text_events(
+                r#"{"tasks":[{"title":"Official website","research_topic":"Find the current official DeepSeek website.","purpose":"Answer the brief","source_strategy":"Use official sources","success_criteria":"Capture the official domain"}]}"#,
+            )
+        } else if prompt_has_stage(&prompt, "evidence pack compression") {
+            streamed_text_events(
+                "Evidence pack: DeepSeek official website is https://www.deepseek.com/",
+            )
+        } else if prompt_has_stage(&prompt, "delegated deep research worker") {
             vec![
                 Ok(StreamEvent::TextDelta {
                     index: 1,
@@ -103,10 +122,13 @@ impl ModelProviderSDK for IncompleteFinalReportProvider {
                     ),
                 }),
             ]
-        } else if prompt_has_stage(&prompt, "final report writing") || call_index == 1 {
+        } else if prompt_has_stage(&prompt, "final report writing") {
+            let final_report_call_index = self
+                .final_report_stream_calls
+                .fetch_add(1, Ordering::SeqCst);
             assert_eq!(
-                call_index, 1,
-                "final report should be the second stream call"
+                final_report_call_index, 0,
+                "final report should be the first final-report stream call"
             );
             vec![Ok(StreamEvent::TextDelta {
                 index: 1,
@@ -154,7 +176,7 @@ async fn regular_turn_after_incomplete_research_does_not_receive_partial_handoff
     let session_id = start_session(&runtime, connection_id, workspace.path()).await?;
 
     start_research_turn(&runtime, connection_id, session_id).await?;
-    let failed_events = wait_for_turn_failed(&mut notifications_rx).await?;
+    let failed_events = wait_for_turn_failed(&mut notifications_rx, session_id).await?;
     assert!(
         failed_events.iter().any(|event| {
             event.get("method") == Some(&serde_json::json!("item/completed"))
@@ -178,7 +200,7 @@ async fn regular_turn_after_incomplete_research_does_not_receive_partial_handoff
     );
 
     start_regular_turn(&runtime, connection_id, session_id).await?;
-    wait_for_turn_completed(&mut notifications_rx).await?;
+    wait_for_turn_completed(&mut notifications_rx, session_id).await?;
 
     Ok(())
 }
@@ -288,6 +310,19 @@ fn model_response(text: impl Into<String>) -> ModelResponse {
         },
         metadata: ResponseMetadata::default(),
     }
+}
+
+fn streamed_text_events(text: impl Into<String>) -> Vec<Result<StreamEvent>> {
+    let text = text.into();
+    vec![
+        Ok(StreamEvent::TextDelta {
+            index: 0,
+            text: text.clone(),
+        }),
+        Ok(StreamEvent::MessageDone {
+            response: model_response(text),
+        }),
+    ]
 }
 
 async fn initialize_connection(
@@ -410,18 +445,21 @@ async fn start_turn(
 
 async fn wait_for_turn_failed(
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
+    session_id: devo_core::SessionId,
 ) -> Result<Vec<serde_json::Value>> {
-    wait_for_terminal_turn_event(notifications_rx, "turn/failed").await
+    wait_for_terminal_turn_event(notifications_rx, session_id, "turn/failed").await
 }
 
 async fn wait_for_turn_completed(
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
+    session_id: devo_core::SessionId,
 ) -> Result<Vec<serde_json::Value>> {
-    wait_for_terminal_turn_event(notifications_rx, "turn/completed").await
+    wait_for_terminal_turn_event(notifications_rx, session_id, "turn/completed").await
 }
 
 async fn wait_for_terminal_turn_event(
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
+    session_id: devo_core::SessionId,
     expected_method: &str,
 ) -> Result<Vec<serde_json::Value>> {
     let mut events = Vec::new();
@@ -432,11 +470,13 @@ async fn wait_for_terminal_turn_event(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let matches_session =
+                event["params"]["session_id"] == serde_json::json!(session_id.to_string());
             events.push(event);
-            if method == expected_method {
+            if method == expected_method && matches_session {
                 return Ok(events);
             }
-            if matches!(method.as_str(), "turn/completed" | "turn/failed") {
+            if matches_session && matches!(method.as_str(), "turn/completed" | "turn/failed") {
                 anyhow::bail!("expected {expected_method}, received {method}");
             }
         }

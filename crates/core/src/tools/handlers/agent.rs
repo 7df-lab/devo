@@ -63,7 +63,7 @@ pub fn register_agent_tools(builder: &mut ToolRegistryBuilder) {
 }
 
 fn register(builder: &mut ToolRegistryBuilder, handler: Arc<AgentToolHandler>, aliases: &[&str]) {
-    builder.push_spec_with_exposure(handler.spec().clone(), ToolExposure::Deferred);
+    builder.push_spec_with_exposure(handler.spec().clone(), ToolExposure::Direct);
     let handler: Arc<dyn ToolHandler> = handler;
     let name = handler.spec().name.clone();
     builder.register_handler(&name, Arc::clone(&handler));
@@ -287,7 +287,7 @@ fn wait_agent_spec() -> ToolSpec {
                 (
                     "after_sequence".to_string(),
                     JsonSchema::integer(Some(
-                        "Only return output events after this sequence. Use the previous next_sequence value to poll incrementally.",
+                        "Only return output events with sequence greater than this value. To poll incrementally, pass the largest sequence value from the previous events list.",
                     )),
                 ),
                 (
@@ -561,6 +561,12 @@ mod tests {
                 .description
                 .contains("polls child assistant output")
         );
+        let wait_schema = wait_agent_spec().input_schema.to_json_value();
+        let after_sequence_description = wait_schema["properties"]["after_sequence"]["description"]
+            .as_str()
+            .expect("after_sequence description");
+        assert!(after_sequence_description.contains("largest sequence value"));
+        assert!(!after_sequence_description.contains("previous next_sequence"));
         assert!(list_agents_spec().description.contains("generated path"));
         assert!(
             close_agent_spec()

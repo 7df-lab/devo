@@ -5,6 +5,7 @@
 //! policy such as permissions, cancellation, and progress reporting lives in the
 //! contracts module.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -69,11 +70,10 @@ impl ToolContent {
             ToolContent::Json(v) => v.to_string(),
             ToolContent::Mixed { text, json } => match (text, json) {
                 (Some(text), Some(json)) => {
-                    let json = json.to_string();
-                    let mut output = String::with_capacity(text.len() + 1 + json.len());
+                    let mut output = String::with_capacity(text.len() + 1);
                     output.push_str(&text);
                     output.push('\n');
-                    output.push_str(&json);
+                    let _ = write!(output, "{json}");
                     output
                 }
                 (Some(text), None) => text,

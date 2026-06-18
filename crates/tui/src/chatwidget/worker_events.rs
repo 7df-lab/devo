@@ -167,7 +167,7 @@ impl ChatWidget {
                 self.complete_text_item(ActiveTextItemId::Server(item_id), kind, final_text);
                 self.set_status_message(match kind {
                     TextItemKind::Assistant => "Generating",
-                    TextItemKind::Reasoning => "Thinking",
+                    TextItemKind::Reasoning => "Thought",
                     TextItemKind::ResearchArtifact => "Researching",
                 });
             }
@@ -229,7 +229,7 @@ impl ChatWidget {
                         text,
                     );
                 }
-                self.set_status_message("Thinking");
+                self.set_status_message("Thought");
             }
             WorkerEvent::ToolCall {
                 tool_use_id,

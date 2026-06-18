@@ -75,7 +75,6 @@ impl DsmlToolCallHealer {
 
     pub(crate) fn text_stream_filter(&self) -> Option<DsmlTextStreamFilter> {
         self.enabled.then(|| DsmlTextStreamFilter {
-            healer: self.clone(),
             pending: String::new(),
         })
     }
@@ -92,16 +91,6 @@ impl DsmlToolCallHealer {
             name: call.name,
             input: Value::Object(call.input),
         }
-    }
-
-    fn tool_calls_block_is_local_only(&self, inner: &str, syntax: DsmlSyntax) -> bool {
-        let Some(calls) = parse_tool_calls_block(inner, syntax) else {
-            return false;
-        };
-        !calls.is_empty()
-            && calls
-                .iter()
-                .all(|call| matches!(self.tool_kind_for_call(call), DsmlToolKind::Local))
     }
 
     fn tool_kind_for_call(&self, call: &ToolCall) -> DsmlToolKind {
@@ -166,7 +155,12 @@ impl DsmlToolCallHealer {
 }
 
 fn model_uses_text_tool_calls(model: &str) -> bool {
-    let model = model.trim();
+    let model = model
+        .trim()
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or(model)
+        .trim();
     model
         .as_bytes()
         .get(..b"deepseek-v4-".len())
@@ -182,7 +176,6 @@ fn hosted_tool_name(tool: &HostedToolDefinition) -> &'static str {
 
 #[derive(Debug)]
 pub(crate) struct DsmlTextStreamFilter {
-    healer: DsmlToolCallHealer,
     pending: String,
 }
 
@@ -195,17 +188,10 @@ impl DsmlTextStreamFilter {
             if let Some(block) = find_next_tool_calls_block(&self.pending, 0) {
                 let block_start = block.start;
                 let block_len = block.end - block.start;
-                let should_suppress = self
-                    .healer
-                    .tool_calls_block_is_local_only(block.inner, block.syntax);
                 if block_start > 0 {
                     push_non_empty_text(&mut output, take_prefix(&mut self.pending, block_start));
                 }
-                if !should_suppress {
-                    push_non_empty_text(&mut output, take_prefix(&mut self.pending, block_len));
-                } else {
-                    self.pending.drain(..block_len);
-                }
+                self.pending.drain(..block_len);
                 continue;
             }
 
@@ -240,7 +226,11 @@ impl DsmlTextStreamFilter {
     }
 
     pub(crate) fn finish(&mut self) -> Vec<String> {
-        non_empty_text(std::mem::take(&mut self.pending))
+        let pending = std::mem::take(&mut self.pending);
+        if let Some(block) = find_next_tool_calls_open(&pending, 0) {
+            return non_empty_text(pending[..block.start].to_string());
+        }
+        non_empty_text(pending)
     }
 }
 
@@ -675,6 +665,11 @@ after"#;
                 .text_stream_filter()
                 .is_some()
         );
+        assert!(
+            DsmlToolCallHealer::for_model("deepseek/deepseek-v4-flash")
+                .text_stream_filter()
+                .is_some()
+        );
     }
 
     #[test]
@@ -774,7 +769,7 @@ after"#;
     }
 
     #[test]
-    fn stream_filter_preserves_hosted_only_dsml_split_across_chunks() {
+    fn stream_filter_suppresses_hosted_only_dsml_split_across_chunks() {
         let request = model_request_with_tools(
             "deepseek-v4-pro",
             /*tools*/ None,
@@ -783,11 +778,6 @@ after"#;
         let mut filter = DsmlToolCallHealer::for_request(&request)
             .text_stream_filter()
             .expect("filter enabled");
-        let text = r#"before<｜DSML｜tool_calls>
-<｜DSML｜invoke name="web_search">
-<｜DSML｜parameter name="query" string="true">DeepSeek V4</｜DSML｜parameter>
-</｜DSML｜invoke>
-</｜DSML｜tool_calls>after"#;
         let mut emitted = Vec::new();
 
         emitted.extend(filter.consume("before<｜DS"));
@@ -795,6 +785,25 @@ after"#;
         emitted.extend(filter.consume("<｜DSML｜parameter name=\"query\" string=\"true\">DeepSeek V4</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>after"));
         emitted.extend(filter.finish());
 
-        assert_eq!(emitted.concat(), text);
+        assert_eq!(emitted, vec!["before".to_string(), "after".to_string()]);
+    }
+
+    #[test]
+    fn stream_filter_drops_unclosed_dsml_on_finish() {
+        let request = model_request_with_tools(
+            "deepseek-v4-pro",
+            /*tools*/ None,
+            vec![HostedToolDefinition::WebSearch(HostedWebSearchTool::new())],
+        );
+        let mut filter = DsmlToolCallHealer::for_request(&request)
+            .text_stream_filter()
+            .expect("filter enabled");
+        let mut emitted = Vec::new();
+
+        emitted.extend(filter.consume("visible<｜｜DSML｜｜tool_calls>\n"));
+        emitted.extend(filter.consume("<｜｜DSML｜｜invoke name=\"web_search\">"));
+        emitted.extend(filter.finish());
+
+        assert_eq!(emitted, vec!["visible".to_string()]);
     }
 }

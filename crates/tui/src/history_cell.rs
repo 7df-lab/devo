@@ -305,13 +305,7 @@ impl HistoryCell for UserHistoryCell {
         };
         let element_style = style.fg(accent);
         let prefix_style = Style::default().fg(mode_color);
-        let blank_prefixed_line = || {
-            Line::from(vec![
-                Span::styled("▌ ", prefix_style),
-                Span::styled(String::new(), style),
-            ])
-            .style(style)
-        };
+        let blank_prefixed_line = || Line::from(Span::styled("  ", style)).style(style);
 
         let wrapped_message = if self.message.is_empty() && self.text_elements.is_empty() {
             None
@@ -347,7 +341,7 @@ impl HistoryCell for UserHistoryCell {
             lines.extend(prefix_lines(
                 wrapped_message,
                 Span::styled("▌ ", prefix_style),
-                Span::styled("▌ ", prefix_style),
+                Span::styled("  ", style),
             ));
         }
         lines.push(blank_prefixed_line());

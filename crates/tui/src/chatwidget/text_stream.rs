@@ -13,6 +13,7 @@ use ratatui::text::Span;
 use crate::events::TextItemKind;
 use crate::history_cell;
 use crate::markdown::append_markdown;
+use crate::research_artifact_cell::ResearchArtifactCell;
 use crate::streaming::commit_tick::CommitTickScope;
 use crate::streaming::commit_tick::run_commit_tick;
 use crate::streaming::controller::StreamController;
@@ -30,7 +31,7 @@ pub(super) struct ActiveTextItem {
     stream_stall_warned: bool,
     delta_seq: u64,
     raw_text: String,
-    pub(super) cell: Option<history_cell::AgentMessageCell>,
+    pub(super) cell: Option<Box<dyn history_cell::HistoryCell>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,7 +317,11 @@ impl ChatWidget {
             }
             TextItemKind::ResearchArtifact => {
                 if !item.raw_text.trim().is_empty() {
-                    self.add_markdown_history_with_status("Research", &item.raw_text, status);
+                    self.add_history_entry_without_redraw(Box::new(ResearchArtifactCell::new(
+                        "Research",
+                        &item.raw_text,
+                        &self.session.cwd,
+                    )));
                 }
             }
         }
@@ -474,19 +479,23 @@ impl ChatWidget {
     fn assistant_active_cell(
         &self,
         item: &ActiveTextItem,
-    ) -> Option<history_cell::AgentMessageCell> {
+    ) -> Option<Box<dyn history_cell::HistoryCell>> {
         if let Some(controller) = &item.stream_controller {
             let lines = controller.live_lines();
             if lines.iter().any(|line| !Self::is_blank_line(line)) {
-                return Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
-                    lines,
-                    Self::pending_dot_prefix(),
-                    "  ",
-                    false,
+                return Some(Box::new(
+                    history_cell::AgentMessageCell::new_ai_response_with_prefix(
+                        lines,
+                        Self::pending_dot_prefix(),
+                        "  ",
+                        false,
+                    ),
                 ));
             }
         } else if !item.raw_text.trim().is_empty() {
-            return Some(self.bulleted_markdown_cell(&item.raw_text, Self::pending_dot_prefix()));
+            return Some(Box::new(
+                self.bulleted_markdown_cell(&item.raw_text, Self::pending_dot_prefix()),
+            ));
         }
         None
     }
@@ -494,7 +503,7 @@ impl ChatWidget {
     fn reasoning_active_cell(
         &self,
         item: &ActiveTextItem,
-    ) -> Option<history_cell::AgentMessageCell> {
+    ) -> Option<Box<dyn history_cell::HistoryCell>> {
         if item.raw_text.trim().is_empty() {
             return None;
         }
@@ -513,41 +522,29 @@ impl ChatWidget {
                 Span::styled("Thinking: ", Self::reasoning_heading_style()),
             );
         }
-        Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
-            body_lines,
-            Self::reasoning_dot_prefix(item.status),
-            "  ",
-            false,
+        Some(Box::new(
+            history_cell::AgentMessageCell::new_ai_response_with_prefix(
+                body_lines,
+                Self::reasoning_dot_prefix(item.status),
+                "  ",
+                false,
+            ),
         ))
     }
 
     fn research_artifact_active_cell(
         &self,
         item: &ActiveTextItem,
-    ) -> Option<history_cell::AgentMessageCell> {
+    ) -> Option<Box<dyn history_cell::HistoryCell>> {
         if item.raw_text.trim().is_empty() {
             return None;
         }
 
-        let mut body_lines = Vec::new();
-        append_markdown(
-            &item.raw_text,
-            None,
-            Some(&self.session.cwd),
-            &mut body_lines,
-        );
-        if let Some(first_line) = body_lines.first_mut() {
-            first_line.spans.insert(
-                0,
-                Span::styled("Research: ", Self::reasoning_heading_style()),
-            );
-        }
-        Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
-            body_lines,
-            Self::pending_dot_prefix(),
-            "  ",
-            false,
-        ))
+        Some(Box::new(ResearchArtifactCell::new(
+            "Research",
+            item.raw_text.clone(),
+            &self.session.cwd,
+        )))
     }
 }
 

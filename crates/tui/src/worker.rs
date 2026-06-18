@@ -1867,7 +1867,7 @@ async fn run_worker_inner(
                                 thinking: thinking_selection.clone(),
                                 sandbox: None,
                                 approval_policy: None,
-                                cwd: None,
+                                cwd: Some(session_cwd.clone()),
                                 collaboration_mode: CollaborationMode::Build,
                                 execution_mode: TurnExecutionMode::Research,
                             })
