@@ -32,7 +32,7 @@ resolver = "3"
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
-version = "0.1.20"
+version = "0.1.21"
 
 [workspace.dependencies]
 ansi-to-tui = "7.0.0"
