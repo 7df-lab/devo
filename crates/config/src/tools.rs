@@ -1,3 +1,10 @@
+//! Web-tool configuration and resolution.
+//!
+//! The serialized config keeps user intent separate from runtime credentials:
+//! provider-hosted modes stay as capability flags, while local search resolves a
+//! named provider plus user-scoped auth entry into the per-turn settings used by
+//! tool/runtime code.
+
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
@@ -178,24 +185,28 @@ fn resolve_local_web_search(
     auth: &UserAuthConfigFile,
 ) -> Result<ResolvedLocalWebSearchConfig, ProviderConfigError> {
     let provider_id = match effective.local_provider.as_deref() {
-        Some(provider_id) if !provider_id.trim().is_empty() => provider_id.to_string(),
+        Some(provider_id) if !provider_id.trim().is_empty() => provider_id,
         _ if global.local_providers.len() == 1 => global
             .local_providers
             .keys()
             .next()
             .expect("single local provider key should exist")
-            .clone(),
+            .as_str(),
         _ => {
             return Err(ProviderConfigError::Validation {
                 message: "tools.web_search mode `local` requires local_provider when zero or multiple local providers are configured".to_string(),
             });
         }
     };
-    let provider = global.local_providers.get(&provider_id).ok_or_else(|| {
-        ProviderConfigError::Validation {
-            message: format!("tools.web_search references missing local provider `{provider_id}`"),
-        }
-    })?;
+    let provider =
+        global
+            .local_providers
+            .get(provider_id)
+            .ok_or_else(|| ProviderConfigError::Validation {
+                message: format!(
+                    "tools.web_search references missing local provider `{provider_id}`"
+                ),
+            })?;
     if provider.credential.trim().is_empty() {
         return Err(ProviderConfigError::Validation {
             message: format!("web search local provider `{provider_id}` has an empty credential"),
@@ -212,7 +223,7 @@ fn resolve_local_web_search(
             })?;
     match credential.kind {
         AuthCredentialKind::ApiKey => Ok(ResolvedLocalWebSearchConfig {
-            provider_id,
+            provider_id: provider_id.to_string(),
             kind: provider.kind,
             api_key: credential.value.clone(),
             base_url: provider.base_url.clone(),
@@ -278,6 +289,17 @@ mod tests {
         .expect("resolve web search");
 
         assert_eq!(resolved, ResolvedWebSearchConfig::Provider);
+    }
+
+    #[test]
+    fn default_web_fetch_mode_resolves_local() {
+        // Trace: L2-DES-APP-005
+        // Verifies: missing web_fetch config preserves the local webfetch default.
+        assert_eq!(WebFetchConfig::default().mode, WebFetchMode::Local);
+        assert_eq!(
+            resolve_web_fetch_config(&WebFetchConfig::default(), None, None),
+            ResolvedWebFetchConfig::Local
+        );
     }
 
     #[test]

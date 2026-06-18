@@ -5,17 +5,16 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::model::SkillMetadata;
-use crate::model::canonicalize_for_identity;
+use crate::model::path_set_contains_identity;
 
 pub fn build_skill_name_counts(
     skills: &[SkillMetadata],
     disabled_paths: &HashSet<PathBuf>,
 ) -> (HashMap<String, usize>, HashMap<String, usize>) {
-    let mut exact = HashMap::new();
-    let mut lowercase = HashMap::new();
+    let mut exact = HashMap::with_capacity(skills.len());
+    let mut lowercase = HashMap::with_capacity(skills.len());
     for skill in skills {
-        let path = canonicalize_for_identity(&skill.path_to_skills_md);
-        if disabled_paths.contains(&path) {
+        if path_set_contains_identity(disabled_paths, &skill.path_to_skills_md) {
             continue;
         }
         *exact.entry(skill.name.clone()).or_insert(0) += 1;

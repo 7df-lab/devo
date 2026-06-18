@@ -74,12 +74,12 @@ pub fn collect_explicit_skill_mentions(
     structured: &[SkillSelection],
     outcome: &SkillLoadOutcome,
 ) -> Vec<SkillMetadata> {
-    let mut selected = Vec::new();
-    let mut seen_paths = HashSet::new();
-    let mut blocked_plain_names = HashSet::new();
+    let mut selected = Vec::with_capacity(structured.len());
+    let mut seen_paths = HashSet::with_capacity(structured.len());
+    let mut blocked_plain_names = HashSet::with_capacity(structured.len());
 
     for selection in structured {
-        blocked_plain_names.insert(selection.name.clone());
+        blocked_plain_names.insert(selection.name.as_str());
         let selection_path = canonicalize_for_identity(&selection.path);
         if outcome.disabled_paths.contains(&selection_path) || seen_paths.contains(&selection_path)
         {
@@ -100,12 +100,12 @@ pub fn collect_explicit_skill_mentions(
         if mentions.paths.is_empty() && mentions.plain_names.is_empty() {
             continue;
         }
-        let mention_skill_paths = mentions
-            .paths
-            .iter()
-            .filter(|path| is_skill_path(path))
-            .map(|path| canonicalize_for_identity(Path::new(normalize_skill_path(path))))
-            .collect::<HashSet<_>>();
+        let mut mention_skill_paths = HashSet::with_capacity(mentions.paths.len());
+        for path in mentions.paths.iter().filter(|path| is_skill_path(path)) {
+            mention_skill_paths.insert(canonicalize_for_identity(Path::new(normalize_skill_path(
+                path,
+            ))));
+        }
 
         if !mention_skill_paths.is_empty() {
             for skill in &outcome.skills {
@@ -124,7 +124,8 @@ pub fn collect_explicit_skill_mentions(
         if mentions.plain_names.is_empty() {
             continue;
         }
-        let mut plain_name_matches = HashMap::<String, (usize, usize)>::new();
+        let mut plain_name_matches =
+            HashMap::<&str, (usize, usize)>::with_capacity(mentions.plain_names.len());
         for (index, skill) in outcome.skills.iter().enumerate() {
             if outcome.disabled_paths.contains(&skill.path_to_skills_md)
                 || !mentions.plain_names.contains(&skill.name)
@@ -132,20 +133,22 @@ pub fn collect_explicit_skill_mentions(
                 continue;
             }
             plain_name_matches
-                .entry(skill.name.clone())
+                .entry(skill.name.as_str())
                 .and_modify(|(count, _)| *count += 1)
                 .or_insert((1, index));
         }
-        let mut plain_skill_indices = plain_name_matches
-            .into_values()
-            .filter_map(|(count, index)| (count == 1).then_some(index))
-            .collect::<Vec<_>>();
+        let mut plain_skill_indices = Vec::with_capacity(plain_name_matches.len());
+        plain_skill_indices.extend(
+            plain_name_matches
+                .into_values()
+                .filter_map(|(count, index)| (count == 1).then_some(index)),
+        );
         plain_skill_indices.sort_unstable();
 
         for index in plain_skill_indices {
             let skill = &outcome.skills[index];
             if seen_paths.contains(&skill.path_to_skills_md)
-                || blocked_plain_names.contains(&skill.name)
+                || blocked_plain_names.contains(skill.name.as_str())
             {
                 continue;
             }
@@ -276,19 +279,21 @@ fn is_mention_name_char(byte: u8) -> bool {
 }
 
 fn is_common_env_var(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    matches!(
-        upper.as_str(),
-        "PATH"
-            | "HOME"
-            | "USER"
-            | "SHELL"
-            | "PWD"
-            | "TMPDIR"
-            | "TEMP"
-            | "TMP"
-            | "LANG"
-            | "TERM"
-            | "XDG_CONFIG_HOME"
-    )
+    COMMON_ENV_VARS
+        .iter()
+        .any(|env_var| name.eq_ignore_ascii_case(env_var))
 }
+
+const COMMON_ENV_VARS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "PWD",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "TERM",
+    "XDG_CONFIG_HOME",
+];

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::*;
 
 impl ServerRuntime {
@@ -221,6 +223,22 @@ impl ServerRuntime {
         turn_item: TurnItem,
         payload: serde_json::Value,
     ) {
+        if !should_emit_turn_item_events(&turn_item) {
+            let item_id = ItemId::new();
+            let item_seq = self.allocate_item_sequence(session_id).await;
+            self.persist_item(
+                session_id,
+                turn_id,
+                item_id,
+                item_seq,
+                turn_item,
+                Some(TurnStatus::Running),
+                None,
+            )
+            .await;
+            return;
+        }
+
         let (item_id, item_seq) = self
             .start_item(session_id, turn_id, item_kind.clone(), payload.clone())
             .await;
@@ -340,10 +358,24 @@ impl ServerRuntime {
                 if let Some(history_item) = history_item_from_turn_item(&turn_item) {
                     session.history_items.push(history_item);
                 }
+                let turn_kind = session
+                    .active_turn
+                    .as_ref()
+                    .filter(|turn| turn.turn_id == turn_id)
+                    .map(|turn| turn.kind.clone())
+                    .or_else(|| {
+                        session
+                            .latest_turn
+                            .as_ref()
+                            .filter(|turn| turn.turn_id == turn_id)
+                            .map(|turn| turn.kind.clone())
+                    })
+                    .unwrap_or_default();
                 session
                     .persisted_turn_items
                     .push(crate::execution::PersistedTurnItem {
                         turn_id,
+                        turn_kind,
                         item_id,
                         turn_item: turn_item.clone(),
                     });
@@ -379,19 +411,118 @@ impl ServerRuntime {
 }
 
 pub(crate) fn render_input_items(input: &[crate::InputItem]) -> Option<String> {
-    let parts = input
-        .iter()
-        .map(|item| match item {
-            crate::InputItem::Text { text } => text.trim().to_string(),
+    let mut rendered = String::new();
+    for item in input {
+        let part = match item {
+            crate::InputItem::Text { text } => {
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                Cow::Borrowed(text)
+            }
             crate::InputItem::Skill { name, path } => {
-                format!("[skill:{name} @ {}]", path.display())
+                Cow::Owned(format!("[skill:{name} @ {}]", path.display()))
             }
-            crate::InputItem::LocalImage { path } => format!("[image:{}]", path.display()),
-            crate::InputItem::Mention { path, name } => {
-                format!("[mention:{}]", name.as_deref().unwrap_or(path.as_str()))
+            crate::InputItem::LocalImage { path } => {
+                Cow::Owned(format!("[image:{}]", path.display()))
             }
+            crate::InputItem::Mention { path, name } => Cow::Owned(format!(
+                "[mention:{}]",
+                name.as_deref().unwrap_or(path.as_str())
+            )),
+        };
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        rendered.push_str(&part);
+    }
+    (!rendered.is_empty()).then_some(rendered)
+}
+
+fn should_emit_turn_item_events(turn_item: &TurnItem) -> bool {
+    !matches!(
+        turn_item,
+        TurnItem::ResearchArtifact(ResearchArtifactItem {
+            artifact_type: ResearchArtifactType::FinalReportMetadata,
+            ..
         })
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>();
-    (!parts.is_empty()).then(|| parts.join("\n"))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+    use crate::InputItem;
+
+    #[test]
+    fn render_input_items_trims_text_and_preserves_item_markers() {
+        let input = vec![
+            InputItem::Text {
+                text: "  hello  ".to_string(),
+            },
+            InputItem::Text {
+                text: "   ".to_string(),
+            },
+            InputItem::Skill {
+                name: "writer".to_string(),
+                path: PathBuf::from("writer.md"),
+            },
+            InputItem::LocalImage {
+                path: PathBuf::from("photo.png"),
+            },
+            InputItem::Mention {
+                path: "src/lib.rs".to_string(),
+                name: None,
+            },
+            InputItem::Mention {
+                path: "src/main.rs".to_string(),
+                name: Some("main".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            render_input_items(&input),
+            Some(
+                "hello\n[skill:writer @ writer.md]\n[image:photo.png]\n[mention:src/lib.rs]\n[mention:main]"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn render_input_items_returns_none_for_empty_text_only_input() {
+        assert_eq!(
+            render_input_items(&[InputItem::Text {
+                text: " \n\t ".to_string(),
+            }]),
+            None
+        );
+    }
+
+    #[test]
+    fn final_report_metadata_is_prompt_only() {
+        let prompt_only = TurnItem::ResearchArtifact(ResearchArtifactItem {
+            artifact_type: ResearchArtifactType::FinalReportMetadata,
+            title: "Research Context Reference".to_string(),
+            content: "compact reference".to_string(),
+        });
+        let visible_artifact = TurnItem::ResearchArtifact(ResearchArtifactItem {
+            artifact_type: ResearchArtifactType::Finding,
+            title: "Research Finding".to_string(),
+            content: "finding body".to_string(),
+        });
+
+        assert_eq!(
+            vec![
+                should_emit_turn_item_events(&prompt_only),
+                should_emit_turn_item_events(&visible_artifact),
+            ],
+            vec![false, true]
+        );
+    }
 }

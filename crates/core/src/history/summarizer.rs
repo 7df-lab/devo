@@ -45,19 +45,23 @@ impl DefaultHistorySummarizer {
 }
 
 fn sanitize_compaction_summary(text: &str) -> String {
-    text.lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.contains("DSML")
-                && !trimmed.starts_with("<｜")
-                && !trimmed.ends_with("｜>")
-                && !trimmed.starts_with("<|")
-                && !trimmed.ends_with("|>")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
+    let mut sanitized = String::with_capacity(text.len());
+    for line in text.lines().filter(|line| should_keep_summary_line(line)) {
+        if !sanitized.is_empty() {
+            sanitized.push('\n');
+        }
+        sanitized.push_str(line);
+    }
+    sanitized.trim().to_string()
+}
+
+fn should_keep_summary_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.contains("DSML")
+        && !trimmed.starts_with("<｜")
+        && !trimmed.ends_with("｜>")
+        && !trimmed.starts_with("<|")
+        && !trimmed.ends_with("|>")
 }
 
 #[async_trait]
@@ -99,17 +103,18 @@ impl HistorySummarizer for DefaultHistorySummarizer {
             }
         };
 
-        let text: String = response
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                ResponseContent::Text(text) => Some(text.as_str()),
-                ResponseContent::ToolUse { .. }
-                | ResponseContent::HostedToolUse { .. }
-                | ResponseContent::ProviderReasoning { .. } => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut text = String::new();
+        let mut saw_text = false;
+        for block in &response.content {
+            let ResponseContent::Text(block_text) = block else {
+                continue;
+            };
+            if saw_text {
+                text.push('\n');
+            }
+            text.push_str(block_text);
+            saw_text = true;
+        }
 
         let text = sanitize_compaction_summary(&text);
 
@@ -147,6 +152,14 @@ Next step"#;
         assert_eq!(
             sanitize_compaction_summary(input),
             "Progress so far\nNext step"
+        );
+    }
+
+    #[test]
+    fn sanitize_compaction_summary_preserves_internal_spacing() {
+        assert_eq!(
+            sanitize_compaction_summary("  Summary line  \n\n  Next line  \n"),
+            "Summary line  \n\n  Next line"
         );
     }
 }

@@ -1,3 +1,10 @@
+//! Streamable HTTP MCP authentication discovery.
+//!
+//! Auth status checks are deliberately best-effort: explicit bearer-token
+//! configuration wins, cached OAuth tokens are treated as logged-in state, and
+//! network/discovery failures fall back to `Unsupported` so a status refresh does
+//! not break normal startup.
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -95,7 +102,7 @@ async fn discover_streamable_http_oauth_with_headers(
         discovery_url.set_path(&candidate_path);
 
         let response = match client
-            .get(discovery_url.clone())
+            .get(discovery_url)
             .header(OAUTH_DISCOVERY_HEADER, OAUTH_DISCOVERY_VERSION)
             .send()
             .await
@@ -146,15 +153,14 @@ struct OAuthDiscoveryMetadata {
 fn normalize_scopes(scopes_supported: Option<Vec<String>>) -> Option<Vec<String>> {
     let scopes_supported = scopes_supported?;
 
-    let mut normalized = Vec::new();
+    let mut normalized = Vec::with_capacity(scopes_supported.len());
     for scope in scopes_supported {
         let scope = scope.trim();
         if scope.is_empty() {
             continue;
         }
-        let scope = scope.to_string();
-        if !normalized.contains(&scope) {
-            normalized.push(scope);
+        if !normalized.iter().any(|existing| existing == scope) {
+            normalized.push(scope.to_string());
         }
     }
 
@@ -177,7 +183,7 @@ fn discovery_paths(base_path: &str) -> Vec<String> {
         return vec![canonical];
     }
 
-    let mut candidates = Vec::new();
+    let mut candidates = Vec::with_capacity(3);
     let mut push_unique = |candidate: String| {
         if !candidates.contains(&candidate) {
             candidates.push(candidate);
@@ -198,9 +204,7 @@ mod tests {
     use axum::Router;
     use axum::routing::get;
     use pretty_assertions::assert_eq;
-    use serial_test::serial;
     use std::collections::HashMap;
-    use std::ffi::OsString;
     use tokio::task::JoinHandle;
 
     struct TestServer {
@@ -239,38 +243,6 @@ mod tests {
         }
     }
 
-    struct EnvVarGuard {
-        key: String,
-        original: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &str, value: &str) -> Self {
-            let original = std::env::var_os(key);
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self {
-                key: key.to_string(),
-                original,
-            }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            if let Some(value) = &self.original {
-                unsafe {
-                    std::env::set_var(&self.key, value);
-                }
-            } else {
-                unsafe {
-                    std::env::remove_var(&self.key);
-                }
-            }
-        }
-    }
-
     #[tokio::test]
     async fn determine_auth_status_uses_bearer_token_when_authorization_header_present() {
         let status = determine_streamable_http_auth_status(
@@ -291,18 +263,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(auth_status_env)]
-    async fn determine_auth_status_uses_bearer_token_when_env_authorization_header_present() {
-        let _guard = EnvVarGuard::set("CODEX_RMCP_CLIENT_AUTH_STATUS_TEST_TOKEN", "Bearer token");
+    async fn determine_auth_status_uses_bearer_token_when_env_var_is_configured() {
         let status = determine_streamable_http_auth_status(
             "server",
             "not-a-url",
-            /*bearer_token_env_var*/ None,
+            Some("CODEX_RMCP_CLIENT_AUTH_STATUS_TEST_TOKEN"),
             /*http_headers*/ None,
-            Some(HashMap::from([(
-                "Authorization".to_string(),
-                "CODEX_RMCP_CLIENT_AUTH_STATUS_TEST_TOKEN".to_string(),
-            )])),
+            /*env_http_headers*/ None,
             OAuthCredentialsStoreMode::Keyring,
         )
         .await

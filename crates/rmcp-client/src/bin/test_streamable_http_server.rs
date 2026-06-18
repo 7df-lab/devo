@@ -72,12 +72,16 @@ struct SessionFailureState {
 struct ArmedFailure {
     status: StatusCode,
     remaining: usize,
+    content_type: Option<String>,
+    body: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ArmSessionPostFailureRequest {
     status: u16,
     remaining: usize,
+    content_type: Option<String>,
+    body: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -411,6 +415,8 @@ async fn arm_session_post_failure(
         Some(ArmedFailure {
             status,
             remaining: request.remaining,
+            content_type: request.content_type,
+            body: request.body,
         })
     };
     *state.armed_failure.lock().await = armed_failure;
@@ -436,13 +442,21 @@ async fn fail_session_post_when_armed(
         {
             failure.remaining -= 1;
             let status = failure.status;
+            let body = failure
+                .body
+                .clone()
+                .unwrap_or_else(|| format!("forced session failure with status {status}"));
+            let content_type = failure.content_type.clone();
             if failure.remaining == 0 {
                 *armed_failure = None;
             }
-            let mut response = Response::new(Body::from(format!(
-                "forced session failure with status {status}"
-            )));
+            let mut response = Response::new(Body::from(body));
             *response.status_mut() = status;
+            if let Some(content_type) = content_type
+                && let Ok(value) = content_type.parse()
+            {
+                response.headers_mut().insert(CONTENT_TYPE, value);
+            }
             return response;
         }
     }

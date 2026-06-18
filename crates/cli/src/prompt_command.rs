@@ -8,13 +8,22 @@ use devo_core::FileSystemAppConfigLoader;
 use devo_core::ModelCatalog;
 use devo_core::PresetModelCatalog;
 use devo_core::QueryEvent;
+use devo_core::TurnConfig;
+use devo_core::default_base_instructions;
+use devo_core::provider_request_model_map_for_binding;
+use devo_core::resolve_enabled_model_binding;
 use devo_core::tools::ToolPlanConfig;
 use devo_core::tools::handlers;
 use devo_mcp::manager::RmcpMcpManager;
+use devo_provider::ModelProviderSDK;
+use devo_provider::ProviderRoute;
+use devo_provider::ProviderRouter;
 use devo_util_paths::find_devo_home;
+use futures::Stream;
 use serde::Serialize;
 use std::io::Write;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -37,7 +46,6 @@ pub(crate) async fn run_prompt(
     }
     use devo_core::SessionConfig;
     use devo_core::SessionState;
-    use devo_core::default_base_instructions;
     use devo_core::tools::ToolRuntime;
 
     let cwd = std::env::current_dir()?;
@@ -45,10 +53,16 @@ pub(crate) async fn run_prompt(
     let app_config = FileSystemAppConfigLoader::new(home_dir.clone())
         .load(Some(cwd.as_path()))
         .unwrap_or_else(|_| AppConfig::default());
-    let provider = devo_server::load_server_provider(&app_config, model_override, &home_dir)?;
-    let selected_model = model_override
-        .map(ToString::to_string)
-        .unwrap_or_else(|| provider.default_model.clone());
+    let resolved_provider =
+        devo_server::load_server_provider(&app_config, model_override, &home_dir)?;
+    let model_catalog = PresetModelCatalog::load_from_config(&home_dir, Some(&cwd))?;
+    let turn_config = prompt_turn_config(
+        &app_config,
+        &model_catalog,
+        model_override,
+        &resolved_provider.default_model,
+    );
+    let selected_model = turn_config.model.slug.clone();
 
     let mut session_state = SessionState::new(
         SessionConfig {
@@ -79,6 +93,7 @@ pub(crate) async fn run_prompt(
             turn_id: None,
             cwd: cwd.clone(),
             agent_scope: devo_core::tools::ToolAgentScope::Parent,
+            agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
             local_web_search: None,
@@ -96,19 +111,10 @@ pub(crate) async fn run_prompt(
             network_proxy: None,
         },
     );
-    let model_catalog = PresetModelCatalog::load_from_config(&home_dir, Some(&cwd))?;
-
-    let turn_config = devo_core::TurnConfig::new(
-        model_catalog
-            .get(&selected_model)
-            .cloned()
-            .unwrap_or_else(|| devo_core::Model {
-                slug: selected_model.clone(),
-                base_instructions: default_base_instructions().to_string(),
-                ..Default::default()
-            }),
-        /*thinking_selection*/ None,
-    );
+    let provider = Arc::new(RoutedPromptProvider::new(
+        Arc::clone(&resolved_provider.provider_router),
+        turn_config.provider_route.clone(),
+    ));
 
     eprintln!("devo [prompt] model={selected_model} sending...");
 
@@ -128,7 +134,7 @@ pub(crate) async fn run_prompt(
     let result = devo_core::query(
         &mut session_state,
         &turn_config,
-        provider.provider.clone(),
+        provider,
         registry,
         &runtime,
         jsonl_event_callback(output_format, session_id_for_events),
@@ -158,13 +164,14 @@ pub(crate) async fn run_prompt(
         },
         Err(e) => {
             if output_format == PromptOutputFormat::Jsonl {
+                let message = e.to_string();
                 write_jsonl(&PromptJsonlEvent::Error {
                     session_id: session_state.id.as_str(),
-                    message: &e.to_string(),
+                    message: &message,
                 })?;
                 write_jsonl(&PromptJsonlEvent::TurnFailed {
                     session_id: session_state.id.as_str(),
-                    message: &e.to_string(),
+                    message: &message,
                 })?;
             }
             anyhow::bail!("prompt failed: {e}");
@@ -172,6 +179,90 @@ pub(crate) async fn run_prompt(
     }
 
     Ok(())
+}
+
+struct RoutedPromptProvider {
+    router: Arc<dyn ProviderRouter>,
+    route: ProviderRoute,
+}
+
+impl RoutedPromptProvider {
+    fn new(router: Arc<dyn ProviderRouter>, route: ProviderRoute) -> Self {
+        Self { router, route }
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProviderSDK for RoutedPromptProvider {
+    async fn completion(
+        &self,
+        request: devo_protocol::ModelRequest,
+    ) -> anyhow::Result<devo_protocol::ModelResponse> {
+        self.router
+            .complete(self.route.clone(), request)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn completion_stream(
+        &self,
+        request: devo_protocol::ModelRequest,
+    ) -> anyhow::Result<
+        Pin<Box<dyn Stream<Item = anyhow::Result<devo_protocol::StreamEvent>> + Send>>,
+    > {
+        self.router
+            .stream(self.route.clone(), request)
+            .await
+            .map_err(Into::into)
+    }
+
+    fn name(&self) -> &str {
+        self.router.name()
+    }
+}
+
+fn prompt_turn_config(
+    app_config: &AppConfig,
+    model_catalog: &PresetModelCatalog,
+    requested_model: Option<&str>,
+    default_model: &str,
+) -> TurnConfig {
+    let catalog_model = |model_slug: &str| {
+        model_catalog
+            .get(model_slug)
+            .cloned()
+            .unwrap_or_else(|| devo_core::Model {
+                slug: model_slug.to_string(),
+                base_instructions: default_base_instructions().to_string(),
+                ..Default::default()
+            })
+    };
+
+    if let Some(binding) = resolve_enabled_model_binding(&app_config.provider, requested_model) {
+        let provider_request_models = devo_core::ProviderRequestModelMap::new(
+            provider_request_model_map_for_binding(&app_config.provider, &binding),
+        );
+        let thinking_selection = app_config
+            .provider
+            .model_thinking_selection
+            .clone()
+            .or(binding.default_reasoning_effort.clone());
+        let mut turn_config = TurnConfig::with_provider_route(
+            catalog_model(&binding.model_slug),
+            binding.model_name.clone(),
+            provider_request_models,
+            ProviderRoute::binding(binding.provider_id.clone(), binding.invocation_method),
+            thinking_selection,
+        );
+        turn_config.model_binding_id = Some(binding.binding_id);
+        return turn_config;
+    }
+
+    let selected_model = requested_model.unwrap_or(default_model);
+    TurnConfig::new(
+        catalog_model(selected_model),
+        app_config.provider.model_thinking_selection.clone(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -584,3 +675,6 @@ mod tests {
         assert_eq!(latest_assistant_text(&messages), Some("final answer"));
     }
 }
+
+#[cfg(test)]
+mod prompt_routing_tests;

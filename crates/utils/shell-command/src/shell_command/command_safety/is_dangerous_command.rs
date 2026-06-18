@@ -1,4 +1,5 @@
 use crate::shell_command::bash::parse_shell_lc_plain_commands;
+use std::borrow::Cow;
 use std::path::Path;
 #[cfg(windows)]
 #[path = "windows_dangerous_commands.rs"]
@@ -76,7 +77,7 @@ pub(crate) fn git_global_option_requires_prompt(arg: &str) -> bool {
     )
 }
 
-pub(crate) fn executable_name_lookup_key(raw: &str) -> Option<String> {
+pub(crate) fn executable_name_lookup_key(raw: &str) -> Option<Cow<'_, str>> {
     #[cfg(windows)]
     {
         Path::new(raw)
@@ -86,10 +87,10 @@ pub(crate) fn executable_name_lookup_key(raw: &str) -> Option<String> {
                 let name = name.to_ascii_lowercase();
                 for suffix in [".exe", ".cmd", ".bat", ".com"] {
                     if let Some(stripped) = name.strip_suffix(suffix) {
-                        return stripped.to_string();
+                        return Cow::Owned(stripped.to_string());
                     }
                 }
-                name
+                Cow::Owned(name)
             })
     }
 
@@ -98,7 +99,7 @@ pub(crate) fn executable_name_lookup_key(raw: &str) -> Option<String> {
         Path::new(raw)
             .file_name()
             .and_then(|name| name.to_str())
-            .map(std::borrow::ToOwned::to_owned)
+            .map(Cow::Borrowed)
     }
 }
 

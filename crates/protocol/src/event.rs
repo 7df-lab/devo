@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
@@ -41,6 +42,10 @@ pub struct ToolResultPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<serde_json::Value>,
     pub content: serde_json::Value,
+    /// Optional UI-facing rendering of `content`.
+    ///
+    /// `content` remains the canonical protocol payload; this field lets clients
+    /// show a compact version without losing the original result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_content: Option<String>,
     pub is_error: bool,
@@ -159,6 +164,59 @@ pub struct SteerAcceptedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageEditRecordedPayload {
+    pub session_id: SessionId,
+    pub edit_id: String,
+    pub target_message_id: ItemId,
+    pub replacement_message_id: ItemId,
+    pub edit_state: String,
+    pub content_preview: String,
+    #[serde(default)]
+    pub mentions: Vec<serde_json::Value>,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnSupersededPayload {
+    pub session_id: SessionId,
+    pub superseded_turn_id: TurnId,
+    pub replacement_turn_id: TurnId,
+    pub edit_id: String,
+    pub reason: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRestoreStartedPayload {
+    pub session_id: SessionId,
+    pub edit_id: String,
+    pub superseded_turn_id: TurnId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub candidate_files: Vec<String>,
+    pub restore_policy: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRestoreCompletedPayload {
+    pub session_id: SessionId,
+    pub edit_id: String,
+    pub superseded_turn_id: TurnId,
+    #[serde(default)]
+    pub restored_files: Vec<String>,
+    #[serde(default)]
+    pub skipped_files: Vec<String>,
+    #[serde(default)]
+    pub unsupported_files: Vec<String>,
+    #[serde(default)]
+    pub failed_files: Vec<String>,
+    pub current_state_kept: bool,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
     UserMessage,
@@ -175,6 +233,7 @@ pub enum ItemKind {
     ContextCompaction,
     ApprovalRequest,
     ApprovalDecision,
+    ResearchArtifact,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +245,7 @@ pub enum ItemDeltaKind {
     CommandExecutionOutputDelta,
     FileChangeOutputDelta,
     PlanDelta,
+    ResearchArtifactDelta,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +255,7 @@ pub enum ServerRequestKind {
     ItemFileChangeRequestApproval,
     ItemPermissionsRequestApproval,
     ItemToolRequestUserInput,
+    ResearchClarificationRequest,
     McpServerElicitationRequest,
 }
 
@@ -260,6 +321,10 @@ pub enum ServerEvent {
     RequestUserInput(RequestUserInputPayload),
     InputQueueUpdated(InputQueueUpdatedPayload),
     SteerAccepted(SteerAcceptedPayload),
+    MessageEditRecorded(MessageEditRecordedPayload),
+    TurnSuperseded(TurnSupersededPayload),
+    WorkspaceRestoreStarted(WorkspaceRestoreStartedPayload),
+    WorkspaceRestoreCompleted(WorkspaceRestoreCompletedPayload),
     ItemStarted(ItemEventPayload),
     ItemCompleted(ItemEventPayload),
     ItemDelta {
@@ -296,6 +361,10 @@ impl ServerEvent {
             Self::RequestUserInput(payload) => Some(payload.request.session_id),
             Self::InputQueueUpdated(payload) => Some(payload.session_id),
             Self::SteerAccepted(payload) => Some(payload.session_id),
+            Self::MessageEditRecorded(payload) => Some(payload.session_id),
+            Self::TurnSuperseded(payload) => Some(payload.session_id),
+            Self::WorkspaceRestoreStarted(payload) => Some(payload.session_id),
+            Self::WorkspaceRestoreCompleted(payload) => Some(payload.session_id),
             Self::ItemStarted(payload) | Self::ItemCompleted(payload) => {
                 Some(payload.context.session_id)
             }
@@ -330,6 +399,10 @@ impl ServerEvent {
             Self::RequestUserInput(_) => "item/tool/requestUserInput",
             Self::InputQueueUpdated(_) => "inputQueue/updated",
             Self::SteerAccepted(_) => "steer/accepted",
+            Self::MessageEditRecorded(_) => "message/edit/recorded",
+            Self::TurnSuperseded(_) => "turn/superseded",
+            Self::WorkspaceRestoreStarted(_) => "workspace_restore_started",
+            Self::WorkspaceRestoreCompleted(_) => "workspace_restore_completed",
             Self::ItemStarted(_) => "item/started",
             Self::ItemCompleted(_) => "item/completed",
             Self::ItemDelta { delta_kind, .. } => match delta_kind {
@@ -339,6 +412,7 @@ impl ServerEvent {
                 ItemDeltaKind::CommandExecutionOutputDelta => "item/commandExecution/outputDelta",
                 ItemDeltaKind::FileChangeOutputDelta => "item/fileChange/outputDelta",
                 ItemDeltaKind::PlanDelta => "item/plan/delta",
+                ItemDeltaKind::ResearchArtifactDelta => "item/researchArtifact/delta",
             },
             Self::ServerRequestResolved(_) => "serverRequest/resolved",
             Self::ReferenceSearchUpdated(_) => "search/updated",
@@ -359,6 +433,10 @@ impl ServerEvent {
             | Self::RequestUserInput(_)
             | Self::InputQueueUpdated(_)
             | Self::SteerAccepted(_)
+            | Self::MessageEditRecorded(_)
+            | Self::TurnSuperseded(_)
+            | Self::WorkspaceRestoreStarted(_)
+            | Self::WorkspaceRestoreCompleted(_)
             | Self::ReferenceSearchUpdated(_)
             | Self::ReferenceSearchCompleted(_)
             | Self::ReferenceSearchFailed(_)
@@ -437,6 +515,87 @@ mod tests {
     }
 
     #[test]
+    fn message_edit_events_roundtrip_and_report_methods() {
+        let session_id = SessionId::new();
+        let target_message_id = ItemId::new();
+        let replacement_message_id = ItemId::new();
+        let superseded_turn_id = TurnId::new();
+        let replacement_turn_id = TurnId::new();
+        let timestamp = Utc::now();
+        let edit_payload = MessageEditRecordedPayload {
+            session_id,
+            edit_id: "edit-1".to_string(),
+            target_message_id,
+            replacement_message_id,
+            edit_state: "accepted".to_string(),
+            content_preview: "edited".to_string(),
+            mentions: vec![],
+            timestamp,
+        };
+        let superseded_payload = TurnSupersededPayload {
+            session_id,
+            superseded_turn_id,
+            replacement_turn_id,
+            edit_id: "edit-1".to_string(),
+            reason: "message_edit_previous".to_string(),
+            timestamp,
+        };
+        let restore_started_payload = WorkspaceRestoreStartedPayload {
+            session_id,
+            edit_id: "edit-1".to_string(),
+            superseded_turn_id,
+            checkpoint_id: None,
+            candidate_files: vec!["src/main.rs".to_string()],
+            restore_policy: "safe".to_string(),
+            timestamp,
+        };
+        let restore_completed_payload = WorkspaceRestoreCompletedPayload {
+            session_id,
+            edit_id: "edit-1".to_string(),
+            superseded_turn_id,
+            restored_files: vec![],
+            skipped_files: vec!["src/main.rs".to_string()],
+            unsupported_files: vec![],
+            failed_files: vec![],
+            current_state_kept: true,
+            timestamp,
+        };
+
+        let restored: MessageEditRecordedPayload =
+            serde_json::from_str(&serde_json::to_string(&edit_payload).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(restored, edit_payload);
+        let restored: WorkspaceRestoreCompletedPayload = serde_json::from_str(
+            &serde_json::to_string(&restore_completed_payload).expect("serialize"),
+        )
+        .expect("deserialize");
+        assert_eq!(restored, restore_completed_payload);
+
+        let edit_event = ServerEvent::MessageEditRecorded(edit_payload);
+        assert_eq!(edit_event.method_name(), "message/edit/recorded");
+        assert_eq!(edit_event.session_id(), Some(session_id));
+
+        let superseded_event = ServerEvent::TurnSuperseded(superseded_payload);
+        assert_eq!(superseded_event.method_name(), "turn/superseded");
+        assert_eq!(superseded_event.session_id(), Some(session_id));
+
+        let restore_started_event = ServerEvent::WorkspaceRestoreStarted(restore_started_payload);
+        assert_eq!(
+            restore_started_event.method_name(),
+            "workspace_restore_started"
+        );
+        assert_eq!(restore_started_event.session_id(), Some(session_id));
+
+        let restore_completed_event =
+            ServerEvent::WorkspaceRestoreCompleted(restore_completed_payload);
+        assert_eq!(
+            restore_completed_event.method_name(),
+            "workspace_restore_completed"
+        );
+        assert_eq!(restore_completed_event.session_id(), Some(session_id));
+    }
+
+    #[test]
     fn server_event_input_queue_updated_method_name() {
         let event = ServerEvent::InputQueueUpdated(InputQueueUpdatedPayload {
             session_id: SessionId::new(),
@@ -455,5 +614,27 @@ mod tests {
         });
         assert_eq!(event.method_name(), "steer/accepted");
         assert!(event.session_id().is_some());
+    }
+
+    #[test]
+    fn research_artifact_delta_method_name() {
+        let session_id = SessionId::new();
+        let event = ServerEvent::ItemDelta {
+            delta_kind: ItemDeltaKind::ResearchArtifactDelta,
+            payload: ItemDeltaPayload {
+                context: EventContext {
+                    session_id,
+                    turn_id: Some(TurnId::new()),
+                    item_id: Some(ItemId::new()),
+                    seq: 0,
+                },
+                delta: "partial finding".to_string(),
+                stream_index: None,
+                channel: None,
+            },
+        };
+
+        assert_eq!(event.method_name(), "item/researchArtifact/delta");
+        assert_eq!(event.session_id(), Some(session_id));
     }
 }

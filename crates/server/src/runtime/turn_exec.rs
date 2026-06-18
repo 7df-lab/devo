@@ -575,7 +575,8 @@ fn tool_start_item(
         | ItemKind::ImageView
         | ItemKind::ContextCompaction
         | ItemKind::ApprovalRequest
-        | ItemKind::ApprovalDecision => unreachable!("tool start item kind must be tool-like"),
+        | ItemKind::ApprovalDecision
+        | ItemKind::ResearchArtifact => unreachable!("tool start item kind must be tool-like"),
     };
     ToolStartItem { item_kind, payload }
 }
@@ -914,6 +915,7 @@ impl ServerRuntime {
             .await;
 
         let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+            self.clear_active_turn_runtime_handles(session_id).await;
             return;
         };
         let (permission_mode, permission_profile) = {
@@ -933,7 +935,14 @@ impl ServerRuntime {
             .provider_http
             .proxy_url
             .clone();
-        let runtime = ToolRuntime::new_with_context(
+        let turn_cancel_token = self
+            .active_turn_cancellations
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_else(CancellationToken::new);
+        let runtime = ToolRuntime::new_with_context_and_options(
             Arc::clone(&self.deps.registry),
             self.build_permission_checker(
                 session_id,
@@ -946,11 +955,16 @@ impl ServerRuntime {
                 turn_id: Some(turn.turn_id.to_string()),
                 cwd,
                 agent_scope: ToolAgentScope::Parent,
+                agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                 collaboration_mode: devo_protocol::CollaborationMode::Build,
                 agent_coordinator: None,
                 local_web_search: None,
                 hooks: self.hook_context_for_session(session_id).await,
                 network_proxy,
+            },
+            ToolExecutionOptions {
+                cancel_token: turn_cancel_token,
+                ..ToolExecutionOptions::default()
             },
         );
         let result = runtime
@@ -971,6 +985,7 @@ impl ServerRuntime {
             }
         };
         let is_error = result.is_error;
+        self.clear_active_turn_runtime_handles(session_id).await;
         self.complete_item(
             session_id,
             turn.turn_id,
@@ -1920,11 +1935,28 @@ impl ServerRuntime {
             let callback = std::sync::Arc::new(move |event: QueryEvent| {
                 event_callback_tx.send(event);
             });
+            let agent_context_mode = core_session
+                .session_context
+                .as_ref()
+                .map(|context| match context.system_prompt_mode {
+                    devo_core::SystemPromptMode::CodingAgent => {
+                        devo_protocol::AgentContextMode::CodingAgent
+                    }
+                    devo_core::SystemPromptMode::DeepResearch => {
+                        devo_protocol::AgentContextMode::DeepResearch
+                    }
+                })
+                .unwrap_or_default();
             let registry = match agent_tool_policy {
                 devo_protocol::AgentToolPolicy::Inherit => Arc::clone(&self.deps.registry),
                 devo_protocol::AgentToolPolicy::DenyAll => {
                     Arc::new(devo_core::tools::ToolRegistry::new())
                 }
+                devo_protocol::AgentToolPolicy::DeepResearch => Arc::new(
+                    self.deps
+                        .registry
+                        .restricted_to_specs(research::RESEARCH_WORKER_TOOL_NAMES),
+                ),
             };
             let permission_mode = core_session.config.permission_mode;
             let permission_profile = core_session.config.permission_profile.clone();
@@ -1958,6 +1990,7 @@ impl ServerRuntime {
                     turn_id: Some(turn_for_events.turn_id.to_string()),
                     cwd: core_session.cwd.clone(),
                     agent_scope,
+                    agent_context_mode,
                     collaboration_mode,
                     agent_coordinator: Some(Arc::clone(&self) as Arc<dyn AgentToolCoordinator>),
                     local_web_search: match &turn_config.web_search {

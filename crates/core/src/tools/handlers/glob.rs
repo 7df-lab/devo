@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use super::ripgrep::RG_NO_MATCH_EXIT_CODE;
+use super::ripgrep::ripgrep_failure_message;
 use super::ripgrep::run_rg;
 use crate::contracts::{
     ToolCallError, ToolContext, ToolProgressSender, ToolResult, ToolResultContent,
@@ -100,12 +101,7 @@ impl ToolHandler for GlobHandler {
             ));
         }
         if exit_code != 0 {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let message = if stderr.is_empty() {
-                format!("ripgrep exited with status {exit_code}")
-            } else {
-                stderr
-            };
+            let message = ripgrep_failure_message(output.stderr, exit_code);
             return Ok(ToolResult::error(
                 ToolResultContent::Text(message.clone()),
                 "Find failed",

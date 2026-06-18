@@ -57,8 +57,8 @@ Later layers win over earlier layers for overlapping fields. TOML tables are
 merged recursively; non-table values replace the earlier value.
 
 Provider-owned fields use `ProviderConfigSection::merge_overlay` while loading
-user and project config, so project config can override specific provider fields
-without clearing every omitted provider field from user config.
+user, project, and CLI config, so higher-priority layers can override specific
+provider fields without clearing every omitted provider field from lower layers.
 
 ## App Defaults
 
@@ -403,6 +403,24 @@ Supported modes:
   server tool `{"type":"web_fetch_20250910","name":"web_fetch"}`.
 - `local`: expose the existing local `webfetch` function tool. This is the
   default to preserve the existing local fetch behavior.
+
+## Deep Research
+
+`[research]` controls the server-owned `/research` workflow. The workflow reuses
+the active session model, provider, thinking, `web_search`, and `web_fetch`
+configuration for all stages.
+
+Supported keys:
+
+- `max_concurrent_tasks` (default `3`): reserved concurrency budget for
+  researcher tasks.
+- `max_tasks` (default `4`): maximum supervisor-planned research tasks.
+- `max_researcher_iterations` (default `5`): search/fetch iteration guidance
+  passed to researcher prompts.
+- `fetch_summary_threshold_chars` (default `24000`): local `webfetch` text
+  length above which research summarizes the fetched page for downstream stages.
+- `max_summary_chars` (default `8000`): target cap for oversized webpage
+  summaries.
 
 ## Provider Resolution
 

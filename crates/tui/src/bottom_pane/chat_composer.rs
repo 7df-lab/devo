@@ -1430,6 +1430,8 @@ impl ChatComposer {
                 modifiers: KeyModifiers::NONE,
                 ..
             } => {
+                let first_line = self.textarea.text().lines().next().unwrap_or("");
+                popup.on_composer_text_change(first_line.to_string());
                 if let Some(sel) = popup.selected_item() {
                     let CommandItem::Builtin(cmd) = sel;
                     // If the command supports inline args and there's already
@@ -4028,5 +4030,24 @@ mod reference_popup_tests {
 
         assert_eq!(result, (InputResult::None, true));
         assert!(matches!(composer.active_popup, ActivePopup::None));
+    }
+
+    /// Trace: L2-DES-TUI-003
+    /// Verifies: Enter confirms the focused slash-command popup row.
+    #[test]
+    fn enter_accepts_focused_slash_command() {
+        let (mut composer, _rx) = test_composer();
+        set_text_at_end(&mut composer, "/");
+
+        assert_eq!(
+            composer.handle_key_event(press(KeyCode::Down)),
+            (InputResult::None, true)
+        );
+
+        assert_eq!(
+            composer.handle_key_event(press(KeyCode::Enter)),
+            (InputResult::Command(SlashCommand::Model), true)
+        );
+        assert_eq!(composer.current_text(), "");
     }
 }

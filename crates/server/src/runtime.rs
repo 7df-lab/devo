@@ -19,6 +19,8 @@ use devo_core::CommandExecutionItem;
 use devo_core::ItemId;
 use devo_core::Message;
 use devo_core::QueryEvent;
+use devo_core::ResearchArtifactItem;
+use devo_core::ResearchArtifactType;
 use devo_core::ResponseItem;
 use devo_core::SessionId;
 use devo_core::SessionTitleFinalSource;
@@ -49,6 +51,7 @@ use devo_core::tools::ToolCallResult;
 use devo_core::tools::ToolContent;
 use devo_core::tools::ToolExecutionOptions;
 use devo_core::tools::ToolPermissionRequest;
+use devo_core::tools::ToolRegistry;
 use devo_core::tools::ToolRuntime;
 use devo_core::tools::ToolRuntimeContext;
 use devo_safety::PermissionMode;
@@ -97,6 +100,7 @@ use crate::SessionPermissionsUpdateParams;
 use crate::SessionPermissionsUpdateResult;
 use crate::SessionResumeParams;
 use crate::SessionResumeResult;
+use crate::SessionRollbackMode;
 use crate::SessionRollbackParams;
 use crate::SessionRollbackResult;
 use crate::SessionRuntimeStatus;
@@ -163,14 +167,19 @@ mod model_api;
 mod proposed_plan;
 mod provider_vendor_api;
 mod reference_search;
+mod research;
+mod research_tools;
 mod skills;
 mod turn_exec;
+mod turn_reservation;
 mod user_input;
 
 pub(crate) use connection::CONNECTION_NOTIFICATION_CHANNEL_CAPACITY;
 pub(crate) use connection::ConnectionRuntime;
 pub(crate) use connection::SubscriptionFilter;
 pub(crate) use items::render_input_items;
+pub(crate) use research_tools::extract_written_file_path;
+pub(crate) use research_tools::is_write_tool_name;
 use turn_exec::ExecuteTurnRequest;
 
 pub struct ServerRuntime {
@@ -194,6 +203,8 @@ pub struct ServerRuntime {
     agent_mailboxes: Mutex<HashMap<SessionId, SubagentMailbox>>,
     /// Per-parent child-output buffers used by wait_agent polling.
     agent_output_buffers: Mutex<HashMap<SessionId, SubagentOutputBuffer>>,
+    /// Child agents owned by an active `/research` pipeline.
+    research_child_agents: Mutex<HashMap<SessionId, HashSet<SessionId>>>,
     /// Live client-owned reference search sessions.
     reference_searches:
         Mutex<HashMap<devo_protocol::ReferenceSearchId, reference_search::ReferenceSearchState>>,
@@ -279,6 +290,7 @@ impl ServerRuntime {
             agent_registries: Mutex::new(HashMap::new()),
             agent_mailboxes: Mutex::new(HashMap::new()),
             agent_output_buffers: Mutex::new(HashMap::new()),
+            research_child_agents: Mutex::new(HashMap::new()),
             reference_searches: Mutex::new(HashMap::new()),
             command_exec_manager: command_exec::CommandExecManager::new(),
         })

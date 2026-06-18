@@ -1,4 +1,12 @@
+//! Normalization helpers for provider request messages.
+//!
+//! Some providers require tool results to appear immediately after the assistant
+//! tool-use message that requested them. Devo can inject user-role context
+//! messages between those records, so this pass groups the required tool results
+//! first while preserving the remaining user content after them.
+
 use std::collections::HashSet;
+use std::collections::VecDeque;
 
 use crate::RequestContent;
 use crate::RequestMessage;
@@ -6,62 +14,53 @@ use crate::Role;
 
 pub fn normalize_tool_result_messages(messages: &mut Vec<RequestMessage>) {
     let capacity = messages.len();
-    let previous = std::mem::replace(messages, Vec::with_capacity(capacity));
-    let mut index = 0;
-
-    while index < previous.len() {
-        let message = reorder_user_tool_results(previous[index].clone());
-        let pending_tool_use_ids = tool_use_ids(&message);
-        messages.push(message);
-        index += 1;
-
-        if pending_tool_use_ids.is_empty() {
+    let mut previous = VecDeque::from(std::mem::replace(messages, Vec::with_capacity(capacity)));
+    while let Some(message) = previous.pop_front() {
+        let message = reorder_user_tool_results(message);
+        let Some(pending_tool_use_ids) = tool_use_ids(&message) else {
+            messages.push(message);
             continue;
-        }
+        };
 
-        if let Some((tool_result_message, consumed)) =
-            collect_tool_result_followup(&previous, index, &pending_tool_use_ids)
-        {
+        let tool_result_message =
+            collect_tool_result_followup(&mut previous, &pending_tool_use_ids);
+        messages.push(message);
+        if let Some(tool_result_message) = tool_result_message {
             messages.push(tool_result_message);
-            index += consumed;
         }
     }
 }
 
-fn tool_use_ids(message: &RequestMessage) -> Vec<String> {
+fn tool_use_ids(message: &RequestMessage) -> Option<HashSet<&str>> {
     if message.role != Role::Assistant.as_str() {
-        return Vec::new();
+        return None;
     }
 
-    message
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            RequestContent::ToolUse { id, .. } => Some(id.clone()),
+    let mut ids = None::<HashSet<&str>>;
+    for content in &message.content {
+        match content {
+            RequestContent::ToolUse { id, .. } => {
+                ids.get_or_insert_with(|| HashSet::with_capacity(message.content.len()))
+                    .insert(id.as_str());
+            }
             RequestContent::Text { .. }
             | RequestContent::Reasoning { .. }
             | RequestContent::ProviderReasoning { .. }
             | RequestContent::HostedToolUse { .. }
-            | RequestContent::ToolResult { .. } => None,
-        })
-        .collect()
+            | RequestContent::ToolResult { .. } => {}
+        }
+    }
+    ids
 }
 
 fn collect_tool_result_followup(
-    messages: &[RequestMessage],
-    start: usize,
-    pending_tool_use_ids: &[String],
-) -> Option<(RequestMessage, usize)> {
-    let pending_ids = pending_tool_use_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    let mut found_ids = HashSet::with_capacity(pending_ids.len());
-    let mut tool_results = Vec::new();
-    let mut other_content = Vec::new();
+    messages: &mut VecDeque<RequestMessage>,
+    pending_tool_use_ids: &HashSet<&str>,
+) -> Option<RequestMessage> {
+    let mut found_ids = HashSet::with_capacity(pending_tool_use_ids.len());
     let mut consumed = 0;
 
-    for message in messages.iter().skip(start) {
+    for message in messages.iter() {
         if message.role != Role::User.as_str() {
             break;
         }
@@ -69,58 +68,79 @@ fn collect_tool_result_followup(
         for content in &message.content {
             match content {
                 RequestContent::ToolResult { tool_use_id, .. } => {
-                    if pending_ids.contains(tool_use_id.as_str()) {
+                    if pending_tool_use_ids.contains(tool_use_id.as_str()) {
                         found_ids.insert(tool_use_id.as_str());
                     }
-                    tool_results.push(content.clone());
                 }
                 RequestContent::Text { .. }
                 | RequestContent::Reasoning { .. }
                 | RequestContent::ProviderReasoning { .. }
                 | RequestContent::HostedToolUse { .. }
-                | RequestContent::ToolUse { .. } => other_content.push(content.clone()),
+                | RequestContent::ToolUse { .. } => {}
             }
         }
 
         consumed += 1;
-        if pending_tool_use_ids
-            .iter()
-            .all(|id| found_ids.contains(id.as_str()))
-        {
+        if found_ids.len() == pending_tool_use_ids.len() {
             break;
         }
     }
 
-    if consumed == 0
-        || !pending_tool_use_ids
-            .iter()
-            .all(|id| found_ids.contains(id.as_str()))
-    {
+    if consumed == 0 || found_ids.len() != pending_tool_use_ids.len() {
         return None;
     }
 
+    let (tool_result_count, other_content_count) = messages
+        .iter()
+        .take(consumed)
+        .flat_map(|message| &message.content)
+        .fold((0, 0), |(tool_results, other_content), content| {
+            if matches!(content, RequestContent::ToolResult { .. }) {
+                (tool_results + 1, other_content)
+            } else {
+                (tool_results, other_content + 1)
+            }
+        });
+    let mut tool_results = Vec::with_capacity(tool_result_count);
+    let mut other_content = Vec::with_capacity(other_content_count);
+    for _ in 0..consumed {
+        let message = messages
+            .pop_front()
+            .expect("consumed count only includes queued messages");
+        for content in message.content {
+            match content {
+                RequestContent::ToolResult { .. } => tool_results.push(content),
+                RequestContent::Text { .. }
+                | RequestContent::Reasoning { .. }
+                | RequestContent::ProviderReasoning { .. }
+                | RequestContent::HostedToolUse { .. }
+                | RequestContent::ToolUse { .. } => other_content.push(content),
+            }
+        }
+    }
+
     tool_results.extend(other_content);
-    Some((
-        RequestMessage {
-            role: Role::User.as_str().to_string(),
-            content: tool_results,
-        },
-        consumed,
-    ))
+    Some(RequestMessage {
+        role: Role::User.as_str().to_string(),
+        content: tool_results,
+    })
 }
 
 fn reorder_user_tool_results(mut message: RequestMessage) -> RequestMessage {
-    if message.role != Role::User.as_str()
-        || !message
-            .content
-            .iter()
-            .any(|content| matches!(content, RequestContent::ToolResult { .. }))
-    {
+    if message.role != Role::User.as_str() {
+        return message;
+    }
+    let tool_result_count = message
+        .content
+        .iter()
+        .filter(|content| matches!(content, RequestContent::ToolResult { .. }))
+        .count();
+    if tool_result_count == 0 {
         return message;
     }
 
-    let mut tool_results = Vec::new();
-    let mut other_content = Vec::new();
+    let mut tool_results = Vec::with_capacity(tool_result_count);
+    let mut other_content = Vec::with_capacity(message.content.len() - tool_result_count);
     for content in message.content {
         match content {
             RequestContent::ToolResult { .. } => tool_results.push(content),

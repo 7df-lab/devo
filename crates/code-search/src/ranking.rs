@@ -37,7 +37,8 @@ pub fn rank_search(
     let semantic = index.semantic_search(query_embedding, candidate_limit, filters);
     let sparse = index.sparse_search(query, candidate_limit, filters);
     let alpha = resolve_alpha(query);
-    let mut scores = HashMap::<usize, f32>::with_capacity(candidate_limit.saturating_mul(2));
+    let mut scores =
+        HashMap::<usize, f32>::with_capacity(semantic.len().saturating_add(sparse.len()));
 
     for (rank, (chunk_id, _)) in semantic.into_iter().enumerate() {
         *scores.entry(chunk_id).or_default() += alpha * reciprocal_rank(rank);
@@ -70,15 +71,22 @@ fn rerank(
     scores: HashMap<usize, f32>,
     top_k: usize,
 ) -> Vec<SearchResult> {
-    let mut file_counts = HashMap::<String, usize>::with_capacity(scores.len());
+    if scores.is_empty() {
+        return Vec::new();
+    }
+
     let mut contexts = Vec::with_capacity(scores.len());
     for (chunk_id, base_score) in scores {
         if let Some(chunk) = index.chunk(chunk_id) {
             let path = normalized_path(&chunk.file_path);
-            *file_counts.entry(path.clone()).or_default() += 1;
             contexts.push((chunk_id, base_score, path, chunk));
         }
     }
+    let mut file_counts = HashMap::<&str, usize>::with_capacity(contexts.len());
+    for (_, _, path, _) in &contexts {
+        *file_counts.entry(path.as_ref()).or_default() += 1;
+    }
+    let all_files_unique = file_counts.len() == contexts.len();
 
     let symbol_query = is_symbol_query(query);
     let symbol = query
@@ -88,30 +96,50 @@ fn rerank(
         .next()
         .unwrap_or(query);
     let terms = query_terms(query);
-    let all_files_unique = file_counts.len() == contexts.len();
-    let mut candidates = contexts
-        .into_iter()
-        .map(|(chunk_id, base_score, path, chunk)| {
-            let lowercase_path = lowercase_path(&path);
+
+    let score_candidate =
+        |base_score: f32, path: &str, chunk: &Chunk, file_count: Option<usize>| {
+            let lowercase_path = lowercase_path(path);
             let mut score = base_score;
-            if !all_files_unique {
-                score *= multi_chunk_file_boost(file_counts.get(&path).copied().unwrap_or(1));
+            if let Some(file_count) = file_count {
+                score *= multi_chunk_file_boost(file_count);
             }
             if symbol_query && contains_symbol_definition(&chunk.content, symbol) {
                 score *= 1.35;
             }
             score *= path_keyword_boost(lowercase_path.as_ref(), &terms);
             score *= path_penalty(lowercase_path.as_ref());
-            (chunk_id, score, path, chunk)
-        })
-        .collect::<Vec<_>>();
+            score
+        };
 
     let mut saturated = if all_files_unique {
-        candidates
+        // Unique-file candidate sets are common after retrieval over many files.
+        // Avoid allocating candidate/count buffers when saturation will not use
+        // them.
+        drop(file_counts);
+        contexts
             .into_iter()
-            .map(|(_chunk_id, score, _path, chunk)| (score, chunk))
+            .map(|(_, base_score, path, chunk)| {
+                let score = score_candidate(base_score, path.as_ref(), chunk, None);
+                (score, chunk)
+            })
             .collect::<Vec<_>>()
     } else {
+        // `file_counts` borrows the path strings stored in `contexts`; materialize
+        // cheap counts before moving contexts into candidate tuples.
+        let context_counts = contexts
+            .iter()
+            .map(|(_, _, path, _)| file_counts.get(path.as_ref()).copied().unwrap_or(1))
+            .collect::<Vec<_>>();
+        drop(file_counts);
+        let mut candidates = contexts
+            .into_iter()
+            .zip(context_counts)
+            .map(|((chunk_id, base_score, path, chunk), file_count)| {
+                let score = score_candidate(base_score, path.as_ref(), chunk, Some(file_count));
+                (chunk_id, score, path, chunk)
+            })
+            .collect::<Vec<_>>();
         candidates.sort_by(|left, right| {
             right
                 .1
@@ -119,7 +147,7 @@ fn rerank(
                 .then_with(|| left.0.cmp(&right.0))
         });
 
-        let mut seen_per_file = HashMap::<String, usize>::new();
+        let mut seen_per_file = HashMap::<Cow<'_, str>, usize>::with_capacity(candidates.len());
         // Saturation prevents one file with many adjacent chunks from crowding out
         // other relevant files while preserving deterministic ordering within ties.
         candidates
@@ -155,8 +183,13 @@ fn rerank(
         .collect()
 }
 
-fn normalized_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+fn normalized_path(path: &Path) -> Cow<'_, str> {
+    let path = path.to_string_lossy();
+    if path.contains('\\') {
+        Cow::Owned(path.replace('\\', "/"))
+    } else {
+        path
+    }
 }
 
 fn lowercase_path(path: &str) -> Cow<'_, str> {
@@ -437,6 +470,22 @@ mod tests {
         let uppercase = lowercase_path("SRC/Parser/Module.rs");
         assert!(matches!(uppercase, std::borrow::Cow::Owned(_)));
         assert_eq!(uppercase.as_ref(), "src/parser/module.rs");
+    }
+
+    #[test]
+    fn normalized_path_preserves_forward_slash_paths() {
+        assert_eq!(
+            normalized_path(Path::new("src/parser/module.rs")),
+            "src/parser/module.rs"
+        );
+    }
+
+    #[test]
+    fn normalized_path_converts_backslash_separators() {
+        assert_eq!(
+            normalized_path(Path::new("src\\parser\\module.rs")),
+            "src/parser/module.rs"
+        );
     }
 
     #[test]

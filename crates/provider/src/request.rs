@@ -1,3 +1,9 @@
+//! Shared request-body helpers for provider adapters.
+//!
+//! Provider-specific adapters build their normal payload first, then overlay
+//! `extra_body` so caller-supplied escape-hatch fields keep their documented
+//! precedence without each adapter reimplementing the merge contract.
+
 use serde_json::Value;
 
 /// Merges an extra JSON object into a provider request body.
@@ -20,6 +26,7 @@ pub fn merge_extra_body(body: &mut Value, extra_body: Option<&Value>) {
 #[cfg(test)]
 mod tests {
     use crate::merge_extra_body;
+    use pretty_assertions::assert_eq;
     use serde_json::json;
 
     #[test]

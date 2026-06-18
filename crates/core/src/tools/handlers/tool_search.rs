@@ -27,6 +27,7 @@ use crate::tool_spec::ToolOutputMode;
 use crate::tool_spec::ToolSpec;
 
 const TOOL_SEARCH_DEFAULT_LIMIT: usize = 8;
+const SELECT_QUERY_PREFIX: &str = "select:";
 
 #[derive(Clone)]
 pub struct ToolSearchEntry {
@@ -118,18 +119,23 @@ impl ToolHandler for ToolSearchHandler {
         let selection = if is_select_query(query) {
             query.to_string()
         } else {
-            let names = self
-                .search(query, limit)
-                .into_iter()
-                .filter(|name| resolve_tool_policy(name, &config) != PromptLoadingPolicy::Hidden)
-                .collect::<Vec<_>>();
-            if names.is_empty() {
+            let mut selection = String::from(SELECT_QUERY_PREFIX);
+            for name in self.search(query, limit) {
+                if resolve_tool_policy(name, &config) == PromptLoadingPolicy::Hidden {
+                    continue;
+                }
+                if selection.len() > SELECT_QUERY_PREFIX.len() {
+                    selection.push(',');
+                }
+                selection.push_str(name);
+            }
+            if selection.len() == SELECT_QUERY_PREFIX.len() {
                 return Ok(ToolResult::success(
                     ToolResultContent::Text("No matching deferred tools found.".to_string()),
                     "No tools available",
                 ));
             }
-            format!("select:{}", names.join(","))
+            selection
         };
 
         let mut loaded_tools = self.loaded_tools.lock().map_err(|_| {
@@ -152,13 +158,12 @@ impl ToolHandler for ToolSearchHandler {
 }
 
 impl ToolSearchHandler {
-    fn search(&self, query: &str, limit: usize) -> Vec<&str> {
+    fn search<'a>(&'a self, query: &str, limit: usize) -> impl Iterator<Item = &'a str> + 'a {
         self.search_engine
             .search(query, limit)
             .into_iter()
             .filter_map(|result| self.entries.get(result.document.id))
             .map(|entry| entry.name.as_str())
-            .collect()
     }
 }
 
@@ -194,7 +199,7 @@ pub fn tool_search_spec() -> ToolSpec {
 }
 
 fn is_select_query(query: &str) -> bool {
-    query.starts_with("select:") || query.starts_with("SELECT:")
+    query.starts_with(SELECT_QUERY_PREFIX) || query.starts_with("SELECT:")
 }
 
 fn default_search_text(definition: &ToolDefinition) -> String {
@@ -397,7 +402,7 @@ mod tests {
         let mut total_results = 0;
 
         for _ in 0..20_000 {
-            total_results += black_box(handler.search(black_box("workspace database"), 8)).len();
+            total_results += black_box(handler.search(black_box("workspace database"), 8)).count();
         }
 
         let elapsed = started.elapsed();
@@ -447,6 +452,7 @@ mod tests {
                     },
                     cancel_token: tokio_util::sync::CancellationToken::new(),
                     agent_scope: ToolAgentScope::Parent,
+                    agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                     collaboration_mode: devo_protocol::CollaborationMode::Build,
                     agent_coordinator: None,
                     network_proxy: None,
@@ -548,6 +554,7 @@ mod tests {
                         },
                         cancel_token: tokio_util::sync::CancellationToken::new(),
                         agent_scope: ToolAgentScope::Subagent,
+                        agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                         collaboration_mode: devo_protocol::CollaborationMode::Build,
                         agent_coordinator: None,
                         network_proxy: None,

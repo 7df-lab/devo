@@ -8,22 +8,11 @@ use crate::shell_command::command_safety::is_dangerous_command::git_global_optio
 use crate::shell_command::command_safety::windows_safe_commands::is_safe_command_windows;
 
 pub fn is_known_safe_command(command: &[String]) -> bool {
-    let command: Vec<String> = command
-        .iter()
-        .map(|s| {
-            if s == "zsh" {
-                "bash".to_string()
-            } else {
-                s.clone()
-            }
-        })
-        .collect();
-
-    if is_safe_command_windows(&command) {
+    if is_safe_command_windows(command) {
         return true;
     }
 
-    if is_safe_to_call_with_exec(&command) {
+    if is_safe_to_call_with_exec(command) {
         return true;
     }
 
@@ -33,7 +22,7 @@ pub fn is_known_safe_command(command: &[String]) -> bool {
     // introduce side effects ( "&&", "||", ";", and "|" ). If every
     // individual command in the script is itself a known‑safe command, then
     // the composite expression is considered safe.
-    if let Some(all_commands) = parse_shell_lc_plain_commands(&command)
+    if let Some(all_commands) = parse_shell_lc_plain_commands(command)
         && !all_commands.is_empty()
         && all_commands
             .iter()
@@ -127,9 +116,12 @@ fn is_safe_to_call_with_exec(command: &[String]) -> bool {
 
             !command.iter().any(|arg| {
                 UNSAFE_RIPGREP_OPTIONS_WITHOUT_ARGS.contains(&arg.as_str())
-                    || UNSAFE_RIPGREP_OPTIONS_WITH_ARGS
-                        .iter()
-                        .any(|&opt| arg == opt || arg.starts_with(&format!("{opt}=")))
+                    || UNSAFE_RIPGREP_OPTIONS_WITH_ARGS.iter().any(|&opt| {
+                        arg == opt
+                            || arg
+                                .strip_prefix(opt)
+                                .is_some_and(|suffix| suffix.starts_with('='))
+                    })
             })
         }
 
@@ -243,34 +235,22 @@ Example
 
 /// Returns true if `arg` matches /^(\d+,)?\d+p$/
 fn is_valid_sed_n_arg(arg: Option<&str>) -> bool {
-    // unwrap or bail
-    let s = match arg {
-        Some(s) => s,
-        None => return false,
+    let Some(core) = arg.and_then(|s| s.strip_suffix('p')) else {
+        return false;
     };
 
-    // must end with 'p', strip it
-    let core = match s.strip_suffix('p') {
-        Some(rest) => rest,
-        None => return false,
-    };
+    let mut parts = core.split(',');
+    let first = parts.next().unwrap_or_default();
+    let second = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
 
-    // split on ',' and ensure 1 or 2 numeric parts
-    let parts: Vec<&str> = core.split(',').collect();
-    match parts.as_slice() {
-        // single number, e.g. "10"
-        [num] => !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()),
+    let is_number = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
 
-        // two numbers, e.g. "1,5"
-        [a, b] => {
-            !a.is_empty()
-                && !b.is_empty()
-                && a.chars().all(|c| c.is_ascii_digit())
-                && b.chars().all(|c| c.is_ascii_digit())
-        }
-
-        // anything else (more than one comma) is invalid
-        _ => false,
+    match second {
+        Some(second) => is_number(first) && is_number(second),
+        None => is_number(first),
     }
 }
 

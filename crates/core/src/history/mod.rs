@@ -6,6 +6,7 @@ pub mod summarizer;
 pub use context_insertion::insert_context_diff_message;
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -106,21 +107,24 @@ impl ContextView {
 
     /// Renders the full context as a structured prompt fragment.
     pub fn to_prompt(&self) -> String {
-        let mut parts = vec![
-            format!("<os>{}</os>", self.os),
-            format!("<shell>{}</shell>", self.shell),
-            format!("<timezone>{}</timezone>", self.timezone),
-            format!("<model>{}</model>", self.model),
-            format!("<date>{}</date>", self.date),
-            format!("<cwd>{}</cwd>", self.cwd),
-        ];
+        let os = &self.os;
+        let shell = &self.shell;
+        let timezone = &self.timezone;
+        let model = &self.model;
+        let date = &self.date;
+        let cwd = &self.cwd;
+        let mut prompt = String::new();
+        let _ = write!(
+            prompt,
+            "<os>{os}</os>\n<shell>{shell}</shell>\n<timezone>{timezone}</timezone>\n<model>{model}</model>\n<date>{date}</date>\n<cwd>{cwd}</cwd>"
+        );
         if let Some(ref effort) = self.thinking_effort {
-            parts.push(format!("<thinking_effort>{effort}</thinking_effort>"));
+            let _ = write!(prompt, "\n<thinking_effort>{effort}</thinking_effort>");
         }
         if let Some(ref persona) = self.persona {
-            parts.push(format!("<persona>{persona}</persona>"));
+            let _ = write!(prompt, "\n<persona>{persona}</persona>");
         }
-        parts.join("\n")
+        prompt
     }
 
     /// Produces a diff prompt describing what has changed since `other`.
@@ -129,50 +133,88 @@ impl ContextView {
     /// directory), this returns a structured message that can be injected
     /// into the prompt to inform the LLM.
     pub fn diff_since(&self, previous: &ContextView) -> Option<String> {
-        let mut changes = Vec::new();
+        let mut diff = String::from("<context_changes>\n");
+        let mut changed = false;
 
         if self.os != previous.os {
-            changes.push(format!("os: {} -> {}", previous.os, self.os));
+            let previous_os = &previous.os;
+            let os = &self.os;
+            let _ = write!(diff, "os: {previous_os} -> {os}");
+            changed = true;
         }
         if self.shell != previous.shell {
-            changes.push(format!("shell: {} -> {}", previous.shell, self.shell));
+            if changed {
+                diff.push('\n');
+            }
+            let previous_shell = &previous.shell;
+            let shell = &self.shell;
+            let _ = write!(diff, "shell: {previous_shell} -> {shell}");
+            changed = true;
         }
         if self.timezone != previous.timezone {
-            changes.push(format!(
-                "timezone: {} -> {}",
-                previous.timezone, self.timezone
-            ));
+            if changed {
+                diff.push('\n');
+            }
+            let previous_timezone = &previous.timezone;
+            let timezone = &self.timezone;
+            let _ = write!(diff, "timezone: {previous_timezone} -> {timezone}");
+            changed = true;
         }
         if self.model != previous.model {
-            changes.push(format!("model: {} -> {}", previous.model, self.model));
+            if changed {
+                diff.push('\n');
+            }
+            let previous_model = &previous.model;
+            let model = &self.model;
+            let _ = write!(diff, "model: {previous_model} -> {model}");
+            changed = true;
         }
         if self.thinking_effort != previous.thinking_effort {
-            changes.push(format!(
-                "thinking_effort: {:?} -> {:?}",
-                previous.thinking_effort, self.thinking_effort
-            ));
+            if changed {
+                diff.push('\n');
+            }
+            let previous_thinking_effort = &previous.thinking_effort;
+            let thinking_effort = &self.thinking_effort;
+            let _ = write!(
+                diff,
+                "thinking_effort: {previous_thinking_effort:?} -> {thinking_effort:?}"
+            );
+            changed = true;
         }
         if self.persona != previous.persona {
-            changes.push(format!(
-                "persona: {:?} -> {:?}",
-                previous.persona, self.persona
-            ));
+            if changed {
+                diff.push('\n');
+            }
+            let previous_persona = &previous.persona;
+            let persona = &self.persona;
+            let _ = write!(diff, "persona: {previous_persona:?} -> {persona:?}");
+            changed = true;
         }
         if self.date != previous.date {
-            changes.push(format!("date: {} -> {}", previous.date, self.date));
+            if changed {
+                diff.push('\n');
+            }
+            let previous_date = &previous.date;
+            let date = &self.date;
+            let _ = write!(diff, "date: {previous_date} -> {date}");
+            changed = true;
         }
         if self.cwd != previous.cwd {
-            changes.push(format!("cwd: {} -> {}", previous.cwd, self.cwd));
+            if changed {
+                diff.push('\n');
+            }
+            let previous_cwd = &previous.cwd;
+            let cwd = &self.cwd;
+            let _ = write!(diff, "cwd: {previous_cwd} -> {cwd}");
+            changed = true;
         }
 
-        if changes.is_empty() {
+        if !changed {
             return None;
         }
 
-        Some(format!(
-            "<context_changes>\n{}\n</context_changes>",
-            changes.join("\n")
-        ))
+        diff.push_str("\n</context_changes>");
+        Some(diff)
     }
 }
 
@@ -486,20 +528,20 @@ mod tests {
         let mut ctx2 = test_context();
         ctx2.cwd = "/home/other".into();
         let diff = ctx2.diff_since(&ctx1);
-        assert!(diff.is_some());
-        let diff_str = diff.unwrap();
-        assert!(diff_str.contains("cwd"));
-        assert!(diff_str.contains("/home/test"));
-        assert!(diff_str.contains("/home/other"));
+        assert_eq!(
+            diff,
+            Some("<context_changes>\ncwd: /home/test -> /home/other\n</context_changes>".into())
+        );
     }
 
     #[test]
     fn history_context_to_prompt_contains_fields() {
         let ctx = test_context();
         let prompt = ctx.to_prompt();
-        assert!(prompt.contains("<os>linux</os>"));
-        assert!(prompt.contains("<shell>bash</shell>"));
-        assert!(prompt.contains("<date>2026-04-27</date>"));
+        assert_eq!(
+            prompt,
+            "<os>linux</os>\n<shell>bash</shell>\n<timezone>UTC</timezone>\n<model>test-model</model>\n<date>2026-04-27</date>\n<cwd>/home/test</cwd>"
+        );
     }
 
     #[test]

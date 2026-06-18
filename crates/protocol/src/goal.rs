@@ -18,7 +18,7 @@ pub fn validate_thread_goal_objective(value: &str) -> Result<(), String> {
     if value.is_empty() {
         return Err("goal objective must not be empty".to_string());
     }
-    if value.chars().count() > MAX_THREAD_GOAL_OBJECTIVE_CHARS {
+    if value.chars().nth(MAX_THREAD_GOAL_OBJECTIVE_CHARS).is_some() {
         return Err(format!(
             "goal objective must be at most {MAX_THREAD_GOAL_OBJECTIVE_CHARS} characters"
         ));
@@ -119,4 +119,39 @@ pub struct GoalClearParams {
 #[serde(rename_all = "camelCase")]
 pub struct GoalClearResult {
     pub cleared: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::{
+        MAX_THREAD_GOAL_OBJECTIVE_CHARS, validate_thread_goal_objective,
+        validate_thread_goal_token_budget,
+    };
+
+    #[test]
+    fn objective_validation_accepts_exact_character_limit() {
+        let objective = "a".repeat(MAX_THREAD_GOAL_OBJECTIVE_CHARS);
+
+        assert_eq!(validate_thread_goal_objective(&objective), Ok(()));
+    }
+
+    #[test]
+    fn objective_validation_rejects_first_character_over_limit() {
+        let objective = "a".repeat(MAX_THREAD_GOAL_OBJECTIVE_CHARS + 1);
+
+        assert_eq!(
+            validate_thread_goal_objective(&objective),
+            Err(format!(
+                "goal objective must be at most {MAX_THREAD_GOAL_OBJECTIVE_CHARS} characters"
+            ))
+        );
+    }
+
+    #[test]
+    fn token_budget_validation_accepts_absent_or_positive_budget() {
+        assert_eq!(validate_thread_goal_token_budget(None), Ok(()));
+        assert_eq!(validate_thread_goal_token_budget(Some(1)), Ok(()));
+    }
 }

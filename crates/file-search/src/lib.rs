@@ -17,6 +17,7 @@ use serde::Serialize;
 use std::num::NonZero;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
@@ -25,7 +26,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
-use tokio::process::Command;
+use tokio::process::Command as TokioCommand;
 
 #[cfg(test)]
 use nucleo::Utf32Str;
@@ -236,24 +237,7 @@ pub async fn run_main<T: Reporter>(
         Some(pattern) => pattern,
         None => {
             reporter.warn_no_search_pattern(&search_directory);
-            #[cfg(unix)]
-            Command::new("ls")
-                .arg("-al")
-                .current_dir(search_directory)
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status()
-                .await?;
-            #[cfg(windows)]
-            {
-                Command::new("cmd")
-                    .arg("/c")
-                    .arg(search_directory)
-                    .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit())
-                    .status()
-                    .await?;
-            }
+            list_directory_command(&search_directory).status().await?;
             return Ok(());
         }
     };
@@ -284,6 +268,28 @@ pub async fn run_main<T: Reporter>(
     }
 
     Ok(())
+}
+
+fn list_directory_command(search_directory: &Path) -> TokioCommand {
+    let mut command = TokioCommand::from(list_directory_std_command(search_directory));
+    command
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    command
+}
+
+#[cfg(unix)]
+fn list_directory_std_command(search_directory: &Path) -> StdCommand {
+    let mut command = StdCommand::new("ls");
+    command.arg("-al").current_dir(search_directory);
+    command
+}
+
+#[cfg(windows)]
+fn list_directory_std_command(search_directory: &Path) -> StdCommand {
+    let mut command = StdCommand::new("cmd");
+    command.arg("/c").arg("dir").current_dir(search_directory);
+    command
 }
 
 /// The worker threads will periodically check `cancel_flag` to see if they
@@ -647,6 +653,7 @@ mod tests {
 
     use super::*;
     use pretty_assertions::assert_eq;
+    use std::ffi::OsStr;
     use std::fs;
     use std::sync::Arc;
     use std::sync::Condvar;
@@ -696,6 +703,30 @@ mod tests {
     #[test]
     fn file_name_from_path_falls_back_to_full_path() {
         assert_eq!(file_name_from_path(""), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_directory_command_uses_ls_in_search_directory_on_unix() {
+        let search_directory = Path::new("/tmp/devo-file-search");
+        let command = list_directory_std_command(search_directory);
+        let args = command.get_args().collect::<Vec<_>>();
+
+        assert_eq!(command.get_program(), OsStr::new("ls"));
+        assert_eq!(args, vec![OsStr::new("-al")]);
+        assert_eq!(command.get_current_dir(), Some(search_directory));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn list_directory_command_uses_dir_in_search_directory_on_windows() {
+        let search_directory = Path::new(r"C:\devo-file-search");
+        let command = list_directory_std_command(search_directory);
+        let args = command.get_args().collect::<Vec<_>>();
+
+        assert_eq!(command.get_program(), OsStr::new("cmd"));
+        assert_eq!(args, vec![OsStr::new("/c"), OsStr::new("dir")]);
+        assert_eq!(command.get_current_dir(), Some(search_directory));
     }
 
     #[derive(Default)]

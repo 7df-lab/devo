@@ -137,8 +137,16 @@ impl FromStr for ReasoningEffort {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_value(serde_json::Value::String(s.to_string()))
-            .map_err(|_| format!("invalid reasoning_effort: {s}"))
+        match s {
+            "none" => Ok(Self::None),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
+            _ => Err(format!("invalid reasoning_effort: {s}")),
+        }
     }
 }
 
@@ -165,6 +173,78 @@ impl ReasoningEffort {
             Self::XHigh => "Most deliberate, highest effort",
             Self::Max => "Most deliberate, highest effort",
         }
+    }
+}
+
+fn reasoning_effort_wire_value(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::None => "none",
+        ReasoningEffort::Minimal => "minimal",
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::XHigh => "xhigh",
+        ReasoningEffort::Max => "max",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::ReasoningEffort;
+    use super::ThinkingCapability;
+    use super::ThinkingPreset;
+
+    #[test]
+    fn reasoning_effort_from_str_accepts_wire_values() {
+        assert_eq!("none".parse::<ReasoningEffort>(), Ok(ReasoningEffort::None));
+        assert_eq!(
+            "minimal".parse::<ReasoningEffort>(),
+            Ok(ReasoningEffort::Minimal)
+        );
+        assert_eq!("low".parse::<ReasoningEffort>(), Ok(ReasoningEffort::Low));
+        assert_eq!(
+            "medium".parse::<ReasoningEffort>(),
+            Ok(ReasoningEffort::Medium)
+        );
+        assert_eq!("high".parse::<ReasoningEffort>(), Ok(ReasoningEffort::High));
+        assert_eq!(
+            "xhigh".parse::<ReasoningEffort>(),
+            Ok(ReasoningEffort::XHigh)
+        );
+        assert_eq!("max".parse::<ReasoningEffort>(), Ok(ReasoningEffort::Max));
+    }
+
+    #[test]
+    fn reasoning_effort_from_str_preserves_serde_strictness() {
+        assert_eq!(
+            "High".parse::<ReasoningEffort>(),
+            Err("invalid reasoning_effort: High".to_string())
+        );
+        assert_eq!(
+            " high ".parse::<ReasoningEffort>(),
+            Err("invalid reasoning_effort:  high ".to_string())
+        );
+    }
+
+    #[test]
+    fn thinking_options_use_reasoning_effort_wire_values() {
+        assert_eq!(
+            ThinkingCapability::ToggleWithLevels(vec![ReasoningEffort::XHigh]).options(),
+            vec![
+                ThinkingPreset {
+                    label: "Off".to_string(),
+                    description: "Disable thinking for this turn".to_string(),
+                    value: "disabled".to_string(),
+                },
+                ThinkingPreset {
+                    label: "XHigh".to_string(),
+                    description: "Most deliberate, highest effort".to_string(),
+                    value: "xhigh".to_string(),
+                },
+            ]
+        );
     }
 }
 
@@ -247,28 +327,29 @@ impl ThinkingCapability {
                     value: "enabled".to_string(),
                 },
             ],
-            ThinkingCapability::Levels(levels) => levels
-                .iter()
-                .copied()
-                .map(|effort| ThinkingPreset {
-                    label: effort.label().to_string(),
-                    description: effort.description().to_string(),
-                    value: effort.label().to_lowercase(),
-                })
-                .collect(),
+            ThinkingCapability::Levels(levels) => {
+                let mut presets = Vec::with_capacity(levels.len());
+                presets.extend(levels.iter().copied().map(thinking_preset_for_effort));
+                presets
+            }
             ThinkingCapability::ToggleWithLevels(levels) => {
-                let mut presets = vec![ThinkingPreset {
+                let mut presets = Vec::with_capacity(levels.len() + 1);
+                presets.push(ThinkingPreset {
                     label: "Off".to_string(),
                     description: "Disable thinking for this turn".to_string(),
                     value: "disabled".to_string(),
-                }];
-                presets.extend(levels.iter().copied().map(|effort| ThinkingPreset {
-                    label: effort.label().to_string(),
-                    description: effort.description().to_string(),
-                    value: effort.label().to_lowercase(),
-                }));
+                });
+                presets.extend(levels.iter().copied().map(thinking_preset_for_effort));
                 presets
             }
         }
+    }
+}
+
+fn thinking_preset_for_effort(effort: ReasoningEffort) -> ThinkingPreset {
+    ThinkingPreset {
+        label: effort.label().to_string(),
+        description: effort.description().to_string(),
+        value: reasoning_effort_wire_value(effort).to_string(),
     }
 }

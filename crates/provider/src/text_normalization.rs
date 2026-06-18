@@ -1,3 +1,8 @@
+//! Splits provider-emitted tagged reasoning from assistant text.
+//!
+//! The parser keeps partial tags in `pending` so streaming chunks can end in the
+//! middle of `<think>`-style markers without leaking the marker text to clients.
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TaggedTextFragment {
     Text(String),
@@ -23,22 +28,21 @@ impl TaggedTextParser {
             };
 
             if let Some((start, tag)) = find_first_tag(&self.pending, tags) {
-                let prefix = self.pending[..start].to_string();
-                if !prefix.is_empty() {
+                if start > 0 {
+                    let prefix = take_prefix(&mut self.pending, start);
                     fragments.push(fragment_for_mode(self.in_reasoning, prefix));
                 }
-                self.pending.drain(..start + tag.len());
+                self.pending.drain(..tag.len());
                 self.in_reasoning = !self.in_reasoning;
                 continue;
             }
 
             let partial_start = earliest_partial_start(&self.pending, tags);
             if let Some(partial_start) = partial_start {
-                let prefix = self.pending[..partial_start].to_string();
-                if !prefix.is_empty() {
+                if partial_start > 0 {
+                    let prefix = take_prefix(&mut self.pending, partial_start);
                     fragments.push(fragment_for_mode(self.in_reasoning, prefix));
                 }
-                self.pending.drain(..partial_start);
             } else if !self.pending.is_empty() {
                 fragments.push(fragment_for_mode(
                     self.in_reasoning,
@@ -63,9 +67,18 @@ impl TaggedTextParser {
     }
 }
 
+fn take_prefix(text: &mut String, end: usize) -> String {
+    let suffix = text.split_off(end);
+    std::mem::replace(text, suffix)
+}
+
 pub(crate) fn split_tagged_text(text: &str) -> (String, Vec<String>) {
+    if !OPEN_TAGS.iter().any(|tag| text.contains(tag)) {
+        return (text.to_string(), Vec::new());
+    }
+
     let mut parser = TaggedTextParser::default();
-    let mut assistant_text = String::new();
+    let mut assistant_text = String::with_capacity(text.len());
     let mut reasoning = Vec::new();
 
     for fragment in parser.consume(text).into_iter().chain(parser.finish()) {

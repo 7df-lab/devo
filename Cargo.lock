@@ -1410,6 +1410,7 @@ version = "0.1.20"
 dependencies = [
  "anyhow",
  "devo-protocol",
+ "pretty_assertions",
  "serde",
  "serde_json",
  "tokio",
@@ -1509,6 +1510,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "shlex 1.3.0",
  "smol_str",
  "tempfile",
@@ -1572,6 +1574,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -1649,6 +1652,7 @@ name = "devo-safety"
 version = "0.1.20"
 dependencies = [
  "async-trait",
+ "pretty_assertions",
  "regex",
  "serde",
  "serde_json",
@@ -1677,6 +1681,7 @@ dependencies = [
  "devo-util-git",
  "devo-util-paths",
  "devo-util-shell-command",
+ "diffy",
  "futures",
  "pretty_assertions",
  "rusqlite",
@@ -1717,6 +1722,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "pretty_assertions",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

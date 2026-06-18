@@ -10,10 +10,7 @@ use crate::git_op::GitToolingError;
 pub(crate) fn ensure_git_repository(path: &Path) -> Result<(), GitToolingError> {
     match run_git_for_stdout(
         path,
-        vec![
-            OsString::from("rev-parse"),
-            OsString::from("--is-inside-work-tree"),
-        ],
+        ["rev-parse", "--is-inside-work-tree"],
         /*env*/ None,
     ) {
         Ok(output) if output.trim() == "true" => Ok(()),
@@ -30,15 +27,7 @@ pub(crate) fn ensure_git_repository(path: &Path) -> Result<(), GitToolingError> 
 }
 
 pub(crate) fn resolve_head(path: &Path) -> Result<Option<String>, GitToolingError> {
-    match run_git_for_stdout(
-        path,
-        vec![
-            OsString::from("rev-parse"),
-            OsString::from("--verify"),
-            OsString::from("HEAD"),
-        ],
-        /*env*/ None,
-    ) {
+    match run_git_for_stdout(path, ["rev-parse", "--verify", "HEAD"], /*env*/ None) {
         Ok(sha) => Ok(Some(sha)),
         Err(GitToolingError::GitCommand { status, .. }) if status.code() == Some(128) => Ok(None),
         Err(other) => Err(other),
@@ -78,14 +67,7 @@ pub(crate) fn normalize_relative_path(path: &Path) -> Result<PathBuf, GitTooling
 }
 
 pub(crate) fn resolve_repository_root(path: &Path) -> Result<PathBuf, GitToolingError> {
-    let root = run_git_for_stdout(
-        path,
-        vec![
-            OsString::from("rev-parse"),
-            OsString::from("--show-toplevel"),
-        ],
-        /*env*/ None,
-    )?;
+    let root = run_git_for_stdout(path, ["rev-parse", "--show-toplevel"], /*env*/ None)?;
     Ok(PathBuf::from(root))
 }
 
@@ -154,9 +136,12 @@ where
 {
     let run = run_git(dir, args, env)?;
     String::from_utf8(run.output.stdout)
-        .map(|value| value.trim().to_string())
+        .map(|mut value| {
+            trim_in_place(&mut value);
+            value
+        })
         .map_err(|source| GitToolingError::GitOutputUtf8 {
-            command: run.command,
+            command: build_command_string(&run.args),
             source,
         })
 }
@@ -177,7 +162,7 @@ where
     let run = run_git(dir, args, env)?;
     // Propagate UTF-8 conversion failures with the command context for debugging.
     String::from_utf8(run.output.stdout).map_err(|source| GitToolingError::GitOutputUtf8 {
-        command: run.command,
+        command: build_command_string(&run.args),
         source,
     })
 }
@@ -197,7 +182,6 @@ where
     for arg in iterator {
         args_vec.push(OsString::from(arg.as_ref()));
     }
-    let command_string = build_command_string(&args_vec);
     let mut command = Command::new("git");
     command.current_dir(dir);
     if let Some(envs) = env {
@@ -208,15 +192,24 @@ where
     command.args(&args_vec);
     let output = command.output()?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let std::process::Output { status, stderr, .. } = output;
+        let stderr = match String::from_utf8(stderr) {
+            Ok(mut value) => {
+                trim_in_place(&mut value);
+                value
+            }
+            Err(source) => String::from_utf8_lossy(source.as_bytes())
+                .trim()
+                .to_string(),
+        };
         return Err(GitToolingError::GitCommand {
-            command: command_string,
-            status: output.status,
+            command: build_command_string(&args_vec),
+            status,
             stderr,
         });
     }
     Ok(GitRun {
-        command: command_string,
+        args: args_vec,
         output,
     })
 }
@@ -225,15 +218,47 @@ fn build_command_string(args: &[OsString]) -> String {
     if args.is_empty() {
         return "git".to_string();
     }
-    let joined = args
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("git {joined}")
+    let mut command = String::from("git");
+    for arg in args {
+        command.push(' ');
+        command.push_str(&arg.to_string_lossy());
+    }
+    command
+}
+
+fn trim_in_place(value: &mut String) {
+    // Git output is usually newline-terminated. Trim in place so the common
+    // valid UTF-8 path does not allocate a second String just to drop whitespace.
+    let end = value.trim_end().len();
+    value.truncate(end);
+    let start = value.len().saturating_sub(value.trim_start().len());
+    if start > 0 {
+        value.drain(..start);
+    }
 }
 
 struct GitRun {
-    command: String,
+    args: Vec<OsString>,
     output: std::process::Output,
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use std::ffi::OsString;
+
+    use super::*;
+
+    #[test]
+    fn build_command_string_matches_joined_format() {
+        assert_eq!(
+            build_command_string(&[
+                OsString::from("status"),
+                OsString::from("--short"),
+                OsString::from("src/lib.rs"),
+            ]),
+            "git status --short src/lib.rs"
+        );
+        assert_eq!(build_command_string(&[]), "git");
+    }
 }

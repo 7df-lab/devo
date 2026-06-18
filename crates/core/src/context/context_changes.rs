@@ -1,3 +1,10 @@
+//! Rendering for prompt-visible context-change fragments.
+//!
+//! These fragments are deliberately XML-like because downstream prompt
+//! filtering recognizes them by stable outer markers. Keep rendering here
+//! explicit so small formatting changes do not leak into the conversation
+//! history or prompt normalization paths.
+
 use devo_protocol::{CollaborationMode, Message};
 
 use crate::context::ContextualUserFragment;
@@ -36,17 +43,23 @@ impl ContextualUserFragment for ContextChangesFragment {
     const END_MARKER: &'static str = "</context_changes>";
 
     fn body(&self) -> String {
-        let mut sections = vec![self.collaboration_mode.render()];
+        let collaboration_mode = self.collaboration_mode.render();
+        let mut body = String::with_capacity(collaboration_mode.len() + 2);
+        body.push('\n');
+        body.push_str(&collaboration_mode);
         if !self.metadata.is_empty() {
-            let metadata = self
-                .metadata
-                .iter()
-                .map(MetadataContextChange::render)
-                .collect::<Vec<_>>()
-                .join("\n");
-            sections.push(format!("<metadata>\n{metadata}\n</metadata>"));
+            body.push('\n');
+            body.push_str("<metadata>\n");
+            for (index, metadata) in self.metadata.iter().enumerate() {
+                if index > 0 {
+                    body.push('\n');
+                }
+                body.push_str(&metadata.render());
+            }
+            body.push_str("\n</metadata>");
         }
-        format!("\n{}\n", sections.join("\n"))
+        body.push('\n');
+        body
     }
 }
 
@@ -59,34 +72,33 @@ struct CollaborationModeContextChange {
 
 impl CollaborationModeContextChange {
     fn render(&self) -> String {
-        let current = collaboration_mode_label(self.current);
-        let mut lines = vec!["<collaboration_mode>".to_string()];
+        let current = escape_context_xml(collaboration_mode_label(self.current));
+        let mut rendered = String::from("<collaboration_mode>");
         if let Some(previous) = self.previous {
-            let previous = collaboration_mode_label(previous);
-            lines.push(format!(
-                "<previous>{}</previous>",
-                escape_context_xml(previous)
-            ));
-            lines.push(format!(
-                "<current>{}</current>",
-                escape_context_xml(current)
-            ));
-            lines.push(format!(
-                "<transition>{} -> {}</transition>",
-                escape_context_xml(previous),
-                escape_context_xml(current)
-            ));
+            let previous = escape_context_xml(collaboration_mode_label(previous));
+            rendered.push_str("\n<previous>");
+            rendered.push_str(&previous);
+            rendered.push_str("</previous>");
+            rendered.push_str("\n<current>");
+            rendered.push_str(&current);
+            rendered.push_str("</current>");
+            rendered.push_str("\n<transition>");
+            rendered.push_str(&previous);
+            rendered.push_str(" -> ");
+            rendered.push_str(&current);
+            rendered.push_str("</transition>");
         } else {
-            lines.push(format!(
-                "<current>{}</current>",
-                escape_context_xml(current)
-            ));
+            rendered.push_str("\n<current>");
+            rendered.push_str(&current);
+            rendered.push_str("</current>");
         }
         if let Some(note) = &self.note {
-            lines.push(format!("<note>{}</note>", escape_context_xml(note)));
+            rendered.push_str("\n<note>");
+            rendered.push_str(&escape_context_xml(note));
+            rendered.push_str("</note>");
         }
-        lines.push("</collaboration_mode>".to_string());
-        lines.join("\n")
+        rendered.push_str("\n</collaboration_mode>");
+        rendered
     }
 }
 
@@ -124,5 +136,44 @@ fn collaboration_mode_label(collaboration_mode: CollaborationMode) -> &'static s
 }
 
 fn escape_context_xml(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;")
+    let Some(first_escape) = text.find(['&', '<']) else {
+        return text.to_string();
+    };
+
+    let mut escaped = String::with_capacity(text.len());
+    escaped.push_str(&text[..first_escape]);
+    for ch in text[first_escape..].chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn context_changes_fragment_preserves_rendered_shape() {
+        let fragment = ContextChangesFragment::new(
+            CollaborationMode::Build,
+            Some(CollaborationMode::Plan),
+            Some("use <xml> & mode".to_string()),
+            vec![MetadataContextChange::new(
+                "cwd",
+                "/tmp/<a>".to_string(),
+                "/tmp/&b".to_string(),
+            )],
+        );
+
+        assert_eq!(
+            fragment.render(),
+            "<context_changes>\n<collaboration_mode>\n<previous>plan</previous>\n<current>build</current>\n<transition>plan -> build</transition>\n<note>use &lt;xml> &amp; mode</note>\n</collaboration_mode>\n<metadata>\n<change>\n<name>cwd</name>\n<previous>/tmp/&lt;a></previous>\n<current>/tmp/&amp;b</current>\n</change>\n</metadata>\n</context_changes>"
+        );
+    }
 }

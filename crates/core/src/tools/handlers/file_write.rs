@@ -116,25 +116,32 @@ fn build_write_metadata(
     content: &str,
 ) -> serde_json::Value {
     match previous {
-        None => json!({
-            "diff": format!(
-                "diff --git a/{0} b/{0}\nnew file mode 100644\n--- /dev/null\n+++ b/{0}\n@@ -0,0 +1,{1} @@\n{2}",
-                path.display(),
-                content.lines().count(),
-                content
-                    .lines()
-                    .map(|line| format!("+{line}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ),
-            "files": [{
-                "path": path.display().to_string(),
-                "kind": "add",
-                "content": content,
-                "additions": content.lines().count(),
-                "deletions": 0
-            }]
-        }),
+        None => {
+            let additions = content.lines().count();
+            let mut added_content = String::with_capacity(content.len() + additions);
+            for (index, line) in content.lines().enumerate() {
+                if index > 0 {
+                    added_content.push('\n');
+                }
+                added_content.push('+');
+                added_content.push_str(line);
+            }
+            json!({
+                "diff": format!(
+                    "diff --git a/{0} b/{0}\nnew file mode 100644\n--- /dev/null\n+++ b/{0}\n@@ -0,0 +1,{1} @@\n{2}",
+                    path.display(),
+                    additions,
+                    added_content
+                ),
+                "files": [{
+                    "path": path.display().to_string(),
+                    "kind": "add",
+                    "content": content,
+                    "additions": additions,
+                    "deletions": 0
+                }]
+            })
+        }
         Some(old) => {
             let patch = create_patch(old, content);
             let patch_text = PatchFormatter::new().fmt_patch(&patch).to_string();
@@ -149,6 +156,12 @@ fn build_write_metadata(
                 "files": [{
                     "path": path.display().to_string(),
                     "kind": "update",
+                    "content": content,
+                    "postContent": content,
+                    "post_content": content,
+                    "oldContent": old,
+                    "preContent": old,
+                    "pre_content": old,
                     "additions": additions,
                     "deletions": deletions
                 }]
@@ -176,6 +189,12 @@ mod tests {
         let metadata =
             build_write_metadata(std::path::Path::new("foo.txt"), Some("old\n"), "new\n");
         assert_eq!(metadata["files"][0]["kind"], "update");
+        assert_eq!(metadata["files"][0]["content"], "new\n");
+        assert_eq!(metadata["files"][0]["postContent"], "new\n");
+        assert_eq!(metadata["files"][0]["post_content"], "new\n");
+        assert_eq!(metadata["files"][0]["oldContent"], "old\n");
+        assert_eq!(metadata["files"][0]["preContent"], "old\n");
+        assert_eq!(metadata["files"][0]["pre_content"], "old\n");
         assert!(
             metadata["diff"]
                 .as_str()

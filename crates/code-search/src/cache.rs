@@ -8,6 +8,11 @@
 //! must validate both the metadata shape and the binary row count before the
 //! index can trust any cached chunk id.
 
+use std::fmt::Write as _;
+use std::io::BufReader;
+use std::io::BufWriter;
+use std::io::Read as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -17,7 +22,7 @@ use crate::files::FileManifestEntry;
 use crate::matrix::EmbeddingMatrix;
 use crate::types::{Chunk, CodeSearchError, ContentFilter};
 
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
 const CHUNKER_VERSION: u32 = 2;
 const F32_BYTES: usize = 4;
 
@@ -42,6 +47,7 @@ pub struct CachedIndexPayloadV4 {
     pub embedding_format: EmbeddingFormat,
     pub embedding_dimensions: usize,
     pub embedding_rows: usize,
+    pub embedding_sha256: String,
     pub files: Vec<CachedFileRecord>,
 }
 
@@ -67,6 +73,7 @@ impl CachedIndexPayloadV4 {
             embedding_format: EmbeddingFormat::F32LittleEndian,
             embedding_dimensions: embeddings.dimensions(),
             embedding_rows: embeddings.row_count(),
+            embedding_sha256: embedding_sha256(embeddings),
             files,
         }
     }
@@ -96,6 +103,7 @@ impl CachedIndexPayloadV4 {
             && self.embedding_format == EmbeddingFormat::F32LittleEndian
             && self.embedding_dimensions == embeddings.dimensions()
             && self.embedding_rows == embeddings.row_count()
+            && self.embedding_sha256 == embedding_sha256(embeddings)
             && self.is_internally_consistent()
     }
 
@@ -185,7 +193,9 @@ pub fn cache_file_path(
     content: ContentFilter,
     model_id: &str,
 ) -> PathBuf {
-    cache_dir.join(format!("{}.json", cache_key(root, content, model_id)))
+    let mut file_name = cache_key(root, content, model_id);
+    file_name.push_str(".json");
+    cache_dir.join(file_name)
 }
 
 /// Returns the binary vector sidecar path for a metadata file.
@@ -199,8 +209,9 @@ pub fn embedding_file_path(metadata_path: &Path) -> PathBuf {
 /// the cache is an optimization. The service can rebuild the index from source
 /// files when the JSON, version, row ranges, or binary sidecar do not validate.
 pub fn load_payload(path: &Path) -> Option<CachedIndex> {
-    let bytes = std::fs::read(path).ok()?;
-    let payload = serde_json::from_slice::<CachedIndexPayloadV4>(&bytes).ok()?;
+    let file = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let payload = serde_json::from_reader::<_, CachedIndexPayloadV4>(reader).ok()?;
     let embeddings = read_embeddings(&embedding_file_path(path), &payload)?;
     payload
         .is_loadable_with(&embeddings)
@@ -212,9 +223,9 @@ pub fn load_payload(path: &Path) -> Option<CachedIndex> {
 
 /// Saves cache metadata and row-major embeddings for a completed refresh.
 ///
-/// The binary sidecar is written before JSON metadata. If the process dies
-/// between writes, the old or malformed JSON path becomes a miss instead of
-/// advertising rows that have not reached disk.
+/// The binary sidecar is written before JSON metadata, and the JSON contains a
+/// digest of the sidecar bytes. If the process dies between writes, stale JSON
+/// can no longer validate against a newer sidecar with the same shape.
 pub fn save_payload(
     path: &Path,
     payload: &CachedIndexPayloadV4,
@@ -225,9 +236,11 @@ pub fn save_payload(
     }
     validate_payload_embeddings(payload, embeddings)?;
     write_embeddings(&embedding_file_path(path), embeddings)?;
-    let bytes =
-        serde_json::to_vec(payload).map_err(|error| CodeSearchError::Io(error.to_string()))?;
-    std::fs::write(path, bytes)?;
+    let file = std::fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer(&mut writer, payload)
+        .map_err(|error| CodeSearchError::Io(error.to_string()))?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -244,6 +257,7 @@ fn validate_payload_embeddings(
         || payload.chunker_version != CHUNKER_VERSION
         || payload.embedding_dimensions != embeddings.dimensions()
         || payload.embedding_rows != embeddings.row_count()
+        || payload.embedding_sha256 != embedding_sha256(embeddings)
         || !payload.is_internally_consistent()
     {
         return Err(CodeSearchError::Index(
@@ -254,34 +268,60 @@ fn validate_payload_embeddings(
 }
 
 fn read_embeddings(path: &Path, payload: &CachedIndexPayloadV4) -> Option<EmbeddingMatrix> {
-    let bytes = std::fs::read(path).ok()?;
-    let expected_bytes = payload
+    let expected_values = payload
         .embedding_rows
-        .checked_mul(payload.embedding_dimensions)?
-        .checked_mul(F32_BYTES)?;
-    if bytes.len() != expected_bytes {
+        .checked_mul(payload.embedding_dimensions)?;
+    let expected_bytes = expected_values.checked_mul(F32_BYTES)?;
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() != u64::try_from(expected_bytes).ok()? {
         return None;
     }
-    let mut rows = Vec::with_capacity(bytes.len() / F32_BYTES);
-    for chunk in bytes.chunks_exact(F32_BYTES) {
-        rows.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    let mut reader = BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut rows = Vec::with_capacity(expected_values);
+    let mut bytes = [0_u8; F32_BYTES];
+    for _ in 0..expected_values {
+        reader.read_exact(&mut bytes).ok()?;
+        hasher.update(bytes);
+        rows.push(f32::from_le_bytes(bytes));
+    }
+    if reader.read(&mut [0_u8; 1]).ok()? != 0 {
+        return None;
+    }
+    if hex_digest(hasher) != payload.embedding_sha256 {
+        return None;
     }
     EmbeddingMatrix::new(payload.embedding_dimensions, rows).ok()
 }
 
 fn write_embeddings(path: &Path, embeddings: &EmbeddingMatrix) -> Result<(), CodeSearchError> {
-    let mut bytes = Vec::with_capacity(embeddings.rows().len() * F32_BYTES);
+    let file = std::fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
     for value in embeddings.rows() {
-        bytes.extend_from_slice(&value.to_le_bytes());
+        writer.write_all(&value.to_le_bytes())?;
     }
-    std::fs::write(path, bytes)?;
+    writer.flush()?;
     Ok(())
+}
+
+fn embedding_sha256(embeddings: &EmbeddingMatrix) -> String {
+    let mut hasher = Sha256::new();
+    for value in embeddings.rows() {
+        hasher.update(value.to_le_bytes());
+    }
+    hex_digest(hasher)
 }
 
 fn cache_key(root: &Path, content: ContentFilter, model_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(root.to_string_lossy().as_bytes());
-    hasher.update(format!("{content:?}").as_bytes());
+    let content_bytes: &[u8] = match content {
+        ContentFilter::Code => b"Code",
+        ContentFilter::Docs => b"Docs",
+        ContentFilter::Config => b"Config",
+        ContentFilter::All => b"All",
+    };
+    hasher.update(content_bytes);
     hasher.update(model_id.as_bytes());
     hex_digest(hasher)
 }
@@ -293,11 +333,12 @@ fn hex_sha256(bytes: &[u8]) -> String {
 }
 
 fn hex_digest(hasher: Sha256) -> String {
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
 }
 
 #[cfg(test)]
@@ -341,7 +382,7 @@ mod tests {
     }
 
     /// Trace: L2-DES-TOOL-001
-    /// Verifies: v4 cache metadata validates model, chunker, content filter, and embedding ranges.
+    /// Verifies: cache metadata validates model, chunker, content filter, and embedding ranges.
     #[test]
     fn cached_payload_validates_header_and_records() {
         let cached = cached_index();
@@ -375,18 +416,21 @@ mod tests {
         let loaded = load_payload(&path);
 
         assert_eq!(json.contains("embeddings"), false);
+        assert_eq!(json.contains("\"cache_version\":5"), true);
         assert_eq!(json.contains("\"chunker_version\":2"), true);
+        assert_eq!(json.contains("\"embedding_sha256\""), true);
         assert_eq!(embedding_bytes.len(), 8);
         assert_eq!(loaded, Some(cached));
     }
 
     /// Trace: L2-DES-TOOL-001
-    /// Verifies: stale v1/v2/v3 and malformed cache files are treated as disposable cache misses.
+    /// Verifies: stale v1/v2/v3/v4 and malformed cache files are treated as disposable cache misses.
     #[test]
     fn load_payload_rejects_stale_and_malformed_cache_files() {
         let temp = tempfile::tempdir().expect("tempdir");
         let v2_path = temp.path().join("v2.json");
         let v3_path = temp.path().join("v3.json");
+        let v4_path = temp.path().join("v4.json");
         let malformed_path = temp.path().join("malformed.json");
         fs::write(
             &v2_path,
@@ -398,15 +442,21 @@ mod tests {
             r#"{"cache_version":3,"root":"/repo","content":"code","model_id":"test","embedding_format":"f32_little_endian","embedding_dimensions":0,"embedding_rows":0,"files":[]}"#,
         )
         .expect("write v3");
+        fs::write(
+            &v4_path,
+            r#"{"cache_version":4,"chunker_version":2,"root":"/repo","content":"code","model_id":"test","embedding_format":"f32_little_endian","embedding_dimensions":0,"embedding_rows":0,"files":[]}"#,
+        )
+        .expect("write v4");
         fs::write(&malformed_path, b"{").expect("write malformed");
 
         let loaded = vec![
             load_payload(&v2_path),
             load_payload(&v3_path),
+            load_payload(&v4_path),
             load_payload(&malformed_path),
         ];
 
-        assert_eq!(loaded, vec![None, None, None]);
+        assert_eq!(loaded, vec![None, None, None, None]);
     }
 
     /// Trace: L2-DES-TOOL-001
@@ -440,7 +490,24 @@ mod tests {
     }
 
     /// Trace: L2-DES-TOOL-001
-    /// Verifies: v4 cache payloads require the current chunker version.
+    /// Verifies: stale metadata cannot validate against a newer embedding sidecar.
+    #[test]
+    fn load_payload_rejects_sidecar_that_does_not_match_metadata_hash() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("index.json");
+        let cached = cached_index();
+        save_payload(&path, &cached.payload, &cached.embeddings).expect("save");
+        let newer_embeddings =
+            EmbeddingMatrix::from_vectors(vec![vec![0.0, 1.0]]).expect("newer matrix");
+
+        write_embeddings(&embedding_file_path(&path), &newer_embeddings).expect("write sidecar");
+        let loaded = load_payload(&path);
+
+        assert_eq!(loaded, None);
+    }
+
+    /// Trace: L2-DES-TOOL-001
+    /// Verifies: cache payloads require the current chunker version.
     #[test]
     fn load_payload_rejects_wrong_chunker_version() {
         let temp = tempfile::tempdir().expect("tempdir");

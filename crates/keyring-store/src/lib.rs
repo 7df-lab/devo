@@ -1,3 +1,5 @@
+//! Credential storage abstraction over the platform keyring.
+
 use keyring::Entry;
 use keyring::Error as KeyringError;
 use std::error::Error;
@@ -39,6 +41,11 @@ impl fmt::Display for CredentialStoreError {
 impl Error for CredentialStoreError {}
 
 /// Shared credential store abstraction for keyring-backed implementations.
+///
+/// Implementations should treat a missing credential as a successful
+/// `Ok(None)`/`Ok(false)` result and reserve `CredentialStoreError` for
+/// backend failures. That keeps callers from depending on backend-specific
+/// "not found" errors and lets tests use the same contract as the OS keyring.
 pub trait KeyringStore: Debug + Send + Sync {
     fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError>;
     fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError>;
@@ -128,10 +135,13 @@ pub mod tests {
                 .credentials
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            guard
-                .entry(account.to_string())
-                .or_insert_with(|| Arc::new(MockCredential::default()))
-                .clone()
+            if let Some(credential) = guard.get(account) {
+                return Arc::clone(credential);
+            }
+
+            let credential = Arc::new(MockCredential::default());
+            guard.insert(account.to_string(), Arc::clone(&credential));
+            credential
         }
 
         pub fn saved_value(&self, account: &str) -> Option<String> {

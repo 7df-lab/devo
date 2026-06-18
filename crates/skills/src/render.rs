@@ -88,22 +88,25 @@ pub fn build_available_skills(
     outcome: &SkillLoadOutcome,
     budget: SkillMetadataBudget,
 ) -> Option<AvailableSkills> {
-    let skills = outcome.allowed_skills_for_implicit_invocation();
-    if skills.is_empty() {
-        return None;
-    }
-
-    let mut skill_lines = Vec::new();
+    let mut skill_lines = Vec::with_capacity(outcome.skills.len());
+    let mut total_count = 0;
     let mut included_count = 0;
     let mut omitted_count = 0;
     let mut truncated_description_chars = 0;
     let mut truncated_description_count = 0;
     let mut used = 0usize;
+    let limit = budget.limit();
 
-    for skill in &skills {
-        let full_line = skill_line(skill, Some(skill_description(skill)));
+    for skill in outcome
+        .skills
+        .iter()
+        .filter(|skill| outcome.is_skill_allowed_for_implicit_invocation(skill))
+    {
+        total_count += 1;
+        let description = skill_description(skill);
+        let full_line = skill_line(skill, Some(description));
         let cost = budget.cost(&full_line);
-        if used.saturating_add(cost) <= budget.limit() {
+        if used.saturating_add(cost) <= limit {
             used = used.saturating_add(cost);
             included_count += 1;
             skill_lines.push(full_line);
@@ -112,8 +115,8 @@ pub fn build_available_skills(
 
         let no_description = skill_line(skill, None);
         let no_description_cost = budget.cost(&no_description);
-        if used.saturating_add(no_description_cost) <= budget.limit() {
-            truncated_description_chars += skill_description(skill).chars().count();
+        if used.saturating_add(no_description_cost) <= limit {
+            truncated_description_chars += description.chars().count();
             truncated_description_count += 1;
             included_count += 1;
             used = used.saturating_add(no_description_cost);
@@ -121,6 +124,10 @@ pub fn build_available_skills(
         } else {
             omitted_count += 1;
         }
+    }
+
+    if total_count == 0 {
+        return None;
     }
 
     let warning_message = if omitted_count > 0 {
@@ -143,7 +150,7 @@ pub fn build_available_skills(
         skill_root_lines: Vec::new(),
         skill_lines,
         report: SkillRenderReport {
-            total_count: skills.len(),
+            total_count,
             included_count,
             omitted_count,
             truncated_description_chars,
@@ -154,26 +161,55 @@ pub fn build_available_skills(
 }
 
 pub fn render_available_skills_body(skill_root_lines: &[String], skill_lines: &[String]) -> String {
-    let mut lines = Vec::new();
-    lines.push("## Skills".to_string());
-    lines.push(SKILLS_INTRO_WITH_ABSOLUTE_PATHS.to_string());
+    let estimated_len = "\n## Skills\n".len()
+        + SKILLS_INTRO_WITH_ABSOLUTE_PATHS.len()
+        + 1
+        + if skill_root_lines.is_empty() {
+            0
+        } else {
+            "### Skill roots\n".len()
+                + skill_root_lines
+                    .iter()
+                    .map(|line| line.len() + 1)
+                    .sum::<usize>()
+        }
+        + "### Available skills\n".len()
+        + skill_lines.iter().map(|line| line.len() + 1).sum::<usize>()
+        + "### How to use skills\n".len()
+        + SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS.len()
+        + 1;
+    let mut body = String::with_capacity(estimated_len);
+    body.push('\n');
+    body.push_str("## Skills\n");
+    body.push_str(SKILLS_INTRO_WITH_ABSOLUTE_PATHS);
+    body.push('\n');
     if !skill_root_lines.is_empty() {
-        lines.push("### Skill roots".to_string());
-        lines.extend(skill_root_lines.iter().cloned());
+        body.push_str("### Skill roots\n");
+        for line in skill_root_lines {
+            body.push_str(line);
+            body.push('\n');
+        }
     }
-    lines.push("### Available skills".to_string());
-    lines.extend(skill_lines.iter().cloned());
-    lines.push("### How to use skills".to_string());
-    lines.push(SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS.to_string());
-    format!("\n{}\n", lines.join("\n"))
+    body.push_str("### Available skills\n");
+    for line in skill_lines {
+        body.push_str(line);
+        body.push('\n');
+    }
+    body.push_str("### How to use skills\n");
+    body.push_str(SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS);
+    body.push('\n');
+    body
 }
 
 fn skill_line(skill: &SkillMetadata, description: Option<&str>) -> String {
-    match description.filter(|description| !description.trim().is_empty()) {
+    let description = description
+        .map(str::trim)
+        .filter(|description| !description.is_empty());
+    match description {
         Some(description) => format!(
             "- {}: {} (path: {})",
             skill.name,
-            description.trim(),
+            description,
             skill.path_to_skills_md.display()
         ),
         None => format!(
@@ -197,4 +233,53 @@ fn approx_token_count(text: &str) -> usize {
     text.len()
         .saturating_add(APPROX_BYTES_PER_TOKEN.saturating_sub(1))
         / APPROX_BYTES_PER_TOKEN
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::model::SkillScope;
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn render_available_skills_body_preserves_line_layout() {
+        let body = render_available_skills_body(
+            &["- /repo/.devo/skills".to_string()],
+            &["- code-review: Review code (path: /skills/code-review/SKILL.md)".to_string()],
+        );
+
+        assert_eq!(
+            body,
+            format!(
+                "\n## Skills\n{SKILLS_INTRO_WITH_ABSOLUTE_PATHS}\n### Skill roots\n- /repo/.devo/skills\n### Available skills\n- code-review: Review code (path: /skills/code-review/SKILL.md)\n### How to use skills\n{SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS}\n"
+            )
+        );
+    }
+
+    #[test]
+    fn skill_line_trims_description_once_for_rendering() {
+        let skill = SkillMetadata {
+            name: "code-review".to_string(),
+            description: "Review code".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: PathBuf::from("/skills/code-review/SKILL.md"),
+            scope: SkillScope::User,
+            plugin_id: None,
+        };
+
+        assert_eq!(
+            skill_line(&skill, Some("  Review code  ")),
+            "- code-review: Review code (path: /skills/code-review/SKILL.md)"
+        );
+        assert_eq!(
+            skill_line(&skill, Some("   ")),
+            "- code-review (path: /skills/code-review/SKILL.md)"
+        );
+    }
 }

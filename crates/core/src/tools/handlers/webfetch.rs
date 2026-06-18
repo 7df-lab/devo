@@ -230,18 +230,16 @@ fn extract_text_from_html(html: &str) -> String {
     let mut text = String::with_capacity(html.len());
     let mut in_tag = false;
     let mut skip = false;
-    let lower = html.to_ascii_lowercase();
     let bytes = html.as_bytes();
-    let lower_bytes = lower.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'<' {
-            if lower_bytes[i..].starts_with(b"<script")
-                || lower_bytes[i..].starts_with(b"<style")
-                || lower_bytes[i..].starts_with(b"<noscript")
-                || lower_bytes[i..].starts_with(b"<iframe")
-                || lower_bytes[i..].starts_with(b"<object")
-                || lower_bytes[i..].starts_with(b"<embed")
+            if starts_with_ignore_ascii_case(&bytes[i..], b"<script")
+                || starts_with_ignore_ascii_case(&bytes[i..], b"<style")
+                || starts_with_ignore_ascii_case(&bytes[i..], b"<noscript")
+                || starts_with_ignore_ascii_case(&bytes[i..], b"<iframe")
+                || starts_with_ignore_ascii_case(&bytes[i..], b"<object")
+                || starts_with_ignore_ascii_case(&bytes[i..], b"<embed")
             {
                 skip = true;
             }
@@ -249,7 +247,7 @@ fn extract_text_from_html(html: &str) -> String {
         } else if bytes[i] == b'>' {
             in_tag = false;
             if skip
-                && (lower_bytes[i.saturating_sub(10)..=i]
+                && (bytes[i.saturating_sub(10)..=i]
                     .windows(2)
                     .any(|w| w == b"</"))
             {
@@ -260,7 +258,20 @@ fn extract_text_from_html(html: &str) -> String {
         }
         i += 1;
     }
-    text.trim().to_string()
+    if let Some(start) = text.find(|ch: char| !ch.is_whitespace()) {
+        if start > 0 {
+            text.drain(..start);
+        }
+        text.truncate(text.trim_end().len());
+        text
+    } else {
+        String::new()
+    }
+}
+
+fn starts_with_ignore_ascii_case(text: &[u8], prefix: &[u8]) -> bool {
+    text.get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
 }
 
 fn convert_html_to_markdown(html: &str) -> String {
@@ -275,4 +286,23 @@ fn convert_html_to_markdown(html: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::extract_text_from_html;
+
+    #[test]
+    fn extract_text_from_html_skips_case_insensitive_script_blocks() {
+        let html = "  <HTML><BODY>Hello<SCRIPT>hidden</SCRIPT> world</BODY></HTML>\n";
+
+        assert_eq!(extract_text_from_html(html), "Hello world");
+    }
+
+    #[test]
+    fn extract_text_from_html_trims_without_content() {
+        assert_eq!(extract_text_from_html(" \n\t "), "");
+    }
 }

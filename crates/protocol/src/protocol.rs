@@ -64,6 +64,7 @@ pub enum ClientMethod {
     CommandExecWrite,
     CommandExecResize,
     CommandExecTerminate,
+    MessageEditPrevious,
     TurnStart,
     TurnShellCommand,
     TurnInterrupt,
@@ -114,6 +115,7 @@ impl ClientMethod {
             Self::CommandExecWrite => "command/exec/write",
             Self::CommandExecResize => "command/exec/resize",
             Self::CommandExecTerminate => "command/exec/terminate",
+            Self::MessageEditPrevious => "message/editPrevious",
             Self::TurnStart => "turn/start",
             Self::TurnShellCommand => "turn/shell_command",
             Self::TurnInterrupt => "turn/interrupt",
@@ -164,6 +166,7 @@ impl ClientMethod {
             "command/exec/write" => Self::CommandExecWrite,
             "command/exec/resize" => Self::CommandExecResize,
             "command/exec/terminate" => Self::CommandExecTerminate,
+            "message/editPrevious" => Self::MessageEditPrevious,
             "turn/start" => Self::TurnStart,
             "turn/shell_command" => Self::TurnShellCommand,
             "turn/interrupt" => Self::TurnInterrupt,
@@ -569,6 +572,18 @@ mod tests {
         assert_eq!(
             ProtocolErrorCode::ForkRetentionRequired.to_string(),
             "ForkRetentionRequired"
+        );
+    }
+
+    #[test]
+    fn client_method_recognizes_message_edit_previous() {
+        assert_eq!(
+            ClientMethod::parse("message/editPrevious"),
+            Some(ClientMethod::MessageEditPrevious)
+        );
+        assert_eq!(
+            ClientMethod::MessageEditPrevious.as_str(),
+            "message/editPrevious"
         );
     }
 }

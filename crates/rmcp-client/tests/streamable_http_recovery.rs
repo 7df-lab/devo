@@ -3,6 +3,7 @@ mod streamable_http_test_support;
 use pretty_assertions::assert_eq;
 
 use streamable_http_test_support::arm_session_post_failure;
+use streamable_http_test_support::arm_session_post_failure_response;
 use streamable_http_test_support::call_echo_tool;
 use streamable_http_test_support::create_client;
 use streamable_http_test_support::expected_echo_result;
@@ -86,6 +87,36 @@ async fn streamable_http_non_session_failure_does_not_trigger_recovery() -> anyh
         .await
         .unwrap_err();
     assert!(second_error.to_string().contains("500"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn streamable_http_json_error_status_is_not_parsed_as_success() -> anyhow::Result<()> {
+    let (_server, base_url) = spawn_streamable_http_server().await?;
+    let client = create_client(&base_url).await?;
+
+    let warmup = call_echo_tool(&client, "warmup").await?;
+    assert_eq!(warmup, expected_echo_result("warmup"));
+
+    arm_session_post_failure_response(
+        &base_url,
+        /*status*/ 500,
+        /*remaining*/ 1,
+        Some("application/json"),
+        Some(r#"{"error":"upstream failed"}"#),
+    )
+    .await?;
+
+    let error = call_echo_tool(&client, "json-error").await.unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("POST returned HTTP 500"),
+        "unexpected error: {message}"
+    );
+
+    let recovered = call_echo_tool(&client, "after-json-error").await?;
+    assert_eq!(recovered, expected_echo_result("after-json-error"));
 
     Ok(())
 }

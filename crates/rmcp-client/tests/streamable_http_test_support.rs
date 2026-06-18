@@ -128,11 +128,26 @@ pub(crate) async fn arm_session_post_failure(
     status: u16,
     remaining: usize,
 ) -> anyhow::Result<()> {
+    arm_session_post_failure_response(
+        base_url, status, remaining, /*content_type*/ None, /*body*/ None,
+    )
+    .await
+}
+
+pub(crate) async fn arm_session_post_failure_response(
+    base_url: &str,
+    status: u16,
+    remaining: usize,
+    content_type: Option<&str>,
+    body: Option<&str>,
+) -> anyhow::Result<()> {
     let response = reqwest::Client::new()
         .post(format!("{base_url}{SESSION_POST_FAILURE_CONTROL_PATH}"))
         .json(&json!({
             "status": status,
             "remaining": remaining,
+            "content_type": content_type,
+            "body": body,
         }))
         .send()
         .await?;

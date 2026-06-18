@@ -120,7 +120,11 @@ fn file_changed_events(result: &ToolCallResult) -> Vec<FileChangedEvent> {
     let Some(files) = metadata.get("files").and_then(Value::as_array) else {
         return Vec::new();
     };
-    files.iter().flat_map(file_changed_event).collect()
+    let mut events = Vec::new();
+    for file in files {
+        push_file_changed_events(file, &mut events);
+    }
+    events
 }
 
 fn result_metadata(content: &ToolContent) -> Option<&Value> {
@@ -138,9 +142,9 @@ fn result_metadata(content: &ToolContent) -> Option<&Value> {
     }
 }
 
-fn file_changed_event(file: &Value) -> Vec<FileChangedEvent> {
+fn push_file_changed_events(file: &Value, events: &mut Vec<FileChangedEvent>) {
     let Some(object) = file.as_object() else {
-        return Vec::new();
+        return;
     };
     let kind = object
         .get("kind")
@@ -148,7 +152,6 @@ fn file_changed_event(file: &Value) -> Vec<FileChangedEvent> {
         .and_then(Value::as_str)
         .unwrap_or("change");
     if kind == "move" {
-        let mut events = Vec::new();
         if let Some(source) = file_path_field(object) {
             events.push(FileChangedEvent {
                 file_path: source.to_string(),
@@ -161,20 +164,20 @@ fn file_changed_event(file: &Value) -> Vec<FileChangedEvent> {
                 event: "add",
             });
         }
-        return events;
+        return;
     }
     let Some(file_path) = file_path_field(object) else {
-        return Vec::new();
+        return;
     };
     let event = match kind {
         "add" => "add",
         "delete" | "remove" | "unlink" => "unlink",
         _ => "change",
     };
-    vec![FileChangedEvent {
+    events.push(FileChangedEvent {
         file_path: file_path.to_string(),
         event,
-    }]
+    });
 }
 
 fn file_path_field(object: &Map<String, Value>) -> Option<&str> {

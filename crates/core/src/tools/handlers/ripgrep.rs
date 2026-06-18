@@ -51,6 +51,24 @@ pub(crate) fn resolve_rg_binary() -> Result<PathBuf, ToolCallError> {
     })
 }
 
+pub(crate) fn ripgrep_failure_message(stderr: Vec<u8>, exit_code: i32) -> String {
+    let stderr = match String::from_utf8(stderr) {
+        Ok(mut value) => {
+            trim_in_place(&mut value);
+            value
+        }
+        Err(source) => String::from_utf8_lossy(source.as_bytes())
+            .trim()
+            .to_string(),
+    };
+
+    if stderr.is_empty() {
+        format!("ripgrep exited with status {exit_code}")
+    } else {
+        stderr
+    }
+}
+
 fn resolve_rg_binary_from(current_exe: Option<&Path>, path_env: Option<&OsStr>) -> Option<PathBuf> {
     if let Some(current_exe) = current_exe
         && let Some(parent) = current_exe.parent()
@@ -69,6 +87,15 @@ fn resolve_rg_binary_from(current_exe: Option<&Path>, path_env: Option<&OsStr>) 
 
 fn rg_binary_name() -> &'static str {
     if cfg!(windows) { "rg.exe" } else { "rg" }
+}
+
+fn trim_in_place(value: &mut String) {
+    let end = value.trim_end().len();
+    value.truncate(end);
+    let start = value.len().saturating_sub(value.trim_start().len());
+    if start > 0 {
+        value.drain(..start);
+    }
 }
 
 #[cfg(test)]
@@ -123,6 +150,22 @@ mod tests {
         assert_eq!(
             resolve_rg_binary_from(Some(&current_exe), Some(path_env.as_os_str())),
             Some(path_rg)
+        );
+    }
+
+    #[test]
+    fn ripgrep_failure_message_preserves_stderr_text() {
+        assert_eq!(
+            ripgrep_failure_message(b"  regex parse error\n".to_vec(), 2),
+            "regex parse error"
+        );
+    }
+
+    #[test]
+    fn ripgrep_failure_message_falls_back_to_status() {
+        assert_eq!(
+            ripgrep_failure_message(b" \n\t".to_vec(), 2),
+            "ripgrep exited with status 2"
         );
     }
 }

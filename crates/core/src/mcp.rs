@@ -208,7 +208,13 @@ pub fn sanitize_model_name(value: &str) -> String {
             last_was_separator = true;
         }
     }
-    let output = output.trim_matches('_').to_string();
+    while output.ends_with('_') {
+        output.pop();
+    }
+    let leading_separators = output.bytes().take_while(|byte| *byte == b'_').count();
+    if leading_separators > 0 {
+        output.drain(..leading_separators);
+    }
     if output.is_empty() {
         "tool".to_string()
     } else if output
@@ -320,6 +326,8 @@ mod tests {
         assert_eq!(sanitize_model_name("Docs Server"), "docs_server");
         assert_eq!(sanitize_model_name("echo-tool"), "echo_tool");
         assert_eq!(sanitize_model_name("123"), "_123");
+        assert_eq!(sanitize_model_name("  Docs Server! "), "docs_server");
+        assert_eq!(sanitize_model_name("!!!"), "tool");
     }
 
     #[test]

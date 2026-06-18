@@ -8,29 +8,33 @@
 //! avoiding full repository work on repeated queries.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::ffi::{OsStr, OsString};
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::cache::{cache_file_path, default_cache_dir, load_payload, save_payload};
 use crate::dense::{EmbeddingProvider, Model2VecEmbeddingProvider};
-use crate::files::{FileManifestEntry, discover_files};
+use crate::files::{FileEntry, discover_files};
 use crate::index::SearchIndex;
 use crate::ranking::rank_search;
 use crate::refresh::IndexRefresh;
 use crate::types::{
     CodeSearchError, CodeSearchOperation, ContentFilter, IndexStats, RelatedRequest, SearchOutput,
-    SearchRequest, validate_top_k,
+    SearchRequest, trim_whitespace_in_place, validate_top_k,
 };
 use crate::watch::IndexWatcher;
 
 const MANIFEST_SAFETY_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_WARM_INDEXES: usize = 8;
 
 /// Thread-safe entrypoint used by the Devo tool runtime.
 ///
-/// `CodeSearchService` keeps one in-memory index per root/content/model identity.
-/// The service is read-only with respect to the workspace; its only writes are
-/// disposable cache files under the configured cache directory.
+/// `CodeSearchService` keeps a bounded in-memory index cache keyed by
+/// root/content/model identity. The service is read-only with respect to the
+/// workspace; its only writes are disposable cache files under the configured
+/// cache directory.
 pub struct CodeSearchService {
     provider: Arc<dyn EmbeddingProvider>,
     cache_dir: PathBuf,
@@ -81,7 +85,8 @@ impl CodeSearchService {
     pub fn search(&self, request: SearchRequest) -> Result<SearchOutput, CodeSearchError> {
         let top_k = validate_top_k(request.top_k)?;
         let root = canonical_root(&request.root)?;
-        let query = request.query.trim().to_string();
+        let mut query = request.query;
+        trim_whitespace_in_place(&mut query);
         if query.is_empty() {
             return Ok(SearchOutput {
                 operation: CodeSearchOperation::Search,
@@ -159,11 +164,7 @@ impl CodeSearchService {
         // dirty, unavailable, or beyond the safety interval, the manifest walk is
         // the source of truth for reuse decisions.
         let files = discover_files(&root, content)?;
-        let manifest = files
-            .iter()
-            .map(|file| file.manifest.clone())
-            .collect::<Vec<_>>();
-        if let Some(index) = self.matching_memory_index(&key, &root, &manifest)? {
+        if let Some(index) = self.matching_memory_index(&key, &root, &files)? {
             return Ok(index);
         }
 
@@ -180,11 +181,11 @@ impl CodeSearchService {
             previous_payload,
             self.provider.as_ref(),
         )?;
-        let index = Arc::new(SearchIndex::from_cached(crate::cache::CachedIndex {
-            payload: outcome.payload.clone(),
-            embeddings: outcome.embeddings.clone(),
-        })?);
         save_payload(&cache_path, &outcome.payload, &outcome.embeddings)?;
+        let index = Arc::new(SearchIndex::from_cached(crate::cache::CachedIndex {
+            payload: outcome.payload,
+            embeddings: outcome.embeddings,
+        })?);
         self.store_index(key, &root, Arc::clone(&index))?;
         Ok(index)
     }
@@ -193,13 +194,18 @@ impl CodeSearchService {
     /// state says it is both available and clean.
     fn clean_warm_index(&self, key: &str) -> Result<Option<Arc<SearchIndex>>, CodeSearchError> {
         let now = Instant::now();
-        Ok(self
+        let mut indexes = self
             .indexes
             .lock()
-            .map_err(|_| CodeSearchError::Index("index cache lock poisoned".to_string()))?
-            .get(key)
-            .filter(|state| state.can_reuse_without_manifest(now, MANIFEST_SAFETY_INTERVAL))
-            .map(|state| Arc::clone(&state.index)))
+            .map_err(|_| CodeSearchError::Index("index cache lock poisoned".to_string()))?;
+        let Some(state) = indexes.get_mut(key) else {
+            return Ok(None);
+        };
+        if !state.can_reuse_without_manifest(now, MANIFEST_SAFETY_INTERVAL) {
+            return Ok(None);
+        }
+        state.mark_used(now);
+        Ok(Some(Arc::clone(&state.index)))
     }
 
     /// Reuses an in-memory index after a manifest walk proves it is still fresh.
@@ -210,20 +216,30 @@ impl CodeSearchService {
         &self,
         key: &str,
         root: &Path,
-        manifest: &[FileManifestEntry],
+        files: &[FileEntry],
     ) -> Result<Option<Arc<SearchIndex>>, CodeSearchError> {
-        let index = self
-            .indexes
-            .lock()
-            .map_err(|_| CodeSearchError::Index("index cache lock poisoned".to_string()))?
-            .get(key)
-            .filter(|state| state.index.manifest_matches(manifest))
-            .map(|state| Arc::clone(&state.index));
-        if let Some(index) = index {
-            self.store_index(key.to_string(), root, Arc::clone(&index))?;
-            return Ok(Some(index));
-        }
-        Ok(None)
+        let index = {
+            let mut indexes = self
+                .indexes
+                .lock()
+                .map_err(|_| CodeSearchError::Index("index cache lock poisoned".to_string()))?;
+            let Some(state) = indexes.get_mut(key) else {
+                return Ok(None);
+            };
+            // Only allocate the manifest snapshot when a warm candidate exists.
+            // Cold and disk-cache paths can hand `files` directly to refresh.
+            let manifest = files
+                .iter()
+                .map(|file| file.manifest.clone())
+                .collect::<Vec<_>>();
+            if !state.index.manifest_matches(&manifest) {
+                return Ok(None);
+            }
+            state.mark_used(Instant::now());
+            Arc::clone(&state.index)
+        };
+        self.store_index(key.to_string(), root, Arc::clone(&index))?;
+        Ok(Some(index))
     }
 
     /// Installs an index in the warm cache with a watcher for its root.
@@ -234,11 +250,31 @@ impl CodeSearchService {
         index: Arc<SearchIndex>,
     ) -> Result<(), CodeSearchError> {
         let state = CachedIndexState::new(index, root, self.watcher_policy);
-        self.indexes
+        let mut indexes = self
+            .indexes
             .lock()
-            .map_err(|_| CodeSearchError::Index("index cache lock poisoned".to_string()))?
-            .insert(key, state);
+            .map_err(|_| CodeSearchError::Index("index cache lock poisoned".to_string()))?;
+        indexes.insert(key, state);
+        prune_warm_indexes(&mut indexes);
         Ok(())
+    }
+}
+
+fn prune_warm_indexes(indexes: &mut HashMap<String, CachedIndexState>) {
+    while indexes.len() > MAX_WARM_INDEXES {
+        let Some(oldest_last_used) = indexes.values().map(|state| state.last_used).min() else {
+            return;
+        };
+        let mut removed_oldest = false;
+        // Remove via retain so eviction does not need to clone the selected key.
+        indexes.retain(|_, state| {
+            if !removed_oldest && state.last_used == oldest_last_used {
+                removed_oldest = true;
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 
@@ -263,19 +299,97 @@ fn canonical_root(root: &Path) -> Result<PathBuf, CodeSearchError> {
 /// Converts an absolute source path into the workspace-relative path stored in
 /// chunks and rejects absolute paths outside the root.
 fn normalize_source_path(root: &Path, file_path: &Path) -> Result<PathBuf, CodeSearchError> {
-    if file_path.is_absolute() {
-        let canonical = file_path.canonicalize()?;
-        return canonical
-            .strip_prefix(root)
-            .map(Path::to_path_buf)
-            .map_err(|_| {
-                CodeSearchError::InvalidInput(format!(
-                    "file path is outside the search root: {}",
-                    file_path.display()
-                ))
-            });
+    let relative_path = if file_path.is_absolute() {
+        match file_path.canonicalize() {
+            Ok(canonical) => strip_source_root(root, &canonical, file_path),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                normalize_missing_absolute_source_path(root, file_path)
+            }
+            Err(error) => Err(error.into()),
+        }
+    } else {
+        Ok(normalize_relative_source_path(file_path))
+    }?;
+    if relative_path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(outside_root_error(file_path));
     }
-    Ok(file_path.to_path_buf())
+    Ok(relative_path)
+}
+
+fn normalize_missing_absolute_source_path(
+    root: &Path,
+    file_path: &Path,
+) -> Result<PathBuf, CodeSearchError> {
+    let mut resolved = PathBuf::new();
+    let mut components = file_path.components();
+    while let Some(component) = components.next() {
+        if component == Component::CurDir {
+            continue;
+        }
+        resolved.push(component.as_os_str());
+        match resolved.canonicalize() {
+            Ok(canonical) => resolved = canonical,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                for remaining in components {
+                    if remaining != Component::CurDir {
+                        resolved.push(remaining.as_os_str());
+                    }
+                }
+                let relative = strip_source_root(root, &resolved, file_path)?;
+                return Ok(normalize_relative_source_path(&relative));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    strip_source_root(root, &resolved, file_path)
+}
+
+fn strip_source_root(
+    root: &Path,
+    file_path: &Path,
+    original_path: &Path,
+) -> Result<PathBuf, CodeSearchError> {
+    file_path
+        .strip_prefix(root)
+        .map(Path::to_path_buf)
+        .map_err(|_| outside_root_error(original_path))
+}
+
+fn outside_root_error(file_path: &Path) -> CodeSearchError {
+    CodeSearchError::InvalidInput(format!(
+        "file path is outside the search root: {}",
+        file_path.display()
+    ))
+}
+
+fn normalize_relative_source_path(file_path: &Path) -> PathBuf {
+    let separator_normalized = file_path.to_string_lossy().replace('\\', "/");
+    let mut parts = Vec::<OsString>::new();
+    for component in Path::new(&separator_normalized).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts
+                    .last()
+                    .is_some_and(|part| part.as_os_str() != OsStr::new(".."))
+                {
+                    parts.pop();
+                } else {
+                    parts.push(OsString::from(".."));
+                }
+            }
+            Component::Normal(part) => parts.push(part.to_os_string()),
+            Component::RootDir | Component::Prefix(_) => {
+                parts.push(component.as_os_str().to_os_string());
+            }
+        }
+    }
+    parts.into_iter().collect()
 }
 
 /// Builds the in-memory index key from the dimensions that affect retrieval.
@@ -288,15 +402,18 @@ struct CachedIndexState {
     index: Arc<SearchIndex>,
     watcher: IndexWatcher,
     last_manifest_check: Instant,
+    last_used: Instant,
 }
 
 impl CachedIndexState {
     /// Creates a warm state and starts a watcher when policy allows it.
     fn new(index: Arc<SearchIndex>, root: &Path, watcher_policy: WatcherPolicy) -> Self {
+        let now = Instant::now();
         Self {
             index,
             watcher: watcher_policy.create_watcher(root),
-            last_manifest_check: Instant::now(),
+            last_manifest_check: now,
+            last_used: now,
         }
     }
 
@@ -305,6 +422,10 @@ impl CachedIndexState {
     fn can_reuse_without_manifest(&self, now: Instant, safety_interval: Duration) -> bool {
         self.watcher.can_skip_manifest_check()
             && now.duration_since(self.last_manifest_check) < safety_interval
+    }
+
+    fn mark_used(&mut self, now: Instant) {
+        self.last_used = now;
     }
 }
 
@@ -409,6 +530,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn find_related_missing_absolute_source_path_returns_empty_results() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache = tempfile::tempdir().expect("cache");
+        fs::write(temp.path().join("lib.rs"), "pub fn parse_input() {}\n").expect("write");
+        let root = temp.path().canonicalize().expect("canonical root");
+        let service = test_service(cache.path().to_path_buf());
+
+        let output = service
+            .find_related(RelatedRequest {
+                root: temp.path().to_path_buf(),
+                file_path: root.join("generated").join("missing.rs"),
+                line: 1,
+                content: ContentFilter::Code,
+                top_k: 5,
+                filters: SearchFilters::empty(),
+            })
+            .expect("missing source path");
+
+        assert_eq!(output.operation, CodeSearchOperation::FindRelated);
+        assert_eq!(output.root, root);
+        assert!(output.results.is_empty());
+    }
+
+    #[test]
+    fn source_path_normalization_collapses_relative_dot_components() {
+        let root = Path::new("repo");
+        let dotted_path = Path::new(".").join("src").join("..").join("lib.rs");
+        let nested_dot_path = Path::new("src").join(".").join("lib.rs");
+
+        let normalized_paths = vec![
+            normalize_source_path(root, &dotted_path).expect("dotted path"),
+            normalize_source_path(root, &nested_dot_path).expect("nested dot path"),
+        ];
+
+        assert_eq!(
+            normalized_paths,
+            vec![PathBuf::from("lib.rs"), Path::new("src").join("lib.rs")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_path_normalization_collapses_backslash_dot_components_on_unix() {
+        let root = Path::new("repo");
+        let dotted_path = PathBuf::from(r"src\..\lib.rs");
+        let nested_dot_path = PathBuf::from(r"src\.\nested.rs");
+
+        let normalized_paths = vec![
+            normalize_source_path(root, &dotted_path).expect("dotted path"),
+            normalize_source_path(root, &nested_dot_path).expect("nested dot path"),
+        ];
+
+        assert_eq!(
+            normalized_paths,
+            vec![PathBuf::from("lib.rs"), Path::new("src").join("nested.rs")]
+        );
+    }
+
     /// Trace: L2-DES-TOOL-001
     /// Verifies: cache invalidates when the indexed file manifest changes.
     #[test]
@@ -501,21 +681,25 @@ mod tests {
             index: empty_index(),
             watcher: IndexWatcher::clean_for_test(),
             last_manifest_check: now,
+            last_used: now,
         };
         let dirty_recent = CachedIndexState {
             index: empty_index(),
             watcher: IndexWatcher::dirty_for_test(),
             last_manifest_check: now,
+            last_used: now,
         };
         let unavailable_recent = CachedIndexState {
             index: empty_index(),
             watcher: IndexWatcher::unavailable(),
             last_manifest_check: now,
+            last_used: now,
         };
         let clean_stale = CachedIndexState {
             index: empty_index(),
             watcher: IndexWatcher::clean_for_test(),
             last_manifest_check: stale,
+            last_used: now,
         };
 
         let reuse_decisions = vec![
@@ -528,8 +712,41 @@ mod tests {
         assert_eq!(reuse_decisions, vec![true, false, false, false]);
     }
 
+    /// Verifies: warm indexes are bounded so long-running sessions cannot retain
+    /// one full index for every root/content/model combination they have seen.
+    #[test]
+    fn warm_index_cache_prunes_oldest_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache = tempfile::tempdir().expect("cache");
+        let service = test_service(cache.path().to_path_buf());
+
+        for index in 0..MAX_WARM_INDEXES {
+            service
+                .store_index(format!("key-{index}"), temp.path(), empty_index())
+                .expect("store index");
+        }
+        service
+            .indexes
+            .lock()
+            .expect("indexes")
+            .get_mut("key-0")
+            .expect("first state")
+            .last_used = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("older instant");
+
+        service
+            .store_index("key-new".to_string(), temp.path(), empty_index())
+            .expect("store new index");
+
+        let indexes = service.indexes.lock().expect("indexes");
+        assert_eq!(indexes.len(), MAX_WARM_INDEXES);
+        assert!(!indexes.contains_key("key-0"));
+        assert!(indexes.contains_key("key-new"));
+    }
+
     /// Trace: L2-DES-TOOL-001
-    /// Verifies: stale v1 cache payloads are ignored and replaced by a v4 cache payload.
+    /// Verifies: stale v1 cache payloads are ignored and replaced by a current cache payload.
     #[test]
     fn stale_v1_cache_rebuilds_cleanly() {
         let temp = tempfile::tempdir().expect("tempdir");

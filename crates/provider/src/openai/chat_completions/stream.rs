@@ -154,7 +154,7 @@ pub(super) async fn completion_stream(
             }
         }
 
-        for stream_event in state.finish_pending_text() {
+        for stream_event in state.finish_pending_content() {
             yield stream_event;
         }
         yield StreamEvent::MessageDone {
@@ -330,18 +330,13 @@ impl ChatCompletionStreamState {
             }
         }
 
-        for tool_call_delta in choice.delta.tool_calls {
-            self.apply_tool_call_delta(tool_call_delta, events);
+        for (fallback_index, tool_call_delta) in choice.delta.tool_calls.into_iter().enumerate() {
+            let fallback_index = u32::try_from(fallback_index).unwrap_or(u32::MAX);
+            self.apply_tool_call_delta(tool_call_delta, fallback_index, events);
         }
 
         if let Some(reason) = choice.finish_reason {
-            for fragment in self.text_parser.finish() {
-                match fragment {
-                    TaggedTextFragment::Text(text) => self.push_text_delta(text, events),
-                    TaggedTextFragment::Reasoning(text) => self.push_reasoning_delta(text, events),
-                }
-            }
-            self.finish_pending_text_into(events);
+            self.finish_pending_content_into(events);
             self.finish_reason = Some(parse_finish_reason(&reason));
             self.choice_metadata
                 .entry(choice_index)
@@ -376,10 +371,25 @@ impl ChatCompletionStreamState {
         }
     }
 
-    fn finish_pending_text(&mut self) -> Vec<StreamEvent> {
+    fn finish_pending_content(&mut self) -> Vec<StreamEvent> {
         let mut events = Vec::new();
-        self.finish_pending_text_into(&mut events);
+        self.finish_pending_content_into(&mut events);
         events
+    }
+
+    fn finish_pending_content_into(&mut self, events: &mut Vec<StreamEvent>) {
+        self.finish_tagged_text_into(events);
+        self.finish_pending_text_into(events);
+        self.finish_reasoning_into(events);
+    }
+
+    fn finish_tagged_text_into(&mut self, events: &mut Vec<StreamEvent>) {
+        for fragment in self.text_parser.finish() {
+            match fragment {
+                TaggedTextFragment::Text(text) => self.push_text_delta(text, events),
+                TaggedTextFragment::Reasoning(text) => self.push_reasoning_delta(text, events),
+            }
+        }
     }
 
     fn finish_pending_text_into(&mut self, events: &mut Vec<StreamEvent>) {
@@ -394,16 +404,23 @@ impl ChatCompletionStreamState {
         if text.is_empty() {
             return;
         }
-        if !self.reasoning.started {
+        if !self.reasoning.started || self.reasoning.finished {
             self.reasoning.started = true;
+            self.reasoning.finished = false;
             events.push(StreamEvent::ReasoningStart { index: 1 });
         }
         self.reasoning.value.push_str(&text);
         events.push(StreamEvent::ReasoningDelta { index: 1, text });
     }
 
+    fn finish_reasoning_into(&mut self, events: &mut Vec<StreamEvent>) {
+        self.reasoning_content_active = false;
+        self.push_reasoning_done(events);
+    }
+
     fn push_reasoning_done(&mut self, events: &mut Vec<StreamEvent>) {
-        if self.reasoning.started {
+        if self.reasoning.started && !self.reasoning.finished {
+            self.reasoning.finished = true;
             events.push(StreamEvent::ReasoningDone { index: 1 });
         }
     }
@@ -411,6 +428,7 @@ impl ChatCompletionStreamState {
     fn apply_tool_call_delta(
         &mut self,
         tool_call_delta: ChatCompletionStreamToolCallDelta,
+        fallback_index: u32,
         events: &mut Vec<StreamEvent>,
     ) {
         let ChatCompletionStreamToolCallDelta {
@@ -420,8 +438,9 @@ impl ChatCompletionStreamState {
             function,
             custom,
         } = tool_call_delta;
-        let index = index.unwrap_or(0);
-        let content_index = (index + 1) as usize;
+        let index = index.unwrap_or(fallback_index);
+        let content_index =
+            usize::try_from(index).map_or(usize::MAX, |index| index.saturating_add(1));
         let entry = self.tool_calls.entry(index).or_default();
 
         if let Some(id) = id {
@@ -454,7 +473,7 @@ impl ChatCompletionStreamState {
             }
         }
 
-        if !entry.started && tool_call_delta_starts_block(entry) {
+        let newly_started = if !entry.started && tool_call_delta_starts_block(entry) {
             entry.started = true;
             events.push(StreamEvent::ToolCallStart {
                 index: content_index,
@@ -462,15 +481,32 @@ impl ChatCompletionStreamState {
                 name: entry.name.clone(),
                 input: entry.kind.empty_input(),
             });
+            true
+        } else {
+            false
+        };
+
+        if newly_started {
+            if !entry.arguments_json.is_empty() {
+                events.push(StreamEvent::ToolCallInputDelta {
+                    index: content_index,
+                    partial_json: entry.arguments_json.clone(),
+                });
+            }
+            return;
         }
 
-        if let Some(arguments) = function_arguments_delta {
+        if entry.started
+            && let Some(arguments) = function_arguments_delta
+        {
             events.push(StreamEvent::ToolCallInputDelta {
                 index: content_index,
                 partial_json: arguments,
             });
         }
-        if let Some(input) = custom_input_delta {
+        if entry.started
+            && let Some(input) = custom_input_delta
+        {
             events.push(StreamEvent::ToolCallInputDelta {
                 index: content_index,
                 partial_json: input,
@@ -636,7 +672,7 @@ impl ChatCompletionStreamState {
 }
 
 fn tool_call_delta_starts_block(entry: &PartialToolCall) -> bool {
-    !entry.id.is_empty() || !entry.name.is_empty() || !entry.arguments_json.is_empty()
+    !entry.id.is_empty() && !entry.name.is_empty()
 }
 
 fn usage_from_completion_usage(usage: OpenAICompletionUsage) -> Usage {
@@ -655,6 +691,7 @@ fn usage_from_completion_usage(usage: OpenAICompletionUsage) -> Usage {
 struct StreamTextBlock {
     value: String,
     started: bool,
+    finished: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1206,6 +1243,104 @@ mod tests {
         );
     }
 
+    #[test]
+    fn finish_reason_closes_active_reasoning_content_phase() {
+        let mut state = ChatCompletionStreamState::default();
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": "plan"
+                    },
+                    "finish_reason": "stop"
+                }
+            ]
+        })));
+
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ReasoningStart { index: 1 },
+                StreamEvent::ReasoningDelta {
+                    index: 1,
+                    text: "plan".to_string(),
+                },
+                StreamEvent::ReasoningDone { index: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn finish_pending_content_closes_tagged_reasoning_at_stream_end() {
+        let mut state = ChatCompletionStreamState::default();
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "content": "<think>plan</think>"
+                    }
+                }
+            ]
+        })));
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ReasoningStart { index: 1 },
+                StreamEvent::ReasoningDelta {
+                    index: 1,
+                    text: "plan".to_string(),
+                },
+            ]
+        );
+
+        let events = state.finish_pending_content();
+
+        assert_eq!(events, vec![StreamEvent::ReasoningDone { index: 1 }]);
+    }
+
+    #[test]
+    fn finish_pending_content_flushes_buffered_tagged_text_at_stream_end() {
+        let mut state = ChatCompletionStreamState::default();
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "content": "answer<th"
+                    }
+                }
+            ]
+        })));
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::TextStart { index: 0 },
+                StreamEvent::TextDelta {
+                    index: 0,
+                    text: "answer".to_string(),
+                },
+            ]
+        );
+
+        let events = state.finish_pending_content();
+
+        assert_eq!(
+            events,
+            vec![StreamEvent::TextDelta {
+                index: 0,
+                text: "<th".to_string(),
+            }]
+        );
+
+        let response = state.into_response();
+        assert_eq!(
+            response.content,
+            vec![ResponseContent::Text("answer<th".to_string())]
+        );
+    }
+
     fn parse_chunk(value: Value) -> ChatCompletionStreamChunk {
         serde_json::from_value(value).expect("valid stream chunk")
     }
@@ -1227,7 +1362,7 @@ mod tests {
             ]
         })));
 
-        assert_eq!(events.len(), 5);
+        assert_eq!(events.len(), 6);
         assert!(matches!(
             &events[0],
             StreamEvent::ReasoningStart { index: 1 }
@@ -1244,6 +1379,10 @@ mod tests {
         assert!(matches!(
             &events[4],
             StreamEvent::TextDelta { index: 0, text } if text == "visible"
+        ));
+        assert!(matches!(
+            &events[5],
+            StreamEvent::ReasoningDone { index: 1 }
         ));
 
         let response = state.into_response();

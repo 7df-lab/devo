@@ -1,3 +1,10 @@
+//! Provider and model-binding resolution from serialized config plus user auth.
+//!
+//! This module keeps the TOML/auth shapes separate from runtime settings:
+//! callers get owned resolved values, while validation can still distinguish
+//! missing, disabled, and unsupported provider/binding states for user-facing
+//! errors.
+
 use devo_util_paths::current_user_config_file;
 
 use crate::ProviderConfigError;
@@ -31,6 +38,21 @@ impl ResolvedModelBinding {
             invocation_method: binding.invocation_method,
             default_reasoning_effort: binding.default_reasoning_effort.clone(),
             enabled: binding.enabled,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BindingVisibility {
+    IncludeDisabled,
+    EnabledOnly,
+}
+
+impl BindingVisibility {
+    fn allows(self, binding: &ModelBindingConfig) -> bool {
+        match self {
+            Self::IncludeDisabled => true,
+            Self::EnabledOnly => binding.enabled,
         }
     }
 }
@@ -101,20 +123,23 @@ pub fn resolve_provider_settings_from_config_and_auth(
             });
         }
 
+        let api_key = resolve_provider_api_key(&binding.provider_id, provider_config, auth)?;
+        let model_thinking_selection = file
+            .model_thinking_selection
+            .clone()
+            .or(binding.default_reasoning_effort);
+
         return Ok(ResolvedProviderSettings {
-            provider_id: binding.provider_id.clone(),
+            provider_id: binding.provider_id,
             wire_api: binding.invocation_method,
-            model: binding.model_name.clone(),
+            model: binding.model_name,
             base_url: provider_config.base_url.clone(),
-            api_key: resolve_provider_api_key(&binding.provider_id, provider_config, auth)?,
+            api_key,
             proxy_url: None,
             headers: provider_config.headers.clone(),
             model_auto_compact_token_limit: file.model_auto_compact_token_limit,
             model_context_window: file.model_context_window,
-            model_thinking_selection: file
-                .model_thinking_selection
-                .clone()
-                .or_else(|| binding.default_reasoning_effort.clone()),
+            model_thinking_selection,
             disable_response_storage: file.disable_response_storage.unwrap_or(false),
             preferred_auth_method: file.preferred_auth_method,
         });
@@ -154,21 +179,11 @@ pub fn resolve_model_binding(
     // a configured-but-disabled binding visible so the caller can report
     // "binding is disabled" instead of silently selecting another model.
     if let Some(requested_model) = requested_model {
-        if let Some((binding_id, binding)) = config
-            .model_bindings
-            .iter()
-            .find(|(binding_id, _)| binding_id.as_str() == requested_model)
-        {
-            return Some(ResolvedModelBinding::from_config(binding_id, binding));
-        }
-
-        return config
-            .model_bindings
-            .iter()
-            .find(|(_, binding)| {
-                binding.model_slug == requested_model || binding.model_name == requested_model
-            })
-            .map(|(binding_id, binding)| ResolvedModelBinding::from_config(binding_id, binding));
+        return requested_model_binding(
+            config,
+            requested_model,
+            BindingVisibility::IncludeDisabled,
+        );
     }
 
     if let Some(binding) = config
@@ -207,23 +222,7 @@ pub fn resolve_enabled_model_binding(
     // wire name: e.g. `deepseek-main`, `deepseek-v4-pro`, or
     // `deepseek/deepseek-v4-pro`.
     if let Some(requested_model) = requested_model {
-        if let Some((binding_id, binding)) = config
-            .model_bindings
-            .iter()
-            .find(|(binding_id, binding)| binding.enabled && binding_id.as_str() == requested_model)
-        {
-            return Some(ResolvedModelBinding::from_config(binding_id, binding));
-        }
-
-        return config
-            .model_bindings
-            .iter()
-            .find(|(_, binding)| {
-                binding.enabled
-                    && (binding.model_slug == requested_model
-                        || binding.model_name == requested_model)
-            })
-            .map(|(binding_id, binding)| ResolvedModelBinding::from_config(binding_id, binding));
+        return requested_model_binding(config, requested_model, BindingVisibility::EnabledOnly);
     }
 
     config
@@ -246,6 +245,27 @@ pub fn resolve_enabled_model_binding(
         })
 }
 
+fn requested_model_binding(
+    config: &ProviderConfigSection,
+    requested_model: &str,
+    visibility: BindingVisibility,
+) -> Option<ResolvedModelBinding> {
+    config
+        .model_bindings
+        .iter()
+        .find(|(binding_id, binding)| {
+            visibility.allows(binding) && binding_id.as_str() == requested_model
+        })
+        .or_else(|| {
+            config.model_bindings.iter().find(|(_, binding)| {
+                visibility.allows(binding)
+                    && (binding.model_slug == requested_model
+                        || binding.model_name == requested_model)
+            })
+        })
+        .map(|(binding_id, binding)| ResolvedModelBinding::from_config(binding_id, binding))
+}
+
 pub fn provider_request_model_map_for_binding(
     config: &ProviderConfigSection,
     binding: &ResolvedModelBinding,
@@ -255,10 +275,14 @@ pub fn provider_request_model_map_for_binding(
     // matching binding's `model_name`, such as `moonshotai/kimi-k2.5-thinking`.
     // Scope this map to the selected provider so another provider with the same
     // variant slug cannot hijack the wire model name.
-    config
+    let mut request_model_map =
+        std::collections::HashMap::with_capacity(config.model_bindings.len());
+    for candidate in config
         .model_bindings
         .values()
         .filter(|candidate| candidate.enabled && candidate.provider == binding.provider_id)
-        .map(|candidate| (candidate.model_slug.clone(), candidate.model_name.clone()))
-        .collect()
+    {
+        request_model_map.insert(candidate.model_slug.clone(), candidate.model_name.clone());
+    }
+    request_model_map
 }

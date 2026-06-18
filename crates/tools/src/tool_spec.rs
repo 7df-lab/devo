@@ -1,3 +1,9 @@
+//! Stable tool metadata shared by registries, runtimes, and clients.
+//!
+//! Keep this type explicit rather than deriving it from handlers: the protocol
+//! needs a serializable capability contract before any concrete handler is
+//! invoked.
+
 use serde::{Deserialize, Serialize};
 
 use crate::JsonSchema;
@@ -22,6 +28,8 @@ impl ToolSpec {
 
 #[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
+
     use super::*;
 
     #[test]

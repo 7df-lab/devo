@@ -146,11 +146,13 @@ impl AgentsMdManager {
     }
 
     fn render_documents(&self, documents: &[AgentsDocumentSnapshot]) -> String {
-        let mut rendered = documents
-            .iter()
-            .map(|document| document.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let mut rendered = String::new();
+        for document in documents {
+            if !rendered.is_empty() {
+                rendered.push_str("\n\n");
+            }
+            rendered.push_str(&document.content);
+        }
         truncate_to_bytes(&mut rendered, self.config.project_doc_max_bytes);
         if self.config.include_hierarchical_message {
             if !rendered.is_empty() {

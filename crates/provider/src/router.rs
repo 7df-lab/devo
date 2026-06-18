@@ -87,10 +87,7 @@ impl ProviderRouter for SingleProviderRouter {
         self.provider
             .completion_stream(request)
             .await
-            .map_err(|e| ProviderError::UnknownError {
-                message: e.to_string(),
-                status_code: None,
-            })
+            .map_err(unknown_provider_error)
     }
 
     async fn complete(
@@ -101,10 +98,7 @@ impl ProviderRouter for SingleProviderRouter {
         self.provider
             .completion(request)
             .await
-            .map_err(|e| ProviderError::UnknownError {
-                message: e.to_string(),
-                status_code: None,
-            })
+            .map_err(unknown_provider_error)
     }
 
     fn name(&self) -> &str {
@@ -133,13 +127,15 @@ impl MultiProviderRouter {
     fn provider_for_route(
         &self,
         route: &ProviderRoute,
-    ) -> Result<Arc<dyn ModelProviderSDK>, ProviderError> {
+    ) -> Result<&dyn ModelProviderSDK, ProviderError> {
+        // The router owns providers for its lifetime, so dispatch can borrow the
+        // selected adapter instead of cloning an Arc for each request.
         match route {
-            ProviderRoute::Default => Ok(Arc::clone(&self.default_provider)),
+            ProviderRoute::Default => Ok(self.default_provider.as_ref()),
             ProviderRoute::Binding { provider_id, wire_api } => self
                 .providers
                 .get(route)
-                .cloned()
+                .map(Arc::as_ref)
                 .ok_or_else(|| ProviderError::UnknownError {
                     message: format!(
                         "provider route not configured: provider `{provider_id}` with wire API `{wire_api}`"
@@ -161,10 +157,7 @@ impl ProviderRouter for MultiProviderRouter {
         self.provider_for_route(&route)?
             .completion_stream(request)
             .await
-            .map_err(|e| ProviderError::UnknownError {
-                message: e.to_string(),
-                status_code: None,
-            })
+            .map_err(unknown_provider_error)
     }
 
     async fn complete(
@@ -175,14 +168,18 @@ impl ProviderRouter for MultiProviderRouter {
         self.provider_for_route(&route)?
             .completion(request)
             .await
-            .map_err(|e| ProviderError::UnknownError {
-                message: e.to_string(),
-                status_code: None,
-            })
+            .map_err(unknown_provider_error)
     }
 
     fn name(&self) -> &str {
         "multi-provider"
+    }
+}
+
+fn unknown_provider_error(error: anyhow::Error) -> ProviderError {
+    ProviderError::UnknownError {
+        message: error.to_string(),
+        status_code: None,
     }
 }
 

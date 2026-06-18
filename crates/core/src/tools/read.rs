@@ -242,30 +242,34 @@ pub(crate) fn missing_file_message(filepath: &str) -> String {
         .unwrap_or(filepath);
     let base_lower = base.to_lowercase();
 
-    let suggestions = std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter_map(|entry| entry.file_name().into_string().ok())
-                .filter(|name| {
-                    let name_lower = name.to_lowercase();
-                    name_lower.contains(&base_lower) || base_lower.contains(&name_lower)
-                })
-                .take(3)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut suggestions = String::new();
+    let mut suggestion_count = 0usize;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let name_lower = name.to_lowercase();
+            if !name_lower.contains(&base_lower) && !base_lower.contains(&name_lower) {
+                continue;
+            }
+            if suggestion_count > 0 {
+                suggestions.push('\n');
+            }
+            let _ = write!(suggestions, "{}", dir.join(name).display());
+            suggestion_count += 1;
+            if suggestion_count >= 3 {
+                break;
+            }
+        }
+    }
 
-    if suggestions.is_empty() {
+    if suggestion_count == 0 {
         format!("File not found: {filepath}")
     } else {
         format!(
             "File not found: {filepath}\n\nDid you mean one of these?\n{}",
             suggestions
-                .into_iter()
-                .map(|item| dir.join(item).to_string_lossy().to_string())
-                .collect::<Vec<_>>()
-                .join("\n")
         )
     }
 }
@@ -471,7 +475,13 @@ mod tests {
 
         let missing = dir.join("example");
         let message = missing_file_message(&missing.to_string_lossy());
-        assert!(message.contains("Did you mean"));
-        assert!(message.contains("example.txt"));
+        assert_eq!(
+            message,
+            format!(
+                "File not found: {}\n\nDid you mean one of these?\n{}",
+                missing.display(),
+                target.display()
+            )
+        );
     }
 }

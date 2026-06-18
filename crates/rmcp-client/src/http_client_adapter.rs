@@ -1,5 +1,6 @@
 //! RMCP Streamable HTTP adapter backed by the local reqwest client.
 
+use std::fmt::Write as _;
 use std::io;
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use reqwest::Response;
 use reqwest::StatusCode;
 use reqwest::header::ACCEPT;
 use reqwest::header::AUTHORIZATION;
+use reqwest::header::AsHeaderName;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
@@ -24,6 +26,7 @@ use sse_stream::SseStream;
 
 const EVENT_STREAM_MIME_TYPE: &str = "text/event-stream";
 const JSON_MIME_TYPE: &str = "application/json";
+const ACCEPT_HEADER_VALUE: &str = "text/event-stream, application/json";
 const HEADER_SESSION_ID: &str = "Mcp-Session-Id";
 const NON_JSON_RESPONSE_BODY_PREVIEW_BYTES: usize = 8_192;
 
@@ -66,13 +69,13 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         insert_header(
             &mut headers,
             ACCEPT,
-            [EVENT_STREAM_MIME_TYPE, JSON_MIME_TYPE].join(", "),
+            ACCEPT_HEADER_VALUE,
             StreamableHttpClientAdapterError::Header,
         )?;
         insert_header(
             &mut headers,
             CONTENT_TYPE,
-            JSON_MIME_TYPE.to_string(),
+            JSON_MIME_TYPE,
             StreamableHttpClientAdapterError::Header,
         )?;
         if let Some(auth_token) = auth_token {
@@ -87,7 +90,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             insert_header(
                 &mut headers,
                 HeaderName::from_static("mcp-session-id"),
-                session_id_value.to_string(),
+                session_id_value.as_ref(),
                 StreamableHttpClientAdapterError::Header,
             )?;
         }
@@ -103,7 +106,6 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             .map_err(StreamableHttpClientAdapterError::HttpRequest)
             .map_err(StreamableHttpError::Client)?;
         let status = response.status();
-        let headers = response.headers().clone();
 
         if status == StatusCode::NOT_FOUND && session_id.is_some() {
             return Err(StreamableHttpError::Client(
@@ -111,7 +113,9 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             ));
         }
         if status == StatusCode::UNAUTHORIZED
-            && let Some(header) = response_header(&headers, reqwest::header::WWW_AUTHENTICATE)
+            && let Some(header) =
+                response_header_value(response.headers(), reqwest::header::WWW_AUTHENTICATE)
+                    .map(str::to_string)
         {
             return Err(StreamableHttpError::AuthRequired(AuthRequiredError {
                 www_authenticate_header: header,
@@ -120,26 +124,39 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         if matches!(status, StatusCode::ACCEPTED | StatusCode::NO_CONTENT) {
             return Ok(StreamableHttpPostResponse::Accepted);
         }
+        if !status.is_success() {
+            let body = collect_body(response).await?;
+            return Err(StreamableHttpError::UnexpectedServerResponse(
+                format!(
+                    "POST returned HTTP {status}; body: {}",
+                    body_preview(body.as_ref())
+                )
+                .into(),
+            ));
+        }
 
-        let content_type = response_header(&headers, CONTENT_TYPE);
-        let session_id = response_header(&headers, HEADER_SESSION_ID);
-        match content_type.as_deref() {
+        let content_type = response_header_value(response.headers(), CONTENT_TYPE);
+        let session_id =
+            response_header_value(response.headers(), HEADER_SESSION_ID).map(str::to_string);
+        match content_type {
             Some(content_type) if content_type.starts_with(EVENT_STREAM_MIME_TYPE) => {
                 let event_stream = sse_stream_from_body(response);
                 Ok(StreamableHttpPostResponse::Sse(event_stream, session_id))
             }
             Some(content_type) if content_type.starts_with(JSON_MIME_TYPE) => {
                 let body = collect_body(response).await?;
-                let message: ServerJsonRpcMessage =
-                    serde_json::from_slice(&body).map_err(StreamableHttpError::Deserialize)?;
+                let message: ServerJsonRpcMessage = serde_json::from_slice(body.as_ref())
+                    .map_err(StreamableHttpError::Deserialize)?;
                 Ok(StreamableHttpPostResponse::Json(message, session_id))
             }
             _ => {
+                let content_type = content_type
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "missing-content-type".into());
                 let body = collect_body(response).await?;
-                let content_type = content_type.unwrap_or_else(|| "missing-content-type".into());
                 Err(StreamableHttpError::UnexpectedContentType(Some(format!(
                     "{content_type}; body: {}",
-                    body_preview(String::from_utf8_lossy(&body).to_string())
+                    body_preview(body.as_ref())
                 ))))
             }
         }
@@ -163,7 +180,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         insert_header(
             &mut headers,
             HeaderName::from_static("mcp-session-id"),
-            session.to_string(),
+            session.as_ref(),
             StreamableHttpClientAdapterError::Header,
         )?;
 
@@ -202,13 +219,13 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         insert_header(
             &mut headers,
             ACCEPT,
-            [EVENT_STREAM_MIME_TYPE, JSON_MIME_TYPE].join(", "),
+            ACCEPT_HEADER_VALUE,
             StreamableHttpClientAdapterError::Header,
         )?;
         insert_header(
             &mut headers,
             HeaderName::from_static("mcp-session-id"),
-            session_id.to_string(),
+            session_id.as_ref(),
             StreamableHttpClientAdapterError::Header,
         )?;
         if let Some(last_event_id) = last_event_id {
@@ -237,7 +254,6 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             .map_err(StreamableHttpClientAdapterError::HttpRequest)
             .map_err(StreamableHttpError::Client)?;
         let status = response.status();
-        let headers = response.headers().clone();
 
         if status == StatusCode::METHOD_NOT_ALLOWED {
             return Err(StreamableHttpError::ServerDoesNotSupportSse);
@@ -253,7 +269,7 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             ));
         }
 
-        match response_header(&headers, CONTENT_TYPE).as_deref() {
+        match response_header_value(response.headers(), CONTENT_TYPE) {
             Some(content_type) if is_streamable_http_content_type(content_type) => {}
             Some(content_type) => {
                 return Err(StreamableHttpError::UnexpectedContentType(Some(
@@ -269,33 +285,36 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
     }
 }
 
-fn body_preview(body: impl Into<String>) -> String {
-    let mut body_preview = body.into();
+fn body_preview(body: &[u8]) -> String {
+    let body_preview = String::from_utf8_lossy(body);
     let body_len = body_preview.len();
     if body_len > NON_JSON_RESPONSE_BODY_PREVIEW_BYTES {
         let mut boundary = NON_JSON_RESPONSE_BODY_PREVIEW_BYTES;
         while !body_preview.is_char_boundary(boundary) {
             boundary = boundary.saturating_sub(1);
         }
-        body_preview.truncate(boundary);
-        body_preview.push_str(&format!(
+        let mut truncated = body_preview[..boundary].to_string();
+        write!(
+            &mut truncated,
             "... (truncated {} bytes)",
             body_len.saturating_sub(boundary)
-        ));
+        )
+        .expect("writing to a String cannot fail");
+        return truncated;
     }
-    body_preview
+    body_preview.into_owned()
 }
 
 fn insert_header<Error>(
     headers: &mut HeaderMap,
     name: HeaderName,
-    value: String,
+    value: impl AsRef<str>,
     map_error: impl FnOnce(String) -> Error,
 ) -> std::result::Result<(), StreamableHttpError<Error>>
 where
     Error: std::error::Error + Send + Sync + 'static,
 {
-    let value = reqwest::header::HeaderValue::from_str(&value)
+    let value = reqwest::header::HeaderValue::from_str(value.as_ref())
         .map_err(|error| StreamableHttpError::Client(map_error(error.to_string())))?;
     headers.insert(name, value);
     Ok(())
@@ -310,22 +329,19 @@ fn is_streamable_http_content_type(content_type: &str) -> bool {
             .starts_with(JSON_MIME_TYPE.as_bytes())
 }
 
-fn response_header(headers: &HeaderMap, name: impl AsRef<str>) -> Option<String> {
-    let name = name.as_ref();
-    headers
-        .iter()
-        .find(|(header_name, _)| header_name.as_str().eq_ignore_ascii_case(name))
-        .and_then(|(_, value)| value.to_str().ok())
-        .map(str::to_string)
+fn response_header_value(headers: &HeaderMap, name: impl AsHeaderName) -> Option<&str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
 }
 
 async fn collect_body(
     response: Response,
-) -> std::result::Result<Vec<u8>, StreamableHttpError<StreamableHttpClientAdapterError>> {
+) -> std::result::Result<impl AsRef<[u8]>, StreamableHttpError<StreamableHttpClientAdapterError>> {
+    // `reqwest::Response::bytes` already yields a shareable byte buffer. Keep it
+    // in that representation so error previews and JSON parsing can borrow it
+    // without copying the response body into a new Vec.
     response
         .bytes()
         .await
-        .map(|body| body.to_vec())
         .map_err(StreamableHttpClientAdapterError::HttpRequest)
         .map_err(StreamableHttpError::Client)
 }
@@ -339,4 +355,47 @@ fn sse_stream_from_body(
             .map(|result| result.map_err(io::Error::other)),
     )
     .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn body_preview_returns_short_utf8_body() {
+        assert_eq!(body_preview(b"plain text"), "plain text");
+    }
+
+    #[test]
+    fn body_preview_truncates_long_body() {
+        let body = vec![b'a'; NON_JSON_RESPONSE_BODY_PREVIEW_BYTES + 3];
+
+        let preview = body_preview(&body);
+
+        assert_eq!(
+            preview,
+            format!(
+                "{}... (truncated 3 bytes)",
+                "a".repeat(NON_JSON_RESPONSE_BODY_PREVIEW_BYTES)
+            )
+        );
+    }
+
+    #[test]
+    fn body_preview_truncates_on_utf8_boundary() {
+        let mut body = vec![b'a'; NON_JSON_RESPONSE_BODY_PREVIEW_BYTES - 1];
+        body.extend_from_slice("éx".as_bytes());
+
+        let preview = body_preview(&body);
+
+        assert_eq!(
+            preview,
+            format!(
+                "{}... (truncated 3 bytes)",
+                "a".repeat(NON_JSON_RESPONSE_BODY_PREVIEW_BYTES - 1)
+            )
+        );
+    }
 }

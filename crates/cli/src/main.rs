@@ -1,3 +1,11 @@
+//! User-facing CLI entrypoint for interactive, prompt, diagnostic, upgrade,
+//! and hidden server process modes.
+//!
+//! This binary owns command-line parsing, startup update checks, logging
+//! bootstrap, and final exit messages. Long-lived runtime behavior is delegated
+//! to the server, TUI, and core crates so CLI changes stay focused on process
+//! orchestration and display.
+
 use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
@@ -62,14 +70,16 @@ fn main() -> Result<()> {
 
 fn format_with_separators(value: usize) -> String {
     let digits = value.to_string();
-    let mut out = String::new();
-    for (index, ch) in digits.chars().rev().enumerate() {
-        if index > 0 && index % 3 == 0 {
+    let separator_count = digits.len().saturating_sub(1) / 3;
+    let first_group_len = digits.len() - separator_count * 3;
+    let mut out = String::with_capacity(digits.len() + separator_count);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && index >= first_group_len && (index - first_group_len).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);
     }
-    out.chars().rev().collect()
+    out
 }
 
 fn format_token_usage_line(exit: &devo_tui::AppExit, color_enabled: bool) -> Option<String> {
@@ -86,11 +96,7 @@ fn format_token_usage_line(exit: &devo_tui::AppExit, color_enabled: bool) -> Opt
     let cached_suffix = if exit.total_cache_read_tokens > 0 {
         let cached_value = format_with_separators(exit.total_cache_read_tokens);
         if color_enabled {
-            format!(
-                " (+ {} {})",
-                "\u{1b}[1;33m".to_string() + &cached_value + "\u{1b}[0m",
-                "\u{1b}[33mcached\u{1b}[0m"
-            )
+            format!(" (+ \u{1b}[1;33m{cached_value}\u{1b}[0m \u{1b}[33mcached\u{1b}[0m)")
         } else {
             format!(" (+ {cached_value} cached)")
         }
@@ -131,9 +137,9 @@ fn exit_messages(exit: &devo_tui::AppExit, color_enabled: bool) -> Vec<String> {
             command
         };
         let prefix = if color_enabled {
-            "\u{1b}[2mTo continue this session, run\u{1b}[0m".to_string()
+            "\u{1b}[2mTo continue this session, run\u{1b}[0m"
         } else {
-            "To continue this session, run".to_string()
+            "To continue this session, run"
         };
         lines.push(format!("{prefix} {command}"));
     }

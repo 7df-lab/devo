@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -12,15 +11,17 @@ use crate::{TaskInfo, TaskNotification, TaskState};
 /// and makes completed task output available for injection into the
 /// conversation.
 pub struct TaskManager {
-    tasks: Arc<RwLock<HashMap<String, TaskInfo>>>,
-    notifications: Arc<RwLock<Vec<TaskNotification>>>,
+    tasks: RwLock<HashMap<String, TaskInfo>>,
+    // Notifications are user-visible turn context. Keep the buffer lossless and
+    // drain it at turn boundaries rather than dropping older task updates here.
+    notifications: RwLock<Vec<TaskNotification>>,
 }
 
 impl TaskManager {
     pub fn new() -> Self {
         Self {
-            tasks: Arc::new(RwLock::new(HashMap::new())),
-            notifications: Arc::new(RwLock::new(Vec::new())),
+            tasks: RwLock::new(HashMap::new()),
+            notifications: RwLock::new(Vec::new()),
         }
     }
 
@@ -31,11 +32,14 @@ impl TaskManager {
 
     pub async fn update_state(&self, task_id: &str, state: TaskState) {
         if let Some(info) = self.tasks.write().await.get_mut(task_id) {
+            // Background workers can report late completion after cancellation;
+            // preserve the first terminal state so user-visible task history is stable.
+            if is_terminal_state(info.state) {
+                return;
+            }
+
             info.state = state;
-            if matches!(
-                state,
-                TaskState::Completed | TaskState::Failed | TaskState::Cancelled
-            ) {
+            if is_terminal_state(state) {
                 info.finished_at = Some(chrono::Utc::now());
             }
         }
@@ -72,6 +76,13 @@ impl TaskManager {
     }
 }
 
+fn is_terminal_state(state: TaskState) -> bool {
+    matches!(
+        state,
+        TaskState::Completed | TaskState::Failed | TaskState::Cancelled
+    )
+}
+
 impl Default for TaskManager {
     fn default() -> Self {
         Self::new()
@@ -82,6 +93,7 @@ impl Default for TaskManager {
 mod tests {
     use super::*;
     use crate::TaskState;
+    use pretty_assertions::assert_eq;
 
     fn make_task_info(id: &str, name: &str) -> TaskInfo {
         TaskInfo {
@@ -98,11 +110,9 @@ mod tests {
     async fn register_and_get() {
         let mgr = TaskManager::new();
         let info = make_task_info("t1", "compile");
-        mgr.register(info).await;
+        mgr.register(info.clone()).await;
 
-        let task = mgr.get("t1").await;
-        assert!(task.is_some());
-        assert_eq!(task.unwrap().name, "compile");
+        assert_eq!(mgr.get("t1").await, Some(info));
     }
 
     #[tokio::test]
@@ -130,33 +140,35 @@ mod tests {
     #[tokio::test]
     async fn set_output() {
         let mgr = TaskManager::new();
-        mgr.register(make_task_info("t1", "run")).await;
+        let info = make_task_info("t1", "run");
+        let mut expected = info.clone();
+        expected.output = Some("success output".into());
+
+        mgr.register(info).await;
         mgr.set_output("t1", "success output".into()).await;
 
-        let task = mgr.get("t1").await.unwrap();
-        assert_eq!(task.output, Some("success output".into()));
+        assert_eq!(mgr.get("t1").await, Some(expected));
     }
 
     #[tokio::test]
     async fn notifications_drain() {
         let mgr = TaskManager::new();
-        mgr.push_notification(TaskNotification {
+        let step_done = TaskNotification {
             task_id: "t1".into(),
             message: "step 1 done".into(),
             is_final: false,
-        })
-        .await;
-        mgr.push_notification(TaskNotification {
+        };
+        let finished = TaskNotification {
             task_id: "t1".into(),
             message: "finished".into(),
             is_final: true,
-        })
-        .await;
+        };
+
+        mgr.push_notification(step_done.clone()).await;
+        mgr.push_notification(finished.clone()).await;
 
         let notifs = mgr.drain_notifications().await;
-        assert_eq!(notifs.len(), 2);
-        assert_eq!(notifs[0].message, "step 1 done");
-        assert!(notifs[1].is_final);
+        assert_eq!(notifs, vec![step_done, finished]);
 
         // After drain, should be empty
         let notifs = mgr.drain_notifications().await;
@@ -183,6 +195,19 @@ mod tests {
         let task = mgr.get("t1").await.unwrap();
         assert_eq!(task.state, TaskState::Cancelled);
         assert!(task.finished_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn terminal_state_is_not_overwritten_by_late_updates() {
+        let mgr = TaskManager::new();
+        mgr.register(make_task_info("t1", "long_task")).await;
+        mgr.update_state("t1", TaskState::Running).await;
+        mgr.cancel("t1").await;
+
+        let cancelled = mgr.get("t1").await.unwrap();
+        mgr.update_state("t1", TaskState::Completed).await;
+
+        assert_eq!(mgr.get("t1").await.unwrap(), cancelled);
     }
 
     #[tokio::test]

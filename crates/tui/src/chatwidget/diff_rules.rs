@@ -21,13 +21,24 @@ pub(super) fn should_auto_show_git_diff(tool_title: &str, is_error: bool) -> boo
     if is_error {
         return false;
     }
-    let lower = tool_title.to_ascii_lowercase();
-    lower.contains("write ")
-        || lower.starts_with("write:")
-        || lower.contains("edit ")
-        || lower.starts_with("edit:")
-        || lower.contains("apply_patch")
-        || lower.contains("apply patch")
+    let title = tool_title.as_bytes();
+    let contains_ascii = |needle: &str| {
+        title
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+    };
+    let starts_ascii = |needle: &str| {
+        title
+            .get(..needle.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(needle.as_bytes()))
+    };
+
+    contains_ascii("write ")
+        || starts_ascii("write:")
+        || contains_ascii("edit ")
+        || starts_ascii("edit:")
+        || contains_ascii("apply_patch")
+        || contains_ascii("apply patch")
 }
 
 #[cfg(test)]

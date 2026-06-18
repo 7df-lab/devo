@@ -2,7 +2,7 @@
 //!
 //! Idempotent installation of bundled default skills into the user skill root.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -78,7 +78,7 @@ pub struct DefaultSkillInstallReport {
 }
 
 /// A failure during default skill installation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefaultSkillInstallFailure {
     pub package_name: SkillName,
     pub reason: String,
@@ -214,9 +214,8 @@ impl DefaultSkillInstaller {
         match mode {
             DefaultSkillInstallMode::DryRun => {
                 if package_dir.exists() {
-                    if ManagedMetadata::read(package_dir)?.is_some() {
+                    if let Some(meta) = ManagedMetadata::read(package_dir)? {
                         // Would update if hash changed
-                        let meta = ManagedMetadata::read(package_dir)?.unwrap();
                         if meta.installed_hash != asset.content_hash.0 {
                             return Ok(InstallAction::SkippedDryRun); // would update
                         }
@@ -273,27 +272,45 @@ impl DefaultSkillInstaller {
     }
 
     fn write_package(&self, asset: &DefaultSkillAsset, package_dir: &Path) -> Result<(), String> {
+        let mut file_paths = Vec::with_capacity(asset.files.len());
+        for file in &asset.files {
+            let relative_path = file.relative_path.as_str();
+            let path = Path::new(relative_path);
+            if path.as_os_str().is_empty()
+                || path.components().any(|component| {
+                    matches!(
+                        component,
+                        Component::ParentDir | Component::Prefix(_) | Component::RootDir
+                    )
+                })
+            {
+                return Err(format!(
+                    "embedded skill file path must stay inside package: {relative_path}"
+                ));
+            }
+            file_paths.push(package_dir.join(path));
+        }
+
         std::fs::create_dir_all(package_dir)
-            .map_err(|e| format!("failed to create package dir: {}", e))?;
+            .map_err(|e| format!("failed to create package dir: {e}"))?;
 
         // Write SKILL.md entrypoint
-        for file in &asset.files {
-            let file_path = package_dir.join(&file.relative_path);
+        for (file, file_path) in asset.files.iter().zip(file_paths) {
             if let Some(parent) = file_path.parent() {
                 std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("failed to create dir: {}", e))?;
+                    .map_err(|e| format!("failed to create dir: {e}"))?;
             }
             std::fs::write(&file_path, &file.content)
-                .map_err(|e| format!("failed to write {}: {}", file.relative_path, e))?;
+                .map_err(|e| format!("failed to write {}: {e}", file.relative_path))?;
 
             #[cfg(unix)]
             if file.executable {
                 use std::os::unix::fs::PermissionsExt;
                 let mut perms = std::fs::metadata(&file_path)
-                    .map_err(|e| format!("metadata: {}", e))?
+                    .map_err(|e| format!("metadata: {e}"))?
                     .permissions();
                 perms.set_mode(0o755);
-                std::fs::set_permissions(&file_path, perms).map_err(|e| format!("chmod: {}", e))?;
+                std::fs::set_permissions(&file_path, perms).map_err(|e| format!("chmod: {e}"))?;
             }
         }
 
@@ -315,6 +332,7 @@ enum InstallAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
     fn make_bundle() -> DefaultSkillBundle {
@@ -468,5 +486,70 @@ mod tests {
         assert_eq!(read.default_skill_id, "test.id");
         assert_eq!(read.bundle_version, "1.0");
         assert_eq!(read.managed_by, "devo");
+    }
+
+    #[test]
+    fn rejects_embedded_file_paths_that_escape_package() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("skills");
+        let options = DefaultSkillInstallOptions {
+            user_skill_root: root.clone(),
+            mode: DefaultSkillInstallMode::InstallMissingAndUpdateManaged,
+        };
+        let mut bundle = make_bundle();
+        bundle.skills[0].files = vec![
+            EmbeddedSkillFile {
+                relative_path: "SKILL.md".into(),
+                content: "valid".into(),
+                executable: false,
+            },
+            EmbeddedSkillFile {
+                relative_path: "../outside.txt".into(),
+                content: "escape".into(),
+                executable: false,
+            },
+        ];
+
+        let report = DefaultSkillInstaller::new(bundle).install(&options);
+
+        assert_eq!(
+            report.failed,
+            vec![DefaultSkillInstallFailure {
+                package_name: SkillName::new("code-review").expect("valid skill name"),
+                reason: "embedded skill file path must stay inside package: ../outside.txt".into(),
+            }]
+        );
+        assert!(!root.join("outside.txt").exists());
+        assert!(!root.join("code-review").join("SKILL.md").exists());
+        assert!(!root.join("code-review").join(".devo").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_absolute_embedded_file_paths() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("skills");
+        let outside = tmp.path().join("outside.txt");
+        let options = DefaultSkillInstallOptions {
+            user_skill_root: root,
+            mode: DefaultSkillInstallMode::InstallMissingAndUpdateManaged,
+        };
+        let mut bundle = make_bundle();
+        let outside_path = outside.display().to_string();
+        bundle.skills[0].files[0].relative_path = outside_path.clone();
+        bundle.skills[0].files[0].content = "escape".into();
+
+        let report = DefaultSkillInstaller::new(bundle).install(&options);
+
+        assert_eq!(
+            report.failed,
+            vec![DefaultSkillInstallFailure {
+                package_name: SkillName::new("code-review").expect("valid skill name"),
+                reason: format!(
+                    "embedded skill file path must stay inside package: {outside_path}"
+                ),
+            }]
+        );
+        assert!(!outside.exists());
     }
 }

@@ -5,7 +5,7 @@
 //! four-layer pipeline, approval scoping/caching, and auto-reviewer.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -169,25 +169,31 @@ pub fn materialize_workspace_roots(profile: &mut PermissionProfile, roots: &[Pat
 
 /// Resolve the effective access mode for a path.
 pub fn resolve_access(path: &Path, profile: &PermissionProfile) -> AccessMode {
-    let canonical = match path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => path.to_path_buf(),
-    };
+    let canonical = normalize_access_path(path);
 
     let mut best_match: Option<&FsPolicyEntry> = None;
     let mut best_len = 0;
 
     for entry in &profile.filesystem_policy {
-        if let Ok(_stripped) = canonical.strip_prefix(&entry.path) {
+        let entry_path = normalize_access_path(&entry.path);
+        if let Ok(_stripped) = canonical.strip_prefix(&entry_path) {
             // Longest prefix match wins
-            let prefix_len = entry.path.as_os_str().len();
+            let prefix_len = entry_path.as_os_str().len();
             if prefix_len > best_len {
                 best_len = prefix_len;
                 best_match = Some(entry);
             } else if prefix_len == best_len {
                 // At equal specificity: None > Write > Read
                 if let Some(current) = best_match
-                    && entry.access > current.access
+                    && match entry.access {
+                        AccessMode::None => 2,
+                        AccessMode::Write => 1,
+                        AccessMode::Read => 0,
+                    } > match current.access {
+                        AccessMode::None => 2,
+                        AccessMode::Write => 1,
+                        AccessMode::Read => 0,
+                    }
                 {
                     best_match = Some(entry);
                 }
@@ -196,6 +202,45 @@ pub fn resolve_access(path: &Path, profile: &PermissionProfile) -> AccessMode {
     }
 
     best_match.map(|e| e.access).unwrap_or(AccessMode::None)
+}
+
+fn normalize_access_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if let Ok(canonical) = normalized.canonicalize() {
+                    normalized = canonical;
+                }
+                if !normalized.pop() && !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Normal(part) => {
+                let candidate = normalized.join(part);
+                if std::fs::symlink_metadata(&candidate).is_ok()
+                    && let Ok(canonical) = candidate.canonicalize()
+                {
+                    normalized = canonical;
+                } else {
+                    normalized.push(part);
+                }
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
 }
 
 /// Check if a path is readable.

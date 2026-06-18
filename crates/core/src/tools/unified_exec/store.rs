@@ -174,15 +174,17 @@ fn process_id_to_prune_from_meta(meta: &[ProcessPruneMeta]) -> Option<i32> {
         return None;
     }
 
-    let mut by_recency = meta.to_vec();
+    // Keep the most recently touched processes even if they have already exited:
+    // callers often poll immediately after command completion to collect output.
+    let mut by_recency = meta.iter().collect::<Vec<_>>();
     by_recency.sort_by_key(|entry| Reverse(entry.last_used));
     let protected = by_recency
-        .iter()
+        .into_iter()
         .take(PROTECTED_RECENT_PROCESSES)
         .map(|entry| entry.process_id)
-        .collect::<HashSet<_>>();
+        .collect::<Vec<_>>();
 
-    let mut lru = meta.to_vec();
+    let mut lru = meta.iter().collect::<Vec<_>>();
     lru.sort_by_key(|entry| entry.last_used);
 
     if let Some(entry) = lru

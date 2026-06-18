@@ -58,10 +58,13 @@ enum ModelMatcher {
 
 impl ModelMatcher {
     fn matches(self, model: &str) -> bool {
-        let lowered = model.to_ascii_lowercase();
         match self {
-            ModelMatcher::Prefix(value) => lowered.starts_with(value),
-            ModelMatcher::Contains(value) => lowered.contains(value),
+            // Capability resolution runs for every provider request; active
+            // rules are prefix checks, so avoid lowercasing the whole model id.
+            ModelMatcher::Prefix(value) => model
+                .get(..value.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(value)),
+            ModelMatcher::Contains(value) => model.to_ascii_lowercase().contains(value),
         }
     }
 }
@@ -196,6 +199,12 @@ mod tests {
         assert_eq!(profile.reasoning_mode, OpenAIReasoningMode::Thinking);
         assert!(profile.supports_top_k);
         assert!(profile.require_reasoning_content);
+    }
+
+    #[test]
+    fn resolve_request_profile_matches_prefix_case_insensitively() {
+        let profile = resolve_request_profile("GLM-4.5", OpenAITransport::ChatCompletions);
+        assert_eq!(profile.reasoning_mode, OpenAIReasoningMode::Thinking);
     }
 
     #[test]

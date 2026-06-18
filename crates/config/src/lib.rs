@@ -1,3 +1,8 @@
+//! Configuration loading, persistence, and typed runtime settings.
+//!
+//! This crate owns the boundary between user/workspace TOML or auth files and
+//! the normalized settings consumed by the runtime and provider layers.
+
 mod app;
 mod error;
 mod experimental;
@@ -6,6 +11,7 @@ mod logging;
 mod mcp;
 mod oauth;
 mod provider;
+mod research;
 mod server;
 mod skills;
 mod tools;
@@ -18,6 +24,7 @@ pub use logging::*;
 pub use mcp::*;
 pub use oauth::*;
 pub use provider::*;
+pub use research::*;
 pub use server::*;
 pub use skills::*;
 pub use tools::*;

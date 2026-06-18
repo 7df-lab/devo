@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use tree_sitter::Node;
 use tree_sitter::Parser;
@@ -100,7 +100,7 @@ pub fn extract_bash_command(command: &[String]) -> Option<(&str, &str)> {
     };
     if !matches!(flag.as_str(), "-lc" | "-c")
         || !matches!(
-            detect_shell_type(&PathBuf::from(shell)),
+            detect_shell_type(Path::new(shell)),
             Some(ShellType::Zsh) | Some(ShellType::Bash) | Some(ShellType::Sh)
         )
     {
@@ -156,29 +156,29 @@ fn parse_plain_command_from_node(cmd: tree_sitter::Node, src: &str) -> Option<Ve
             }
             "string" => {
                 let parsed = parse_double_quoted_string(child, src)?;
-                words.push(parsed);
+                words.push(parsed.to_owned());
             }
             "raw_string" => {
                 let parsed = parse_raw_string(child, src)?;
-                words.push(parsed);
+                words.push(parsed.to_owned());
             }
             "concatenation" => {
                 // Handle concatenated arguments like -g"*.py"
-                let mut concatenated = String::new();
+                let mut concatenated =
+                    String::with_capacity(child.end_byte().saturating_sub(child.start_byte()));
                 let mut concat_cursor = child.walk();
                 for part in child.named_children(&mut concat_cursor) {
                     match part.kind() {
                         "word" | "number" => {
-                            concatenated
-                                .push_str(part.utf8_text(src.as_bytes()).ok()?.to_owned().as_str());
+                            concatenated.push_str(part.utf8_text(src.as_bytes()).ok()?);
                         }
                         "string" => {
                             let parsed = parse_double_quoted_string(part, src)?;
-                            concatenated.push_str(&parsed);
+                            concatenated.push_str(parsed);
                         }
                         "raw_string" => {
                             let parsed = parse_raw_string(part, src)?;
-                            concatenated.push_str(&parsed);
+                            concatenated.push_str(parsed);
                         }
                         _ => return None,
                     }
@@ -282,7 +282,7 @@ fn has_named_descendant_kind(node: Node<'_>, kind: &str) -> bool {
     false
 }
 
-fn parse_double_quoted_string(node: Node, src: &str) -> Option<String> {
+fn parse_double_quoted_string<'a>(node: Node<'_>, src: &'a str) -> Option<&'a str> {
     if node.kind() != "string" {
         return None;
     }
@@ -297,19 +297,18 @@ fn parse_double_quoted_string(node: Node, src: &str) -> Option<String> {
     let stripped = raw
         .strip_prefix('"')
         .and_then(|text| text.strip_suffix('"'))?;
-    Some(stripped.to_string())
+    Some(stripped)
 }
 
-fn parse_raw_string(node: Node, src: &str) -> Option<String> {
+fn parse_raw_string<'a>(node: Node<'_>, src: &'a str) -> Option<&'a str> {
     if node.kind() != "raw_string" {
         return None;
     }
 
     let raw_string = node.utf8_text(src.as_bytes()).ok()?;
-    let stripped = raw_string
+    raw_string
         .strip_prefix('\'')
-        .and_then(|s| s.strip_suffix('\''));
-    stripped.map(str::to_owned)
+        .and_then(|s| s.strip_suffix('\''))
 }
 
 #[cfg(test)]

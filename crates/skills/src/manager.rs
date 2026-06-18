@@ -1,6 +1,7 @@
 //! Skill manager that owns root assembly, system-skill installation, and caching.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -14,6 +15,8 @@ use crate::model::canonicalize_for_identity;
 use crate::system::install_system_skills;
 use crate::system::system_cache_root_dir;
 use crate::system::uninstall_system_skills;
+
+const MAX_CACHED_CWDS: usize = 64;
 
 /// Minimal skill config shape consumed by `devo-skills`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +56,7 @@ pub struct SkillsManager {
     config: RwLock<SkillsRuntimeConfig>,
     plugin_roots: RwLock<Vec<PluginSkillRoot>>,
     extra_roots: RwLock<Vec<PathBuf>>,
-    cache_by_cwd: RwLock<HashMap<PathBuf, SkillLoadOutcome>>,
+    cache: RwLock<SkillLoadCache>,
 }
 
 impl SkillsManager {
@@ -70,7 +73,7 @@ impl SkillsManager {
             config: RwLock::new(config),
             plugin_roots: RwLock::new(Vec::new()),
             extra_roots: RwLock::new(Vec::new()),
-            cache_by_cwd: RwLock::new(HashMap::new()),
+            cache: RwLock::new(SkillLoadCache::default()),
         }
     }
 
@@ -82,7 +85,11 @@ impl SkillsManager {
     }
 
     pub fn include_instructions(&self) -> bool {
-        self.config().enabled && self.config().include_instructions
+        let config = self
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        config.enabled && config.include_instructions
     }
 
     pub fn set_config(&self, config: SkillsRuntimeConfig) {
@@ -126,7 +133,7 @@ impl SkillsManager {
     }
 
     pub fn clear_cache(&self) {
-        self.cache_by_cwd
+        self.cache
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
@@ -136,11 +143,10 @@ impl SkillsManager {
         let cwd = canonicalize_for_identity(cwd);
         if !force_reload
             && let Some(outcome) = self
-                .cache_by_cwd
+                .cache
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&cwd)
-                .cloned()
         {
             return outcome;
         }
@@ -152,7 +158,7 @@ impl SkillsManager {
 
         let roots = self.skill_roots(&cwd, &config);
         let outcome = load_skills_from_roots(roots, &config.config_rules);
-        self.cache_by_cwd
+        self.cache
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(cwd, outcome.clone());
@@ -160,7 +166,8 @@ impl SkillsManager {
     }
 
     fn skill_roots(&self, cwd: &Path, config: &SkillsRuntimeConfig) -> Vec<SkillRoot> {
-        let mut roots = Vec::new();
+        let mut roots =
+            Vec::with_capacity(config.workspace_roots.len() + config.user_roots.len() + 2);
         roots.extend(workspace_native_roots(cwd, config));
         roots.extend(user_native_roots(&self.devo_home, config));
         if let Some(home) = home_dir() {
@@ -177,89 +184,124 @@ impl SkillsManager {
                 plugin_id: None,
             });
         }
-        roots.extend(
-            self.plugin_roots
+        {
+            let plugin_roots = self
+                .plugin_roots
                 .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .iter()
-                .cloned()
-                .map(|root| SkillRoot {
-                    path: root.path,
-                    scope: SkillScope::Plugin,
-                    plugin_id: Some(root.plugin_id),
-                }),
-        );
-        roots.extend(
-            self.extra_roots
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            roots.reserve(plugin_roots.len());
+            roots.extend(plugin_roots.iter().cloned().map(|root| SkillRoot {
+                path: root.path,
+                scope: SkillScope::Plugin,
+                plugin_id: Some(root.plugin_id),
+            }));
+        }
+        {
+            let extra_roots = self
+                .extra_roots
                 .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .iter()
-                .cloned()
-                .map(|path| SkillRoot {
-                    path,
-                    scope: SkillScope::User,
-                    plugin_id: None,
-                }),
-        );
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            roots.reserve(extra_roots.len());
+            roots.extend(extra_roots.iter().cloned().map(|path| SkillRoot {
+                path,
+                scope: SkillScope::User,
+                plugin_id: None,
+            }));
+        }
         roots.extend(repo_agents_skill_roots(cwd, &config.project_root_markers));
         dedupe_roots(&mut roots);
         roots
     }
 }
 
-fn workspace_native_roots(cwd: &Path, config: &SkillsRuntimeConfig) -> Vec<SkillRoot> {
-    config
-        .workspace_roots
-        .iter()
-        .map(|root| {
-            let path = if root.is_absolute() {
-                root.clone()
-            } else {
-                cwd.join(".devo").join(root)
-            };
-            SkillRoot {
-                path,
-                scope: SkillScope::Repo,
-                plugin_id: None,
-            }
-        })
-        .collect()
+#[derive(Debug, Default)]
+struct SkillLoadCache {
+    entries: HashMap<PathBuf, SkillLoadOutcome>,
+    insertion_order: VecDeque<PathBuf>,
 }
 
-fn user_native_roots(devo_home: &Path, config: &SkillsRuntimeConfig) -> Vec<SkillRoot> {
-    config
-        .user_roots
-        .iter()
-        .map(|root| {
-            let path = if root.is_absolute() {
-                root.clone()
-            } else {
-                devo_home.join(root)
+impl SkillLoadCache {
+    fn get(&self, cwd: &Path) -> Option<SkillLoadOutcome> {
+        self.entries.get(cwd).cloned()
+    }
+
+    fn insert(&mut self, cwd: PathBuf, outcome: SkillLoadOutcome) {
+        if !self.entries.contains_key(&cwd) {
+            self.insertion_order.push_back(cwd.clone());
+        }
+        self.entries.insert(cwd, outcome);
+        self.prune_oldest();
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.insertion_order.clear();
+    }
+
+    fn prune_oldest(&mut self) {
+        while self.entries.len() > MAX_CACHED_CWDS {
+            let Some(cwd) = self.insertion_order.pop_front() else {
+                break;
             };
-            SkillRoot {
-                path,
-                scope: SkillScope::User,
-                plugin_id: None,
-            }
-        })
-        .collect()
+            self.entries.remove(&cwd);
+        }
+    }
+}
+
+fn workspace_native_roots<'a>(
+    cwd: &'a Path,
+    config: &'a SkillsRuntimeConfig,
+) -> impl Iterator<Item = SkillRoot> + 'a {
+    config.workspace_roots.iter().map(|root| {
+        let path = if root.is_absolute() {
+            root.clone()
+        } else {
+            cwd.join(".devo").join(root)
+        };
+        SkillRoot {
+            path,
+            scope: SkillScope::Repo,
+            plugin_id: None,
+        }
+    })
+}
+
+fn user_native_roots<'a>(
+    devo_home: &'a Path,
+    config: &'a SkillsRuntimeConfig,
+) -> impl Iterator<Item = SkillRoot> + 'a {
+    config.user_roots.iter().map(|root| {
+        let path = if root.is_absolute() {
+            root.clone()
+        } else {
+            devo_home.join(root)
+        };
+        SkillRoot {
+            path,
+            scope: SkillScope::User,
+            plugin_id: None,
+        }
+    })
 }
 
 fn repo_agents_skill_roots(cwd: &Path, project_root_markers: &[String]) -> Vec<SkillRoot> {
     let project_root = find_project_root(cwd, project_root_markers);
-    let mut ancestors = cwd.ancestors().collect::<Vec<_>>();
-    ancestors.reverse();
-    ancestors
-        .into_iter()
-        .filter(|dir| dir.starts_with(&project_root))
-        .map(|dir| dir.join(".agents").join("skills"))
-        .filter(|path| path.is_dir())
-        .map(|path| SkillRoot {
-            path,
-            scope: SkillScope::Repo,
-            plugin_id: None,
-        })
-        .collect()
+    let mut roots = Vec::new();
+    for dir in cwd.ancestors() {
+        if !dir.starts_with(&project_root) {
+            break;
+        }
+        let path = dir.join(".agents").join("skills");
+        if path.is_dir() {
+            roots.push(SkillRoot {
+                path,
+                scope: SkillScope::Repo,
+                plugin_id: None,
+            });
+        }
+    }
+    roots.reverse();
+    roots
 }
 
 fn find_project_root(cwd: &Path, project_root_markers: &[String]) -> PathBuf {
@@ -277,7 +319,7 @@ fn find_project_root(cwd: &Path, project_root_markers: &[String]) -> PathBuf {
 }
 
 fn dedupe_roots(roots: &mut Vec<SkillRoot>) {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::with_capacity(roots.len());
     roots.retain(|root| seen.insert(canonicalize_for_identity(&root.path)));
 }
 
@@ -285,4 +327,34 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn skill_load_cache_prunes_oldest_cwd() {
+        let mut cache = SkillLoadCache::default();
+
+        for index in 0..=MAX_CACHED_CWDS {
+            cache.insert(
+                PathBuf::from(format!("/workspace/{index}")),
+                SkillLoadOutcome::default(),
+            );
+        }
+
+        let state = (
+            cache.entries.len(),
+            cache.get(Path::new("/workspace/0")).is_some(),
+            cache.get(Path::new("/workspace/1")).is_some(),
+            cache
+                .get(Path::new(&format!("/workspace/{MAX_CACHED_CWDS}")))
+                .is_some(),
+        );
+
+        assert_eq!(state, (MAX_CACHED_CWDS, false, true, true));
+    }
 }

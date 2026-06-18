@@ -140,6 +140,183 @@ async fn spawn_agent_tool_call_does_not_deadlock_parent_turn() -> Result<()> {
 }
 
 #[tokio::test]
+async fn deep_research_spawn_uses_research_child_context() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(ScriptedProvider::new([
+        ScriptedProvider::completed("parent stable answer"),
+        ScriptedProvider::completed("delegated evidence notes"),
+    ]));
+    let runtime = build_runtime(data_root.path(), Arc::clone(&provider) as _)?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
+
+    let _ = start_turn(
+        &runtime,
+        connection_id,
+        parent_session_id,
+        "stable parent context must not leak into research child",
+    )
+    .await?;
+    wait_for_parent_turn_completed(&mut notifications_rx, parent_session_id).await?;
+
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 21,
+                "method": "agent/spawn",
+                "params": {
+                    "session_id": parent_session_id,
+                    "message": "Investigate the delegated research topic and return evidence notes.",
+                    "fork_turns": "all",
+                    "context_mode": "deep_research",
+                    "ephemeral": true
+                }
+            }),
+        )
+        .await
+        .context("agent/spawn")?;
+    let spawn_result = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_protocol::SpawnAgentResult>,
+    >(response)?
+    .result;
+
+    wait_for_session_notification(
+        &mut notifications_rx,
+        "turn/completed",
+        spawn_result.child_session_id,
+    )
+    .await?;
+
+    let requests = provider.requests();
+    let request = requests
+        .get(1)
+        .context("deep research child should start a model request")?;
+    let system = request.system.as_deref().unwrap_or_default();
+    assert!(system.contains("You are Devo `/research`"));
+    assert!(system.contains("Stage: delegated deep research worker."));
+
+    let texts = message_texts(request);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.starts_with("<research_environment>")),
+        "deep research child should receive environment as a user-role message: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text
+                == "Investigate the delegated research topic and return evidence notes."),
+        "deep research child should receive the original delegated task message: {texts:?}"
+    );
+    assert!(
+        texts.iter().all(|text| {
+            !text.contains("stable parent context must not leak into research child")
+                && !text.contains("parent stable answer")
+        }),
+        "deep research child should force fork_turns=none even when caller requested all: {texts:?}"
+    );
+
+    let tool_names = request
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        tool_names,
+        vec!["read", "write", "apply_patch", "webfetch"],
+        "deep research child should get worker tools without coordination tools"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn deep_research_tool_policy_implies_research_child_context() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
+        "delegated evidence notes",
+    )]));
+    let runtime = build_runtime(data_root.path(), Arc::clone(&provider) as _)?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
+
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 22,
+                "method": "agent/spawn",
+                "params": {
+                    "session_id": parent_session_id,
+                    "message": "Investigate another delegated research topic.",
+                    "tool_policy": "deep_research",
+                    "ephemeral": true
+                }
+            }),
+        )
+        .await
+        .context("agent/spawn")?;
+    let spawn_result = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_protocol::SpawnAgentResult>,
+    >(response)?
+    .result;
+
+    wait_for_session_notification(
+        &mut notifications_rx,
+        "turn/completed",
+        spawn_result.child_session_id,
+    )
+    .await?;
+
+    let requests = provider.requests();
+    let request = requests
+        .first()
+        .context("deep research policy should start a model request")?;
+    let system = request.system.as_deref().unwrap_or_default();
+    assert!(system.contains("You are Devo `/research`"));
+    assert!(system.contains("Stage: delegated deep research worker."));
+
+    let texts = message_texts(request);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.starts_with("<research_environment>")),
+        "deep research policy should imply environment user context: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text == "Investigate another delegated research topic."),
+        "deep research policy should preserve the delegated task message: {texts:?}"
+    );
+
+    let tool_names = request
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        tool_names,
+        vec!["read", "write", "apply_patch", "webfetch"],
+        "deep research policy should imply research worker tools"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn wait_agent_reports_child_output_and_terminal_status() -> Result<()> {
     let data_root = TempDir::new()?;
     let provider = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
@@ -536,6 +713,19 @@ async fn invalid_agent_requests_return_invalid_params() -> Result<()> {
         (
             serde_json::json!({
                 "id": 11,
+                "method": "agent/spawn",
+                "params": {
+                    "session_id": parent_session_id,
+                    "message": "bad deep research fork",
+                    "fork_turns": "2",
+                    "context_mode": "deep_research"
+                }
+            }),
+            "fork_turns must be \"none\" or \"all\"",
+        ),
+        (
+            serde_json::json!({
+                "id": 12,
                 "method": "agent/send_message",
                 "params": {
                     "session_id": parent_session_id,
@@ -547,7 +737,7 @@ async fn invalid_agent_requests_return_invalid_params() -> Result<()> {
         ),
         (
             serde_json::json!({
-                "id": 12,
+                "id": 13,
                 "method": "agent/spawn",
                 "params": {
                     "session_id": devo_protocol::SessionId::new(),

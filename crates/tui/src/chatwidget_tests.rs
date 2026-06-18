@@ -226,7 +226,7 @@ fn indices_containing(lines: &[String], needles: &[&str]) -> Vec<usize> {
 }
 
 #[test]
-fn user_prompt_multiline_has_no_extra_blank_prefix_rows_and_consistent_prefix_text() {
+fn user_prompt_multiline_has_single_marker_and_aligned_continuation_rows() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
@@ -237,21 +237,16 @@ fn user_prompt_multiline_has_no_extra_blank_prefix_rows_and_consistent_prefix_te
     widget.submit_text("line one\nline two\nline three".to_string());
 
     let transcript = line_texts(widget.transcript_overlay_lines(80));
-    let user_lines: Vec<String> = transcript
-        .into_iter()
-        .filter(|line| line.starts_with("▌ "))
-        .collect();
+    let first_line_index = transcript
+        .iter()
+        .position(|line| line.contains("line one"))
+        .unwrap_or_else(|| panic!("missing user prompt in:\n{}", transcript.join("\n")));
+    let user_lines = &transcript[first_line_index - 1..first_line_index + 3];
 
     assert_eq!(
-        user_lines.len(),
-        5,
-        "unexpected user prompt rows: {user_lines:?}"
+        user_lines,
+        ["  ", "▌ line one", "  line two", "  line three"]
     );
-    assert_eq!(user_lines[0], "▌ ");
-    assert_eq!(user_lines[1], "▌ line one");
-    assert_eq!(user_lines[2], "▌ line two");
-    assert_eq!(user_lines[3], "▌ line three");
-    assert_eq!(user_lines[4], "▌ ");
 }
 
 #[test]
@@ -948,6 +943,61 @@ fn approval_request_does_not_duplicate_already_committed_assistant_text() {
         rows.matches(&text).count(),
         1,
         "assistant text should not be committed twice around approval request:\n{rows}"
+    );
+}
+
+#[test]
+fn research_artifact_completion_does_not_commit_assistant_turn() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let artifact_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        delta: "partial finding".to_string(),
+    });
+    let live_rows = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(
+        live_rows.contains("partial finding"),
+        "research artifact delta should be visible before completion:\n{live_rows}"
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        final_text: "### Finding\n\npartial finding".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::AssistantMessageCompleted(
+        "final report".to_string(),
+    ));
+
+    let committed = scrollback_plain_lines(&trim_trailing_blank_scrollback_lines(
+        widget.drain_scrollback_lines(80),
+    ))
+    .join("\n");
+    assert!(
+        committed.contains("partial finding"),
+        "research artifact should commit independently:\n{committed}"
+    );
+    assert!(
+        committed.contains("final report"),
+        "research artifact completion must not suppress assistant completion:\n{committed}"
     );
 }
 
@@ -3327,12 +3377,11 @@ fn session_switch_restores_header_and_spacing_before_user_input() {
     assert!(!committed_text.contains("session 1 lingering line"));
     assert!(
         committed_rows
-            .windows(5)
-            .any(|window| window[0].trim_end() == "▌"
-                && window[1].contains("hello")
-                && window[2].trim_end() == "▌"
-                && window[3].trim().is_empty()
-                && window[4].contains("world")),
+            .windows(4)
+            .any(|window| window[0].trim().is_empty()
+                && window[1].contains("▌ hello")
+                && window[2].trim().is_empty()
+                && window[3].contains("world")),
         "expected restored spaced user prompt before assistant response: {committed_lines:?}"
     );
 }
@@ -4410,7 +4459,9 @@ fn reasoning_text_commits_to_history_when_turn_finishes() {
     });
 
     let scrollback = widget.drain_scrollback_lines(80);
-    assert!(scrollback_contains_text(&scrollback, "thinking text"));
+    let scrollback_text = scrollback_plain_lines(&scrollback).join("\n");
+    assert!(scrollback_text.contains("Thought: thinking text"));
+    assert!(!scrollback_text.contains("Thinking: thinking text"));
 }
 
 #[test]
@@ -4450,7 +4501,9 @@ fn restored_reasoning_text_is_visible_in_transcript() {
     });
 
     let scrollback = widget.drain_scrollback_lines(80);
-    assert!(scrollback_contains_text(&scrollback, "thinking text"));
+    let scrollback_text = scrollback_plain_lines(&scrollback).join("\n");
+    assert!(scrollback_text.contains("Thought: thinking text"));
+    assert!(!scrollback_text.contains("Thinking: thinking text"));
 }
 
 #[test]
@@ -4483,6 +4536,10 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
     assert!(
         before.contains("thinking") && before.contains("final answer line 1"),
         "reasoning/text should both be visible while streaming:\n{before}"
+    );
+    assert!(
+        before.contains("Thinking: thinking"),
+        "live reasoning should keep Thinking label while streaming:\n{before}"
     );
     let reasoning_row = find_row_index(&before_rows, "thinking").expect("missing reasoning row");
     let assistant_row =
@@ -4531,8 +4588,12 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
     assert!(
-        committed_after_text.contains("thinking"),
-        "reasoning text should be in scrollback after ReasoningCompleted: {committed_after_reasoning_complete:?}"
+        committed_after_text.contains("Thought: thinking"),
+        "completed reasoning should use Thought label in scrollback: {committed_after_reasoning_complete:?}"
+    );
+    assert!(
+        !committed_after_text.contains("Thinking: thinking"),
+        "completed reasoning should not keep Thinking label in scrollback: {committed_after_reasoning_complete:?}"
     );
     let after_reasoning_rows = rendered_rows(&widget, 80, 16).join("\n");
     assert!(
@@ -4609,6 +4670,17 @@ fn lifecycle_text_items_render_as_ordered_sibling_cells() {
         rows_after_reasoning.iter().any(|row| row.contains("Line1")),
         "assistant should remain active:\n{}",
         rows_after_reasoning.join("\n")
+    );
+    let committed_after_reasoning = widget.drain_scrollback_lines(80);
+    let committed_after_reasoning_text =
+        scrollback_plain_lines(&committed_after_reasoning).join("\n");
+    assert!(
+        committed_after_reasoning_text.contains("Thought: thinking"),
+        "completed reasoning should use Thought label in scrollback: {committed_after_reasoning:?}"
+    );
+    assert!(
+        !committed_after_reasoning_text.contains("Thinking: thinking"),
+        "completed reasoning should not keep Thinking label in scrollback: {committed_after_reasoning:?}"
     );
 }
 
@@ -5093,7 +5165,7 @@ fn subagent_discovery_shows_ctrl_x_hint_without_auto_opening_selector() {
 
     assert!(!widget.is_subagent_monitor_open_for_test());
     assert_eq!(widget.selected_subagent_for_test(), Some(child));
-    let rows = rendered_rows(&widget, 100, 18).join("\n");
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
     assert!(rows.contains("ctrl + x agents"), "rows:\n{rows}");
     assert!(!rows.contains("checking files"), "rows:\n{rows}");
     let parent_transcript = line_texts(widget.transcript_overlay_lines(80)).join("\n");
@@ -5122,7 +5194,7 @@ fn ctrl_x_selector_selects_live_subagents_and_q_exits() {
     widget.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
     assert!(widget.is_subagent_monitor_open_for_test());
     assert_eq!(widget.selected_subagent_for_test(), Some(second));
-    let rows = rendered_rows(&widget, 100, 18).join("\n");
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
     assert!(rows.contains("Sub-agents"), "rows:\n{rows}");
     assert!(rows.contains("run first"), "rows:\n{rows}");
     assert!(rows.contains("root/second"), "rows:\n{rows}");
@@ -5151,7 +5223,7 @@ fn terminal_subagent_status_hides_ctrl_x_hint_when_no_live_children_remain() {
         agent: monitor_agent(child, parent, "builder"),
     });
     assert!(widget.has_live_subagents_for_test());
-    let rows = rendered_rows(&widget, 100, 18).join("\n");
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
     assert!(rows.contains("ctrl + x agents"), "rows:\n{rows}");
 
     widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
@@ -5319,7 +5391,7 @@ fn session_switch_sets_active_agent_footer_label() {
         pending_texts: vec![],
     });
 
-    let rows = rendered_rows(&widget, 80, 16);
+    let rows = rendered_rows(&widget, 160, 16);
     assert!(
         rows.iter().any(|row| row.contains("Agent: cr")),
         "expected active agent footer label in rows:\n{}",
@@ -5400,8 +5472,8 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
     assert!(transcript_text.contains("old session line"));
     let old_line_index = find_row_index(&transcript_lines, "old session line")
         .expect("old session line remains in transcript");
-    let header_index = find_row_index(&transcript_lines, "new-session-model")
-        .expect("new session header is appended");
+    let header_index =
+        find_row_index(&transcript_lines, "Workspace").expect("new session header is appended");
     assert!(header_index > old_line_index);
 }
 

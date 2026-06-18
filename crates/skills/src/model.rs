@@ -104,10 +104,7 @@ pub struct SkillLoadOutcome {
 
 impl SkillLoadOutcome {
     pub fn is_skill_enabled(&self, skill: &SkillMetadata) -> bool {
-        !self
-            .disabled_paths
-            .iter()
-            .any(|path| paths_equal(path, &skill.path_to_skills_md))
+        !path_set_contains_identity(&self.disabled_paths, &skill.path_to_skills_md)
     }
 
     pub fn is_skill_allowed_for_implicit_invocation(&self, skill: &SkillMetadata) -> bool {
@@ -133,6 +130,20 @@ pub(crate) fn paths_equal(left: &Path, right: &Path) -> bool {
     canonicalize_for_identity(left) == canonicalize_for_identity(right)
 }
 
+pub(crate) fn path_set_contains_identity(paths: &HashSet<PathBuf>, path: &Path) -> bool {
+    if paths.is_empty() {
+        return false;
+    }
+    if paths.contains(path) {
+        return true;
+    }
+    // Loaded skill paths and disabled-path rules are canonicalized up front, so
+    // the direct lookup is the normal path. Keep the slower identity fallback for
+    // manually constructed `SkillMetadata` values that may contain `..` or other
+    // platform-specific aliases.
+    paths.iter().any(|candidate| paths_equal(candidate, path))
+}
+
 pub fn canonicalize_for_identity(path: &Path) -> PathBuf {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     normalize_canonical_path(canonical)
@@ -151,5 +162,44 @@ pub fn normalize_canonical_path(path: PathBuf) -> PathBuf {
     #[cfg(not(windows))]
     {
         path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::fs;
+
+    use super::*;
+
+    fn skill(path_to_skills_md: PathBuf) -> SkillMetadata {
+        SkillMetadata {
+            name: "example".to_string(),
+            description: "Example skill".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md,
+            scope: SkillScope::User,
+            plugin_id: None,
+        }
+    }
+
+    #[test]
+    fn skill_enabled_uses_canonical_identity_fallback() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("skills/example");
+        fs::create_dir_all(&skill_dir).expect("skill dir");
+        let skill_path = skill_dir.join("SKILL.md");
+        fs::write(&skill_path, "").expect("skill file");
+        let disabled_path = canonicalize_for_identity(&skill_path);
+        let equivalent_path = skill_dir.join("../example/SKILL.md");
+        let outcome = SkillLoadOutcome {
+            disabled_paths: HashSet::from([disabled_path]),
+            ..SkillLoadOutcome::default()
+        };
+
+        assert!(!outcome.is_skill_enabled(&skill(equivalent_path)));
     }
 }

@@ -1,3 +1,9 @@
+//! Minimal JSON Schema value model for tool specifications.
+//!
+//! Tool schemas are serialized into provider/runtime metadata, so this module
+//! keeps the builder surface explicit and dependency-free instead of exposing a
+//! general-purpose schema generator.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -56,33 +62,25 @@ pub struct JsonSchema {
 
 impl JsonSchema {
     pub fn string(description: Option<&str>) -> Self {
-        JsonSchema {
-            schema_type: Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::String)),
-            description: description.map(|d| d.to_string()),
-            ..Default::default()
-        }
+        Self::primitive(JsonSchemaPrimitiveType::String, description)
     }
 
     pub fn boolean(description: Option<&str>) -> Self {
-        JsonSchema {
-            schema_type: Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Boolean)),
-            description: description.map(|d| d.to_string()),
-            ..Default::default()
-        }
+        Self::primitive(JsonSchemaPrimitiveType::Boolean, description)
     }
 
     pub fn integer(description: Option<&str>) -> Self {
-        JsonSchema {
-            schema_type: Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Integer)),
-            description: description.map(|d| d.to_string()),
-            ..Default::default()
-        }
+        Self::primitive(JsonSchemaPrimitiveType::Integer, description)
     }
 
     pub fn number(description: Option<&str>) -> Self {
+        Self::primitive(JsonSchemaPrimitiveType::Number, description)
+    }
+
+    fn primitive(schema_type: JsonSchemaPrimitiveType, description: Option<&str>) -> Self {
         JsonSchema {
-            schema_type: Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Number)),
-            description: description.map(|d| d.to_string()),
+            schema_type: Some(JsonSchemaType::Single(schema_type)),
+            description: description.map(str::to_owned),
             ..Default::default()
         }
     }
@@ -90,7 +88,7 @@ impl JsonSchema {
     pub fn array(items: JsonSchema, description: Option<&str>) -> Self {
         JsonSchema {
             schema_type: Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Array)),
-            description: description.map(|d| d.to_string()),
+            description: description.map(str::to_owned),
             items: Some(Box::new(items)),
             ..Default::default()
         }

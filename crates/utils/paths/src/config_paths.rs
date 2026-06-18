@@ -69,7 +69,7 @@ impl FileSystemConfigPathResolver {
     }
 
     pub fn user_config_file(&self) -> PathBuf {
-        self.user_config_dir().join(APP_CONFIG_FILE_NAME)
+        self.user_config_dir.join(APP_CONFIG_FILE_NAME)
     }
 
     /// Returns the canonical project-level config directory for one workspace root.
@@ -86,11 +86,15 @@ impl FileSystemConfigPathResolver {
 
 impl ConfigPathResolver for FileSystemConfigPathResolver {
     fn resolve_paths(&self, workspace_root: Option<&Path>) -> Result<ConfigPaths, ConfigPathError> {
+        let project_config_dir = workspace_root.map(|root| self.project_config_dir(root));
+        let project_config_file = project_config_dir
+            .as_ref()
+            .map(|dir| dir.join(APP_CONFIG_FILE_NAME));
         Ok(ConfigPaths {
             user_config_file: self.user_config_file(),
             user_config_dir: self.user_config_dir(),
-            project_config_file: workspace_root.map(|root| self.project_config_file(root)),
-            project_config_dir: workspace_root.map(|root| self.project_config_dir(root)),
+            project_config_file,
+            project_config_dir,
         })
     }
 }
@@ -99,7 +103,11 @@ impl ConfigPathResolver for FileSystemConfigPathResolver {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{ConfigPathResolver, FileSystemConfigPathResolver};
+    use pretty_assertions::assert_eq;
+
+    use super::ConfigPathResolver;
+    use super::ConfigPaths;
+    use super::FileSystemConfigPathResolver;
 
     #[test]
     fn resolver_builds_user_and_project_paths() {
@@ -108,15 +116,14 @@ mod tests {
             .resolve_paths(Some(PathBuf::from("/repo").as_path()))
             .expect("paths");
 
-        assert_eq!(paths.user_config_dir, PathBuf::from("/home/tester"));
         assert_eq!(
-            paths.user_config_file,
-            PathBuf::from("/home/tester/config.toml")
-        );
-        assert_eq!(paths.project_config_dir, Some(PathBuf::from("/repo/.devo")));
-        assert_eq!(
-            paths.project_config_file,
-            Some(PathBuf::from("/repo/.devo/config.toml"))
+            paths,
+            ConfigPaths {
+                user_config_file: PathBuf::from("/home/tester/config.toml"),
+                user_config_dir: PathBuf::from("/home/tester"),
+                project_config_file: Some(PathBuf::from("/repo/.devo/config.toml")),
+                project_config_dir: Some(PathBuf::from("/repo/.devo")),
+            }
         );
     }
 
@@ -126,11 +133,14 @@ mod tests {
         let resolver = FileSystemConfigPathResolver::new(PathBuf::from("C:\\Users\\tester\\.devo"));
         let paths = resolver.resolve_paths(None).expect("paths");
 
-        assert!(paths.project_config_dir.is_none());
-        assert!(paths.project_config_file.is_none());
         assert_eq!(
-            paths.user_config_file,
-            PathBuf::from("C:\\Users\\tester\\.devo\\config.toml")
+            paths,
+            ConfigPaths {
+                user_config_file: PathBuf::from("C:\\Users\\tester\\.devo\\config.toml"),
+                user_config_dir: PathBuf::from("C:\\Users\\tester\\.devo"),
+                project_config_file: None,
+                project_config_dir: None,
+            }
         );
     }
 
@@ -140,11 +150,14 @@ mod tests {
         let resolver = FileSystemConfigPathResolver::new(PathBuf::from("/home/tester/.devo"));
         let paths = resolver.resolve_paths(None).expect("paths");
 
-        assert!(paths.project_config_dir.is_none());
-        assert!(paths.project_config_file.is_none());
         assert_eq!(
-            paths.user_config_file,
-            PathBuf::from("/home/tester/.devo/config.toml")
+            paths,
+            ConfigPaths {
+                user_config_file: PathBuf::from("/home/tester/.devo/config.toml"),
+                user_config_dir: PathBuf::from("/home/tester/.devo"),
+                project_config_file: None,
+                project_config_dir: None,
+            }
         );
     }
 }

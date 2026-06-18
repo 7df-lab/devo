@@ -1,3 +1,9 @@
+//! Shared types and limits for long-lived command execution tools.
+//!
+//! The process runner, bounded output buffer, and session store live below this
+//! module so tool handlers can enforce one set of limits for exec and stdin
+//! polling without duplicating lifecycle policy.
+
 pub mod buffer;
 pub mod process;
 pub mod store;

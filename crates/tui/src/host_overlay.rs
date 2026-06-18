@@ -115,6 +115,16 @@ impl OverlayState {
         }
     }
 
+    pub(crate) fn parent_transcript(&self) -> Option<&TranscriptOverlay> {
+        if !matches!(self.transcript_source, Some(TranscriptSource::Parent)) {
+            return None;
+        }
+        match self.overlay.as_ref() {
+            Some(Overlay::Transcript(overlay)) => Some(overlay),
+            Some(Overlay::Static(_)) | None => None,
+        }
+    }
+
     pub(crate) fn close(&mut self, tui: &mut Tui) -> Result<()> {
         self.overlay = None;
         self.transcript_source = None;

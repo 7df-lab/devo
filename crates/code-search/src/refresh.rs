@@ -48,27 +48,25 @@ impl IndexRefresh {
                 .payload
                 .is_valid_for(root, content, provider.model_id())
         });
-        let previous_embeddings = previous_cache
-            .as_ref()
-            .map(|cache| cache.embeddings.clone())
-            .unwrap_or_else(EmbeddingMatrix::empty);
-        let mut previous_records = previous_cache
-            .map(|cache| {
+        let (previous_embeddings, mut previous_records) = match previous_cache {
+            Some(cache) => (
+                cache.embeddings,
                 cache
                     .payload
                     .files
                     .into_iter()
                     .map(|record| (record.manifest.path.clone(), record))
-                    .collect::<HashMap<_, _>>()
-            })
-            .unwrap_or_default();
+                    .collect::<HashMap<_, _>>(),
+            ),
+            None => (EmbeddingMatrix::empty(), HashMap::new()),
+        };
 
         let mut slots = Vec::with_capacity(files.len());
         let mut pending_files = Vec::new();
         let mut reused_files = 0;
 
         for file in files {
-            if let Some(record) = previous_records.remove(&file.relative_path)
+            if let Some(record) = previous_records.remove(&file.manifest.path)
                 && record.can_reuse_for(&file.manifest)
             {
                 reused_files += 1;
@@ -92,16 +90,10 @@ impl IndexRefresh {
             .collect::<Result<Vec<_>, _>>()?;
         pending_records.sort_by_key(|(slot_idx, _)| *slot_idx);
 
-        let texts = pending_records
-            .iter()
-            .flat_map(|(_, record)| record.chunks.iter().map(|chunk| chunk.content.clone()))
-            .collect::<Vec<_>>();
         let changed_embeddings =
-            EmbeddingMatrix::from_vectors(embed_in_batches(provider, &texts)?)?;
-        let pending_by_slot = pending_records
-            .into_iter()
-            .collect::<HashMap<usize, PendingFileRecord>>();
-        let reembedded_files = pending_by_slot.len();
+            EmbeddingMatrix::from_vectors(embed_pending_chunks(provider, &pending_records)?)?;
+        let reembedded_files = pending_records.len();
+        let mut pending_records = pending_records.into_iter();
 
         let mut embeddings = EmbeddingMatrix::empty();
         let mut changed_cursor = 0;
@@ -131,22 +123,28 @@ impl IndexRefresh {
                     // Zero-chunk pending records are valid: empty and unreadable
                     // files still get manifests so the refresh can skip them
                     // until the file metadata changes.
-                    let pending = pending_by_slot.get(&slot_idx).ok_or_else(|| {
+                    let (pending_slot_idx, pending) = pending_records.next().ok_or_else(|| {
                         CodeSearchError::Index("missing pending file record".to_string())
                     })?;
+                    if pending_slot_idx != slot_idx {
+                        return Err(CodeSearchError::Index(
+                            "missing pending file record".to_string(),
+                        ));
+                    }
+                    let embedding_count = pending.chunks.len();
                     let embedding_start = embeddings.row_count();
                     embeddings.extend_rows_from(
                         &changed_embeddings,
                         changed_cursor,
-                        pending.chunks.len(),
+                        embedding_count,
                     )?;
-                    changed_cursor += pending.chunks.len();
+                    changed_cursor += embedding_count;
                     records.push(CachedFileRecord::new(
-                        pending.manifest.clone(),
-                        pending.content_hash.clone(),
-                        pending.chunks.clone(),
+                        pending.manifest,
+                        pending.content_hash,
+                        pending.chunks,
                         embedding_start,
-                        pending.chunks.len(),
+                        embedding_count,
                     ));
                 }
             }
@@ -189,7 +187,6 @@ enum RefreshSlot {
 }
 
 /// File data that must be embedded before it can become a cache record.
-#[derive(Clone)]
 struct PendingFileRecord {
     manifest: FileManifestEntry,
     content_hash: String,
@@ -204,16 +201,22 @@ impl PendingFileRecord {
     /// disappears or becomes unreadable during indexing. A later manifest change
     /// will retry the file.
     fn read(file: FileEntry) -> Result<Self, CodeSearchError> {
-        let (content_hash_value, chunks) = match read_indexable_text(&file.absolute_path) {
+        let FileEntry {
+            absolute_path,
+            language,
+            manifest,
+            ..
+        } = file;
+        let (content_hash_value, chunks) = match read_indexable_text(&absolute_path) {
             Ok(Some(text)) => (
                 content_hash(&text),
-                chunk_file(&file.relative_path, &file.language, &text),
+                chunk_file(&manifest.path, &language, &text),
             ),
             Ok(None) => (content_hash(""), Vec::new()),
             Err(_) => (content_hash("unreadable"), Vec::new()),
         };
         Ok(Self {
-            manifest: file.manifest,
+            manifest,
             content_hash: content_hash_value,
             chunks,
         })
@@ -225,19 +228,35 @@ impl PendingFileRecord {
 /// Providers must return one vector per input chunk. The explicit count check
 /// catches model/runtime bugs before the flattened matrix can drift out of sync
 /// with chunk ids.
-fn embed_in_batches(
+fn embed_pending_chunks(
     provider: &dyn EmbeddingProvider,
-    texts: &[String],
+    pending_records: &[(usize, PendingFileRecord)],
 ) -> Result<Vec<Vec<f32>>, CodeSearchError> {
-    let mut embeddings = Vec::new();
-    for batch in texts.chunks(EMBEDDING_BATCH_SIZE) {
-        embeddings.extend(provider.embed(batch)?);
+    let expected_chunks = pending_records
+        .iter()
+        .map(|(_, record)| record.chunks.len())
+        .sum();
+    let mut embeddings = Vec::with_capacity(expected_chunks);
+    let mut batch = Vec::with_capacity(EMBEDDING_BATCH_SIZE.min(expected_chunks));
+
+    for (_, record) in pending_records {
+        for chunk in &record.chunks {
+            batch.push(chunk.content.clone());
+            if batch.len() == EMBEDDING_BATCH_SIZE {
+                embeddings.extend(provider.embed(&batch)?);
+                batch.clear();
+            }
+        }
     }
-    if embeddings.len() != texts.len() {
+    if !batch.is_empty() {
+        embeddings.extend(provider.embed(&batch)?);
+    }
+
+    if embeddings.len() != expected_chunks {
         return Err(CodeSearchError::Index(format!(
             "embedding provider returned {} vectors for {} chunks",
             embeddings.len(),
-            texts.len()
+            expected_chunks
         )));
     }
     Ok(embeddings)
@@ -348,7 +367,7 @@ mod tests {
     }
 
     /// Trace: L2-DES-TOOL-001
-    /// Verifies: adding and deleting files updates the v4 payload and flattened search index.
+    /// Verifies: adding and deleting files updates the cache payload and flattened search index.
     #[test]
     fn added_and_deleted_files_update_flattened_index() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -402,12 +421,29 @@ mod tests {
     /// Verifies: embedding provider calls are split into deterministic bounded batches.
     #[test]
     fn embedding_calls_are_batched() {
-        let texts = (0..600)
-            .map(|idx| format!("chunk {idx}"))
-            .collect::<Vec<_>>();
+        let pending_records = vec![(
+            0,
+            PendingFileRecord {
+                manifest: FileManifestEntry {
+                    path: PathBuf::from("src/lib.rs"),
+                    size: 0,
+                    modified_unix_nanos: 1,
+                },
+                content_hash: content_hash("chunks"),
+                chunks: (0..600)
+                    .map(|idx| Chunk {
+                        content: format!("chunk {idx}"),
+                        file_path: PathBuf::from("src/lib.rs"),
+                        start_line: idx + 1,
+                        end_line: idx + 1,
+                        language: "rust".to_string(),
+                    })
+                    .collect(),
+            },
+        )];
         let provider = CountingProvider::new();
 
-        let embeddings = embed_in_batches(&provider, &texts).expect("embed");
+        let embeddings = embed_pending_chunks(&provider, &pending_records).expect("embed");
         let batch_sizes = provider
             .batches()
             .into_iter()

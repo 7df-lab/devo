@@ -5,6 +5,7 @@
 //! projections needed by the server at session load time.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 
@@ -127,6 +128,7 @@ pub fn build_replay_projection(
     let _turns: Vec<TurnProjection> = Vec::new();
     let mut turn_map: HashMap<TurnId, TurnProjection> = HashMap::new();
     let mut pending_items: HashMap<ItemId, PendingItemProjection> = HashMap::new();
+    let mut superseded_turn_ids: HashSet<TurnId> = HashSet::new();
     let mut usage_totals = UsageTotals::default();
     let mut current_goal: Option<GoalReplayProjection> = None;
     let mut goal_context_snapshots = Vec::new();
@@ -378,16 +380,33 @@ pub fn build_replay_projection(
                 }
             }
 
+            DurableRecord::TurnSuperseded(r) => {
+                superseded_turn_ids.insert(r.superseded_turn_id);
+                pending_items.retain(|_, item| item.turn_id != r.superseded_turn_id);
+                if meta.is_active
+                    && turn_map
+                        .get(&r.superseded_turn_id)
+                        .is_some_and(|turn| turn.status == TurnStatus::Running)
+                {
+                    meta.is_active = false;
+                }
+            }
+
             _ => { /* other records don't affect core projection */ }
         }
     }
 
     // Sort turns by sequence
     let mut all_turns: Vec<TurnProjection> = turn_map.into_values().collect();
+    all_turns.retain(|turn| !superseded_turn_ids.contains(&turn.turn_id));
     all_turns.sort_by_key(|t| t.sequence);
+    meta.turn_count = all_turns.len();
 
     // Resolve unterminated state
-    let pending: Vec<PendingItemProjection> = pending_items.into_values().collect();
+    let pending: Vec<PendingItemProjection> = pending_items
+        .into_values()
+        .filter(|item| !superseded_turn_ids.contains(&item.turn_id))
+        .collect();
     if !pending.is_empty() {
         meta.is_active = true;
     }
@@ -562,6 +581,127 @@ mod tests {
         assert_eq!(projection.turns[0].items.len(), 1);
         assert_eq!(projection.turns[0].items[0].item_id, iid);
         assert_eq!(projection.pending_items.len(), 1);
+    }
+
+    #[test]
+    fn turn_superseded_projects_replacement_branch() {
+        let sid = SessionId::new();
+        let original_turn_id = TurnId::new();
+        let replacement_turn_id = TurnId::new();
+        let original_item_id = ItemId::new();
+        let replacement_item_id = ItemId::new();
+        let edit_id = EditId::new();
+        let records = vec![
+            DurableRecord::TurnStarted(TurnStartedRecord {
+                schema_version: 1,
+                session_id: sid,
+                turn_id: original_turn_id,
+                sequence: 0,
+                status: TurnStatus::Running,
+                kind: TurnKind::Regular,
+                resume_of_turn_id: None,
+                submitted_by_client_id: None,
+                model: None,
+                thinking: None,
+                reasoning_effort: None,
+                started_at: now(),
+            }),
+            DurableRecord::ItemStarted(ItemStartedRecord {
+                schema_version: 1,
+                session_id: sid,
+                turn_id: original_turn_id,
+                item_id: original_item_id,
+                kind: ItemRecordKind::UserInput,
+                role: RecordRole::User,
+                content_parts: vec![],
+                mentions: vec![],
+                visibility: ItemVisibility::Visible,
+                created_at: now(),
+            }),
+            DurableRecord::TurnCompleted(TurnCompletedRecord {
+                schema_version: 1,
+                terminal: TurnTerminalFields {
+                    turn_id: original_turn_id,
+                    session_id: sid,
+                    status: TurnStatus::Completed,
+                    usage: None,
+                    workspace_change_set_id: None,
+                    completed_at: now(),
+                },
+            }),
+            DurableRecord::MessageEditRecorded(MessageEditRecordedRecord {
+                schema_version: 1,
+                session_id: sid,
+                edit_id,
+                target_message_id: original_item_id,
+                replacement_message_id: replacement_item_id,
+                target_turn_id: Some(original_turn_id),
+                replacement_turn_id: Some(replacement_turn_id),
+                queue_item_id: None,
+                edited_content_parts: vec![ContentPart::Text("edited".into())],
+                edited_mentions: vec![],
+                workspace_restore_policy: WorkspaceRestorePolicy::Skip,
+                edit_state: EditState::Accepted,
+                requested_by_client_id: None,
+                created_at: now(),
+            }),
+            DurableRecord::TurnSuperseded(TurnSupersededRecord {
+                schema_version: 1,
+                session_id: sid,
+                superseded_turn_id: original_turn_id,
+                replacement_turn_id,
+                edit_id,
+                restore_id: None,
+                reason: "message_edit_previous".into(),
+                created_at: now(),
+            }),
+            DurableRecord::TurnStarted(TurnStartedRecord {
+                schema_version: 1,
+                session_id: sid,
+                turn_id: replacement_turn_id,
+                sequence: 1,
+                status: TurnStatus::Running,
+                kind: TurnKind::Regular,
+                resume_of_turn_id: None,
+                submitted_by_client_id: None,
+                model: None,
+                thinking: None,
+                reasoning_effort: None,
+                started_at: now(),
+            }),
+            DurableRecord::ItemStarted(ItemStartedRecord {
+                schema_version: 1,
+                session_id: sid,
+                turn_id: replacement_turn_id,
+                item_id: replacement_item_id,
+                kind: ItemRecordKind::UserInput,
+                role: RecordRole::User,
+                content_parts: vec![],
+                mentions: vec![],
+                visibility: ItemVisibility::Visible,
+                created_at: now(),
+            }),
+        ];
+
+        let projection = build_replay_projection(sid, &records);
+
+        assert_eq!(
+            projection
+                .turns
+                .iter()
+                .map(|turn| turn.turn_id)
+                .collect::<Vec<_>>(),
+            vec![replacement_turn_id]
+        );
+        assert_eq!(projection.metadata.turn_count, 1);
+        assert_eq!(
+            projection
+                .pending_items
+                .iter()
+                .map(|item| item.item_id)
+                .collect::<Vec<_>>(),
+            vec![replacement_item_id]
+        );
     }
 
     #[test]

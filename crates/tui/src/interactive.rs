@@ -27,6 +27,7 @@ use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetInit;
 use crate::chatwidget::MCP_SERVERS_TRANSCRIPT_TITLE;
 use crate::chatwidget::TuiSessionState;
+use crate::chatwidget::UserMessage;
 use crate::events::WorkerEvent;
 use crate::history_cell;
 use crate::host_overlay::OverlayState;
@@ -36,6 +37,7 @@ use crate::onboarding::onboarding_provider_vendor;
 use crate::onboarding::save_last_used_model;
 use crate::onboarding::save_project_permission_preset;
 use crate::onboarding::save_thinking_selection;
+use crate::pager_overlay::TranscriptOverlay;
 use crate::render::renderable::Renderable;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
@@ -120,6 +122,7 @@ struct InteractiveLoopState {
     // True after clearing the inline UI for a session switch and before the
     // replacement session has been restored into widget state.
     session_switch_pending: bool,
+    pending_backtrack_restore: Option<UserMessage>,
     last_ctrl_c_at: Option<Instant>,
     esc_backtrack_primed: bool,
     overlay: OverlayState,
@@ -144,6 +147,16 @@ enum EscBacktrackAction {
     PrimeHint,
     OpenOverlay,
     ClearHint,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum TranscriptBacktrackSelection {
+    Latest {
+        user_message: UserMessage,
+        user_turn_index: u32,
+    },
+    OlderSelected,
+    NoSelection,
 }
 
 struct AppCommandContext<'a, M: ModelCatalog> {
@@ -445,7 +458,7 @@ fn stream_trace_elapsed_ms() -> u128 {
 fn handle_tui_event(
     tui_event: Option<TuiEvent>,
     tui: &mut Tui,
-    _worker: &QueryWorkerHandle,
+    worker: &QueryWorkerHandle,
     chat_widget: &mut ChatWidget,
     loop_state: &mut InteractiveLoopState,
 ) -> Result<LoopAction> {
@@ -460,17 +473,40 @@ fn handle_tui_event(
                 crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
             )
             && key_event.code == KeyCode::Enter
-            && let Some(transcript) = loop_state.overlay.transcript_mut()
-            && let Some(user_message) = transcript.selected_user_message()
         {
-            if let Some(selected_history_position) = transcript.selected_user_history_position() {
-                chat_widget.truncate_history_to_user_turn_count(
-                    selected_history_position.saturating_add(1),
-                );
+            let selection = loop_state
+                .overlay
+                .parent_transcript()
+                .map(selected_transcript_backtrack_selection)
+                .unwrap_or(TranscriptBacktrackSelection::NoSelection);
+            match selection {
+                TranscriptBacktrackSelection::Latest {
+                    user_message,
+                    user_turn_index,
+                } => {
+                    if loop_state.busy {
+                        loop_state.overlay.close(tui)?;
+                        chat_widget.set_status_message("Cannot edit message while generating");
+                        return Ok(LoopAction::Continue);
+                    }
+                    loop_state.pending_backtrack_restore = Some(user_message);
+                    loop_state.overlay.close(tui)?;
+                    loop_state.session_switch_pending = true;
+                    tui.replace_inline_session_ui()?;
+                    worker.rollback_before_user_turn(user_turn_index)?;
+                    return Ok(LoopAction::Continue);
+                }
+                TranscriptBacktrackSelection::OlderSelected => {
+                    loop_state.overlay.close(tui)?;
+                    chat_widget.add_to_history(crate::history_cell::new_info_event(
+                        "Use rollback or fork to revise older messages".to_string(),
+                        Some("Select the message in transcript selection mode".to_string()),
+                    ));
+                    chat_widget.set_status_message("Use rollback or fork for older messages");
+                    return Ok(LoopAction::Continue);
+                }
+                TranscriptBacktrackSelection::NoSelection => {}
             }
-            chat_widget.restore_user_message_to_composer(user_message);
-            loop_state.overlay.close(tui)?;
-            return Ok(LoopAction::Continue);
         }
         if matches!(tui_event, TuiEvent::Draw) {
             chat_widget.pre_draw_tick();
@@ -669,6 +705,27 @@ fn determine_esc_backtrack_action(
         return EscBacktrackAction::ClearHint;
     }
     EscBacktrackAction::Noop
+}
+
+fn selected_transcript_backtrack_selection(
+    transcript: &TranscriptOverlay,
+) -> TranscriptBacktrackSelection {
+    let Some(user_message) = transcript.selected_user_message() else {
+        return TranscriptBacktrackSelection::NoSelection;
+    };
+    let Some(position) = transcript.selected_user_history_position() else {
+        return TranscriptBacktrackSelection::NoSelection;
+    };
+    if position != transcript.user_message_count().saturating_sub(1) {
+        return TranscriptBacktrackSelection::OlderSelected;
+    }
+    let Ok(user_turn_index) = u32::try_from(position) else {
+        return TranscriptBacktrackSelection::NoSelection;
+    };
+    TranscriptBacktrackSelection::Latest {
+        user_message,
+        user_turn_index,
+    }
 }
 
 fn handle_app_event(
@@ -909,7 +966,16 @@ fn handle_worker_event(
     {
         loop_state.resume_browser_pending = false;
     }
+    let session_switched = matches!(&worker_event, WorkerEvent::SessionSwitched { .. });
+    let turn_failed = matches!(&worker_event, WorkerEvent::TurnFailed { .. });
     chat_widget.handle_worker_event(worker_event);
+    if session_switched {
+        if let Some(user_message) = loop_state.pending_backtrack_restore.take() {
+            chat_widget.restore_user_message_to_composer(user_message);
+        }
+    } else if turn_failed {
+        loop_state.pending_backtrack_restore = None;
+    }
 
     Ok(LoopAction::Continue)
 }
@@ -956,6 +1022,9 @@ fn handle_app_command(
         }
         AppCommand::RunBtwQuestion { question } => {
             worker.run_btw_question(question.clone())?;
+        }
+        AppCommand::RunResearch { question } => {
+            worker.run_research(question.clone())?;
         }
         AppCommand::ApprovalRespond {
             session_id,
@@ -1159,6 +1228,44 @@ mod tests {
     use super::*;
 
     use pretty_assertions::assert_eq;
+    use ratatui::text::Line;
+
+    fn transcript_overlay_with_two_users() -> TranscriptOverlay {
+        let crate::pager_overlay::Overlay::Transcript(overlay) =
+            crate::pager_overlay::Overlay::new_transcript(
+                vec![
+                    crate::chatwidget::TranscriptOverlayCell {
+                        lines: vec![Line::from("assistant 1")],
+                        is_stream_continuation: false,
+                        user_message: None,
+                        is_selected_user: false,
+                    },
+                    crate::chatwidget::TranscriptOverlayCell {
+                        lines: vec![Line::from("user 1")],
+                        is_stream_continuation: false,
+                        user_message: Some(UserMessage::from("user 1")),
+                        is_selected_user: false,
+                    },
+                    crate::chatwidget::TranscriptOverlayCell {
+                        lines: vec![Line::from("assistant 2")],
+                        is_stream_continuation: false,
+                        user_message: None,
+                        is_selected_user: false,
+                    },
+                    crate::chatwidget::TranscriptOverlayCell {
+                        lines: vec![Line::from("user 2")],
+                        is_stream_continuation: false,
+                        user_message: Some(UserMessage::from("user 2")),
+                        is_selected_user: false,
+                    },
+                ],
+                /*width*/ 80,
+            )
+        else {
+            unreachable!("new_transcript should create transcript overlay");
+        };
+        *overlay
+    }
 
     #[test]
     fn ctrl_c_while_busy_prompts_for_esc_without_arming_exit() {
@@ -1223,6 +1330,44 @@ mod tests {
                 /*composer_is_empty*/ true,
             ),
             EscBacktrackAction::OpenOverlay
+        );
+    }
+
+    #[test]
+    fn transcript_backtrack_selection_is_noop_without_selected_user() {
+        let overlay = transcript_overlay_with_two_users();
+
+        assert_eq!(
+            selected_transcript_backtrack_selection(&overlay),
+            TranscriptBacktrackSelection::NoSelection
+        );
+    }
+
+    #[test]
+    fn transcript_backtrack_selection_targets_latest_user_turn() {
+        let mut overlay = transcript_overlay_with_two_users();
+
+        overlay.begin_backtrack_preview();
+
+        assert_eq!(
+            selected_transcript_backtrack_selection(&overlay),
+            TranscriptBacktrackSelection::Latest {
+                user_message: UserMessage::from("user 2"),
+                user_turn_index: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn transcript_backtrack_selection_rejects_older_user_turn() {
+        let mut overlay = transcript_overlay_with_two_users();
+
+        overlay.begin_backtrack_preview();
+        overlay.select_prev_user();
+
+        assert_eq!(
+            selected_transcript_backtrack_selection(&overlay),
+            TranscriptBacktrackSelection::OlderSelected
         );
     }
 

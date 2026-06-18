@@ -23,7 +23,7 @@ impl ProviderHttpOptions {
     /// Builds provider HTTP options from raw config fields.
     pub fn from_raw(proxy_url: Option<String>, headers: Option<String>) -> Result<Self> {
         Ok(Self {
-            proxy_url: proxy_url.and_then(|value| non_empty_string(&value)),
+            proxy_url: proxy_url.and_then(non_empty_owned_string),
             custom_headers: parse_custom_headers(headers)?,
         })
     }
@@ -84,15 +84,19 @@ pub(crate) async fn invalid_status_error(
 }
 
 fn parse_custom_headers(headers: Option<String>) -> Result<HeaderMap> {
-    let Some(headers) = headers.and_then(|value| non_empty_string(&value)) else {
+    let Some(headers) = headers else {
         return Ok(HeaderMap::new());
     };
+    let headers = headers.trim();
+    if headers.is_empty() {
+        return Ok(HeaderMap::new());
+    }
     let value: Value =
-        serde_json::from_str(&headers).context("provider custom headers must be valid JSON")?;
+        serde_json::from_str(headers).context("provider custom headers must be valid JSON")?;
     let object = value
         .as_object()
         .context("provider custom headers must be a JSON object string")?;
-    let mut parsed = HeaderMap::new();
+    let mut parsed = HeaderMap::with_capacity(object.len());
     for (name, value) in object {
         let header_name = HeaderName::from_bytes(name.as_bytes())
             .with_context(|| format!("invalid provider custom header name `{name}`"))?;
@@ -106,12 +110,19 @@ fn parse_custom_headers(headers: Option<String>) -> Result<HeaderMap> {
     Ok(parsed)
 }
 
-fn non_empty_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
+fn non_empty_owned_string(mut value: String) -> Option<String> {
+    if value.trim().is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        // Trim in place: these values originate as owned environment/config
+        // strings, so avoid allocating another `String` just to drop whitespace.
+        let end = value.trim_end().len();
+        value.truncate(end);
+        let start = value.len() - value.trim_start().len();
+        if start > 0 {
+            value.drain(..start);
+        }
+        Some(value)
     }
 }
 

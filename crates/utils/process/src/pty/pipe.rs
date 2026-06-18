@@ -1,3 +1,9 @@
+//! Pipe-backed process spawning for non-interactive commands.
+//!
+//! This backend keeps stdout and stderr split for callers that need structured
+//! output while still sharing the same `ProcessHandle` lifecycle as PTY-backed
+//! sessions.
+
 use std::collections::HashMap;
 use std::io;
 use std::io::ErrorKind;
@@ -72,7 +78,7 @@ async fn read_output_stream<R>(mut reader: R, output_tx: mpsc::Sender<Vec<u8>>)
 where
     R: AsyncRead + Unpin,
 {
-    let mut buf = vec![0u8; 8_192];
+    let mut buf = [0u8; 8_192];
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
@@ -186,7 +192,7 @@ async fn spawn_process_with_stdin_mode(
             read_output_stream(BufReader::new(stderr), stderr_tx).await;
         })
     });
-    let mut reader_abort_handles = Vec::new();
+    let mut reader_abort_handles = Vec::with_capacity(2);
     if let Some(handle) = stdout_handle.as_ref() {
         reader_abort_handles.push(handle.abort_handle());
     }

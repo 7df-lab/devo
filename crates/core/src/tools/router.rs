@@ -290,6 +290,7 @@ impl ToolRuntime {
             budgets: self.execution_options.budgets,
             cancel_token: self.execution_options.cancel_token.clone(),
             agent_scope: self.context.agent_scope,
+            agent_context_mode: self.context.agent_context_mode,
             collaboration_mode: self.context.collaboration_mode,
             agent_coordinator: self.context.agent_coordinator.clone(),
             network_proxy: self.context.network_proxy.clone(),
@@ -409,16 +410,13 @@ impl ToolRuntime {
         tool_name: &str,
     ) -> Option<ToolPermissionRequest> {
         let spec = self.registry.spec(tool_name)?;
+        let resource = resource_kind_for_tool(tool_name, &spec.capability_tags);
         let needs_permission = spec.execution_mode == crate::tool_spec::ToolExecutionMode::Mutating
-            || spec
-                .capability_tags
-                .iter()
-                .any(|tag| matches!(tag, ToolCapabilityTag::NetworkAccess));
+            || resource_requires_permission(&resource);
         if !needs_permission {
             return None;
         }
 
-        let resource = resource_kind_for_tool(tool_name, &spec.capability_tags);
         let path = path_for_tool_input(tool_name, &call.input, &self.context.cwd);
         let host = host_for_tool_input(tool_name, &call.input);
         let target = target_for_tool_input(tool_name, &call.input);
@@ -490,6 +488,7 @@ pub struct ToolRuntimeContext {
     pub turn_id: Option<String>,
     pub cwd: PathBuf,
     pub agent_scope: ToolAgentScope,
+    pub agent_context_mode: devo_protocol::AgentContextMode,
     pub collaboration_mode: devo_protocol::CollaborationMode,
     pub agent_coordinator: Option<Arc<dyn AgentToolCoordinator>>,
     pub local_web_search: Option<ResolvedLocalWebSearchConfig>,
@@ -504,6 +503,7 @@ impl std::fmt::Debug for ToolRuntimeContext {
             .field("turn_id", &self.turn_id)
             .field("cwd", &self.cwd)
             .field("agent_scope", &self.agent_scope)
+            .field("agent_context_mode", &self.agent_context_mode)
             .field("collaboration_mode", &self.collaboration_mode)
             .field(
                 "agent_coordinator",
@@ -591,17 +591,36 @@ fn resource_kind_for_tool(tool_name: &str, tags: &[ToolCapabilityTag]) -> Resour
     ResourceKind::Custom(tool_name.to_string())
 }
 
+fn resource_requires_permission(resource: &ResourceKind) -> bool {
+    matches!(
+        resource,
+        ResourceKind::FileRead
+            | ResourceKind::FileWrite
+            | ResourceKind::ShellExec
+            | ResourceKind::Network
+    )
+}
+
 fn path_for_tool_input(tool_name: &str, input: &serde_json::Value, cwd: &Path) -> Option<PathBuf> {
     let raw = match tool_name {
-        "read" | "write" | "lsp" => input
+        "read" | "write" => input
             .get("filePath")
             .and_then(serde_json::Value::as_str)
             .or_else(|| input.get("path").and_then(serde_json::Value::as_str)),
-        "find" | "grep" | "glob" => input.get("path").and_then(serde_json::Value::as_str),
+        "lsp" => input
+            .get("filePath")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| input.get("path").and_then(serde_json::Value::as_str))
+            .or_else(|| input.get("file_path").and_then(serde_json::Value::as_str))
+            .or(Some(".")),
+        "find" | "grep" | "glob" => input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .or(Some(".")),
         "code_search" => input
             .get("path")
             .and_then(serde_json::Value::as_str)
-            .or_else(|| input.get("file_path").and_then(serde_json::Value::as_str)),
+            .or(Some(".")),
         _ => None,
     }?;
     let path = PathBuf::from(raw);
@@ -905,6 +924,20 @@ mod tests {
             supports_cancellation: None,
             supports_streaming: None,
         });
+        builder.register_handler("read", Arc::new(ReadOnlyTool::new()));
+        builder.push_spec(ToolSpec {
+            name: "read".into(),
+            description: String::new(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Text,
+            execution_mode: ToolExecutionMode::ReadOnly,
+            capability_tags: vec![ToolCapabilityTag::ReadFiles],
+            supports_parallel: true,
+            preparation_feedback: ToolPreparationFeedback::None,
+            display_name: None,
+            supports_cancellation: None,
+            supports_streaming: None,
+        });
         builder.register_handler("write_tool", Arc::new(WriteTool::new()));
         builder.push_spec(ToolSpec {
             name: "write_tool".into(),
@@ -1082,7 +1115,8 @@ mod tests {
             Box::pin(async move { Err(format!("{n} denied")) })
         });
         let runtime = ToolRuntime::new(registry, checker);
-        // Read-only tool should succeed (no permission check)
+        // Read-only tools that do not access guarded resources should still run
+        // without a permission request.
         let read_call = ToolCall {
             id: "c1".into(),
             name: "read_tool".into(),
@@ -1111,6 +1145,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_checks_file_read_tools() {
+        let registry = make_registry();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = std::sync::Mutex::new(Some(tx));
+        let checker = PermissionChecker::new(move |request| {
+            tx.lock()
+                .expect("lock sender")
+                .take()
+                .expect("send once")
+                .send(request)
+                .expect("receiver still alive");
+            Box::pin(async { Err("read denied".into()) })
+        });
+        let runtime = ToolRuntime::new_with_context(
+            registry,
+            checker,
+            ToolRuntimeContext {
+                cwd: PathBuf::from("C:/workspace"),
+                ..ToolRuntimeContext::default()
+            },
+        );
+        let call = ToolCall {
+            id: "call-read".into(),
+            name: "read".into(),
+            input: serde_json::json!({ "filePath": "src/lib.rs" }),
+        };
+
+        let result = runtime.execute_single(&call, &None).await;
+        let request = rx.await.expect("permission request");
+
+        assert!(result.is_error);
+        assert_eq!(request.tool_name, "read");
+        assert_eq!(request.resource, devo_safety::ResourceKind::FileRead);
+        assert_eq!(
+            request.path,
+            Some(PathBuf::from("C:/workspace").join("src/lib.rs"))
+        );
+        assert!(result.content.into_string().contains("permission denied"));
+    }
+
+    #[tokio::test]
     async fn mutating_tool_permission_request_carries_context_and_summary() {
         let registry = make_registry();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1132,6 +1207,7 @@ mod tests {
                 turn_id: Some("turn-1".into()),
                 cwd: PathBuf::from("C:/workspace"),
                 agent_scope: ToolAgentScope::Parent,
+                agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                 collaboration_mode: devo_protocol::CollaborationMode::Build,
                 agent_coordinator: None,
                 local_web_search: None,
@@ -1216,6 +1292,105 @@ mod tests {
         );
 
         assert_eq!(path, Some(PathBuf::from("C:/workspace").join("src/lib.rs")));
+    }
+
+    #[test]
+    fn path_for_tool_input_defaults_workspace_searches_to_cwd() {
+        let path = path_for_tool_input(
+            "grep",
+            &serde_json::json!({ "pattern": "needle" }),
+            Path::new("C:/workspace"),
+        );
+
+        assert_eq!(path, Some(PathBuf::from("C:/workspace").join(".")));
+    }
+
+    #[test]
+    fn path_for_tool_input_code_search_uses_search_root() {
+        let default_root = path_for_tool_input(
+            "code_search",
+            &serde_json::json!({
+                "operation": "find_related",
+                "file_path": "src/main.rs",
+                "line": 1
+            }),
+            Path::new("C:/workspace"),
+        );
+        let explicit_root = path_for_tool_input(
+            "code_search",
+            &serde_json::json!({
+                "operation": "find_related",
+                "path": "crates/core",
+                "file_path": "src/main.rs",
+                "line": 1
+            }),
+            Path::new("C:/workspace"),
+        );
+
+        assert_eq!(
+            (default_root, explicit_root),
+            (
+                Some(PathBuf::from("C:/workspace").join(".")),
+                Some(PathBuf::from("C:/workspace").join("crates/core"))
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_code_search_permission_uses_search_root() {
+        let mut builder = ToolRegistryBuilder::new();
+        builder.register_handler("code_search", Arc::new(ReadOnlyTool::new()));
+        builder.push_spec(ToolSpec {
+            name: "code_search".into(),
+            description: String::new(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::StructuredJson,
+            execution_mode: ToolExecutionMode::ReadOnly,
+            capability_tags: vec![ToolCapabilityTag::SearchWorkspace],
+            supports_parallel: true,
+            preparation_feedback: ToolPreparationFeedback::None,
+            display_name: None,
+            supports_cancellation: None,
+            supports_streaming: None,
+        });
+        let registry = Arc::new(builder.build());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = std::sync::Mutex::new(Some(tx));
+        let checker = PermissionChecker::new(move |request| {
+            tx.lock()
+                .expect("lock sender")
+                .take()
+                .expect("send once")
+                .send(request)
+                .expect("receiver still alive");
+            Box::pin(async { Err("read denied".into()) })
+        });
+        let runtime = ToolRuntime::new_with_context(
+            registry,
+            checker,
+            ToolRuntimeContext {
+                cwd: PathBuf::from("C:/workspace"),
+                ..ToolRuntimeContext::default()
+            },
+        );
+        let call = ToolCall {
+            id: "call-code-search".into(),
+            name: "code_search".into(),
+            input: serde_json::json!({
+                "operation": "find_related",
+                "file_path": "src/main.rs",
+                "line": 1
+            }),
+        };
+
+        let result = runtime.execute_single(&call, &None).await;
+        let request = rx.await.expect("permission request");
+
+        assert!(result.is_error);
+        assert_eq!(request.tool_name, "code_search");
+        assert_eq!(request.resource, devo_safety::ResourceKind::FileRead);
+        assert_eq!(request.path, Some(PathBuf::from("C:/workspace").join(".")));
+        assert!(result.content.into_string().contains("permission denied"));
     }
 
     #[test]

@@ -20,7 +20,6 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
 use crate::events::TextItemKind;
-use crate::history_cell::HistoryCell;
 use crate::render::renderable::Renderable;
 
 use super::ChatWidget;

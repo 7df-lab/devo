@@ -495,6 +495,13 @@ impl ChatWidget {
                     false,
                 )
                 .transcript_lines(width),
+                TextItemKind::ResearchArtifact => history_cell::AgentMessageCell::new_with_prefix(
+                    titled_body_lines("Research", &text.text),
+                    Self::pending_dot_prefix(),
+                    "  ",
+                    false,
+                )
+                .transcript_lines(width),
             };
             extend_lines_with_separator(&mut lines, next);
         }
@@ -755,6 +762,7 @@ fn text_title(kind: TextItemKind) -> &'static str {
     match kind {
         TextItemKind::Assistant => "Assistant",
         TextItemKind::Reasoning => "Reasoning",
+        TextItemKind::ResearchArtifact => "Research",
     }
 }
 
@@ -762,6 +770,7 @@ fn transcript_kind_for_text(kind: TextItemKind) -> MonitorTranscriptKind {
     match kind {
         TextItemKind::Assistant => MonitorTranscriptKind::Assistant,
         TextItemKind::Reasoning => MonitorTranscriptKind::Reasoning,
+        TextItemKind::ResearchArtifact => MonitorTranscriptKind::Assistant,
     }
 }
 

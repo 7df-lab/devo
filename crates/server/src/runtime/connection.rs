@@ -173,6 +173,9 @@ impl ServerRuntime {
                 self.handle_command_exec_terminate(connection_id, id?, params)
                     .await,
             ),
+            Some(ClientMethod::MessageEditPrevious) => {
+                Some(self.handle_message_edit_previous(id?, params).await)
+            }
             // TODO: start a new user turn, maybe should change name to "turn/submit"
             Some(ClientMethod::TurnStart) => Some(self.handle_turn_start(id?, params).await),
             Some(ClientMethod::TurnShellCommand) => {

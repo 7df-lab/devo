@@ -24,6 +24,7 @@ mod model_preset;
 mod permission;
 mod query;
 mod replay;
+pub mod research;
 mod response_item;
 mod session;
 mod session_store;
@@ -84,6 +85,7 @@ pub use permission::*;
 pub use query::*;
 #[allow(ambiguous_glob_reexports)]
 pub use replay::*;
+pub use research::*;
 pub use response_item::*;
 pub use session::*;
 pub use session_store::*;

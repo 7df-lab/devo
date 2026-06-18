@@ -1,3 +1,11 @@
+//! Hidden goal-continuation prompts injected into resumed turns.
+//!
+//! These templates are control-plane context, not user-visible copy. User-provided
+//! objective text is XML-escaped before interpolation because the surrounding
+//! prompt format uses XML-like tags for structured hidden state.
+
+use std::borrow::Cow;
+
 use devo_protocol::{ThreadGoal, ThreadGoalStatus};
 
 const CONTINUATION_TEMPLATE: &str = include_str!("../prompts/goals/continuation.md");
@@ -33,8 +41,10 @@ fn render_goal_template(template: &str, goal: &ThreadGoal) -> String {
         .map(|value| (value - goal.tokens_used).max(0).to_string())
         .unwrap_or_else(|| "unlimited".to_string());
 
+    let objective = escape_xml_text(&goal.objective);
+
     template
-        .replace("{{ objective }}", &escape_xml_text(&goal.objective))
+        .replace("{{ objective }}", objective.as_ref())
         .replace("{{ tokens_used }}", &goal.tokens_used.to_string())
         .replace("{{ token_budget }}", &token_budget)
         .replace("{{ remaining_tokens }}", &remaining_tokens)
@@ -44,9 +54,14 @@ fn render_goal_template(template: &str, goal: &ThreadGoal) -> String {
         )
 }
 
-fn escape_xml_text(text: &str) -> String {
+fn escape_xml_text(text: &str) -> Cow<'_, str> {
+    let Some(first_escape_at) = text.find(['&', '<', '>', '"', '\'']) else {
+        return Cow::Borrowed(text);
+    };
+
     let mut escaped = String::with_capacity(text.len());
-    for ch in text.chars() {
+    escaped.push_str(&text[..first_escape_at]);
+    for ch in text[first_escape_at..].chars() {
         match ch {
             '&' => escaped.push_str("&amp;"),
             '<' => escaped.push_str("&lt;"),
@@ -56,7 +71,7 @@ fn escape_xml_text(text: &str) -> String {
             _ => escaped.push(ch),
         }
     }
-    escaped
+    Cow::Owned(escaped)
 }
 
 fn token_budget_exhausted(goal: &ThreadGoal) -> bool {
@@ -116,5 +131,12 @@ mod tests {
 
         assert!(prompt.contains("has reached its token budget"));
         assert!(prompt.contains("do not start new substantive work"));
+    }
+
+    #[test]
+    fn escape_xml_text_borrows_when_no_escape_is_needed() {
+        let escaped = escape_xml_text("plain objective");
+
+        assert!(matches!(escaped, Cow::Borrowed("plain objective")));
     }
 }

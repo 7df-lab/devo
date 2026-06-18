@@ -148,39 +148,73 @@ pub fn filter_reason(items: &[ResponseItem]) -> Vec<ResponseItem> {
 /// is removed from the sequence. This operates on a **mutable** slice
 /// since it is typically called before prompt building.
 pub fn pair_tool_call_items(items: &mut Vec<ResponseItem>) {
-    let mut tool_call_ids = None::<HashSet<String>>;
-    let mut tool_output_ids = None::<HashSet<String>>;
+    let mut tool_call_ids = None::<HashSet<&str>>;
+    let mut tool_output_ids = None::<HashSet<&str>>;
     for item in items.iter() {
         match item {
             ResponseItem::ToolCall { id, .. } => {
                 tool_call_ids
                     .get_or_insert_with(|| HashSet::with_capacity(items.len() / 2))
-                    .insert(id.clone());
+                    .insert(id.as_str());
             }
             ResponseItem::ToolCallOutput { tool_use_id, .. } => {
                 tool_output_ids
                     .get_or_insert_with(|| HashSet::with_capacity(items.len() / 2))
-                    .insert(tool_use_id.clone());
+                    .insert(tool_use_id.as_str());
             }
             _ => {}
         }
     }
     let Some(tool_call_ids) = tool_call_ids else {
-        if tool_output_ids.is_some() {
+        let has_tool_outputs = tool_output_ids.is_some();
+        drop(tool_output_ids);
+        if has_tool_outputs {
             items.retain(|item| !matches!(item, ResponseItem::ToolCallOutput { .. }));
         }
         return;
     };
     let Some(tool_output_ids) = tool_output_ids else {
+        drop(tool_call_ids);
         items.retain(|item| !matches!(item, ResponseItem::ToolCall { .. }));
         return;
     };
 
-    items.retain(|item| match item {
-        ResponseItem::ToolCall { id, .. } => tool_output_ids.contains(id),
-        ResponseItem::ToolCallOutput { tool_use_id, .. } => tool_call_ids.contains(tool_use_id),
-        _ => true,
+    if items
+        .iter()
+        .all(|item| item_has_required_tool_pair(item, &tool_call_ids, &tool_output_ids))
+    {
+        return;
+    }
+
+    // Compute keep decisions while the ID sets can borrow from `items`, then
+    // drop those borrows before mutating the vector with `retain`.
+    let retain_flags = items
+        .iter()
+        .map(|item| item_has_required_tool_pair(item, &tool_call_ids, &tool_output_ids))
+        .collect::<Vec<_>>();
+    drop(tool_call_ids);
+    drop(tool_output_ids);
+
+    let mut index = 0;
+    items.retain(|_| {
+        let keep = retain_flags[index];
+        index += 1;
+        keep
     });
+}
+
+fn item_has_required_tool_pair(
+    item: &ResponseItem,
+    tool_call_ids: &HashSet<&str>,
+    tool_output_ids: &HashSet<&str>,
+) -> bool {
+    match item {
+        ResponseItem::ToolCall { id, .. } => tool_output_ids.contains(id.as_str()),
+        ResponseItem::ToolCallOutput { tool_use_id, .. } => {
+            tool_call_ids.contains(tool_use_id.as_str())
+        }
+        _ => true,
+    }
 }
 
 #[cfg(test)]

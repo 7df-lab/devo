@@ -12,7 +12,7 @@ pub enum TaskState {
 }
 
 /// A notification emitted by a task that can be fed back into the conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskNotification {
     pub task_id: String,
     pub message: String,
@@ -20,7 +20,7 @@ pub struct TaskNotification {
 }
 
 /// Metadata describing a running or completed task.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskInfo {
     pub id: String,
     pub name: String,

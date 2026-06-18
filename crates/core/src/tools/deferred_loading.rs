@@ -455,19 +455,10 @@ fn default_preloaded_tools() -> BTreeSet<String> {
         "update_plan",
         "approval",
         "ToolSearch",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
-}
-
-fn default_deferred_tools() -> BTreeSet<String> {
-    [
         "web_search",
-        "fetch_url",
         "webfetch",
-        "multi_tool_use",
-        "goal_update",
+        "web_fetch",
+        "fetch_url",
         "spawn_agent",
         "send_message",
         "wait_agent",
@@ -477,6 +468,13 @@ fn default_deferred_tools() -> BTreeSet<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+fn default_deferred_tools() -> BTreeSet<String> {
+    ["multi_tool_use", "goal_update"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 fn first_line(description: &str) -> String {
@@ -534,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn classification_exposes_preloaded_and_loaded_deferred_only() {
+    fn classification_exposes_default_preloaded_tools() {
         let mut config = DeferredLoadingConfig::default();
         config.hidden.insert("secret_internal".to_string());
         let loaded = BTreeSet::from(["web_search".to_string()]);
@@ -547,38 +545,42 @@ mod tests {
                 .iter()
                 .map(|tool| &tool.name)
                 .collect::<Vec<_>>(),
-            vec!["read", "find", "grep", "ToolSearch", "web_search"]
-        );
-        assert_eq!(prompt.core, vec!["read", "find", "grep", "ToolSearch"]);
-        assert_eq!(prompt.loaded_deferred, vec!["web_search"]);
-        assert_eq!(
-            prompt.deferred,
             vec![
-                DeferredTool {
-                    name: "fetch_url".to_string(),
-                    description: "Fetch a URL.".to_string(),
-                },
-                DeferredTool {
-                    name: "spawn_agent".to_string(),
-                    description: "Spawn a subagent.".to_string(),
-                },
+                "read",
+                "find",
+                "grep",
+                "ToolSearch",
+                "web_search",
+                "fetch_url",
+                "spawn_agent"
             ]
         );
+        assert_eq!(
+            prompt.core,
+            vec![
+                "read",
+                "find",
+                "grep",
+                "ToolSearch",
+                "web_search",
+                "fetch_url",
+                "spawn_agent"
+            ]
+        );
+        assert_eq!(prompt.loaded_deferred, Vec::<String>::new());
+        assert_eq!(prompt.deferred, Vec::<DeferredTool>::new());
+        assert_eq!(prompt.reminder, None);
     }
 
     #[test]
-    fn reminder_uses_canonical_names_not_aliases() {
-        let prompt = assemble_deferred_tool_prompt(
-            &tools(),
-            &BTreeSet::new(),
-            &DeferredLoadingConfig::default(),
-        );
-        let reminder = prompt.reminder.expect("deferred reminder");
+    fn default_reminder_omits_preloaded_web_and_agent_tools() {
+        let mut config = DeferredLoadingConfig::default();
+        config.hidden.insert("secret_internal".to_string());
 
-        assert!(reminder.contains("  spawn_agent: Spawn a subagent."));
-        assert!(!reminder.contains("spawn_subagent"));
-        assert!(!reminder.contains("delegate"));
-        assert!(reminder.contains("select:<name>[,<name>...]"));
+        let prompt = assemble_deferred_tool_prompt(&tools(), &BTreeSet::new(), &config);
+
+        assert_eq!(prompt.reminder, None);
+        assert_eq!(prompt.deferred, Vec::<DeferredTool>::new());
     }
 
     #[test]
@@ -845,20 +847,19 @@ mod tests {
     }
 
     #[test]
-    fn prompt_metrics_report_deferred_savings() {
+    fn prompt_metrics_report_default_preloaded_tools() {
         let mut config = DeferredLoadingConfig::default();
         config.hidden.insert("secret_internal".to_string());
         let prompt = assemble_deferred_tool_prompt(&tools(), &BTreeSet::new(), &config);
 
-        assert_eq!(prompt.metrics.exposed_tool_count, 4);
-        assert_eq!(prompt.metrics.hidden_tool_count, 3);
+        assert_eq!(prompt.metrics.exposed_tool_count, 7);
+        assert_eq!(prompt.metrics.hidden_tool_count, 0);
         assert_eq!(prompt.metrics.loaded_deferred_tool_count, 0);
-        assert!(
-            prompt.metrics.baseline_tool_schema_tokens >= prompt.metrics.exposed_tool_schema_tokens
-        );
+        assert_eq!(prompt.metrics.deferred_reminder_tokens, 0);
+        assert_eq!(prompt.metrics.estimated_tokens_saved, 0);
         assert_eq!(
             prompt.metrics.estimated_net_tool_context_tokens,
-            prompt.metrics.exposed_tool_schema_tokens + prompt.metrics.deferred_reminder_tokens
+            prompt.metrics.exposed_tool_schema_tokens
         );
     }
 }

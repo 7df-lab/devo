@@ -13,6 +13,7 @@ use ratatui::text::Span;
 use crate::events::TextItemKind;
 use crate::history_cell;
 use crate::markdown::append_markdown;
+use crate::research_artifact_cell::ResearchArtifactCell;
 use crate::streaming::commit_tick::CommitTickScope;
 use crate::streaming::commit_tick::run_commit_tick;
 use crate::streaming::controller::StreamController;
@@ -30,7 +31,7 @@ pub(super) struct ActiveTextItem {
     stream_stall_warned: bool,
     delta_seq: u64,
     raw_text: String,
-    pub(super) cell: Option<history_cell::AgentMessageCell>,
+    pub(super) cell: Option<Box<dyn history_cell::HistoryCell>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,7 +97,7 @@ impl ChatWidget {
 
         let stream_controller = match kind {
             TextItemKind::Assistant => Some(StreamController::new(None, &self.session.cwd)),
-            TextItemKind::Reasoning => None,
+            TextItemKind::Reasoning | TextItemKind::ResearchArtifact => None,
         };
         let insert_index = self.active_text_item_insert_index(kind);
         tracing::debug!(
@@ -187,6 +188,9 @@ impl ChatWidget {
                 }
             }
             TextItemKind::Reasoning => {
+                self.active_text_items[index].raw_text.push_str(delta);
+            }
+            TextItemKind::ResearchArtifact => {
                 self.active_text_items[index].raw_text.push_str(delta);
             }
         }
@@ -319,6 +323,15 @@ impl ChatWidget {
                     self.add_markdown_history_with_status("Reasoning", &item.raw_text, status);
                 }
             }
+            TextItemKind::ResearchArtifact => {
+                if !item.raw_text.trim().is_empty() {
+                    self.add_history_entry_without_redraw(Box::new(ResearchArtifactCell::new(
+                        "Research",
+                        &item.raw_text,
+                        &self.session.cwd,
+                    )));
+                }
+            }
         }
         self.stream_chunking_policy.reset();
     }
@@ -338,7 +351,7 @@ impl ChatWidget {
 
     fn active_text_item_insert_index(&self, kind: TextItemKind) -> usize {
         match kind {
-            TextItemKind::Reasoning => self
+            TextItemKind::Reasoning | TextItemKind::ResearchArtifact => self
                 .active_text_items
                 .iter()
                 .position(|item| item.kind == TextItemKind::Assistant)
@@ -463,6 +476,9 @@ impl ChatWidget {
         let cell = match self.active_text_items[index].kind {
             TextItemKind::Assistant => self.assistant_active_cell(&self.active_text_items[index]),
             TextItemKind::Reasoning => self.reasoning_active_cell(&self.active_text_items[index]),
+            TextItemKind::ResearchArtifact => {
+                self.research_artifact_active_cell(&self.active_text_items[index])
+            }
         };
         self.active_text_items[index].cell = cell;
         self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
@@ -471,19 +487,23 @@ impl ChatWidget {
     fn assistant_active_cell(
         &self,
         item: &ActiveTextItem,
-    ) -> Option<history_cell::AgentMessageCell> {
+    ) -> Option<Box<dyn history_cell::HistoryCell>> {
         if let Some(controller) = &item.stream_controller {
             let lines = controller.live_lines();
             if lines.iter().any(|line| !Self::is_blank_line(line)) {
-                return Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
-                    lines,
-                    Self::pending_dot_prefix(),
-                    "  ",
-                    false,
+                return Some(Box::new(
+                    history_cell::AgentMessageCell::new_ai_response_with_prefix(
+                        lines,
+                        Self::pending_dot_prefix(),
+                        "  ",
+                        false,
+                    ),
                 ));
             }
         } else if !item.raw_text.trim().is_empty() {
-            return Some(self.bulleted_markdown_cell(&item.raw_text, Self::pending_dot_prefix()));
+            return Some(Box::new(
+                self.bulleted_markdown_cell(&item.raw_text, Self::pending_dot_prefix()),
+            ));
         }
         None
     }
@@ -491,7 +511,7 @@ impl ChatWidget {
     fn reasoning_active_cell(
         &self,
         item: &ActiveTextItem,
-    ) -> Option<history_cell::AgentMessageCell> {
+    ) -> Option<Box<dyn history_cell::HistoryCell>> {
         if item.raw_text.trim().is_empty() {
             return None;
         }
@@ -510,12 +530,29 @@ impl ChatWidget {
                 Span::styled("Thinking: ", Self::reasoning_heading_style()),
             );
         }
-        Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
-            body_lines,
-            Self::reasoning_dot_prefix(item.status),
-            "  ",
-            false,
+        Some(Box::new(
+            history_cell::AgentMessageCell::new_ai_response_with_prefix(
+                body_lines,
+                Self::reasoning_dot_prefix(item.status),
+                "  ",
+                false,
+            ),
         ))
+    }
+
+    fn research_artifact_active_cell(
+        &self,
+        item: &ActiveTextItem,
+    ) -> Option<Box<dyn history_cell::HistoryCell>> {
+        if item.raw_text.trim().is_empty() {
+            return None;
+        }
+
+        Some(Box::new(ResearchArtifactCell::new(
+            "Research",
+            item.raw_text.clone(),
+            &self.session.cwd,
+        )))
     }
 }
 

@@ -50,36 +50,35 @@ pub fn load_skills_from_roots<I>(roots: I, rules: &SkillConfigRules) -> SkillLoa
 where
     I: IntoIterator<Item = SkillRoot>,
 {
+    let roots = roots.into_iter();
+    let (lower, upper) = roots.size_hint();
+    let root_capacity = upper.unwrap_or(lower);
     let mut outcome = SkillLoadOutcome::default();
-    let mut skill_roots = Vec::new();
+    let mut skill_roots = Vec::with_capacity(root_capacity);
     let mut skill_root_by_path = HashMap::new();
 
     for root in roots {
         let root_path = canonicalize_for_identity(&root.path);
         let skills_before_root = outcome.skills.len();
         discover_skills_under_root(&root, &root_path, &mut outcome);
+        if outcome.skills.len() > skills_before_root && !skill_roots.contains(&root_path) {
+            skill_roots.push(root_path.clone());
+        }
         for skill in &outcome.skills[skills_before_root..] {
-            if !skill_roots.contains(&root_path) {
-                skill_roots.push(root_path.clone());
-            }
             skill_root_by_path
                 .entry(skill.path_to_skills_md.clone())
                 .or_insert_with(|| root_path.clone());
         }
     }
 
-    let mut seen_paths = HashSet::new();
+    let mut seen_paths = HashSet::with_capacity(outcome.skills.len());
     outcome
         .skills
         .retain(|skill| seen_paths.insert(skill.path_to_skills_md.clone()));
-    let retained_skill_paths = outcome
-        .skills
-        .iter()
-        .map(|skill| skill.path_to_skills_md.clone())
-        .collect::<HashSet<_>>();
-    skill_root_by_path.retain(|path, _| retained_skill_paths.contains(path));
-    let used_roots = skill_root_by_path.values().cloned().collect::<HashSet<_>>();
-    skill_roots.retain(|root| used_roots.contains(root));
+    skill_root_by_path.retain(|path, _| seen_paths.contains(path));
+    let mut used_roots = HashSet::with_capacity(skill_root_by_path.len());
+    used_roots.extend(skill_root_by_path.values().map(|root| root.as_path()));
+    skill_roots.retain(|root| used_roots.contains(root.as_path()));
     outcome.skill_roots = skill_roots;
     outcome.skill_root_by_path = Arc::new(skill_root_by_path);
     outcome.skills.sort_by(|left, right| {
@@ -140,6 +139,10 @@ fn discover_skills_under_root(root: &SkillRoot, root_path: &Path, outcome: &mut 
                 continue;
             }
             let path = entry.path();
+            let canonical_path = canonicalize_for_identity(&path);
+            if !canonical_path.starts_with(root_path) {
+                continue;
+            }
             let metadata = match entry.metadata() {
                 Ok(metadata) => metadata,
                 Err(error) => {
@@ -216,7 +219,7 @@ fn parse_skill_file(
         .and_then(|name| name.to_str())
         .unwrap_or("unknown-skill")
         .to_string();
-    let (frontmatter, _body) = parse_frontmatter(path, &contents, &fallback_name)?;
+    let frontmatter = parse_frontmatter(path, &contents, &fallback_name)?;
     let metadata = load_metadata_file(parent)?;
 
     let canonical_path = canonicalize_for_identity(path);
@@ -237,24 +240,18 @@ fn parse_frontmatter(
     path: &Path,
     contents: &str,
     fallback_name: &str,
-) -> Result<(ParsedFrontmatter, String), String> {
+) -> Result<ParsedFrontmatter, String> {
     let Some(stripped) = contents.strip_prefix("---") else {
-        return Ok((
-            ParsedFrontmatter {
-                name: validate_name(fallback_name)?,
-                description: format!("Skill discovered at {}", path.display()),
-                short_description: None,
-            },
-            contents.to_string(),
-        ));
+        return Ok(ParsedFrontmatter {
+            name: validate_name(fallback_name)?,
+            description: format!("Skill discovered at {}", path.display()),
+            short_description: None,
+        });
     };
     let Some(end_index) = stripped.find("\n---") else {
         return Err("missing YAML frontmatter terminator".to_string());
     };
     let raw = stripped[..end_index].trim();
-    let body = stripped[end_index + 4..]
-        .trim_start_matches(['\r', '\n'])
-        .to_string();
     let frontmatter: SkillFrontmatter =
         serde_yaml::from_str(raw).map_err(|error| format!("invalid YAML: {error}"))?;
     let name = validate_name(
@@ -276,14 +273,11 @@ fn parse_frontmatter(
             MAX_SHORT_DESCRIPTION_LEN,
         )?;
     }
-    Ok((
-        ParsedFrontmatter {
-            name,
-            description,
-            short_description: frontmatter.metadata.short_description,
-        },
-        body,
-    ))
+    Ok(ParsedFrontmatter {
+        name,
+        description,
+        short_description: frontmatter.metadata.short_description,
+    })
 }
 
 fn validate_name(name: &str) -> Result<String, String> {
@@ -318,8 +312,8 @@ fn load_metadata_file(package_root: &Path) -> Result<LoadedSkillMetadata, String
 }
 
 fn build_implicit_indexes(outcome: &mut SkillLoadOutcome) {
-    let mut by_scripts_dir = HashMap::new();
-    let mut by_doc_path = HashMap::new();
+    let mut by_scripts_dir = HashMap::with_capacity(outcome.skills.len());
+    let mut by_doc_path = HashMap::with_capacity(outcome.skills.len());
     for skill in &outcome.skills {
         let Some(package_root) = skill.path_to_skills_md.parent() else {
             continue;
@@ -332,6 +326,86 @@ fn build_implicit_indexes(outcome: &mut SkillLoadOutcome) {
     }
     outcome.implicit_skills_by_scripts_dir = Arc::new(by_scripts_dir);
     outcome.implicit_skills_by_doc_path = Arc::new(by_doc_path);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
+
+    use super::SkillRoot;
+    use super::load_skills_from_roots;
+    use crate::config_rules::SkillConfigRules;
+    use crate::model::SkillScope;
+
+    fn write_skill(path: &Path, name: &str) {
+        std::fs::create_dir_all(path).expect("create skill dir");
+        std::fs::write(
+            path.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Test skill\n---\n\nBody\n"),
+        )
+        .expect("write skill");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_does_not_follow_symlinked_directory_outside_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("skills");
+        let outside_skill = tmp.path().join("outside").join("escape");
+        write_skill(&outside_skill, "escape");
+        std::fs::create_dir_all(&root).expect("create root");
+        symlink(
+            outside_skill.parent().expect("outside parent"),
+            root.join("linked-outside"),
+        )
+        .expect("create symlink");
+
+        let outcome = load_skills_from_roots(
+            [SkillRoot {
+                path: root,
+                scope: SkillScope::Repo,
+                plugin_id: None,
+            }],
+            &SkillConfigRules::default(),
+        );
+
+        assert_eq!(outcome.skills, vec![]);
+        assert_eq!(outcome.errors, vec![]);
+        assert_eq!(outcome.skill_roots, Vec::<PathBuf>::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_does_not_follow_symlinked_skill_file_outside_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("skills");
+        let package = root.join("linked-file");
+        let outside_skill = tmp.path().join("outside").join("escape");
+        write_skill(&outside_skill, "escape");
+        std::fs::create_dir_all(&package).expect("create package");
+        symlink(outside_skill.join("SKILL.md"), package.join("SKILL.md")).expect("create symlink");
+
+        let outcome = load_skills_from_roots(
+            [SkillRoot {
+                path: root,
+                scope: SkillScope::Repo,
+                plugin_id: None,
+            }],
+            &SkillConfigRules::default(),
+        );
+
+        assert_eq!(outcome.skills, vec![]);
+        assert_eq!(outcome.errors, vec![]);
+        assert_eq!(outcome.skill_roots, Vec::<PathBuf>::new());
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -435,7 +509,7 @@ impl TryFrom<Dependencies> for SkillDependencies {
     type Error = String;
 
     fn try_from(value: Dependencies) -> Result<Self, Self::Error> {
-        let mut tools = Vec::new();
+        let mut tools = Vec::with_capacity(value.tools.len());
         for tool in value.tools {
             tools.push(tool.try_into()?);
         }

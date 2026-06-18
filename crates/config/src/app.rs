@@ -11,6 +11,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use devo_util_git::get_git_repo_root;
+use devo_util_paths::APP_CONFIG_DIR_NAME;
+use devo_util_paths::APP_CONFIG_FILE_NAME;
 use devo_util_paths::FileSystemConfigPathResolver;
 
 use crate::AUTH_CONFIG_FILE_NAME;
@@ -26,6 +28,7 @@ use crate::OAuthCredentialsStoreMode;
 use crate::ProviderConfigError;
 use crate::ProviderConfigSection;
 use crate::ProviderHttpConfig;
+use crate::ResearchConfig;
 use crate::ResolvedProviderSettings;
 use crate::ServerConfig;
 use crate::SkillsConfig;
@@ -66,6 +69,9 @@ pub struct AppConfig {
     /// Tool-specific runtime configuration.
     #[serde(default, skip_serializing_if = "ToolsConfig::is_empty")]
     pub tools: ToolsConfig,
+    /// Server-owned deep research workflow defaults.
+    #[serde(default, skip_serializing_if = "ResearchConfig::is_default")]
+    pub research: ResearchConfig,
     /// External lifecycle hooks keyed by event name.
     #[serde(default, skip_serializing_if = "HooksConfig::is_empty")]
     pub hooks: HooksConfig,
@@ -158,6 +164,7 @@ impl Default for AppConfig {
             mcp_oauth_credentials_store: Some(OAuthCredentialsStoreMode::default()),
             mcp: McpConfig::default(),
             tools: ToolsConfig::default(),
+            research: ResearchConfig::default(),
             hooks: HooksConfig::default(),
             provider: ProviderConfigSection::default(),
             provider_http: ProviderHttpConfig::default(),
@@ -402,15 +409,40 @@ fn validate_provider_model_binding(
 }
 
 fn credential_id_for_provider(provider_id: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(provider_id.len());
     for ch in provider_id.chars() {
         if ch.is_ascii_alphanumeric() {
             out.push(ch.to_ascii_lowercase());
-        } else if !out.ends_with('_') {
+        } else if !out.is_empty() && !out.ends_with('_') {
             out.push('_');
         }
     }
-    format!("{}_api_key", out.trim_matches('_'))
+    if out.ends_with('_') {
+        out.pop();
+    }
+    out.push_str("_api_key");
+    out
+}
+
+#[cfg(test)]
+mod app_tests {
+    use pretty_assertions::assert_eq;
+
+    use super::credential_id_for_provider;
+
+    #[test]
+    fn credential_id_normalizes_provider_id_without_extra_allocation_suffix() {
+        let cases = [
+            ("OpenRouter", "openrouter_api_key"),
+            ("deep-seek", "deep_seek_api_key"),
+            ("__custom/provider__", "custom_provider_api_key"),
+            ("---", "_api_key"),
+        ];
+
+        for (provider_id, expected) in cases {
+            assert_eq!(credential_id_for_provider(provider_id), expected);
+        }
+    }
 }
 
 impl AppConfig {
@@ -523,12 +555,13 @@ impl FileSystemAppConfigLoader {
     }
 
     fn user_config_path(&self) -> PathBuf {
-        FileSystemConfigPathResolver::new(self.config_folder_home.clone()).user_config_file()
+        self.config_folder_home.join(APP_CONFIG_FILE_NAME)
     }
 
     fn project_config_path(&self, workspace_root: &Path) -> PathBuf {
-        FileSystemConfigPathResolver::new(self.config_folder_home.clone())
-            .project_config_file(workspace_root)
+        workspace_root
+            .join(APP_CONFIG_DIR_NAME)
+            .join(APP_CONFIG_FILE_NAME)
     }
 }
 
@@ -543,7 +576,10 @@ impl AppConfigLoader for FileSystemAppConfigLoader {
         let user_path = self.user_config_path();
         if user_path.exists() {
             let user_config = read_config_value(&user_path)?;
-            provider_config.merge_overlay(provider_section_from_value(&user_path, &user_config)?);
+            provider_config.merge_overlay(
+                provider_section_from_value(&user_path, &user_config)?,
+                &user_config,
+            );
             merge_toml_values(&mut merged, user_config);
         }
 
@@ -551,13 +587,19 @@ impl AppConfigLoader for FileSystemAppConfigLoader {
             let project_path = self.project_config_path(workspace_root);
             if project_path.exists() {
                 let project_config = read_config_value(&project_path)?;
-                provider_config
-                    .merge_overlay(provider_section_from_value(&project_path, &project_config)?);
+                provider_config.merge_overlay(
+                    provider_section_from_value(&project_path, &project_config)?,
+                    &project_config,
+                );
                 merge_toml_values(&mut merged, project_config);
             }
         }
 
-        merge_toml_values(&mut merged, self.cli_overrides.clone());
+        provider_config.merge_overlay(
+            provider_section_from_value(Path::new("<cli overrides>"), &self.cli_overrides)?,
+            &self.cli_overrides,
+        );
+        merge_toml_values_ref(&mut merged, &self.cli_overrides);
 
         let mut config: AppConfig =
             merged
@@ -584,6 +626,21 @@ fn merge_toml_values(base: &mut toml::Value, overlay: toml::Value) {
             }
         }
         (base_value, overlay_value) => *base_value = overlay_value,
+    }
+}
+
+fn merge_toml_values_ref(base: &mut toml::Value, overlay: &toml::Value) {
+    match (base, overlay) {
+        (toml::Value::Table(base_table), toml::Value::Table(overlay_table)) => {
+            for (key, value) in overlay_table {
+                if let Some(existing) = base_table.get_mut(key) {
+                    merge_toml_values_ref(existing, value);
+                } else {
+                    base_table.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        (base_value, overlay_value) => *base_value = overlay_value.clone(),
     }
 }
 

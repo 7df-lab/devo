@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -71,8 +72,7 @@ impl ToolHandler for SkillHandler {
             .map_err(|e| ToolCallError::ExecutionFailed(format!("Failed to read skill: {e}")))?;
 
         let dir = found.parent().unwrap_or(Path::new("")).to_path_buf();
-        let files = sample_files(&dir);
-        let file_list = files.join("\n");
+        let file_list = sample_file_list(&dir);
 
         Ok(ToolResult::success(
             ToolResultContent::Text(format!(
@@ -103,19 +103,44 @@ fn find_skill(root: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-fn sample_files(dir: &Path) -> Vec<String> {
-    let mut files = Vec::new();
+fn sample_file_list(dir: &Path) -> String {
+    let mut files = String::new();
     if let Ok(read) = std::fs::read_dir(dir) {
+        let mut count = 0usize;
         for entry in read.flatten() {
             let path = entry.path();
             if path.file_name().and_then(|x| x.to_str()) == Some("SKILL.md") {
                 continue;
             }
-            files.push(format!("<file>{}</file>", path.display()));
-            if files.len() >= 10 {
+            if count > 0 {
+                files.push('\n');
+            }
+            let _ = write!(files, "<file>{}</file>", path.display());
+            count += 1;
+            if count >= 10 {
                 break;
             }
         }
     }
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn sample_file_list_excludes_skill_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("SKILL.md"), "skill").expect("write skill");
+        let reference_path = dir.path().join("reference.md");
+        std::fs::write(&reference_path, "reference").expect("write reference");
+
+        assert_eq!(
+            sample_file_list(dir.path()),
+            format!("<file>{}</file>", reference_path.display())
+        );
+    }
 }

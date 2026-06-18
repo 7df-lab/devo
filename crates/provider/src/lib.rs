@@ -1,3 +1,9 @@
+//! Provider adapters and routing for model request execution.
+//!
+//! This crate keeps wire-format details for OpenAI-family, Anthropic, and
+//! provider-compatible APIs behind a small router interface so the runtime can
+//! work with normalized protocol events.
+
 pub mod anthropic;
 mod dsml;
 pub mod error;

@@ -62,9 +62,10 @@ use crate::session::SessionHistoryItem;
 use crate::session::SessionMetadata;
 use crate::turn::TurnMetadata;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PersistedTurnItem {
     pub(crate) turn_id: TurnId,
+    pub(crate) turn_kind: devo_core::TurnKind,
     pub(crate) item_id: devo_core::ItemId,
     pub(crate) turn_item: devo_core::TurnItem,
 }

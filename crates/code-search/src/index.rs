@@ -7,6 +7,7 @@
 //! searches may use HNSW for candidate generation, but exact cosine scores are
 //! recomputed before ranking so the public behavior remains stable.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use bm25::{Document, SearchEngine, SearchEngineBuilder, Tokenizer};
@@ -276,11 +277,12 @@ impl SearchIndex {
     /// Paths are normalized with `/` separators so workspace-relative paths from
     /// tool input match cached paths on Windows and Unix.
     pub fn find_source_chunk(&self, file_path: &Path, line: usize) -> Option<usize> {
-        let normalized = file_path.to_string_lossy().replace('\\', "/");
+        let source_path = normalize_path_separators(file_path.to_string_lossy());
         self.chunks.iter().position(|chunk| {
             chunk.start_line <= line
                 && line <= chunk.end_line
-                && chunk.file_path.to_string_lossy().replace('\\', "/") == normalized
+                && normalize_path_separators(chunk.file_path.to_string_lossy()).as_ref()
+                    == source_path.as_ref()
         })
     }
 
@@ -314,6 +316,14 @@ impl SearchIndex {
             bm25,
             stats,
         })
+    }
+}
+
+fn normalize_path_separators(path: Cow<'_, str>) -> Cow<'_, str> {
+    if path.contains('\\') {
+        Cow::Owned(path.replace('\\', "/"))
+    } else {
+        path
     }
 }
 
@@ -413,6 +423,29 @@ mod tests {
             Some(0)
         );
         assert_eq!(index.find_source_chunk(Path::new("src/lib.rs"), 13), None);
+    }
+
+    #[test]
+    fn source_chunk_lookup_normalizes_backslash_separators() {
+        let index = index_with_chunks_and_embeddings(vec![(
+            Chunk {
+                content: "fn parse() {}".to_string(),
+                file_path: PathBuf::from(r"src\lib.rs"),
+                start_line: 10,
+                end_line: 12,
+                language: "rust".to_string(),
+            },
+            vec![1.0],
+        )]);
+
+        assert_eq!(
+            index.find_source_chunk(Path::new("src/lib.rs"), 11),
+            Some(0)
+        );
+        assert_eq!(
+            index.find_source_chunk(Path::new(r"src\lib.rs"), 11),
+            Some(0)
+        );
     }
 
     #[test]

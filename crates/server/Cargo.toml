@@ -25,6 +25,7 @@ devo-util-fuzzy = { workspace = true }
 devo-util-git = { workspace = true }
 devo-util-paths = { workspace = true }
 devo-util-shell-command = { workspace = true }
+diffy = { workspace = true }
 futures = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

@@ -15,6 +15,7 @@ pub enum SlashCommand {
     Exit,
     Btw,
     Goal,
+    Research,
 }
 
 impl SlashCommand {
@@ -35,6 +36,7 @@ impl SlashCommand {
                 "Ask a quick side question without interrupting the main conversation"
             }
             SlashCommand::Goal => "set or view the goal for a long-running task",
+            SlashCommand::Research => "run a deep research workflow",
             SlashCommand::Exit => "exit Devo",
         }
     }
@@ -54,6 +56,7 @@ impl SlashCommand {
             SlashCommand::Diff => "diff",
             SlashCommand::Btw => "btw",
             SlashCommand::Goal => "goal",
+            SlashCommand::Research => "research",
             SlashCommand::Exit => "exit",
         }
     }
@@ -61,7 +64,7 @@ impl SlashCommand {
     pub fn supports_inline_args(self) -> bool {
         matches!(
             self,
-            SlashCommand::Model | SlashCommand::Btw | SlashCommand::Goal
+            SlashCommand::Model | SlashCommand::Btw | SlashCommand::Goal | SlashCommand::Research
         )
     }
 
@@ -69,6 +72,7 @@ impl SlashCommand {
         match self {
             SlashCommand::Btw => Some("<side conversation message>"),
             SlashCommand::Goal => Some("<objective for autonomous work>"),
+            SlashCommand::Research => Some("<research question>"),
             SlashCommand::Theme
             | SlashCommand::Model
             | SlashCommand::Skills
@@ -92,6 +96,7 @@ impl SlashCommand {
                 | SlashCommand::Compact
                 | SlashCommand::Diff
                 | SlashCommand::New
+                | SlashCommand::Research
                 | SlashCommand::Resume
         )
     }
@@ -115,6 +120,7 @@ impl std::str::FromStr for SlashCommand {
             "diff" => Ok(Self::Diff),
             "btw" => Ok(Self::Btw),
             "goal" => Ok(Self::Goal),
+            "research" => Ok(Self::Research),
             "exit" => Ok(Self::Exit),
             _ => Err(()),
         }
@@ -135,6 +141,7 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
         ("clear", SlashCommand::Clear),
         ("diff", SlashCommand::Diff),
         ("goal", SlashCommand::Goal),
+        ("research", SlashCommand::Research),
         ("btw", SlashCommand::Btw),
         ("exit", SlashCommand::Exit),
     ]
@@ -169,6 +176,27 @@ mod tests {
             built_in_slash_commands()
                 .iter()
                 .any(|(name, command)| *name == "goal" && *command == SlashCommand::Goal)
+        );
+    }
+
+    #[test]
+    fn research_slash_command_parses_and_accepts_inline_args() {
+        // Trace: L2-DES-RESEARCH-001
+        // Verifies: /research is discoverable and accepts a question parameter.
+        assert_eq!(
+            "research".parse::<SlashCommand>(),
+            Ok(SlashCommand::Research)
+        );
+        assert!(SlashCommand::Research.supports_inline_args());
+        assert!(!SlashCommand::Research.available_during_task());
+        assert_eq!(
+            SlashCommand::Research.parameter_hint(),
+            Some("<research question>")
+        );
+        assert!(
+            built_in_slash_commands()
+                .iter()
+                .any(|(name, command)| *name == "research" && *command == SlashCommand::Research)
         );
     }
 

@@ -1,4 +1,5 @@
 use std::io::IsTerminal;
+use std::io::Write as _;
 use std::path::Path;
 
 use clap::Parser;
@@ -6,7 +7,6 @@ use devo_file_search::Cli;
 use devo_file_search::FileMatch;
 use devo_file_search::Reporter;
 use devo_file_search::run_main;
-use serde_json::json;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,8 +28,12 @@ impl Reporter for StdioReporter {
     fn report_match(&self, file_match: &FileMatch) {
         if self.write_output_as_json {
             #[allow(clippy::unwrap_used)]
-            let json = serde_json::to_string(file_match).unwrap();
-            println!("{json}");
+            {
+                let stdout = std::io::stdout();
+                let mut stdout = stdout.lock();
+                serde_json::to_writer(&mut stdout, file_match).unwrap();
+                stdout.write_all(b"\n").unwrap();
+            }
         } else if self.show_indices {
             #[allow(clippy::expect_used)]
             let indices = file_match
@@ -57,16 +61,13 @@ impl Reporter for StdioReporter {
             }
             println!();
         } else {
-            println!("{}", file_match.path.to_string_lossy());
+            println!("{}", file_match.path.display());
         }
     }
 
     fn warn_matches_truncated(&self, total_match_count: usize, shown_match_count: usize) {
         if self.write_output_as_json {
-            let value = json!({"matches_truncated": true});
-            #[allow(clippy::unwrap_used)]
-            let json = serde_json::to_string(&value).unwrap();
-            println!("{json}");
+            println!(r#"{{"matches_truncated":true}}"#);
         } else {
             eprintln!(
                 "Warning: showing {shown_match_count} out of {total_match_count} results. Provide a more specific pattern or increase the --limit.",
@@ -77,7 +78,7 @@ impl Reporter for StdioReporter {
     fn warn_no_search_pattern(&self, search_directory: &Path) {
         eprintln!(
             "No search pattern specified. Showing the contents of the current directory ({}):",
-            search_directory.to_string_lossy()
+            search_directory.display()
         );
     }
 }

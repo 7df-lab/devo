@@ -48,18 +48,17 @@ fn parse_with_cached_process(
 ) -> PowershellParseOutcome {
     // `powershell.exe` and `pwsh.exe` do not accept the same language surface, so each
     // executable keeps its own parser process and request stream.
-    let parser_key = executable.to_string();
     for attempt in 0..=1 {
-        if !parser_processes.contains_key(&parser_key) {
+        if !parser_processes.contains_key(executable) {
             match PowershellParserProcess::spawn(executable) {
                 Ok(process) => {
-                    parser_processes.insert(parser_key.clone(), process);
+                    parser_processes.insert(executable.to_owned(), process);
                 }
                 Err(_) => return PowershellParseOutcome::Failed,
             }
         }
 
-        let Some(parser_process) = parser_processes.get_mut(&parser_key) else {
+        let Some(parser_process) = parser_processes.get_mut(executable) else {
             return PowershellParseOutcome::Failed;
         };
         let parse_result = parser_process.parse(script);
@@ -69,7 +68,7 @@ fn parse_with_cached_process(
                 // The common failure mode here is that a previously cached child exited or its
                 // stdio stream became unusable between requests. Drop that process and retry once
                 // with a fresh child before giving up.
-                parser_processes.remove(&parser_key);
+                parser_processes.remove(executable);
             }
             Err(_) => return PowershellParseOutcome::Failed,
         }

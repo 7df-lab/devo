@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, types::Type};
 use serde_json;
 
 use devo_protocol::{
@@ -196,7 +196,7 @@ impl Database {
             };
 
             Ok(SessionMetadata {
-                session_id: SessionId::from_str(&id_str).unwrap_or_default(),
+                session_id: parse_session_id_column(id_str, 0)?,
                 cwd: PathBuf::from(&cwd_str),
                 created_at: Utc
                     .timestamp_opt(created_at, 0)
@@ -264,7 +264,7 @@ impl Database {
                 };
 
                 Ok(SessionMetadata {
-                    session_id: SessionId::from_str(&id_str).unwrap_or_default(),
+                    session_id: parse_session_id_column(id_str, 0)?,
                     cwd: PathBuf::from(&cwd_str),
                     created_at: Utc
                         .timestamp_opt(created_at, 0)
@@ -560,9 +560,20 @@ impl Database {
     }
 }
 
+fn parse_session_id_column(id: String, column: usize) -> rusqlite::Result<SessionId> {
+    SessionId::from_str(&id).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
     fn test_db() -> (Database, TempDir) {
@@ -624,6 +635,38 @@ mod tests {
         let sessions = db.list_sessions().expect("list");
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].session_id, meta2.session_id);
+    }
+
+    #[test]
+    fn list_sessions_rejects_invalid_persisted_session_id() {
+        let (db, _dir) = test_db();
+        let conn = db.conn.lock().expect("database mutex poisoned");
+        conn.execute(
+            "INSERT INTO sessions (id, title, title_state, cwd, ephemeral, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                "",
+                "Corrupt Session",
+                "provisional",
+                "/tmp",
+                0_i32,
+                1_i64,
+                1_i64
+            ],
+        )
+        .expect("insert corrupt session");
+        drop(conn);
+
+        let error = db
+            .list_sessions()
+            .expect_err("invalid persisted session id should fail closed");
+        let message = error
+            .chain()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(message.contains("invalid length: found 0"), "{message}");
     }
 
     #[test]

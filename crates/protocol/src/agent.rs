@@ -12,6 +12,15 @@ pub enum AgentToolPolicy {
     #[default]
     Inherit,
     DenyAll,
+    DeepResearch,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentContextMode {
+    #[default]
+    CodingAgent,
+    DeepResearch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +33,8 @@ pub struct SpawnAgentParams {
     pub max_turns: Option<u32>,
     #[serde(default)]
     pub tool_policy: AgentToolPolicy,
+    #[serde(default)]
+    pub context_mode: AgentContextMode,
     #[serde(default)]
     pub ephemeral: bool,
 }
@@ -153,6 +164,7 @@ mod tests {
                 fork_turns: Some("all".to_string()),
                 max_turns: None,
                 tool_policy: AgentToolPolicy::Inherit,
+                context_mode: AgentContextMode::CodingAgent,
                 ephemeral: false,
             },
             "result": SpawnAgentResult {

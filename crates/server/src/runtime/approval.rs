@@ -1,5 +1,8 @@
 use super::*;
 
+use std::path::Component;
+use std::path::Path;
+
 enum PolicyAuthorization {
     Allow,
     Ask,
@@ -131,7 +134,7 @@ impl ServerRuntime {
         if self.approval_cache_allows(session_id, &request).await {
             return Ok(());
         }
-        match self.policy_decision(&permission_profile, &request) {
+        match policy_decision(&permission_profile, &request) {
             PolicyAuthorization::Allow => Ok(()),
             PolicyAuthorization::Ask => {
                 if let Some(reason) = self
@@ -323,52 +326,6 @@ impl ServerRuntime {
         .await;
     }
 
-    fn policy_decision(
-        &self,
-        profile: &devo_safety::RuntimePermissionProfile,
-        request: &ToolPermissionRequest,
-    ) -> PolicyAuthorization {
-        if profile.auto_approve {
-            return PolicyAuthorization::Allow;
-        }
-        if request_forces_approval(request) {
-            return PolicyAuthorization::Ask;
-        }
-        match request.resource {
-            devo_safety::ResourceKind::Network => {
-                if profile.allow_network {
-                    PolicyAuthorization::Allow
-                } else {
-                    PolicyAuthorization::Ask
-                }
-            }
-            devo_safety::ResourceKind::ShellExec => {
-                if profile.allow_shell_commands {
-                    PolicyAuthorization::Allow
-                } else {
-                    PolicyAuthorization::Ask
-                }
-            }
-            devo_safety::ResourceKind::FileWrite => {
-                let Some(path) = request.path.as_ref() else {
-                    return PolicyAuthorization::Ask;
-                };
-                if profile
-                    .writable_roots
-                    .iter()
-                    .any(|root| path.starts_with(root))
-                {
-                    PolicyAuthorization::Allow
-                } else {
-                    PolicyAuthorization::Ask
-                }
-            }
-            devo_safety::ResourceKind::FileRead | devo_safety::ResourceKind::Custom(_) => {
-                PolicyAuthorization::Allow
-            }
-        }
-    }
-
     async fn approval_cache_allows(
         &self,
         session_id: SessionId,
@@ -456,6 +413,57 @@ impl ServerRuntime {
             Ok(ApprovalDecisionValue::Cancel) => Err("cancelled by user".to_string()),
             Err(_) => Err("approval channel closed".to_string()),
         }
+    }
+}
+
+fn policy_decision(
+    profile: &devo_safety::RuntimePermissionProfile,
+    request: &ToolPermissionRequest,
+) -> PolicyAuthorization {
+    if profile.auto_approve {
+        return PolicyAuthorization::Allow;
+    }
+    if request_forces_approval(request) {
+        return PolicyAuthorization::Ask;
+    }
+    match request.resource {
+        devo_safety::ResourceKind::Network => {
+            if profile.allow_network {
+                PolicyAuthorization::Allow
+            } else {
+                PolicyAuthorization::Ask
+            }
+        }
+        devo_safety::ResourceKind::ShellExec => {
+            if profile.allow_shell_commands {
+                PolicyAuthorization::Allow
+            } else {
+                PolicyAuthorization::Ask
+            }
+        }
+        devo_safety::ResourceKind::FileRead => {
+            let Some(path) = request.path.as_ref() else {
+                return PolicyAuthorization::Ask;
+            };
+            if path_matches_any_prefix(path, &profile.readable_roots)
+                || path_matches_any_prefix(path, &profile.writable_roots)
+            {
+                PolicyAuthorization::Allow
+            } else {
+                PolicyAuthorization::Ask
+            }
+        }
+        devo_safety::ResourceKind::FileWrite => {
+            let Some(path) = request.path.as_ref() else {
+                return PolicyAuthorization::Ask;
+            };
+            if path_matches_any_prefix(path, &profile.writable_roots) {
+                PolicyAuthorization::Allow
+            } else {
+                PolicyAuthorization::Ask
+            }
+        }
+        devo_safety::ResourceKind::Custom(_) => PolicyAuthorization::Allow,
     }
 }
 
@@ -558,21 +566,48 @@ fn cache_allows(
     {
         return true;
     }
-    request.path.as_ref().is_some_and(|path| {
-        cache
-            .path_prefixes
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
-    }) || request.command_prefix.as_ref().is_some_and(|command| {
-        cache
-            .command_prefixes
-            .iter()
-            .any(|prefix| command.starts_with(prefix))
-    })
+    request
+        .path
+        .as_ref()
+        .is_some_and(|path| path_matches_any_prefix(path, &cache.path_prefixes))
+        || request.command_prefix.as_ref().is_some_and(|command| {
+            cache
+                .command_prefixes
+                .iter()
+                .any(|prefix| command.starts_with(prefix))
+        })
 }
 
 fn request_forces_approval(request: &ToolPermissionRequest) -> bool {
     request.requests_escalation
+}
+
+fn path_matches_any_prefix<'a, I>(path: &Path, prefixes: I) -> bool
+where
+    I: IntoIterator<Item = &'a PathBuf>,
+{
+    let path = normalize_permission_path(path);
+    prefixes
+        .into_iter()
+        .any(|prefix| path.starts_with(normalize_permission_path(prefix)))
+}
+
+fn normalize_permission_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
 }
 
 fn permission_tool_extra(
@@ -602,6 +637,8 @@ fn permission_mode_authorization(mode: PermissionMode) -> Option<Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn approval_policy_strings_map_to_permission_modes() {
@@ -666,6 +703,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn path_prefix_match_normalizes_parent_components() {
+        let root = abs_path(&["workspace"]);
+        let inside = root.join("src").join("..").join("Cargo.toml");
+        let outside = root.join("src").join("..").join("..").join("outside.txt");
+
+        assert!(path_matches_any_prefix(&inside, [&root]));
+        assert!(!path_matches_any_prefix(&outside, [&root]));
+    }
+
+    #[test]
+    fn approval_path_cache_does_not_allow_parent_escape() {
+        let mut cache = crate::execution::ApprovalGrantCache::default();
+        let root = abs_path(&["workspace", "generated"]);
+        cache.path_prefixes.insert(root.clone());
+
+        let mut escaped = test_permission_request("write");
+        escaped.resource = devo_safety::ResourceKind::FileWrite;
+        escaped.path = Some(root.join("..").join("outside.txt"));
+
+        let mut allowed = test_permission_request("write");
+        allowed.resource = devo_safety::ResourceKind::FileWrite;
+        allowed.path = Some(root.join("..").join("generated").join("file.txt"));
+
+        assert!(!cache_allows(&cache, &escaped));
+        assert!(cache_allows(&cache, &allowed));
+    }
+
+    #[test]
+    fn policy_allows_file_read_inside_readable_roots() {
+        let root = abs_path(&["workspace"]);
+        let profile = devo_safety::RuntimePermissionProfile::from_preset(
+            devo_safety::PermissionPreset::ReadOnly,
+            root.clone(),
+        );
+        let mut request = test_permission_request("read");
+        request.resource = devo_safety::ResourceKind::FileRead;
+        request.path = Some(root.join("Cargo.toml"));
+
+        assert!(matches!(
+            policy_decision(&profile, &request),
+            PolicyAuthorization::Allow
+        ));
+    }
+
+    #[test]
+    fn policy_asks_for_file_read_outside_readable_roots() {
+        let root = abs_path(&["workspace"]);
+        let profile = devo_safety::RuntimePermissionProfile::from_preset(
+            devo_safety::PermissionPreset::ReadOnly,
+            root,
+        );
+        let mut request = test_permission_request("read");
+        request.resource = devo_safety::ResourceKind::FileRead;
+        request.path = Some(abs_path(&["outside", "secret.txt"]));
+
+        assert!(matches!(
+            policy_decision(&profile, &request),
+            PolicyAuthorization::Ask
+        ));
+    }
+
     fn test_permission_request(tool_name: &str) -> ToolPermissionRequest {
         ToolPermissionRequest {
             tool_call_id: "call".into(),
@@ -683,5 +782,17 @@ mod tests {
             command_prefix: None,
             requests_escalation: false,
         }
+    }
+
+    fn abs_path(parts: &[&str]) -> PathBuf {
+        #[cfg(windows)]
+        let mut path = PathBuf::from(r"C:\");
+        #[cfg(unix)]
+        let mut path = PathBuf::from("/");
+
+        for part in parts {
+            path.push(part);
+        }
+        path
     }
 }

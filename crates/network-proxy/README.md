@@ -12,3 +12,5 @@ The helper applies proxy settings in this order:
 Config proxy URLs are applied with `reqwest::Proxy::all`, so a configured
 `http://`, `socks5://`, or `socks5h://` proxy is used for all local tool HTTP
 requests. Environment values are only used when no config proxy URL is present.
+When environment proxies are used, `NO_PROXY` / `no_proxy` is applied as the
+proxy bypass list.

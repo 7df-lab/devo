@@ -116,8 +116,8 @@ impl ToolHandler for BashHandler {
         .await
         .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
 
+        let display = output.display_content;
         let text = output.content.into_string();
-        let display = output.display_content.clone();
         let mut result = if output.is_error {
             ToolResult::error(
                 ToolResultContent::Text(text.clone()),

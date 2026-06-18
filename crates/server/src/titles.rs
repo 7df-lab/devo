@@ -65,7 +65,7 @@ pub(crate) fn build_title_generation_request(model: String, user_input: &str) ->
                 ),
             }],
         }],
-        max_tokens: 1024,
+        max_tokens: 24,
         tools: None,
         hosted_tools: Vec::new(),
         sampling: SamplingControls { temperature: None, top_p: None, top_k: None },
@@ -126,7 +126,6 @@ fn trim_title_wrappers(input: &str) -> &str {
 
 fn strip_generated_title_prefix(input: &str) -> &str {
     let trimmed = input.trim();
-    let lower = trimmed.to_ascii_lowercase();
     for prefix in [
         "session title:",
         "session title -",
@@ -137,7 +136,11 @@ fn strip_generated_title_prefix(input: &str) -> &str {
         "title:",
         "title -",
     ] {
-        if lower.starts_with(prefix) {
+        if trimmed
+            .as_bytes()
+            .get(..prefix.len())
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix.as_bytes()))
+        {
             return trimmed[prefix.len()..].trim();
         }
     }
@@ -161,7 +164,17 @@ fn strip_code_fences(input: &str) -> String {
 }
 
 fn collapse_whitespace(input: &str) -> String {
-    input.split_whitespace().collect::<Vec<_>>().join(" ")
+    let mut words = input.split_whitespace();
+    let Some(first) = words.next() else {
+        return String::new();
+    };
+
+    let mut output = String::from(first);
+    for word in words {
+        output.push(' ');
+        output.push_str(word);
+    }
+    output
 }
 
 fn strip_prompt_noise(input: &str) -> String {

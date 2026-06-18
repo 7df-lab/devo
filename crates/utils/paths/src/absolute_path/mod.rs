@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::de::Error as SerdeError;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::path::Display;
 use std::path::Path;
@@ -22,22 +23,26 @@ mod absolutize;
 pub struct AbsolutePathBuf(PathBuf);
 
 impl AbsolutePathBuf {
-    fn maybe_expand_home_directory(path: &Path) -> PathBuf {
+    fn maybe_expand_home_directory(path: &Path) -> Cow<'_, Path> {
         if let Some(path_str) = path.to_str()
-            && let Some(home) = home_dir()
             && let Some(rest) = path_str.strip_prefix('~')
         {
-            if rest.is_empty() {
-                return home;
-            } else if let Some(rest) = rest.strip_prefix('/') {
-                return home.join(rest.trim_start_matches('/'));
+            if rest.is_empty()
+                && let Some(home) = home_dir()
+            {
+                return Cow::Owned(home);
+            } else if let Some(rest) = rest.strip_prefix('/')
+                && let Some(home) = home_dir()
+            {
+                return Cow::Owned(home.join(rest.trim_start_matches('/')));
             } else if cfg!(windows)
                 && let Some(rest) = rest.strip_prefix('\\')
+                && let Some(home) = home_dir()
             {
-                return home.join(rest.trim_start_matches('\\'));
+                return Cow::Owned(home.join(rest.trim_start_matches('\\')));
             }
         }
-        path.to_path_buf()
+        Cow::Borrowed(path)
     }
 
     pub fn resolve_path_against_base<P: AsRef<Path>, B: AsRef<Path>>(
@@ -332,6 +337,18 @@ mod tests {
             serde_json::from_str::<AbsolutePathBuf>("\"~//code\"").expect("failed to deserialize")
         };
         assert_eq!(abs_path_buf.as_path(), home.join("code").as_path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tilde_user_syntax_is_not_treated_as_current_home() {
+        let temp_dir = tempdir().expect("base dir");
+        let abs_path_buf =
+            AbsolutePathBuf::resolve_path_against_base("~other/code", temp_dir.path());
+        assert_eq!(
+            abs_path_buf.as_path(),
+            temp_dir.path().join("~other/code").as_path()
+        );
     }
 
     #[cfg(target_os = "windows")]

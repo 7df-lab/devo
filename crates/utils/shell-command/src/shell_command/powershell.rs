@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use devo_util_paths::absolute_path::AbsolutePathBuf;
 
@@ -11,23 +11,25 @@ const POWERSHELL_FLAGS: &[&str] = &["-nologo", "-noprofile", "-command", "-c"];
 pub const UTF8_OUTPUT_PREFIX: &str = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;\n";
 
 pub fn prefix_powershell_script_with_utf8(command: &[String]) -> Vec<String> {
-    let Some((_, script)) = extract_powershell_command(command) else {
+    let Some(script_index) = extract_powershell_command_index(command) else {
         return command.to_vec();
     };
 
-    let trimmed = script.trim_start();
-    let script = if trimmed.starts_with(UTF8_OUTPUT_PREFIX) {
-        script.to_string()
-    } else {
-        format!("{UTF8_OUTPUT_PREFIX}{script}")
-    };
+    let script = &command[script_index];
+    if script.trim_start().starts_with(UTF8_OUTPUT_PREFIX) {
+        return command.to_vec();
+    }
 
-    let mut command: Vec<String> = command[..(command.len() - 1)]
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect();
-    command.push(script);
-    command
+    // Build the modified argv directly so the script string is not cloned just
+    // to be replaced by the prefixed version.
+    let mut prefixed = Vec::with_capacity(command.len());
+    prefixed.extend_from_slice(&command[..script_index]);
+    let mut prefixed_script = String::with_capacity(UTF8_OUTPUT_PREFIX.len() + script.len());
+    prefixed_script.push_str(UTF8_OUTPUT_PREFIX);
+    prefixed_script.push_str(script);
+    prefixed.push(prefixed_script);
+    prefixed.extend_from_slice(&command[script_index + 1..]);
+    prefixed
 }
 
 /// Extract the PowerShell script body from an invocation such as:
@@ -39,13 +41,18 @@ pub fn prefix_powershell_script_with_utf8(command: &[String]) -> Vec<String> {
 /// Returns (`shell`, `script`) when the first arg is a PowerShell executable and a
 /// `-Command` (or `-c`) flag is present followed by a script string.
 pub fn extract_powershell_command(command: &[String]) -> Option<(&str, &str)> {
+    let script_index = extract_powershell_command_index(command)?;
+    Some((&command[0], &command[script_index]))
+}
+
+fn extract_powershell_command_index(command: &[String]) -> Option<usize> {
     if command.len() < 3 {
         return None;
     }
 
     let shell = &command[0];
     if !matches!(
-        detect_shell_type(&PathBuf::from(shell)),
+        detect_shell_type(Path::new(shell)),
         Some(ShellType::PowerShell)
     ) {
         return None;
@@ -56,12 +63,14 @@ pub fn extract_powershell_command(command: &[String]) -> Option<(&str, &str)> {
     while i + 1 < command.len() {
         let flag = &command[i];
         // Reject unknown flags
-        if !POWERSHELL_FLAGS.contains(&flag.to_ascii_lowercase().as_str()) {
+        if !POWERSHELL_FLAGS
+            .iter()
+            .any(|allowed| flag.eq_ignore_ascii_case(allowed))
+        {
             return None;
         }
         if flag.eq_ignore_ascii_case("-Command") || flag.eq_ignore_ascii_case("-c") {
-            let script = &command[i + 1];
-            return Some((shell, script));
+            return Some(i + 1);
         }
         i += 1;
     }
@@ -97,7 +106,7 @@ pub fn try_find_powershell_executable_blocking() -> Option<AbsolutePathBuf> {
 /// has installed pwsh.exe, it may not be available in the system PATH, in which
 /// case we attempt to locate it via other means.
 pub fn try_find_pwsh_executable_blocking() -> Option<AbsolutePathBuf> {
-    if let Some(ps_home) = std::process::Command::new("cmd")
+    if let Some(candidate) = std::process::Command::new("cmd")
         .args(["/C", "pwsh", "-NoProfile", "-Command", "$PSHOME"])
         .output()
         .ok()
@@ -107,14 +116,12 @@ pub fn try_find_pwsh_executable_blocking() -> Option<AbsolutePathBuf> {
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
             let trimmed = stdout.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
+            (!trimmed.is_empty())
+                .then(|| AbsolutePathBuf::resolve_path_against_base("pwsh.exe", Path::new(trimmed)))
         })
+        && is_powershellish_executable_available(candidate.as_path())
     {
-        let candidate = AbsolutePathBuf::resolve_path_against_base("pwsh.exe", &ps_home);
-
-        if is_powershellish_executable_available(candidate.as_path()) {
-            return Some(candidate);
-        }
+        return Some(candidate);
     }
 
     try_find_powershellish_executable_in_path(&["pwsh.exe"])
@@ -151,7 +158,10 @@ fn is_powershellish_executable_available(powershell_or_pwsh_exe: &std::path::Pat
 
 #[cfg(test)]
 mod tests {
+    use super::UTF8_OUTPUT_PREFIX;
     use super::extract_powershell_command;
+    use super::prefix_powershell_script_with_utf8;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn extracts_basic_powershell_command() {
@@ -198,5 +208,61 @@ mod tests {
         ];
         let (_shell, script) = extract_powershell_command(&cmd).expect("extract");
         assert_eq!(script, "Get-ChildItem | Select-String foo");
+    }
+
+    #[test]
+    fn prefixes_powershell_script_argument() {
+        let cmd = vec![
+            "powershell".to_string(),
+            "-Command".to_string(),
+            "Write-Host hi".to_string(),
+        ];
+
+        let prefixed = prefix_powershell_script_with_utf8(&cmd);
+
+        assert_eq!(
+            prefixed,
+            vec![
+                "powershell".to_string(),
+                "-Command".to_string(),
+                format!("{UTF8_OUTPUT_PREFIX}Write-Host hi"),
+            ]
+        );
+    }
+
+    #[test]
+    fn prefix_preserves_arguments_after_script() {
+        let cmd = vec![
+            "powershell".to_string(),
+            "-Command".to_string(),
+            "Write-Host $args[0]".to_string(),
+            "hi".to_string(),
+        ];
+
+        let prefixed = prefix_powershell_script_with_utf8(&cmd);
+
+        assert_eq!(
+            prefixed,
+            vec![
+                "powershell".to_string(),
+                "-Command".to_string(),
+                format!("{UTF8_OUTPUT_PREFIX}Write-Host $args[0]"),
+                "hi".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn prefix_keeps_already_prefixed_script_unchanged() {
+        let cmd = vec![
+            "pwsh".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            format!("{UTF8_OUTPUT_PREFIX}Write-Host hi"),
+        ];
+
+        let prefixed = prefix_powershell_script_with_utf8(&cmd);
+
+        assert_eq!(prefixed, cmd);
     }
 }

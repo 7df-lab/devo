@@ -1,3 +1,9 @@
+//! `devo doctor` health checks for local configuration and provider readiness.
+//!
+//! This command is intentionally diagnostic rather than mutating: it reports
+//! toolchain, config, provider-resolution, and model-catalog state so users can
+//! fix setup issues before launching the interactive runtime.
+
 use anyhow::Result;
 use devo_core::AppConfigLoader;
 use devo_core::FileSystemAppConfigLoader;
@@ -16,8 +22,8 @@ pub(crate) async fn run_doctor() -> Result<()> {
     let rustc = Command::new("rustc").arg("--version").output();
     match rustc {
         Ok(output) => {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("  {}", version);
+            let version = String::from_utf8_lossy(&output.stdout);
+            println!("  {}", version.trim());
         }
         Err(e) => {
             println!("  {} rustc not found: {}", "✗".red(), e);
@@ -78,7 +84,7 @@ pub(crate) async fn run_doctor() -> Result<()> {
                     println!("  model:      {}", resolved.model);
                     println!(
                         "  base_url:   {}",
-                        resolved.base_url.unwrap_or("default".into())
+                        resolved.base_url.as_deref().unwrap_or("default")
                     );
                     println!("  wire_api:   {:?}", resolved.wire_api);
                     if resolved.api_key.is_some() {

@@ -724,40 +724,51 @@ fn classify_goal_failure(message: Option<&str>) -> GoalFailureClass {
     let Some(message) = message else {
         return GoalFailureClass::Other;
     };
-    let normalized = message.to_ascii_lowercase();
-    if (normalized.contains("tool_calls") || normalized.contains("tool calls"))
-        && (normalized.contains("tool_call_id")
-            || normalized.contains("tool messages")
-            || normalized.contains("insufficient tool messages"))
+    if (contains_ascii_case_insensitive(message, "tool_calls")
+        || contains_ascii_case_insensitive(message, "tool calls"))
+        && (contains_ascii_case_insensitive(message, "tool_call_id")
+            || contains_ascii_case_insensitive(message, "tool messages")
+            || contains_ascii_case_insensitive(message, "insufficient tool messages"))
     {
         return GoalFailureClass::ToolCallAdjacency;
     }
-    if normalized.contains("401")
-        || normalized.contains("unauthorized")
-        || normalized.contains("authentication")
-        || normalized.contains("api key")
-        || normalized.contains("token timeout")
+    if contains_ascii_case_insensitive(message, "401")
+        || contains_ascii_case_insensitive(message, "unauthorized")
+        || contains_ascii_case_insensitive(message, "authentication")
+        || contains_ascii_case_insensitive(message, "api key")
+        || contains_ascii_case_insensitive(message, "token timeout")
     {
         return GoalFailureClass::Authentication;
     }
-    if normalized.contains("403")
-        || normalized.contains("434")
-        || normalized.contains("forbidden")
-        || normalized.contains("permission")
-        || normalized.contains("no api permission")
+    if contains_ascii_case_insensitive(message, "403")
+        || contains_ascii_case_insensitive(message, "434")
+        || contains_ascii_case_insensitive(message, "forbidden")
+        || contains_ascii_case_insensitive(message, "permission")
+        || contains_ascii_case_insensitive(message, "no api permission")
     {
         return GoalFailureClass::Permission;
     }
-    if normalized.contains("400")
-        || normalized.contains("bad request")
-        || normalized.contains("invalid request")
-        || normalized.contains("invalid_request_error")
-        || normalized.contains("invalid parameter")
-        || normalized.contains("parameter error")
+    if contains_ascii_case_insensitive(message, "400")
+        || contains_ascii_case_insensitive(message, "bad request")
+        || contains_ascii_case_insensitive(message, "invalid request")
+        || contains_ascii_case_insensitive(message, "invalid_request_error")
+        || contains_ascii_case_insensitive(message, "invalid parameter")
+        || contains_ascii_case_insensitive(message, "parameter error")
     {
         return GoalFailureClass::ProviderParameter;
     }
     GoalFailureClass::Other
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn goal_failure_blocker_summary(message: Option<&str>) -> String {
@@ -863,7 +874,7 @@ mod tests {
     fn classifies_provider_parameter_failure() {
         // Trace: L2-DES-GOAL-001
         assert_eq!(
-            classify_goal_failure(Some("400 Bad Request invalid_request_error")),
+            classify_goal_failure(Some("400 BAD REQUEST invalid_request_error")),
             GoalFailureClass::ProviderParameter
         );
     }

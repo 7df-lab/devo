@@ -23,11 +23,14 @@ impl<'de> Deserialize<'de> for PreferredAuthMethod {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        match value.trim().to_ascii_lowercase().as_str() {
-            "apikey" | "api_key" => Ok(Self::Apikey),
-            other => Err(serde::de::Error::custom(format!(
-                "unsupported preferred_auth_method `{other}`"
-            ))),
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("apikey") || value.eq_ignore_ascii_case("api_key") {
+            Ok(Self::Apikey)
+        } else {
+            let normalized = value.to_ascii_lowercase();
+            Err(serde::de::Error::custom(format!(
+                "unsupported preferred_auth_method `{normalized}`"
+            )))
         }
     }
 }
@@ -44,7 +47,7 @@ pub struct ConfiguredModel {
 }
 
 /// One persisted provider vendor record stored under `[providers.<id>]`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderVendorConfig {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,6 +66,21 @@ pub struct ProviderVendorConfig {
     pub web_fetch: Option<WebFetchConfig>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl Default for ProviderVendorConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            base_url: None,
+            credential: None,
+            headers: None,
+            wire_apis: Vec::new(),
+            web_search: None,
+            web_fetch: None,
+            enabled: true,
+        }
+    }
 }
 
 impl ProviderVendorConfig {
@@ -213,7 +231,7 @@ pub struct ProviderConfigSection {
 }
 
 impl ProviderConfigSection {
-    pub(crate) fn merge_overlay(&mut self, overlay: Self) {
+    pub(crate) fn merge_overlay(&mut self, overlay: Self, source: &toml::Value) {
         if overlay.model_provider.is_some() {
             self.model_provider = overlay.model_provider;
         }
@@ -239,6 +257,8 @@ impl ProviderConfigSection {
             self.defaults.model_binding = overlay.defaults.model_binding;
         }
         for (provider_id, overlay_provider) in overlay.providers {
+            let enabled_present =
+                nested_table_has_key(source, "providers", &provider_id, "enabled");
             let provider = self.providers.entry(provider_id).or_default();
             if !overlay_provider.name.is_empty() {
                 provider.name = overlay_provider.name;
@@ -261,9 +281,15 @@ impl ProviderConfigSection {
             if overlay_provider.web_fetch.is_some() {
                 provider.web_fetch = overlay_provider.web_fetch;
             }
-            provider.enabled = overlay_provider.enabled;
+            if enabled_present {
+                provider.enabled = overlay_provider.enabled;
+            }
         }
         for (binding_id, overlay_binding) in overlay.model_bindings {
+            let invocation_method_present =
+                nested_table_has_key(source, "model_bindings", &binding_id, "invocation_method");
+            let enabled_present =
+                nested_table_has_key(source, "model_bindings", &binding_id, "enabled");
             let binding = self.model_bindings.entry(binding_id).or_default();
             if !overlay_binding.model_slug.is_empty() {
                 binding.model_slug = overlay_binding.model_slug;
@@ -277,7 +303,9 @@ impl ProviderConfigSection {
             if overlay_binding.display_name.is_some() {
                 binding.display_name = overlay_binding.display_name;
             }
-            binding.invocation_method = overlay_binding.invocation_method;
+            if invocation_method_present {
+                binding.invocation_method = overlay_binding.invocation_method;
+            }
             if overlay_binding.default_reasoning_effort.is_some() {
                 binding.default_reasoning_effort = overlay_binding.default_reasoning_effort;
             }
@@ -287,9 +315,20 @@ impl ProviderConfigSection {
             if overlay_binding.web_fetch.is_some() {
                 binding.web_fetch = overlay_binding.web_fetch;
             }
-            binding.enabled = overlay_binding.enabled;
+            if enabled_present {
+                binding.enabled = overlay_binding.enabled;
+            }
         }
     }
+}
+
+fn nested_table_has_key(source: &toml::Value, section: &str, entry_id: &str, key: &str) -> bool {
+    source
+        .get(section)
+        .and_then(toml::Value::as_table)
+        .and_then(|entries| entries.get(entry_id))
+        .and_then(toml::Value::as_table)
+        .is_some_and(|entry| entry.contains_key(key))
 }
 
 impl ProviderDefaultsConfig {
@@ -350,4 +389,31 @@ fn default_auth_config_version() -> u32 {
 
 fn default_provider_wire_api() -> ProviderWireApi {
     ProviderWireApi::OpenAIChatCompletions
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn preferred_auth_method_accepts_case_insensitive_values() {
+        assert_eq!(
+            serde_json::from_str::<PreferredAuthMethod>("\"API_KEY\"").expect("parse auth method"),
+            PreferredAuthMethod::Apikey
+        );
+        assert_eq!(
+            serde_json::from_str::<PreferredAuthMethod>("\" apiKEY \"").expect("parse auth method"),
+            PreferredAuthMethod::Apikey
+        );
+    }
+
+    #[test]
+    fn preferred_auth_method_error_keeps_normalized_value() {
+        let err =
+            serde_json::from_str::<PreferredAuthMethod>("\"TOKEN\"").expect_err("reject token");
+
+        assert_eq!(err.to_string(), "unsupported preferred_auth_method `token`");
+    }
 }

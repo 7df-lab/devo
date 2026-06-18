@@ -108,36 +108,40 @@ fn is_powershell_executable(exe: &str) -> bool {
     let executable_name = Path::new(exe)
         .file_name()
         .and_then(|osstr| osstr.to_str())
-        .unwrap_or(exe)
-        .to_ascii_lowercase();
+        .unwrap_or(exe);
 
-    matches!(
-        executable_name.as_str(),
-        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
-    )
+    ["powershell", "powershell.exe", "pwsh", "pwsh.exe"]
+        .iter()
+        .any(|name| executable_name.eq_ignore_ascii_case(name))
 }
 
 fn join_arguments_as_script(args: &[String]) -> String {
-    let mut words = Vec::with_capacity(args.len());
-    if let Some((first, rest)) = args.split_first() {
-        words.push(first.clone());
-        for arg in rest {
-            words.push(quote_argument(arg));
+    let Some((first, rest)) = args.split_first() else {
+        return String::new();
+    };
+
+    let args_len = args.iter().map(String::len).sum::<usize>();
+    let mut script = String::with_capacity(args_len + args.len().saturating_sub(1));
+    script.push_str(first);
+    for arg in rest {
+        script.push(' ');
+        if arg.is_empty() {
+            script.push_str("''");
+        } else if arg.chars().all(|ch| !ch.is_whitespace()) {
+            script.push_str(arg);
+        } else {
+            script.push('\'');
+            for ch in arg.chars() {
+                if ch == '\'' {
+                    script.push_str("''");
+                } else {
+                    script.push(ch);
+                }
+            }
+            script.push('\'');
         }
     }
-    words.join(" ")
-}
-
-fn quote_argument(arg: &str) -> String {
-    if arg.is_empty() {
-        return "''".to_string();
-    }
-
-    if arg.chars().all(|ch| !ch.is_whitespace()) {
-        return arg.to_string();
-    }
-
-    format!("'{}'", arg.replace('\'', "''"))
+    script
 }
 
 /// Validates that a parsed PowerShell command stays within our read-only safelist.
@@ -215,9 +219,12 @@ fn is_safe_ripgrep(words: &[String]) -> bool {
         let arg_lc = arg.to_ascii_lowercase();
         // Examples rejected here: "pwsh -Command 'rg --pre cat pattern'" and "pwsh -Command 'rg --search-zip pattern'".
         UNSAFE_RIPGREP_OPTIONS_WITHOUT_ARGS.contains(&arg_lc.as_str())
-            || UNSAFE_RIPGREP_OPTIONS_WITH_ARGS
-                .iter()
-                .any(|opt| arg_lc == *opt || arg_lc.starts_with(&format!("{opt}=")))
+            || UNSAFE_RIPGREP_OPTIONS_WITH_ARGS.iter().any(|opt| {
+                arg_lc == *opt
+                    || arg_lc
+                        .strip_prefix(opt)
+                        .is_some_and(|suffix| suffix.starts_with('='))
+            })
     })
 }
 
@@ -246,6 +253,49 @@ fn is_safe_git_command(words: &[String]) -> bool {
 
     // Examples rejected here: "pwsh -Command 'git'" and "pwsh -Command 'git status --short | Remove-Item foo'".
     false
+}
+
+#[cfg(test)]
+mod portable_tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use std::string::ToString;
+
+    fn vec_str(args: &[&str]) -> Vec<String> {
+        args.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn powershell_executable_detection_is_case_insensitive() {
+        assert!(is_powershell_executable("PWSH.EXE"));
+        assert!(is_powershell_executable("/usr/local/bin/PowerShell"));
+        assert!(!is_powershell_executable("pwsh-preview"));
+    }
+
+    #[test]
+    fn joins_powershell_arguments_without_intermediate_word_vector() {
+        assert_eq!(
+            join_arguments_as_script(&vec_str(&[
+                "Get-Content",
+                "two words",
+                "contains ' quote",
+                "",
+                "plain",
+            ])),
+            "Get-Content 'two words' 'contains '' quote' '' plain"
+        );
+    }
+
+    #[test]
+    fn ripgrep_rejects_external_command_options() {
+        assert!(!is_safe_ripgrep(&vec_str(&["rg", "--pre=cmd", "needle"])));
+        assert!(!is_safe_ripgrep(&vec_str(&[
+            "rg",
+            "--hostname-bin=cmd",
+            "needle",
+        ])));
+        assert!(is_safe_ripgrep(&vec_str(&["rg", "--pretty", "needle"])));
+    }
 }
 
 #[cfg(all(test, windows))]

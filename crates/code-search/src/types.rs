@@ -202,50 +202,136 @@ impl SearchFilters {
 
     /// Normalizes tool input filters into the form used by search.
     pub fn normalized(paths: Vec<String>, languages: Vec<String>) -> Self {
+        let mut normalized_paths = Vec::with_capacity(paths.len());
+        for path in paths {
+            if let Some(path) = normalize_filter_path(path) {
+                normalized_paths.push(path);
+            }
+        }
+
+        let mut normalized_languages = Vec::with_capacity(languages.len());
+        for language in languages {
+            if let Some(language) = normalize_filter_language(language) {
+                normalized_languages.push(language);
+            }
+        }
+
         Self {
-            paths: paths
-                .into_iter()
-                .map(|path| path.replace('\\', "/").trim_matches('/').to_lowercase())
-                .filter(|path| !path.is_empty())
-                .collect(),
-            languages: languages
-                .into_iter()
-                .map(|language| language.trim().to_lowercase())
-                .filter(|language| !language.is_empty())
-                .collect(),
+            paths: normalized_paths,
+            languages: normalized_languages,
         }
     }
 
     /// Checks whether a chunk survives both path and language filters.
     pub fn allows(&self, chunk: &Chunk) -> bool {
-        let path_allowed = if self.paths.is_empty() {
-            true
-        } else {
-            let matches_filter = |path: &str| {
-                self.paths.iter().any(|filter| {
-                    path == filter
-                        || path
-                            .strip_prefix(filter)
-                            .is_some_and(|suffix| suffix.starts_with('/'))
-                })
-            };
-            let path = chunk.file_path.to_string_lossy();
-            if path
-                .bytes()
-                .all(|byte| byte.is_ascii() && byte != b'\\' && !byte.is_ascii_uppercase())
-            {
-                matches_filter(&path)
-            } else {
-                let path = path.replace('\\', "/").to_lowercase();
-                matches_filter(&path)
-            }
-        };
-        let language_allowed = self.languages.is_empty()
-            || self
+        if !self.languages.is_empty()
+            && !self
                 .languages
                 .iter()
-                .any(|language| language.eq_ignore_ascii_case(&chunk.language));
-        path_allowed && language_allowed
+                .any(|language| language.eq_ignore_ascii_case(&chunk.language))
+        {
+            return false;
+        }
+        if self.paths.is_empty() {
+            return true;
+        }
+
+        let matches_filter = |path: &str| {
+            self.paths.iter().any(|filter| {
+                path == filter
+                    || path
+                        .strip_prefix(filter)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+        };
+        let path = chunk.file_path.to_string_lossy();
+        if path
+            .bytes()
+            .all(|byte| byte.is_ascii() && byte != b'\\' && !byte.is_ascii_uppercase())
+        {
+            matches_filter(&path)
+        } else {
+            let mut normalized = String::with_capacity(path.len());
+            for ch in path.chars() {
+                if ch == '\\' {
+                    normalized.push('/');
+                } else {
+                    normalized.extend(ch.to_lowercase());
+                }
+            }
+            matches_filter(&normalized)
+        }
+    }
+}
+
+fn normalize_filter_path(mut path: String) -> Option<String> {
+    if path.contains('\\') {
+        path = path.replace('\\', "/");
+    }
+    trim_slashes_in_place(&mut path);
+
+    let normalized = {
+        let mut parts = Vec::<&str>::new();
+        for component in path.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    if parts
+                        .last()
+                        .is_some_and(|part| part != &".." && !part.ends_with(':'))
+                    {
+                        parts.pop();
+                    } else {
+                        parts.push(component);
+                    }
+                }
+                _ => parts.push(component),
+            }
+        }
+        parts.join("/")
+    };
+    path = lowercase_owned(normalized);
+    (!path.is_empty()).then_some(path)
+}
+
+fn normalize_filter_language(mut language: String) -> Option<String> {
+    trim_whitespace_in_place(&mut language);
+    language = lowercase_owned(language);
+    (!language.is_empty()).then_some(language)
+}
+
+fn trim_slashes_in_place(value: &mut String) {
+    let end = value.trim_end_matches('/').len();
+    value.truncate(end);
+    let start = value.len() - value.trim_start_matches('/').len();
+    if start > 0 {
+        value.drain(..start);
+    }
+}
+
+pub(crate) fn trim_whitespace_in_place(value: &mut String) {
+    let end = value.trim_end().len();
+    value.truncate(end);
+    let start = value.len() - value.trim_start().len();
+    if start > 0 {
+        value.drain(..start);
+    }
+}
+
+fn lowercase_owned(mut value: String) -> String {
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii() && !byte.is_ascii_uppercase())
+    {
+        value
+    } else if value.is_ascii() {
+        // Filter strings are already owned. ASCII path/language filters can be
+        // normalized in place; Unicode still needs `to_lowercase` because it can
+        // expand into multiple codepoints.
+        value.make_ascii_lowercase();
+        value
+    } else {
+        value.to_lowercase()
     }
 }
 
@@ -461,6 +547,78 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(allowed, vec![true, false, false, true]);
+    }
+
+    #[test]
+    fn search_filters_normalize_owned_inputs() {
+        let filters = SearchFilters::normalized(
+            vec![
+                "/SRC\\Server/".to_string(),
+                "///".to_string(),
+                "readme.md".to_string(),
+            ],
+            vec![
+                " Rust ".to_string(),
+                " ".to_string(),
+                "markdown".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            filters,
+            SearchFilters {
+                paths: vec!["src/server".to_string(), "readme.md".to_string()],
+                languages: vec!["rust".to_string(), "markdown".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn search_filters_normalize_relative_dot_components() {
+        let filters = SearchFilters::normalized(
+            vec![
+                "./src/../src/server/./".to_string(),
+                "crates\\core\\src\\..\\tests".to_string(),
+            ],
+            Vec::new(),
+        );
+        let chunks = [
+            Chunk {
+                content: "server".to_string(),
+                file_path: PathBuf::from("src/server/bootstrap.rs"),
+                start_line: 1,
+                end_line: 4,
+                language: "rust".to_string(),
+            },
+            Chunk {
+                content: "tests".to_string(),
+                file_path: PathBuf::from("crates/core/tests/search.rs"),
+                start_line: 1,
+                end_line: 4,
+                language: "rust".to_string(),
+            },
+            Chunk {
+                content: "client".to_string(),
+                file_path: PathBuf::from("src/client/bootstrap.rs"),
+                start_line: 1,
+                end_line: 4,
+                language: "rust".to_string(),
+            },
+        ];
+
+        let allowed = chunks
+            .iter()
+            .map(|chunk| filters.allows(chunk))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            filters,
+            SearchFilters {
+                paths: vec!["src/server".to_string(), "crates/core/tests".to_string()],
+                languages: Vec::new(),
+            }
+        );
+        assert_eq!(allowed, vec![true, true, false]);
     }
 
     #[test]

@@ -92,6 +92,16 @@ impl ToolHandler for ReadHandler {
             ));
         }
 
+        if let Some(limit) = limit
+            && limit < 1
+        {
+            return Ok(ToolResult::error(
+                ToolResultContent::Text("limit must be greater than or equal to 1".into()),
+                "Invalid limit",
+                ToolCallError::InvalidInput("limit must be >= 1".into()),
+            ));
+        }
+
         if !PathBuf::from(&filepath).is_absolute() {
             filepath = ctx
                 .workspace_root
@@ -112,8 +122,8 @@ impl ToolHandler for ReadHandler {
         if path.is_dir() {
             let output = read_directory(&path, limit.unwrap_or(usize::MAX), offset.unwrap_or(1));
             let output = output.map_err(|e| ToolCallError::ExecutionFailed(format!("{e}")))?;
+            let display = output.display_content;
             let text = output.content.into_string();
-            let display = output.display_content.clone();
             let mut result = ToolResult::success(ToolResultContent::Text(text), "Directory read");
             result.display_content = display;
             return Ok(result);
@@ -131,10 +141,68 @@ impl ToolHandler for ReadHandler {
 
         let output = read_file(&path, limit.unwrap_or(usize::MAX), offset.unwrap_or(1));
         let output = output.map_err(|e| ToolCallError::ExecutionFailed(format!("{e}")))?;
+        let display = output.display_content;
         let text = output.content.into_string();
-        let display = output.display_content.clone();
         let mut result = ToolResult::success(ToolResultContent::Text(text), "File read");
         result.display_content = display;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::contracts::{ToolAgentScope, ToolBudgets, ToolTerminalStatus};
+    use crate::invocation::ToolCallId;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn handle_rejects_zero_limit() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("sample.txt"), "one\n").expect("write sample");
+
+        let result = ReadHandler::new()
+            .handle(
+                ToolContext {
+                    tool_call_id: ToolCallId("call-1".to_string()),
+                    session_id: "session-1".to_string(),
+                    turn_id: Some("turn-1".to_string()),
+                    workspace_root: root.path().to_path_buf(),
+                    budgets: ToolBudgets {
+                        output_limit_bytes: 32_768,
+                        wall_time_limit_ms: None,
+                    },
+                    cancel_token: CancellationToken::new(),
+                    agent_scope: ToolAgentScope::Parent,
+                    agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
+                    collaboration_mode: devo_protocol::CollaborationMode::Build,
+                    agent_coordinator: None,
+                    network_proxy: None,
+                },
+                serde_json::json!({
+                    "filePath": "sample.txt",
+                    "limit": 0
+                }),
+                None,
+            )
+            .await
+            .expect("handler returns tool error result");
+
+        assert_eq!(result.result_summary, "Invalid limit");
+        match &result.content {
+            ToolResultContent::Text(text) => {
+                assert_eq!(text, "limit must be greater than or equal to 1");
+            }
+            content => panic!("expected text error content, got {content:?}"),
+        }
+        match &result.structured_status {
+            ToolTerminalStatus::Failed(ToolCallError::InvalidInput(message)) => {
+                assert_eq!(message, "limit must be >= 1");
+            }
+            status => panic!("expected invalid input status, got {status:?}"),
+        }
     }
 }

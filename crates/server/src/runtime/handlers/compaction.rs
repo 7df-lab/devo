@@ -250,6 +250,7 @@ impl ServerRuntime {
                         runtime_session.persisted_turn_items.push(
                             crate::execution::PersistedTurnItem {
                                 turn_id,
+                                turn_kind: devo_core::TurnKind::ManualCompaction,
                                 item_id,
                                 turn_item: summary_turn_item.clone(),
                             },
@@ -340,60 +341,65 @@ impl ServerRuntime {
         persisted_turn_items: &[crate::execution::PersistedTurnItem],
         compacted_items: &[ResponseItem],
     ) -> Vec<ItemId> {
-        let normalized_persisted_items = persisted_turn_items
-            .iter()
-            .flat_map(|item| {
-                let response_items = match &item.turn_item {
-                    TurnItem::UserMessage(TextItem { text })
-                    | TurnItem::SteerInput(TextItem { text }) => {
-                        vec![ResponseItem::Message(Message::user(text.clone()))]
-                    }
-                    TurnItem::AgentMessage(TextItem { text })
-                    | TurnItem::Plan(TextItem { text })
-                    | TurnItem::WebSearch(TextItem { text })
-                    | TurnItem::ImageGeneration(TextItem { text })
-                    | TurnItem::ContextCompaction(TextItem { text })
-                    | TurnItem::HookPrompt(TextItem { text }) => {
-                        vec![ResponseItem::Message(Message::assistant_text(text.clone()))]
-                    }
-                    TurnItem::Reasoning(TextItem { text }) => {
-                        vec![ResponseItem::Reason { text: text.clone() }]
-                    }
-                    TurnItem::ToolCall(ToolCallItem {
-                        tool_call_id,
-                        tool_name,
-                        input,
-                    }) => vec![ResponseItem::ToolCall {
-                        id: tool_call_id.clone(),
-                        name: tool_name.clone(),
-                        input: input.clone(),
-                    }],
-                    TurnItem::ToolResult(ToolResultItem {
-                        tool_call_id,
-                        output,
-                        is_error,
-                        ..
-                    }) => vec![ResponseItem::ToolCallOutput {
-                        tool_use_id: tool_call_id.clone(),
-                        content: match output {
-                            serde_json::Value::String(text) => text.clone(),
-                            other => other.to_string(),
-                        },
-                        is_error: *is_error,
-                    }],
-                    TurnItem::CommandExecution(CommandExecutionItem {
-                        tool_call_id,
-                        tool_name,
-                        input,
-                        output,
-                        is_error,
-                        ..
-                    }) => vec![
+        let mut normalized_persisted_items = Vec::new();
+        for item in persisted_turn_items {
+            if !crate::persistence::prompt_visible_persisted_turn_item(item) {
+                continue;
+            }
+
+            // The compactor returns a summary followed by the prompt-visible suffix it
+            // kept verbatim. Normalize persisted items into that same response shape
+            // without allocating a short intermediate Vec for every journal item.
+            match &item.turn_item {
+                TurnItem::UserMessage(TextItem { text })
+                | TurnItem::SteerInput(TextItem { text }) => {
+                    normalized_persisted_items.push((
+                        item.item_id,
+                        ResponseItem::Message(Message::user(text.clone())),
+                    ));
+                }
+                TurnItem::AgentMessage(TextItem { text })
+                | TurnItem::Plan(TextItem { text })
+                | TurnItem::WebSearch(TextItem { text })
+                | TurnItem::ImageGeneration(TextItem { text })
+                | TurnItem::ContextCompaction(TextItem { text })
+                | TurnItem::HookPrompt(TextItem { text }) => {
+                    normalized_persisted_items.push((
+                        item.item_id,
+                        ResponseItem::Message(Message::assistant_text(text.clone())),
+                    ));
+                }
+                TurnItem::ResearchArtifact(ResearchArtifactItem { title, content, .. }) => {
+                    normalized_persisted_items.push((
+                        item.item_id,
+                        ResponseItem::Message(Message::assistant_text(format!(
+                            "### {title}\n\n{content}"
+                        ))),
+                    ));
+                }
+                TurnItem::Reasoning(_) => {}
+                TurnItem::ToolCall(ToolCallItem {
+                    tool_call_id,
+                    tool_name,
+                    input,
+                }) => {
+                    normalized_persisted_items.push((
+                        item.item_id,
                         ResponseItem::ToolCall {
                             id: tool_call_id.clone(),
                             name: tool_name.clone(),
                             input: input.clone(),
                         },
+                    ));
+                }
+                TurnItem::ToolResult(ToolResultItem {
+                    tool_call_id,
+                    output,
+                    is_error,
+                    ..
+                }) => {
+                    normalized_persisted_items.push((
+                        item.item_id,
                         ResponseItem::ToolCallOutput {
                             tool_use_id: tool_call_id.clone(),
                             content: match output {
@@ -402,19 +408,42 @@ impl ServerRuntime {
                             },
                             is_error: *is_error,
                         },
-                    ],
-                    TurnItem::ToolProgress(_)
-                    | TurnItem::ApprovalRequest(_)
-                    | TurnItem::ApprovalDecision(_)
-                    | TurnItem::TurnSummary(_) => Vec::new(),
-                };
-                response_items
-                    .into_iter()
-                    .filter(|response_item| !response_item.is_reason())
-                    .map(|response_item| (item.item_id, response_item))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+                    ));
+                }
+                TurnItem::CommandExecution(CommandExecutionItem {
+                    tool_call_id,
+                    tool_name,
+                    input,
+                    output,
+                    is_error,
+                    ..
+                }) => {
+                    normalized_persisted_items.push((
+                        item.item_id,
+                        ResponseItem::ToolCall {
+                            id: tool_call_id.clone(),
+                            name: tool_name.clone(),
+                            input: input.clone(),
+                        },
+                    ));
+                    normalized_persisted_items.push((
+                        item.item_id,
+                        ResponseItem::ToolCallOutput {
+                            tool_use_id: tool_call_id.clone(),
+                            content: match output {
+                                serde_json::Value::String(text) => text.clone(),
+                                other => other.to_string(),
+                            },
+                            is_error: *is_error,
+                        },
+                    ));
+                }
+                TurnItem::ToolProgress(_)
+                | TurnItem::ApprovalRequest(_)
+                | TurnItem::ApprovalDecision(_)
+                | TurnItem::TurnSummary(_) => {}
+            }
+        }
         let preserved = compacted_items.get(1..).unwrap_or(&[]);
         if preserved.is_empty() {
             return Vec::new();
@@ -467,6 +496,7 @@ mod tests {
         let command_output = serde_json::Value::String("ok".to_string());
         let persisted_turn_items = vec![crate::execution::PersistedTurnItem {
             turn_id: TurnId::new(),
+            turn_kind: devo_core::TurnKind::Regular,
             item_id: command_item_id,
             turn_item: TurnItem::CommandExecution(CommandExecutionItem {
                 tool_call_id: "call-1".to_string(),
@@ -497,6 +527,57 @@ mod tests {
                 &compacted_items
             ),
             vec![command_item_id, command_item_id]
+        );
+    }
+
+    #[test]
+    fn preserved_item_ids_ignore_research_internal_tool_payloads() {
+        let tool_item_id = ItemId::new();
+        let tool_input = serde_json::json!({ "query": "internal research query" });
+        let persisted_turn_items = vec![
+            crate::execution::PersistedTurnItem {
+                turn_id: TurnId::new(),
+                turn_kind: devo_core::TurnKind::Research,
+                item_id: tool_item_id,
+                turn_item: TurnItem::ToolCall(ToolCallItem {
+                    tool_call_id: "search-1".to_string(),
+                    tool_name: "web_search".to_string(),
+                    input: tool_input.clone(),
+                }),
+            },
+            crate::execution::PersistedTurnItem {
+                turn_id: TurnId::new(),
+                turn_kind: devo_core::TurnKind::Research,
+                item_id: tool_item_id,
+                turn_item: TurnItem::ToolResult(ToolResultItem {
+                    tool_call_id: "search-1".to_string(),
+                    tool_name: Some("web_search".to_string()),
+                    output: serde_json::Value::String("opaque provider payload".to_string()),
+                    display_content: None,
+                    is_error: false,
+                }),
+            },
+        ];
+        let compacted_items = vec![
+            ResponseItem::Message(Message::assistant_text("summary")),
+            ResponseItem::ToolCall {
+                id: "search-1".to_string(),
+                name: "web_search".to_string(),
+                input: tool_input,
+            },
+            ResponseItem::ToolCallOutput {
+                tool_use_id: "search-1".to_string(),
+                content: "opaque provider payload".to_string(),
+                is_error: false,
+            },
+        ];
+
+        assert_eq!(
+            ServerRuntime::preserved_item_ids_from_compacted(
+                &persisted_turn_items,
+                &compacted_items
+            ),
+            Vec::<ItemId>::new()
         );
     }
 }

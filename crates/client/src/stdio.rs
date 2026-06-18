@@ -1,3 +1,9 @@
+//! Stdio transport for a spawned devo server process.
+//!
+//! The client writes newline-delimited JSON requests to child stdin and owns a
+//! background stdout reader that demultiplexes responses by request id while
+//! forwarding id-less messages as server notifications.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -94,13 +100,13 @@ use devo_protocol::TurnStartResult;
 use devo_protocol::TurnSteerParams;
 use devo_protocol::TurnSteerResult;
 use serde::de::DeserializeOwned;
+use tokio::io::AsyncBufRead;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::process::Child;
 use tokio::process::ChildStderr;
 use tokio::process::ChildStdin;
-use tokio::process::ChildStdout;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -110,6 +116,8 @@ use tokio::time::timeout;
 
 const SERVER_CHILD_STDIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 const SERVER_CHILD_EXIT_TIMEOUT: Duration = Duration::from_millis(500);
+
+type PendingResponses = Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>;
 
 #[derive(Debug, Clone)]
 pub struct StdioServerClientConfig {
@@ -127,7 +135,7 @@ pub struct ServerNotificationMessage {
 pub struct StdioServerClient {
     child: Child,
     stdin: ChildStdin,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>,
+    pending: PendingResponses,
     next_request_id: AtomicU64,
     notifications_rx: mpsc::UnboundedReceiver<ServerNotificationMessage>,
 }
@@ -157,9 +165,7 @@ impl StdioServerClient {
         let stdin = child.stdin.take().context("capture server stdin")?;
         let stdout = child.stdout.take().context("capture server stdout")?;
         let stderr = child.stderr.take().context("capture server stderr")?;
-        let pending = Arc::new(Mutex::new(
-            HashMap::<u64, oneshot::Sender<serde_json::Value>>::new(),
-        ));
+        let pending = Arc::new(Mutex::new(HashMap::new()));
         let (notifications_tx, notifications_rx) = mpsc::unbounded_channel();
 
         tokio::spawn(run_stdout_reader(
@@ -443,13 +449,10 @@ impl StdioServerClient {
         let Some(notification) = self.recv_notification().await else {
             return Ok(None);
         };
-        let event = serde_json::from_value(notification.params.clone()).with_context(|| {
-            format!(
-                "failed to decode server event for method {}",
-                notification.method
-            )
-        })?;
-        Ok(Some((notification.method, event)))
+        let ServerNotificationMessage { method, params } = notification;
+        let event = serde_json::from_value(params)
+            .with_context(|| format!("failed to decode server event for method {method}"))?;
+        Ok(Some((method, event)))
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
@@ -483,20 +486,35 @@ impl StdioServerClient {
         let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
         tracing::debug!(request_id, method, "sending client request");
         let (response_tx, response_rx) = oneshot::channel();
+        // The stdout reader owns response routing. Keep the sender in this map
+        // only while the request can still be completed by an incoming response.
         self.pending.lock().await.insert(request_id, response_tx);
-        self.write_json(&ClientRequest {
-            id: serde_json::json!(request_id),
-            method: method.to_string(),
-            params,
-        })
-        .await?;
+        let write_result = self
+            .write_json(&ClientRequest {
+                id: serde_json::json!(request_id),
+                method: method.to_string(),
+                params,
+            })
+            .await;
+        if let Err(error) = write_result {
+            self.pending.lock().await.remove(&request_id);
+            return Err(error);
+        }
 
-        let response = timeout(Duration::from_secs(10), response_rx)
-            .await
-            .with_context(|| {
-                format!("timed out waiting for server response to request {request_id}")
-            })?
-            .with_context(|| format!("server dropped response for request {request_id}"))?;
+        let response = match timeout(Duration::from_secs(10), response_rx).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                self.pending.lock().await.remove(&request_id);
+                return Err(error)
+                    .with_context(|| format!("server dropped response for request {request_id}"));
+            }
+            Err(error) => {
+                self.pending.lock().await.remove(&request_id);
+                return Err(error).with_context(|| {
+                    format!("timed out waiting for server response to request {request_id}")
+                });
+            }
+        };
         tracing::debug!(request_id, method, "received client response");
         if response.get("error").is_some() {
             let error: ErrorResponse =
@@ -544,14 +562,19 @@ impl StdioServerClient {
     }
 }
 
-async fn run_stdout_reader(
-    mut lines: tokio::io::Lines<BufReader<ChildStdout>>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>,
+async fn run_stdout_reader<R>(
+    mut lines: tokio::io::Lines<R>,
+    pending: PendingResponses,
     notifications_tx: mpsc::UnboundedSender<ServerNotificationMessage>,
-) {
+) where
+    R: AsyncBufRead + Unpin,
+{
     while let Ok(Some(line)) = lines.next_line().await {
         match serde_json::from_str::<serde_json::Value>(&line) {
             Ok(message) => {
+                // Responses are consumed by the request future waiting on the
+                // matching oneshot. Notifications intentionally bypass that
+                // map so event consumers can drain them independently.
                 if let Some(id) = message.get("id").and_then(serde_json::Value::as_u64) {
                     if let Some(tx) = pending.lock().await.remove(&id) {
                         let _ = tx.send(message);
@@ -601,7 +624,17 @@ async fn run_stdout_reader(
             }
         }
     }
-    tracing::warn!("server stdout reader stopped");
+    // Dropping the pending response senders wakes request futures instead of
+    // leaving them blocked until their timeout when the child closes stdout.
+    let abandoned_response_count = pending.lock().await.drain().count();
+    if abandoned_response_count == 0 {
+        tracing::warn!("server stdout reader stopped");
+    } else {
+        tracing::warn!(
+            abandoned_response_count,
+            "server stdout reader stopped with pending responses"
+        );
+    }
 }
 
 async fn run_stderr_reader(mut lines: tokio::io::Lines<BufReader<ChildStderr>>) {
@@ -659,12 +692,11 @@ fn stream_trace_elapsed_ms() -> u128 {
         .as_millis()
 }
 
-fn notification_item_id(params: &serde_json::Value) -> Option<String> {
+fn notification_item_id(params: &serde_json::Value) -> Option<&str> {
     params
         .get("context")
         .and_then(|context| context.get("item_id"))
         .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
 }
 
 fn notification_assistant_delta<'a>(
@@ -708,7 +740,7 @@ fn assistant_token_log_max_chars() -> usize {
 
 fn format_assistant_token_log_preview(text: &str, max_chars: usize) -> String {
     let max_chars = max_chars.max(1);
-    let mut preview = String::new();
+    let mut preview = String::with_capacity(text.len().min(max_chars));
     let mut chars = text.chars();
     for ch in chars.by_ref().take(max_chars) {
         preview.extend(ch.escape_default());
@@ -717,4 +749,29 @@ fn format_assistant_token_log_preview(text: &str, max_chars: usize) -> String {
         preview.push_str("...");
     }
     preview
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[tokio::test]
+    async fn stdout_reader_drops_pending_responses_when_stdout_closes() {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let (response_tx, response_rx) = oneshot::channel();
+        let request_id = 7;
+        pending.lock().await.insert(request_id, response_tx);
+        let (notifications_tx, _notifications_rx) = mpsc::unbounded_channel();
+
+        run_stdout_reader(
+            BufReader::new(tokio::io::empty()).lines(),
+            Arc::clone(&pending),
+            notifications_tx,
+        )
+        .await;
+
+        assert!(response_rx.await.is_err());
+        assert_eq!(pending.lock().await.len(), 0);
+    }
 }

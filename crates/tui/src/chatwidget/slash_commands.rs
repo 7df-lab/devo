@@ -32,6 +32,7 @@ impl ChatWidget {
             SlashCommand::Resume => "session",
             SlashCommand::Permissions => "permissions",
             SlashCommand::Diff => "diff",
+            SlashCommand::Research => "research",
             SlashCommand::Mcp
             | SlashCommand::Skills
             | SlashCommand::Goal
@@ -163,6 +164,30 @@ impl ChatWidget {
             }
             SlashCommand::Goal => {
                 self.handle_goal_slash_command(argument);
+            }
+            SlashCommand::Research => {
+                let trimmed = argument.trim();
+                if trimmed.is_empty() {
+                    self.add_to_history(history_cell::new_info_event(
+                        "Usage: /research <research question>".to_string(),
+                        None,
+                    ));
+                    self.set_status_message("Usage: /research <research question>");
+                    return;
+                }
+                self.add_to_history(history_cell::new_user_prompt(
+                    format!("/research {trimmed}"),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    self.active_accent_color(),
+                    self.current_turn_mode,
+                ));
+                self.app_event_tx
+                    .send(AppEvent::Command(AppCommand::RunResearch {
+                        question: trimmed.to_string(),
+                    }));
+                self.set_status_message("Starting research");
             }
             SlashCommand::Diff => {
                 self.set_status_message("Computing diff");

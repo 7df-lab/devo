@@ -105,6 +105,40 @@ impl ToolRegistry {
             .collect()
     }
 
+    pub fn restricted_to_specs(&self, names: &[&str]) -> Self {
+        let mut registry = ToolRegistry::new();
+        registry.unified_exec_store = self.unified_exec_store.clone();
+        registry.loaded_deferred_tools = Arc::clone(&self.loaded_deferred_tools);
+
+        for spec in &self.specs {
+            if !names.iter().any(|name| *name == spec.name) {
+                continue;
+            }
+            registry
+                .spec_index
+                .insert(spec.name.clone(), registry.specs.len());
+            if let Some(exposure) = self.spec_exposure.get(&spec.name).copied() {
+                registry.spec_exposure.insert(spec.name.clone(), exposure);
+            }
+            if let Some(search_text) = self.spec_search_text.get(&spec.name) {
+                registry
+                    .spec_search_text
+                    .insert(spec.name.clone(), search_text.clone());
+            }
+            registry.specs.push(spec.clone());
+        }
+
+        for name in names {
+            if let Some(handler) = self.handlers.get(*name) {
+                registry
+                    .handlers
+                    .insert((*name).to_string(), Arc::clone(handler));
+            }
+        }
+
+        registry
+    }
+
     pub fn deferred_tool_prompt(
         &self,
         session_id: &str,
@@ -472,6 +506,7 @@ mod tests {
             },
             cancel_token: CancellationToken::new(),
             agent_scope: crate::contracts::ToolAgentScope::Parent,
+            agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
             network_proxy: None,
@@ -544,6 +579,42 @@ mod tests {
     }
 
     #[test]
+    fn registry_restricted_to_specs_keeps_only_named_tools() {
+        let mut builder = ToolRegistryBuilder::new();
+        for name in ["webfetch", "write"] {
+            builder.register_handler(name, Arc::new(EchoHandler::new()));
+            builder.push_spec(ToolSpec {
+                name: name.into(),
+                description: format!("{name} description"),
+                input_schema: JsonSchema::string(None),
+                output_mode: ToolOutputMode::Text,
+                execution_mode: ToolExecutionMode::ReadOnly,
+                capability_tags: vec![],
+                supports_parallel: true,
+                preparation_feedback: ToolPreparationFeedback::None,
+                display_name: None,
+                supports_cancellation: None,
+                supports_streaming: None,
+            });
+        }
+        let registry = builder.build();
+
+        let restricted = registry.restricted_to_specs(&["webfetch"]);
+
+        assert_eq!(
+            restricted
+                .tool_definitions()
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>(),
+            vec!["webfetch"]
+        );
+        assert!(restricted.get("webfetch").is_some());
+        assert!(restricted.get("write").is_none());
+        assert!(restricted.spec("write").is_none());
+    }
+
+    #[test]
     fn registry_builds_deferred_tool_prompt() {
         let mut builder = ToolRegistryBuilder::new();
         for name in ["read", "ToolSearch", "web_search"] {
@@ -576,7 +647,7 @@ mod tests {
                 .iter()
                 .map(|tool| &tool.name)
                 .collect::<Vec<_>>(),
-            vec!["read", "ToolSearch"]
+            vec!["read", "ToolSearch", "web_search"]
         );
         assert_eq!(
             prompt
@@ -584,7 +655,7 @@ mod tests {
                 .iter()
                 .map(|tool| &tool.name)
                 .collect::<Vec<_>>(),
-            vec!["web_search"]
+            Vec::<&String>::new()
         );
     }
 
@@ -646,7 +717,7 @@ mod tests {
                 &DeferredLoadingConfig::default(),
                 "select:WebSearch",
             )
-            .expect("deferred tool should be available");
+            .expect("preloaded tool should be available");
 
         assert_eq!(
             summary,

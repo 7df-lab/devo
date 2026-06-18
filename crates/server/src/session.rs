@@ -3,6 +3,7 @@ pub use devo_protocol::{
     SessionHistoryItem, SessionHistoryItemKind, SessionHistoryToolIo, SessionListParams,
     SessionListResult, SessionMetadata, SessionMetadataUpdateParams, SessionMetadataUpdateResult,
     SessionPermissionsUpdateParams, SessionPermissionsUpdateResult, SessionResumeParams,
-    SessionResumeResult, SessionRollbackParams, SessionRollbackResult, SessionRuntimeStatus,
-    SessionStartParams, SessionStartResult, SessionTitleUpdateParams, SessionTitleUpdateResult,
+    SessionResumeResult, SessionRollbackMode, SessionRollbackParams, SessionRollbackResult,
+    SessionRuntimeStatus, SessionStartParams, SessionStartResult, SessionTitleUpdateParams,
+    SessionTitleUpdateResult,
 };

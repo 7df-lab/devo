@@ -302,7 +302,8 @@ fn emit_subagent_item_started(
         | ItemKind::ImageView
         | ItemKind::ContextCompaction
         | ItemKind::ApprovalRequest
-        | ItemKind::ApprovalDecision => {}
+        | ItemKind::ApprovalDecision
+        | ItemKind::ResearchArtifact => {}
     }
 }
 
@@ -422,7 +423,8 @@ fn emit_subagent_item_completed(
                 | ItemKind::ImageView
                 | ItemKind::ContextCompaction
                 | ItemKind::ApprovalRequest
-                | ItemKind::ApprovalDecision,
+                | ItemKind::ApprovalDecision
+                | ItemKind::ResearchArtifact,
             ..
         } => {}
     }

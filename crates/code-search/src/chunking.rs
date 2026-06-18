@@ -59,7 +59,7 @@ fn chunk_by_ast(
         return Vec::new();
     }
 
-    let mut ranges = Vec::new();
+    let mut ranges = Vec::with_capacity(root.named_child_count());
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
         collect_node_ranges(child, content, 0, &mut ranges);
@@ -110,7 +110,7 @@ fn merge_ranges(
     }
     ranges.sort_by_key(|range| range.start);
     let line_starts = line_start_offsets(content);
-    let mut merged = Vec::new();
+    let mut merged = Vec::with_capacity(ranges.len());
     let mut current: Option<(Range<usize>, usize)> = None;
 
     for range in ranges {
@@ -203,8 +203,8 @@ fn count_chars(text: &str) -> usize {
 /// Line-based splitting never slices through UTF-8 bytes and keeps line spans
 /// straightforward for `find_related`.
 fn chunk_by_lines(relative_path: &Path, language: &str, content: &str) -> Vec<Chunk> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
+    let mut chunks = Vec::with_capacity(content.len().div_ceil(DESIRED_CHUNK_CHARS));
+    let mut current = String::with_capacity(content.len().min(DESIRED_CHUNK_CHARS));
     let mut current_chars = 0usize;
     let mut start_line: usize = 1;
     let mut current_line: usize = 1;
@@ -213,14 +213,14 @@ fn chunk_by_lines(relative_path: &Path, language: &str, content: &str) -> Vec<Ch
         let line_chars = count_chars(line);
         let next_len = current_chars + line_chars + 1;
         if !current.is_empty() && next_len > DESIRED_CHUNK_CHARS {
-            chunks.push(Chunk {
-                content: current.trim_end().to_string(),
-                file_path: relative_path.to_path_buf(),
+            push_line_chunk(
+                &mut chunks,
+                relative_path,
+                language,
+                &mut current,
                 start_line,
-                end_line: current_line.saturating_sub(1),
-                language: language.to_string(),
-            });
-            current.clear();
+                current_line.saturating_sub(1),
+            );
             current_chars = 0;
             start_line = current_line;
         }
@@ -231,15 +231,38 @@ fn chunk_by_lines(relative_path: &Path, language: &str, content: &str) -> Vec<Ch
     }
 
     if !current.trim().is_empty() {
-        chunks.push(Chunk {
-            content: current.trim_end().to_string(),
-            file_path: relative_path.to_path_buf(),
+        push_line_chunk(
+            &mut chunks,
+            relative_path,
+            language,
+            &mut current,
             start_line,
-            end_line: current_line.saturating_sub(1),
-            language: language.to_string(),
-        });
+            current_line.saturating_sub(1),
+        );
     }
     chunks
+}
+
+fn push_line_chunk(
+    chunks: &mut Vec<Chunk>,
+    relative_path: &Path,
+    language: &str,
+    current: &mut String,
+    start_line: usize,
+    end_line: usize,
+) {
+    // The chunk must own its content, but copying would temporarily keep two
+    // large buffers alive. Truncate the reusable line buffer and move it into
+    // the chunk instead.
+    let trimmed_len = current.trim_end().len();
+    current.truncate(trimmed_len);
+    chunks.push(Chunk {
+        content: std::mem::take(current),
+        file_path: relative_path.to_path_buf(),
+        start_line,
+        end_line,
+        language: language.to_string(),
+    });
 }
 
 /// Converts a byte offset to a 1-indexed line number.

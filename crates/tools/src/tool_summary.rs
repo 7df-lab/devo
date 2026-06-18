@@ -1,34 +1,63 @@
-// TODO: Current tool sumary is a function with match, we need to refactor the summary as tool trait
-//       and implement the summary as a method of a tool.
+//! Stable, display-only summaries for tool calls.
+//!
+//! Tool specs and handlers live in different crates, so summaries are centralized
+//! here until each tool can own its display policy without introducing cycles.
 
+use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::path::Path;
-use std::path::PathBuf;
 
-fn make_relative(cwd: &Path, path: &str) -> String {
-    let p = PathBuf::from(path);
+use serde_json::Value;
+
+fn make_relative<'a>(cwd: &Path, path: &'a str) -> Cow<'a, str> {
+    let p = Path::new(path);
     if !p.is_absolute() {
-        return path.to_string();
+        return Cow::Borrowed(path);
     }
     // Try Path::strip_prefix first (handles platform semantics correctly)
     if let Ok(rel) = p.strip_prefix(cwd) {
-        let lossy = rel.to_string_lossy();
-        let s = lossy.replace('\\', "/");
-        if s.is_empty() { ".".to_string() } else { s }
+        if rel.as_os_str().is_empty() {
+            Cow::Borrowed(".")
+        } else if let Some(rel) = rel.to_str() {
+            // Tool summaries are generated for every call; keep the common
+            // UTF-8 path case borrowed and allocate only when normalizing.
+            normalize_path_separators(Cow::Borrowed(rel))
+        } else {
+            Cow::Owned(normalize_path_separators(rel.to_string_lossy()).into_owned())
+        }
     } else {
         // Fallback: string-level comparison with forward-slash normalization
-        let cwd_str = cwd.to_string_lossy().replace('\\', "/");
-        let path_str = p.to_string_lossy().replace('\\', "/");
-        if let Some(rest) = path_str.strip_prefix(&cwd_str) {
-            let rel = rest.trim_start_matches('/');
-            if rel.is_empty() {
-                ".".to_string()
-            } else {
-                rel.to_string()
-            }
+        let cwd_str = normalize_path_separators(cwd.to_string_lossy());
+        let path_str = normalize_path_separators(Cow::Borrowed(path));
+        if path_str == cwd_str.as_ref() {
+            Cow::Borrowed(".")
+        } else if let Some(rel) = path_str
+            .strip_prefix(cwd_str.as_ref())
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
+            Cow::Owned(rel.to_string())
         } else {
-            path.to_string()
+            Cow::Borrowed(path)
         }
     }
+}
+
+fn normalize_path_separators(text: Cow<'_, str>) -> Cow<'_, str> {
+    if text.contains('\\') {
+        Cow::Owned(text.replace('\\', "/"))
+    } else {
+        text
+    }
+}
+
+fn string_arg<'a>(input: &'a Value, key: &str, default: &'a str) -> &'a str {
+    input.get(key).and_then(Value::as_str).unwrap_or(default)
+}
+
+fn string_arg_any<'a>(input: &'a Value, keys: &[&str], default: &'a str) -> &'a str {
+    keys.iter()
+        .find_map(|key| input.get(*key).and_then(Value::as_str))
+        .unwrap_or(default)
 }
 
 /// Compute a human-readable summary/title for a tool call, based on the tool
@@ -36,91 +65,94 @@ fn make_relative(cwd: &Path, path: &str) -> String {
 pub fn tool_summary(name: &str, input: &serde_json::Value, cwd: &Path) -> String {
     match name {
         "bash" | "shell_command" => {
-            let cmd = input
-                .get("command")
-                .or_else(|| input.get("cmd"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let cmd = string_arg_any(input, &["command", "cmd"], "");
             format!("{name}: {cmd}")
         }
         "exec_command" => {
-            let cmd = input
-                .get("cmd")
-                .or_else(|| input.get("command"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let cmd = string_arg_any(input, &["cmd", "command"], "");
             format!("exec: {cmd}")
         }
         "read" => {
-            let path = input
-                .get("filePath")
-                .or_else(|| input.get("path"))
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
+            let path = string_arg_any(input, &["filePath", "path"], "");
             let rel = make_relative(cwd, path);
-            let mut s = format!("read: {rel}");
+            let mut s = String::with_capacity("read: ".len() + rel.len() + 32);
+            s.push_str("read: ");
+            s.push_str(&rel);
             let offset = input["offset"].as_u64();
             let limit = input["limit"].as_u64();
             match (offset, limit) {
-                (Some(o), Some(l)) => s.push_str(&format!(" (offset:{o}, limit:{l})")),
-                (Some(o), None) => s.push_str(&format!(" (offset:{o})")),
-                (None, Some(l)) => s.push_str(&format!(" (limit:{l})")),
+                (Some(o), Some(l)) => {
+                    write!(&mut s, " (offset:{o}, limit:{l})")
+                        .expect("writing to a String cannot fail");
+                }
+                (Some(o), None) => {
+                    write!(&mut s, " (offset:{o})").expect("writing to a String cannot fail");
+                }
+                (None, Some(l)) => {
+                    write!(&mut s, " (limit:{l})").expect("writing to a String cannot fail");
+                }
                 (None, None) => {}
             }
             s
         }
         "write" => {
-            let path = input["filePath"].as_str().unwrap_or("");
+            let path = string_arg(input, "filePath", "");
             let rel = make_relative(cwd, path);
             format!("write: {rel}")
         }
         "grep" => {
-            let pattern = input["pattern"].as_str().unwrap_or("");
-            let path = input["path"].as_str().unwrap_or(".");
+            let pattern = string_arg(input, "pattern", "");
+            let path = string_arg(input, "path", ".");
             let rel = make_relative(cwd, path);
             format!("grep: '{pattern}' in {rel}")
         }
         "code_search" => {
-            let operation = input["operation"].as_str().unwrap_or("search");
+            let operation = string_arg(input, "operation", "search");
             match operation {
                 "find_related" => {
-                    let path = input["file_path"].as_str().unwrap_or("");
+                    let path = string_arg(input, "file_path", "");
                     let rel = make_relative(cwd, path);
-                    let line = input["line"]
-                        .as_u64()
-                        .map(|line| line.to_string())
-                        .unwrap_or_else(|| "?".to_string());
-                    format!("code_search related {rel}:{line}")
+                    let mut summary =
+                        String::with_capacity("code_search related ".len() + rel.len() + 21);
+                    summary.push_str("code_search related ");
+                    summary.push_str(&rel);
+                    summary.push(':');
+                    if let Some(line) = input["line"].as_u64() {
+                        write!(&mut summary, "{line}").expect("writing to a String cannot fail");
+                    } else {
+                        summary.push('?');
+                    }
+                    summary
                 }
                 _ => {
-                    let query = input["query"].as_str().unwrap_or("");
-                    let path = input["path"].as_str().unwrap_or(".");
+                    let query = string_arg(input, "query", "");
+                    let path = string_arg(input, "path", ".");
                     let rel = make_relative(cwd, path);
                     format!("code_search: {query} in {rel}")
                 }
             }
         }
         "find" | "glob" => {
-            let pattern = input["pattern"].as_str().unwrap_or("");
-            let path = input["path"].as_str().unwrap_or(".");
+            let pattern = string_arg(input, "pattern", "");
+            let path = string_arg(input, "path", ".");
             let rel = make_relative(cwd, path);
             format!("{name}: {pattern} in {rel}")
         }
         "apply_patch" => "apply_patch".to_string(),
         "webfetch" | "web_fetch" | "web-fetch" | "fetch_url" | "fetch-url" => {
-            let url = input["url"].as_str().unwrap_or("");
+            let url = string_arg(input, "url", "");
             format!("web_fetch: {url}")
         }
         "web_search" | "websearch" | "web-search" => {
-            let q = input["query"].as_str().unwrap_or("");
+            let q = string_arg(input, "query", "");
             format!("web_search: {q}")
         }
         "skill" => {
-            let name = input["name"].as_str().unwrap_or("");
+            let name = string_arg(input, "name", "");
             format!("skill: {name}")
         }
         "spawn_agent" => {
-            let message = input["message"].as_str().unwrap_or("");
+            let message = string_arg(input, "message", "");
             if message.is_empty() {
                 "spawn_agent".to_string()
             } else {
@@ -130,17 +162,23 @@ pub fn tool_summary(name: &str, input: &serde_json::Value, cwd: &Path) -> String
         "question" | "request_user_input" => "request_user_input".to_string(),
         "update_plan" => "update_plan".to_string(),
         "lsp" => {
-            let path = input["filePath"].as_str().unwrap_or("");
+            let path = string_arg(input, "filePath", "");
             let rel = make_relative(cwd, path);
-            let line = input["line"]
-                .as_i64()
-                .map(|l| l.to_string())
-                .unwrap_or_else(|| "?".into());
-            let col = input["character"]
-                .as_i64()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "?".into());
-            format!("lsp: {rel}:{line}:{col}")
+            let mut summary = String::with_capacity("lsp: ".len() + rel.len() + 24);
+            summary.push_str("lsp: ");
+            summary.push_str(&rel);
+            summary.push(':');
+            if let Some(line) = input["line"].as_i64() {
+                write!(&mut summary, "{line}:").expect("writing to a String cannot fail");
+            } else {
+                summary.push_str("?:");
+            }
+            if let Some(col) = input["character"].as_i64() {
+                write!(&mut summary, "{col}").expect("writing to a String cannot fail");
+            } else {
+                summary.push('?');
+            }
+            summary
         }
         "invalid" => "invalid".to_string(),
         _ => name.to_string(),
@@ -152,6 +190,7 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use serde_json::json;
+    use std::path::PathBuf;
 
     fn cwd() -> PathBuf {
         PathBuf::from("/project")
@@ -276,5 +315,24 @@ mod tests {
             rel == "src/main.rs" || rel == "src\\main.rs",
             "make_relative('{sub_str}') = '{rel}', expected 'src/main.rs'"
         );
+    }
+
+    #[test]
+    fn absolute_path_with_same_prefix_stays_absolute() {
+        let cwd = std::env::current_dir().expect("current dir");
+        let cwd_name = cwd
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("current dir has utf-8 file name");
+        let sibling = cwd
+            .with_file_name(format!("{cwd_name}-backup"))
+            .join("src")
+            .join("main.rs");
+        let sibling_text = sibling.to_string_lossy().to_string();
+        let input = json!({"filePath": sibling_text});
+
+        let summary = tool_summary("read", &input, &cwd);
+
+        assert_eq!(summary, format!("read: {}", sibling.to_string_lossy()));
     }
 }

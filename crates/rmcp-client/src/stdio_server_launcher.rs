@@ -222,10 +222,8 @@ impl LocalStdioServerLauncher {
         let (transport, stderr) = TokioChildProcess::builder(command)
             .stderr(Stdio::piped())
             .spawn()?;
-        let process = StdioServerProcessHandle::local(
-            program_name.clone(),
-            transport.id().map(LocalProcessTerminator::new),
-        );
+        let process =
+            StdioServerProcessHandle::local(transport.id().map(LocalProcessTerminator::new));
 
         if let Some(stderr) = stderr {
             tokio::spawn(async move {
@@ -309,7 +307,7 @@ impl LocalProcessTerminator {
 }
 
 impl StdioServerProcessHandle {
-    fn local(_program_name: String, terminator: Option<LocalProcessTerminator>) -> Self {
+    fn local(terminator: Option<LocalProcessTerminator>) -> Self {
         Self {
             inner: Arc::new(StdioServerProcessHandleInner {
                 terminator,

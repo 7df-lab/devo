@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::path::Path;
 
 use crate::git_op::GitToolingError;
@@ -36,11 +35,7 @@ pub fn merge_base_with_head(
 
     let merge_base = run_git_for_stdout(
         repo_root.as_path(),
-        vec![
-            OsString::from("merge-base"),
-            OsString::from(head),
-            OsString::from(preferred_ref),
-        ],
+        ["merge-base", head.as_str(), preferred_ref.as_str()],
         /*env*/ None,
     )?;
 
@@ -50,11 +45,7 @@ pub fn merge_base_with_head(
 fn resolve_branch_ref(repo_root: &Path, branch: &str) -> Result<Option<String>, GitToolingError> {
     let rev = run_git_for_stdout(
         repo_root,
-        vec![
-            OsString::from("rev-parse"),
-            OsString::from("--verify"),
-            OsString::from(branch),
-        ],
+        ["rev-parse", "--verify", branch],
         /*env*/ None,
     );
 
@@ -69,35 +60,31 @@ fn resolve_upstream_if_remote_ahead(
     repo_root: &Path,
     branch: &str,
 ) -> Result<Option<String>, GitToolingError> {
+    let upstream_ref = format!("{branch}@{{upstream}}");
     let upstream = match run_git_for_stdout(
         repo_root,
-        vec![
-            OsString::from("rev-parse"),
-            OsString::from("--abbrev-ref"),
-            OsString::from("--symbolic-full-name"),
-            OsString::from(format!("{branch}@{{upstream}}")),
+        [
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            upstream_ref.as_str(),
         ],
         /*env*/ None,
     ) {
         Ok(name) => {
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
+            if name.is_empty() {
                 return Ok(None);
             }
-            trimmed.to_string()
+            name
         }
         Err(GitToolingError::GitCommand { .. }) => return Ok(None),
         Err(other) => return Err(other),
     };
 
+    let branch_range = format!("{branch}...{upstream}");
     let counts = match run_git_for_stdout(
         repo_root,
-        vec![
-            OsString::from("rev-list"),
-            OsString::from("--left-right"),
-            OsString::from("--count"),
-            OsString::from(format!("{branch}...{upstream}")),
-        ],
+        ["rev-list", "--left-right", "--count", branch_range.as_str()],
         /*env*/ None,
     ) {
         Ok(counts) => counts,

@@ -51,10 +51,19 @@ pub fn uninstall_system_skills(devo_home: &Path) {
 }
 
 fn read_marker(path: &Path) -> Result<String, SystemSkillsError> {
-    Ok(fs::read_to_string(path)
-        .map_err(|source| SystemSkillsError::io("read system skills marker", source))?
-        .trim()
-        .to_string())
+    let mut marker = fs::read_to_string(path)
+        .map_err(|source| SystemSkillsError::io("read system skills marker", source))?;
+    let start = marker.len() - marker.trim_start().len();
+    let end = marker.trim_end().len();
+    if start >= end {
+        marker.clear();
+        return Ok(marker);
+    }
+    marker.truncate(end);
+    if start > 0 {
+        marker.drain(..start);
+    }
+    Ok(marker)
 }
 
 fn embedded_system_skills_fingerprint() -> String {
@@ -75,14 +84,14 @@ fn collect_fingerprint_items(dir: &Dir<'_>, items: &mut Vec<(String, Option<u64>
     for entry in dir.entries() {
         match entry {
             include_dir::DirEntry::Dir(subdir) => {
-                items.push((subdir.path().to_string_lossy().to_string(), None));
+                items.push((subdir.path().to_string_lossy().into_owned(), None));
                 collect_fingerprint_items(subdir, items);
             }
             include_dir::DirEntry::File(file) => {
                 let mut file_hasher = DefaultHasher::new();
                 file.contents().hash(&mut file_hasher);
                 items.push((
-                    file.path().to_string_lossy().to_string(),
+                    file.path().to_string_lossy().into_owned(),
                     Some(file_hasher.finish()),
                 ));
             }
@@ -101,6 +110,8 @@ fn write_embedded_dir(dir: &Dir<'_>, dest: &Path) -> Result<(), SystemSkillsErro
                 fs::create_dir_all(&subdir_dest).map_err(|source| {
                     SystemSkillsError::io("create system skills subdir", source)
                 })?;
+                // `include_dir` paths remain relative to the embedded root at
+                // every recursion level, so keep `dest` as the cache root.
                 write_embedded_dir(subdir, dest)?;
             }
             include_dir::DirEntry::File(file) => {
@@ -137,10 +148,14 @@ impl SystemSkillsError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use pretty_assertions::assert_eq;
+    use tempfile::NamedTempFile;
 
     use super::SYSTEM_SKILLS_DIR;
     use super::collect_fingerprint_items;
+    use super::read_marker;
 
     #[test]
     fn fingerprint_traverses_nested_entries() {
@@ -160,5 +175,21 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(paths.is_empty(), false);
+    }
+
+    #[test]
+    fn read_marker_trims_surrounding_whitespace() {
+        let file = NamedTempFile::new().expect("marker file");
+        fs::write(file.path(), " \nabc\t\n ").expect("write marker");
+
+        assert_eq!(read_marker(file.path()).expect("marker"), "abc");
+    }
+
+    #[test]
+    fn read_marker_whitespace_only_is_empty() {
+        let file = NamedTempFile::new().expect("marker file");
+        fs::write(file.path(), " \n\t ").expect("write marker");
+
+        assert_eq!(read_marker(file.path()).expect("marker"), "");
     }
 }

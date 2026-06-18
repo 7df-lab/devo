@@ -139,7 +139,7 @@ pub fn parse_skill_md(path: &Path) -> Result<SkillPackage, Vec<SkillDiagnostic>>
 
     let root = path
         .parent()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     let definition = SkillDefinition {
@@ -170,6 +170,7 @@ pub fn parse_skill_md(path: &Path) -> Result<SkillPackage, Vec<SkillDiagnostic>>
     })
 }
 
+#[derive(Default)]
 struct FrontmatterFields {
     name: Option<String>,
     description: Option<String>,
@@ -217,13 +218,7 @@ fn detect_frontmatter_format(frontmatter: &str) -> FrontmatterFormat {
 }
 
 fn parse_yaml_frontmatter(raw: &str) -> Result<FrontmatterFields, String> {
-    let mut fields = FrontmatterFields {
-        name: None,
-        description: None,
-        version: None,
-        tags: Vec::new(),
-        allowed_tools: Vec::new(),
-    };
+    let mut fields = FrontmatterFields::default();
 
     for line in raw.lines() {
         let line = line.trim();
@@ -231,33 +226,8 @@ fn parse_yaml_frontmatter(raw: &str) -> Result<FrontmatterFields, String> {
             continue;
         }
         if let Some((key, value)) = line.split_once(':') {
-            let key = key.trim().to_lowercase();
             let value = value.trim().trim_matches('"').trim_matches('\'');
-
-            match key.as_str() {
-                "name" => fields.name = Some(value.to_string()),
-                "description" => fields.description = Some(value.to_string()),
-                "version" => fields.version = Some(value.to_string()),
-                "tags" => {
-                    fields.tags = value
-                        .trim_matches('[')
-                        .trim_matches(']')
-                        .split(',')
-                        .map(|t| t.trim().trim_matches('"').trim_matches('\'').to_string())
-                        .filter(|t| !t.is_empty())
-                        .collect();
-                }
-                "allowed_tools" | "allowed-tools" => {
-                    fields.allowed_tools = value
-                        .trim_matches('[')
-                        .trim_matches(']')
-                        .split(',')
-                        .map(|t| t.trim().trim_matches('"').trim_matches('\'').to_string())
-                        .filter(|t| !t.is_empty())
-                        .collect();
-                }
-                _ => {}
-            }
+            assign_frontmatter_field(&mut fields, key.trim(), value);
         }
     }
 
@@ -270,13 +240,7 @@ fn parse_yaml_frontmatter(raw: &str) -> Result<FrontmatterFields, String> {
 
 fn parse_toml_frontmatter(raw: &str) -> Result<FrontmatterFields, String> {
     // Simple TOML-like key=value parsing
-    let mut fields = FrontmatterFields {
-        name: None,
-        description: None,
-        version: None,
-        tags: Vec::new(),
-        allowed_tools: Vec::new(),
-    };
+    let mut fields = FrontmatterFields::default();
 
     for line in raw.lines() {
         let line = line.trim();
@@ -284,33 +248,8 @@ fn parse_toml_frontmatter(raw: &str) -> Result<FrontmatterFields, String> {
             continue;
         }
         if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim().to_lowercase();
             let value = value.trim().trim_matches('"').trim_matches('\'');
-
-            match key.as_str() {
-                "name" => fields.name = Some(value.to_string()),
-                "description" => fields.description = Some(value.to_string()),
-                "version" => fields.version = Some(value.to_string()),
-                "tags" => {
-                    fields.tags = value
-                        .trim_matches('[')
-                        .trim_matches(']')
-                        .split(',')
-                        .map(|t| t.trim().trim_matches('"').trim_matches('\'').to_string())
-                        .filter(|t| !t.is_empty())
-                        .collect();
-                }
-                "allowed_tools" | "allowed-tools" => {
-                    fields.allowed_tools = value
-                        .trim_matches('[')
-                        .trim_matches(']')
-                        .split(',')
-                        .map(|t| t.trim().trim_matches('"').trim_matches('\'').to_string())
-                        .filter(|t| !t.is_empty())
-                        .collect();
-                }
-                _ => {}
-            }
+            assign_frontmatter_field(&mut fields, key.trim(), value);
         }
     }
 
@@ -319,6 +258,33 @@ fn parse_toml_frontmatter(raw: &str) -> Result<FrontmatterFields, String> {
     }
 
     Ok(fields)
+}
+
+fn assign_frontmatter_field(fields: &mut FrontmatterFields, key: &str, value: &str) {
+    if key.eq_ignore_ascii_case("name") {
+        fields.name = Some(value.to_string());
+    } else if key.eq_ignore_ascii_case("description") {
+        fields.description = Some(value.to_string());
+    } else if key.eq_ignore_ascii_case("version") {
+        fields.version = Some(value.to_string());
+    } else if key.eq_ignore_ascii_case("tags") {
+        fields.tags = parse_inline_string_list(value);
+    } else if key.eq_ignore_ascii_case("allowed_tools") || key.eq_ignore_ascii_case("allowed-tools")
+    {
+        fields.allowed_tools = parse_inline_string_list(value);
+    }
+}
+
+fn parse_inline_string_list(value: &str) -> Vec<String> {
+    value
+        .trim_matches('[')
+        .trim_matches(']')
+        .split(',')
+        .filter_map(|item| {
+            let item = item.trim().trim_matches('"').trim_matches('\'');
+            (!item.is_empty()).then(|| item.to_string())
+        })
+        .collect()
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -463,5 +429,24 @@ mod tests {
             result.definition.frontmatter_format,
             FrontmatterFormat::Toml
         );
+    }
+
+    #[test]
+    fn frontmatter_keys_are_case_insensitive_and_lists_skip_empty_items() {
+        let tmp = TempDir::new().expect("tempdir");
+        let pkg_dir = tmp.path().join("case-skill");
+        std::fs::create_dir(&pkg_dir).expect("create");
+        let skill_md = pkg_dir.join("SKILL.md");
+
+        write_skill_md(
+            &pkg_dir,
+            "SKILL.md",
+            "---\nNAME: case-skill\nDESCRIPTION: Case handling\nTAGS: [alpha, , 'beta']\nALLOWED-TOOLS: [read, , write]\n---\n\nbody",
+        );
+
+        let result = parse_skill_md(&skill_md).expect("parse");
+        assert_eq!(result.definition.name.as_str(), "case-skill");
+        assert_eq!(result.definition.tags, vec!["alpha", "beta"]);
+        assert_eq!(result.definition.allowed_tools, vec!["read", "write"]);
     }
 }

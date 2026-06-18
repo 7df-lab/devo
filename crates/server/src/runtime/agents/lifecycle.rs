@@ -139,6 +139,7 @@ mod tests {
     use devo_protocol::ModelRequest;
     use devo_protocol::ModelResponse;
     use devo_protocol::StreamEvent;
+    use devo_protocol::SuccessResponse;
     use devo_protocol::WaitAgentParams;
     use devo_provider::ModelProviderSDK;
     use devo_provider::SingleProviderRouter;
@@ -277,6 +278,63 @@ mod tests {
                 created_at: wait_result.events[0].created_at,
             }]
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn child_agent_turn_start_failure_clears_active_turn() -> Result<()> {
+        let data_root = TempDir::new()?;
+        let runtime = build_runtime(data_root.path())?;
+        let value = runtime
+            .handle_session_start(
+                /*connection_id*/ 1,
+                serde_json::json!(1),
+                serde_json::to_value(SessionStartParams {
+                    cwd: data_root.path().to_path_buf(),
+                    ephemeral: false,
+                    title: None,
+                    model: None,
+                    model_binding_id: None,
+                })
+                .expect("session start params"),
+            )
+            .await;
+        let response: SuccessResponse<SessionStartResult> =
+            serde_json::from_value(value).expect("session start response");
+        let session_id = response.result.session.session_id;
+        let bad_rollout_path = data_root.path().join("rollout-dir");
+        std::fs::create_dir(&bad_rollout_path)?;
+        let session_arc = runtime
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .expect("session");
+        {
+            let mut session = session_arc.lock().await;
+            session
+                .record
+                .as_mut()
+                .expect("durable record")
+                .rollout_path = bad_rollout_path;
+        }
+
+        let error = runtime
+            .start_runtime_turn(
+                session_id,
+                "inspect this".to_string(),
+                "inspect this".to_string(),
+            )
+            .await
+            .expect_err("append failure");
+        let session = session_arc.lock().await;
+
+        assert!(matches!(error, ToolCallError::InternalError(_)));
+        assert_eq!(session.active_turn, None);
+        assert_eq!(session.summary.status, SessionRuntimeStatus::Idle);
+        assert_eq!(session.latest_turn, None);
 
         Ok(())
     }

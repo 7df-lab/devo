@@ -1,7 +1,8 @@
 pub use devo_protocol::{
     AgentInfo, AgentListParams, AgentListResult, AgentMailboxMessage, AgentMessageParams,
     AgentMessageResult, AgentOutputEvent, AgentStatusParams, ClientMethod, ClientNotification,
-    ClientRequest, CloseAgentParams, CloseAgentResult, ErrorResponse, ModelCatalogEntry,
+    ClientRequest, CloseAgentParams, CloseAgentResult, ErrorResponse, MessageEditPreviousParams,
+    MessageEditPreviousResult, MessageEditWorkspaceRestorePolicy, ModelCatalogEntry,
     ModelCatalogParams, ModelCatalogResult, ModelSavedEntry, ModelSavedParams, ModelSavedResult,
     NotificationEnvelope, ProtocolError, ProtocolErrorCode, ReferenceSearchCancelParams,
     ReferenceSearchCancelResult, ReferenceSearchFailedPayload, ReferenceSearchId,

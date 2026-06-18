@@ -1,3 +1,9 @@
+//! Shared wire and persistence types exchanged between Devo crates.
+//!
+//! The crate keeps provider requests, runtime events, sessions, permissions,
+//! and tool payloads in one serialization boundary so other crates can depend
+//! on stable protocol shapes instead of each other's internal models.
+
 mod agent;
 mod approval;
 mod command_exec;

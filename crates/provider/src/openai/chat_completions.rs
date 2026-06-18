@@ -1581,6 +1581,52 @@ mod tests {
     }
 
     #[test]
+    fn build_request_documents_hosted_tool_history_is_not_replayed_yet() {
+        let request = ModelRequest {
+            model: "gpt-4o-mini".to_string(),
+            system: None,
+            messages: vec![RequestMessage {
+                role: "assistant".to_string(),
+                content: vec![
+                    RequestContent::HostedToolUse {
+                        id: "hosted_ws_1".to_string(),
+                        name: "web_search".to_string(),
+                        input: json!({"query": "Rust docs"}),
+                        output: None,
+                        status: None,
+                    },
+                    RequestContent::HostedToolUse {
+                        id: "hosted_ws_1".to_string(),
+                        name: "web_search".to_string(),
+                        input: json!({"query": "Rust docs"}),
+                        output: Some(json!([{
+                            "title": "Rust documentation",
+                            "url": "https://example.test/rust"
+                        }])),
+                        status: Some("completed".to_string()),
+                    },
+                ],
+            }],
+            max_tokens: 256,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: SamplingControls::default(),
+            thinking: None,
+            reasoning_effort: None,
+            extra_body: None,
+        };
+
+        let body = build_request(&request, false);
+
+        assert_eq!(body["messages"][0]["role"], json!("assistant"));
+        assert_eq!(body["messages"][0]["content"], json!(""));
+        assert!(body["messages"][0].get("tool_calls").is_none());
+        let serialized = serde_json::to_string(&body).expect("serialize request body");
+        assert!(!serialized.contains("hosted_tool_use"));
+        assert!(!serialized.contains("web_search_tool_result"));
+    }
+
+    #[test]
     fn debug_request_body_uses_explicit_reasoning_effort_field() {
         let request = ModelRequest {
             model: "deepseek-v4".to_string(),

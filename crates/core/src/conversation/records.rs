@@ -4,7 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::conversation::{ItemId, SessionId, SessionTitleState, TurnId, TurnStatus, TurnUsage};
-use crate::{SessionContext, TurnContext, TurnKind};
+use crate::{
+    MessageEditRecordedRecord, SessionContext, TurnContext, TurnKind, TurnSupersededRecord,
+    TurnWorkspaceRestoreCompletedRecord, TurnWorkspaceRestoreStartedRecord,
+};
 
 /// Stores persistent metadata for one session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -237,6 +240,26 @@ pub struct ApprovalDecisionItem {
     pub scope: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchArtifactType {
+    Clarification,
+    Brief,
+    Plan,
+    Finding,
+    CompressedFinding,
+    WebpageSummary,
+    Failure,
+    FinalReportMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchArtifactItem {
+    pub artifact_type: ResearchArtifactType,
+    pub title: String,
+    pub content: String,
+}
+
 /// Enumerates the canonical persisted item kinds used by the conversation model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnItem {
@@ -272,6 +295,8 @@ pub enum TurnItem {
     ImageGeneration(TextItem),
     /// A context-compaction summary item.
     ContextCompaction(TextItem),
+    /// A deep-research milestone artifact persisted for replay and inspection.
+    ResearchArtifact(ResearchArtifactItem),
     /// A turn boundary summary with model name and duration.
     /// title = model name, body = duration_secs:u64 as string
     TurnSummary(TextItem),
@@ -381,6 +406,59 @@ pub struct CompactionSnapshotLine {
     pub preserved_item_ids: Vec<ItemId>,
 }
 
+/// Stores an append-only rollback marker for a session rollout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRollbackLine {
+    /// The time when this rollout line was persisted.
+    pub timestamp: DateTime<Utc>,
+    /// The session whose in-memory history was rebuilt.
+    pub session_id: SessionId,
+    /// The retained turn identifiers in prompt/replay order.
+    pub retained_turn_ids: Vec<TurnId>,
+    /// The retained item identifiers in prompt/replay order.
+    pub retained_item_ids: Vec<ItemId>,
+    /// The latest retained turn after rollback, if any.
+    pub latest_turn_id: Option<TurnId>,
+    /// The schema version for persisted rollback metadata.
+    pub schema_version: u32,
+}
+
+/// Stores one accepted message-edit record in the rollout file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageEditRecordedLine {
+    /// The time when this rollout line was persisted.
+    pub timestamp: DateTime<Utc>,
+    /// The accepted edit payload carried by the line.
+    pub record: MessageEditRecordedRecord,
+}
+
+/// Stores one turn-superseded marker in the rollout file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnSupersededLine {
+    /// The time when this rollout line was persisted.
+    pub timestamp: DateTime<Utc>,
+    /// The superseded-turn payload carried by the line.
+    pub record: TurnSupersededRecord,
+}
+
+/// Stores one workspace-restore-start record in the rollout file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnWorkspaceRestoreStartedLine {
+    /// The time when this rollout line was persisted.
+    pub timestamp: DateTime<Utc>,
+    /// The restore-start payload carried by the line.
+    pub record: TurnWorkspaceRestoreStartedRecord,
+}
+
+/// Stores one workspace-restore-completed record in the rollout file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnWorkspaceRestoreCompletedLine {
+    /// The time when this rollout line was persisted.
+    pub timestamp: DateTime<Utc>,
+    /// The restore-completed payload carried by the line.
+    pub record: TurnWorkspaceRestoreCompletedRecord,
+}
+
 /// Enumerates every canonical line type written to the rollout journal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RolloutLine {
@@ -394,6 +472,16 @@ pub enum RolloutLine {
     SessionTitleUpdated(SessionTitleUpdatedLine),
     /// Compaction snapshot line.
     CompactionSnapshot(Box<CompactionSnapshotLine>),
+    /// Accepted message-edit record line.
+    MessageEditRecorded(Box<MessageEditRecordedLine>),
+    /// Turn-superseded marker line.
+    TurnSuperseded(Box<TurnSupersededLine>),
+    /// Workspace-restore-start record line.
+    TurnWorkspaceRestoreStarted(Box<TurnWorkspaceRestoreStartedLine>),
+    /// Workspace-restore-completed record line.
+    TurnWorkspaceRestoreCompleted(Box<TurnWorkspaceRestoreCompletedLine>),
+    /// Session rollback marker line.
+    SessionRollback(Box<SessionRollbackLine>),
 }
 
 #[cfg(test)]
@@ -629,6 +717,11 @@ mod tests {
             TurnItem::ContextCompaction(TextItem {
                 text: "summary".into(),
             }),
+            TurnItem::ResearchArtifact(ResearchArtifactItem {
+                artifact_type: ResearchArtifactType::Brief,
+                title: "Research Brief".into(),
+                content: "brief".into(),
+            }),
             TurnItem::TurnSummary(TextItem { text: "0".into() }),
             TurnItem::WebSearch(TextItem {
                 text: "results".into(),
@@ -643,6 +736,22 @@ mod tests {
             let restored: TurnItem = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(variant, restored, "roundtrip failed for variant");
         }
+    }
+
+    #[test]
+    fn research_artifact_item_roundtrips() {
+        // Trace: L2-DES-RESEARCH-001
+        // Verifies: research milestones persist as a single ResearchArtifact turn item.
+        let item = TurnItem::ResearchArtifact(ResearchArtifactItem {
+            artifact_type: ResearchArtifactType::CompressedFinding,
+            title: "Compressed Finding".into(),
+            content: "Visible finding details and source context.".into(),
+        });
+
+        let json = serde_json::to_string(&item).expect("serialize");
+        let restored: TurnItem = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(item, restored);
     }
 
     // ── RolloutLine enum ──────────────────────────────────────
@@ -679,6 +788,14 @@ mod tests {
                 turn_id: turn.id,
                 summary_item_id: item.id,
                 preserved_item_ids: vec![item.id],
+            })),
+            RolloutLine::SessionRollback(Box::new(SessionRollbackLine {
+                timestamp: Utc::now(),
+                session_id: session.id,
+                retained_turn_ids: vec![turn.id],
+                retained_item_ids: vec![item.id],
+                latest_turn_id: Some(turn.id),
+                schema_version: 1,
             })),
         ];
 

@@ -17,6 +17,7 @@
 //! }
 //! ```
 
+use std::ffi::OsString;
 use std::future::Future;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -27,6 +28,7 @@ use anyhow::Result;
 
 /// Alias name for the server sub‑binary.
 const SERVER_ALIAS: &str = "devo-server";
+const ALIAS_SENTINEL_PREFIX: &str = "--devo-alias=";
 
 /// Directory (under DEVO_HOME/tmp/arg0) where alias entries are created.
 const ALIAS_TEMP_ROOT: &str = "arg0";
@@ -111,7 +113,15 @@ where
 /// Returns the alias name if the process was invoked through one of our
 /// symlinks or batch scripts, or `None` for a normal `devo` invocation.
 fn argv0_alias() -> Option<&'static str> {
-    let argv0 = std::env::args_os().next().unwrap_or_default();
+    argv0_alias_from_args(std::env::args_os())
+}
+
+fn argv0_alias_from_args<I>(args: I) -> Option<&'static str>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter();
+    let argv0 = args.next().unwrap_or_default();
     let file_name = Path::new(&argv0)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -123,17 +133,37 @@ fn argv0_alias() -> Option<&'static str> {
     }
 
     // Windows batch scripts pass the intended alias via a sentinel arg.
-    let mut args = std::env::args_os();
-    args.next(); // skip argv[0]
-    if let Some(sentinel) = args.next()
-        && let Some(s) = sentinel.to_str()
-        && let Some(rest) = s.strip_prefix("--devo-alias=")
-        && rest == SERVER_ALIAS
-    {
+    if args.next().as_deref().is_some_and(is_server_alias_sentinel) {
         return Some(SERVER_ALIAS);
     }
 
     None
+}
+
+fn is_server_alias_sentinel(arg: &std::ffi::OsStr) -> bool {
+    arg.to_str()
+        .and_then(|s| s.strip_prefix(ALIAS_SENTINEL_PREFIX))
+        .is_some_and(|rest| rest == SERVER_ALIAS)
+}
+
+fn server_dispatch_args() -> Vec<OsString> {
+    server_dispatch_args_from(std::env::args_os())
+}
+
+fn server_dispatch_args_from<I>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter();
+    let mut filtered = vec![args.next().unwrap_or_else(|| OsString::from(SERVER_ALIAS))];
+
+    if let Some(first_arg) = args.next()
+        && !is_server_alias_sentinel(&first_arg)
+    {
+        filtered.push(first_arg);
+    }
+    filtered.extend(args);
+    filtered
 }
 
 /// Build a multi‑thread Tokio runtime.
@@ -150,7 +180,7 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
 /// consumed by `argv0_alias()` so the remaining args are the server's own.
 async fn run_server_dispatch() {
     use clap::Parser;
-    let args = devo_server::ServerProcessArgs::parse();
+    let args = devo_server::ServerProcessArgs::parse_from(server_dispatch_args());
     let home_dir = match devo_util_paths::find_devo_home() {
         Ok(d) => d,
         Err(err) => {
@@ -208,7 +238,13 @@ where
     I: IntoIterator<Item = std::result::Result<(String, String), dotenvy::Error>>,
 {
     for (key, value) in iter.into_iter().flatten() {
-        if !key.to_ascii_uppercase().starts_with(ILLEGAL_ENV_VAR_PREFIX) {
+        // Avoid allocating an uppercased copy for every dotenv key; the
+        // reserved prefix is ASCII, so byte-wise case folding is equivalent.
+        let has_illegal_prefix = key
+            .as_bytes()
+            .get(..ILLEGAL_ENV_VAR_PREFIX.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(ILLEGAL_ENV_VAR_PREFIX.as_bytes()));
+        if !has_illegal_prefix {
             // SAFETY: called before any threads are spawned.
             unsafe { std::env::set_var(&key, &value) };
         }
@@ -384,6 +420,7 @@ struct PathGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
     use std::io::ErrorKind;
     use std::path::Path;
@@ -407,6 +444,58 @@ mod tests {
     #[test]
     fn argv0_alias_returns_none_for_normal_invocation() {
         assert_eq!(super::argv0_alias(), None);
+    }
+
+    #[test]
+    fn argv0_alias_detects_batch_sentinel() {
+        let args = vec![
+            OsString::from("devo.exe"),
+            OsString::from("--devo-alias=devo-server"),
+            OsString::from("--transport"),
+            OsString::from("stdio"),
+        ];
+
+        assert_eq!(
+            super::argv0_alias_from_args(args),
+            Some(super::SERVER_ALIAS)
+        );
+    }
+
+    #[test]
+    fn server_dispatch_args_remove_batch_alias_sentinel() {
+        let args = vec![
+            OsString::from("devo.exe"),
+            OsString::from("--devo-alias=devo-server"),
+            OsString::from("--transport"),
+            OsString::from("stdio"),
+        ];
+
+        assert_eq!(
+            super::server_dispatch_args_from(args),
+            vec![
+                OsString::from("devo.exe"),
+                OsString::from("--transport"),
+                OsString::from("stdio")
+            ]
+        );
+    }
+
+    #[test]
+    fn server_dispatch_args_keep_direct_alias_args() {
+        let args = vec![
+            OsString::from("devo-server"),
+            OsString::from("--transport"),
+            OsString::from("stdio"),
+        ];
+
+        assert_eq!(
+            super::server_dispatch_args_from(args),
+            vec![
+                OsString::from("devo-server"),
+                OsString::from("--transport"),
+                OsString::from("stdio")
+            ]
+        );
     }
 
     #[test]

@@ -270,7 +270,14 @@ fn hash_embedding(text: &str, dimensions: usize) -> Vec<f32> {
         .filter(|token| !token.is_empty())
     {
         let mut hasher = Sha256::new();
-        hasher.update(token.to_lowercase().as_bytes());
+        let lowercase;
+        let token_bytes = if token.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            lowercase = token.to_ascii_lowercase();
+            lowercase.as_bytes()
+        } else {
+            token.as_bytes()
+        };
+        hasher.update(token_bytes);
         let digest = hasher.finalize();
         let index = u64::from_le_bytes([
             digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],

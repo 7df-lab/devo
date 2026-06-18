@@ -1,3 +1,9 @@
+//! Server-side provider bootstrap and routing.
+//!
+//! This module keeps provider construction at the runtime boundary: config and
+//! auth are resolved once into concrete provider adapters, while later turns
+//! select between those adapters through a route-aware facade.
+
 use anyhow::Context;
 use anyhow::Result;
 
@@ -67,7 +73,7 @@ pub fn load_server_provider(
         let resolved = app_config.resolve_provider_settings(user_config_dir)?;
         let default_model =
             resolve_model_binding(&app_config.provider, /*requested_model*/ None)
-                .map(|binding| binding.model_slug.clone())
+                .map(|binding| binding.model_slug)
                 .or_else(|| default_model.map(ToOwned::to_owned))
                 .unwrap_or(resolved.model);
         let provider = build_provider_adapter(
@@ -347,13 +353,18 @@ fn resolve_legacy_server_provider_settings(
         .or_else(|| {
             file_config
                 .model_provider
-                .clone()
-                .filter(|provider| file_config.model_providers.contains_key(provider))
+                .as_deref()
+                .filter(|provider| file_config.model_providers.contains_key(*provider))
         })
-        .or_else(|| file_config.model_providers.keys().next().cloned());
-    let provider_config = provider_id
-        .as_deref()
-        .and_then(|provider_id| file_config.model_providers.get(provider_id));
+        .or_else(|| {
+            file_config
+                .model_providers
+                .keys()
+                .next()
+                .map(String::as_str)
+        });
+    let provider_config =
+        provider_id.and_then(|provider_id| file_config.model_providers.get(provider_id));
     let selected_model =
         provider_config.and_then(|provider| select_configured_model(provider, requested_model));
     let wire_api = provider_config
@@ -361,7 +372,7 @@ fn resolve_legacy_server_provider_settings(
         .unwrap_or(ProviderWireApi::OpenAIChatCompletions);
     let model = selected_model
         .map(|model| model.model.clone())
-        .or(file_config.model.clone())
+        .or_else(|| file_config.model.clone())
         .or_else(|| default_model.map(ToOwned::to_owned))
         .or_else(|| provider_config.and_then(|provider| provider.default_model.clone()))
         .or_else(|| {
@@ -398,10 +409,10 @@ fn select_configured_model<'a>(
     }
 }
 
-fn provider_id_for_model(
-    config: &ProviderConfigSection,
+fn provider_id_for_model<'a>(
+    config: &'a ProviderConfigSection,
     requested_model: Option<&str>,
-) -> Option<String> {
+) -> Option<&'a str> {
     let requested_model = requested_model?;
     config
         .model_providers
@@ -414,7 +425,7 @@ fn provider_id_for_model(
                     .iter()
                     .any(|entry| entry.model == requested_model)
         })
-        .map(|(provider_id, _)| provider_id.clone())
+        .map(|(provider_id, _)| provider_id.as_str())
 }
 
 pub(crate) fn normalize_openai_base_url(url: &str) -> String {

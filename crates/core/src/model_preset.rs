@@ -122,20 +122,24 @@ impl Default for ModelPreset {
 
 impl From<ModelPreset> for Model {
     fn from(value: ModelPreset) -> Self {
+        let supported_reasoning_levels = value.supported_reasoning_levels;
+        let default_reasoning_effort = value.default_reasoning_effort;
+
+        // Legacy presets express "toggle with selectable levels" as a plain
+        // toggle plus a non-empty level list. Move that list into the runtime
+        // shape once; catalog loading can convert many presets at startup.
         let thinking_capability = match value.thinking_capability {
-            ThinkingCapability::Toggle if !value.supported_reasoning_levels.is_empty() => {
-                ThinkingCapability::ToggleWithLevels(value.supported_reasoning_levels.clone())
+            ThinkingCapability::Toggle if !supported_reasoning_levels.is_empty() => {
+                ThinkingCapability::ToggleWithLevels(supported_reasoning_levels)
             }
             capability => capability,
         };
-        let default_reasoning_effort =
-            if matches!(thinking_capability, ThinkingCapability::ToggleWithLevels(_)) {
-                value
-                    .default_reasoning_effort
-                    .or_else(|| value.supported_reasoning_levels.first().copied())
-            } else {
-                value.default_reasoning_effort
-            };
+        let default_reasoning_effort = match &thinking_capability {
+            ThinkingCapability::ToggleWithLevels(levels) => {
+                default_reasoning_effort.or_else(|| levels.first().copied())
+            }
+            _ => default_reasoning_effort,
+        };
 
         Self {
             slug: value.slug,
@@ -218,5 +222,40 @@ where
             Ok(default_thinking_capability())
         }
         other => serde_json::from_value(other).map_err(serde::de::Error::custom),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn conversion_promotes_legacy_toggle_levels() {
+        let preset = ModelPreset {
+            slug: "legacy-toggle".to_string(),
+            display_name: "Legacy Toggle".to_string(),
+            thinking_capability: ThinkingCapability::Toggle,
+            supported_reasoning_levels: vec![ReasoningEffort::High, ReasoningEffort::Max],
+            default_reasoning_effort: None,
+            ..ModelPreset::default()
+        };
+
+        let model = Model::from(preset);
+
+        assert_eq!(
+            model,
+            Model {
+                slug: "legacy-toggle".to_string(),
+                display_name: "Legacy Toggle".to_string(),
+                thinking_capability: ThinkingCapability::ToggleWithLevels(vec![
+                    ReasoningEffort::High,
+                    ReasoningEffort::Max,
+                ]),
+                default_reasoning_effort: Some(ReasoningEffort::High),
+                ..Model::default()
+            }
+        );
     }
 }

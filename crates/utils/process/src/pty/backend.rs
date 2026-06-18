@@ -148,7 +148,8 @@ async fn spawn_process_portable(
     let pty_system = platform_native_pty_system();
     let pair = pty_system.openpty(size.into())?;
 
-    let mut command_builder = CommandBuilder::new(arg0.as_ref().unwrap_or(&program.to_string()));
+    let command_name = arg0.as_deref().unwrap_or(program);
+    let mut command_builder = CommandBuilder::new(command_name);
     command_builder.cwd(cwd);
     command_builder.env_clear();
     for arg in args {

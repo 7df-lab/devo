@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -34,6 +35,14 @@ impl Persona {
             Self::Default => "default",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemPromptMode {
+    #[default]
+    CodingAgent,
+    DeepResearch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +110,8 @@ pub struct SessionContext {
     pub model: Model,
     pub thinking_selection: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub system_prompt_mode: SystemPromptMode,
 }
 
 impl SessionContext {
@@ -127,11 +138,15 @@ impl SessionContext {
             model: model.clone(),
             thinking_selection: normalized_thinking_selection,
             reasoning_effort: resolved.effective_reasoning_effort,
+            system_prompt_mode: SystemPromptMode::CodingAgent,
         }
     }
 
     pub fn build_system_prompt(&self) -> String {
         let base = self.base_instructions.trim();
+        if self.system_prompt_mode == SystemPromptMode::DeepResearch {
+            return base.to_string();
+        }
         let mode_prompt = crate::collaboration_mode_prompts::mode_introductions_prompt();
         if base.is_empty() {
             mode_prompt
@@ -141,6 +156,10 @@ impl SessionContext {
     }
 
     pub fn prefix_user_inputs(&self) -> Vec<UserInput> {
+        if self.system_prompt_mode == SystemPromptMode::DeepResearch {
+            return Vec::new();
+        }
+
         let mut inputs = Vec::new();
         if let Some(text) = self
             .available_skills
@@ -320,17 +339,31 @@ impl ContextualUserFragment for AgentsMdDiffFragment {
     const END_MARKER: &'static str = "</user_instructions_updates>";
 
     fn body(&self) -> String {
-        let mut lines = Vec::new();
+        let mut body = String::from("\n");
+        let mut has_line = false;
         for path in &self.diff.added {
-            lines.push(format!("added: {}", path.display()));
+            if has_line {
+                body.push('\n');
+            }
+            let _ = write!(body, "added: {}", path.display());
+            has_line = true;
         }
         for path in &self.diff.removed {
-            lines.push(format!("removed: {}", path.display()));
+            if has_line {
+                body.push('\n');
+            }
+            let _ = write!(body, "removed: {}", path.display());
+            has_line = true;
         }
         for path in &self.diff.changed {
-            lines.push(format!("changed: {}", path.display()));
+            if has_line {
+                body.push('\n');
+            }
+            let _ = write!(body, "changed: {}", path.display());
+            has_line = true;
         }
-        format!("\n{}\n", lines.join("\n"))
+        body.push('\n');
+        body
     }
 }
 
@@ -426,10 +459,12 @@ mod tests {
     use devo_protocol::UserInput;
     use pretty_assertions::assert_eq;
 
+    use super::AgentsMdDiffFragment;
     use super::EnvironmentContext;
     use super::LanguageContext;
     use super::SessionContext;
     use super::TurnContext;
+    use crate::AgentsMdDiff;
     use crate::AgentsMdSnapshot;
     use crate::ContextualUserFragment;
     use crate::Model;
@@ -490,6 +525,20 @@ mod tests {
         assert_eq!(
             context.render(),
             "<language_preference>Reply in the same natural language as the user's latest message. If the latest user message mixes languages, use the primary language of that message. Preserve technical terms, code identifiers, file paths, commands, API names, and quoted text in their original form unless the user explicitly asks to translate them. This language rule also applies to Proposed Plan: any content inside <proposed_plan></proposed_plan> must follow the same natural language as the user's latest message.</language_preference>"
+        );
+    }
+
+    #[test]
+    fn agents_md_diff_fragment_preserves_line_order() {
+        let fragment = AgentsMdDiffFragment::new(AgentsMdDiff {
+            added: vec![PathBuf::from("added.md")],
+            removed: vec![PathBuf::from("removed.md")],
+            changed: vec![PathBuf::from("changed.md")],
+        });
+
+        assert_eq!(
+            fragment.render(),
+            "<user_instructions_updates>\nadded: added.md\nremoved: removed.md\nchanged: changed.md\n</user_instructions_updates>"
         );
     }
 
@@ -626,5 +675,23 @@ mod tests {
                 crate::collaboration_mode_prompts::mode_introductions_prompt()
             )
         );
+    }
+
+    #[test]
+    fn deep_research_session_context_uses_only_base_system_prompt() {
+        let mut context = SessionContext::capture(
+            &Model {
+                base_instructions: "research system".into(),
+                ..Model::default()
+            },
+            None,
+            Path::new("/tmp/a"),
+            None,
+            /*available_skills*/ None,
+        );
+        context.system_prompt_mode = super::SystemPromptMode::DeepResearch;
+
+        assert_eq!(context.build_system_prompt(), "research system");
+        assert_eq!(context.prefix_user_inputs(), Vec::<UserInput>::new());
     }
 }

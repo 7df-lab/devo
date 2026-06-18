@@ -117,10 +117,20 @@ impl ServerRuntime {
                 format!("prompt blocked by hook: {reason}"),
             );
         }
+        if params.execution_mode == devo_protocol::TurnExecutionMode::Research {
+            return self
+                .handle_research_turn_start(
+                    request_id,
+                    params,
+                    display_input,
+                    resolved_input.prompt_text,
+                )
+                .await;
+        }
 
         let now = Utc::now();
         let mut cwd_change = None;
-        let turn = {
+        let (turn, turn_config) = {
             let mut session = session_arc.lock().await;
             if let Some(active_turn) = session.active_turn.as_ref() {
                 let pending_turn_queue = Arc::clone(&session.pending_turn_queue);
@@ -243,49 +253,7 @@ impl ServerRuntime {
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
             session.active_turn = Some(turn.clone());
-            let clear_session_id = params.session_id;
-            let runtime_for_broadcast = Arc::clone(self);
-            tokio::spawn(async move {
-                runtime_for_broadcast
-                    .broadcast_event(ServerEvent::InputQueueUpdated(
-                        devo_core::InputQueueUpdatedPayload {
-                            session_id: clear_session_id,
-                            pending_count: 0,
-                            pending_texts: vec![],
-                        },
-                    ))
-                    .await;
-            });
-            let runtime = Arc::clone(self);
-            let turn_for_task = turn.clone();
-            let display_input_for_task = display_input.clone();
-            let input_for_task = resolved_input.prompt_text.clone();
-            let input_messages_for_task = resolved_input.prompt_messages.clone();
-            let turn_config_for_task = turn_config.clone();
-            let cancel_token = CancellationToken::new();
-            self.active_turn_cancellations
-                .lock()
-                .await
-                .insert(params.session_id, cancel_token);
-            let task = tokio::spawn(async move {
-                runtime
-                    .execute_turn(ExecuteTurnRequest {
-                        session_id: params.session_id,
-                        turn: turn_for_task,
-                        turn_config: turn_config_for_task,
-                        display_input: display_input_for_task,
-                        input: input_for_task,
-                        input_messages: input_messages_for_task,
-                        collaboration_mode: params.collaboration_mode,
-                        input_mode: TurnInputMode::VisibleUserMessage,
-                    })
-                    .await;
-            });
-            self.active_tasks
-                .lock()
-                .await
-                .insert(params.session_id, task.abort_handle());
-            turn
+            (turn, turn_config)
         };
         if let Some((old_cwd, new_cwd)) = cwd_change {
             self.run_session_hook(
@@ -321,12 +289,63 @@ impl ServerRuntime {
                 build_turn_record(&turn, session_context, turn_context),
             )
         {
+            {
+                let mut session = session_arc.lock().await;
+                if session
+                    .active_turn
+                    .as_ref()
+                    .is_some_and(|active| active.turn_id == turn.turn_id)
+                {
+                    session.active_turn = None;
+                    session.summary.status = SessionRuntimeStatus::Idle;
+                    session.summary.updated_at = Utc::now();
+                }
+            }
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::InternalError,
                 format!("failed to persist turn start: {error}"),
             );
         }
+
+        self.broadcast_event(ServerEvent::InputQueueUpdated(
+            devo_core::InputQueueUpdatedPayload {
+                session_id: params.session_id,
+                pending_count: 0,
+                pending_texts: vec![],
+            },
+        ))
+        .await;
+        self.active_turn_cancellations
+            .lock()
+            .await
+            .insert(params.session_id, CancellationToken::new());
+        let runtime = Arc::clone(self);
+        let turn_for_task = turn.clone();
+        let display_input_for_task = display_input.clone();
+        let input_for_task = resolved_input.prompt_text.clone();
+        let input_messages_for_task = resolved_input.prompt_messages.clone();
+        let turn_config_for_task = turn_config.clone();
+        let collaboration_mode = params.collaboration_mode;
+        let session_id = params.session_id;
+        let task = tokio::spawn(async move {
+            runtime
+                .execute_turn(ExecuteTurnRequest {
+                    session_id,
+                    turn: turn_for_task,
+                    turn_config: turn_config_for_task,
+                    display_input: display_input_for_task,
+                    input: input_for_task,
+                    input_messages: input_messages_for_task,
+                    collaboration_mode,
+                    input_mode: TurnInputMode::VisibleUserMessage,
+                })
+                .await;
+        });
+        self.active_tasks
+            .lock()
+            .await
+            .insert(params.session_id, task.abort_handle());
 
         tracing::info!(
             session_id = %params.session_id,
@@ -464,6 +483,9 @@ impl ServerRuntime {
                     .rollout_store
                     .append_turn(&record, build_turn_record(&turn, None, None))
             {
+                drop(session);
+                self.clear_active_turn_reservation(&session_arc, turn.turn_id)
+                    .await;
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InternalError,
@@ -488,11 +510,19 @@ impl ServerRuntime {
         let runtime = Arc::clone(self);
         let command_for_task = command.clone();
         let turn_for_task = turn.clone();
-        tokio::spawn(async move {
+        self.active_turn_cancellations
+            .lock()
+            .await
+            .insert(params.session_id, CancellationToken::new());
+        let task = tokio::spawn(async move {
             runtime
                 .execute_shell_command_turn(params.session_id, turn_for_task, command_for_task, cwd)
                 .await;
         });
+        self.active_tasks
+            .lock()
+            .await
+            .insert(params.session_id, task.abort_handle());
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -561,6 +591,23 @@ impl ServerRuntime {
             .await;
         }
 
+        {
+            let mut session = session_arc.lock().await;
+            let previous_len = session.pending_user_inputs.len();
+            session
+                .pending_user_inputs
+                .retain(|_, pending| pending.turn_id != params.turn_id);
+            let removed_len = previous_len.saturating_sub(session.pending_user_inputs.len());
+            if removed_len > 0 {
+                tracing::info!(
+                    session_id = %params.session_id,
+                    turn_id = %params.turn_id,
+                    removed_len,
+                    "cleared pending request_user_input requests for interrupted turn"
+                );
+            }
+        }
+
         if let Some(cancel_token) = self
             .active_turn_cancellations
             .lock()
@@ -572,6 +619,9 @@ impl ServerRuntime {
         if let Some(task) = self.active_tasks.lock().await.remove(&params.session_id) {
             task.abort();
         }
+        Arc::clone(self)
+            .close_research_child_agents(params.session_id)
+            .await;
         let interrupted_turn = {
             let mut session = session_arc.lock().await;
             let Some(mut turn) = session.active_turn.take() else {

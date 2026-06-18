@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -53,20 +55,6 @@ pub(crate) const fn ctrl_alt(key: KeyCode) -> KeyBinding {
     KeyBinding::new(key, KeyModifiers::CONTROL.union(KeyModifiers::ALT))
 }
 
-fn modifiers_to_string(modifiers: KeyModifiers) -> String {
-    let mut result = String::new();
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        result.push_str(CTRL_PREFIX);
-    }
-    if modifiers.contains(KeyModifiers::SHIFT) {
-        result.push_str(SHIFT_PREFIX);
-    }
-    if modifiers.contains(KeyModifiers::ALT) {
-        result.push_str(ALT_PREFIX);
-    }
-    result
-}
-
 impl From<KeyBinding> for Span<'static> {
     fn from(binding: KeyBinding) -> Self {
         (&binding).into()
@@ -75,19 +63,31 @@ impl From<KeyBinding> for Span<'static> {
 impl From<&KeyBinding> for Span<'static> {
     fn from(binding: &KeyBinding) -> Self {
         let KeyBinding { key, modifiers } = binding;
-        let modifiers = modifiers_to_string(*modifiers);
         let key = match key {
-            KeyCode::Enter => "enter".to_string(),
-            KeyCode::Char(' ') => "space".to_string(),
-            KeyCode::Up => "↑".to_string(),
-            KeyCode::Down => "↓".to_string(),
-            KeyCode::Left => "←".to_string(),
-            KeyCode::Right => "→".to_string(),
-            KeyCode::PageUp => "pgup".to_string(),
-            KeyCode::PageDown => "pgdn".to_string(),
-            _ => format!("{key}").to_ascii_lowercase(),
+            KeyCode::Enter => Cow::Borrowed("enter"),
+            KeyCode::Char(' ') => Cow::Borrowed("space"),
+            KeyCode::Up => Cow::Borrowed("↑"),
+            KeyCode::Down => Cow::Borrowed("↓"),
+            KeyCode::Left => Cow::Borrowed("←"),
+            KeyCode::Right => Cow::Borrowed("→"),
+            KeyCode::PageUp => Cow::Borrowed("pgup"),
+            KeyCode::PageDown => Cow::Borrowed("pgdn"),
+            _ => Cow::Owned(format!("{key}").to_ascii_lowercase()),
         };
-        Span::styled(format!("{modifiers}{key}"), key_hint_style())
+        let mut label = String::with_capacity(
+            CTRL_PREFIX.len() + SHIFT_PREFIX.len() + ALT_PREFIX.len() + key.len(),
+        );
+        if modifiers.contains(KeyModifiers::CONTROL) {
+            label.push_str(CTRL_PREFIX);
+        }
+        if modifiers.contains(KeyModifiers::SHIFT) {
+            label.push_str(SHIFT_PREFIX);
+        }
+        if modifiers.contains(KeyModifiers::ALT) {
+            label.push_str(ALT_PREFIX);
+        }
+        label.push_str(&key);
+        Span::styled(label, key_hint_style())
     }
 }
 
@@ -109,4 +109,25 @@ pub(crate) fn is_altgr(mods: KeyModifiers) -> bool {
 #[inline]
 pub(crate) fn is_altgr(_mods: KeyModifiers) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::KeyCode;
+    use pretty_assertions::assert_eq;
+    use ratatui::text::Span;
+
+    use super::*;
+
+    fn label(binding: KeyBinding) -> String {
+        let span = Span::from(binding);
+        span.content.into_owned()
+    }
+
+    #[test]
+    fn key_hint_labels_preserve_modifier_order_and_special_names() {
+        assert_eq!(label(ctrl_alt(KeyCode::Enter)), "ctrl + ⌥ + enter");
+        assert_eq!(label(shift(KeyCode::Char(' '))), "shift + space");
+        assert_eq!(label(plain(KeyCode::Up)), "↑");
+    }
 }

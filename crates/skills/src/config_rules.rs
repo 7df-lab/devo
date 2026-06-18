@@ -31,16 +31,22 @@ impl SkillConfigRules {
     where
         I: IntoIterator<Item = (Option<PathBuf>, Option<String>, bool)>,
     {
-        let mut rules = Vec::new();
+        let entries = entries.into_iter();
+        let (lower, upper) = entries.size_hint();
+        let mut rules = Vec::with_capacity(upper.unwrap_or(lower));
         for (path, name, enabled) in entries {
             let selector = match (path, name) {
                 (Some(path), None) => {
                     SkillConfigRuleSelector::Path(canonicalize_for_identity(&path))
                 }
-                (None, Some(name)) if !name.trim().is_empty() => {
-                    SkillConfigRuleSelector::Name(name.trim().to_string())
+                (None, Some(name)) => {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    SkillConfigRuleSelector::Name(name.to_string())
                 }
-                (Some(_), Some(_)) | (None, Some(_)) | (None, None) => continue,
+                (Some(_), Some(_)) | (None, None) => continue,
             };
             rules.retain(|rule: &SkillConfigRule| rule.selector != selector);
             rules.push(SkillConfigRule { selector, enabled });
@@ -79,4 +85,37 @@ pub fn resolve_disabled_skill_paths(
         }
     }
     disabled_paths
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn from_entries_trims_names_and_keeps_last_rule() {
+        let rules = SkillConfigRules::from_entries([
+            (None, Some(" docs ".to_string()), false),
+            (None, Some("docs".to_string()), true),
+            (None, Some("   ".to_string()), false),
+            (
+                Some(PathBuf::from("skills/docs/SKILL.md")),
+                Some("docs".to_string()),
+                false,
+            ),
+        ]);
+
+        assert_eq!(
+            rules,
+            SkillConfigRules {
+                entries: vec![SkillConfigRule {
+                    selector: SkillConfigRuleSelector::Name("docs".to_string()),
+                    enabled: true,
+                }],
+            }
+        );
+    }
 }

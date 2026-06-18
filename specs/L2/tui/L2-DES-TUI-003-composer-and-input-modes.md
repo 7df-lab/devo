@@ -297,6 +297,7 @@ Slash-command inline rendering:
 - Parameters or placeholder text following the matched slash command use muted foreground color.
 - If the typed slash command does not match an existing command, the composer should not apply matched-command coloring.
 - Inline command coloring is presentational only. Command parsing and validation still happen when the user confirms or submits the command.
+- Submitted user history cells apply the same matched-command coloring to a leading recognized `/name` token, including rows restored or constructed without composer text-element metadata.
 - For `/goal`, free-form text after the command is the objective. Pressing Enter submits that objective directly to the goal command instead of opening a budget prompt or create wizard.
 
 Example matched slash command with parameter hint:
@@ -388,3 +389,4 @@ Rules:
 | 3 | 2026-05-26 | Human | Refinement | Updated navigable slash-command lists so `>` marks the focused row and `●` is reserved for enabled options in choice lists. |
 | 4 | 2026-05-27 | Human | Refinement | Removed `/onboard` from slash-command discovery because onboarding is entered through startup CLI arguments. |
 | 4 | 2026-06-08 | Assistant | Refinement | Defined `Shift+Tab` Build/Plan toggling, leftmost uppercase mode labels, Shell-only `!` entry behavior, one-shot PTY-backed Shell execution including sessionless startup commands, prompt-only Plan Mode v1 behavior, active-mode composer marker color, direct user-shell output, and `▣ Shell` process summaries. |
+| 5 | 2026-06-18 | Assistant | Refinement | Clarified that submitted user history cells also highlight a leading recognized slash-command token, even when no composer text-element metadata is available. |

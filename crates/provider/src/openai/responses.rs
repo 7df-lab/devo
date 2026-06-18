@@ -125,7 +125,8 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
 }
 
 fn build_input(request: &ModelRequest) -> Vec<Value> {
-    let mut input = Vec::new();
+    let mut input =
+        Vec::with_capacity(request.messages.len() + usize::from(request.system.is_some()));
 
     if let Some(system) = &request.system {
         input.push(json!({
@@ -144,44 +145,44 @@ fn build_input(request: &ModelRequest) -> Vec<Value> {
 }
 
 fn build_input_message(role: OpenAIRole, content: &[RequestContent]) -> Value {
-    let content = content
-        .iter()
-        .filter_map(|block| match block {
-            RequestContent::Text { text } => Some(json!({
+    let mut content_blocks = Vec::with_capacity(content.len());
+    for block in content {
+        match block {
+            RequestContent::Text { text } => content_blocks.push(json!({
                 "type": "input_text",
                 "text": text,
             })),
-            RequestContent::Reasoning { text } => Some(json!({
+            RequestContent::Reasoning { text } => content_blocks.push(json!({
                 "type": "reasoning",
                 "text": text,
             })),
-            RequestContent::ProviderReasoning { .. } => None,
-            RequestContent::ToolUse { id, name, input } => Some(json!({
+            RequestContent::ProviderReasoning { .. } | RequestContent::HostedToolUse { .. } => {}
+            RequestContent::ToolUse { id, name, input } => content_blocks.push(json!({
                 "type": "tool_call",
                 "id": id,
                 "name": name,
                 "input": input,
             })),
-            RequestContent::HostedToolUse { .. } => None,
             RequestContent::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
-            } => Some(json!({
+            } => content_blocks.push(json!({
                 "type": "function_call_output",
                 "call_id": tool_use_id,
                 "output": content,
                 "is_error": is_error,
             })),
-        })
-        .collect::<Vec<_>>();
+        }
+    }
 
     json!({
         "type": "message",
         "role": role,
-        "content": content,
+        "content": content_blocks,
     })
 }
+
 fn parse_response(value: Value) -> Result<ModelResponse> {
     let id = value
         .get("id")
@@ -268,11 +269,7 @@ fn parse_output_item(item: &Value) -> Vec<ResponseContent> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let input = item
-                .get("arguments")
-                .or_else(|| item.get("input"))
-                .cloned()
-                .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+            let input = parse_function_call_arguments(item);
             vec![ResponseContent::ToolUse { id, name, input }]
         }
         Some("web_search_call") => vec![parse_hosted_web_search_call(item)],
@@ -305,16 +302,35 @@ fn parse_message_content(item: &Value) -> Option<ResponseContent> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            input: item
-                .get("arguments")
-                .or_else(|| item.get("input"))
-                .cloned()
-                .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+            input: parse_function_call_arguments(item),
         }),
         Some("web_search_call") => Some(parse_hosted_web_search_call(item)),
         Some("web_fetch_call") => Some(parse_hosted_web_fetch_call(item)),
         _ => None,
     }
+}
+
+fn parse_function_call_arguments(item: &Value) -> Value {
+    match item.get("arguments").or_else(|| item.get("input")) {
+        Some(Value::String(arguments)) => parse_function_call_arguments_json(arguments),
+        Some(Value::Null) | None => Value::Object(serde_json::Map::new()),
+        Some(value) => value.clone(),
+    }
+}
+
+fn function_call_arguments_json(item: &Value) -> String {
+    match item.get("arguments").or_else(|| item.get("input")) {
+        Some(Value::String(arguments)) => arguments.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(value) => value.to_string(),
+    }
+}
+
+fn parse_function_call_arguments_json(arguments_json: &str) -> Value {
+    if arguments_json.trim().is_empty() {
+        return Value::Object(serde_json::Map::new());
+    }
+    serde_json::from_str(arguments_json).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
 }
 
 fn parse_hosted_web_search_call(item: &Value) -> ResponseContent {
@@ -496,8 +512,9 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
             let mut reasoning_buf = String::new();
             let mut text_parser = TaggedTextParser::default();
             let mut response_id = String::new();
-            let mut tool_calls: HashMap<String, (String, String, String)> = HashMap::new();
-            let mut hosted_tool_calls: HashMap<String, (usize, String, String, Value, Option<Value>, Option<String>)> = HashMap::new();
+            let mut tool_calls: HashMap<String, ResponsesStreamToolCall> = HashMap::new();
+            let mut tool_call_keys_by_item_id: HashMap<String, String> = HashMap::new();
+            let mut hosted_tool_calls: HashMap<String, ResponsesStreamHostedToolCall> = HashMap::new();
             let mut usage: Option<Usage> = None;
             let mut reasoning_started = false;
             let mut text_started = false;
@@ -601,8 +618,25 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                                         match content {
                                             ResponseContent::ToolUse { id, name, input } => {
                                                 let key = id.clone();
-                                                tool_calls.insert(key.clone(), (id.clone(), name.clone(), input.to_string()));
-                                                let index = tool_calls.len();
+                                                let item_id = item
+                                                    .get("id")
+                                                    .and_then(Value::as_str)
+                                                    .unwrap_or_default();
+                                                let index = tool_calls.len() + hosted_tool_calls.len() + 1;
+                                                let arguments_json = function_call_arguments_json(item);
+                                                tool_calls.insert(
+                                                    key.clone(),
+                                                    ResponsesStreamToolCall {
+                                                        index,
+                                                        id: id.clone(),
+                                                        name: name.clone(),
+                                                        arguments_json,
+                                                    },
+                                                );
+                                                if !item_id.is_empty() {
+                                                    tool_call_keys_by_item_id
+                                                        .insert(item_id.to_string(), key);
+                                                }
                                                 yield StreamEvent::ToolCallStart {
                                                     index,
                                                     id,
@@ -646,7 +680,23 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                                         parse_output_item(item).into_iter().next()
                                 {
                                     let key = id.clone();
-                                    let index = if let Some((index, ..)) = hosted_tool_calls.get(&key) {
+                                    let index = if let Some((
+                                        index,
+                                        stored_id,
+                                        stored_name,
+                                        stored_input,
+                                        stored_output,
+                                        stored_status,
+                                    )) = hosted_tool_calls.get_mut(&key) {
+                                        *stored_id = id.clone();
+                                        *stored_name = name.clone();
+                                        *stored_input = input.clone();
+                                        if output.is_some() {
+                                            *stored_output = output.clone();
+                                        }
+                                        if status.is_some() {
+                                            *stored_status = status.clone();
+                                        }
                                         *index
                                     } else {
                                         let index = tool_calls.len() + hosted_tool_calls.len() + 1;
@@ -673,21 +723,24 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                                     .and_then(Value::as_str)
                                     .unwrap_or_default();
                                 let call_id = chunk
-                                    .get("item_id")
-                                    .or_else(|| chunk.get("call_id"))
+                                    .get("call_id")
                                     .and_then(Value::as_str)
-                                    .unwrap_or_default();
+                                    .map(ToOwned::to_owned)
+                                    .or_else(|| {
+                                        chunk
+                                            .get("item_id")
+                                            .and_then(Value::as_str)
+                                            .and_then(|item_id| {
+                                                tool_call_keys_by_item_id.get(item_id).cloned()
+                                            })
+                                    });
                                 if !partial_json.is_empty()
-                                    && !call_id.is_empty()
-                                    && let Some((index, entry)) = tool_calls
-                                        .values_mut()
-                                        .enumerate()
-                                        .find(|(_, entry)| entry.0 == call_id)
+                                    && let Some(call_id) = call_id
+                                    && let Some(entry) = tool_calls.get_mut(&call_id)
                                 {
-                                    let input = &mut entry.2;
-                                    input.push_str(partial_json);
+                                    entry.arguments_json.push_str(partial_json);
                                     yield StreamEvent::ToolCallInputDelta {
-                                        index: index + 1,
+                                        index: entry.index,
                                         partial_json: partial_json.to_string(),
                                     };
                                 }
@@ -719,8 +772,25 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                                         }
                                     }
                                 }
+                                if reasoning_started {
+                                    yield StreamEvent::ReasoningDone { index: 1 };
+                                }
                                 let response = if let Some(parsed) = chunk.get("response") {
-                                    parse_response(parsed.clone())?
+                                    let mut response = parse_response(parsed.clone())?;
+                                    if !reasoning_buf.is_empty()
+                                        && !response.metadata.extras.iter().any(|extra| {
+                                            matches!(
+                                                extra,
+                                                ResponseExtra::ReasoningText { text }
+                                                    if text == &reasoning_buf
+                                            )
+                                        })
+                                    {
+                                        response.metadata.extras.push(ResponseExtra::ReasoningText {
+                                            text: reasoning_buf.clone(),
+                                        });
+                                    }
+                                    response
                                 } else {
                                     ModelResponse {
                                         id: response_id.clone(),
@@ -729,24 +799,10 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                                             if !text_buf.is_empty() {
                                                 content.push(ResponseContent::Text(text_buf.clone()));
                                             }
-                                            for (id, name, input) in tool_calls.values() {
-                                                let parsed_input = serde_json::from_str(input)
-                                                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
-                                                content.push(ResponseContent::ToolUse {
-                                                    id: id.clone(),
-                                                    name: name.clone(),
-                                                    input: parsed_input,
-                                                });
-                                            }
-                                            for (_, id, name, input, output, status) in hosted_tool_calls.values() {
-                                                content.push(ResponseContent::HostedToolUse {
-                                                    id: id.clone(),
-                                                    name: name.clone(),
-                                                    input: input.clone(),
-                                                    output: output.clone(),
-                                                    status: status.clone(),
-                                                });
-                                            }
+                                            content.extend(responses_stream_tool_content(
+                                                &tool_calls,
+                                                &hosted_tool_calls,
+                                            ));
                                             content
                                         },
                                         stop_reason: Some(StopReason::EndTurn),
@@ -773,9 +829,33 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
 
             for fragment in text_parser.finish() {
                 match fragment {
-                    TaggedTextFragment::Text(text) => text_buf.push_str(&text),
-                    TaggedTextFragment::Reasoning(text) => reasoning_buf.push_str(&text),
+                    TaggedTextFragment::Text(text) => {
+                        if text.is_empty() {
+                            continue;
+                        }
+                        if !text_started {
+                            text_started = true;
+                            yield StreamEvent::TextStart { index: 0 };
+                        }
+                        text_buf.push_str(&text);
+                        yield StreamEvent::TextDelta { index: 0, text };
+                    }
+                    TaggedTextFragment::Reasoning(text) => {
+                        if text.is_empty() {
+                            continue;
+                        }
+                        if !reasoning_started {
+                            reasoning_started = true;
+                            yield StreamEvent::ReasoningStart { index: 1 };
+                        }
+                        reasoning_buf.push_str(&text);
+                        yield StreamEvent::ReasoningDelta { index: 1, text };
+                    }
                 }
+            }
+
+            if reasoning_started {
+                yield StreamEvent::ReasoningDone { index: 1 };
             }
 
             let response = ModelResponse {
@@ -785,24 +865,10 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                     if !text_buf.is_empty() {
                         content.push(ResponseContent::Text(text_buf));
                     }
-                    for (id, name, input) in tool_calls.values() {
-                        let parsed_input = serde_json::from_str(input)
-                            .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
-                        content.push(ResponseContent::ToolUse {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: parsed_input,
-                        });
-                    }
-                    for (_, id, name, input, output, status) in hosted_tool_calls.values() {
-                        content.push(ResponseContent::HostedToolUse {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                            output: output.clone(),
-                            status: status.clone(),
-                        });
-                    }
+                    content.extend(responses_stream_tool_content(
+                        &tool_calls,
+                        &hosted_tool_calls,
+                    ));
                     content
                 },
                 stop_reason: Some(StopReason::EndTurn),
@@ -826,6 +892,50 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
     fn name(&self) -> &str {
         "openai-responses"
     }
+}
+
+#[derive(Debug)]
+struct ResponsesStreamToolCall {
+    index: usize,
+    id: String,
+    name: String,
+    arguments_json: String,
+}
+
+type ResponsesStreamHostedToolCall = (usize, String, String, Value, Option<Value>, Option<String>);
+
+fn responses_stream_tool_content(
+    tool_calls: &HashMap<String, ResponsesStreamToolCall>,
+    hosted_tool_calls: &HashMap<String, ResponsesStreamHostedToolCall>,
+) -> Vec<ResponseContent> {
+    let mut indexed_content = Vec::new();
+    for call in tool_calls.values() {
+        indexed_content.push((
+            call.index,
+            ResponseContent::ToolUse {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                input: parse_function_call_arguments_json(&call.arguments_json),
+            },
+        ));
+    }
+    for (index, id, name, input, output, status) in hosted_tool_calls.values() {
+        indexed_content.push((
+            *index,
+            ResponseContent::HostedToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                output: output.clone(),
+                status: status.clone(),
+            },
+        ));
+    }
+    indexed_content.sort_by_key(|(index, _)| *index);
+    indexed_content
+        .into_iter()
+        .map(|(_, content)| content)
+        .collect()
 }
 
 #[cfg(test)]
@@ -883,6 +993,51 @@ mod tests {
     }
 
     #[test]
+    fn build_request_documents_hosted_tool_history_is_not_replayed_yet() {
+        let request = ModelRequest {
+            model: "gpt-5.4".to_string(),
+            system: None,
+            messages: vec![RequestMessage {
+                role: "assistant".to_string(),
+                content: vec![
+                    RequestContent::HostedToolUse {
+                        id: "hosted_ws_1".to_string(),
+                        name: "web_search".to_string(),
+                        input: json!({"query": "Rust docs"}),
+                        output: None,
+                        status: None,
+                    },
+                    RequestContent::HostedToolUse {
+                        id: "hosted_ws_1".to_string(),
+                        name: "web_search".to_string(),
+                        input: json!({"query": "Rust docs"}),
+                        output: Some(json!([{
+                            "title": "Rust documentation",
+                            "url": "https://example.test/rust"
+                        }])),
+                        status: Some("completed".to_string()),
+                    },
+                ],
+            }],
+            max_tokens: 256,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: SamplingControls::default(),
+            thinking: None,
+            reasoning_effort: None,
+            extra_body: None,
+        };
+
+        let body = build_request(&request, false);
+
+        assert_eq!(body["input"][0]["role"], json!("assistant"));
+        assert_eq!(body["input"][0]["content"], json!([]));
+        let serialized = serde_json::to_string(&body).expect("serialize request body");
+        assert!(!serialized.contains("hosted_tool_use"));
+        assert!(!serialized.contains("web_search_tool_result"));
+    }
+
+    #[test]
     fn parse_response_extracts_text_and_tool_use() {
         let response = parse_response(json!({
             "id": "resp_123",
@@ -915,6 +1070,32 @@ mod tests {
             response.content[1],
             ResponseContent::ToolUse { .. }
         ));
+    }
+
+    #[test]
+    fn parse_response_parses_string_tool_arguments_as_json() {
+        let response = parse_response(json!({
+            "id": "resp_args",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "weather",
+                    "arguments": "{\"city\":\"Boston\"}"
+                }
+            ]
+        }))
+        .expect("parse response");
+
+        assert_eq!(
+            response.content,
+            vec![ResponseContent::ToolUse {
+                id: "call_1".to_string(),
+                name: "weather".to_string(),
+                input: json!({"city": "Boston"}),
+            }]
+        );
     }
 
     #[test]

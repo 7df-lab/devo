@@ -187,14 +187,23 @@ impl From<&ResponseItem> for RequestMessage {
 /// tool calls with their outputs) and modality-based filtering.
 pub fn message_to_response_items(msg: Message) -> Vec<ResponseItem> {
     let role = msg.role;
-    let mut items = Vec::with_capacity(msg.content.len());
+    let content = msg.content;
+    if matches!(
+        content.as_slice(),
+        [ContentBlock::Text { .. }
+            | ContentBlock::ProviderReasoning { .. }
+            | ContentBlock::HostedToolUse { .. }]
+    ) {
+        return vec![ResponseItem::Message(Message { role, content })];
+    }
 
-    for block in msg.content {
+    let mut items = Vec::with_capacity(content.len());
+    for block in content {
         match block {
             ContentBlock::Text { text } => {
-                // Aggregate consecutive text blocks into one message, but
-                // since we iterate, each text block becomes a separate Message item.
-                // In practice, the assistant typically has one text block per message.
+                // Preserve the historical split shape for mixed-content messages:
+                // each text-like block becomes its own message item so tool calls
+                // can still be reasoned about as adjacent standalone records.
                 items.push(ResponseItem::Message(Message {
                     role,
                     content: vec![ContentBlock::Text { text }],

@@ -32,7 +32,6 @@ pub struct FileManifestEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
     pub absolute_path: PathBuf,
-    pub relative_path: PathBuf,
     pub language: String,
     pub content_kind: ContentKind,
     pub manifest: FileManifestEntry,
@@ -95,7 +94,6 @@ pub fn discover_files(
             .unwrap_or(0);
         files.push(FileEntry {
             absolute_path,
-            relative_path: relative_path.clone(),
             language: language.to_string(),
             content_kind,
             manifest: FileManifestEntry {
@@ -105,7 +103,7 @@ pub fn discover_files(
             },
         });
     }
-    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    files.sort_by(|left, right| left.manifest.path.cmp(&right.manifest.path));
     Ok(files)
 }
 
@@ -118,7 +116,10 @@ pub fn read_indexable_text(path: &Path) -> Result<Option<String>, CodeSearchErro
     if bytes.len() < 128 && bytes.iter().all(u8::is_ascii_whitespace) {
         return Ok(None);
     }
-    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) => Ok(Some(String::from_utf8_lossy(error.as_bytes()).into_owned())),
+    }
 }
 
 /// Classifies a path into retrieval language and content kind.
@@ -245,7 +246,7 @@ mod tests {
         let files = discover_files(temp.path(), ContentFilter::Code).expect("discover files");
         let paths = files
             .into_iter()
-            .map(|entry| entry.relative_path)
+            .map(|entry| entry.manifest.path)
             .collect::<Vec<_>>();
 
         assert_eq!(paths, vec![PathBuf::from("main.rs")]);
@@ -279,7 +280,7 @@ mod tests {
         let paths = discover_files(temp.path(), ContentFilter::All)
             .expect("discover files")
             .into_iter()
-            .map(|entry| entry.relative_path)
+            .map(|entry| entry.manifest.path)
             .collect::<Vec<_>>();
 
         assert_eq!(

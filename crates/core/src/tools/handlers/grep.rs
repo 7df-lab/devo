@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use super::ripgrep::RG_NO_MATCH_EXIT_CODE;
+use super::ripgrep::ripgrep_failure_message;
 use super::ripgrep::run_rg;
 use crate::contracts::{
     ToolCallError, ToolContext, ToolProgressSender, ToolResult, ToolResultContent,
@@ -15,6 +16,7 @@ use crate::tool_spec::{ToolCapabilityTag, ToolExecutionMode, ToolOutputMode, Too
 const MAX_RESULTS: usize = 500;
 const TRUNCATED_MESSAGE: &str = "(truncated at 500 matches)";
 const GREP_DESCRIPTION: &str = include_str!("../grep.txt");
+const REGEX_PARSE_ERROR: &[u8] = b"regex parse error";
 
 pub struct GrepHandler {
     spec: ToolSpec,
@@ -120,13 +122,8 @@ impl ToolHandler for GrepHandler {
             ));
         }
         if exit_code != 0 {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let message = if stderr.is_empty() {
-                format!("ripgrep exited with status {exit_code}")
-            } else {
-                stderr
-            };
-            let error = if message.to_ascii_lowercase().contains("regex parse error") {
+            let message = ripgrep_failure_message(output.stderr, exit_code);
+            let error = if contains_ascii_case_insensitive(&message, REGEX_PARSE_ERROR) {
                 ToolCallError::InvalidInput(message.clone())
             } else {
                 ToolCallError::ExecutionFailed(message.clone())
@@ -176,6 +173,12 @@ fn format_grep_matches(text: &str) -> Option<(String, String)> {
     Some((matches, summary))
 }
 
+fn contains_ascii_case_insensitive(text: &str, needle: &[u8]) -> bool {
+    text.as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use std::hint::black_box;
@@ -212,6 +215,18 @@ mod tests {
         assert_eq!(summary, "500+ matches");
         assert_eq!(lines.len(), MAX_RESULTS + 1);
         assert_eq!(lines[MAX_RESULTS], TRUNCATED_MESSAGE);
+    }
+
+    #[test]
+    fn regex_parse_error_detection_is_ascii_case_insensitive() {
+        assert!(contains_ascii_case_insensitive(
+            "REGEX PARSE ERROR near column 1",
+            REGEX_PARSE_ERROR
+        ));
+        assert!(!contains_ascii_case_insensitive(
+            "permission denied",
+            REGEX_PARSE_ERROR
+        ));
     }
 
     #[test]

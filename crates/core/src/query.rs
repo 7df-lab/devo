@@ -15,6 +15,7 @@ use devo_protocol::ResponseExtra;
 use devo_protocol::SamplingControls;
 use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
+use devo_protocol::ToolDefinition;
 use futures::StreamExt;
 use tokio::time::sleep;
 use tracing::debug;
@@ -57,6 +58,14 @@ use crate::response_item::message_to_response_items;
 
 const SUBAGENT_MODE_REMINDER: &str = "<system-reminder>\nYou are running as a sub-agent. Complete the delegated task using the available non-agent tools. Do not call agent coordination tools such as spawn_agent, send_message, wait_agent, list_agents, or close_agent; report progress and final results through assistant output.\n</system-reminder>";
 const DEEPSEEK_THINKING_ONLY_CONTINUATION_PROMPT: &str = "Your previous response contained only hidden reasoning and no user-visible answer. Provide the final answer to the user's original request now. Do not reveal or summarize hidden reasoning; return only user-visible content.";
+const MAX_DSML_TEXT_TOOL_CALL_CONTINUATIONS: usize = 3;
+const DSML_TEXT_TOOL_CALL_CONTINUATION_REMINDER: &str = "Your previous assistant message contained DSML tagged tool-call text. Those tags were emitted as ordinary text and no tool was executed. Do not repeat the DSML block. Continue now by using the provider's native hosted tool interface when you need a hosted tool, by invoking one of the available local tools when appropriate, or by producing normal prose if no tool is needed.";
+const DSML_TOOL_CALL_MARKERS: [&str; 4] = [
+    "<｜DSML｜tool_calls>",
+    "<｜｜DSML｜｜tool_calls>",
+    "<|DSML|tool_calls>",
+    "<||DSML||tool_calls>",
+];
 
 fn hosted_tools_for_web_capabilities(
     web_search: &devo_config::ResolvedWebSearchConfig,
@@ -70,6 +79,13 @@ fn hosted_tools_for_web_capabilities(
         hosted_tools.push(HostedToolDefinition::WebFetch(HostedWebFetchTool::new()));
     }
     hosted_tools
+}
+
+fn hosted_tool_name_for_reminder(tool: &HostedToolDefinition) -> &'static str {
+    match tool {
+        HostedToolDefinition::WebSearch(_) => "web_search",
+        HostedToolDefinition::WebFetch(_) => "web_fetch",
+    }
 }
 
 #[cfg(test)]
@@ -515,12 +531,20 @@ fn emit_hosted_tool_result<F>(
     }
 
     let text = hosted_tool_result_text(name, input, output.as_ref(), status.as_deref());
+    let content = if output.is_some() {
+        ToolContent::Mixed {
+            text: Some(text.clone()),
+            json: output.clone(),
+        }
+    } else {
+        ToolContent::Text(text.clone())
+    };
     let summary = crate::tools::tool_summary::tool_summary(name, input, session_cwd);
     emit(QueryEvent::ToolResult {
         tool_use_id: id.to_string(),
         tool_name: name.to_string(),
         input: input.clone(),
-        content: ToolContent::Text(text.clone()),
+        content,
         display_content: Some(micro_compact(text)),
         is_error: hosted_tool_status_is_error(status.as_deref()),
         summary,
@@ -542,6 +566,50 @@ fn hosted_tool_status_is_error(status: Option<&str>) -> bool {
     status
         .map(str::to_ascii_lowercase)
         .is_some_and(|status| matches!(status.as_str(), "error" | "errored" | "failed"))
+}
+
+fn assistant_content_contains_dsml_tool_call_text(content: &[ContentBlock]) -> bool {
+    content.iter().any(|block| match block {
+        ContentBlock::Text { text } => DSML_TOOL_CALL_MARKERS
+            .iter()
+            .any(|marker| text.contains(marker)),
+        ContentBlock::Reasoning { .. }
+        | ContentBlock::ProviderReasoning { .. }
+        | ContentBlock::ToolUse { .. }
+        | ContentBlock::HostedToolUse { .. }
+        | ContentBlock::ToolResult { .. } => false,
+    })
+}
+
+fn dsml_text_tool_call_continuation_message(
+    request_tools: &[ToolDefinition],
+    hosted_tools: &[HostedToolDefinition],
+) -> Message {
+    let mut reminder = String::from("<system-reminder>\n");
+    reminder.push_str(DSML_TEXT_TOOL_CALL_CONTINUATION_REMINDER);
+    let local_tool_names = request_tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    if !local_tool_names.is_empty() {
+        reminder.push_str("\n\nAvailable local tools: ");
+        reminder.push_str(&local_tool_names.join(", "));
+        reminder.push('.');
+    }
+    let hosted_tool_names = hosted_tools
+        .iter()
+        .map(hosted_tool_name_for_reminder)
+        .collect::<Vec<_>>();
+    if !hosted_tool_names.is_empty() {
+        reminder.push_str("\nAvailable hosted tools: ");
+        reminder.push_str(&hosted_tool_names.join(", "));
+        reminder.push_str(". Hosted tools must be invoked through provider-native server tool calls, not by writing DSML tags in text.");
+    }
+    if local_tool_names.contains(&"spawn_agent") && local_tool_names.contains(&"wait_agent") {
+        reminder.push_str("\nFor research work with separable subtasks, prefer spawning independent agents first and then waiting for their results.");
+    }
+    reminder.push_str("\n</system-reminder>");
+    Message::user(reminder)
 }
 
 // ---------------------------------------------------------------------------
@@ -633,6 +701,7 @@ pub async fn query(
         turn_config.model.slug.starts_with("deepseek-v4-")
             || turn_config.request_model.starts_with("deepseek-v4-");
     let mut deepseek_v4_thinking_only_continuation_used = false;
+    let mut dsml_text_tool_call_continuations = 0usize;
 
     if session.turn_state.is_none() {
         session.start_turn(devo_protocol::TurnKind::Regular);
@@ -788,6 +857,8 @@ pub async fn query(
             insert_subagent_request_reminders(&mut messages);
         }
 
+        let hosted_tools =
+            hosted_tools_for_web_capabilities(&turn_config.web_search, turn_config.web_fetch);
         let request = ModelRequest {
             model: provider_request_model,
             system: request_system,
@@ -799,10 +870,7 @@ pub async fn query(
                     value as usize
                 }),
             tools: Some(request_tools.clone()),
-            hosted_tools: hosted_tools_for_web_capabilities(
-                &turn_config.web_search,
-                turn_config.web_fetch,
-            ),
+            hosted_tools: hosted_tools.clone(),
             sampling: SamplingControls {
                 temperature: turn_config.model.temperature,
                 top_p: turn_config.model.top_p,
@@ -1294,6 +1362,8 @@ pub async fn query(
             })
             .collect();
 
+        let assistant_content_contains_dsml_tool_call =
+            assistant_content_contains_dsml_tool_call_text(&assistant_content);
         session.push_message(Message {
             role: Role::Assistant,
             content: assistant_content,
@@ -1315,6 +1385,23 @@ pub async fn query(
         if tool_calls.is_empty() {
             if has_hosted_tool_uses && stop_reason == Some(StopReason::ToolUse) {
                 debug!("hosted tool use returned without local calls, continuing query loop");
+                continue;
+            }
+
+            if assistant_content_contains_dsml_tool_call {
+                if dsml_text_tool_call_continuations >= MAX_DSML_TEXT_TOOL_CALL_CONTINUATIONS {
+                    return Err(AgentError::Provider(anyhow::anyhow!(
+                        "provider returned DSML text tool calls {MAX_DSML_TEXT_TOOL_CALL_CONTINUATIONS} times without structured or hosted tool results"
+                    )));
+                }
+                dsml_text_tool_call_continuations += 1;
+                debug!(
+                    "DSML text tool call returned without structured tool result; continuing query loop"
+                );
+                session.push_message(dsml_text_tool_call_continuation_message(
+                    &request_tools,
+                    &hosted_tools,
+                ));
                 continue;
             }
 
@@ -1594,6 +1681,8 @@ mod tests {
     use crate::TruncationPolicyConfig;
     use crate::TurnConfig;
 
+    const HOSTED_DSML_TEXT: &str = "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"web_search\">\n<｜｜DSML｜｜parameter name=\"query\" string=\"true\">current Rust docs</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>";
+
     struct SingleToolUseProvider {
         requests: AtomicUsize,
     }
@@ -1844,6 +1933,10 @@ mod tests {
         requests: Arc<Mutex<Vec<ModelRequest>>>,
     }
 
+    struct HostedDsmlTextProvider {
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
+    }
+
     struct HostedWebFetchProvider {
         requests: Arc<Mutex<Vec<ModelRequest>>>,
     }
@@ -1989,6 +2082,46 @@ mod tests {
 
         fn name(&self) -> &str {
             "hosted-web-search-provider"
+        }
+    }
+
+    #[async_trait]
+    impl devo_provider::ModelProviderSDK for HostedDsmlTextProvider {
+        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            unreachable!("tests stream responses only")
+        }
+
+        async fn completion_stream(
+            &self,
+            request: ModelRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            let request_count = {
+                let mut requests = self.requests.lock().expect("lock requests");
+                requests.push(request);
+                requests.len()
+            };
+            if request_count > 1 {
+                return Ok(final_text_stream("done"));
+            }
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(StreamEvent::TextDelta {
+                    index: 0,
+                    text: HOSTED_DSML_TEXT.to_string(),
+                }),
+                Ok(StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: "resp-dsml".into(),
+                        content: vec![ResponseContent::Text(HOSTED_DSML_TEXT.to_string())],
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage: Usage::default(),
+                        metadata: Default::default(),
+                    },
+                }),
+            ])))
+        }
+
+        fn name(&self) -> &str {
+            "hosted-dsml-text-provider"
         }
     }
 
@@ -2373,7 +2506,7 @@ mod tests {
                 "Search the web.",
                 JsonSchema::object(Default::default(), None, None),
             ),
-            ToolExposure::Deferred,
+            ToolExposure::Direct,
         );
         for (name, description) in [
             ("spawn_agent", "Create a child agent."),
@@ -2388,7 +2521,7 @@ mod tests {
                     description,
                     JsonSchema::object(Default::default(), None, None),
                 ),
-                ToolExposure::Deferred,
+                ToolExposure::Direct,
             );
         }
         let registry = Arc::new(builder.build());
@@ -2402,20 +2535,6 @@ mod tests {
         );
         let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
         session.push_message(Message::user("work on the delegated task"));
-        {
-            let loaded_deferred_tools = registry.loaded_deferred_tools();
-            let mut loaded_deferred_tools = loaded_deferred_tools.lock().expect("loaded tools");
-            for name in [
-                "spawn_agent",
-                "send_message",
-                "wait_agent",
-                "list_agents",
-                "close_agent",
-            ] {
-                loaded_deferred_tools.mark_loaded(&session.id, name);
-            }
-        }
-
         let mut turn_config = TurnConfig::new(
             Model {
                 base_instructions: "base system".to_string(),
@@ -2543,6 +2662,8 @@ mod tests {
         );
     }
 
+    /// Trace: L2-DES-RESEARCH-001
+    /// Verifies: provider-hosted web_search emits normal tool events with hosted output.
     #[tokio::test]
     async fn provider_hosted_web_search_emits_tool_events_without_local_execution() {
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -2673,7 +2794,18 @@ mod tests {
         assert!(!*is_error);
         assert!(matches!(
             *content,
-            ToolContent::Text(text) if text == "status: completed"
+            ToolContent::Mixed {
+                text: Some(text),
+                json: Some(json),
+            } if text == "status: completed"
+                && json == &json!({
+                    "results": [
+                        {
+                            "title": "Rust documentation",
+                            "url": "https://example.test/rust"
+                        }
+                    ]
+                })
         ));
         assert!(events.iter().any(|event| matches!(
             event,
@@ -2691,6 +2823,105 @@ mod tests {
         }));
     }
 
+    /// Trace: L2-DES-RESEARCH-001
+    /// Verifies: DSML text that represents a provider-hosted web_search does not end the query loop.
+    #[tokio::test]
+    async fn provider_hosted_dsml_text_tool_call_continues_query_loop() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn ModelProviderSDK> = Arc::new(HostedDsmlTextProvider {
+            requests: Arc::clone(&requests),
+        });
+        let mut builder = ToolRegistryBuilder::new();
+        for (name, description) in [
+            ("spawn_agent", "Create a child agent."),
+            ("wait_agent", "Poll child output."),
+        ] {
+            builder.push_spec_with_exposure(
+                ToolSpec::new(
+                    name,
+                    description,
+                    JsonSchema::object(Default::default(), None, None),
+                ),
+                ToolExposure::Direct,
+            );
+        }
+        let registry = Arc::new(builder.build());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("search current docs"));
+        let mut turn_config = TurnConfig::new(Model::default(), None);
+        turn_config.web_search = devo_config::ResolvedWebSearchConfig::Provider;
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = Arc::clone(&seen);
+        let callback = Arc::new(move |event: QueryEvent| {
+            seen_clone.lock().unwrap().push(event);
+        });
+
+        query(
+            &mut session,
+            &turn_config,
+            provider,
+            registry,
+            &runtime,
+            Some(callback),
+        )
+        .await
+        .expect("query should continue after DSML text and complete");
+
+        let captured = requests.lock().expect("lock requests");
+        assert_eq!(captured.len(), 2);
+        let request = &captured[0];
+        assert!(matches!(
+            request.hosted_tools.as_slice(),
+            [devo_protocol::HostedToolDefinition::WebSearch(_)]
+        ));
+        let continuation = &captured[1];
+        assert!(continuation.messages.iter().any(|message| {
+            message_contains(message, "DSML tagged tool-call text")
+                && message_contains(message, "spawn_agent")
+                && message_contains(message, "wait_agent")
+                && message_contains(message, "web_search")
+        }));
+
+        let assistant_messages = session
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            assistant_messages,
+            vec![
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: HOSTED_DSML_TEXT.to_string(),
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "done".to_string(),
+                    }],
+                },
+            ]
+        );
+
+        let turn_completes = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                QueryEvent::TurnComplete { stop_reason } => Some(stop_reason.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(turn_completes, vec![StopReason::EndTurn]);
+    }
+
+    /// Trace: L2-DES-RESEARCH-001
+    /// Verifies: provider-hosted web_fetch emits normal tool events with hosted output.
     #[tokio::test]
     async fn provider_hosted_web_fetch_emits_tool_events_without_local_execution() {
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -2821,7 +3052,14 @@ mod tests {
         assert!(!*is_error);
         assert!(matches!(
             *content,
-            ToolContent::Text(text) if text == "status: completed"
+            ToolContent::Mixed {
+                text: Some(text),
+                json: Some(json),
+            } if text == "status: completed"
+                && json == &json!({
+                    "title": "Docs",
+                    "url": "https://example.test/docs"
+                })
         ));
     }
 

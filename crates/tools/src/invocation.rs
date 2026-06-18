@@ -1,3 +1,11 @@
+//! Runtime-neutral tool invocation and output values.
+//!
+//! This module deliberately stops at the protocol boundary: handlers can return
+//! canonical model-facing content plus optional display-only text, while runtime
+//! policy such as permissions, cancellation, and progress reporting lives in the
+//! contracts module.
+
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -23,11 +31,20 @@ pub struct ToolInvocation {
 pub trait ToolOutput: Send {
     fn to_content(self: Box<Self>) -> ToolContent;
     fn is_error(&self) -> bool;
+    /// Optional text tailored for local display surfaces.
+    ///
+    /// This is intentionally separate from `ToolContent`: the canonical content
+    /// is sent through protocol/replay paths, while display content may omit
+    /// wrappers or metadata that would be noisy in the UI.
     fn display_content(&self) -> Option<&str> {
         None
     }
 }
 
+/// Canonical content returned by a tool invocation.
+///
+/// Callers may persist or forward this value, so display-only shortening should
+/// use `ToolOutput::display_content` instead of changing these variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToolContent {
     Text(String),
@@ -51,16 +68,18 @@ impl ToolContent {
         match self {
             ToolContent::Text(t) => t,
             ToolContent::Json(v) => v.to_string(),
-            ToolContent::Mixed { text, json } => {
-                let mut parts = Vec::new();
-                if let Some(t) = text {
-                    parts.push(t);
+            ToolContent::Mixed { text, json } => match (text, json) {
+                (Some(text), Some(json)) => {
+                    let mut output = String::with_capacity(text.len() + 1);
+                    output.push_str(&text);
+                    output.push('\n');
+                    let _ = write!(output, "{json}");
+                    output
                 }
-                if let Some(j) = json {
-                    parts.push(j.to_string());
-                }
-                parts.join("\n")
-            }
+                (Some(text), None) => text,
+                (None, Some(json)) => json.to_string(),
+                (None, None) => String::new(),
+            },
         }
     }
 }
@@ -68,6 +87,11 @@ impl ToolContent {
 pub struct FunctionToolOutput {
     pub content: ToolContent,
     pub is_error: bool,
+    /// Optional UI-facing rendering of `content`.
+    ///
+    /// Some tools deliberately store both forms: one for the model/protocol and
+    /// one for compact human display. Keep them distinct even when they contain
+    /// similar text.
     pub display_content: Option<String>,
 }
 

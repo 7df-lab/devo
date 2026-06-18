@@ -27,6 +27,11 @@ fn is_dangerous_powershell(command: &[String]) -> bool {
     if !is_powershell_executable(exe) {
         return false;
     }
+
+    if has_opaque_powershell_execution_arg(rest) {
+        return true;
+    }
+
     // Parse the PowerShell invocation to get a flat token list we can scan for
     // dangerous cmdlets/COM calls plus any URL-looking arguments. This is a
     // best-effort shlex split of the script text, not a full PS parser.
@@ -88,6 +93,30 @@ fn is_dangerous_powershell(command: &[String]) -> bool {
     }
 
     false
+}
+
+fn has_opaque_powershell_execution_arg(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let lower = arg.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "-encodedcommand"
+                | "/encodedcommand"
+                | "-enc"
+                | "/enc"
+                | "-ec"
+                | "/ec"
+                | "-file"
+                | "/file"
+        ) || lower.starts_with("-encodedcommand:")
+            || lower.starts_with("/encodedcommand:")
+            || lower.starts_with("-enc:")
+            || lower.starts_with("/enc:")
+            || lower.starts_with("-ec:")
+            || lower.starts_with("/ec:")
+            || lower.starts_with("-file:")
+            || lower.starts_with("/file:")
+    })
 }
 
 fn is_dangerous_cmd(command: &[String]) -> bool {
@@ -411,6 +440,7 @@ fn parse_powershell_invocation(args: &[String]) -> Option<ParsedPowershell> {
 #[cfg(test)]
 mod tests {
     use super::is_dangerous_command_windows;
+    use pretty_assertions::assert_eq;
 
     fn vec_str(items: &[&str]) -> Vec<String> {
         items.iter().map(std::string::ToString::to_string).collect()
@@ -506,6 +536,37 @@ mod tests {
             "-Command",
             "Remove-Item test"
         ])));
+    }
+
+    #[test]
+    fn powershell_encoded_command_is_dangerous() {
+        assert_eq!(
+            is_dangerous_command_windows(&vec_str(&[
+                "powershell",
+                "-EncodedCommand",
+                "UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAdABlAHMAdAAgAC0ARgBvAHIAYwBlAA==",
+            ])),
+            true
+        );
+        assert_eq!(
+            is_dangerous_command_windows(&vec_str(&[
+                "pwsh",
+                "-EncodedCommand:UgBlAG0AbwB2AGUALQBJAHQAZQBtAA==",
+            ])),
+            true
+        );
+    }
+
+    #[test]
+    fn powershell_file_execution_is_dangerous() {
+        assert_eq!(
+            is_dangerous_command_windows(&vec_str(&["powershell", "-File", "cleanup.ps1",])),
+            true
+        );
+        assert_eq!(
+            is_dangerous_command_windows(&vec_str(&["pwsh", "/File:cleanup.ps1",])),
+            true
+        );
     }
 
     // Force delete tests for CMD

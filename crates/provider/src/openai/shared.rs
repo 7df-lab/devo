@@ -1,3 +1,4 @@
+use devo_protocol::ReasoningEffort;
 use devo_protocol::RequestRole;
 use devo_protocol::ToolDefinition;
 use serde_json::Value;
@@ -7,7 +8,6 @@ use tracing::warn;
 use super::OpenAIRole;
 use super::capabilities::OpenAIReasoningMode;
 use super::capabilities::OpenAIRequestProfile;
-use devo_protocol::ReasoningEffort;
 
 pub(crate) fn request_role(role: &str) -> OpenAIRole {
     match role.parse::<RequestRole>() {
@@ -47,31 +47,24 @@ pub(crate) fn reasoning_value(
     match profile.reasoning_mode {
         OpenAIReasoningMode::Effort => reasoning_effort.map(OpenAIReasoningValue::Effort),
         OpenAIReasoningMode::Thinking => {
-            let enabled = !matches!(
-                thinking
-                    .map(str::trim)
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
-                    .as_str(),
-                "disabled" | "none"
-            );
+            let enabled = !thinking_is_disabled(thinking);
             Some(OpenAIReasoningValue::Thinking { enabled })
         }
         OpenAIReasoningMode::ThinkingWithEffort => {
-            let enabled = !matches!(
-                thinking
-                    .map(str::trim)
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
-                    .as_str(),
-                "disabled" | "none"
-            );
+            let enabled = !thinking_is_disabled(thinking);
             Some(OpenAIReasoningValue::ThinkingWithEffort {
                 enabled,
                 effort: if enabled { reasoning_effort } else { None },
             })
         }
     }
+}
+
+fn thinking_is_disabled(thinking: Option<&str>) -> bool {
+    let Some(thinking) = thinking.map(str::trim) else {
+        return false;
+    };
+    thinking.eq_ignore_ascii_case("disabled") || thinking.eq_ignore_ascii_case("none")
 }
 
 pub(crate) fn tool_definitions(tools: &[ToolDefinition]) -> Value {
@@ -94,4 +87,17 @@ pub(crate) fn tool_definitions(tools: &[ToolDefinition]) -> Value {
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_disabled_check_is_case_insensitive_without_lowercase_allocation() {
+        assert!(thinking_is_disabled(Some(" disabled ")));
+        assert!(thinking_is_disabled(Some("NONE")));
+        assert!(!thinking_is_disabled(Some("enabled")));
+        assert!(!thinking_is_disabled(None));
+    }
 }

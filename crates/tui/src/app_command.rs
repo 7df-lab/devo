@@ -78,6 +78,9 @@ pub(crate) enum AppCommand {
     RunBtwQuestion {
         question: String,
     },
+    RunResearch {
+        question: String,
+    },
     ApprovalRespond {
         session_id: SessionId,
         turn_id: TurnId,
@@ -148,6 +151,9 @@ pub(crate) enum AppCommandView<'a> {
         input: &'a [InputItem],
     },
     RunBtwQuestion {
+        question: &'a str,
+    },
+    RunResearch {
         question: &'a str,
     },
     ApprovalRespond {
@@ -339,6 +345,7 @@ impl AppCommand {
             Self::OverrideTurnContext { .. } => "override_turn_context",
             Self::SteerTurn { .. } => "steer_turn",
             Self::RunBtwQuestion { .. } => "run_btw_question",
+            Self::RunResearch { .. } => "run_research",
             Self::ApprovalRespond { .. } => "approval_respond",
             Self::RequestUserInputRespond { .. } => "request_user_input_respond",
             Self::UpdatePermissions { .. } => "update_permissions",
@@ -402,6 +409,7 @@ impl AppCommand {
             },
             Self::SteerTurn { input, .. } => AppCommandView::SteerTurn { input },
             Self::RunBtwQuestion { question } => AppCommandView::RunBtwQuestion { question },
+            Self::RunResearch { question } => AppCommandView::RunResearch { question },
             Self::ApprovalRespond {
                 approval_id,
                 decision,
@@ -464,6 +472,7 @@ impl AppCommand {
             approval_policy: approval_policy.clone(),
             cwd: cwd.clone(),
             collaboration_mode: *collaboration_mode,
+            execution_mode: devo_server::TurnExecutionMode::Regular,
         })
     }
 }

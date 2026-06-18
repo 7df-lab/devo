@@ -1,3 +1,9 @@
+//! Lightweight tool lifecycle events for local progress surfaces.
+//!
+//! These events describe execution progress only; canonical tool output still
+//! flows through `ToolResult` / `ToolContent` so replay and model-visible
+//! content stay separate from UI progress messages.
+
 use serde::{Deserialize, Serialize};
 
 /// Sender for streaming tool output progress during execution.
@@ -7,6 +13,8 @@ pub type ToolProgressSender = tokio::sync::mpsc::UnboundedSender<String>;
 
 #[cfg(test)]
 mod tests {
+    use pretty_assertions::assert_eq;
+
     use super::*;
 
     #[test]

@@ -2,6 +2,7 @@ pub mod sandbox;
 
 use std::collections::BTreeSet;
 use std::collections::HashSet;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -637,7 +638,51 @@ impl PermissionPolicy for StaticPermissionPolicy {
         snapshot: &PolicySnapshot,
         request: &PermissionRequest,
     ) -> Result<PermissionDecision, PermissionError> {
-        match request.resource {
+        match &request.resource {
+            ResourceKind::FileRead => {
+                let Some(path) = request.path.as_ref() else {
+                    return Err(PermissionError::InvalidRequest {
+                        message: "file read request missing path".into(),
+                    });
+                };
+
+                let path = canonicalize_path(path)?;
+                if snapshot
+                    .effective_policy
+                    .denied_roots
+                    .iter()
+                    .any(|denied| path.starts_with(denied))
+                {
+                    return Ok(PermissionDecision::Deny {
+                        reason: format!("path denied by policy: {}", path.display()),
+                    });
+                }
+
+                if snapshot
+                    .effective_policy
+                    .readable_roots
+                    .iter()
+                    .chain(snapshot.effective_policy.writable_roots.iter())
+                    .any(|root| path.starts_with(root))
+                {
+                    return Ok(PermissionDecision::Allow);
+                }
+
+                Ok(PermissionDecision::Ask {
+                    approval_id: format!("approval-{}", request.tool_name).into(),
+                    message: format!(
+                        "{} needs read access to {}",
+                        request.tool_name,
+                        path.display()
+                    ),
+                    available_scopes: vec![
+                        ApprovalScope::Once,
+                        ApprovalScope::Turn,
+                        ApprovalScope::Session,
+                        ApprovalScope::PathPrefix { path },
+                    ],
+                })
+            }
             ResourceKind::FileWrite => {
                 let Some(path) = request.path.as_ref() else {
                     return Err(PermissionError::InvalidRequest {
@@ -805,14 +850,29 @@ pub fn render_safety_summary(snapshot: &PolicySnapshot) -> Vec<String> {
 }
 
 fn canonicalize_path(path: &Path) -> Result<PathBuf, PermissionError> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
+    if !path.is_absolute() {
+        return Err(PermissionError::PathNormalizationFailed {
+            path: path.to_path_buf(),
+            message: "path must be absolute".into(),
+        });
     }
 
-    Err(PermissionError::PathNormalizationFailed {
-        path: path.to_path_buf(),
-        message: "path must be absolute".into(),
-    })
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    Ok(normalized)
 }
 
 fn canonicalized_set(paths: &BTreeSet<PathBuf>) -> Result<BTreeSet<PathBuf>, PermissionError> {

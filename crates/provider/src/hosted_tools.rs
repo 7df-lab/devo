@@ -1,3 +1,11 @@
+//! Provider-specific serialization for hosted tools.
+//!
+//! The protocol exposes provider-neutral `HostedToolDefinition` values, but
+//! each provider family wires them differently: OpenAI Responses appends them
+//! to `tools`, OpenAI Chat Completions uses top-level option objects, and
+//! Anthropic requires versioned server-tool type names. Keep those mappings
+//! here so adapter code does not duplicate wire-format conditionals.
+
 use devo_protocol::HostedToolDefinition;
 use devo_protocol::HostedWebFetchTool;
 use devo_protocol::HostedWebSearchTool;
@@ -12,12 +20,10 @@ pub(crate) fn append_openai_responses_hosted_tools(
     root: &mut Value,
     hosted_tools: &[HostedToolDefinition],
 ) {
-    for hosted_tool in hosted_tools {
-        match hosted_tool {
-            HostedToolDefinition::WebSearch(options) => push_tool(root, openai_web_search(options)),
-            HostedToolDefinition::WebFetch(options) => push_tool(root, openai_web_fetch(options)),
-        }
-    }
+    append_rendered_tools(root, hosted_tools, |hosted_tool| match hosted_tool {
+        HostedToolDefinition::WebSearch(options) => openai_web_search(options),
+        HostedToolDefinition::WebFetch(options) => openai_web_fetch(options),
+    });
 }
 
 pub(crate) fn apply_openai_chat_completions_hosted_tools(
@@ -28,12 +34,7 @@ pub(crate) fn apply_openai_chat_completions_hosted_tools(
         match hosted_tool {
             HostedToolDefinition::WebSearch(options) => {
                 let mut value = Map::new();
-                if let Some(search_context_size) = &options.search_context_size {
-                    value.insert(
-                        "search_context_size".to_string(),
-                        json!(search_context_size),
-                    );
-                }
+                append_web_search_common_options(&mut value, options);
                 root["web_search_options"] = Value::Object(value);
             }
             HostedToolDefinition::WebFetch(options) => {
@@ -47,26 +48,15 @@ pub(crate) fn append_anthropic_hosted_tools(
     root: &mut Value,
     hosted_tools: &[HostedToolDefinition],
 ) {
-    for hosted_tool in hosted_tools {
-        match hosted_tool {
-            HostedToolDefinition::WebSearch(options) => {
-                push_tool(root, anthropic_web_search(options));
-            }
-            HostedToolDefinition::WebFetch(options) => {
-                push_tool(root, anthropic_web_fetch(options));
-            }
-        }
-    }
+    append_rendered_tools(root, hosted_tools, |hosted_tool| match hosted_tool {
+        HostedToolDefinition::WebSearch(options) => anthropic_web_search(options),
+        HostedToolDefinition::WebFetch(options) => anthropic_web_fetch(options),
+    });
 }
 
 fn openai_web_search(options: &HostedWebSearchTool) -> Value {
     let mut value = Map::from_iter([("type".to_string(), json!("web_search"))]);
-    if let Some(search_context_size) = &options.search_context_size {
-        value.insert(
-            "search_context_size".to_string(),
-            json!(search_context_size),
-        );
-    }
+    append_web_search_common_options(&mut value, options);
     Value::Object(value)
 }
 
@@ -110,6 +100,15 @@ fn anthropic_web_fetch(options: &HostedWebFetchTool) -> Value {
     Value::Object(value)
 }
 
+fn append_web_search_common_options(value: &mut Map<String, Value>, options: &HostedWebSearchTool) {
+    if let Some(search_context_size) = &options.search_context_size {
+        value.insert(
+            "search_context_size".to_string(),
+            json!(search_context_size),
+        );
+    }
+}
+
 fn append_web_fetch_common_options(value: &mut Map<String, Value>, options: &HostedWebFetchTool) {
     if let Some(max_uses) = options.max_uses {
         value.insert("max_uses".to_string(), json!(max_uses));
@@ -134,10 +133,27 @@ fn append_web_fetch_common_options(value: &mut Map<String, Value>, options: &Hos
     }
 }
 
-fn push_tool(root: &mut Value, tool: Value) {
+fn append_rendered_tools<F>(root: &mut Value, hosted_tools: &[HostedToolDefinition], mut render: F)
+where
+    F: FnMut(&HostedToolDefinition) -> Value,
+{
+    if hosted_tools.is_empty() {
+        return;
+    }
     match root.get_mut("tools").and_then(Value::as_array_mut) {
-        Some(tools) => tools.push(tool),
-        None => root["tools"] = Value::Array(vec![tool]),
+        Some(tools) => {
+            tools.reserve(hosted_tools.len());
+            for hosted_tool in hosted_tools {
+                tools.push(render(hosted_tool));
+            }
+        }
+        None => {
+            let mut tools = Vec::with_capacity(hosted_tools.len());
+            for hosted_tool in hosted_tools {
+                tools.push(render(hosted_tool));
+            }
+            root["tools"] = Value::Array(tools);
+        }
     }
 }
 

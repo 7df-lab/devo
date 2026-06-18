@@ -213,12 +213,13 @@ pub fn discover_instructions(
         }
     }
 
-    let assembled_content: String = global_files
-        .iter()
-        .chain(discovered_files.iter())
-        .map(|f| f.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let mut assembled_content = String::new();
+    for file in global_files.iter().chain(discovered_files.iter()) {
+        if !assembled_content.is_empty() {
+            assembled_content.push_str("\n\n");
+        }
+        assembled_content.push_str(&file.content);
+    }
 
     InstructionDiscovery {
         project_root,

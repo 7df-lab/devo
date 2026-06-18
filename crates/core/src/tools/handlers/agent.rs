@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use devo_protocol::{
-    AgentListParams, AgentMessageParams, CloseAgentParams, SessionId, SpawnAgentParams,
-    WaitAgentParams,
+    AgentContextMode, AgentListParams, AgentMessageParams, AgentToolPolicy, CloseAgentParams,
+    SessionId, SpawnAgentParams, WaitAgentParams,
 };
 
 use crate::contracts::{
@@ -63,7 +63,7 @@ pub fn register_agent_tools(builder: &mut ToolRegistryBuilder) {
 }
 
 fn register(builder: &mut ToolRegistryBuilder, handler: Arc<AgentToolHandler>, aliases: &[&str]) {
-    builder.push_spec_with_exposure(handler.spec().clone(), ToolExposure::Deferred);
+    builder.push_spec_with_exposure(handler.spec().clone(), ToolExposure::Direct);
     let handler: Arc<dyn ToolHandler> = handler;
     let name = handler.spec().name.clone();
     builder.register_handler(&name, Arc::clone(&handler));
@@ -93,13 +93,21 @@ impl ToolHandler for AgentToolHandler {
         match self.kind {
             AgentToolKind::Spawn => {
                 let input: SpawnAgentInput = parse_input(input)?;
+                let fork_turns = match (ctx.agent_context_mode, input.fork_turns) {
+                    (AgentContextMode::CodingAgent, fork_turns) => fork_turns,
+                    (AgentContextMode::DeepResearch, _) => Some("none".to_string()),
+                };
                 let result = coordinator
                     .spawn_agent(SpawnAgentParams {
                         session_id,
                         message: input.message,
-                        fork_turns: input.fork_turns,
+                        fork_turns,
                         max_turns: None,
-                        tool_policy: Default::default(),
+                        tool_policy: match ctx.agent_context_mode {
+                            AgentContextMode::CodingAgent => AgentToolPolicy::Inherit,
+                            AgentContextMode::DeepResearch => AgentToolPolicy::DeepResearch,
+                        },
+                        context_mode: ctx.agent_context_mode,
                         ephemeral: false,
                     })
                     .await?;
@@ -246,7 +254,7 @@ fn spawn_spec() -> ToolSpec {
                 (
                     "fork_turns".to_string(),
                     JsonSchema::string(Some(
-                        "Optional history fork mode. Use \"all\" (default) when the child needs stable completed parent history; it excludes the active parent turn. Use \"none\" for a clean child context containing only the task message. Do not assume the child sees your active turn unless you include needed context in message.",
+                        "Optional history fork mode. In coding-agent sessions, use \"all\" (default) when the child needs stable completed parent history; it excludes the active parent turn. Use \"none\" for a clean child context containing only the task message. In DeepResearch sessions, this is always forced to \"none\". Do not assume the child sees your active turn unless you include needed context in message.",
                     )),
                 ),
             ]),
@@ -279,7 +287,7 @@ fn wait_agent_spec() -> ToolSpec {
                 (
                     "after_sequence".to_string(),
                     JsonSchema::integer(Some(
-                        "Only return output events after this sequence. Use the previous next_sequence value to poll incrementally.",
+                        "Only return output events with sequence greater than this value. To poll incrementally, pass the largest sequence value from the previous events list.",
                     )),
                 ),
                 (
@@ -484,7 +492,44 @@ mod tests {
                 message: "review this".to_string(),
                 fork_turns: Some("all".to_string()),
                 max_turns: None,
-                tool_policy: Default::default(),
+                tool_policy: AgentToolPolicy::Inherit,
+                context_mode: AgentContextMode::CodingAgent,
+                ephemeral: false,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_handler_uses_deep_research_context_defaults() {
+        let session_id = SessionId::new();
+        let coordinator = Arc::new(FakeAgentCoordinator::default());
+        let handler = AgentToolHandler::new(spawn_spec(), AgentToolKind::Spawn);
+        let result = handler
+            .handle(
+                tool_context_with_mode(
+                    session_id,
+                    Some(coordinator.clone() as Arc<dyn devo_tools::AgentToolCoordinator>),
+                    AgentContextMode::DeepResearch,
+                ),
+                serde_json::json!({
+                    "message": "research this source cluster",
+                    "fork_turns": "all"
+                }),
+                None,
+            )
+            .await
+            .expect("spawn succeeds");
+
+        assert_eq!(result.result_summary, "agent spawned");
+        assert_eq!(
+            coordinator.spawned.lock().await.as_slice(),
+            &[SpawnAgentParams {
+                session_id,
+                message: "research this source cluster".to_string(),
+                fork_turns: Some("none".to_string()),
+                max_turns: None,
+                tool_policy: AgentToolPolicy::DeepResearch,
+                context_mode: AgentContextMode::DeepResearch,
                 ephemeral: false,
             }]
         );
@@ -502,6 +547,8 @@ mod tests {
         assert!(fork_description.contains("\"all\" (default)"));
         assert!(fork_description.contains("stable completed parent history"));
         assert!(fork_description.contains("excludes the active parent turn"));
+        assert!(fork_description.contains("DeepResearch sessions"));
+        assert!(fork_description.contains("always forced to \"none\""));
         assert!(fork_description.contains("\"none\""));
         assert!(send_message_spec().description.contains("Parent-only"));
         assert!(
@@ -514,6 +561,12 @@ mod tests {
                 .description
                 .contains("polls child assistant output")
         );
+        let wait_schema = wait_agent_spec().input_schema.to_json_value();
+        let after_sequence_description = wait_schema["properties"]["after_sequence"]["description"]
+            .as_str()
+            .expect("after_sequence description");
+        assert!(after_sequence_description.contains("largest sequence value"));
+        assert!(!after_sequence_description.contains("previous next_sequence"));
         assert!(list_agents_spec().description.contains("generated path"));
         assert!(
             close_agent_spec()
@@ -568,13 +621,40 @@ mod tests {
         session_id: SessionId,
         agent_coordinator: Option<Arc<dyn devo_tools::AgentToolCoordinator>>,
     ) -> ToolContext {
-        tool_context_with_cancel_token(session_id, agent_coordinator, CancellationToken::new())
+        tool_context_with_mode(session_id, agent_coordinator, AgentContextMode::CodingAgent)
+    }
+
+    fn tool_context_with_mode(
+        session_id: SessionId,
+        agent_coordinator: Option<Arc<dyn devo_tools::AgentToolCoordinator>>,
+        agent_context_mode: AgentContextMode,
+    ) -> ToolContext {
+        tool_context_with_cancel_token_and_mode(
+            session_id,
+            agent_coordinator,
+            CancellationToken::new(),
+            agent_context_mode,
+        )
     }
 
     fn tool_context_with_cancel_token(
         session_id: SessionId,
         agent_coordinator: Option<Arc<dyn devo_tools::AgentToolCoordinator>>,
         cancel_token: CancellationToken,
+    ) -> ToolContext {
+        tool_context_with_cancel_token_and_mode(
+            session_id,
+            agent_coordinator,
+            cancel_token,
+            AgentContextMode::CodingAgent,
+        )
+    }
+
+    fn tool_context_with_cancel_token_and_mode(
+        session_id: SessionId,
+        agent_coordinator: Option<Arc<dyn devo_tools::AgentToolCoordinator>>,
+        cancel_token: CancellationToken,
+        agent_context_mode: AgentContextMode,
     ) -> ToolContext {
         ToolContext {
             tool_call_id: crate::invocation::ToolCallId("tool-call".to_string()),
@@ -587,6 +667,7 @@ mod tests {
             },
             cancel_token,
             agent_scope: crate::contracts::ToolAgentScope::Parent,
+            agent_context_mode,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator,
             network_proxy: None,

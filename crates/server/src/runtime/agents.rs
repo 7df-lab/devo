@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use devo_protocol::AgentContextMode;
+use devo_protocol::AgentToolPolicy;
+
 use super::*;
 
 mod coordinator;
@@ -26,12 +29,33 @@ impl ServerRuntime {
         let parent_session_id = params.session_id;
         let child_session_id = SessionId::new();
         let now = Utc::now();
-        let fork_turns = params.fork_turns.as_deref().unwrap_or("all");
-        if !matches!(fork_turns, "none" | "all") {
+        if let Some(fork_turns) = params.fork_turns.as_deref()
+            && !matches!(fork_turns, "none" | "all")
+        {
             return Err(ToolCallError::InvalidInput(
                 "fork_turns must be \"none\" or \"all\"".to_string(),
             ));
         }
+        let effective_context_mode = match (params.context_mode, params.tool_policy) {
+            (AgentContextMode::DeepResearch, AgentToolPolicy::Inherit)
+            | (AgentContextMode::DeepResearch, AgentToolPolicy::DenyAll)
+            | (AgentContextMode::DeepResearch, AgentToolPolicy::DeepResearch)
+            | (AgentContextMode::CodingAgent, AgentToolPolicy::DeepResearch) => {
+                AgentContextMode::DeepResearch
+            }
+            (AgentContextMode::CodingAgent, AgentToolPolicy::Inherit)
+            | (AgentContextMode::CodingAgent, AgentToolPolicy::DenyAll) => {
+                AgentContextMode::CodingAgent
+            }
+        };
+        let effective_tool_policy = match effective_context_mode {
+            AgentContextMode::CodingAgent => params.tool_policy,
+            AgentContextMode::DeepResearch => AgentToolPolicy::DeepResearch,
+        };
+        let fork_turns = match effective_context_mode {
+            AgentContextMode::CodingAgent => params.fork_turns.as_deref().unwrap_or("all"),
+            AgentContextMode::DeepResearch => "none",
+        };
         if params.max_turns == Some(0) {
             return Err(ToolCallError::InvalidInput(
                 "max_turns must be positive when provided".to_string(),
@@ -110,6 +134,7 @@ impl ServerRuntime {
                 &mut rebuilt_messages,
                 &mut rebuilt_history_items,
                 &mut tool_names_by_id,
+                &item.turn_kind,
                 item.turn_item.clone(),
             );
         }
@@ -152,6 +177,24 @@ impl ServerRuntime {
             last_query_total_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
+        if effective_context_mode == AgentContextMode::DeepResearch {
+            let turn_config = self
+                .deps
+                .resolve_turn_config(session_model_selection(&summary), summary.thinking.clone());
+            core_session.session_context = Some(research::research_session_context(
+                &core_session,
+                &turn_config,
+                research::research_stage_system(devo_core::research::prompts::subagent()),
+            ));
+            let cwd = core_session.cwd.display().to_string();
+            core_session.push_message(Message::user(
+                devo_core::research::prompts::environment_context(
+                    &devo_core::research::prompts::today_string(),
+                    &devo_core::research::prompts::timezone_string(),
+                    &cwd,
+                ),
+            ));
+        }
         let child_session = RuntimeSession {
             record,
             summary: summary.clone(),
@@ -165,7 +208,7 @@ impl ServerRuntime {
             latest_compaction_snapshot: None,
             pending_turn_queue,
             btw_input_queue,
-            agent_tool_policy: params.tool_policy,
+            agent_tool_policy: effective_tool_policy,
             max_turns: params.max_turns,
             deferred_assistant: None,
             deferred_reasoning: None,
@@ -456,7 +499,11 @@ impl ServerRuntime {
             session.active_turn = Some(turn.clone());
             turn
         };
-        self.append_turn_start(session_id, &turn).await?;
+        if let Err(error) = self.append_turn_start(session_id, &turn).await {
+            self.clear_active_turn_reservation(&session_arc, turn.turn_id)
+                .await;
+            return Err(error);
+        }
         self.broadcast_event(ServerEvent::SessionStatusChanged(
             SessionStatusChangedPayload {
                 session_id,
@@ -685,11 +732,15 @@ impl ServerRuntime {
         };
         self.set_agent_status(parent_session_id, child_session_id, status)
             .await;
-        self.record_subagent_status_event(
+        let detail = self
+            .subagent_terminal_status_detail(child_session_id, turn.turn_id, status)
+            .await;
+        self.record_subagent_status_event_with_text(
             parent_session_id,
             child_session_id,
             status,
             turn.turn_id,
+            detail,
         )
         .await;
         if matches!(
@@ -702,6 +753,46 @@ impl ServerRuntime {
         ) {
             self.run_subagent_stop_hook(child_session_id).await;
         }
+    }
+
+    async fn subagent_terminal_status_detail(
+        &self,
+        child_session_id: SessionId,
+        turn_id: TurnId,
+        status: SubagentStatus,
+    ) -> Option<String> {
+        if status != SubagentStatus::Failed {
+            return None;
+        }
+        let session_arc = self.sessions.lock().await.get(&child_session_id).cloned()?;
+        let session = session_arc.lock().await;
+        session.persisted_turn_items.iter().rev().find_map(|item| {
+            if item.turn_id != turn_id {
+                return None;
+            }
+            match &item.turn_item {
+                TurnItem::AgentMessage(TextItem { text }) if !text.trim().is_empty() => {
+                    Some(text.trim().to_string())
+                }
+                TurnItem::UserMessage(_)
+                | TurnItem::SteerInput(_)
+                | TurnItem::HookPrompt(_)
+                | TurnItem::AgentMessage(_)
+                | TurnItem::Plan(_)
+                | TurnItem::Reasoning(_)
+                | TurnItem::ToolCall(_)
+                | TurnItem::ToolProgress(_)
+                | TurnItem::ToolResult(_)
+                | TurnItem::CommandExecution(_)
+                | TurnItem::ApprovalRequest(_)
+                | TurnItem::ApprovalDecision(_)
+                | TurnItem::WebSearch(_)
+                | TurnItem::ImageGeneration(_)
+                | TurnItem::ContextCompaction(_)
+                | TurnItem::ResearchArtifact(_)
+                | TurnItem::TurnSummary(_) => None,
+            }
+        })
     }
 
     pub(super) async fn child_parent_and_path(

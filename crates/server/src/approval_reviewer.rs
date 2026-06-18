@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use devo_core::tools::ToolPermissionRequest;
 use devo_protocol::{
     ModelRequest, RequestContent, RequestMessage, ResponseContent, SamplingControls,
@@ -72,29 +74,42 @@ fn parse_reviewer_text(raw: &str) -> Option<ReviewerDecision> {
 }
 
 fn review_prompt_for_request(request: &ToolPermissionRequest) -> String {
-    let mut details = vec![
-        format!("tool_name: {}", request.tool_name),
-        format!("resource: {:?}", request.resource),
-        format!("cwd: {}", request.cwd.display()),
-        format!("action_summary: {}", request.action_summary),
-    ];
+    let mut prompt = String::with_capacity(256);
+    write!(&mut prompt, "tool_name: {}", request.tool_name)
+        .expect("writing to a String cannot fail");
+    write!(&mut prompt, "\nresource: {:?}", request.resource)
+        .expect("writing to a String cannot fail");
+    write!(&mut prompt, "\ncwd: {}", request.cwd.display())
+        .expect("writing to a String cannot fail");
+    write!(&mut prompt, "\naction_summary: {}", request.action_summary)
+        .expect("writing to a String cannot fail");
     if let Some(justification) = &request.justification {
-        details.push(format!("justification: {justification}"));
+        write!(&mut prompt, "\njustification: {justification}")
+            .expect("writing to a String cannot fail");
     }
     if let Some(path) = &request.path {
-        details.push(format!("path: {}", path.display()));
+        write!(&mut prompt, "\npath: {}", path.display()).expect("writing to a String cannot fail");
     }
     if let Some(host) = &request.host {
-        details.push(format!("host: {host}"));
+        write!(&mut prompt, "\nhost: {host}").expect("writing to a String cannot fail");
     }
     if let Some(target) = &request.target {
-        details.push(format!("target: {target}"));
+        write!(&mut prompt, "\ntarget: {target}").expect("writing to a String cannot fail");
     }
     if let Some(command_prefix) = &request.command_prefix {
-        details.push(format!("command_prefix: {}", command_prefix.join(" ")));
+        prompt.push_str("\ncommand_prefix: ");
+        let mut tokens = command_prefix.iter();
+        if let Some(first) = tokens.next() {
+            prompt.push_str(first);
+            for token in tokens {
+                prompt.push(' ');
+                prompt.push_str(token);
+            }
+        }
     }
-    details.push(format!("input_json: {}", request.input));
-    details.join("\n")
+    write!(&mut prompt, "\ninput_json: {}", request.input)
+        .expect("writing to a String cannot fail");
+    prompt
 }
 
 #[cfg(test)]
@@ -132,7 +147,7 @@ mod tests {
             tool_call_id: "call".to_string(),
             tool_name: "shell_command".to_string(),
             input: json!({ "command": "git add -A" }),
-            cwd: std::path::PathBuf::from("C:\\repo"),
+            cwd: std::path::PathBuf::from("repo"),
             session_id: "session".to_string(),
             turn_id: Some("turn".to_string()),
             resource: devo_safety::ResourceKind::ShellExec,
@@ -149,7 +164,9 @@ mod tests {
         let RequestContent::Text { text } = &model_request.messages[0].content[0] else {
             panic!("review request should contain text content");
         };
-        assert!(text.contains("command_prefix: git add"));
-        assert!(text.contains("target: git add -A"));
+        assert_eq!(
+            text,
+            "tool_name: shell_command\nresource: ShellExec\ncwd: repo\naction_summary: Run git add -A\njustification: stage files\ntarget: git add -A\ncommand_prefix: git add\ninput_json: {\"command\":\"git add -A\"}"
+        );
     }
 }

@@ -23,6 +23,7 @@ use tracing::warn;
 
 use devo_core::mcp::McpAuthConfig;
 use devo_core::mcp::McpAuthState;
+use devo_core::mcp::McpCapability;
 use devo_core::mcp::McpConfig;
 use devo_core::mcp::McpError;
 use devo_core::mcp::McpManager;
@@ -47,34 +48,22 @@ pub struct RmcpMcpManager {
 
 impl RmcpMcpManager {
     pub fn new(config: McpConfig, oauth_store_mode: OAuthCredentialsStoreMode) -> Self {
-        let statuses = config
-            .servers
-            .iter()
-            .map(|record| {
-                let startup_state = if record.enabled {
-                    McpStartupState::NotStarted
-                } else {
-                    McpStartupState::Disabled
-                };
-                (
-                    record.id.clone(),
-                    McpServerStatus {
-                        server_id: record.id.clone(),
-                        startup_state,
-                        auth_state: McpAuthState::NotRequired,
-                        tools: Vec::new(),
-                        resources: Vec::new(),
-                        resource_templates: Vec::new(),
-                        last_refreshed_at: None,
-                    },
-                )
-            })
-            .collect();
+        let server_count = config.servers.len();
+        let mut statuses = HashMap::with_capacity(server_count);
+        for record in &config.servers {
+            let server_id = record.id.clone();
+            let startup_state = if record.enabled {
+                McpStartupState::NotStarted
+            } else {
+                McpStartupState::Disabled
+            };
+            statuses.insert(server_id.clone(), empty_status(server_id, startup_state));
+        }
 
         Self {
             config,
             oauth_store_mode,
-            clients: RwLock::new(HashMap::new()),
+            clients: RwLock::new(HashMap::with_capacity(server_count)),
             statuses: RwLock::new(statuses),
         }
     }
@@ -84,11 +73,16 @@ impl RmcpMcpManager {
             return Ok(client);
         }
 
+        // Client startup can perform process or network I/O, so avoid holding
+        // the write lock while creating it. Concurrent callers may race to
+        // create a transient duplicate; the second cache check prevents a later
+        // finisher from replacing the client that already became shared state.
         let client = Arc::new(create_client(record, self.oauth_store_mode).await?);
-        self.clients
-            .write()
-            .await
-            .insert(record.id.clone(), Arc::clone(&client));
+        let mut clients = self.clients.write().await;
+        if let Some(client) = clients.get(&record.id) {
+            return Ok(Arc::clone(client));
+        }
+        clients.insert(record.id.clone(), Arc::clone(&client));
         Ok(client)
     }
 
@@ -102,12 +96,25 @@ impl RmcpMcpManager {
             })
     }
 
-    fn discoverable_records(&self) -> impl Iterator<Item = &McpServerRecord> {
+    fn discoverable_tool_records(&self) -> impl Iterator<Item = &McpServerRecord> {
         self.config.servers.iter().filter(|record| {
             record.enabled
+                && tools_capability_allowed(record)
                 && self.config.auto_start
                 && !matches!(record.startup_policy, McpStartupPolicy::Manual)
         })
+    }
+}
+
+fn empty_status(server_id: McpServerId, startup_state: McpStartupState) -> McpServerStatus {
+    McpServerStatus {
+        server_id,
+        startup_state,
+        auth_state: McpAuthState::NotRequired,
+        tools: Vec::new(),
+        resources: Vec::new(),
+        resource_templates: Vec::new(),
+        last_refreshed_at: None,
     }
 }
 
@@ -118,10 +125,10 @@ impl McpManager for RmcpMcpManager {
     }
 
     async fn discover_tools(&self) -> Result<Vec<McpToolInfo>, McpError> {
-        let mut tools = Vec::new();
-        for record in self.discoverable_records() {
+        let mut tools = Vec::with_capacity(self.config.servers.len());
+        for record in self.discoverable_tool_records() {
             match self.refresh(&record.id).await {
-                Ok(status) => {
+                Ok(_) => {
                     let Some(client) = self.clients.read().await.get(&record.id).cloned() else {
                         continue;
                     };
@@ -130,6 +137,7 @@ impl McpManager for RmcpMcpManager {
                         .await
                     {
                         Ok(list) => {
+                            tools.reserve(list.tools.len());
                             for tool in list.tools {
                                 tools.push(mcp_tool_info_from_rmcp_tool(
                                     record,
@@ -147,10 +155,6 @@ impl McpManager for RmcpMcpManager {
                             );
                         }
                     }
-                    self.statuses
-                        .write()
-                        .await
-                        .insert(record.id.clone(), status);
                 }
                 Err(err) => {
                     warn!(
@@ -174,44 +178,39 @@ impl McpManager for RmcpMcpManager {
 
         self.statuses.write().await.insert(
             server_id.clone(),
-            McpServerStatus {
-                server_id: server_id.clone(),
-                startup_state: McpStartupState::Starting,
-                auth_state: McpAuthState::NotRequired,
-                tools: Vec::new(),
-                resources: Vec::new(),
-                resource_templates: Vec::new(),
-                last_refreshed_at: None,
-            },
+            empty_status(server_id.clone(), McpStartupState::Starting),
         );
 
         let client = self.ensure_client(record).await?;
-        let list = client
-            .list_tools(None, Some(MCP_OPERATION_TIMEOUT))
-            .await
-            .map_err(|err| McpError::McpProtocolError {
-                server_id: server_id.clone(),
-                message: err.to_string(),
-            })?;
+        let tools = if tools_capability_allowed(record) {
+            client
+                .list_tools(None, Some(MCP_OPERATION_TIMEOUT))
+                .await
+                .map_err(|err| McpError::McpProtocolError {
+                    server_id: server_id.clone(),
+                    message: err.to_string(),
+                })?
+                .tools
+                .into_iter()
+                .map(|tool| McpToolDescriptor {
+                    server_id: server_id.clone(),
+                    name: tool.name.into_owned(),
+                    description: tool
+                        .description
+                        .map(std::borrow::Cow::into_owned)
+                        .unwrap_or_default(),
+                    input_schema: Value::Object(Arc::unwrap_or_clone(tool.input_schema)),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let status = McpServerStatus {
             server_id: server_id.clone(),
             startup_state: McpStartupState::Ready,
             auth_state: McpAuthState::Authenticated,
-            tools: list
-                .tools
-                .into_iter()
-                .map(|tool| McpToolDescriptor {
-                    server_id: server_id.clone(),
-                    name: tool.name.to_string(),
-                    description: tool
-                        .description
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
-                    input_schema: Value::Object((*tool.input_schema).clone()),
-                })
-                .collect(),
+            tools,
             resources: Vec::new(),
             resource_templates: Vec::new(),
             last_refreshed_at: Some(chrono::Utc::now()),
@@ -230,6 +229,18 @@ impl McpManager for RmcpMcpManager {
         input: Value,
     ) -> Result<Value, McpError> {
         let record = self.record(server_id)?;
+        if !record.enabled {
+            return Err(McpError::McpServerUnavailable {
+                server_id: server_id.clone(),
+            });
+        }
+        if !tools_capability_allowed(record) {
+            return Err(McpError::McpToolInvocationFailed {
+                server_id: server_id.clone(),
+                tool_name: tool_name.to_string(),
+                message: "MCP tools capability is not allowed for this server".to_string(),
+            });
+        }
         let client = self.ensure_client(record).await?;
         let result = client
             .call_tool(
@@ -260,21 +271,26 @@ impl McpManager for RmcpMcpManager {
     }
 }
 
+fn tools_capability_allowed(record: &McpServerRecord) -> bool {
+    record.allowed_capabilities.is_empty()
+        || record.allowed_capabilities.contains(&McpCapability::Tools)
+}
+
 fn mcp_tool_info_from_rmcp_tool(
     record: &McpServerRecord,
     tool: Tool,
     source_description: Option<String>,
     supports_parallel_tool_calls: bool,
 ) -> McpToolInfo {
-    let raw_tool_name = tool.name.to_string();
-    let description = tool.description.as_ref().map(ToString::to_string);
-    let input_schema = Value::Object((*tool.input_schema).clone());
+    let raw_tool_name = tool.name.into_owned();
+    let description = tool.description.map(std::borrow::Cow::into_owned);
     let read_only_hint = tool
         .annotations
         .as_ref()
         .and_then(|annotations| annotations.read_only_hint)
         .unwrap_or(false);
     let meta = tool.meta.map(|meta| Value::Object(meta.0));
+    let input_schema = Value::Object(Arc::unwrap_or_clone(tool.input_schema));
     let mut info = McpToolInfo::new(
         record.id.clone(),
         record.display_name.clone(),
@@ -396,21 +412,146 @@ fn env_map(env: &BTreeMap<String, String>) -> Option<HashMap<OsString, OsString>
     if env.is_empty() {
         return None;
     }
-    Some(
-        env.iter()
-            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
-            .collect(),
-    )
+    let mut mapped = HashMap::with_capacity(env.len());
+    for (key, value) in env {
+        mapped.insert(OsString::from(key), OsString::from(value));
+    }
+    Some(mapped)
 }
 
 fn non_empty_map(map: &BTreeMap<String, String>) -> Option<HashMap<String, String>> {
-    (!map.is_empty()).then(|| {
-        map.iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
-    })
+    if map.is_empty() {
+        return None;
+    }
+    let mut mapped = HashMap::with_capacity(map.len());
+    for (key, value) in map {
+        mapped.insert(key.clone(), value.clone());
+    }
+    Some(mapped)
 }
 
 fn bearer_token(auth: Option<&McpAuthConfig>) -> Option<String> {
     auth.map(|McpAuthConfig::BearerToken { token }| token.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    use super::*;
+
+    fn record(
+        id: &str,
+        allowed_capabilities: Vec<McpCapability>,
+        startup_policy: McpStartupPolicy,
+    ) -> McpServerRecord {
+        McpServerRecord {
+            id: McpServerId(id.to_string()),
+            display_name: id.to_string(),
+            transport: McpTransportConfig::Stdio {
+                command: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                env_vars: Vec::new(),
+            },
+            startup_policy,
+            enabled: true,
+            trust_policy: Default::default(),
+            allowed_capabilities,
+            roots_policy: Default::default(),
+            output_limits: Default::default(),
+            auth_ref: None,
+        }
+    }
+
+    fn manager_with(records: Vec<McpServerRecord>) -> RmcpMcpManager {
+        RmcpMcpManager::new(
+            McpConfig {
+                servers: records,
+                ..McpConfig::default()
+            },
+            OAuthCredentialsStoreMode::default(),
+        )
+    }
+
+    #[test]
+    fn tool_discovery_respects_allowed_capabilities() {
+        let mut disabled = record(
+            "disabled",
+            vec![McpCapability::Tools],
+            McpStartupPolicy::Eager,
+        );
+        disabled.enabled = false;
+        let manager = manager_with(vec![
+            record("implicit", Vec::new(), McpStartupPolicy::Eager),
+            record(
+                "resources",
+                vec![McpCapability::Resources],
+                McpStartupPolicy::Eager,
+            ),
+            record("tools", vec![McpCapability::Tools], McpStartupPolicy::Eager),
+            record(
+                "manual",
+                vec![McpCapability::Tools],
+                McpStartupPolicy::Manual,
+            ),
+            disabled,
+        ]);
+
+        let server_ids = manager
+            .discoverable_tool_records()
+            .map(|record| record.id.0.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(server_ids, vec!["implicit", "tools"]);
+    }
+
+    #[tokio::test]
+    async fn invoke_tool_rejects_disallowed_tools_before_starting_client() {
+        let manager = manager_with(vec![record(
+            "resources",
+            vec![McpCapability::Resources],
+            McpStartupPolicy::Eager,
+        )]);
+
+        let error = manager
+            .invoke_tool(&McpServerId("resources".to_string()), "search", json!({}))
+            .await
+            .expect_err("tools capability should be rejected");
+
+        assert_eq!(
+            error,
+            McpError::McpToolInvocationFailed {
+                server_id: McpServerId("resources".to_string()),
+                tool_name: "search".to_string(),
+                message: "MCP tools capability is not allowed for this server".to_string(),
+            }
+        );
+        assert!(manager.clients.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invoke_tool_rejects_disabled_server_before_starting_client() {
+        let mut disabled = record(
+            "disabled",
+            vec![McpCapability::Tools],
+            McpStartupPolicy::Eager,
+        );
+        disabled.enabled = false;
+        let manager = manager_with(vec![disabled]);
+
+        let error = manager
+            .invoke_tool(&McpServerId("disabled".to_string()), "search", json!({}))
+            .await
+            .expect_err("disabled server should be rejected");
+
+        assert_eq!(
+            error,
+            McpError::McpServerUnavailable {
+                server_id: McpServerId("disabled".to_string()),
+            }
+        );
+        assert!(manager.clients.read().await.is_empty());
+    }
 }
