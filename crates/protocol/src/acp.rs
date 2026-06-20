@@ -33,6 +33,11 @@ pub const ACP_SESSION_UPDATE_METHOD: &str = "session/update";
 pub const ACP_SESSION_REQUEST_PERMISSION_METHOD: &str = "session/request_permission";
 pub const ACP_SESSION_SET_MODE_METHOD: &str = "session/set_mode";
 pub const ACP_SESSION_SET_CONFIG_OPTION_METHOD: &str = "session/set_config_option";
+pub const ACP_TERMINAL_CREATE_METHOD: &str = "terminal/create";
+pub const ACP_TERMINAL_OUTPUT_METHOD: &str = "terminal/output";
+pub const ACP_TERMINAL_WAIT_FOR_EXIT_METHOD: &str = "terminal/wait_for_exit";
+pub const ACP_TERMINAL_KILL_METHOD: &str = "terminal/kill";
+pub const ACP_TERMINAL_RELEASE_METHOD: &str = "terminal/release";
 pub const ACP_JSONRPC_VERSION: &str = "2.0";
 pub const DEVO_EXTENSION_METHOD_PREFIX: &str = "_devo/";
 pub const DEVO_ORIGINAL_METHOD_META: &str = "devo/originalMethod";
@@ -554,8 +559,19 @@ pub struct AcpToolCallUpdate {
     pub raw_output: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content: Vec<AcpToolCallContent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<AcpToolCallLocation>,
     #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct AcpToolCallLocation {
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -622,16 +638,30 @@ pub enum AcpSessionUpdate {
         status: AcpToolCallStatus,
         #[serde(default, rename = "rawInput", skip_serializing_if = "Option::is_none")]
         raw_input: Option<serde_json::Value>,
+        #[serde(default, rename = "rawOutput", skip_serializing_if = "Option::is_none")]
+        raw_output: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        content: Vec<AcpToolCallContent>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        locations: Vec<AcpToolCallLocation>,
     },
     ToolCallUpdate {
         #[serde(rename = "toolCallId")]
         tool_call_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<AcpToolKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<AcpToolCallStatus>,
+        #[serde(default, rename = "rawInput", skip_serializing_if = "Option::is_none")]
+        raw_input: Option<serde_json::Value>,
         #[serde(default, rename = "rawOutput", skip_serializing_if = "Option::is_none")]
         raw_output: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         content: Vec<AcpToolCallContent>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        locations: Vec<AcpToolCallLocation>,
     },
     Plan {
         entries: Vec<AcpPlanEntry>,
@@ -675,7 +705,97 @@ pub enum AcpToolCallStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AcpToolCallContent {
-    Content { content: AcpContentBlock },
+    Content {
+        content: AcpContentBlock,
+    },
+    Diff {
+        path: PathBuf,
+        #[serde(default, rename = "oldText", skip_serializing_if = "Option::is_none")]
+        old_text: Option<String>,
+        #[serde(rename = "newText")]
+        new_text: String,
+    },
+    Terminal {
+        #[serde(rename = "terminalId")]
+        terminal_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct AcpTerminalCreateParams {
+    pub session_id: SessionId,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<AcpEnvVariable>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(
+        default,
+        rename = "outputByteLimit",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub output_byte_limit: Option<usize>,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpTerminalCreateResult {
+    #[serde(rename = "terminalId")]
+    pub terminal_id: String,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct AcpTerminalParams {
+    pub session_id: SessionId,
+    #[serde(rename = "terminalId")]
+    pub terminal_id: String,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpTerminalOutputResult {
+    pub output: String,
+    pub truncated: bool,
+    #[serde(
+        default,
+        rename = "exitStatus",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exit_status: Option<AcpTerminalExitStatus>,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpTerminalWaitForExitResult {
+    #[serde(default, rename = "exitCode", skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpTerminalExitStatus {
+    #[serde(default, rename = "exitCode", skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -780,9 +900,13 @@ fn acp_update_from_server_event(event: &ServerEvent) -> Option<AcpSessionUpdate>
         }
         ServerEvent::ToolCallStatusUpdated(payload) => Some(AcpSessionUpdate::ToolCallUpdate {
             tool_call_id: payload.tool_call_id.clone(),
+            title: None,
+            kind: None,
             status: acp_tool_call_status_from_str(payload.status.as_str()),
+            raw_input: None,
             raw_output: None,
             content: Vec::new(),
+            locations: Vec::new(),
         }),
         ServerEvent::ItemDelta {
             delta_kind,
@@ -825,7 +949,10 @@ fn acp_update_from_item_started(payload: &ItemEventPayload) -> Option<AcpSession
                 title: tool_title(tool.tool_name.as_str(), &tool.parameters),
                 kind: tool_kind_from_name(tool.tool_name.as_str()),
                 status: AcpToolCallStatus::Pending,
+                locations: tool_locations_from_value(&tool.parameters),
                 raw_input: Some(tool.parameters),
+                raw_output: None,
+                content: Vec::new(),
             })
         }
         ItemKind::CommandExecution => {
@@ -837,7 +964,14 @@ fn acp_update_from_item_started(payload: &ItemEventPayload) -> Option<AcpSession
                 title: command.command,
                 kind: AcpToolKind::Execute,
                 status: AcpToolCallStatus::Pending,
+                locations: command
+                    .input
+                    .as_ref()
+                    .map(tool_locations_from_value)
+                    .unwrap_or_default(),
                 raw_input: command.input,
+                raw_output: None,
+                content: Vec::new(),
             })
         }
         _ => None,
@@ -851,12 +985,25 @@ fn acp_update_from_item_completed(payload: &ItemEventPayload) -> Option<AcpSessi
                 serde_json::from_value::<ToolResultPayload>(payload.item.payload.clone()).ok()?;
             Some(AcpSessionUpdate::ToolCallUpdate {
                 tool_call_id: result.tool_call_id,
+                title: Some(
+                    (!result.summary.is_empty())
+                        .then_some(result.summary)
+                        .or(result.tool_name.clone())
+                        .unwrap_or_else(|| "Tool result".to_string()),
+                ),
+                kind: result.tool_name.as_deref().map(tool_kind_from_name),
                 status: Some(if result.is_error {
                     AcpToolCallStatus::Failed
                 } else {
                     AcpToolCallStatus::Completed
                 }),
+                raw_input: result.input.clone(),
                 raw_output: Some(result.content.clone()),
+                locations: result
+                    .input
+                    .as_ref()
+                    .map(tool_locations_from_value)
+                    .unwrap_or_default(),
                 content: tool_result_content(result.display_content, result.content),
             })
         }
@@ -866,27 +1013,35 @@ fn acp_update_from_item_completed(payload: &ItemEventPayload) -> Option<AcpSessi
                     .ok()?;
             Some(AcpSessionUpdate::ToolCallUpdate {
                 tool_call_id: command.tool_call_id,
+                title: Some(command.command),
+                kind: Some(AcpToolKind::Execute),
                 status: Some(if command.is_error {
                     AcpToolCallStatus::Failed
                 } else {
                     AcpToolCallStatus::Completed
                 }),
+                raw_input: command.input,
                 raw_output: command.output,
                 content: Vec::new(),
+                locations: Vec::new(),
             })
         }
         ItemKind::FileChange => {
             let change =
                 serde_json::from_value::<FileChangePayload>(payload.item.payload.clone()).ok()?;
             Some(AcpSessionUpdate::ToolCallUpdate {
-                tool_call_id: change.tool_call_id,
+                tool_call_id: change.tool_call_id.clone(),
+                title: change.tool_name.clone(),
+                kind: Some(AcpToolKind::Edit),
                 status: Some(if change.is_error {
                     AcpToolCallStatus::Failed
                 } else {
                     AcpToolCallStatus::Completed
                 }),
+                raw_input: change.input.clone(),
                 raw_output: Some(payload.item.payload.clone()),
-                content: Vec::new(),
+                content: file_change_tool_content(&change),
+                locations: file_change_locations(&change),
             })
         }
         _ => None,
@@ -937,6 +1092,85 @@ fn acp_tool_call_status_from_str(status: &str) -> Option<AcpToolCallStatus> {
     })
 }
 
+fn file_change_tool_content(change: &FileChangePayload) -> Vec<AcpToolCallContent> {
+    change
+        .changes
+        .iter()
+        .map(|(path, change)| match change {
+            crate::protocol::FileChange::Add { content } => AcpToolCallContent::Diff {
+                path: path.clone(),
+                old_text: None,
+                new_text: content.clone(),
+            },
+            crate::protocol::FileChange::Delete { content } => AcpToolCallContent::Diff {
+                path: path.clone(),
+                old_text: Some(content.clone()),
+                new_text: String::new(),
+            },
+            crate::protocol::FileChange::Update { unified_diff, .. } => {
+                AcpToolCallContent::Content {
+                    content: AcpContentBlock::text(unified_diff.clone()),
+                }
+            }
+        })
+        .collect()
+}
+
+fn file_change_locations(change: &FileChangePayload) -> Vec<AcpToolCallLocation> {
+    change
+        .changes
+        .iter()
+        .map(|(path, _)| AcpToolCallLocation {
+            path: path.clone(),
+            line: None,
+        })
+        .collect()
+}
+
+fn tool_locations_from_value(value: &serde_json::Value) -> Vec<AcpToolCallLocation> {
+    let mut locations = Vec::new();
+    for key in ["path", "filePath", "file_path"] {
+        if let Some(path) = value.get(key).and_then(serde_json::Value::as_str) {
+            locations.push(AcpToolCallLocation {
+                path: PathBuf::from(path),
+                line: value.get("line").and_then(serde_json::Value::as_u64),
+            });
+        }
+    }
+    for key in ["paths", "files"] {
+        if let Some(items) = value.get(key).and_then(serde_json::Value::as_array) {
+            for item in items {
+                if let Some(path) = item.as_str() {
+                    locations.push(AcpToolCallLocation {
+                        path: PathBuf::from(path),
+                        line: None,
+                    });
+                } else {
+                    push_location_from_object(item, &mut locations);
+                }
+            }
+        }
+    }
+    locations
+}
+
+fn push_location_from_object(value: &serde_json::Value, locations: &mut Vec<AcpToolCallLocation>) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    let path = object
+        .get("path")
+        .or_else(|| object.get("filePath"))
+        .or_else(|| object.get("file_path"))
+        .and_then(serde_json::Value::as_str);
+    if let Some(path) = path {
+        locations.push(AcpToolCallLocation {
+            path: PathBuf::from(path),
+            line: object.get("line").and_then(serde_json::Value::as_u64),
+        });
+    }
+}
+
 fn tool_result_content(
     display_content: Option<String>,
     content: serde_json::Value,
@@ -961,6 +1195,14 @@ fn tool_result_content(
 }
 
 fn acp_tool_content_from_value(value: &serde_json::Value) -> Option<Vec<AcpToolCallContent>> {
+    if let Ok(content) = serde_json::from_value::<AcpToolCallContent>(value.clone()) {
+        return Some(vec![content]);
+    }
+
+    if let Ok(contents) = serde_json::from_value::<Vec<AcpToolCallContent>>(value.clone()) {
+        return Some(contents);
+    }
+
     if let Ok(content) = serde_json::from_value::<AcpContentBlock>(value.clone()) {
         return Some(vec![AcpToolCallContent::Content { content }]);
     }
@@ -1251,6 +1493,196 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_updates_round_trip_full_wire_shape() {
+        let path = PathBuf::from("src/main.rs");
+        let path_json = serde_json::to_value(&path).expect("serialize path");
+        let tool_call = AcpSessionUpdate::ToolCall {
+            tool_call_id: "call-1".to_string(),
+            title: "Read file".to_string(),
+            kind: AcpToolKind::Read,
+            status: AcpToolCallStatus::Pending,
+            raw_input: Some(serde_json::json!({ "path": path_json.clone() })),
+            raw_output: Some(serde_json::json!({ "ok": true })),
+            content: vec![AcpToolCallContent::Content {
+                content: AcpContentBlock::text("reading"),
+            }],
+            locations: vec![AcpToolCallLocation {
+                path: path.clone(),
+                line: Some(7),
+            }],
+        };
+        let value = serde_json::to_value(&tool_call).expect("serialize tool call");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-1",
+                "title": "Read file",
+                "kind": "read",
+                "status": "pending",
+                "rawInput": { "path": path_json.clone() },
+                "rawOutput": { "ok": true },
+                "content": [
+                    {
+                        "type": "content",
+                        "content": {
+                            "type": "text",
+                            "text": "reading"
+                        }
+                    }
+                ],
+                "locations": [
+                    {
+                        "path": path_json.clone(),
+                        "line": 7
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AcpSessionUpdate>(value).expect("deserialize tool call"),
+            tool_call
+        );
+
+        let update = AcpSessionUpdate::ToolCallUpdate {
+            tool_call_id: "call-1".to_string(),
+            title: Some("Updated file".to_string()),
+            kind: Some(AcpToolKind::Edit),
+            status: Some(AcpToolCallStatus::Completed),
+            raw_input: Some(serde_json::json!({ "path": path_json.clone() })),
+            raw_output: Some(serde_json::json!({ "changed": true })),
+            content: vec![
+                AcpToolCallContent::Diff {
+                    path: path.clone(),
+                    old_text: Some("old\n".to_string()),
+                    new_text: "new\n".to_string(),
+                },
+                AcpToolCallContent::Terminal {
+                    terminal_id: "term_1".to_string(),
+                },
+            ],
+            locations: vec![AcpToolCallLocation {
+                path: path.clone(),
+                line: None,
+            }],
+        };
+        let value = serde_json::to_value(&update).expect("serialize tool call update");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "title": "Updated file",
+                "kind": "edit",
+                "status": "completed",
+                "rawInput": { "path": path_json.clone() },
+                "rawOutput": { "changed": true },
+                "content": [
+                    {
+                        "type": "diff",
+                        "path": path_json.clone(),
+                        "oldText": "old\n",
+                        "newText": "new\n"
+                    },
+                    {
+                        "type": "terminal",
+                        "terminalId": "term_1"
+                    }
+                ],
+                "locations": [
+                    {
+                        "path": path_json
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AcpSessionUpdate>(value)
+                .expect("deserialize tool call update"),
+            update
+        );
+    }
+
+    #[test]
+    fn file_change_item_emits_acp_diff_content_and_locations() {
+        let session_id = SessionId::new();
+        let path = PathBuf::from("src/lib.rs");
+        let raw_input = serde_json::json!({
+            "path": serde_json::to_value(&path).expect("serialize path"),
+        });
+        let payload_value = serde_json::to_value(FileChangePayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("apply_patch".to_string()),
+            input: Some(raw_input.clone()),
+            changes: vec![(
+                path.clone(),
+                crate::protocol::FileChange::Add {
+                    content: "hello\n".to_string(),
+                },
+            )],
+            is_error: false,
+        })
+        .expect("serialize file change payload");
+        let event = ServerEvent::ItemCompleted(ItemEventPayload {
+            context: EventContext {
+                session_id,
+                turn_id: Some(TurnId::new()),
+                item_id: Some(ItemId::new()),
+                seq: 1,
+            },
+            item: crate::ItemEnvelope {
+                item_id: ItemId::new(),
+                item_kind: ItemKind::FileChange,
+                payload: payload_value.clone(),
+            },
+        });
+
+        assert_eq!(
+            acp_update_from_server_event(&event),
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: "call-1".to_string(),
+                title: Some("apply_patch".to_string()),
+                kind: Some(AcpToolKind::Edit),
+                status: Some(AcpToolCallStatus::Completed),
+                raw_input: Some(raw_input),
+                raw_output: Some(payload_value),
+                content: vec![AcpToolCallContent::Diff {
+                    path: path.clone(),
+                    old_text: None,
+                    new_text: "hello\n".to_string(),
+                }],
+                locations: vec![AcpToolCallLocation { path, line: None }],
+            })
+        );
+    }
+
+    #[test]
+    fn file_change_update_emits_text_content_when_old_new_text_is_unavailable() {
+        let path = PathBuf::from("src/lib.rs");
+        let unified_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let change = FileChangePayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("apply_patch".to_string()),
+            input: None,
+            changes: vec![(
+                path,
+                crate::protocol::FileChange::Update {
+                    unified_diff: unified_diff.to_string(),
+                    move_path: None,
+                },
+            )],
+            is_error: false,
+        };
+
+        assert_eq!(
+            file_change_tool_content(&change),
+            vec![AcpToolCallContent::Content {
+                content: AcpContentBlock::text(unified_diff)
+            }]
+        );
+    }
+
+    #[test]
     fn request_permission_uses_acp_wire_shape() {
         let session_id = SessionId::new();
         let params = AcpRequestPermissionParams {
@@ -1263,6 +1695,7 @@ mod tests {
                 raw_input: Some(serde_json::json!({"command": "cargo test"})),
                 raw_output: None,
                 content: Vec::new(),
+                locations: Vec::new(),
                 meta: None,
             },
             options: vec![AcpPermissionOption {

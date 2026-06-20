@@ -1072,6 +1072,12 @@ fn acp_update_from_history_item(
                 kind: AcpToolKind::Other,
                 status: AcpToolCallStatus::Completed,
                 raw_input: item.tool_io.as_ref().map(|tool_io| tool_io.input.clone()),
+                raw_output: item
+                    .tool_io
+                    .as_ref()
+                    .and_then(|tool_io| tool_io.output.clone()),
+                content: Vec::new(),
+                locations: Vec::new(),
             })
         }
         SessionHistoryItemKind::ToolResult
@@ -1085,11 +1091,14 @@ fn acp_update_from_history_item(
             };
             Some(AcpSessionUpdate::ToolCallUpdate {
                 tool_call_id,
+                title: Some(item.title.clone()),
+                kind: None,
                 status: Some(if item.kind == SessionHistoryItemKind::Error {
                     AcpToolCallStatus::Failed
                 } else {
                     AcpToolCallStatus::Completed
                 }),
+                raw_input: item.tool_io.as_ref().map(|tool_io| tool_io.input.clone()),
                 raw_output: item
                     .tool_io
                     .as_ref()
@@ -1097,6 +1106,7 @@ fn acp_update_from_history_item(
                 content: vec![AcpToolCallContent::Content {
                     content: AcpContentBlock::text(text),
                 }],
+                locations: Vec::new(),
             })
         }
     }

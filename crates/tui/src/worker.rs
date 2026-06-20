@@ -21,11 +21,6 @@ use devo_core::SessionId;
 use devo_core::TurnId;
 use devo_core::TurnStatus;
 use devo_protocol::ACP_SESSION_UPDATE_METHOD;
-use devo_protocol::AcpContentBlock;
-use devo_protocol::AcpEmbeddedResource;
-use devo_protocol::AcpPlanEntryStatus;
-use devo_protocol::AcpSessionNotification;
-use devo_protocol::AcpSessionUpdate;
 use devo_protocol::AcpStopReason;
 use devo_protocol::AgentToolPolicy;
 use devo_protocol::CloseAgentParams;
@@ -51,6 +46,7 @@ use devo_protocol::SpawnAgentParams;
 use devo_protocol::ThreadGoalStatus;
 use devo_server::ACP_PROMPT_COMPLETED_NOTIFICATION_METHOD;
 use devo_server::ACP_PROMPT_STARTED_NOTIFICATION_METHOD;
+use devo_server::ACP_TERMINAL_OUTPUT_NOTIFICATION_METHOD;
 use devo_server::ApprovalDecisionPayload;
 use devo_server::ApprovalRequestPayload;
 use devo_server::ApprovalResponseParams;
@@ -95,7 +91,12 @@ use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
 
+mod acp_events;
 mod subagent_events;
+
+use acp_events::acp_terminal_output_event;
+use acp_events::worker_events_from_acp_notification;
+use acp_events::worker_events_from_acp_notification_with_terminal_state;
 
 const WORKER_SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
 const WORKER_ABORT_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -756,6 +757,8 @@ async fn run_worker_inner(
     let mut input_history_cursor: Option<usize> = None;
     let mut active_reference_search_id: Option<ReferenceSearchId> = None;
     let mut active_shell_process_ids: HashSet<String> = HashSet::new();
+    let mut visible_acp_terminal_ids: HashSet<String> = HashSet::new();
+    let mut pending_acp_terminal_output: HashMap<String, String> = HashMap::new();
     let mut next_shell_process_index = 1_u64;
 
     if let Some(initial_session_id) = config.initial_session_id {
@@ -2163,8 +2166,23 @@ async fn run_worker_inner(
                             }
                             continue;
                         }
+                        if method == ACP_TERMINAL_OUTPUT_NOTIFICATION_METHOD {
+                            if let Some(event) = acp_terminal_output_event(
+                                &params,
+                                &visible_acp_terminal_ids,
+                                &mut pending_acp_terminal_output,
+                            ) {
+                                let _ = event_tx.send(event);
+                            }
+                            continue;
+                        }
                         if method == ACP_SESSION_UPDATE_METHOD {
-                            for event in worker_events_from_acp_notification(&params, session_id) {
+                            for event in worker_events_from_acp_notification_with_terminal_state(
+                                &params,
+                                session_id,
+                                &mut visible_acp_terminal_ids,
+                                &mut pending_acp_terminal_output,
+                            ) {
                                 let _ = event_tx.send(event);
                             }
                             continue;
@@ -4008,83 +4026,6 @@ fn acp_stop_reason_text(stop_reason: AcpStopReason) -> String {
     .to_string()
 }
 
-// Devo events reconstructed from ACP metadata are the primary live source for
-// local server sessions. This handles raw ACP-native updates that do not carry
-// Devo metadata.
-fn worker_events_from_acp_notification(
-    params: &serde_json::Value,
-    active_session_id: Option<SessionId>,
-) -> Vec<WorkerEvent> {
-    let Ok(notification) = serde_json::from_value::<AcpSessionNotification>(params.clone()) else {
-        return Vec::new();
-    };
-    if Some(notification.session_id) != active_session_id {
-        return Vec::new();
-    }
-    match notification.update {
-        AcpSessionUpdate::AgentMessageChunk { content, .. } => acp_content_display_text(&content)
-            .into_iter()
-            .map(WorkerEvent::TextDelta)
-            .collect(),
-        AcpSessionUpdate::AgentThoughtChunk { content, .. } => acp_content_display_text(&content)
-            .into_iter()
-            .map(WorkerEvent::ReasoningDelta)
-            .collect(),
-        AcpSessionUpdate::Plan { entries } => vec![WorkerEvent::PlanUpdated {
-            explanation: None,
-            steps: entries
-                .into_iter()
-                .map(|entry| PlanStep {
-                    text: entry.content,
-                    status: match entry.status {
-                        AcpPlanEntryStatus::Pending => PlanStepStatus::Pending,
-                        AcpPlanEntryStatus::InProgress => PlanStepStatus::InProgress,
-                        AcpPlanEntryStatus::Completed => PlanStepStatus::Completed,
-                    },
-                })
-                .collect(),
-        }],
-        AcpSessionUpdate::SessionInfoUpdate {
-            title: Some(title), ..
-        } => vec![WorkerEvent::SessionTitleUpdated {
-            session_id: notification.session_id.to_string(),
-            title,
-        }],
-        AcpSessionUpdate::UserMessageChunk { .. }
-        | AcpSessionUpdate::ToolCall { .. }
-        | AcpSessionUpdate::ToolCallUpdate { .. }
-        | AcpSessionUpdate::SessionInfoUpdate { title: None, .. }
-        | AcpSessionUpdate::UsageUpdate { .. } => Vec::new(),
-    }
-}
-
-fn acp_content_display_text(content: &AcpContentBlock) -> Option<String> {
-    let text = match content {
-        AcpContentBlock::Text { text, .. } => text.clone(),
-        AcpContentBlock::Image { mime_type, uri, .. } => uri
-            .as_ref()
-            .map_or_else(|| format!("[image: {mime_type}]"), ToString::to_string),
-        AcpContentBlock::Audio { mime_type, .. } => format!("[audio: {mime_type}]"),
-        AcpContentBlock::ResourceLink {
-            uri, title, name, ..
-        } => {
-            let label = title
-                .as_deref()
-                .filter(|title| !title.is_empty())
-                .unwrap_or(name);
-            format!("{label}: {uri}")
-        }
-        AcpContentBlock::Resource { resource, .. } => match resource {
-            AcpEmbeddedResource::Text(resource) => resource.text.clone(),
-            AcpEmbeddedResource::Blob(resource) => {
-                let mime_type = resource.mime_type.as_deref().unwrap_or("unknown");
-                format!("[resource: {} ({mime_type})]", resource.uri)
-            }
-        },
-    };
-    (!text.is_empty()).then_some(text)
-}
-
 fn plan_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEvent> {
     let tool_name = payload.tool_name.as_deref()?;
     match tool_name {
@@ -4257,6 +4198,8 @@ fn map_worker_join_result(result: std::result::Result<(), JoinError>) -> Result<
 mod tests {
     use chrono::Utc;
     use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::future::pending;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -4274,6 +4217,7 @@ mod tests {
     use super::ShellCommandExecStart;
     use super::acp_prompt_completed_event;
     use super::acp_prompt_started_event;
+    use super::acp_terminal_output_event;
     use super::handle_completed_item;
     use super::is_stale_turn_interrupt_error;
     use super::next_shell_command_exec_start;
@@ -4287,6 +4231,7 @@ mod tests {
     use super::tool_call_started_event;
     use super::truncate_tool_output;
     use super::worker_events_from_acp_notification;
+    use super::worker_events_from_acp_notification_with_terminal_state;
     use crate::events::PlanStep;
     use crate::events::PlanStepStatus;
     use crate::events::SessionListEntry;
@@ -5073,6 +5018,285 @@ mod tests {
             events,
             vec![WorkerEvent::TextDelta("streamed answer".to_string())]
         );
+    }
+
+    #[test]
+    fn raw_acp_tool_call_emits_visible_tool_events() {
+        let session_id = SessionId::new();
+        let events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call-1",
+                    "title": "Read file",
+                    "kind": "read",
+                    "status": "pending",
+                    "rawInput": { "path": "src/lib.rs" }
+                }
+            }),
+            Some(session_id),
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                WorkerEvent::ToolCall {
+                    tool_use_id: "call-1".to_string(),
+                    summary: "Read file".to_string(),
+                    preparing: true,
+                    parsed_commands: None,
+                },
+                WorkerEvent::ToolCallDetails {
+                    tool_use_id: "call-1".to_string(),
+                    tool_name: "read".to_string(),
+                    input: serde_json::json!({ "path": "src/lib.rs" }),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_acp_tool_call_update_text_emits_output_and_result_events() {
+        let session_id = SessionId::new();
+        let output_events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "status": "in_progress",
+                    "content": [
+                        {
+                            "type": "content",
+                            "content": {
+                                "type": "text",
+                                "text": "streamed output"
+                            }
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+        );
+        assert_eq!(
+            output_events,
+            vec![
+                WorkerEvent::ToolCallUpdated {
+                    tool_use_id: "call-1".to_string(),
+                    summary: "Running".to_string(),
+                    parsed_commands: Vec::new(),
+                },
+                WorkerEvent::ToolOutputDelta {
+                    tool_use_id: "call-1".to_string(),
+                    delta: "streamed output".to_string(),
+                },
+            ]
+        );
+
+        let result_events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "title": "Read result",
+                    "status": "completed",
+                    "rawInput": { "path": "src/lib.rs" },
+                    "rawOutput": { "ok": true },
+                    "content": [
+                        {
+                            "type": "content",
+                            "content": {
+                                "type": "text",
+                                "text": "done"
+                            }
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+        );
+        assert_eq!(
+            result_events,
+            vec![
+                WorkerEvent::ToolCallDetails {
+                    tool_use_id: "call-1".to_string(),
+                    tool_name: "tool".to_string(),
+                    input: serde_json::json!({ "path": "src/lib.rs" }),
+                },
+                WorkerEvent::ToolCallUpdated {
+                    tool_use_id: "call-1".to_string(),
+                    summary: "Read result".to_string(),
+                    parsed_commands: Vec::new(),
+                },
+                WorkerEvent::ToolResultIo {
+                    tool_use_id: "call-1".to_string(),
+                    tool_name: "Read result".to_string(),
+                    title: "Read result".to_string(),
+                    input: serde_json::json!({ "path": "src/lib.rs" }),
+                    output: serde_json::json!({ "ok": true }),
+                    display_content: Some("done".to_string()),
+                    is_error: false,
+                    truncated: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_acp_diff_content_emits_patch_applied() {
+        let session_id = SessionId::new();
+        let events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "content": [
+                        {
+                            "type": "diff",
+                            "path": "foo.txt",
+                            "newText": "hello\n"
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+        );
+
+        let mut changes = HashMap::new();
+        changes.insert(
+            PathBuf::from("foo.txt"),
+            devo_protocol::protocol::FileChange::Add {
+                content: "hello\n".to_string(),
+            },
+        );
+        assert_eq!(events, vec![WorkerEvent::PatchApplied { changes }]);
+    }
+
+    #[test]
+    fn raw_acp_terminal_content_and_output_emit_command_rows() {
+        let session_id = SessionId::new();
+        let events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "content": [
+                        {
+                            "type": "terminal",
+                            "terminalId": "term_1"
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+        );
+        assert_eq!(
+            events,
+            vec![WorkerEvent::ToolCall {
+                tool_use_id: "term_1".to_string(),
+                summary: "Terminal term_1".to_string(),
+                preparing: false,
+                parsed_commands: None,
+            }]
+        );
+
+        let visible_terminal_ids = HashSet::from(["term_1".to_string()]);
+        let mut pending_terminal_output = HashMap::new();
+        assert_eq!(
+            acp_terminal_output_event(
+                &serde_json::json!({
+                    "terminalId": "term_1",
+                    "delta": "hello\n"
+                }),
+                &visible_terminal_ids,
+                &mut pending_terminal_output,
+            ),
+            Some(WorkerEvent::ToolOutputDelta {
+                tool_use_id: "term_1".to_string(),
+                delta: "hello\n".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn raw_acp_terminal_rows_are_deduplicated_and_early_output_is_buffered() {
+        let session_id = SessionId::new();
+        let mut visible_terminal_ids = HashSet::new();
+        let mut pending_terminal_output = HashMap::new();
+
+        assert_eq!(
+            acp_terminal_output_event(
+                &serde_json::json!({
+                    "terminalId": "term_1",
+                    "delta": "early\n"
+                }),
+                &visible_terminal_ids,
+                &mut pending_terminal_output,
+            ),
+            None
+        );
+        assert_eq!(
+            pending_terminal_output.get("term_1"),
+            Some(&"early\n".to_string())
+        );
+
+        let first_events = worker_events_from_acp_notification_with_terminal_state(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "content": [
+                        {
+                            "type": "terminal",
+                            "terminalId": "term_1"
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+            &mut visible_terminal_ids,
+            &mut pending_terminal_output,
+        );
+        assert_eq!(
+            first_events,
+            vec![
+                WorkerEvent::ToolCall {
+                    tool_use_id: "term_1".to_string(),
+                    summary: "Terminal term_1".to_string(),
+                    preparing: false,
+                    parsed_commands: None,
+                },
+                WorkerEvent::ToolOutputDelta {
+                    tool_use_id: "term_1".to_string(),
+                    delta: "early\n".to_string(),
+                },
+            ]
+        );
+
+        let second_events = worker_events_from_acp_notification_with_terminal_state(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "content": [
+                        {
+                            "type": "terminal",
+                            "terminalId": "term_1"
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+            &mut visible_terminal_ids,
+            &mut pending_terminal_output,
+        );
+        assert_eq!(second_events, Vec::new());
     }
 
     #[test]

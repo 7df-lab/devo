@@ -450,6 +450,16 @@ fn acp_request_permission_params(
             raw_input: Some(request.input.clone()),
             raw_output: None,
             content: Vec::new(),
+            locations: request
+                .path
+                .as_ref()
+                .map(|path| {
+                    vec![devo_protocol::AcpToolCallLocation {
+                        path: path.clone(),
+                        line: None,
+                    }]
+                })
+                .unwrap_or_default(),
             meta: None,
         },
         options: acp_permission_options_for_scopes(available_scopes),

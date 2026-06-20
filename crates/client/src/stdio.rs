@@ -14,6 +14,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use crate::acp_terminal::AcpTerminalManager;
+use crate::acp_terminal::handle_acp_terminal_request;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
@@ -23,6 +25,11 @@ use devo_protocol::ACP_SESSION_NEW_METHOD;
 use devo_protocol::ACP_SESSION_PROMPT_METHOD;
 use devo_protocol::ACP_SESSION_RESUME_METHOD;
 use devo_protocol::ACP_SESSION_UPDATE_METHOD;
+use devo_protocol::ACP_TERMINAL_CREATE_METHOD;
+use devo_protocol::ACP_TERMINAL_KILL_METHOD;
+use devo_protocol::ACP_TERMINAL_OUTPUT_METHOD;
+use devo_protocol::ACP_TERMINAL_RELEASE_METHOD;
+use devo_protocol::ACP_TERMINAL_WAIT_FOR_EXIT_METHOD;
 use devo_protocol::AcpAgentCapabilities;
 use devo_protocol::AcpClientRequest;
 use devo_protocol::AcpContentBlock;
@@ -153,6 +160,7 @@ const SERVER_CHILD_EXIT_TIMEOUT: Duration = Duration::from_millis(500);
 static ACP_PERMISSION_NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub const ACP_PROMPT_STARTED_NOTIFICATION_METHOD: &str = "_devo/acp_prompt/started";
 pub const ACP_PROMPT_COMPLETED_NOTIFICATION_METHOD: &str = "_devo/acp_prompt/completed";
+pub use crate::acp_terminal::ACP_TERMINAL_OUTPUT_NOTIFICATION_METHOD;
 
 type PendingResponses = Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>;
 
@@ -189,6 +197,7 @@ pub struct StdioServerClient {
     stdin: Arc<Mutex<ChildStdin>>,
     pending: PendingResponses,
     acp_pending_permissions: AcpPendingPermissions,
+    acp_terminals: AcpTerminalManager,
     acp_agent_capabilities: Option<AcpAgentCapabilities>,
     next_request_id: AtomicU64,
     notifications_rx: mpsc::UnboundedReceiver<ServerNotificationMessage>,
@@ -225,6 +234,7 @@ impl StdioServerClient {
         ));
         let stdin = Arc::new(Mutex::new(stdin));
         let acp_pending_permissions = Arc::new(Mutex::new(HashMap::new()));
+        let acp_terminals = AcpTerminalManager::new();
         let (notifications_tx, notifications_rx) = mpsc::unbounded_channel();
 
         tokio::spawn(run_stdout_reader(
@@ -232,6 +242,7 @@ impl StdioServerClient {
             Arc::clone(&pending),
             Arc::clone(&stdin),
             Arc::clone(&acp_pending_permissions),
+            acp_terminals.clone(),
             notifications_tx.clone(),
         ));
         tokio::spawn(run_stderr_reader(BufReader::new(stderr).lines()));
@@ -241,6 +252,7 @@ impl StdioServerClient {
             stdin,
             pending,
             acp_pending_permissions,
+            acp_terminals,
             acp_agent_capabilities: None,
             next_request_id: AtomicU64::new(1),
             notifications_rx,
@@ -256,7 +268,7 @@ impl StdioServerClient {
                 ACP_INITIALIZE_METHOD,
                 AcpInitializeParams {
                     protocol_version: 1,
-                    client_capabilities: serde_json::json!({}),
+                    client_capabilities: serde_json::json!({ "terminal": true }),
                     client_info: Some(
                         AcpImplementation::new("devo", env!("CARGO_PKG_VERSION"))
                             .with_title("Devo"),
@@ -699,6 +711,7 @@ impl StdioServerClient {
                 tracing::debug!("timed out waiting for stdio server child exit");
             }
         }
+        self.acp_terminals.release_all().await;
         Ok(())
     }
 
@@ -845,6 +858,7 @@ async fn run_stdout_reader<R>(
     pending: PendingResponses,
     stdin: Arc<Mutex<ChildStdin>>,
     acp_pending_permissions: AcpPendingPermissions,
+    acp_terminals: AcpTerminalManager,
     notifications_tx: mpsc::UnboundedSender<ServerNotificationMessage>,
 ) where
     R: AsyncBufRead + Unpin,
@@ -858,6 +872,7 @@ async fn run_stdout_reader<R>(
                 ) {
                     let stdin = Arc::clone(&stdin);
                     let acp_pending_permissions = Arc::clone(&acp_pending_permissions);
+                    let acp_terminals = acp_terminals.clone();
                     let notifications_tx = notifications_tx.clone();
                     let method = method.to_string();
                     let params = message
@@ -868,6 +883,7 @@ async fn run_stdout_reader<R>(
                         handle_acp_client_request(
                             stdin,
                             acp_pending_permissions,
+                            acp_terminals,
                             notifications_tx,
                             id,
                             &method,
@@ -962,11 +978,13 @@ async fn run_stdout_reader<R>(
             "server stdout reader stopped with pending responses"
         );
     }
+    acp_terminals.release_all().await;
 }
 
 async fn handle_acp_client_request(
     stdin: Arc<Mutex<ChildStdin>>,
     acp_pending_permissions: AcpPendingPermissions,
+    acp_terminals: AcpTerminalManager,
     notifications_tx: mpsc::UnboundedSender<ServerNotificationMessage>,
     id: serde_json::Value,
     method: &str,
@@ -989,14 +1007,33 @@ async fn handle_acp_client_request(
         }
         return;
     }
+    if matches!(
+        method,
+        ACP_TERMINAL_CREATE_METHOD
+            | ACP_TERMINAL_OUTPUT_METHOD
+            | ACP_TERMINAL_WAIT_FOR_EXIT_METHOD
+            | ACP_TERMINAL_KILL_METHOD
+            | ACP_TERMINAL_RELEASE_METHOD
+    ) {
+        let response = match handle_acp_terminal_request(
+            id.clone(),
+            method,
+            params,
+            acp_terminals,
+            notifications_tx,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(message) => acp_client_error_response(id, -32603, message),
+        };
+        if let Err(error) = write_acp_client_response(stdin, response).await {
+            tracing::warn!(%error, method, "failed to write ACP client response");
+        }
+        return;
+    }
     let response = match method {
-        "fs/read_text_file"
-        | "fs/write_text_file"
-        | "terminal/create"
-        | "terminal/output"
-        | "terminal/wait_for_exit"
-        | "terminal/kill"
-        | "terminal/release" => {
+        "fs/read_text_file" | "fs/write_text_file" => {
             acp_client_error_response(id, -32601, format!("unsupported client method {method}"))
         }
         _ => acp_client_error_response(id, -32601, format!("unknown client method {method}")),
@@ -1503,12 +1540,14 @@ mod tests {
         let stdin = Arc::new(Mutex::new(stdin));
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let acp_pending_permissions = Arc::new(Mutex::new(HashMap::new()));
+        let acp_terminals = AcpTerminalManager::new();
         let (notifications_tx, notifications_rx) = mpsc::unbounded_channel();
         let mut client = StdioServerClient {
             child,
             stdin,
             pending: Arc::clone(&pending),
             acp_pending_permissions,
+            acp_terminals,
             acp_agent_capabilities: None,
             next_request_id: AtomicU64::new(1),
             notifications_rx,
@@ -1583,12 +1622,14 @@ mod tests {
         let stdin = Arc::new(Mutex::new(stdin));
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let acp_pending_permissions = Arc::new(Mutex::new(HashMap::new()));
+        let acp_terminals = AcpTerminalManager::new();
         let (notifications_tx, notifications_rx) = mpsc::unbounded_channel();
         let mut client = StdioServerClient {
             child,
             stdin,
             pending: Arc::clone(&pending),
             acp_pending_permissions,
+            acp_terminals,
             acp_agent_capabilities: None,
             next_request_id: AtomicU64::new(1),
             notifications_rx,
@@ -1703,12 +1744,14 @@ mod tests {
         let (notifications_tx, _notifications_rx) = mpsc::unbounded_channel();
         let (mut child, stdin) = child_stdin_for_stdout_reader_test().await;
         let acp_pending_permissions = Arc::new(Mutex::new(HashMap::new()));
+        let acp_terminals = AcpTerminalManager::new();
 
         run_stdout_reader(
             BufReader::new(tokio::io::empty()).lines(),
             Arc::clone(&pending),
             stdin,
             acp_pending_permissions,
+            acp_terminals,
             notifications_tx,
         )
         .await;
