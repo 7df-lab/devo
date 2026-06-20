@@ -19,6 +19,8 @@ mod titles;
 mod tool_actions;
 mod transport;
 mod turn;
+#[cfg(windows)]
+mod windows_tray;
 
 pub use approval::*;
 pub use bootstrap::*;

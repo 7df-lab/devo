@@ -22,6 +22,8 @@ use crate::execution::ServerRuntimeDependencies;
 use crate::load_server_provider;
 use crate::resolve_listen_targets;
 use crate::run_listeners;
+#[cfg(windows)]
+use crate::windows_tray::WindowsServerTray;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ServerTransportMode {
@@ -147,20 +149,59 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     runtime.load_persisted_sessions().await?;
     tracing::info!("persisted session restore completed");
     tracing::info!("server bootstrap completed; starting listeners");
-    tokio::select! {
-        result = run_listeners(runtime.clone(), &effective_listen) => {
-            result?;
+
+    #[cfg(windows)]
+    let mut windows_tray = match WindowsServerTray::start() {
+        Ok(tray) => Some(tray),
+        Err(error) => {
+            tracing::warn!(%error, "failed to start Windows server tray icon");
+            None
         }
-        result = tokio::signal::ctrl_c() => {
-            result?;
-            tracing::info!("server shutdown requested");
+    };
+
+    #[cfg(windows)]
+    {
+        tokio::select! {
+            result = run_listeners(runtime.clone(), &effective_listen) => {
+                result?;
+            }
+            result = tokio::signal::ctrl_c() => {
+                result?;
+                tracing::info!("server shutdown requested");
+            }
+            _ = wait_for_windows_tray_shutdown(&mut windows_tray) => {
+                tracing::info!("server shutdown requested from Windows tray icon");
+            }
         }
     }
+
+    #[cfg(not(windows))]
+    {
+        tokio::select! {
+            result = run_listeners(runtime.clone(), &effective_listen) => {
+                result?;
+            }
+            result = tokio::signal::ctrl_c() => {
+                result?;
+                tracing::info!("server shutdown requested");
+            }
+        }
+    }
+
     tracing::info!("terminating unified exec processes");
     registry.terminate_unified_exec_processes().await;
     tracing::info!("completing deferred items for active turns");
     runtime.shutdown().await;
     Ok(())
+}
+
+#[cfg(windows)]
+async fn wait_for_windows_tray_shutdown(windows_tray: &mut Option<WindowsServerTray>) {
+    if let Some(tray) = windows_tray {
+        tray.shutdown_requested().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
 }
 
 #[cfg(test)]

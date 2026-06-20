@@ -39,6 +39,11 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+image = { workspace = true, features = ["png"] }
+tray-icon = { workspace = true }
+windows-sys = { workspace = true }
+
 [dev-dependencies]
 async-trait = { workspace = true }
 pretty_assertions = "1"
