@@ -4,6 +4,7 @@
 //! keeps request/notification framing here so UI crates can call typed protocol
 //! methods without owning process I/O or response demultiplexing.
 
+mod acp_fs;
 mod acp_terminal;
 mod stdio;
 

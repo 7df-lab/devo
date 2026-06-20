@@ -12,6 +12,7 @@ use devo_protocol::CollaborationMode;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::client_fs::ClientFilesystem;
 use crate::coordinator::AgentToolCoordinator;
 use crate::invocation::ToolCallId;
 use crate::tool_spec::ToolSpec;
@@ -49,6 +50,7 @@ pub struct ToolContext {
     pub agent_context_mode: devo_protocol::AgentContextMode,
     pub collaboration_mode: CollaborationMode,
     pub agent_coordinator: Option<Arc<dyn AgentToolCoordinator>>,
+    pub client_filesystem: Option<Arc<dyn ClientFilesystem>>,
     pub network_proxy: Option<String>,
 }
 
@@ -67,6 +69,10 @@ impl std::fmt::Debug for ToolContext {
             .field(
                 "agent_coordinator",
                 &self.agent_coordinator.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "client_filesystem",
+                &self.client_filesystem.as_ref().map(|_| "<configured>"),
             )
             .field(
                 "network_proxy",

@@ -14,11 +14,14 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use crate::acp_fs::handle_acp_fs_request;
 use crate::acp_terminal::AcpTerminalManager;
 use crate::acp_terminal::handle_acp_terminal_request;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use devo_protocol::ACP_FS_READ_TEXT_FILE_METHOD;
+use devo_protocol::ACP_FS_WRITE_TEXT_FILE_METHOD;
 use devo_protocol::ACP_INITIALIZE_METHOD;
 use devo_protocol::ACP_SESSION_LIST_METHOD;
 use devo_protocol::ACP_SESSION_NEW_METHOD;
@@ -164,6 +167,16 @@ pub use crate::acp_terminal::ACP_TERMINAL_OUTPUT_NOTIFICATION_METHOD;
 
 type PendingResponses = Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>;
 
+fn acp_client_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        "fs": {
+            "readTextFile": true,
+            "writeTextFile": true
+        },
+        "terminal": true
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct StdioServerClientConfig {
     pub program: PathBuf,
@@ -268,7 +281,7 @@ impl StdioServerClient {
                 ACP_INITIALIZE_METHOD,
                 AcpInitializeParams {
                     protocol_version: 1,
-                    client_capabilities: serde_json::json!({ "terminal": true }),
+                    client_capabilities: acp_client_capabilities(),
                     client_info: Some(
                         AcpImplementation::new("devo", env!("CARGO_PKG_VERSION"))
                             .with_title("Devo"),
@@ -1009,6 +1022,19 @@ async fn handle_acp_client_request(
     }
     if matches!(
         method,
+        ACP_FS_READ_TEXT_FILE_METHOD | ACP_FS_WRITE_TEXT_FILE_METHOD
+    ) {
+        let response = match handle_acp_fs_request(id.clone(), method, params).await {
+            Ok(response) => response,
+            Err(message) => acp_client_error_response(id, -32603, message),
+        };
+        if let Err(error) = write_acp_client_response(stdin, response).await {
+            tracing::warn!(%error, method, "failed to write ACP client response");
+        }
+        return;
+    }
+    if matches!(
+        method,
         ACP_TERMINAL_CREATE_METHOD
             | ACP_TERMINAL_OUTPUT_METHOD
             | ACP_TERMINAL_WAIT_FOR_EXIT_METHOD
@@ -1032,12 +1058,7 @@ async fn handle_acp_client_request(
         }
         return;
     }
-    let response = match method {
-        "fs/read_text_file" | "fs/write_text_file" => {
-            acp_client_error_response(id, -32601, format!("unsupported client method {method}"))
-        }
-        _ => acp_client_error_response(id, -32601, format!("unknown client method {method}")),
-    };
+    let response = acp_client_error_response(id, -32601, format!("unknown client method {method}"));
     if let Err(error) = write_acp_client_response(stdin, response).await {
         tracing::warn!(%error, method, "failed to write ACP client response");
     }
@@ -1533,6 +1554,20 @@ fn format_assistant_token_log_preview(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn acp_client_capabilities_advertise_fs_and_terminal_support() {
+        assert_eq!(
+            acp_client_capabilities(),
+            serde_json::json!({
+                "fs": {
+                    "readTextFile": true,
+                    "writeTextFile": true
+                },
+                "terminal": true
+            })
+        );
+    }
 
     #[tokio::test]
     async fn turn_start_sends_devo_extension_with_full_params() {

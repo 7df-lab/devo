@@ -5,31 +5,31 @@ use devo_core::{
     ItemId, SessionId, SessionRecord, SessionTitleFinalSource, SessionTitleState, TurnId,
     TurnRecord, TurnStatus,
 };
-use devo_protocol::{InitializeParams, SkillChangedParams, SkillListParams, SkillListResult};
+use devo_protocol::{AcpInitializeParams, SkillChangedParams, SkillListParams, SkillListResult};
 use devo_server::{
     ActiveTurnSteeringState, ApprovalDecisionValue, ApprovalRequestPayload, ApprovalResponseParams,
-    ApprovalScopeValue, ClientRequest, ClientTransportKind, DefaultProjection, EventContext,
-    EventsSubscribeParams, InputItem, ItemDeltaKind, ItemDeltaPayload, PendingServerRequestContext,
-    ProtocolError, ProtocolErrorCode, ServerEvent, ServerRequestKind, SessionMetadata,
-    SessionProjector, SessionRuntimeStatus, SessionTitleUpdateParams, SteerInputRecord, TurnKind,
-    TurnProjector,
+    ApprovalScopeValue, ClientRequest, DefaultProjection, EventContext, EventsSubscribeParams,
+    InputItem, ItemDeltaKind, ItemDeltaPayload, PendingServerRequestContext, ProtocolError,
+    ProtocolErrorCode, ServerEvent, ServerRequestKind, SessionMetadata, SessionProjector,
+    SessionRuntimeStatus, SessionTitleUpdateParams, SteerInputRecord, TurnKind, TurnProjector,
 };
 use pretty_assertions::assert_eq;
 
 #[test]
-fn initialize_params_roundtrip() {
-    let params = InitializeParams {
-        client_name: "desktop".into(),
-        client_version: "1.0.0".into(),
-        transport: ClientTransportKind::Stdio,
-        supports_streaming: true,
-        supports_binary_images: false,
-        opt_out_notification_methods: vec!["turn/plan/updated".into()],
-    };
+fn acp_initialize_params_accept_documented_minimal_shape() {
+    let params: AcpInitializeParams =
+        serde_json::from_value(serde_json::json!({ "protocolVersion": 1 }))
+            .expect("deserialize ACP initialize params");
 
-    let json = serde_json::to_string(&params).expect("serialize");
-    let restored: InitializeParams = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(params, restored);
+    assert_eq!(
+        params,
+        AcpInitializeParams {
+            protocol_version: 1,
+            client_capabilities: serde_json::Value::Null,
+            client_info: None,
+            meta: None,
+        }
+    );
 }
 
 #[test]

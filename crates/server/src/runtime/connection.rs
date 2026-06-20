@@ -1,8 +1,11 @@
 use super::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::ACP_AUTHENTICATE_METHOD;
 use crate::ACP_INITIALIZE_METHOD;
@@ -47,6 +50,7 @@ impl ServerRuntime {
                 transport,
                 state: ConnectionState::Connected,
                 acp_authenticated: false,
+                acp_client_capabilities: serde_json::json!({}),
                 sender,
                 opt_out_notification_methods: HashSet::new(),
                 subscriptions: Vec::new(),
@@ -459,6 +463,42 @@ impl ServerRuntime {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        self.send_request_to_connection_inner(
+            connection_id,
+            method,
+            params,
+            /*timeout_duration*/ None,
+            CancellationToken::new(),
+        )
+        .await
+    }
+
+    pub(super) async fn send_request_to_connection_with_timeout(
+        &self,
+        connection_id: u64,
+        method: &str,
+        params: serde_json::Value,
+        timeout_duration: Duration,
+        cancel_token: CancellationToken,
+    ) -> Result<serde_json::Value, String> {
+        self.send_request_to_connection_inner(
+            connection_id,
+            method,
+            params,
+            Some(timeout_duration),
+            cancel_token,
+        )
+        .await
+    }
+
+    async fn send_request_to_connection_inner(
+        &self,
+        connection_id: u64,
+        method: &str,
+        params: serde_json::Value,
+        timeout_duration: Option<Duration>,
+        cancel_token: CancellationToken,
+    ) -> Result<serde_json::Value, String> {
         let (request_id, receiver, notification) = {
             let mut connections = self.connections.lock().await;
             let Some(connection) = connections.get_mut(&connection_id) else {
@@ -486,15 +526,51 @@ impl ServerRuntime {
                 },
             )
         };
+        let mut pending_request = PendingClientRequestGuard::new(
+            Arc::clone(&self.connections),
+            connection_id,
+            request_id,
+        );
         if !send_connection_notification(notification).await {
-            if let Some(connection) = self.connections.lock().await.get_mut(&connection_id) {
-                connection.pending_client_requests.remove(&request_id);
-            }
+            pending_request.remove().await;
             return Err("client connection closed before request was sent".to_string());
         }
-        let message = receiver
-            .await
-            .map_err(|_| "client connection closed before responding".to_string())??;
+        let message = match timeout_duration {
+            Some(timeout_duration) => {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        pending_request.remove().await;
+                        return Err("client request cancelled".to_string());
+                    }
+                    result = tokio::time::timeout(timeout_duration, receiver) => {
+                        match result {
+                            Ok(Ok(message)) => {
+                                pending_request.disarm();
+                                message?
+                            }
+                            Ok(Err(_)) => {
+                                pending_request.disarm();
+                                return Err("client connection closed before responding".to_string());
+                            }
+                            Err(_) => {
+                                pending_request.remove().await;
+                                return Err(format!(
+                                    "client request timed out after {}s",
+                                    timeout_duration.as_secs()
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                let message = receiver
+                    .await
+                    .map_err(|_| "client connection closed before responding".to_string())??;
+                pending_request.disarm();
+                message
+            }
+        };
         if let Some(error) = message.get("error") {
             return Err(error
                 .get("message")
@@ -576,10 +652,71 @@ impl ServerRuntime {
     }
 }
 
+struct PendingClientRequestGuard {
+    connections: Arc<Mutex<HashMap<u64, ConnectionRuntime>>>,
+    connection_id: u64,
+    request_id: u64,
+    active: bool,
+}
+
+impl PendingClientRequestGuard {
+    fn new(
+        connections: Arc<Mutex<HashMap<u64, ConnectionRuntime>>>,
+        connection_id: u64,
+        request_id: u64,
+    ) -> Self {
+        Self {
+            connections,
+            connection_id,
+            request_id,
+            active: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+
+    async fn remove(&mut self) {
+        if !self.active {
+            return;
+        }
+        remove_pending_client_request(&self.connections, self.connection_id, self.request_id).await;
+        self.active = false;
+    }
+}
+
+impl Drop for PendingClientRequestGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let connections = Arc::clone(&self.connections);
+        let connection_id = self.connection_id;
+        let request_id = self.request_id;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                remove_pending_client_request(&connections, connection_id, request_id).await;
+            });
+        }
+    }
+}
+
+async fn remove_pending_client_request(
+    connections: &Mutex<HashMap<u64, ConnectionRuntime>>,
+    connection_id: u64,
+    request_id: u64,
+) {
+    if let Some(connection) = connections.lock().await.get_mut(&connection_id) {
+        connection.pending_client_requests.remove(&request_id);
+    }
+}
+
 pub(crate) struct ConnectionRuntime {
     pub(crate) transport: ClientTransportKind,
     pub(crate) state: ConnectionState,
     pub(crate) acp_authenticated: bool,
+    pub(crate) acp_client_capabilities: serde_json::Value,
     pub(crate) sender: mpsc::Sender<serde_json::Value>,
     pub(crate) opt_out_notification_methods: HashSet<String>,
     pub(crate) subscriptions: Vec<SubscriptionFilter>,
@@ -800,10 +937,78 @@ fn format_assistant_token_log_preview(text: &str, max_chars: usize) -> String {
 mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::Duration;
 
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use devo_core::AppConfigStore;
+    use devo_core::BundledSkillsConfig;
+    use devo_core::FileSystemSkillCatalog;
+    use devo_core::PresetModelCatalog;
+    use devo_core::ProviderVendorCatalog;
+    use devo_core::SkillsConfig;
+    use devo_core::tools::ToolRegistry;
+    use devo_protocol::ModelRequest;
+    use devo_protocol::ModelResponse;
+    use devo_protocol::StreamEvent;
+    use devo_provider::ModelProviderSDK;
+    use devo_provider::SingleProviderRouter;
     use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    struct NoopProvider;
+
+    #[async_trait]
+    impl ModelProviderSDK for NoopProvider {
+        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            anyhow::bail!("noop provider does not support completion")
+        }
+
+        async fn completion_stream(
+            &self,
+            _request: ModelRequest,
+        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>>
+        {
+            anyhow::bail!("noop provider does not support streaming")
+        }
+
+        fn name(&self) -> &str {
+            "noop-provider"
+        }
+    }
+
+    fn build_runtime(data_root: &std::path::Path) -> Arc<ServerRuntime> {
+        let provider: Arc<dyn ModelProviderSDK> = Arc::new(NoopProvider);
+        let db = Arc::new(
+            crate::db::Database::open(data_root.join("connection.db")).expect("open test database"),
+        );
+        ServerRuntime::new(
+            data_root.to_path_buf(),
+            ServerRuntimeDependencies::new(
+                Arc::clone(&provider),
+                Arc::new(SingleProviderRouter::new(provider)),
+                Arc::new(ToolRegistry::new()),
+                "test-model".to_string(),
+                Arc::new(PresetModelCatalog::default()),
+                Arc::new(ProviderVendorCatalog::default()),
+                None,
+                Box::new(FileSystemSkillCatalog::new(SkillsConfig {
+                    bundled: Some(BundledSkillsConfig { enabled: false }),
+                    ..SkillsConfig::default()
+                })),
+                devo_core::AgentsMdConfig::default(),
+                db,
+                Arc::new(std::sync::Mutex::new(
+                    AppConfigStore::load(data_root.to_path_buf(), None)
+                        .expect("load app config store"),
+                )),
+            ),
+        )
+    }
 
     #[test]
     fn subscription_filter_can_match_direct_child_agents() {
@@ -825,5 +1030,126 @@ mod tests {
                 subscription.session_matches(Some(unrelated), &child_parent_by_session),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn timed_out_client_request_removes_pending_request() -> Result<()> {
+        let data_root = TempDir::new()?;
+        let runtime = build_runtime(data_root.path());
+        let (sender, mut receiver) = mpsc::channel(1);
+        let connection_id = runtime
+            .register_connection(ClientTransportKind::Stdio, sender)
+            .await;
+
+        let result = runtime
+            .send_request_to_connection_with_timeout(
+                connection_id,
+                "fs/read_text_file",
+                serde_json::json!({}),
+                Duration::from_millis(1),
+                CancellationToken::new(),
+            )
+            .await;
+
+        let request = receiver.recv().await.expect("client request");
+        assert_eq!(
+            request.get("method").and_then(serde_json::Value::as_str),
+            Some("fs/read_text_file")
+        );
+        assert!(
+            result
+                .expect_err("request should time out")
+                .contains("timed out")
+        );
+        let connections = runtime.connections.lock().await;
+        let connection = connections.get(&connection_id).expect("connection");
+        assert_eq!(connection.pending_client_requests.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_client_request_removes_pending_request() -> Result<()> {
+        let data_root = TempDir::new()?;
+        let runtime = build_runtime(data_root.path());
+        let (sender, mut receiver) = mpsc::channel(1);
+        let connection_id = runtime
+            .register_connection(ClientTransportKind::Stdio, sender)
+            .await;
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let result = runtime
+            .send_request_to_connection_with_timeout(
+                connection_id,
+                "fs/write_text_file",
+                serde_json::json!({}),
+                Duration::from_secs(30),
+                cancel_token,
+            )
+            .await;
+
+        let request = receiver.recv().await.expect("client request");
+        assert_eq!(
+            request.get("method").and_then(serde_json::Value::as_str),
+            Some("fs/write_text_file")
+        );
+        assert_eq!(
+            result.expect_err("request should be cancelled"),
+            "client request cancelled"
+        );
+        let connections = runtime.connections.lock().await;
+        let connection = connections.get(&connection_id).expect("connection");
+        assert_eq!(connection.pending_client_requests.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropped_client_request_removes_pending_request() -> Result<()> {
+        let data_root = TempDir::new()?;
+        let runtime = build_runtime(data_root.path());
+        let (sender, mut receiver) = mpsc::channel(1);
+        let connection_id = runtime
+            .register_connection(ClientTransportKind::Stdio, sender)
+            .await;
+        let runtime_for_request = Arc::clone(&runtime);
+
+        let handle = tokio::spawn(async move {
+            runtime_for_request
+                .send_request_to_connection_with_timeout(
+                    connection_id,
+                    "fs/read_text_file",
+                    serde_json::json!({}),
+                    Duration::from_secs(30),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+
+        let request = receiver.recv().await.expect("client request");
+        assert_eq!(
+            request.get("method").and_then(serde_json::Value::as_str),
+            Some("fs/read_text_file")
+        );
+        handle.abort();
+        let join_error = handle.await.expect_err("request task should be aborted");
+        assert!(join_error.is_cancelled());
+
+        for _ in 0..10 {
+            let connections = runtime.connections.lock().await;
+            let connection = connections.get(&connection_id).expect("connection");
+            if connection.pending_client_requests.is_empty() {
+                return Ok(());
+            }
+            drop(connections);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let connections = runtime.connections.lock().await;
+        let connection = connections.get(&connection_id).expect("connection");
+        assert_eq!(connection.pending_client_requests.len(), 0);
+
+        Ok(())
     }
 }

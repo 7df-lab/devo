@@ -19,6 +19,7 @@ use crate::registry::ToolRegistry;
 use crate::tool_spec::ToolCapabilityTag;
 use crate::tools::deferred_loading::is_subagent_agent_coordination_tool;
 use devo_tools::AgentToolCoordinator;
+use devo_tools::ClientFilesystem;
 use devo_tools::ToolAgentScope;
 use tokio_util::sync::CancellationToken;
 
@@ -298,6 +299,7 @@ impl ToolRuntime {
             agent_context_mode: self.context.agent_context_mode,
             collaboration_mode: self.context.collaboration_mode,
             agent_coordinator: self.context.agent_coordinator.clone(),
+            client_filesystem: self.context.client_filesystem.clone(),
             network_proxy: self.context.network_proxy.clone(),
         };
 
@@ -496,6 +498,7 @@ pub struct ToolRuntimeContext {
     pub agent_context_mode: devo_protocol::AgentContextMode,
     pub collaboration_mode: devo_protocol::CollaborationMode,
     pub agent_coordinator: Option<Arc<dyn AgentToolCoordinator>>,
+    pub client_filesystem: Option<Arc<dyn ClientFilesystem>>,
     pub local_web_search: Option<ResolvedLocalWebSearchConfig>,
     pub hooks: Option<crate::hooks::HookRuntimeContext>,
     pub network_proxy: Option<String>,
@@ -513,6 +516,10 @@ impl std::fmt::Debug for ToolRuntimeContext {
             .field(
                 "agent_coordinator",
                 &self.agent_coordinator.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "client_filesystem",
+                &self.client_filesystem.as_ref().map(|_| "<configured>"),
             )
             .field(
                 "local_web_search",
@@ -1233,6 +1240,7 @@ mod tests {
                 agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                 collaboration_mode: devo_protocol::CollaborationMode::Build,
                 agent_coordinator: None,
+                client_filesystem: None,
                 local_web_search: None,
                 hooks: None,
                 network_proxy: None,

@@ -994,6 +994,7 @@ impl ServerRuntime {
                 agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                 collaboration_mode: devo_protocol::CollaborationMode::Build,
                 agent_coordinator: None,
+                client_filesystem: None,
                 local_web_search: None,
                 hooks: self.hook_context_for_session(session_id).await,
                 network_proxy,
@@ -2074,6 +2075,7 @@ impl ServerRuntime {
                     agent_context_mode,
                     collaboration_mode,
                     agent_coordinator: Some(Arc::clone(&self) as Arc<dyn AgentToolCoordinator>),
+                    client_filesystem: Some(Arc::clone(&self) as Arc<dyn ClientFilesystem>),
                     local_web_search: match &turn_config.web_search {
                         devo_core::ResolvedWebSearchConfig::Local(config) => Some(config.clone()),
                         devo_core::ResolvedWebSearchConfig::Disabled

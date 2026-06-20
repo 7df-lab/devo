@@ -96,6 +96,7 @@ impl ServerRuntime {
         if let Some(connection) = self.connections.lock().await.get_mut(&connection_id) {
             connection.state = ConnectionState::Ready;
             connection.acp_authenticated = !acp_auth_config.enabled;
+            connection.acp_client_capabilities = params.client_capabilities.clone();
         }
         tracing::info!(
             connection_id,

@@ -43,6 +43,7 @@ use devo_core::history::summarizer::DefaultHistorySummarizer;
 use devo_core::message_to_response_items;
 use devo_core::query;
 use devo_core::tools::AgentToolCoordinator;
+use devo_core::tools::ClientFilesystem;
 use devo_core::tools::PermissionChecker;
 use devo_core::tools::ToolAgentScope;
 use devo_core::tools::ToolCall;
@@ -146,6 +147,7 @@ use crate::titles::build_title_generation_request;
 use crate::titles::derive_provisional_title;
 use crate::titles::normalize_generated_title;
 
+mod acp_fs;
 mod agents;
 mod approval;
 mod command_exec;
@@ -183,7 +185,7 @@ pub struct ServerRuntime {
     goal_durable_store: GoalDurableStore,
     /// Thread safe hashmap as sessions container, there are allowed multiple sessions.
     sessions: Mutex<HashMap<SessionId, Arc<Mutex<RuntimeSession>>>>,
-    connections: Mutex<HashMap<u64, ConnectionRuntime>>,
+    connections: Arc<Mutex<HashMap<u64, ConnectionRuntime>>>,
     active_tasks: Mutex<HashMap<SessionId, tokio::task::AbortHandle>>,
     active_turn_cancellations: Mutex<HashMap<SessionId, CancellationToken>>,
     active_turn_connections: Mutex<HashMap<SessionId, u64>>,
@@ -302,7 +304,7 @@ impl ServerRuntime {
             rollout_store,
             goal_durable_store,
             sessions: Mutex::new(HashMap::new()),
-            connections: Mutex::new(HashMap::new()),
+            connections: Arc::new(Mutex::new(HashMap::new())),
             active_tasks: Mutex::new(HashMap::new()),
             active_turn_cancellations: Mutex::new(HashMap::new()),
             active_turn_connections: Mutex::new(HashMap::new()),

@@ -96,6 +96,7 @@ pub(crate) async fn run_prompt(
             agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
+            client_filesystem: None,
             local_web_search: None,
             hooks: (!app_config.hooks.is_empty()).then(|| devo_core::HookRuntimeContext {
                 runner: devo_core::HookRunner::new(app_config.hooks.clone()),

@@ -33,6 +33,8 @@ pub const ACP_SESSION_UPDATE_METHOD: &str = "session/update";
 pub const ACP_SESSION_REQUEST_PERMISSION_METHOD: &str = "session/request_permission";
 pub const ACP_SESSION_SET_MODE_METHOD: &str = "session/set_mode";
 pub const ACP_SESSION_SET_CONFIG_OPTION_METHOD: &str = "session/set_config_option";
+pub const ACP_FS_READ_TEXT_FILE_METHOD: &str = "fs/read_text_file";
+pub const ACP_FS_WRITE_TEXT_FILE_METHOD: &str = "fs/write_text_file";
 pub const ACP_TERMINAL_CREATE_METHOD: &str = "terminal/create";
 pub const ACP_TERMINAL_OUTPUT_METHOD: &str = "terminal/output";
 pub const ACP_TERMINAL_WAIT_FOR_EXIT_METHOD: &str = "terminal/wait_for_exit";
@@ -724,6 +726,39 @@ pub enum AcpToolCallContent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
+pub struct AcpFsReadTextFileParams {
+    pub session_id: SessionId,
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpFsReadTextFileResult {
+    pub content: String,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct AcpFsWriteTextFileParams {
+    pub session_id: SessionId,
+    pub path: PathBuf,
+    pub content: String,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct AcpTerminalCreateParams {
     pub session_id: SessionId,
     pub command: String,
@@ -1250,6 +1285,17 @@ mod tests {
     use crate::SessionId;
     use crate::TurnId;
 
+    fn native_absolute_test_path(suffix: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!(r"C:\Users\user\{}", suffix.replace('/', r"\"))
+        }
+        #[cfg(unix)]
+        {
+            format!("/home/user/{suffix}")
+        }
+    }
+
     #[test]
     fn initialize_result_uses_acp_field_names() {
         let result = AcpInitializeResult {
@@ -1291,6 +1337,68 @@ mod tests {
                     "version": "1.2.3"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn fs_text_file_params_use_acp_wire_shape() {
+        let session_id = SessionId::new();
+        let path = PathBuf::from(native_absolute_test_path("project/src/main.rs"));
+        let path_json = serde_json::to_value(&path).expect("serialize path");
+
+        let read_params = AcpFsReadTextFileParams {
+            session_id,
+            path: path.clone(),
+            line: Some(10),
+            limit: Some(50),
+            meta: None,
+        };
+        let read_value = serde_json::to_value(&read_params).expect("serialize read params");
+        assert_eq!(
+            read_value,
+            serde_json::json!({
+                "sessionId": session_id,
+                "path": path_json.clone(),
+                "line": 10,
+                "limit": 50
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AcpFsReadTextFileParams>(read_value)
+                .expect("deserialize read params"),
+            read_params
+        );
+
+        let read_result = AcpFsReadTextFileResult {
+            content: "def hello_world():\n    print('Hello, world!')\n".to_string(),
+            meta: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&read_result).expect("serialize read result"),
+            serde_json::json!({
+                "content": "def hello_world():\n    print('Hello, world!')\n"
+            })
+        );
+
+        let write_params = AcpFsWriteTextFileParams {
+            session_id,
+            path,
+            content: "{\n  \"debug\": true\n}".to_string(),
+            meta: None,
+        };
+        let write_value = serde_json::to_value(&write_params).expect("serialize write params");
+        assert_eq!(
+            write_value,
+            serde_json::json!({
+                "sessionId": session_id,
+                "path": path_json,
+                "content": "{\n  \"debug\": true\n}"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AcpFsWriteTextFileParams>(write_value)
+                .expect("deserialize write params"),
+            write_params
         );
     }
 

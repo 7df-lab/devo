@@ -95,6 +95,7 @@ mod acp_events;
 mod subagent_events;
 
 use acp_events::acp_terminal_output_event;
+#[cfg(test)]
 use acp_events::worker_events_from_acp_notification;
 use acp_events::worker_events_from_acp_notification_with_terminal_state;
 

@@ -2366,6 +2366,7 @@ impl ServerRuntime {
                 agent_context_mode: devo_protocol::AgentContextMode::DeepResearch,
                 collaboration_mode: devo_protocol::CollaborationMode::Build,
                 agent_coordinator: Some(Arc::clone(self) as Arc<dyn AgentToolCoordinator>),
+                client_filesystem: Some(Arc::clone(self) as Arc<dyn ClientFilesystem>),
                 local_web_search: match &turn_config.web_search {
                     devo_core::ResolvedWebSearchConfig::Local(config) => Some(config.clone()),
                     devo_core::ResolvedWebSearchConfig::Disabled

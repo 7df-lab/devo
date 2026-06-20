@@ -43,4 +43,6 @@ stdout.
   `reference_search_cancel`: control reference search workflows.
 - `recv_notification`: receive the next raw server notification.
 - `recv_event`: receive and decode the next notification as a `ServerEvent`.
+- ACP server-to-client requests: handles permission prompts, client filesystem
+  `fs/read_text_file` / `fs/write_text_file`, and ACP terminal methods.
 - `shutdown`: close stdin, request child termination, and wait briefly for exit.
