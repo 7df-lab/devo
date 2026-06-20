@@ -170,14 +170,14 @@ impl DefaultSkillInstaller {
         };
 
         // Ensure user skill root exists
-        if !matches!(options.mode, DefaultSkillInstallMode::DryRun) {
-            if let Err(e) = std::fs::create_dir_all(&options.user_skill_root) {
-                report.failed.push(DefaultSkillInstallFailure {
-                    package_name: SkillName::new("_root").unwrap_or(SkillName("_root".into())),
-                    reason: format!("cannot create skill root: {}", e),
-                });
-                return report;
-            }
+        if !matches!(options.mode, DefaultSkillInstallMode::DryRun)
+            && let Err(e) = std::fs::create_dir_all(&options.user_skill_root)
+        {
+            report.failed.push(DefaultSkillInstallFailure {
+                package_name: SkillName::new("_root").unwrap_or(SkillName("_root".into())),
+                reason: format!("cannot create skill root: {e}"),
+            });
+            return report;
         }
 
         for asset in &self.bundle.skills {

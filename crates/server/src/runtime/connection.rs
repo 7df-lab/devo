@@ -4,6 +4,20 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::ACP_INITIALIZE_METHOD;
+use crate::ACP_SESSION_CANCEL_METHOD;
+use crate::ACP_SESSION_CLOSE_METHOD;
+use crate::ACP_SESSION_DELETE_METHOD;
+use crate::ACP_SESSION_LIST_METHOD;
+use crate::ACP_SESSION_LOAD_METHOD;
+use crate::ACP_SESSION_NEW_METHOD;
+use crate::ACP_SESSION_PROMPT_METHOD;
+use crate::ACP_SESSION_RESUME_METHOD;
+use crate::ACP_SESSION_SET_CONFIG_OPTION_METHOD;
+use crate::ACP_SESSION_SET_MODE_METHOD;
+use crate::acp_notification_from_server_event;
+use crate::devo_extension_inner_method;
+
 pub(crate) const CONNECTION_NOTIFICATION_CHANNEL_CAPACITY: usize = 4096;
 
 const CONNECTION_NOTIFICATION_BACKPRESSURE_LOG_THRESHOLD: Duration = Duration::from_millis(50);
@@ -93,8 +107,19 @@ impl ServerRuntime {
             tracing::info!(connection_id, "client completed initialized handshake");
             return None;
         }
-        if method == "initialize" {
+        if method == ACP_INITIALIZE_METHOD {
+            let is_acp_initialize = message.get("jsonrpc").is_some()
+                || params.get("protocolVersion").is_some()
+                || params.get("clientCapabilities").is_some()
+                || params.get("clientInfo").is_some();
+            if is_acp_initialize {
+                return Some(self.handle_acp_initialize(connection_id, id, params).await);
+            }
             return Some(self.handle_initialize(connection_id, id, params).await);
+        }
+        if method == ACP_SESSION_CANCEL_METHOD {
+            self.handle_acp_session_cancel(params).await;
+            return None;
         }
 
         // Before connection enter `Ready` state, only allowed method: "initialized" or "initialize"
@@ -108,7 +133,39 @@ impl ServerRuntime {
             });
         }
 
-        let response = match ClientMethod::parse(method.as_str()) {
+        let client_method = devo_extension_inner_method(&method).and_then(ClientMethod::parse);
+        let response = match client_method {
+            None if method == ACP_SESSION_LIST_METHOD => {
+                Some(self.handle_acp_session_list(id?, params).await)
+            }
+            None if method == ACP_SESSION_LOAD_METHOD => Some(
+                self.handle_acp_session_load(connection_id, id?, params)
+                    .await,
+            ),
+            None if method == ACP_SESSION_NEW_METHOD => Some(
+                self.handle_acp_session_new(connection_id, id?, params)
+                    .await,
+            ),
+            None if method == ACP_SESSION_PROMPT_METHOD => {
+                self.handle_acp_session_prompt(connection_id, id?, params)
+                    .await
+            }
+            None if method == ACP_SESSION_RESUME_METHOD => Some(
+                self.handle_acp_session_resume(connection_id, id?, params)
+                    .await,
+            ),
+            None if method == ACP_SESSION_CLOSE_METHOD => {
+                Some(self.handle_acp_session_close(id?, params).await)
+            }
+            None if method == ACP_SESSION_DELETE_METHOD => {
+                Some(self.handle_acp_session_delete(id?, params).await)
+            }
+            None if method == ACP_SESSION_SET_MODE_METHOD => {
+                Some(self.handle_acp_session_set_mode(id?, params).await)
+            }
+            None if method == ACP_SESSION_SET_CONFIG_OPTION_METHOD => {
+                Some(self.handle_acp_session_set_config_option(id?, params).await)
+            }
             // start a session
             Some(ClientMethod::SessionStart) => {
                 Some(self.handle_session_start(connection_id, id?, params).await)
@@ -302,16 +359,14 @@ impl ServerRuntime {
                 return;
             }
             let event_seq = connection.next_seq();
+            let event = event.with_seq(event_seq);
+            let (method, value) = acp_notification_from_server_event(method, &event);
             Some(PendingConnectionNotification {
                 connection_id,
-                method: method.to_string(),
+                method,
                 event_seq,
                 sender: connection.sender.clone(),
-                value: serde_json::to_value(NotificationEnvelope {
-                    method: method.to_string(),
-                    params: event.with_seq(event_seq),
-                })
-                .expect("serialize notification"),
+                value,
             })
         };
         if let Some(notification) = notification {
@@ -336,16 +391,14 @@ impl ServerRuntime {
                         return None;
                     }
                     let event_seq = connection.next_seq();
+                    let event = event.clone().with_seq(event_seq);
+                    let (method, value) = acp_notification_from_server_event(method, &event);
                     Some(PendingConnectionNotification {
                         connection_id: *connection_id,
-                        method: method.to_string(),
+                        method,
                         event_seq,
                         sender: connection.sender.clone(),
-                        value: serde_json::to_value(NotificationEnvelope {
-                            method: method.to_string(),
-                            params: event.clone().with_seq(event_seq),
-                        })
-                        .expect("serialize notification"),
+                        value,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -353,6 +406,27 @@ impl ServerRuntime {
         for notification in notifications {
             send_connection_notification(notification).await;
         }
+    }
+
+    pub(super) async fn send_raw_to_connection(
+        &self,
+        connection_id: u64,
+        value: serde_json::Value,
+    ) {
+        let notification = {
+            let connections = self.connections.lock().await;
+            let Some(connection) = connections.get(&connection_id) else {
+                return;
+            };
+            PendingConnectionNotification {
+                connection_id,
+                method: "<response>".to_string(),
+                event_seq: 0,
+                sender: connection.sender.clone(),
+                value,
+            }
+        };
+        send_connection_notification(notification).await;
     }
 
     pub(super) fn error_response(

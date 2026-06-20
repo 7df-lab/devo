@@ -4,6 +4,8 @@
 //! and tool payloads in one serialization boundary so other crates can depend
 //! on stable protocol shapes instead of each other's internal models.
 
+mod acp;
+mod acp_session;
 mod agent;
 mod approval;
 mod command_exec;
@@ -30,6 +32,8 @@ mod truncation;
 mod turn;
 pub mod user_input;
 
+pub use acp::*;
+pub use acp_session::*;
 pub use agent::*;
 pub use approval::*;
 pub use command_exec::*;

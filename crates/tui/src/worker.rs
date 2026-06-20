@@ -73,7 +73,6 @@ use devo_server::TurnEventPayload;
 use devo_server::TurnExecutionMode;
 use devo_server::TurnInterruptParams;
 use devo_server::TurnStartParams;
-use devo_server::TurnStartResult;
 use devo_server::TurnSteerParams;
 
 use crate::app_command::GoalObjectiveMode;
@@ -863,14 +862,7 @@ async fn run_worker_inner(
                             execution_mode: TurnExecutionMode::Regular,
                         }).await;
                         match start_result {
-                            Ok(result) => match result {
-                                TurnStartResult::Started { turn_id, .. } => {
-                                    active_turn_id = Some(turn_id);
-                                }
-                                TurnStartResult::Queued { active_turn_id: queued_active_turn_id, .. } => {
-                                    active_turn_id = Some(queued_active_turn_id);
-                                }
-                            },
+                            Ok(()) => {}
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
                                     message: error.to_string(),
@@ -1934,9 +1926,7 @@ async fn run_worker_inner(
                             })
                             .await
                         {
-                            Ok(result) => {
-                                active_turn_id = Some(result.active_turn_id());
-                            }
+                            Ok(()) => {}
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
                                     message: error.to_string(),

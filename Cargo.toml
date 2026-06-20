@@ -31,10 +31,11 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.88.0"
 version = "0.1.21"
 
 [workspace.dependencies]
+agent-client-protocol = "0.14.0"
 ansi-to-tui = "7.0.0"
 anyhow = "1"
 arboard = { version = "3", features = ["wayland-data-control"] }

@@ -882,6 +882,16 @@ fn user_shell_command_payload(
 }
 
 impl ServerRuntime {
+    fn tool_registry_for_session(
+        &self,
+        session: &RuntimeSession,
+    ) -> Arc<devo_core::tools::ToolRegistry> {
+        session
+            .tool_registry
+            .clone()
+            .unwrap_or_else(|| Arc::clone(&self.deps.registry))
+    }
+
     pub(super) async fn execute_shell_command_turn(
         self: Arc<Self>,
         session_id: SessionId,
@@ -918,12 +928,14 @@ impl ServerRuntime {
             self.clear_active_turn_runtime_handles(session_id).await;
             return;
         };
-        let (permission_mode, permission_profile) = {
+        let (permission_mode, permission_profile, registry) = {
             let session = session_arc.lock().await;
+            let registry = self.tool_registry_for_session(&session);
             let core_session = session.core_session.lock().await;
             (
                 core_session.config.permission_mode,
                 core_session.config.permission_profile.clone(),
+                registry,
             )
         };
         let network_proxy = self
@@ -943,7 +955,7 @@ impl ServerRuntime {
             .cloned()
             .unwrap_or_else(CancellationToken::new);
         let runtime = ToolRuntime::new_with_context_and_options(
-            Arc::clone(&self.deps.registry),
+            registry,
             self.build_permission_checker(
                 session_id,
                 turn.turn_id,
@@ -1111,6 +1123,10 @@ impl ServerRuntime {
         let turn_for_events = turn.clone();
         let turn_for_plan_updates = turn.clone();
         let event_session_arc = Arc::clone(&session_arc);
+        let event_tool_registry = {
+            let session = session_arc.lock().await;
+            self.tool_registry_for_session(&session)
+        };
         let event_queue_depth_for_task = Arc::clone(&event_queue_depth);
         let event_queue_max_depth_for_task = Arc::clone(&event_queue_max_depth);
         let event_task = tokio::spawn(async move {
@@ -1281,8 +1297,7 @@ impl ServerRuntime {
                         }
                         let display_kind = ToolDisplayKind::for_tool_name(&name);
                         let command = command_display_from_input(&name, &input);
-                        let preparation_feedback =
-                            runtime.deps.registry.preparation_feedback(&name);
+                        let preparation_feedback = event_tool_registry.preparation_feedback(&name);
                         let start_item = tool_start_item_from_input(
                             &id,
                             &name,
@@ -1343,7 +1358,7 @@ impl ServerRuntime {
                                 && let Some(tool_name) = tool_name.clone()
                             {
                                 let preparation_feedback =
-                                    runtime.deps.registry.preparation_feedback(&tool_name);
+                                    event_tool_registry.preparation_feedback(&tool_name);
                                 let start_item = tool_start_item_from_result(
                                     &tool_use_id,
                                     &tool_name,
@@ -1893,17 +1908,19 @@ impl ServerRuntime {
         ) = {
             // Run the model query only after the event pipeline is ready so
             // streamed deltas can be consumed and persisted immediately.
-            let (core_session, agent_scope, agent_tool_policy) = {
+            let (core_session, agent_scope, agent_tool_policy, session_tool_registry) = {
                 let session = session_arc.lock().await;
                 let agent_scope = if session.summary.parent_session_id.is_some() {
                     ToolAgentScope::Subagent
                 } else {
                     ToolAgentScope::Parent
                 };
+                let registry = self.tool_registry_for_session(&session);
                 (
                     Arc::clone(&session.core_session),
                     agent_scope,
                     session.agent_tool_policy,
+                    registry,
                 )
             };
             let turn_goal = match &input_mode {
@@ -1948,7 +1965,7 @@ impl ServerRuntime {
                 })
                 .unwrap_or_default();
             let registry = match agent_tool_policy {
-                devo_protocol::AgentToolPolicy::Inherit => Arc::clone(&self.deps.registry),
+                devo_protocol::AgentToolPolicy::Inherit => session_tool_registry,
                 devo_protocol::AgentToolPolicy::DenyAll => {
                     Arc::new(devo_core::tools::ToolRegistry::new())
                 }

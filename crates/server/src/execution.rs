@@ -694,6 +694,9 @@ pub(crate) struct RuntimeSession {
     pub(crate) pending_approvals: HashMap<String, PendingApproval>,
     /// Active request_user_input calls waiting for client answers.
     pub(crate) pending_user_inputs: HashMap<String, PendingUserInput>,
+    /// Session-specific tool registry, used when the session was created with
+    /// request-scoped tool sources such as ACP MCP servers.
+    pub(crate) tool_registry: Option<Arc<ToolRegistry>>,
     /// Session-scoped approvals granted through approval/respond.
     pub(crate) session_approval_cache: ApprovalGrantCache,
     /// Turn-scoped approvals granted through approval/respond.

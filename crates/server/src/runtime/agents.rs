@@ -81,9 +81,11 @@ impl ServerRuntime {
                 parent.config.clone(),
                 stable_items,
                 parent.latest_turn.clone(),
+                parent.tool_registry.clone(),
             )
         };
-        let (parent_summary, parent_config, stable_items, parent_latest_turn) = parent_snapshot;
+        let (parent_summary, parent_config, stable_items, parent_latest_turn, parent_tool_registry) =
+            parent_snapshot;
 
         let nickname = self
             .generate_unique_agent_name(parent_session_id, child_session_id)
@@ -216,6 +218,7 @@ impl ServerRuntime {
             first_user_input: Some(params.message.clone()),
             pending_approvals: HashMap::new(),
             pending_user_inputs: std::collections::HashMap::new(),
+            tool_registry: parent_tool_registry,
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
         };

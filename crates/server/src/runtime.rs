@@ -76,7 +76,6 @@ use crate::ItemDeltaPayload;
 use crate::ItemEnvelope;
 use crate::ItemEventPayload;
 use crate::ItemKind;
-use crate::NotificationEnvelope;
 use crate::ProtocolError;
 use crate::ProtocolErrorCode;
 use crate::RequestUserInputArgs;

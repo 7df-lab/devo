@@ -324,6 +324,40 @@ impl RolloutStore {
         Ok(sessions)
     }
 
+    /// Deletes canonical rollout files for a session.
+    pub(crate) fn delete_session_rollouts(&self, session_id: &SessionId) -> Result<bool> {
+        let suffix = format!("-{session_id}.jsonl");
+        let mut deleted = false;
+        for rollout_path in self.rollout_paths()? {
+            let Some(file_name) = rollout_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !file_name.ends_with(&suffix) {
+                continue;
+            }
+            let file_lock = {
+                let mut locks = self
+                    .file_locks
+                    .lock()
+                    .expect("rollout file-locks table poisoned");
+                locks
+                    .entry(rollout_path.clone())
+                    .or_insert_with(|| Arc::new(StdMutex::new(())))
+                    .clone()
+            };
+            let _guard = file_lock.lock().expect("rollout per-file lock poisoned");
+            match std::fs::remove_file(&rollout_path) {
+                Ok(()) => deleted = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("delete rollout {}", rollout_path.display()));
+                }
+            }
+        }
+        Ok(deleted)
+    }
+
     fn load_session_from_rollout(
         &self,
         rollout_path: &Path,
@@ -763,6 +797,7 @@ impl ReplayState {
             first_user_input: None,
             pending_approvals: std::collections::HashMap::new(),
             pending_user_inputs: std::collections::HashMap::new(),
+            tool_registry: None,
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
         })

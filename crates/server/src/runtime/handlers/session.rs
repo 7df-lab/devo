@@ -68,6 +68,17 @@ impl ServerRuntime {
             }
         };
 
+        self.start_session_with_registry(connection_id, request_id, params, None)
+            .await
+    }
+
+    pub(crate) async fn start_session_with_registry(
+        &self,
+        connection_id: u64,
+        request_id: serde_json::Value,
+        params: SessionStartParams,
+        tool_registry: Option<Arc<devo_core::tools::ToolRegistry>>,
+    ) -> serde_json::Value {
         let now = Utc::now();
         let session_id = SessionId::new();
         let model = params
@@ -151,6 +162,7 @@ impl ServerRuntime {
                 first_user_input: None,
                 pending_approvals: std::collections::HashMap::new(),
                 pending_user_inputs: std::collections::HashMap::new(),
+                tool_registry,
                 session_approval_cache: crate::execution::ApprovalGrantCache::default(),
                 turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
             }
@@ -837,6 +849,7 @@ impl ServerRuntime {
             first_user_input: source.first_user_input.clone(),
             pending_approvals: std::collections::HashMap::new(),
             pending_user_inputs: std::collections::HashMap::new(),
+            tool_registry: source.tool_registry.clone(),
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
         })
