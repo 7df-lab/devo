@@ -153,7 +153,6 @@ Representative client-to-server JSON-RPC request methods and response results:
 | `session/create` | Create a new session record when the client explicitly starts a new session before submitting a turn. | `workspace_root`, `initial_metadata`, optional `client_generated_label`. | `session_id`, `session_snapshot`, `latest_sequence`. |
 | `session/fork` | Create a child session that inherits visible history from a parent session without deep-copying all parent records. | `parent_session_id`, `fork_turn_id`, `workspace_root`, optional `fork_label`. | `session_id`, `parent_session_id`, `fork_turn_id`, `inherited_segment_id`, `session_snapshot`. |
 | `session/archive` | Mark a session as archived so it leaves active-session views while remaining recoverable where policy allows. | `session_id`, `archive_reason`. | `session_id`, `archived`, `latest_sequence`. |
-| `session/delete` | Delete or request deletion of a session while preserving explicit policy for forks and retained shared records. | `session_id`, `delete_mode`, `fork_policy`, `confirm_token` when required. | `accepted`, `session_id`, `delete_state`, `affected_forks`, `inherited_segment_actions`, `retained_records`, `latest_sequence`. |
 | `session/export` | Export session history and allowed related data for user data portability. | `session_id`, `include_inherited_history`, `redaction_level`, `format`. | `export_id`, `accepted`, `status`, optional `download_ref`, `latest_sequence`. |
 | `session/subscribe` | Start receiving ordered events for a session from a given sequence or from the current state. | `session_id`, `from_sequence`, `event_filter`, `projection`. | `subscription_id`, optional `session_snapshot`, `next_sequence`. |
 | `session/unsubscribe` | Stop a previous session subscription. | `subscription_id`, `session_id`. | `subscription_id`, `closed`. |
@@ -290,7 +289,6 @@ Representative server-client event kinds:
 | `question_resolved` | Report the final state of a question request to all subscribed clients. | `session_id`, `turn_id`, `question_id`, `answer_summary`, `resolved_by_client_id`, `resolved_at`. |
 | `usage_updated` | Update token and cost-related display information. | `session_id`, `turn_id`, `invocation_id`, `usage_delta`, `usage_totals`. |
 | `context_updated` | Report active context changes, compaction, or token pressure. | `session_id`, `context_id`, `token_estimate`, `effective_context_limit`, `compaction_status`, `compaction_trigger_source` where applicable. |
-| `session_deleted` | Report session deletion or tombstoning to subscribed or listing clients. | `session_id`, `delete_state`, `affected_forks`, `retained_records`, `timestamp`. |
 | `session_export_ready` | Report that an export request completed or failed. | `export_id`, `status`, `download_ref`, `error` where applicable. |
 | `error_reported` | Report recoverable or terminal errors tied to a session, turn, item, or server operation. | `scope`, `phase`, `session_id`, `turn_id`, `item_id`, `code`, `message`, `recoverable`, `retry_state`, `retry_after`, `provider_error_ref`, `partial_state`, `recovery_actions`, `details_ref`. |
 
@@ -430,18 +428,20 @@ Rules:
 - `question/requested` must only be emitted when Plan Mode or another explicit requirement allows the question tool.
 - In Normal Mode, the server must reject question-tool attempts before emitting `question/requested`.
 
-## Session Deletion And Forks
+## Future Destructive Deletion And Forks
 
-Deleting a session must preserve user-visible consistency for forks.
+The Devo-native client-server protocol does not currently define a destructive session deletion request. ACP `session/delete` is the supported session-history removal method and only specifies user-facing removal from `session/list` results.
+
+If a future Devo-native destructive deletion endpoint is added, it must preserve user-visible consistency for forks.
 
 Rules:
 
-- `session/delete` must report fork descendants before destructive deletion when descendants exist.
+- The deletion endpoint must report fork descendants before destructive deletion when descendants exist.
 - Deleting a parent session must not make surviving forked sessions unusable.
 - If a fork survives parent deletion, inherited history required by that fork must remain available through a replayable inherited-history segment. That segment may be backed by protected shared records, materialized fork history, or another explicit retention mechanism.
 - The parent session link in a fork is provenance and navigation metadata. It must not be the sole content pointer required to replay inherited history.
 - After deletion, the parent session link may be non-dereferenceable. Clients must treat parent navigation failure as distinct from inherited-history loss.
-- Before a parent session is made inaccessible, `session/delete` must either preserve the inherited segment for each surviving fork, materialize the inherited segment into the fork, or reject deletion until the user chooses another policy.
+- Before a parent session is made inaccessible, the deletion endpoint must either preserve the inherited segment for each surviving fork, materialize the inherited segment into the fork, or reject deletion until the user chooses another policy.
 - Fork indicators should show parent deleted or unavailable when navigation to the parent can no longer work, while keeping origin metadata visible.
 - Hard deletion of records still referenced by surviving forks must be blocked unless those forks first receive replayable inherited-history segments or the user explicitly requests cascade deletion of the dependent forks where supported.
 
@@ -518,7 +518,7 @@ If a client disconnects, the server continues owning active work subject to user
 | related-to | L2-DES-TOOL-002 | 1 | specs/L2/tool/L2-DES-TOOL-002-parallel-tool-orchestration.md | Parallel tool groups require parent and child event identifiers for client rendering and replay. |
 | related-to | L2-DES-GOAL-001 | 1 | specs/L2/goal/L2-DES-GOAL-001-ralph-loop-goals.md | The protocol exposes user-owned goal controls and canonical goal notifications. |
 | related-to | L2-DES-APP-006 | 1 | specs/L2/app/L2-DES-APP-006-fuzzy-search-architecture.md | The protocol exposes fuzzy-search sessions and live result snapshots. |
-| specified-by | L3-BEH-CORE-011 | 1 | specs/L3/core/L3-BEH-CORE-011-session-forking-retention.md | L3 defines concrete behavior behind `session/fork`, `session/delete` fork-retention preflight, inherited segment actions, and parent-unavailable fork projection. |
+| specified-by | L3-BEH-CORE-011 | 1 | specs/L3/core/L3-BEH-CORE-011-session-forking-retention.md | L3 defines concrete behavior behind `session/fork`, inherited segment actions, future destructive deletion safeguards, and parent-unavailable fork projection. |
 | specified-by | L3-BEH-CORE-012 | 1 | specs/L3/core/L3-BEH-CORE-012-message-edit-workspace-restore.md | L3 defines concrete behavior behind `message/editPrevious`, restore policy, workspace restore events, superseded turns, and replacement turn sequencing. |
 | related-to | L2-DES-CLIENT-002 | 1 | specs/L2/client/L2-DES-CLIENT-002-prefixed-input-actions.md | The protocol supports server-owned search providers used by prefixed input. |
 | related-to | L2-DES-CONV-001 | 1 | specs/L2/conv/L2-DES-CONV-001-session-jsonl-data-model.md | Durable session events are distinct from live server-client protocol events. |

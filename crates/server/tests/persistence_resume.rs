@@ -304,16 +304,10 @@ async fn runtime_rebuilds_sessions_from_rollout_and_resume_works() -> Result<()>
         )
         .await
         .context("session/list response")?;
-    let list_result = serde_json::from_value::<
-        devo_server::SuccessResponse<devo_server::SessionListResult>,
-    >(list_response)?
-    .result;
-    assert_eq!(list_result.sessions.len(), 1);
-    assert_eq!(list_result.sessions[0].session_id, session_id);
-    assert_eq!(
-        list_result.sessions[0].title.as_deref(),
-        Some("Persistent session")
-    );
+    let sessions = decode_acp_session_list_response(list_response)?;
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, session_id);
+    assert_eq!(sessions[0].title.as_deref(), Some("Persistent session"));
 
     let resume_response = rebuilt_runtime
         .handle_incoming(
@@ -544,16 +538,13 @@ async fn runtime_assigns_provisional_title_after_first_prompt() -> Result<()> {
         )
         .await
         .context("session/list response")?;
-    let list_result = serde_json::from_value::<
-        devo_server::SuccessResponse<devo_server::SessionListResult>,
-    >(list_response)?
-    .result;
+    let sessions = decode_acp_session_list_response(list_response)?;
     assert_eq!(
-        list_result.sessions[0].title.as_deref(),
+        sessions[0].title.as_deref(),
         Some("Investigate why the current session title stays null")
     );
     assert_eq!(
-        list_result.sessions[0].title_state,
+        sessions[0].title_state,
         devo_core::SessionTitleState::Provisional
     );
     Ok(())
@@ -634,17 +625,11 @@ async fn runtime_skips_invalid_rollout_files_when_loading_sessions() -> Result<(
         )
         .await
         .context("session/list response")?;
-    let list_result = serde_json::from_value::<
-        devo_server::SuccessResponse<devo_server::SessionListResult>,
-    >(list_response)?
-    .result;
+    let sessions = decode_acp_session_list_response(list_response)?;
 
-    assert_eq!(list_result.sessions.len(), 1);
-    assert_eq!(list_result.sessions[0].session_id, session_id);
-    assert_eq!(
-        list_result.sessions[0].title.as_deref(),
-        Some("Valid session")
-    );
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, session_id);
+    assert_eq!(sessions[0].title.as_deref(), Some("Valid session"));
     Ok(())
 }
 
@@ -1360,6 +1345,34 @@ async fn initialize_connection(
         serde_json::json!("devo-server")
     );
     Ok((connection_id, notifications_rx))
+}
+
+fn decode_acp_session_list_response(
+    response: serde_json::Value,
+) -> Result<Vec<devo_server::SessionMetadata>> {
+    let response: devo_server::AcpSuccessResponse<devo_server::AcpListSessionsResult> =
+        serde_json::from_value(response)?;
+    response
+        .result
+        .sessions
+        .into_iter()
+        .map(|session| {
+            session
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(devo_server::DEVO_SESSION_META))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .context("decode Devo session metadata from ACP session/list response")?
+                .with_context(|| {
+                    format!(
+                        "ACP session/list response missing Devo session metadata for {}",
+                        session.session_id
+                    )
+                })
+        })
+        .collect()
 }
 
 async fn wait_for_turn_completed(

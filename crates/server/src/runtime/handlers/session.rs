@@ -9,6 +9,11 @@ pub(crate) struct RuntimeSessionTurnCutOptions {
     created_at: chrono::DateTime<Utc>,
 }
 
+pub(crate) enum RuntimeSessionToolRegistryUpdate {
+    KeepCurrent,
+    Replace(Option<Arc<devo_core::tools::ToolRegistry>>),
+}
+
 impl ServerRuntime {
     pub(crate) async fn start_session_with_registry(
         &self,
@@ -156,18 +161,7 @@ impl ServerRuntime {
         .expect("serialize session/start response")
     }
 
-    pub(crate) async fn handle_session_list(
-        &self,
-        request_id: serde_json::Value,
-        params: serde_json::Value,
-    ) -> serde_json::Value {
-        if let Err(error) = serde_json::from_value::<SessionListParams>(params) {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::InvalidParams,
-                format!("invalid session/list params: {error}"),
-            );
-        }
+    pub(crate) async fn list_session_summaries(&self) -> Vec<SessionMetadata> {
         let sessions = self
             .sessions
             .lock()
@@ -180,13 +174,7 @@ impl ServerRuntime {
             summaries.push(session.lock().await.summary.clone());
         }
         summaries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-        serde_json::to_value(SuccessResponse {
-            id: request_id,
-            result: SessionListResult {
-                sessions: summaries,
-            },
-        })
-        .expect("serialize session/list response")
+        summaries
     }
 
     pub(crate) async fn handle_session_metadata_update(
@@ -405,6 +393,22 @@ impl ServerRuntime {
                 );
             }
         };
+        self.restore_existing_session_with_tool_registry_update(
+            connection_id,
+            request_id,
+            params,
+            RuntimeSessionToolRegistryUpdate::KeepCurrent,
+        )
+        .await
+    }
+
+    pub(crate) async fn restore_existing_session_with_tool_registry_update(
+        &self,
+        connection_id: u64,
+        request_id: serde_json::Value,
+        params: SessionResumeParams,
+        tool_registry_update: RuntimeSessionToolRegistryUpdate,
+    ) -> serde_json::Value {
         let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
             return self.error_response(
                 request_id,
@@ -412,7 +416,10 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        let session = session_arc.lock().await;
+        let mut session = session_arc.lock().await;
+        if let RuntimeSessionToolRegistryUpdate::Replace(tool_registry) = tool_registry_update {
+            session.tool_registry = tool_registry;
+        }
         let session_summary = session.summary.clone();
         let latest_turn = session.latest_turn.clone();
         let loaded_item_count = session.loaded_item_count;

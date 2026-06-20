@@ -206,6 +206,7 @@ async fn acp_session_load_replays_history_and_rejects_relative_roots() -> Result
         )
         .await
         .context("session/load response")?;
+    assert_eq!(load_response["result"], serde_json::Value::Null);
     let _: AcpSuccessResponse<AcpLoadSessionResult> = serde_json::from_value(load_response)?;
     let replayed_updates = wait_for_replayed_history(&mut load_notifications_rx).await?;
     assert!(
@@ -218,6 +219,27 @@ async fn acp_session_load_replays_history_and_rejects_relative_roots() -> Result
             .iter()
             .any(|update| matches!(update, AcpSessionUpdate::AgentMessageChunk { .. }))
     );
+
+    let (resume_connection_id, mut resume_notifications_rx) =
+        initialize_acp_connection(&runtime).await?;
+    let resume_response = runtime
+        .handle_incoming(
+            resume_connection_id,
+            serde_json::json!({
+                "id": 13,
+                "method": "session/resume",
+                "params": {
+                    "sessionId": session_id,
+                    "cwd": path_value(&cwd),
+                    "mcpServers": []
+                }
+            }),
+        )
+        .await
+        .context("session/resume response")?;
+    assert!(resume_response["result"].is_object());
+    let _: AcpSuccessResponse<AcpResumeSessionResult> = serde_json::from_value(resume_response)?;
+    assert_no_replayed_history(&mut resume_notifications_rx).await?;
 
     assert_acp_error_message(
         &runtime,
@@ -355,11 +377,8 @@ async fn acp_session_additional_directories_roundtrip_new_load_and_resume() -> R
         )
         .await
         .context("session/load with additionalDirectories response")?;
-    let loaded: AcpSuccessResponse<AcpLoadSessionResult> = serde_json::from_value(load_response)?;
-    assert_eq!(
-        decode_devo_session_meta(&loaded.result.meta)?.additional_directories,
-        vec![load_root.clone()]
-    );
+    assert_eq!(load_response["result"], serde_json::Value::Null);
+    let _: AcpSuccessResponse<AcpLoadSessionResult> = serde_json::from_value(load_response)?;
     let listed = list_acp_sessions(&runtime, connection_id, 16, Some(&cwd), None).await?;
     assert_eq!(listed.sessions[0].additional_directories, vec![load_root]);
 
@@ -387,6 +406,56 @@ async fn acp_session_additional_directories_roundtrip_new_load_and_resume() -> R
     );
     let listed = list_acp_sessions(&runtime, connection_id, 18, Some(&cwd), None).await?;
     assert_eq!(listed.sessions[0].additional_directories, vec![resume_root]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn acp_session_load_and_resume_accept_mcp_servers() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let runtime = build_runtime(data_root.path())?;
+    let (connection_id, _notifications_rx) = initialize_acp_connection(&runtime).await?;
+    let cwd = data_root.path().join("repo");
+    let load_mcp_command = data_root.path().join("missing-load-mcp-server");
+    let resume_mcp_command = data_root.path().join("missing-resume-mcp-server");
+    std::fs::create_dir_all(&cwd)?;
+
+    let session_id = create_acp_session(&runtime, connection_id, &cwd, 19).await?;
+
+    let load_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 20,
+                "method": "session/load",
+                "params": {
+                    "sessionId": session_id,
+                    "cwd": path_value(&cwd),
+                    "mcpServers": [stdio_mcp_server_value("load-tools", &load_mcp_command)]
+                }
+            }),
+        )
+        .await
+        .context("session/load with mcpServers response")?;
+    assert_eq!(load_response["result"], serde_json::Value::Null);
+    let _: AcpSuccessResponse<AcpLoadSessionResult> = serde_json::from_value(load_response)?;
+
+    let resume_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 21,
+                "method": "session/resume",
+                "params": {
+                    "sessionId": session_id,
+                    "cwd": path_value(&cwd),
+                    "mcpServers": [stdio_mcp_server_value("resume-tools", &resume_mcp_command)]
+                }
+            }),
+        )
+        .await
+        .context("session/resume with mcpServers response")?;
+    assert!(resume_response["result"].is_object());
+    let _: AcpSuccessResponse<AcpResumeSessionResult> = serde_json::from_value(resume_response)?;
     Ok(())
 }
 
@@ -738,6 +807,25 @@ async fn wait_for_replayed_history(
     .context("timed out waiting for replayed history")?
 }
 
+async fn assert_no_replayed_history(
+    notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
+) -> Result<()> {
+    let result = timeout(Duration::from_millis(100), async {
+        while let Some(value) = notifications_rx.recv().await {
+            if value.get("method") == Some(&serde_json::json!("session/update")) {
+                anyhow::bail!("unexpected session/update notification: {value}");
+            }
+        }
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(result) => result,
+        Err(_) => Ok(()),
+    }
+}
+
 async fn assert_acp_error_message(
     runtime: &Arc<ServerRuntime>,
     connection_id: u64,
@@ -814,4 +902,18 @@ fn decode_devo_session_meta(meta: &Option<devo_protocol::AcpMeta>) -> Result<Ses
 
 fn path_value(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn stdio_mcp_server_value(name: &str, command: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "command": path_value(command),
+        "args": ["--stdio"],
+        "env": [
+            {
+                "name": "ACP_TEST",
+                "value": "1"
+            }
+        ]
+    })
 }

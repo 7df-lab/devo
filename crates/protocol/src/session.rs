@@ -197,14 +197,6 @@ impl SessionHistoryItem {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct SessionListParams {}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionListResult {
-    pub sessions: Vec<SessionMetadata>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTitleUpdateParams {
     pub session_id: SessionId,
@@ -299,41 +291,6 @@ pub struct SessionSubscribeResult {
     pub session_id: SessionId,
     pub next_sequence: u64,
     pub session_snapshot: Option<serde_json::Value>,
-}
-
-// ── Session Delete (L3-BEH-PROTOCOL-001 B10) ──────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionDeleteParams {
-    pub session_id: SessionId,
-    #[serde(default)]
-    pub delete_mode: DeleteMode,
-    #[serde(default)]
-    pub fork_policy: Option<ForkRetentionPolicy>,
-    #[serde(default)]
-    pub confirm_token: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum DeleteMode {
-    #[default]
-    Soft,
-    Hard,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ForkRetentionPolicy {
-    pub retain_forks: bool,
-    pub materialize_inherited_segments: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionDeleteResult {
-    pub session_id: SessionId,
-    pub deleted: bool,
-    pub affected_forks: Vec<SessionId>,
-    pub warnings: Vec<String>,
 }
 
 // ── Message Edit Previous (L3-BEH-PROTOCOL-001 B11) ──────────────

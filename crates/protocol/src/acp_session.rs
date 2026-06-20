@@ -71,7 +71,7 @@ pub struct AcpResumeSessionParams {
     pub meta: Option<AcpMeta>,
 }
 
-pub type AcpLoadSessionResult = AcpResumeSessionResult;
+pub type AcpLoadSessionResult = ();
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

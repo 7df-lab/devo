@@ -1,4 +1,5 @@
 use super::super::*;
+use super::session::RuntimeSessionToolRegistryUpdate;
 
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -36,7 +37,6 @@ use crate::AcpInitializeResult;
 use crate::AcpListSessionsParams;
 use crate::AcpListSessionsResult;
 use crate::AcpLoadSessionParams;
-use crate::AcpLoadSessionResult;
 use crate::AcpMcpCapabilities;
 use crate::AcpMcpServer;
 use crate::AcpMcpServerStdio;
@@ -185,20 +185,9 @@ impl ServerRuntime {
             }
             None => 0,
         };
-        let legacy_response = self
-            .handle_session_list(
-                request_id.clone(),
-                serde_json::to_value(SessionListParams::default())
-                    .expect("serialize session list params"),
-            )
-            .await;
-        let legacy: SuccessResponse<SessionListResult> =
-            match serde_json::from_value(legacy_response.clone()) {
-                Ok(legacy) => legacy,
-                Err(_) => return legacy_error_to_acp(request_id, legacy_response),
-            };
+        let sessions = self.list_session_summaries().await;
         let mut filtered_sessions = Vec::new();
-        for session in legacy.result.sessions.iter().filter(|session| {
+        for session in sessions.iter().filter(|session| {
             params
                 .cwd
                 .as_ref()
@@ -262,21 +251,23 @@ impl ServerRuntime {
         {
             return acp_error_response(request_id, AcpErrorCode::InvalidParams, error);
         }
-        if !params.mcp_servers.is_empty() {
-            return acp_error_response(
-                request_id,
-                AcpErrorCode::InvalidParams,
-                "session/load mcpServers are not supported",
-            );
-        }
+        let tool_registry = match self
+            .acp_session_tool_registry("session/load", &params.mcp_servers)
+            .await
+        {
+            Ok(tool_registry) => tool_registry,
+            Err(error) => {
+                return acp_error_response(request_id, AcpErrorCode::InvalidParams, error);
+            }
+        };
         let legacy_response = self
-            .handle_session_resume(
+            .restore_existing_session_with_tool_registry_update(
                 connection_id,
                 request_id.clone(),
-                serde_json::to_value(SessionResumeParams {
+                SessionResumeParams {
                     session_id: params.session_id,
-                })
-                .expect("serialize session resume params"),
+                },
+                RuntimeSessionToolRegistryUpdate::Replace(tool_registry),
             )
             .await;
         let mut legacy: SuccessResponse<SessionResumeResult> =
@@ -308,23 +299,7 @@ impl ServerRuntime {
             &legacy.result.history_items,
         )
         .await;
-        let mut meta = serde_json::Map::new();
-        meta.insert(
-            DEVO_SESSION_META.to_string(),
-            serde_json::to_value(&legacy.result.session).expect("serialize session metadata"),
-        );
-        meta.insert(
-            DEVO_SESSION_RESUME_META.to_string(),
-            serde_json::to_value(&legacy.result).expect("serialize session resume result"),
-        );
-        acp_success_response(
-            request_id,
-            AcpLoadSessionResult {
-                modes: None,
-                config_options: None,
-                meta: Some(meta),
-            },
-        )
+        acp_success_response(request_id, ())
     }
 
     pub(crate) async fn handle_acp_session_new(
@@ -348,7 +323,10 @@ impl ServerRuntime {
         {
             return acp_error_response(request_id, AcpErrorCode::InvalidParams, error);
         }
-        let tool_registry = match self.acp_session_tool_registry(&params.mcp_servers).await {
+        let tool_registry = match self
+            .acp_session_tool_registry("session/new", &params.mcp_servers)
+            .await
+        {
             Ok(tool_registry) => tool_registry,
             Err(error) => {
                 return acp_error_response(request_id, AcpErrorCode::InvalidParams, error);
@@ -392,13 +370,14 @@ impl ServerRuntime {
 
     async fn acp_session_tool_registry(
         &self,
+        method: &str,
         mcp_servers: &[AcpMcpServer],
     ) -> Result<Option<Arc<devo_core::tools::ToolRegistry>>, String> {
         if mcp_servers.is_empty() {
             return Ok(None);
         }
 
-        let mcp_config = acp_mcp_config(mcp_servers)?;
+        let mcp_config = acp_mcp_config(method, mcp_servers)?;
         let (tool_plan, oauth_store_mode) = {
             let config_store = self
                 .deps
@@ -442,21 +421,23 @@ impl ServerRuntime {
         ) {
             return acp_error_response(request_id, AcpErrorCode::InvalidParams, error);
         }
-        if !params.mcp_servers.is_empty() {
-            return acp_error_response(
-                request_id,
-                AcpErrorCode::InvalidParams,
-                "session/resume mcpServers are not supported",
-            );
-        }
+        let tool_registry = match self
+            .acp_session_tool_registry("session/resume", &params.mcp_servers)
+            .await
+        {
+            Ok(tool_registry) => tool_registry,
+            Err(error) => {
+                return acp_error_response(request_id, AcpErrorCode::InvalidParams, error);
+            }
+        };
         let legacy_response = self
-            .handle_session_resume(
+            .restore_existing_session_with_tool_registry_update(
                 connection_id,
                 request_id.clone(),
-                serde_json::to_value(SessionResumeParams {
+                SessionResumeParams {
                     session_id: params.session_id,
-                })
-                .expect("serialize session resume params"),
+                },
+                RuntimeSessionToolRegistryUpdate::Replace(tool_registry),
             )
             .await;
         let mut legacy: SuccessResponse<SessionResumeResult> =
@@ -898,7 +879,7 @@ fn decode_session_list_cursor(cursor: &str) -> Result<usize, String> {
         .map_err(|_| "session/list cursor is invalid".to_string())
 }
 
-fn acp_mcp_config(mcp_servers: &[AcpMcpServer]) -> Result<McpConfig, String> {
+fn acp_mcp_config(method: &str, mcp_servers: &[AcpMcpServer]) -> Result<McpConfig, String> {
     let mut ids = HashSet::new();
     let mut records = Vec::with_capacity(mcp_servers.len());
 
@@ -907,18 +888,20 @@ fn acp_mcp_config(mcp_servers: &[AcpMcpServer]) -> Result<McpConfig, String> {
             AcpMcpServer::Stdio(server) => server,
             AcpMcpServer::Unsupported(server) => {
                 return Err(format!(
-                    "session/new mcpServers transport '{}' is not supported",
+                    "{method} mcpServers transport '{}' is not supported",
                     server.transport_type
                 ));
             }
         };
         let id = server.name.trim().to_string();
         if id.is_empty() {
-            return Err("session/new mcpServers entries must include a non-empty name".to_string());
+            return Err(format!(
+                "{method} mcpServers entries must include a non-empty name"
+            ));
         }
         if !ids.insert(id.clone()) {
             return Err(format!(
-                "session/new mcpServers contains duplicate server name '{id}'"
+                "{method} mcpServers contains duplicate server name '{id}'"
             ));
         }
 
@@ -926,9 +909,9 @@ fn acp_mcp_config(mcp_servers: &[AcpMcpServer]) -> Result<McpConfig, String> {
             id: McpServerId(id.clone()),
             display_name: id,
             transport: McpTransportConfig::Stdio {
-                command: acp_stdio_command(server)?,
+                command: acp_stdio_command(method, server)?,
                 cwd: None,
-                env: acp_stdio_env(server)?,
+                env: acp_stdio_env(method, server)?,
                 env_vars: Vec::new(),
             },
             startup_policy: McpStartupPolicy::Eager,
@@ -948,10 +931,10 @@ fn acp_mcp_config(mcp_servers: &[AcpMcpServer]) -> Result<McpConfig, String> {
     })
 }
 
-fn acp_stdio_command(server: &AcpMcpServerStdio) -> Result<Vec<String>, String> {
+fn acp_stdio_command(method: &str, server: &AcpMcpServerStdio) -> Result<Vec<String>, String> {
     if server.command.as_os_str().is_empty() {
         return Err(format!(
-            "session/new mcpServers entry '{}' must include a non-empty command",
+            "{method} mcpServers entry '{}' must include a non-empty command",
             server.name
         ));
     }
@@ -962,13 +945,16 @@ fn acp_stdio_command(server: &AcpMcpServerStdio) -> Result<Vec<String>, String> 
     Ok(command)
 }
 
-fn acp_stdio_env(server: &AcpMcpServerStdio) -> Result<BTreeMap<String, String>, String> {
+fn acp_stdio_env(
+    method: &str,
+    server: &AcpMcpServerStdio,
+) -> Result<BTreeMap<String, String>, String> {
     let mut env = BTreeMap::new();
     for variable in &server.env {
         let name = variable.name.trim();
         if name.is_empty() {
             return Err(format!(
-                "session/new mcpServers entry '{}' contains an env variable with an empty name",
+                "{method} mcpServers entry '{}' contains an env variable with an empty name",
                 server.name
             ));
         }
@@ -977,7 +963,7 @@ fn acp_stdio_env(server: &AcpMcpServerStdio) -> Result<BTreeMap<String, String>,
             .is_some()
         {
             return Err(format!(
-                "session/new mcpServers entry '{}' contains duplicate env variable '{name}'",
+                "{method} mcpServers entry '{}' contains duplicate env variable '{name}'",
                 server.name
             ));
         }
@@ -1124,17 +1110,20 @@ mod tests {
         #[cfg(unix)]
         let command = "/mcp/filesystem".to_string();
 
-        let config = acp_mcp_config(&[AcpMcpServer::Stdio(AcpMcpServerStdio {
-            name: "filesystem".to_string(),
-            command: command_path,
-            args: vec!["--stdio".to_string()],
-            env: vec![AcpEnvVariable {
-                name: "API_KEY".to_string(),
-                value: "secret123".to_string(),
+        let config = acp_mcp_config(
+            "session/new",
+            &[AcpMcpServer::Stdio(AcpMcpServerStdio {
+                name: "filesystem".to_string(),
+                command: command_path,
+                args: vec!["--stdio".to_string()],
+                env: vec![AcpEnvVariable {
+                    name: "API_KEY".to_string(),
+                    value: "secret123".to_string(),
+                    meta: None,
+                }],
                 meta: None,
-            }],
-            meta: None,
-        })])
+            })],
+        )
         .expect("stdio MCP server should convert");
 
         assert_eq!(
@@ -1179,8 +1168,9 @@ mod tests {
         });
 
         assert_eq!(
-            acp_mcp_config(&[server.clone(), server]).expect_err("duplicate names should fail"),
-            "session/new mcpServers contains duplicate server name 'filesystem'"
+            acp_mcp_config("session/resume", &[server.clone(), server])
+                .expect_err("duplicate names should fail"),
+            "session/resume mcpServers contains duplicate server name 'filesystem'"
         );
     }
 }

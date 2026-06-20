@@ -98,8 +98,7 @@ use devo_protocol::SessionCompactParams;
 use devo_protocol::SessionCompactResult;
 use devo_protocol::SessionForkParams;
 use devo_protocol::SessionForkResult;
-use devo_protocol::SessionListParams;
-use devo_protocol::SessionListResult;
+use devo_protocol::SessionMetadata;
 use devo_protocol::SessionMetadataUpdateParams;
 use devo_protocol::SessionMetadataUpdateResult;
 use devo_protocol::SessionPermissionsUpdateParams;
@@ -328,9 +327,8 @@ impl StdioServerClient {
         &mut self,
         params: SessionResumeParams,
     ) -> Result<SessionResumeResult> {
-        let sessions = self.session_list(SessionListParams::default()).await?;
+        let sessions = self.session_list().await?;
         let session = sessions
-            .sessions
             .into_iter()
             .find(|session| session.session_id == params.session_id)
             .with_context(|| {
@@ -362,7 +360,7 @@ impl StdioServerClient {
             .context("ACP session/resume response missing Devo resume metadata")
     }
 
-    pub async fn session_list(&mut self, _params: SessionListParams) -> Result<SessionListResult> {
+    pub async fn session_list(&mut self) -> Result<Vec<SessionMetadata>> {
         let Some(capabilities) = self.acp_agent_capabilities.as_ref() else {
             bail!("ACP initialize must complete before session/list");
         };
@@ -410,7 +408,7 @@ impl StdioServerClient {
             }
             cursor = Some(next_cursor);
         }
-        Ok(SessionListResult { sessions })
+        Ok(sessions)
     }
 
     pub async fn agent_list(&mut self, params: AgentListParams) -> Result<AgentListResult> {

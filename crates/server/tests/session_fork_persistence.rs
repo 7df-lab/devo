@@ -335,7 +335,27 @@ async fn list_sessions(
         )
         .await
         .context("session/list response")?;
-    let response: devo_server::SuccessResponse<devo_server::SessionListResult> =
+    let response: devo_server::AcpSuccessResponse<devo_server::AcpListSessionsResult> =
         serde_json::from_value(response)?;
-    Ok(response.result.sessions)
+    response
+        .result
+        .sessions
+        .into_iter()
+        .map(|session| {
+            session
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(devo_server::DEVO_SESSION_META))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .context("decode Devo session metadata from ACP session/list response")?
+                .with_context(|| {
+                    format!(
+                        "ACP session/list response missing Devo session metadata for {}",
+                        session.session_id
+                    )
+                })
+        })
+        .collect()
 }

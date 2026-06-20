@@ -108,12 +108,8 @@ async fn goal_set_objective_generates_session_title_for_new_session() -> Result<
         )
         .await
         .context("session/list response")?;
-    let list_result: devo_server::SuccessResponse<devo_server::SessionListResult> =
-        serde_json::from_value(list_response)?;
-    assert_eq!(
-        list_result.result.sessions[0].title.as_deref(),
-        Some("Generated goal title")
-    );
+    let sessions = decode_acp_session_list_response(list_response)?;
+    assert_eq!(sessions[0].title.as_deref(), Some("Generated goal title"));
 
     let title_requests = provider.title_requests.lock().expect("lock title requests");
     assert_eq!(title_requests.len(), 1);
@@ -331,6 +327,36 @@ fn title_request_contains(request: &ModelRequest, needle: &str) -> bool {
             | devo_protocol::RequestContent::ToolResult { .. } => false,
         })
     })
+}
+
+fn decode_acp_session_list_response(
+    response: serde_json::Value,
+) -> Result<Vec<devo_server::SessionMetadata>> {
+    let response_value = response.clone();
+    let response: devo_server::AcpSuccessResponse<devo_server::AcpListSessionsResult> =
+        serde_json::from_value(response)
+            .with_context(|| format!("decode ACP session/list response: {response_value}"))?;
+    response
+        .result
+        .sessions
+        .into_iter()
+        .map(|session| {
+            session
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(devo_server::DEVO_SESSION_META))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .context("decode Devo session metadata from ACP session/list response")?
+                .with_context(|| {
+                    format!(
+                        "ACP session/list response missing Devo session metadata for {}",
+                        session.session_id
+                    )
+                })
+        })
+        .collect()
 }
 
 fn assert_session_not_found(response: serde_json::Value) -> Result<()> {

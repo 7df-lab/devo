@@ -89,8 +89,6 @@ use crate::SessionCompactionFailedPayload;
 use crate::SessionEventPayload;
 use crate::SessionForkParams;
 use crate::SessionForkResult;
-use crate::SessionListParams;
-use crate::SessionListResult;
 use crate::SessionMetadata;
 use crate::SessionMetadataUpdateParams;
 use crate::SessionMetadataUpdateResult;

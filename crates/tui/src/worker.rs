@@ -56,7 +56,6 @@ use devo_server::ServerEvent;
 use devo_server::SessionCompactParams;
 use devo_server::SessionHistoryItem;
 use devo_server::SessionHistoryItemKind;
-use devo_server::SessionListParams;
 use devo_server::SessionResumeParams;
 use devo_server::SessionRollbackMode;
 use devo_server::SessionRollbackParams;
@@ -1076,13 +1075,12 @@ async fn run_worker_inner(
                     Some(OperationCommand::ListSessions) => {
                         match tokio::time::timeout(
                             Duration::from_secs(5),
-                            client.session_list(SessionListParams::default()),
+                            client.session_list(),
                         )
                         .await
                         {
                             Ok(Ok(result)) => {
                                 let sessions = result
-                                    .sessions
                                     .iter()
                                     .map(|session| SessionListEntry {
                                         session_id: session.session_id,
