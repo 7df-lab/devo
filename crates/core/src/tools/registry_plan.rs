@@ -258,6 +258,7 @@ fn grep_schema() -> JsonSchema {
     )
 }
 
+#[cfg(feature = "code-search")]
 fn code_search_schema() -> JsonSchema {
     let enum_string = |description: &str, values: &[&str]| {
         let mut schema = JsonSchema::string(Some(description));
@@ -333,6 +334,7 @@ fn code_search_schema() -> JsonSchema {
     )
 }
 
+#[cfg(feature = "code-search")]
 pub(crate) fn code_search_tool_spec() -> ToolSpec {
     ToolSpec {
         name: "code_search".to_string(),
@@ -737,6 +739,7 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
         ToolHandlerKind::Grep,
     );
 
+    #[cfg(feature = "code-search")]
     if config.code_search {
         plan.push(code_search_tool_spec(), ToolHandlerKind::CodeSearch);
     }

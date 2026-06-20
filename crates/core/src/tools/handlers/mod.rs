@@ -1,6 +1,7 @@
 mod agent;
 mod apply_patch;
 mod bash;
+#[cfg(feature = "code-search")]
 mod code_search;
 mod exec_command;
 mod file_write;
@@ -23,6 +24,7 @@ mod websearch;
 pub use agent::register_agent_tools;
 pub use apply_patch::ApplyPatchHandler;
 pub use bash::BashHandler;
+#[cfg(feature = "code-search")]
 pub use code_search::CodeSearchHandler;
 pub use exec_command::{ExecCommandHandler, WriteStdinHandler};
 pub use file_write::WriteHandler;
@@ -130,7 +132,14 @@ fn build_registry_from_builder(
     for (kind, name) in handlers {
         let handler: Arc<dyn ToolHandler> = match kind {
             ToolHandlerKind::Bash => Arc::new(BashHandler::new()),
+            #[cfg(feature = "code-search")]
             ToolHandlerKind::CodeSearch => Arc::new(CodeSearchHandler::new()),
+            // When the `code-search` feature is disabled the planner never emits
+            // this handler kind (see registry_plan), so the arm is unreachable.
+            #[cfg(not(feature = "code-search"))]
+            ToolHandlerKind::CodeSearch => {
+                unreachable!("code_search handler requested but `code-search` feature is disabled")
+            }
             ToolHandlerKind::ShellCommand => Arc::new(ShellCommandHandler::new()),
             ToolHandlerKind::Read => Arc::new(ReadHandler::new()),
             ToolHandlerKind::Write => Arc::new(WriteHandler::new()),

@@ -5,9 +5,17 @@ license.workspace = true
 name = "devo-core"
 version.workspace = true
 
+[features]
+default = ["code-search"]
+# Semantic code search tool (`code_search`). Optional because it pulls in heavy
+# dependencies (tokenizers, model2vec, hf-hub/hf-xet, hnsw_rs and the full
+# tree-sitter grammar set). Disable with `--no-default-features` for a slim
+# build that omits the entire code-search stack.
+code-search = ["dep:devo-code-search"]
+
 [dependencies]
 devo-config = { workspace = true }
-devo-code-search = { workspace = true }
+devo-code-search = { workspace = true, optional = true }
 devo-network-proxy = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }
