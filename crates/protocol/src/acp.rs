@@ -30,6 +30,7 @@ pub const ACP_SESSION_DELETE_METHOD: &str = "session/delete";
 pub const ACP_SESSION_PROMPT_METHOD: &str = "session/prompt";
 pub const ACP_SESSION_CANCEL_METHOD: &str = "session/cancel";
 pub const ACP_SESSION_UPDATE_METHOD: &str = "session/update";
+pub const ACP_SESSION_REQUEST_PERMISSION_METHOD: &str = "session/request_permission";
 pub const ACP_SESSION_SET_MODE_METHOD: &str = "session/set_mode";
 pub const ACP_SESSION_SET_CONFIG_OPTION_METHOD: &str = "session/set_config_option";
 pub const ACP_JSONRPC_VERSION: &str = "2.0";
@@ -527,6 +528,75 @@ pub struct AcpSessionNotification {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpRequestPermissionParams {
+    pub session_id: SessionId,
+    pub tool_call: AcpToolCallUpdate,
+    pub options: Vec<AcpPermissionOption>,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpToolCallUpdate {
+    #[serde(rename = "toolCallId")]
+    pub tool_call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AcpToolKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<AcpToolCallStatus>,
+    #[serde(default, rename = "rawInput", skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<serde_json::Value>,
+    #[serde(default, rename = "rawOutput", skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<AcpToolCallContent>,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpPermissionOption {
+    #[serde(rename = "optionId")]
+    pub option_id: String,
+    pub name: String,
+    pub kind: AcpPermissionOptionKind,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpPermissionOptionKind {
+    AllowOnce,
+    AllowAlways,
+    RejectOnce,
+    RejectAlways,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpRequestPermissionResponse {
+    pub outcome: AcpPermissionOutcome,
+    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AcpMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum AcpPermissionOutcome {
+    Selected {
+        #[serde(rename = "optionId")]
+        option_id: String,
+    },
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "sessionUpdate", rename_all = "snake_case")]
 pub enum AcpSessionUpdate {
     UserMessageChunk {
@@ -705,9 +775,15 @@ fn acp_update_from_server_event(event: &ServerEvent) -> Option<AcpSessionUpdate>
             let used = (payload.total_input_tokens + payload.total_output_tokens) as u64;
             Some(AcpSessionUpdate::UsageUpdate {
                 used,
-                size: used.max(1),
+                size: payload.context_window.unwrap_or_else(|| used.max(1)),
             })
         }
+        ServerEvent::ToolCallStatusUpdated(payload) => Some(AcpSessionUpdate::ToolCallUpdate {
+            tool_call_id: payload.tool_call_id.clone(),
+            status: acp_tool_call_status_from_str(payload.status.as_str()),
+            raw_output: None,
+            content: Vec::new(),
+        }),
         ServerEvent::ItemDelta {
             delta_kind,
             payload,
@@ -748,7 +824,7 @@ fn acp_update_from_item_started(payload: &ItemEventPayload) -> Option<AcpSession
                 tool_call_id: tool.tool_call_id,
                 title: tool_title(tool.tool_name.as_str(), &tool.parameters),
                 kind: tool_kind_from_name(tool.tool_name.as_str()),
-                status: AcpToolCallStatus::InProgress,
+                status: AcpToolCallStatus::Pending,
                 raw_input: Some(tool.parameters),
             })
         }
@@ -760,7 +836,7 @@ fn acp_update_from_item_started(payload: &ItemEventPayload) -> Option<AcpSession
                 tool_call_id: command.tool_call_id,
                 title: command.command,
                 kind: AcpToolKind::Execute,
-                status: AcpToolCallStatus::InProgress,
+                status: AcpToolCallStatus::Pending,
                 raw_input: command.input,
             })
         }
@@ -850,6 +926,17 @@ fn tool_kind_from_name(tool_name: &str) -> AcpToolKind {
     }
 }
 
+fn acp_tool_call_status_from_str(status: &str) -> Option<AcpToolCallStatus> {
+    Some(match status {
+        "pending" => AcpToolCallStatus::Pending,
+        "in_progress" => AcpToolCallStatus::InProgress,
+        "completed" => AcpToolCallStatus::Completed,
+        "failed" => AcpToolCallStatus::Failed,
+        "cancelled" => AcpToolCallStatus::Cancelled,
+        _ => return None,
+    })
+}
+
 fn tool_result_content(
     display_content: Option<String>,
     content: serde_json::Value,
@@ -919,6 +1006,7 @@ mod tests {
     use crate::ItemDeltaPayload;
     use crate::ItemId;
     use crate::SessionId;
+    use crate::TurnId;
 
     #[test]
     fn initialize_result_uses_acp_field_names() {
@@ -1159,6 +1247,150 @@ mod tests {
                     meta: None,
                 }
             }]
+        );
+    }
+
+    #[test]
+    fn request_permission_uses_acp_wire_shape() {
+        let session_id = SessionId::new();
+        let params = AcpRequestPermissionParams {
+            session_id,
+            tool_call: AcpToolCallUpdate {
+                tool_call_id: "call-1".to_string(),
+                title: Some("Run command".to_string()),
+                kind: Some(AcpToolKind::Execute),
+                status: Some(AcpToolCallStatus::Pending),
+                raw_input: Some(serde_json::json!({"command": "cargo test"})),
+                raw_output: None,
+                content: Vec::new(),
+                meta: None,
+            },
+            options: vec![AcpPermissionOption {
+                option_id: "allow_once".to_string(),
+                name: "Allow once".to_string(),
+                kind: AcpPermissionOptionKind::AllowOnce,
+                meta: None,
+            }],
+            meta: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(params).expect("serialize permission request"),
+            serde_json::json!({
+                "sessionId": session_id,
+                "toolCall": {
+                    "toolCallId": "call-1",
+                    "title": "Run command",
+                    "kind": "execute",
+                    "status": "pending",
+                    "rawInput": { "command": "cargo test" }
+                },
+                "options": [
+                    {
+                        "optionId": "allow_once",
+                        "name": "Allow once",
+                        "kind": "allow_once"
+                    }
+                ]
+            })
+        );
+
+        let response: AcpRequestPermissionResponse = serde_json::from_value(serde_json::json!({
+            "outcome": {
+                "outcome": "selected",
+                "optionId": "allow_once"
+            }
+        }))
+        .expect("deserialize permission response");
+        assert_eq!(
+            response,
+            AcpRequestPermissionResponse {
+                outcome: AcpPermissionOutcome::Selected {
+                    option_id: "allow_once".to_string()
+                },
+                meta: None,
+            }
+        );
+    }
+
+    #[test]
+    fn usage_update_size_uses_context_window() {
+        let session_id = SessionId::new();
+        let event = ServerEvent::TurnUsageUpdated(crate::TurnUsageUpdatedPayload {
+            session_id,
+            turn_id: TurnId::new(),
+            usage: crate::TurnUsage {
+                input_tokens: 3,
+                output_tokens: 4,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            },
+            total_input_tokens: 30,
+            total_output_tokens: 12,
+            total_cache_read_tokens: 0,
+            last_query_input_tokens: 3,
+            context_window: Some(200_000),
+        });
+
+        let (_, value) = acp_notification_from_server_event("turn/usage/updated", &event);
+
+        assert_eq!(
+            value["update"],
+            serde_json::json!({
+                "sessionUpdate": "usage_update",
+                "used": 42,
+                "size": 200000
+            })
+        );
+    }
+
+    #[test]
+    fn tool_status_maps_pending_then_in_progress_update() {
+        let session_id = SessionId::new();
+        let turn_id = TurnId::new();
+        let item_id = ItemId::new();
+        let started = ServerEvent::ItemStarted(ItemEventPayload {
+            context: EventContext {
+                session_id,
+                turn_id: Some(turn_id),
+                item_id: Some(item_id),
+                seq: 0,
+            },
+            item: crate::ItemEnvelope {
+                item_id,
+                item_kind: ItemKind::ToolCall,
+                payload: serde_json::to_value(ToolCallPayload {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "read".to_string(),
+                    parameters: serde_json::json!({"path": "src/lib.rs"}),
+                    command_actions: Vec::new(),
+                })
+                .expect("serialize tool payload"),
+            },
+        });
+        let (_, started_value) = acp_notification_from_server_event("item/started", &started);
+
+        assert_eq!(
+            started_value["update"]["status"],
+            serde_json::json!("pending")
+        );
+
+        let update = ServerEvent::ToolCallStatusUpdated(crate::ToolCallStatusUpdatedPayload {
+            session_id,
+            turn_id,
+            tool_call_id: "call-1".to_string(),
+            status: "in_progress".to_string(),
+        });
+        let (_, update_value) =
+            acp_notification_from_server_event("tool_call/status_updated", &update);
+
+        assert_eq!(
+            update_value["update"],
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "status": "in_progress"
+            })
         );
     }
 

@@ -11,7 +11,10 @@ pub(crate) struct RuntimeSessionTurnCutOptions {
 
 pub(crate) enum RuntimeSessionToolRegistryUpdate {
     KeepCurrent,
-    Replace(Option<Arc<devo_core::tools::ToolRegistry>>),
+    ReplaceIfCwdMatches {
+        cwd: PathBuf,
+        tool_registry: Option<Arc<devo_core::tools::ToolRegistry>>,
+    },
 }
 
 impl ServerRuntime {
@@ -417,8 +420,18 @@ impl ServerRuntime {
             );
         };
         let mut session = session_arc.lock().await;
-        if let RuntimeSessionToolRegistryUpdate::Replace(tool_registry) = tool_registry_update {
-            session.tool_registry = tool_registry;
+        match tool_registry_update {
+            RuntimeSessionToolRegistryUpdate::KeepCurrent => {}
+            RuntimeSessionToolRegistryUpdate::ReplaceIfCwdMatches { cwd, tool_registry } => {
+                if session.summary.cwd != cwd {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InvalidParams,
+                        "session cwd does not match the stored session cwd",
+                    );
+                }
+                session.tool_registry = tool_registry;
+            }
         }
         let session_summary = session.summary.clone();
         let latest_turn = session.latest_turn.clone();
@@ -746,6 +759,8 @@ impl ServerRuntime {
                         started_at: source.summary.created_at,
                         completed_at: Some(source.summary.updated_at),
                         usage: None,
+                        stop_reason: None,
+                        failure_reason: None,
                     })
                 })
         } else {

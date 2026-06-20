@@ -20,6 +20,10 @@ use devo_core::ReasoningEffort;
 use devo_core::SessionId;
 use devo_core::TurnId;
 use devo_core::TurnStatus;
+use devo_protocol::ACP_SESSION_UPDATE_METHOD;
+use devo_protocol::AcpPlanEntryStatus;
+use devo_protocol::AcpSessionNotification;
+use devo_protocol::AcpSessionUpdate;
 use devo_protocol::AgentToolPolicy;
 use devo_protocol::CloseAgentParams;
 use devo_protocol::CommandExecExitedPayload;
@@ -44,7 +48,7 @@ use devo_protocol::SpawnAgentParams;
 use devo_protocol::ThreadGoalStatus;
 use devo_server::ApprovalDecisionPayload;
 use devo_server::ApprovalRequestPayload;
-use devo_server::ApprovalRespondParams;
+use devo_server::ApprovalResponseParams;
 use devo_server::CollaborationMode;
 use devo_server::CommandExecutionPayload;
 use devo_server::InputItem;
@@ -1978,7 +1982,7 @@ async fn run_worker_inner(
                         scope,
                     }) => {
                         if let Err(error) = client
-                            .approval_respond(ApprovalRespondParams {
+                            .approval_respond(ApprovalResponseParams {
                                 session_id,
                                 turn_id,
                                 approval_id: approval_id.into(),
@@ -2112,9 +2116,21 @@ async fn run_worker_inner(
                     }
                 }
             }
-            notification = client.recv_event() => {
-                match notification? {
-                    Some((method, event)) => {
+            notification = client.recv_notification() => {
+                match notification {
+                    Some(notification) => {
+                        let method = notification.method;
+                        let params = notification.params;
+                        if method == ACP_SESSION_UPDATE_METHOD {
+                            if let Some(event) =
+                                plan_event_from_acp_notification(&params, session_id)
+                            {
+                                let _ = event_tx.send(event);
+                            }
+                            continue;
+                        }
+                        let event: ServerEvent = serde_json::from_value(params)
+                            .with_context(|| format!("failed to decode server event for method {method}"))?;
                         if handle_btw_agent_event(
                             &method,
                             &event,
@@ -3860,6 +3876,34 @@ fn proposed_plan_text(payload: &serde_json::Value) -> String {
 }
 
 // TurnPlanUpdated became the primary live source.
+fn plan_event_from_acp_notification(
+    params: &serde_json::Value,
+    active_session_id: Option<SessionId>,
+) -> Option<WorkerEvent> {
+    let notification = serde_json::from_value::<AcpSessionNotification>(params.clone()).ok()?;
+    if Some(notification.session_id) != active_session_id {
+        return None;
+    }
+    let AcpSessionUpdate::Plan { entries } = notification.update else {
+        return None;
+    };
+    let steps = entries
+        .into_iter()
+        .map(|entry| PlanStep {
+            text: entry.content,
+            status: match entry.status {
+                AcpPlanEntryStatus::Pending => PlanStepStatus::Pending,
+                AcpPlanEntryStatus::InProgress => PlanStepStatus::InProgress,
+                AcpPlanEntryStatus::Completed => PlanStepStatus::Completed,
+            },
+        })
+        .collect::<Vec<_>>();
+    Some(WorkerEvent::PlanUpdated {
+        explanation: None,
+        steps,
+    })
+}
+
 fn plan_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEvent> {
     let tool_name = payload.tool_name.as_deref()?;
     match tool_name {
@@ -4051,6 +4095,7 @@ mod tests {
     use super::is_stale_turn_interrupt_error;
     use super::next_shell_command_exec_start;
     use super::normalize_display_output;
+    use super::plan_event_from_acp_notification;
     use super::project_history_items;
     use super::render_skill_list_body;
     use super::research_artifact_delta_event;
@@ -4671,6 +4716,58 @@ mod tests {
     }
 
     #[test]
+    fn acp_plan_notification_emits_plan_updated() {
+        let session_id = SessionId::new();
+        let event = plan_event_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "plan",
+                    "entries": [
+                        {
+                            "content": "Inspect code",
+                            "priority": "medium",
+                            "status": "completed"
+                        },
+                        {
+                            "content": "Patch bug",
+                            "priority": "high",
+                            "status": "in_progress"
+                        },
+                        {
+                            "content": "Run tests",
+                            "priority": "low",
+                            "status": "pending"
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+        );
+
+        assert_eq!(
+            event,
+            Some(WorkerEvent::PlanUpdated {
+                explanation: None,
+                steps: vec![
+                    PlanStep {
+                        text: "Inspect code".to_string(),
+                        status: PlanStepStatus::Completed,
+                    },
+                    PlanStep {
+                        text: "Patch bug".to_string(),
+                        status: PlanStepStatus::InProgress,
+                    },
+                    PlanStep {
+                        text: "Run tests".to_string(),
+                        status: PlanStepStatus::Pending,
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
     fn completed_apply_patch_tool_result_emits_patch_applied() {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         handle_completed_item(
@@ -5013,6 +5110,8 @@ mod tests {
                 started_at: Utc::now(),
                 completed_at: None,
                 usage: None,
+                stop_reason: None,
+                failure_reason: None,
             },
         });
 

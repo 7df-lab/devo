@@ -7,7 +7,7 @@ use devo_core::{
 };
 use devo_protocol::{InitializeParams, SkillChangedParams, SkillListParams, SkillListResult};
 use devo_server::{
-    ActiveTurnSteeringState, ApprovalDecisionValue, ApprovalRequestPayload, ApprovalRespondParams,
+    ActiveTurnSteeringState, ApprovalDecisionValue, ApprovalRequestPayload, ApprovalResponseParams,
     ApprovalScopeValue, ClientRequest, ClientTransportKind, DefaultProjection, EventContext,
     EventsSubscribeParams, InputItem, ItemDeltaKind, ItemDeltaPayload, PendingServerRequestContext,
     ProtocolError, ProtocolErrorCode, ServerEvent, ServerRequestKind, SessionMetadata,
@@ -96,7 +96,7 @@ fn skill_list_result_serializes_expected_shape() {
 
 #[test]
 fn approval_response_roundtrip() {
-    let payload = ApprovalRespondParams {
+    let payload = ApprovalResponseParams {
         session_id: SessionId::new(),
         turn_id: TurnId::new(),
         approval_id: "approval-1".into(),
@@ -105,7 +105,7 @@ fn approval_response_roundtrip() {
     };
 
     let json = serde_json::to_string(&payload).expect("serialize");
-    let restored: ApprovalRespondParams = serde_json::from_str(&json).expect("deserialize");
+    let restored: ApprovalResponseParams = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(payload, restored);
 }
 
@@ -268,6 +268,8 @@ fn turn_projection_preserves_turn_status_vocabulary() {
         request_thinking: None,
         input_token_estimate: None,
         usage: None,
+        stop_reason: None,
+        failure_reason: None,
         session_context: None,
         turn_context: None,
         schema_version: 2,

@@ -396,6 +396,8 @@ impl ServerRuntime {
                 started_at: now,
                 completed_at: None,
                 usage: None,
+                stop_reason: None,
+                failure_reason: None,
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
@@ -1388,6 +1390,7 @@ impl ServerRuntime {
         turn_id: TurnId,
         capture: &mut ResearchQueryCapture,
         usage_ledger: &ResearchUsageLedgerRef,
+        context_window: Option<u64>,
         event: QueryEvent,
     ) {
         match event {
@@ -1421,6 +1424,7 @@ impl ServerRuntime {
                     },
                 );
             }
+            QueryEvent::ToolExecutionStart { .. } => {}
             QueryEvent::ToolResult {
                 tool_use_id,
                 tool_name,
@@ -1508,6 +1512,7 @@ impl ServerRuntime {
                         cache_creation_input_tokens,
                         cache_read_input_tokens,
                     ),
+                    context_window,
                 )
                 .await;
                 capture.usage_invocation_index += 1;
@@ -1530,6 +1535,7 @@ impl ServerRuntime {
                         cache_creation_input_tokens,
                         cache_read_input_tokens,
                     ),
+                    context_window,
                 )
                 .await;
             }
@@ -1846,6 +1852,7 @@ impl ServerRuntime {
                                 runtime.turn_id,
                                 &mut capture,
                                 runtime.usage_ledger,
+                                Some(final_turn_config.model.context_window as u64),
                                 event,
                             )
                             .await;
@@ -1866,6 +1873,7 @@ impl ServerRuntime {
                 runtime.turn_id,
                 &mut capture,
                 runtime.usage_ledger,
+                Some(final_turn_config.model.context_window as u64),
                 event,
             )
             .await;
@@ -2144,6 +2152,7 @@ impl ServerRuntime {
                         runtime.usage_ledger,
                         usage_key.clone(),
                         ResearchUsageTotals::from_usage(&usage),
+                        Some(runtime.turn_config.model.context_window as u64),
                     )
                     .await;
                 }
@@ -2175,6 +2184,7 @@ impl ServerRuntime {
                 runtime.usage_ledger,
                 usage_key,
                 ResearchUsageTotals::from_usage(&response.usage),
+                Some(runtime.turn_config.model.context_window as u64),
             )
             .await;
         }
@@ -2344,6 +2354,7 @@ impl ServerRuntime {
             .get(&session_id)
             .cloned()
             .unwrap_or_else(CancellationToken::new);
+        let tool_execution_start_runtime = Arc::clone(self);
         Ok(ToolRuntime::new_with_context_and_options(
             registry,
             self.build_permission_checker(session_id, turn_id, permission_mode, permission_profile),
@@ -2365,6 +2376,22 @@ impl ServerRuntime {
             },
             ToolExecutionOptions {
                 cancel_token: turn_cancel_token,
+                on_tool_execution_start: Some(Arc::new(move |call: &ToolCall| {
+                    let runtime = Arc::clone(&tool_execution_start_runtime);
+                    let tool_call_id = call.id.clone();
+                    tokio::spawn(async move {
+                        runtime
+                            .broadcast_event(ServerEvent::ToolCallStatusUpdated(
+                                devo_protocol::ToolCallStatusUpdatedPayload {
+                                    session_id,
+                                    turn_id,
+                                    tool_call_id,
+                                    status: "in_progress".to_string(),
+                                },
+                            ))
+                            .await;
+                    });
+                })),
                 ..ToolExecutionOptions::default()
             },
         ))
@@ -2454,6 +2481,7 @@ impl ServerRuntime {
         usage_ledger: &ResearchUsageLedgerRef,
         usage_key: String,
         usage: ResearchUsageTotals,
+        context_window: Option<u64>,
     ) {
         let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
             return;
@@ -2487,6 +2515,7 @@ impl ServerRuntime {
             total_output_tokens,
             total_cache_read_tokens,
             last_query_input_tokens: aggregate.input_tokens,
+            context_window,
         }))
         .await;
     }

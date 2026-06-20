@@ -8,6 +8,7 @@ use crate::{
     MessageEditRecordedRecord, SessionContext, TurnContext, TurnKind, TurnSupersededRecord,
     TurnWorkspaceRestoreCompletedRecord, TurnWorkspaceRestoreStartedRecord,
 };
+use devo_protocol::{StopReason, TurnFailureReason};
 
 /// Stores persistent metadata for one session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -109,6 +110,12 @@ pub struct TurnRecord {
     pub input_token_estimate: Option<u32>,
     /// The authoritative provider token usage, when available.
     pub usage: Option<TurnUsage>,
+    /// The terminal provider/model stop reason, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    /// The typed terminal failure reason, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<TurnFailureReason>,
     /// The locked session context used to build the stable request prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_context: Option<SessionContext>,
@@ -1034,6 +1041,8 @@ mod tests {
             request_thinking: None,
             input_token_estimate: Some(100),
             usage: None,
+            stop_reason: None,
+            failure_reason: None,
             session_context: None,
             turn_context: None,
             schema_version: 2,

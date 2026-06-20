@@ -31,6 +31,16 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
+        self.handle_turn_start_for_connection(None, request_id, params)
+            .await
+    }
+
+    pub(crate) async fn handle_turn_start_for_connection(
+        self: &Arc<Self>,
+        connection_id: Option<u64>,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
         let params: TurnStartParams = match serde_json::from_value(params) {
             Ok(params) => params,
             Err(error) => {
@@ -41,6 +51,22 @@ impl ServerRuntime {
                 );
             }
         };
+        self.handle_turn_start_with_queue_policy(
+            connection_id,
+            request_id,
+            params,
+            TurnStartQueuePolicy::Queue,
+        )
+        .await
+    }
+
+    pub(crate) async fn handle_turn_start_with_queue_policy(
+        self: &Arc<Self>,
+        connection_id: Option<u64>,
+        request_id: serde_json::Value,
+        params: TurnStartParams,
+        queue_policy: TurnStartQueuePolicy,
+    ) -> serde_json::Value {
         if params.input.is_empty() {
             return self.error_response(
                 request_id,
@@ -133,6 +159,13 @@ impl ServerRuntime {
         let (turn, turn_config) = {
             let mut session = session_arc.lock().await;
             if let Some(active_turn) = session.active_turn.as_ref() {
+                if queue_policy == TurnStartQueuePolicy::RejectActive {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::TurnAlreadyRunning,
+                        "session already has an active prompt turn",
+                    );
+                }
                 let pending_turn_queue = Arc::clone(&session.pending_turn_queue);
                 let active_turn_id = active_turn.turn_id;
                 let is_ephemeral = session.summary.ephemeral;
@@ -249,6 +282,8 @@ impl ServerRuntime {
                 started_at: now,
                 completed_at: None,
                 usage: None,
+                stop_reason: None,
+                failure_reason: None,
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
@@ -320,6 +355,12 @@ impl ServerRuntime {
             .lock()
             .await
             .insert(params.session_id, CancellationToken::new());
+        if let Some(connection_id) = connection_id {
+            self.active_turn_connections
+                .lock()
+                .await
+                .insert(params.session_id, connection_id);
+        }
         let runtime = Arc::clone(self);
         let turn_for_task = turn.clone();
         let display_input_for_task = display_input.clone();
@@ -381,6 +422,16 @@ impl ServerRuntime {
 
     pub(crate) async fn handle_turn_shell_command(
         self: &Arc<Self>,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        self.handle_turn_shell_command_for_connection(None, request_id, params)
+            .await
+    }
+
+    pub(crate) async fn handle_turn_shell_command_for_connection(
+        self: &Arc<Self>,
+        connection_id: Option<u64>,
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
@@ -452,6 +503,8 @@ impl ServerRuntime {
                 started_at: now,
                 completed_at: None,
                 usage: None,
+                stop_reason: None,
+                failure_reason: None,
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
@@ -514,6 +567,12 @@ impl ServerRuntime {
             .lock()
             .await
             .insert(params.session_id, CancellationToken::new());
+        if let Some(connection_id) = connection_id {
+            self.active_turn_connections
+                .lock()
+                .await
+                .insert(params.session_id, connection_id);
+        }
         let task = tokio::spawn(async move {
             runtime
                 .execute_shell_command_turn(params.session_id, turn_for_task, command_for_task, cwd)
@@ -669,6 +728,11 @@ impl ServerRuntime {
             }
             turn
         };
+        self.record_terminal_turn_status(
+            interrupted_turn.turn_id,
+            TerminalTurnSnapshot::from_turn(&interrupted_turn),
+        )
+        .await;
         let (record, session_context, turn_context) = {
             let session = session_arc.lock().await;
             let core_session_lock = session.core_session.try_lock();

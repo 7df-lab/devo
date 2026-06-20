@@ -268,6 +268,8 @@ impl ServerRuntime {
             started_at: now,
             completed_at: None,
             usage: None,
+            stop_reason: None,
+            failure_reason: None,
         };
         let (session_context, turn_context, collaboration_mode) = {
             let session = session_arc.lock().await;

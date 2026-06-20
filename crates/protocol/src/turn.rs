@@ -5,7 +5,9 @@ use chrono::{DateTime, Utc};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{ItemId, PendingInputId, ReasoningEffort, SessionId, TurnId, TurnStatus, TurnUsage};
+use crate::{
+    ItemId, PendingInputId, ReasoningEffort, SessionId, StopReason, TurnId, TurnStatus, TurnUsage,
+};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnMetadata {
     pub turn_id: TurnId,
@@ -23,6 +25,16 @@ pub struct TurnMetadata {
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub usage: Option<TurnUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<TurnFailureReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnFailureReason {
+    MaxTurnRequests,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -365,6 +377,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
             }),
+            stop_reason: Some(StopReason::EndTurn),
+            failure_reason: None,
         };
 
         let json = serde_json::to_string(&metadata).expect("serialize");

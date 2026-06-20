@@ -463,6 +463,7 @@ fn write_query_event_jsonl(session_id: &str, event: &QueryEvent) -> Result<()> {
                 input,
             })
         }
+        QueryEvent::ToolExecutionStart { .. } => Ok(()),
         QueryEvent::ToolProgress {
             tool_use_id,
             content,

@@ -112,10 +112,12 @@ impl ServerRuntime {
             "devo/platformOs".to_string(),
             serde_json::Value::String(self.metadata.platform_os.clone()),
         );
-        meta.insert(
-            "devo/serverHome".to_string(),
-            serde_json::Value::String(self.metadata.server_home.display().to_string()),
-        );
+        if !acp_auth_config.enabled {
+            meta.insert(
+                "devo/serverHome".to_string(),
+                serde_json::Value::String(self.metadata.server_home.display().to_string()),
+            );
+        }
         acp_success_response(
             request_id,
             AcpInitializeResult {
@@ -251,6 +253,12 @@ impl ServerRuntime {
         {
             return acp_error_response(request_id, AcpErrorCode::InvalidParams, error);
         }
+        if let Err((code, error)) = self
+            .validate_acp_existing_session_cwd("session/load", params.session_id, &params.cwd)
+            .await
+        {
+            return acp_error_response(request_id, code, error);
+        }
         let tool_registry = match self
             .acp_session_tool_registry("session/load", &params.mcp_servers)
             .await
@@ -267,7 +275,10 @@ impl ServerRuntime {
                 SessionResumeParams {
                     session_id: params.session_id,
                 },
-                RuntimeSessionToolRegistryUpdate::Replace(tool_registry),
+                RuntimeSessionToolRegistryUpdate::ReplaceIfCwdMatches {
+                    cwd: params.cwd.clone(),
+                    tool_registry,
+                },
             )
             .await;
         let mut legacy: SuccessResponse<SessionResumeResult> =
@@ -275,13 +286,6 @@ impl ServerRuntime {
                 Ok(legacy) => legacy,
                 Err(_) => return legacy_error_to_acp(request_id, legacy_response),
             };
-        if legacy.result.session.cwd != params.cwd {
-            return acp_error_response(
-                request_id,
-                AcpErrorCode::InvalidParams,
-                "session/load cwd does not match the stored session cwd",
-            );
-        }
         let updated_summary = match self
             .apply_acp_session_additional_directories(
                 params.session_id,
@@ -368,6 +372,28 @@ impl ServerRuntime {
         )
     }
 
+    async fn validate_acp_existing_session_cwd(
+        &self,
+        method: &str,
+        session_id: SessionId,
+        cwd: &Path,
+    ) -> Result<(), (AcpErrorCode, String)> {
+        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+            return Err((
+                AcpErrorCode::ServerError,
+                "session does not exist".to_string(),
+            ));
+        };
+        let stored_cwd = session_arc.lock().await.summary.cwd.clone();
+        if stored_cwd != cwd {
+            return Err((
+                AcpErrorCode::InvalidParams,
+                format!("{method} cwd does not match the stored session cwd"),
+            ));
+        }
+        Ok(())
+    }
+
     async fn acp_session_tool_registry(
         &self,
         method: &str,
@@ -421,6 +447,12 @@ impl ServerRuntime {
         ) {
             return acp_error_response(request_id, AcpErrorCode::InvalidParams, error);
         }
+        if let Err((code, error)) = self
+            .validate_acp_existing_session_cwd("session/resume", params.session_id, &params.cwd)
+            .await
+        {
+            return acp_error_response(request_id, code, error);
+        }
         let tool_registry = match self
             .acp_session_tool_registry("session/resume", &params.mcp_servers)
             .await
@@ -437,7 +469,10 @@ impl ServerRuntime {
                 SessionResumeParams {
                     session_id: params.session_id,
                 },
-                RuntimeSessionToolRegistryUpdate::Replace(tool_registry),
+                RuntimeSessionToolRegistryUpdate::ReplaceIfCwdMatches {
+                    cwd: params.cwd.clone(),
+                    tool_registry,
+                },
             )
             .await;
         let mut legacy: SuccessResponse<SessionResumeResult> =
@@ -445,13 +480,6 @@ impl ServerRuntime {
                 Ok(legacy) => legacy,
                 Err(_) => return legacy_error_to_acp(request_id, legacy_response),
             };
-        if legacy.result.session.cwd != params.cwd {
-            return acp_error_response(
-                request_id,
-                AcpErrorCode::InvalidParams,
-                "session/resume cwd does not match the stored session cwd",
-            );
-        }
         let updated_summary = match self
             .apply_acp_session_additional_directories(
                 params.session_id,
@@ -492,16 +520,24 @@ impl ServerRuntime {
         };
         let (summary, core_session, profile) = {
             let mut session = session_arc.lock().await;
+            let updated_at = Utc::now();
             session.summary.additional_directories = additional_directories.clone();
+            session.summary.updated_at = updated_at;
             if let Some(record) = session.record.as_mut() {
                 record.additional_directories = additional_directories.clone();
+                record.updated_at = updated_at;
+                if let Err(error) = self.rollout_store.append_session_meta(record) {
+                    return Err(format!(
+                        "failed to persist ACP session additional directories: {error}"
+                    ));
+                }
             }
 
             let profile = devo_safety::RuntimePermissionProfile::from_preset(
                 session.config.permission_profile.preset,
                 session.summary.cwd.clone(),
             )
-            .with_additional_roots(additional_directories);
+            .with_additional_roots(additional_directories.clone());
             session.config.permission_profile = profile.clone();
             (
                 session.summary.clone(),
@@ -558,9 +594,10 @@ impl ServerRuntime {
             }
         };
         let legacy_response = self
-            .handle_turn_start(
+            .handle_turn_start_with_queue_policy(
+                Some(connection_id),
                 request_id.clone(),
-                serde_json::to_value(TurnStartParams {
+                TurnStartParams {
                     session_id,
                     input,
                     model: None,
@@ -571,8 +608,8 @@ impl ServerRuntime {
                     cwd: None,
                     collaboration_mode: CollaborationMode::Build,
                     execution_mode: TurnExecutionMode::Regular,
-                })
-                .expect("serialize turn start params"),
+                },
+                TurnStartQueuePolicy::RejectActive,
             )
             .await;
         let legacy: SuccessResponse<TurnStartResult> =
@@ -821,22 +858,40 @@ impl ServerRuntime {
         session_id: SessionId,
         turn_id: TurnId,
     ) -> AcpStopReason {
-        loop {
-            let Some(session) = self.sessions.lock().await.get(&session_id).cloned() else {
-                return AcpStopReason::Refusal;
-            };
-            let latest = session.lock().await.latest_turn.clone();
-            if let Some(turn) = latest
-                && turn.turn_id == turn_id
-            {
-                match turn.status {
-                    TurnStatus::Completed => return AcpStopReason::EndTurn,
-                    TurnStatus::Interrupted => return AcpStopReason::Cancelled,
-                    TurnStatus::Failed => return AcpStopReason::Refusal,
-                    TurnStatus::Pending | TurnStatus::Running | TurnStatus::WaitingApproval => {}
-                }
+        let receiver = self.subscribe_terminal_turn_status(turn_id).await;
+        if let Some(status) = self.recent_terminal_turn_status(turn_id).await {
+            self.record_terminal_turn_status(turn_id, status).await;
+        } else if !self.sessions.lock().await.contains_key(&session_id) {
+            return AcpStopReason::Cancelled;
+        }
+        let status = match receiver.await {
+            Ok(status) => status,
+            Err(_) => return AcpStopReason::Refusal,
+        };
+        acp_stop_reason_from_terminal_turn(status)
+    }
+}
+
+fn acp_stop_reason_from_terminal_turn(snapshot: TerminalTurnSnapshot) -> AcpStopReason {
+    match snapshot.status {
+        TurnStatus::Completed => match snapshot.stop_reason {
+            Some(devo_core::StopReason::MaxTokens) => AcpStopReason::MaxTokens,
+            Some(
+                devo_core::StopReason::EndTurn
+                | devo_core::StopReason::ToolUse
+                | devo_core::StopReason::StopSequence,
+            )
+            | None => AcpStopReason::EndTurn,
+        },
+        TurnStatus::Interrupted => AcpStopReason::Cancelled,
+        TurnStatus::Failed => match snapshot.failure_reason {
+            Some(devo_protocol::TurnFailureReason::MaxTurnRequests) => {
+                AcpStopReason::MaxTurnRequests
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            None => AcpStopReason::Refusal,
+        },
+        TurnStatus::Pending | TurnStatus::Running | TurnStatus::WaitingApproval => {
+            AcpStopReason::Refusal
         }
     }
 }
@@ -1098,6 +1153,57 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[test]
+    fn acp_stop_reason_maps_terminal_turn_metadata() {
+        let mut turn = TurnMetadata {
+            turn_id: TurnId::new(),
+            session_id: SessionId::new(),
+            sequence: 1,
+            status: TurnStatus::Completed,
+            kind: devo_protocol::TurnKind::Regular,
+            model: "test-model".to_string(),
+            model_binding_id: None,
+            thinking: None,
+            reasoning_effort: None,
+            request_model: "test-model".to_string(),
+            request_thinking: None,
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            usage: None,
+            stop_reason: Some(devo_core::StopReason::MaxTokens),
+            failure_reason: None,
+        };
+        assert_eq!(
+            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot::from_turn(&turn)),
+            AcpStopReason::MaxTokens
+        );
+
+        turn.status = TurnStatus::Failed;
+        turn.stop_reason = None;
+        turn.failure_reason = Some(devo_protocol::TurnFailureReason::MaxTurnRequests);
+        assert_eq!(
+            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot::from_turn(&turn)),
+            AcpStopReason::MaxTurnRequests
+        );
+
+        turn.status = TurnStatus::Interrupted;
+        assert_eq!(
+            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot::from_turn(&turn)),
+            AcpStopReason::Cancelled
+        );
+        turn.status = TurnStatus::Failed;
+        turn.failure_reason = None;
+        assert_eq!(
+            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot::from_turn(&turn)),
+            AcpStopReason::Refusal
+        );
+        turn.status = TurnStatus::Completed;
+        assert_eq!(
+            acp_stop_reason_from_terminal_turn(TerminalTurnSnapshot::from_turn(&turn)),
+            AcpStopReason::EndTurn
+        );
+    }
 
     #[test]
     fn acp_mcp_config_converts_stdio_servers() {

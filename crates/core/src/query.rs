@@ -138,6 +138,11 @@ pub enum QueryEvent {
         /// Fully decoded tool input payload, when available.
         input: serde_json::Value,
     },
+    /// A locally executed tool has passed permission checks and started running.
+    ToolExecutionStart {
+        /// Stable provider-issued tool use identifier.
+        id: String,
+    },
     /// Incremental output delta from a running tool.
     ToolProgress {
         tool_use_id: String,

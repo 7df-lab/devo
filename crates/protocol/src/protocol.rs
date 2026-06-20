@@ -67,7 +67,6 @@ pub enum ClientMethod {
     TurnShellCommand,
     TurnInterrupt,
     TurnSteer,
-    ApprovalRespond,
     RequestUserInputRespond,
     SearchStart,
     SearchUpdate,
@@ -116,7 +115,6 @@ impl ClientMethod {
             Self::TurnShellCommand => "turn/shell_command",
             Self::TurnInterrupt => "turn/interrupt",
             Self::TurnSteer => "turn/steer",
-            Self::ApprovalRespond => "approval/respond",
             Self::RequestUserInputRespond => "request_user_input/respond",
             Self::SearchStart => "search/start",
             Self::SearchUpdate => "search/update",
@@ -165,7 +163,6 @@ impl ClientMethod {
             "turn/shell_command" => Self::TurnShellCommand,
             "turn/interrupt" => Self::TurnInterrupt,
             "turn/steer" => Self::TurnSteer,
-            "approval/respond" => Self::ApprovalRespond,
             "request_user_input/respond" => Self::RequestUserInputRespond,
             "search/start" => Self::SearchStart,
             "search/update" => Self::SearchUpdate,
@@ -579,5 +576,10 @@ mod tests {
             ClientMethod::MessageEditPrevious.as_str(),
             "message/editPrevious"
         );
+    }
+
+    #[test]
+    fn client_method_does_not_recognize_legacy_approval_respond() {
+        assert_eq!(ClientMethod::parse("approval/respond"), None);
     }
 }

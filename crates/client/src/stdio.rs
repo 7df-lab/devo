@@ -42,7 +42,7 @@ use devo_protocol::AgentListResult;
 use devo_protocol::ApprovalDecisionPayload;
 use devo_protocol::ApprovalDecisionValue;
 use devo_protocol::ApprovalRequestPayload;
-use devo_protocol::ApprovalRespondParams;
+use devo_protocol::ApprovalResponseParams;
 use devo_protocol::ApprovalScopeValue;
 use devo_protocol::CloseAgentParams;
 use devo_protocol::CloseAgentResult;
@@ -606,7 +606,7 @@ impl StdioServerClient {
         self.request_devo("turn/steer", params).await
     }
 
-    pub async fn approval_respond(&mut self, params: ApprovalRespondParams) -> Result<()> {
+    pub async fn approval_respond(&mut self, params: ApprovalResponseParams) -> Result<()> {
         if let Some(pending) = self
             .acp_pending_permissions
             .lock()
@@ -625,8 +625,7 @@ impl StdioServerClient {
                 .send(acp_approval_decision_notification(&params, &pending));
             return Ok(());
         }
-        let _: serde_json::Value = self.request_devo("approval/respond", params).await?;
-        Ok(())
+        anyhow::bail!("no pending ACP permission request exists for approval response")
     }
 
     pub async fn request_user_input_respond(
@@ -1081,7 +1080,7 @@ fn acp_approval_request_notification(
 }
 
 fn acp_approval_decision_notification(
-    params: &ApprovalRespondParams,
+    params: &ApprovalResponseParams,
     pending: &AcpPendingPermission,
 ) -> ServerNotificationMessage {
     let payload = ApprovalDecisionPayload {
@@ -1126,7 +1125,7 @@ fn acp_approval_scopes(options: &[AcpPermissionOption]) -> Vec<String> {
 }
 
 fn acp_permission_response_from_approval(
-    params: &ApprovalRespondParams,
+    params: &ApprovalResponseParams,
     pending: &AcpPendingPermission,
 ) -> serde_json::Value {
     if let Some(option_id) = acp_selected_permission_option(params, pending) {
@@ -1142,7 +1141,7 @@ fn acp_permission_response_from_approval(
 }
 
 fn acp_selected_permission_option(
-    params: &ApprovalRespondParams,
+    params: &ApprovalResponseParams,
     pending: &AcpPendingPermission,
 ) -> Option<String> {
     let preferred_kinds: &[&str] = match params.decision {

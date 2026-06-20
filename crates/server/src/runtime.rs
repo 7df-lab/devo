@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,7 +15,6 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use devo_core::ApprovalDecisionItem;
-use devo_core::ApprovalRequestItem;
 use devo_core::CommandExecutionItem;
 use devo_core::ItemId;
 use devo_core::Message;
@@ -58,8 +58,6 @@ use devo_safety::PermissionMode;
 use devo_util_shell_command::parse_command::parse_command;
 
 use crate::ApprovalDecisionValue;
-use crate::ApprovalRequestPayload;
-use crate::ApprovalRespondParams;
 use crate::ApprovalScopeValue;
 use crate::ClientMethod;
 use crate::ClientTransportKind;
@@ -188,6 +186,9 @@ pub struct ServerRuntime {
     connections: Mutex<HashMap<u64, ConnectionRuntime>>,
     active_tasks: Mutex<HashMap<SessionId, tokio::task::AbortHandle>>,
     active_turn_cancellations: Mutex<HashMap<SessionId, CancellationToken>>,
+    active_turn_connections: Mutex<HashMap<SessionId, u64>>,
+    terminal_turn_statuses: Mutex<VecDeque<(TurnId, TerminalTurnSnapshot)>>,
+    acp_prompt_waiters: Mutex<HashMap<TurnId, Vec<oneshot::Sender<TerminalTurnSnapshot>>>>,
     active_goal_continuation_turns: Mutex<HashMap<SessionId, TurnId>>,
     goal_continuation_turn_goals: Mutex<HashMap<TurnId, GoalId>>,
     next_connection_id: AtomicU64,
@@ -212,6 +213,31 @@ pub struct ServerRuntime {
 enum TurnInputMode {
     VisibleUserMessage,
     HiddenGoalContinuation { goal: devo_protocol::ThreadGoal },
+}
+
+const TERMINAL_TURN_STATUS_LIMIT: usize = 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalTurnSnapshot {
+    status: TurnStatus,
+    stop_reason: Option<devo_core::StopReason>,
+    failure_reason: Option<devo_protocol::TurnFailureReason>,
+}
+
+impl TerminalTurnSnapshot {
+    fn from_turn(turn: &TurnMetadata) -> Self {
+        Self {
+            status: turn.status.clone(),
+            stop_reason: turn.stop_reason.clone(),
+            failure_reason: turn.failure_reason,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnStartQueuePolicy {
+    Queue,
+    RejectActive,
 }
 
 impl TurnInputMode {
@@ -279,6 +305,9 @@ impl ServerRuntime {
             connections: Mutex::new(HashMap::new()),
             active_tasks: Mutex::new(HashMap::new()),
             active_turn_cancellations: Mutex::new(HashMap::new()),
+            active_turn_connections: Mutex::new(HashMap::new()),
+            terminal_turn_statuses: Mutex::new(VecDeque::new()),
+            acp_prompt_waiters: Mutex::new(HashMap::new()),
             active_goal_continuation_turns: Mutex::new(HashMap::new()),
             goal_continuation_turn_goals: Mutex::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),

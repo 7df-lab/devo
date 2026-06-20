@@ -26,6 +26,8 @@ type ProgressCallback = dyn Fn(&str, &str) + Send + Sync;
 type ProgressCallbackArc = Arc<ProgressCallback>;
 type CompletionCallback = dyn Fn(&ToolCallResult) + Send + Sync;
 type CompletionCallbackArc = Arc<CompletionCallback>;
+type ExecutionStartCallback = dyn Fn(&ToolCall) + Send + Sync;
+type ExecutionStartCallbackArc = Arc<ExecutionStartCallback>;
 type PermissionFuture = futures::future::BoxFuture<'static, Result<(), String>>;
 type PermissionCheckFn = dyn Fn(ToolPermissionRequest) -> PermissionFuture + Send + Sync;
 const PROGRESS_DRAIN_GRACE_MS: u64 = 50;
@@ -280,6 +282,9 @@ impl ToolRuntime {
             }
         }
 
+        if let Some(callback) = &self.execution_options.on_tool_execution_start {
+            callback(call);
+        }
         info!(tool = %tool_name, id = %call.id, "executing tool");
 
         let ctx = crate::contracts::ToolContext {
@@ -525,10 +530,27 @@ impl std::fmt::Debug for ToolRuntimeContext {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolExecutionOptions {
     pub budgets: ToolBudgets,
     pub cancel_token: CancellationToken,
+    pub on_tool_execution_start: Option<ExecutionStartCallbackArc>,
+}
+
+impl std::fmt::Debug for ToolExecutionOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolExecutionOptions")
+            .field("budgets", &self.budgets)
+            .field("cancel_token", &self.cancel_token)
+            .field(
+                "on_tool_execution_start",
+                &self
+                    .on_tool_execution_start
+                    .as_ref()
+                    .map(|_| "<configured>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for ToolExecutionOptions {
@@ -539,6 +561,7 @@ impl Default for ToolExecutionOptions {
                 wall_time_limit_ms: Some(6_000),
             },
             cancel_token: CancellationToken::new(),
+            on_tool_execution_start: None,
         }
     }
 }

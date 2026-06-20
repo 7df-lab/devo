@@ -15,81 +15,6 @@ enum AutoReviewOutcome {
 }
 
 impl ServerRuntime {
-    pub(super) async fn handle_approval_respond(
-        &self,
-        request_id: serde_json::Value,
-        params: serde_json::Value,
-    ) -> serde_json::Value {
-        let params: ApprovalRespondParams = match serde_json::from_value(params) {
-            Ok(params) => params,
-            Err(error) => {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InvalidParams,
-                    format!("invalid approval/respond params: {error}"),
-                );
-            }
-        };
-
-        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::SessionNotFound,
-                "session does not exist",
-            );
-        };
-
-        let approval_id = params.approval_id.to_string();
-        let pending = {
-            let mut session = session_arc.lock().await;
-            let Some(pending) = session.pending_approvals.remove(&approval_id) else {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::ApprovalNotFound,
-                    "no pending approval request exists for this runtime",
-                );
-            };
-            if pending.turn_id != params.turn_id {
-                session.pending_approvals.insert(approval_id, pending);
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InvalidParams,
-                    "approval request belongs to a different turn",
-                );
-            }
-
-            if matches!(params.decision, ApprovalDecisionValue::Approve) {
-                apply_approval_scope(&mut session, &params.scope, &pending);
-            }
-            pending
-        };
-
-        self.emit_turn_item(
-            params.session_id,
-            params.turn_id,
-            ItemKind::ApprovalDecision,
-            TurnItem::ApprovalDecision(ApprovalDecisionItem {
-                approval_id: approval_id.clone(),
-                decision: approval_decision_label(&params.decision).to_string(),
-                scope: approval_scope_label(&params.scope).to_string(),
-            }),
-            serde_json::to_value(devo_protocol::ApprovalDecisionPayload {
-                approval_id: approval_id.clone().into(),
-                decision: approval_decision_label(&params.decision).to_string(),
-                scope: approval_scope_label(&params.scope).to_string(),
-            })
-            .expect("serialize approval decision payload"),
-        )
-        .await;
-
-        let _ = pending.tx.send(params.decision);
-        serde_json::to_value(SuccessResponse {
-            id: request_id,
-            result: serde_json::json!({ "approval_id": approval_id }),
-        })
-        .expect("serialize approval response")
-    }
-
     pub(super) fn build_permission_checker(
         self: &Arc<Self>,
         session_id: SessionId,
@@ -348,6 +273,15 @@ impl ServerRuntime {
         let approval_id = format!("approval-{}", request.tool_call_id);
         let (tx, rx) = oneshot::channel();
         let available_scopes = approval_scopes_for_request(&request);
+        let Some(connection_id) = self
+            .active_turn_connections
+            .lock()
+            .await
+            .get(&session_id)
+            .copied()
+        else {
+            return Err("no ACP client connection is available for permission request".to_string());
+        };
 
         let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
             return Err("session does not exist".to_string());
@@ -367,45 +301,62 @@ impl ServerRuntime {
             );
         }
 
-        let request_context = crate::PendingServerRequestContext {
-            request_id: approval_id.clone().into(),
-            request_kind: crate::ServerRequestKind::ItemPermissionsRequestApproval,
-            session_id,
-            turn_id: Some(turn_id),
-            item_id: None,
+        let request_params = acp_request_permission_params(session_id, &request, &available_scopes);
+        let response = match self
+            .send_request_to_connection(
+                connection_id,
+                devo_protocol::ACP_SESSION_REQUEST_PERMISSION_METHOD,
+                serde_json::to_value(request_params)
+                    .expect("serialize ACP permission request params"),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                session_arc
+                    .lock()
+                    .await
+                    .pending_approvals
+                    .remove(&approval_id);
+                return Err(format!("permission request failed: {error}"));
+            }
         };
-        let justification = request
-            .justification
-            .clone()
-            .unwrap_or_else(|| "Tool execution requires approval.".to_string());
-        let payload = ApprovalRequestPayload {
-            request: request_context,
-            approval_id: approval_id.clone().into(),
-            action_summary: request.action_summary.clone(),
-            justification: justification.clone(),
-            resource: Some(format!("{:?}", request.resource)),
-            available_scopes: available_scopes.clone(),
-            path: request.path.as_ref().map(|path| path.display().to_string()),
-            host: request.host.clone(),
-            target: request.target.clone(),
+        let response: devo_protocol::AcpRequestPermissionResponse =
+            match serde_json::from_value(response) {
+                Ok(response) => response,
+                Err(error) => {
+                    session_arc
+                        .lock()
+                        .await
+                        .pending_approvals
+                        .remove(&approval_id);
+                    return Err(format!(
+                        "invalid session/request_permission response: {error}"
+                    ));
+                }
+            };
+        let (decision, scope) = match approval_decision_from_acp_outcome(response.outcome) {
+            Ok(decision) => decision,
+            Err(error) => {
+                session_arc
+                    .lock()
+                    .await
+                    .pending_approvals
+                    .remove(&approval_id);
+                return Err(error);
+            }
         };
-        self.emit_turn_item(
-            session_id,
-            turn_id,
-            ItemKind::ApprovalRequest,
-            TurnItem::ApprovalRequest(ApprovalRequestItem {
-                approval_id: approval_id.clone(),
-                action_summary: request.action_summary,
-                justification,
-                resource: Some(format!("{:?}", request.resource)),
-                available_scopes,
-                path: request.path.map(|path| path.display().to_string()),
-                host: request.host,
-                target: request.target,
-            }),
-            serde_json::to_value(payload).expect("serialize approval request payload"),
-        )
-        .await;
+        let pending = {
+            let mut session = session_arc.lock().await;
+            let Some(pending) = session.pending_approvals.remove(&approval_id) else {
+                return Err("approval request was already resolved".to_string());
+            };
+            if matches!(decision, ApprovalDecisionValue::Approve) {
+                apply_approval_scope(&mut session, &scope, &pending);
+            }
+            pending
+        };
+        let _ = pending.tx.send(decision);
 
         match rx.await {
             Ok(ApprovalDecisionValue::Approve) => Ok(()),
@@ -467,26 +418,6 @@ fn policy_decision(
     }
 }
 
-fn approval_decision_label(decision: &ApprovalDecisionValue) -> &'static str {
-    match decision {
-        ApprovalDecisionValue::Approve => "approve",
-        ApprovalDecisionValue::Deny => "deny",
-        ApprovalDecisionValue::Cancel => "cancel",
-    }
-}
-
-fn approval_scope_label(scope: &ApprovalScopeValue) -> &'static str {
-    match scope {
-        ApprovalScopeValue::Once => "once",
-        ApprovalScopeValue::Turn => "turn",
-        ApprovalScopeValue::Session => "session",
-        ApprovalScopeValue::PathPrefix => "path_prefix",
-        ApprovalScopeValue::Host => "host",
-        ApprovalScopeValue::Tool => "tool",
-        ApprovalScopeValue::CommandPrefix => "command_prefix",
-    }
-}
-
 fn approval_scopes_for_request(request: &ToolPermissionRequest) -> Vec<String> {
     let mut scopes = vec![
         "once".to_string(),
@@ -504,6 +435,80 @@ fn approval_scopes_for_request(request: &ToolPermissionRequest) -> Vec<String> {
     }
     scopes.push("tool".to_string());
     scopes
+}
+
+fn acp_request_permission_params(
+    session_id: SessionId,
+    request: &ToolPermissionRequest,
+    available_scopes: &[String],
+) -> devo_protocol::AcpRequestPermissionParams {
+    devo_protocol::AcpRequestPermissionParams {
+        session_id,
+        tool_call: devo_protocol::AcpToolCallUpdate {
+            tool_call_id: request.tool_call_id.clone(),
+            title: Some(request.action_summary.clone()),
+            kind: Some(acp_tool_kind_for_permission_request(request)),
+            status: Some(devo_protocol::AcpToolCallStatus::Pending),
+            raw_input: Some(request.input.clone()),
+            raw_output: None,
+            content: Vec::new(),
+            meta: None,
+        },
+        options: acp_permission_options_for_scopes(available_scopes),
+        meta: None,
+    }
+}
+
+fn acp_permission_options_for_scopes(scopes: &[String]) -> Vec<devo_protocol::AcpPermissionOption> {
+    let mut options = vec![devo_protocol::AcpPermissionOption {
+        option_id: "allow_once".to_string(),
+        name: "Allow once".to_string(),
+        kind: devo_protocol::AcpPermissionOptionKind::AllowOnce,
+        meta: None,
+    }];
+    if scopes.iter().any(|scope| scope == "session") {
+        options.push(devo_protocol::AcpPermissionOption {
+            option_id: "allow_session".to_string(),
+            name: "Allow for session".to_string(),
+            kind: devo_protocol::AcpPermissionOptionKind::AllowAlways,
+            meta: None,
+        });
+    }
+    options.push(devo_protocol::AcpPermissionOption {
+        option_id: "reject_once".to_string(),
+        name: "Reject".to_string(),
+        kind: devo_protocol::AcpPermissionOptionKind::RejectOnce,
+        meta: None,
+    });
+    options
+}
+
+fn acp_tool_kind_for_permission_request(
+    request: &ToolPermissionRequest,
+) -> devo_protocol::AcpToolKind {
+    match request.resource {
+        devo_safety::ResourceKind::FileRead => devo_protocol::AcpToolKind::Read,
+        devo_safety::ResourceKind::FileWrite => devo_protocol::AcpToolKind::Edit,
+        devo_safety::ResourceKind::ShellExec => devo_protocol::AcpToolKind::Execute,
+        devo_safety::ResourceKind::Network => devo_protocol::AcpToolKind::Fetch,
+        devo_safety::ResourceKind::Custom(_) => devo_protocol::AcpToolKind::Other,
+    }
+}
+
+fn approval_decision_from_acp_outcome(
+    outcome: devo_protocol::AcpPermissionOutcome,
+) -> Result<(ApprovalDecisionValue, ApprovalScopeValue), String> {
+    match outcome {
+        devo_protocol::AcpPermissionOutcome::Selected { option_id } => match option_id.as_str() {
+            "allow_once" => Ok((ApprovalDecisionValue::Approve, ApprovalScopeValue::Once)),
+            "allow_session" => Ok((ApprovalDecisionValue::Approve, ApprovalScopeValue::Session)),
+            "reject_once" => Ok((ApprovalDecisionValue::Deny, ApprovalScopeValue::Once)),
+            _ => Err(format!("unknown permission option selected: {option_id}")),
+        },
+        devo_protocol::AcpPermissionOutcome::Cancelled => {
+            Ok((ApprovalDecisionValue::Cancel, ApprovalScopeValue::Once))
+        }
+    }
 }
 
 fn apply_approval_scope(

@@ -405,7 +405,27 @@ async fn acp_session_additional_directories_roundtrip_new_load_and_resume() -> R
         vec![resume_root.clone()]
     );
     let listed = list_acp_sessions(&runtime, connection_id, 18, Some(&cwd), None).await?;
-    assert_eq!(listed.sessions[0].additional_directories, vec![resume_root]);
+    assert_eq!(
+        listed.sessions[0].additional_directories,
+        vec![resume_root.clone()]
+    );
+
+    let restored_runtime = build_runtime(data_root.path())?;
+    restored_runtime.load_persisted_sessions().await?;
+    let (restored_connection_id, _notifications_rx) =
+        initialize_acp_connection(&restored_runtime).await?;
+    let restored_listed = list_acp_sessions(
+        &restored_runtime,
+        restored_connection_id,
+        19,
+        Some(&cwd),
+        None,
+    )
+    .await?;
+    assert_eq!(
+        restored_listed.sessions[0].additional_directories,
+        vec![resume_root]
+    );
     Ok(())
 }
 
@@ -420,6 +440,39 @@ async fn acp_session_load_and_resume_accept_mcp_servers() -> Result<()> {
     std::fs::create_dir_all(&cwd)?;
 
     let session_id = create_acp_session(&runtime, connection_id, &cwd, 19).await?;
+    let wrong_cwd = data_root.path().join("wrong-repo");
+    std::fs::create_dir_all(&wrong_cwd)?;
+
+    assert_acp_error_message(
+        &runtime,
+        connection_id,
+        serde_json::json!({
+            "id": 22,
+            "method": "session/load",
+            "params": {
+                "sessionId": session_id,
+                "cwd": path_value(&wrong_cwd),
+                "mcpServers": [stdio_mcp_server_value("rejected-load-tools", &load_mcp_command)]
+            }
+        }),
+        "session/load cwd does not match the stored session cwd",
+    )
+    .await?;
+    assert_acp_error_message(
+        &runtime,
+        connection_id,
+        serde_json::json!({
+            "id": 23,
+            "method": "session/resume",
+            "params": {
+                "sessionId": session_id,
+                "cwd": path_value(&wrong_cwd),
+                "mcpServers": [stdio_mcp_server_value("rejected-resume-tools", &resume_mcp_command)]
+            }
+        }),
+        "session/resume cwd does not match the stored session cwd",
+    )
+    .await?;
 
     let load_response = runtime
         .handle_incoming(
@@ -487,6 +540,12 @@ logout = true
     assert_eq!(
         initialize.agent_capabilities.auth.logout,
         Some(serde_json::json!({}))
+    );
+    assert!(
+        initialize
+            .meta
+            .as_ref()
+            .is_some_and(|meta| !meta.contains_key("devo/serverHome"))
     );
     let cwd = data_root.path().join("repo");
     std::fs::create_dir_all(&cwd)?;

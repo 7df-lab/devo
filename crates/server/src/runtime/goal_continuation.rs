@@ -76,6 +76,8 @@ impl ServerRuntime {
                     started_at: now,
                     completed_at: None,
                     usage: None,
+                    stop_reason: None,
+                    failure_reason: None,
                 };
                 session.summary.status = SessionRuntimeStatus::ActiveTurn;
                 session.summary.updated_at = now;
@@ -812,6 +814,8 @@ mod tests {
             started_at: completed_at - chrono::Duration::seconds(1),
             completed_at: Some(completed_at),
             usage: None,
+            stop_reason: None,
+            failure_reason: None,
         }
     }
 

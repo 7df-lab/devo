@@ -703,9 +703,9 @@ pub(crate) struct RuntimeSession {
     /// Session-specific tool registry, used when the session was created with
     /// request-scoped tool sources such as ACP MCP servers.
     pub(crate) tool_registry: Option<Arc<ToolRegistry>>,
-    /// Session-scoped approvals granted through approval/respond.
+    /// Session-scoped approvals granted through ACP permission responses.
     pub(crate) session_approval_cache: ApprovalGrantCache,
-    /// Turn-scoped approvals granted through approval/respond.
+    /// Turn-scoped approvals granted through ACP permission responses.
     pub(crate) turn_approval_cache: ApprovalGrantCache,
 }
 

@@ -503,6 +503,8 @@ impl TurnProjector for DefaultProjection {
             started_at: turn.started_at,
             completed_at: turn.completed_at,
             usage: turn.usage.clone(),
+            stop_reason: turn.stop_reason.clone(),
+            failure_reason: turn.failure_reason,
         }
     }
 }

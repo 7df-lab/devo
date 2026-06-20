@@ -51,6 +51,8 @@ impl ServerRuntime {
                 opt_out_notification_methods: HashSet::new(),
                 subscriptions: Vec::new(),
                 next_event_seq: 1,
+                next_client_request_id: 1,
+                pending_client_requests: HashMap::new(),
             },
         );
         tracing::info!(
@@ -67,8 +69,17 @@ impl ServerRuntime {
 
     pub async fn unregister_connection(&self, connection_id: u64) {
         let mut connections = self.connections.lock().await;
-        let removed = connections.remove(&connection_id);
+        let mut removed = connections.remove(&connection_id);
         drop(connections);
+        if let Some(connection) = removed.as_mut() {
+            for (_, pending) in connection.pending_client_requests.drain() {
+                let _ = pending.send(Err("client connection closed".to_string()));
+            }
+        }
+        self.active_turn_connections
+            .lock()
+            .await
+            .retain(|_, active_connection_id| *active_connection_id != connection_id);
         self.reference_searches
             .lock()
             .await
@@ -90,6 +101,14 @@ impl ServerRuntime {
         connection_id: u64,
         message: serde_json::Value,
     ) -> Option<serde_json::Value> {
+        if message.get("method").is_none()
+            && message.get("id").is_some()
+            && (message.get("result").is_some() || message.get("error").is_some())
+        {
+            self.resolve_pending_client_response(connection_id, message)
+                .await;
+            return None;
+        }
         let method = message.get("method")?.as_str()?.to_string();
         let id = message.get("id").cloned();
         let params = message
@@ -239,20 +258,20 @@ impl ServerRuntime {
                 Some(self.handle_message_edit_previous(id?, params).await)
             }
             // TODO: start a new user turn, maybe should change name to "turn/submit"
-            Some(ClientMethod::TurnStart) => Some(self.handle_turn_start(id?, params).await),
-            Some(ClientMethod::TurnShellCommand) => {
-                Some(self.handle_turn_shell_command(id?, params).await)
-            }
+            Some(ClientMethod::TurnStart) => Some(
+                self.handle_turn_start_for_connection(Some(connection_id), id?, params)
+                    .await,
+            ),
+            Some(ClientMethod::TurnShellCommand) => Some(
+                self.handle_turn_shell_command_for_connection(Some(connection_id), id?, params)
+                    .await,
+            ),
             // interupt the current working turn
             Some(ClientMethod::TurnInterrupt) => {
                 Some(self.handle_turn_interrupt(id?, params).await)
             }
             Some(ClientMethod::TurnSteer) => {
                 Some(self.handle_turn_steer(connection_id, id?, params).await)
-            }
-            // client approval result
-            Some(ClientMethod::ApprovalRespond) => {
-                Some(self.handle_approval_respond(id?, params).await)
             }
             Some(ClientMethod::RequestUserInputRespond) => {
                 Some(self.handle_request_user_input_respond(id?, params).await)
@@ -434,6 +453,87 @@ impl ServerRuntime {
         send_connection_notification(notification).await;
     }
 
+    pub(super) async fn send_request_to_connection(
+        &self,
+        connection_id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let (request_id, receiver, notification) = {
+            let mut connections = self.connections.lock().await;
+            let Some(connection) = connections.get_mut(&connection_id) else {
+                return Err("client connection does not exist".to_string());
+            };
+            let request_id = connection.next_client_request_id;
+            connection.next_client_request_id += 1;
+            let (tx, rx) = oneshot::channel();
+            connection.pending_client_requests.insert(request_id, tx);
+            let value = serde_json::to_value(devo_protocol::AcpClientRequest::new(
+                serde_json::json!(request_id),
+                method,
+                params,
+            ))
+            .map_err(|error| format!("failed to serialize client request: {error}"))?;
+            (
+                request_id,
+                rx,
+                PendingConnectionNotification {
+                    connection_id,
+                    method: method.to_string(),
+                    event_seq: 0,
+                    sender: connection.sender.clone(),
+                    value,
+                },
+            )
+        };
+        if !send_connection_notification(notification).await {
+            if let Some(connection) = self.connections.lock().await.get_mut(&connection_id) {
+                connection.pending_client_requests.remove(&request_id);
+            }
+            return Err("client connection closed before request was sent".to_string());
+        }
+        let message = receiver
+            .await
+            .map_err(|_| "client connection closed before responding".to_string())??;
+        if let Some(error) = message.get("error") {
+            return Err(error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("client returned an error response")
+                .to_string());
+        }
+        Ok(message
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+
+    async fn resolve_pending_client_response(
+        &self,
+        connection_id: u64,
+        message: serde_json::Value,
+    ) {
+        let Some(request_id) = message.get("id").and_then(serde_json::Value::as_u64) else {
+            tracing::warn!(connection_id, "dropping client response with non-u64 id");
+            return;
+        };
+        let pending = {
+            let mut connections = self.connections.lock().await;
+            connections
+                .get_mut(&connection_id)
+                .and_then(|connection| connection.pending_client_requests.remove(&request_id))
+        };
+        if let Some(pending) = pending {
+            let _ = pending.send(Ok(message));
+        } else {
+            tracing::warn!(
+                connection_id,
+                request_id,
+                "dropping response for unknown server-initiated request"
+            );
+        }
+    }
+
     pub(super) fn error_response(
         &self,
         request_id: serde_json::Value,
@@ -484,6 +584,8 @@ pub(crate) struct ConnectionRuntime {
     pub(crate) opt_out_notification_methods: HashSet<String>,
     pub(crate) subscriptions: Vec<SubscriptionFilter>,
     next_event_seq: u64,
+    next_client_request_id: u64,
+    pending_client_requests: HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>,
 }
 
 impl ConnectionRuntime {
@@ -541,7 +643,7 @@ impl SubscriptionFilter {
     }
 }
 
-async fn send_connection_notification(notification: PendingConnectionNotification) {
+async fn send_connection_notification(notification: PendingConnectionNotification) -> bool {
     let PendingConnectionNotification {
         connection_id,
         method,
@@ -590,7 +692,7 @@ async fn send_connection_notification(notification: PendingConnectionNotificatio
                 event_seq,
                 "client notification receiver dropped"
             );
-            return;
+            return false;
         }
         Err(_) => {
             tracing::warn!(
@@ -609,7 +711,7 @@ async fn send_connection_notification(notification: PendingConnectionNotificatio
                         event_seq,
                         "client notification receiver dropped during backpressure"
                     );
-                    return;
+                    return false;
                 }
             }
         }
@@ -625,6 +727,7 @@ async fn send_connection_notification(notification: PendingConnectionNotificatio
         );
     }
     permit.send(value);
+    true
 }
 
 fn stream_trace_elapsed_ms() -> u128 {
