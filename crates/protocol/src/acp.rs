@@ -139,17 +139,28 @@ fn acp_update_from_server_event(event: &ServerEvent) -> Option<AcpSessionUpdate>
                 meta: None,
             })
         }
-        ServerEvent::ToolCallStatusUpdated(payload) => Some(AcpSessionUpdate::ToolCallUpdate {
-            tool_call_id: payload.tool_call_id.clone(),
-            title: None,
-            kind: None,
-            status: acp_tool_call_status_from_str(payload.status.as_str()),
-            raw_input: None,
-            raw_output: None,
-            content: Vec::new(),
-            locations: Vec::new(),
-            meta: None,
-        }),
+        ServerEvent::ToolCallStatusUpdated(payload) => {
+            let content = payload
+                .terminal_id
+                .as_ref()
+                .map(|terminal_id| {
+                    vec![AcpToolCallContent::Terminal {
+                        terminal_id: terminal_id.clone(),
+                    }]
+                })
+                .unwrap_or_default();
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: payload.tool_call_id.clone(),
+                title: None,
+                kind: None,
+                status: acp_tool_call_status_from_str(payload.status.as_str()),
+                raw_input: None,
+                raw_output: None,
+                content,
+                locations: Vec::new(),
+                meta: None,
+            })
+        }
         ServerEvent::ItemDelta {
             delta_kind,
             payload,
@@ -258,6 +269,16 @@ fn acp_update_from_item_completed(payload: &ItemEventPayload) -> Option<AcpSessi
             let command =
                 serde_json::from_value::<CommandExecutionPayload>(payload.item.payload.clone())
                     .ok()?;
+            let content = command
+                .output
+                .as_ref()
+                .and_then(serde_json::Value::as_str)
+                .map(|text| {
+                    vec![AcpToolCallContent::Content {
+                        content: AcpContentBlock::text(text),
+                    }]
+                })
+                .unwrap_or_default();
             Some(AcpSessionUpdate::ToolCallUpdate {
                 tool_call_id: command.tool_call_id,
                 title: Some(command.command),
@@ -269,7 +290,7 @@ fn acp_update_from_item_completed(payload: &ItemEventPayload) -> Option<AcpSessi
                 }),
                 raw_input: command.input,
                 raw_output: command.output,
-                content: Vec::new(),
+                content,
                 locations: Vec::new(),
                 meta: None,
             })
@@ -356,9 +377,22 @@ fn file_change_tool_content(change: &FileChangePayload) -> Vec<AcpToolCallConten
                 old_text: Some(content.clone()),
                 new_text: String::new(),
             },
-            crate::protocol::FileChange::Update { unified_diff, .. } => {
-                AcpToolCallContent::Content {
-                    content: AcpContentBlock::text(unified_diff.clone()),
+            crate::protocol::FileChange::Update {
+                unified_diff,
+                old_text,
+                new_text,
+                ..
+            } => {
+                if let (Some(old_text), Some(new_text)) = (old_text, new_text) {
+                    AcpToolCallContent::Diff {
+                        path: path.clone(),
+                        old_text: Some(old_text.clone()),
+                        new_text: new_text.clone(),
+                    }
+                } else {
+                    AcpToolCallContent::Content {
+                        content: AcpContentBlock::text(unified_diff.clone()),
+                    }
                 }
             }
         })
@@ -466,6 +500,9 @@ fn acp_tool_content_from_value(value: &serde_json::Value) -> Option<Vec<AcpToolC
     }
 
     let mcp_contents = value.get("content")?;
+    if let Ok(contents) = serde_json::from_value::<Vec<AcpToolCallContent>>(mcp_contents.clone()) {
+        return Some(contents);
+    }
     let contents = serde_json::from_value::<Vec<AcpContentBlock>>(mcp_contents.clone()).ok()?;
     Some(
         contents
@@ -1169,6 +1206,8 @@ mod tests {
                 path,
                 crate::protocol::FileChange::Update {
                     unified_diff: unified_diff.to_string(),
+                    old_text: None,
+                    new_text: None,
                     move_path: None,
                 },
             )],
@@ -1179,6 +1218,36 @@ mod tests {
             file_change_tool_content(&change),
             vec![AcpToolCallContent::Content {
                 content: AcpContentBlock::text(unified_diff)
+            }]
+        );
+    }
+
+    #[test]
+    fn file_change_update_emits_acp_diff_when_old_new_text_is_available() {
+        let path = PathBuf::from("src/lib.rs");
+        let change = FileChangePayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("write".to_string()),
+            input: None,
+            changes: vec![(
+                path.clone(),
+                crate::protocol::FileChange::Update {
+                    unified_diff: "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n"
+                        .to_string(),
+                    old_text: Some("old\n".to_string()),
+                    new_text: Some("new\n".to_string()),
+                    move_path: None,
+                },
+            )],
+            is_error: false,
+        };
+
+        assert_eq!(
+            file_change_tool_content(&change),
+            vec![AcpToolCallContent::Diff {
+                path,
+                old_text: Some("old\n".to_string()),
+                new_text: "new\n".to_string(),
             }]
         );
     }
@@ -1244,6 +1313,111 @@ mod tests {
                 },
                 meta: None,
             }
+        );
+    }
+
+    #[test]
+    fn command_execution_completion_emits_text_content() {
+        let session_id = SessionId::new();
+        let payload_value = serde_json::to_value(CommandExecutionPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "exec_command".to_string(),
+            command: "cargo test".to_string(),
+            input: Some(serde_json::json!({"cmd": "cargo test"})),
+            source: crate::protocol::ExecCommandSource::Agent,
+            command_actions: Vec::new(),
+            output: Some(serde_json::Value::String("tests passed\n".to_string())),
+            is_error: false,
+        })
+        .expect("serialize command execution payload");
+        let event = ServerEvent::ItemCompleted(ItemEventPayload {
+            context: EventContext {
+                session_id,
+                turn_id: Some(TurnId::new()),
+                item_id: Some(ItemId::new()),
+                seq: 1,
+            },
+            item: crate::ItemEnvelope {
+                item_id: ItemId::new(),
+                item_kind: ItemKind::CommandExecution,
+                payload: payload_value.clone(),
+            },
+        });
+
+        assert_eq!(
+            acp_update_from_server_event(&event),
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: "call-1".to_string(),
+                title: Some("cargo test".to_string()),
+                kind: Some(AcpToolKind::Execute),
+                status: Some(AcpToolCallStatus::Completed),
+                raw_input: Some(serde_json::json!({"cmd": "cargo test"})),
+                raw_output: Some(serde_json::Value::String("tests passed\n".to_string())),
+                content: vec![AcpToolCallContent::Content {
+                    content: AcpContentBlock::text("tests passed\n"),
+                }],
+                locations: Vec::new(),
+                meta: None,
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_metadata_content_can_emit_terminal_content() {
+        let session_id = SessionId::new();
+        let raw_output = serde_json::json!({
+            "content": [
+                {
+                    "type": "terminal",
+                    "terminalId": "term_1"
+                }
+            ],
+            "output": "done\n",
+            "truncated": false,
+            "exitStatus": {
+                "exitCode": 0,
+                "signal": null
+            }
+        });
+        let payload_value = serde_json::to_value(ToolResultPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("shell_command".to_string()),
+            input: Some(serde_json::json!({"command": "echo done"})),
+            content: raw_output.clone(),
+            display_content: None,
+            is_error: false,
+            summary: "Command executed".to_string(),
+        })
+        .expect("serialize tool result payload");
+        let event = ServerEvent::ItemCompleted(ItemEventPayload {
+            context: EventContext {
+                session_id,
+                turn_id: Some(TurnId::new()),
+                item_id: Some(ItemId::new()),
+                seq: 1,
+            },
+            item: crate::ItemEnvelope {
+                item_id: ItemId::new(),
+                item_kind: ItemKind::ToolResult,
+                payload: payload_value,
+            },
+        });
+
+        assert_eq!(
+            acp_update_from_server_event(&event),
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: "call-1".to_string(),
+                title: Some("Command executed".to_string()),
+                kind: Some(AcpToolKind::Execute),
+                status: Some(AcpToolCallStatus::Completed),
+                raw_input: Some(serde_json::json!({"command": "echo done"})),
+                raw_output: Some(raw_output),
+                content: vec![AcpToolCallContent::Terminal {
+                    terminal_id: "term_1".to_string(),
+                }],
+                locations: Vec::new(),
+                meta: None,
+            })
         );
     }
 
@@ -1314,6 +1488,7 @@ mod tests {
             turn_id,
             tool_call_id: "call-1".to_string(),
             status: "in_progress".to_string(),
+            terminal_id: None,
         });
         let (_, update_value) =
             acp_notification_from_server_event("tool_call/status_updated", &update);
@@ -1324,6 +1499,36 @@ mod tests {
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": "call-1",
                 "status": "in_progress"
+            })
+        );
+    }
+
+    #[test]
+    fn tool_status_update_can_emit_terminal_content() {
+        let session_id = SessionId::new();
+        let turn_id = TurnId::new();
+        let update = ServerEvent::ToolCallStatusUpdated(crate::ToolCallStatusUpdatedPayload {
+            session_id,
+            turn_id,
+            tool_call_id: "call-1".to_string(),
+            status: "in_progress".to_string(),
+            terminal_id: Some("term_1".to_string()),
+        });
+        let (_, update_value) =
+            acp_notification_from_server_event("tool_call/status_updated", &update);
+
+        assert_eq!(
+            update_value["update"],
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "status": "in_progress",
+                "content": [
+                    {
+                        "type": "terminal",
+                        "terminalId": "term_1"
+                    }
+                ]
             })
         );
     }

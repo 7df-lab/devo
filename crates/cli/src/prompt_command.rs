@@ -97,6 +97,7 @@ pub(crate) async fn run_prompt(
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
             client_filesystem: None,
+            client_terminal: None,
             local_web_search: None,
             hooks: (!app_config.hooks.is_empty()).then(|| devo_core::HookRuntimeContext {
                 runner: devo_core::HookRunner::new(app_config.hooks.clone()),
@@ -467,13 +468,27 @@ fn write_query_event_jsonl(session_id: &str, event: &QueryEvent) -> Result<()> {
         QueryEvent::ToolExecutionStart { .. } => Ok(()),
         QueryEvent::ToolProgress {
             tool_use_id,
-            content,
-        } => write_jsonl(&PromptJsonlEvent::ToolProgress {
-            session_id,
-            item_type: "tool_result",
-            tool_call_id: tool_use_id,
-            delta: content,
-        }),
+            progress,
+        } => {
+            let delta = match progress {
+                devo_core::tools::ToolProgress::OutputDelta { delta } => Some(delta.as_str()),
+                devo_core::tools::ToolProgress::StatusUpdate { message, .. } => {
+                    Some(message.as_str())
+                }
+                devo_core::tools::ToolProgress::Completion { summary } => Some(summary.as_str()),
+                devo_core::tools::ToolProgress::Terminal { .. } => None,
+            };
+            if let Some(delta) = delta {
+                write_jsonl(&PromptJsonlEvent::ToolProgress {
+                    session_id,
+                    item_type: "tool_result",
+                    tool_call_id: tool_use_id,
+                    delta,
+                })
+            } else {
+                Ok(())
+            }
+        }
         QueryEvent::ToolResult {
             tool_use_id,
             tool_name,

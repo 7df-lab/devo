@@ -410,6 +410,18 @@ fn parse_edited_history_metadata(output: &serde_json::Value) -> Option<SessionHi
                     .and_then(serde_json::Value::as_str)
                     .map(ToOwned::to_owned)
                     .unwrap_or_else(|| diff.clone()),
+                old_text: file
+                    .get("oldContent")
+                    .or_else(|| file.get("preContent"))
+                    .or_else(|| file.get("pre_content"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                new_text: file
+                    .get("postContent")
+                    .or_else(|| file.get("post_content"))
+                    .or_else(|| file.get("content"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
                 move_path: file
                     .get("movePath")
                     .or_else(|| file.get("move_path"))
@@ -426,6 +438,8 @@ fn parse_edited_history_metadata(output: &serde_json::Value) -> Option<SessionHi
                 std::path::PathBuf::from(path),
                 devo_protocol::protocol::FileChange::Update {
                     unified_diff: diff.clone(),
+                    old_text: None,
+                    new_text: None,
                     move_path: None,
                 },
             );

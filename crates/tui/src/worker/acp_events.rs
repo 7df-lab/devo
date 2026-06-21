@@ -374,6 +374,8 @@ fn file_change_from_acp_diff(
         }
         Some(old_text) => devo_protocol::protocol::FileChange::Update {
             unified_diff: diffy::create_patch(&old_text, &new_text).to_string(),
+            old_text: Some(old_text),
+            new_text: Some(new_text),
             move_path: None,
         },
     }

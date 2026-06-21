@@ -284,6 +284,10 @@ pub enum FileChange {
     },
     Update {
         unified_diff: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_text: Option<String>,
         move_path: Option<PathBuf>,
     },
 }

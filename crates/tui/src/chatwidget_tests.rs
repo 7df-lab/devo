@@ -2606,6 +2606,8 @@ fn session_switch_restores_edited_metadata_into_history() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -6158,6 +6160,8 @@ fn transcript_overlay_lines_include_patch_input_and_diff_output() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -7225,6 +7229,8 @@ fn patch_applied_event_renders_edited_block() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -7287,6 +7293,8 @@ fn apply_patch_style_full_git_diff_reports_non_zero_counts() {
         PathBuf::from("update.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "diff --git a/update.txt b/update.txt\n--- a/update.txt\n+++ b/update.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -7336,6 +7344,8 @@ fn write_patch_applied_event_renders_edited_block() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -7363,6 +7373,8 @@ fn write_patch_applied_event_reports_non_zero_counts() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -7394,6 +7406,8 @@ fn patch_applied_event_with_diff_only_reports_non_zero_counts() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );

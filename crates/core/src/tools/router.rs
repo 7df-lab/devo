@@ -20,10 +20,11 @@ use crate::tool_spec::ToolCapabilityTag;
 use crate::tools::deferred_loading::is_subagent_agent_coordination_tool;
 use devo_tools::AgentToolCoordinator;
 use devo_tools::ClientFilesystem;
+use devo_tools::ClientTerminal;
 use devo_tools::ToolAgentScope;
 use tokio_util::sync::CancellationToken;
 
-type ProgressCallback = dyn Fn(&str, &str) + Send + Sync;
+type ProgressCallback = dyn Fn(&str, ToolProgress) + Send + Sync;
 type ProgressCallbackArc = Arc<ProgressCallback>;
 type CompletionCallback = dyn Fn(&ToolCallResult) + Send + Sync;
 type CompletionCallbackArc = Arc<CompletionCallback>;
@@ -136,7 +137,7 @@ impl ToolRuntime {
     pub async fn execute_batch_streaming(
         &self,
         calls: &[ToolCall],
-        on_progress: impl Fn(&str, &str) + Send + Sync + 'static,
+        on_progress: impl Fn(&str, ToolProgress) + Send + Sync + 'static,
     ) -> Vec<ToolCallResult> {
         self.execute_batch_inner(
             calls,
@@ -149,7 +150,7 @@ impl ToolRuntime {
     pub async fn execute_batch_streaming_with_completion(
         &self,
         calls: &[ToolCall],
-        on_progress: impl Fn(&str, &str) + Send + Sync + 'static,
+        on_progress: impl Fn(&str, ToolProgress) + Send + Sync + 'static,
         on_completion: impl Fn(&ToolCallResult) + Send + Sync + 'static,
     ) -> Vec<ToolCallResult> {
         self.execute_batch_inner(
@@ -300,6 +301,7 @@ impl ToolRuntime {
             collaboration_mode: self.context.collaboration_mode,
             agent_coordinator: self.context.agent_coordinator.clone(),
             client_filesystem: self.context.client_filesystem.clone(),
+            client_terminal: self.context.client_terminal.clone(),
             network_proxy: self.context.network_proxy.clone(),
         };
 
@@ -310,15 +312,7 @@ impl ToolRuntime {
                 let tool_use_id = call.id.clone();
                 let task = tokio::spawn(async move {
                     while let Some(progress) = progress_rx.recv().await {
-                        let content = match progress {
-                            ToolProgress::OutputDelta { delta } => delta,
-                            ToolProgress::StatusUpdate { message, percent } => match percent {
-                                Some(percent) => format!("{message} ({percent}%)"),
-                                None => message,
-                            },
-                            ToolProgress::Completion { summary } => summary,
-                        };
-                        callback(&tool_use_id, &content);
+                        callback(&tool_use_id, progress);
                     }
                 });
                 (Some(progress_tx), Some(task))
@@ -499,6 +493,7 @@ pub struct ToolRuntimeContext {
     pub collaboration_mode: devo_protocol::CollaborationMode,
     pub agent_coordinator: Option<Arc<dyn AgentToolCoordinator>>,
     pub client_filesystem: Option<Arc<dyn ClientFilesystem>>,
+    pub client_terminal: Option<Arc<dyn ClientTerminal>>,
     pub local_web_search: Option<ResolvedLocalWebSearchConfig>,
     pub hooks: Option<crate::hooks::HookRuntimeContext>,
     pub network_proxy: Option<String>,
@@ -520,6 +515,10 @@ impl std::fmt::Debug for ToolRuntimeContext {
             .field(
                 "client_filesystem",
                 &self.client_filesystem.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "client_terminal",
+                &self.client_terminal.as_ref().map(|_| "<configured>"),
             )
             .field(
                 "local_web_search",
@@ -1241,6 +1240,7 @@ mod tests {
                 collaboration_mode: devo_protocol::CollaborationMode::Build,
                 agent_coordinator: None,
                 client_filesystem: None,
+                client_terminal: None,
                 local_web_search: None,
                 hooks: None,
                 network_proxy: None,
@@ -1700,11 +1700,14 @@ mod tests {
         let progress_items_for_callback = Arc::clone(&progress_items);
 
         let results = runtime
-            .execute_batch_streaming(&[call], move |tool_use_id, content| {
+            .execute_batch_streaming(&[call], move |tool_use_id, progress| {
+                let ToolProgress::OutputDelta { delta } = progress else {
+                    return;
+                };
                 progress_items_for_callback
                     .lock()
                     .expect("progress lock")
-                    .push(format!("{tool_use_id}:{content}"));
+                    .push(format!("{tool_use_id}:{delta}"));
             })
             .await;
 

@@ -1,4 +1,5 @@
 pub mod client_fs;
+pub mod client_terminal;
 pub mod contracts;
 pub mod coordinator;
 pub mod errors;
@@ -11,6 +12,10 @@ pub mod tool_spec;
 pub mod tool_summary;
 
 pub use client_fs::{ClientFilesystem, ClientTextFileRead, ClientTextFileWrite};
+pub use client_terminal::{
+    ClientTerminal, ClientTerminalCreate, ClientTerminalCreateRequest, ClientTerminalEnv,
+    ClientTerminalExitStatus, ClientTerminalOutput, ClientTerminalRequest,
+};
 pub use contracts::{
     RedactionState, SessionMode, ToolAgentScope, ToolCallError, ToolContext, ToolPermissionProfile,
     ToolProgress, ToolProgressSender, ToolResult, ToolResultContent, ToolTerminalStatus,

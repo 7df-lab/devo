@@ -211,7 +211,12 @@ fn query_event_trace_kind(event: &QueryEvent) -> &'static str {
 fn query_event_trace_delta_len(event: &QueryEvent) -> usize {
     match event {
         QueryEvent::TextDelta(text) | QueryEvent::ReasoningDelta(text) => text.len(),
-        QueryEvent::ToolProgress { content, .. } => content.len(),
+        QueryEvent::ToolProgress { progress, .. } => match progress {
+            devo_core::tools::ToolProgress::OutputDelta { delta } => delta.len(),
+            devo_core::tools::ToolProgress::StatusUpdate { message, .. } => message.len(),
+            devo_core::tools::ToolProgress::Terminal { terminal_id } => terminal_id.len(),
+            devo_core::tools::ToolProgress::Completion { summary } => summary.len(),
+        },
         QueryEvent::ReasoningCompleted
         | QueryEvent::UsageDelta { .. }
         | QueryEvent::ToolUseStart { .. }
@@ -996,6 +1001,7 @@ impl ServerRuntime {
                 collaboration_mode: devo_protocol::CollaborationMode::Build,
                 agent_coordinator: None,
                 client_filesystem: None,
+                client_terminal: None,
                 local_web_search: None,
                 hooks: self.hook_context_for_session(session_id).await,
                 network_proxy,
@@ -1013,6 +1019,7 @@ impl ServerRuntime {
                                     turn_id: tool_execution_start_turn_id,
                                     tool_call_id,
                                     status: "in_progress".to_string(),
+                                    terminal_id: None,
                                 },
                             ))
                             .await;
@@ -1377,6 +1384,7 @@ impl ServerRuntime {
                                     turn_id: turn_for_events.turn_id,
                                     tool_call_id: id,
                                     status: "in_progress".to_string(),
+                                    terminal_id: None,
                                 },
                             ))
                             .await;
@@ -1566,6 +1574,18 @@ impl ServerRuntime {
                                                         .and_then(serde_json::Value::as_str)
                                                         .unwrap_or("")
                                                         .to_string(),
+                                                    old_text: file
+                                                        .get("oldContent")
+                                                        .or_else(|| file.get("preContent"))
+                                                        .or_else(|| file.get("pre_content"))
+                                                        .and_then(serde_json::Value::as_str)
+                                                        .map(ToOwned::to_owned),
+                                                    new_text: file
+                                                        .get("postContent")
+                                                        .or_else(|| file.get("post_content"))
+                                                        .or_else(|| file.get("content"))
+                                                        .and_then(serde_json::Value::as_str)
+                                                        .map(ToOwned::to_owned),
                                                     move_path: file
                                                         .get("movePath")
                                                         .or_else(|| file.get("move_path"))
@@ -1594,6 +1614,8 @@ impl ServerRuntime {
                                                         .and_then(serde_json::Value::as_str)
                                                         .unwrap_or("")
                                                         .to_string(),
+                                                    old_text: None,
+                                                    new_text: None,
                                                     move_path: None,
                                                 },
                                             )
@@ -1752,8 +1774,35 @@ impl ServerRuntime {
                     }
                     QueryEvent::ToolProgress {
                         tool_use_id,
-                        content,
+                        progress,
                     } => {
+                        let content = match progress {
+                            devo_core::tools::ToolProgress::OutputDelta { delta } => Some(delta),
+                            devo_core::tools::ToolProgress::StatusUpdate { message, percent } => {
+                                Some(match percent {
+                                    Some(percent) => format!("{message} ({percent}%)"),
+                                    None => message,
+                                })
+                            }
+                            devo_core::tools::ToolProgress::Completion { summary } => Some(summary),
+                            devo_core::tools::ToolProgress::Terminal { terminal_id } => {
+                                runtime
+                                    .broadcast_event(ServerEvent::ToolCallStatusUpdated(
+                                        devo_protocol::ToolCallStatusUpdatedPayload {
+                                            session_id,
+                                            turn_id: turn_for_events.turn_id,
+                                            tool_call_id: tool_use_id.clone(),
+                                            status: "in_progress".to_string(),
+                                            terminal_id: Some(terminal_id),
+                                        },
+                                    ))
+                                    .await;
+                                None
+                            }
+                        };
+                        let Some(content) = content else {
+                            continue;
+                        };
                         let item_id = command_execution_item_id_for_progress(
                             &pending_tool_calls,
                             &tool_use_id,
@@ -2083,6 +2132,7 @@ impl ServerRuntime {
                     collaboration_mode,
                     agent_coordinator: Some(Arc::clone(&self) as Arc<dyn AgentToolCoordinator>),
                     client_filesystem: Some(Arc::clone(&self) as Arc<dyn ClientFilesystem>),
+                    client_terminal: Some(Arc::clone(&self) as Arc<dyn ClientTerminal>),
                     local_web_search: match &turn_config.web_search {
                         devo_core::ResolvedWebSearchConfig::Local(config) => Some(config.clone()),
                         devo_core::ResolvedWebSearchConfig::Disabled

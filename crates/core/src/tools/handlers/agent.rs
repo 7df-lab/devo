@@ -671,6 +671,7 @@ mod tests {
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator,
             client_filesystem: None,
+            client_terminal: None,
             network_proxy: None,
         }
     }

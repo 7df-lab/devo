@@ -146,7 +146,7 @@ pub enum QueryEvent {
     /// Incremental output delta from a running tool.
     ToolProgress {
         tool_use_id: String,
-        content: String,
+        progress: crate::tools::ToolProgress,
     },
     /// A tool call completed.
     ToolResult {
@@ -1452,10 +1452,10 @@ pub async fn query(
             runtime
                 .execute_batch_streaming_with_completion(
                     &tool_calls,
-                    move |tool_use_id, content| {
+                    move |tool_use_id, progress| {
                         progress_events(QueryEvent::ToolProgress {
                             tool_use_id: tool_use_id.to_string(),
-                            content: content.to_string(),
+                            progress,
                         });
                     },
                     move |result| {
@@ -4726,8 +4726,8 @@ mod tests {
                     event,
                     QueryEvent::ToolProgress {
                         tool_use_id,
-                        content,
-                    } if tool_use_id == "tool-1" && content == "stream chunk\n"
+                        progress: crate::tools::ToolProgress::OutputDelta { delta },
+                    } if tool_use_id == "tool-1" && delta == "stream chunk\n"
                 )
             })
             .expect("tool progress event should be emitted");

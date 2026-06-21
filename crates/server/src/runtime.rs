@@ -44,6 +44,7 @@ use devo_core::message_to_response_items;
 use devo_core::query;
 use devo_core::tools::AgentToolCoordinator;
 use devo_core::tools::ClientFilesystem;
+use devo_core::tools::ClientTerminal;
 use devo_core::tools::PermissionChecker;
 use devo_core::tools::ToolAgentScope;
 use devo_core::tools::ToolCall;
@@ -145,6 +146,7 @@ use crate::subagent::SubagentOutputBuffer;
 use crate::subagent::SubagentStatus;
 
 mod acp_fs;
+mod acp_terminal;
 mod agents;
 mod approval;
 mod command_exec;
