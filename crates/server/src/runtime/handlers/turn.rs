@@ -79,15 +79,37 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        let workspace_root = {
+        let (workspace_root, runtime_context) = {
             let session = session_arc.lock().await;
-            params
+            let workspace_root = params
                 .cwd
                 .clone()
-                .unwrap_or_else(|| session.summary.cwd.clone())
+                .unwrap_or_else(|| session.summary.cwd.clone());
+            let runtime_context = if params
+                .cwd
+                .as_ref()
+                .is_some_and(|cwd| cwd != &session.summary.cwd)
+            {
+                None
+            } else {
+                Some(Arc::clone(&session.runtime_context))
+            };
+            (workspace_root, runtime_context)
         };
-        let Some(resolved_input) = (match self
-            .deps
+        let runtime_context = match runtime_context {
+            Some(runtime_context) => runtime_context,
+            None => match self.deps.context_for_workspace(&workspace_root).await {
+                Ok(runtime_context) => runtime_context,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to initialize session workspace: {error}"),
+                    );
+                }
+            },
+        };
+        let Some(resolved_input) = (match runtime_context
             .resolve_input_items(&params.input, Some(workspace_root.as_path()))
         {
             Ok(resolved_input) => resolved_input,
@@ -226,6 +248,7 @@ impl ServerRuntime {
                 let old_cwd = session.summary.cwd.clone();
                 if old_cwd != cwd {
                     cwd_change = Some((old_cwd, cwd.clone()));
+                    session.runtime_context = Arc::clone(&runtime_context);
                 }
                 session.summary.cwd = cwd.clone();
                 session.core_session.lock().await.cwd = cwd;
@@ -247,8 +270,8 @@ impl ServerRuntime {
                 .thinking
                 .clone()
                 .or_else(|| session.summary.thinking.clone());
-            let turn_config = self
-                .deps
+            let turn_config = session
+                .runtime_context
                 .resolve_turn_config(requested_model, requested_thinking.clone());
             let resolved_request = turn_config
                 .model
@@ -443,6 +466,19 @@ impl ServerRuntime {
             );
         };
 
+        let requested_runtime_context = match params.cwd.as_ref() {
+            Some(cwd) => match self.deps.context_for_workspace(cwd).await {
+                Ok(runtime_context) => Some(runtime_context),
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to initialize session workspace: {error}"),
+                    );
+                }
+            },
+            None => None,
+        };
         let now = Utc::now();
         let mut cwd_change = None;
         let (turn, cwd) = {
@@ -462,6 +498,9 @@ impl ServerRuntime {
                 let old_cwd = session.summary.cwd.clone();
                 if old_cwd != cwd {
                     cwd_change = Some((old_cwd, cwd.clone()));
+                    if let Some(runtime_context) = requested_runtime_context.as_ref() {
+                        session.runtime_context = Arc::clone(runtime_context);
+                    }
                 }
                 session.summary.cwd = cwd.clone();
                 session.core_session.lock().await.cwd = cwd;
@@ -818,7 +857,7 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        let (turn_id, workspace_root, btw_input_queue) = {
+        let (turn_id, workspace_root, btw_input_queue, runtime_context) = {
             let session = session_arc.lock().await;
             let Some(turn_id) = session.active_turn.as_ref().map(|turn| turn.turn_id) else {
                 return self.error_response(
@@ -846,10 +885,10 @@ impl ServerRuntime {
                 turn_id,
                 session.summary.cwd.clone(),
                 Arc::clone(&session.btw_input_queue),
+                Arc::clone(&session.runtime_context),
             )
         };
-        let resolved_input = match self
-            .deps
+        let resolved_input = match runtime_context
             .resolve_input_items(&params.input, Some(workspace_root.as_path()))
         {
             Ok(Some(resolved_input)) => resolved_input,

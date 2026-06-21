@@ -30,6 +30,7 @@ use crate::ProtocolErrorCode;
 use crate::ServerEvent;
 use crate::SkillRecord;
 use crate::SuccessResponse;
+use crate::session_context::SessionRuntimeContext;
 use devo_core::McpServerRecord;
 
 const REFERENCE_FILE_LIMIT: usize = 20;
@@ -178,12 +179,10 @@ impl ServerRuntime {
         connection_id: u64,
         params: ReferenceSearchStartParams,
     ) -> anyhow::Result<ReferenceSearchSnapshot> {
-        let cwd = params.cwd.unwrap_or_else(|| {
-            self.deps
-                .skill_workspace_root
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("."))
-        });
+        let cwd = params
+            .cwd
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let runtime_context = self.deps.context_for_workspace(&cwd).await?;
         let search_id = ReferenceSearchId::new();
         let (update_tx, update_rx) = mpsc::unbounded_channel();
         let reporter = Arc::new(ReferenceSearchReporter {
@@ -203,8 +202,8 @@ impl ServerRuntime {
         let state = ReferenceSearchState {
             connection_id,
             query: params.query,
-            skill_sources: skill_sources(&self.deps.discover_skills(Some(&cwd), false)?),
-            mcp_sources: self.mcp_sources(),
+            skill_sources: skill_sources(&runtime_context.discover_skills(Some(&cwd), false)?),
+            mcp_sources: Self::mcp_sources(&runtime_context),
             file_matches: Vec::new(),
             total_file_match_count: 0,
             scanned_file_count: 0,
@@ -313,8 +312,8 @@ impl ServerRuntime {
         self.emit_to_connection(connection_id, method, event).await;
     }
 
-    fn mcp_sources(&self) -> Vec<McpReferenceSource> {
-        self.deps
+    fn mcp_sources(runtime_context: &SessionRuntimeContext) -> Vec<McpReferenceSource> {
+        runtime_context
             .config_store
             .lock()
             .expect("app config store mutex should not be poisoned")

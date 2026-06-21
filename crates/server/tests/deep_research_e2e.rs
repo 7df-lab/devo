@@ -1107,7 +1107,6 @@ fn build_live_deepseek_runtime(
             "deepseek-v4-flash".to_string(),
             Arc::new(PresetModelCatalog::new(vec![deepseek_model()])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()
@@ -1143,7 +1142,6 @@ fn build_scripted_research_runtime_with_provider(
             "deepseek-v4-flash".to_string(),
             Arc::new(PresetModelCatalog::new(vec![deepseek_model()])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()

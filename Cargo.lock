@@ -1718,6 +1718,7 @@ dependencies = [
  "devo-util-paths",
  "devo-util-shell-command",
  "diffy",
+ "fs2",
  "futures",
  "image",
  "pretty_assertions",
@@ -1734,6 +1735,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 

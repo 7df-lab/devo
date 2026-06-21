@@ -910,7 +910,7 @@ impl ServerRuntime {
         session
             .tool_registry
             .clone()
-            .unwrap_or_else(|| Arc::clone(&self.deps.registry))
+            .unwrap_or_else(|| Arc::clone(&session.runtime_context.registry))
     }
 
     pub(super) async fn execute_shell_command_turn(
@@ -949,25 +949,26 @@ impl ServerRuntime {
             self.clear_active_turn_runtime_handles(session_id).await;
             return;
         };
-        let (permission_mode, permission_profile, registry) = {
+        let (permission_mode, permission_profile, registry, network_proxy) = {
             let session = session_arc.lock().await;
             let registry = self.tool_registry_for_session(&session);
             let core_session = session.core_session.lock().await;
+            let network_proxy = session
+                .runtime_context
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned")
+                .effective_config()
+                .provider_http
+                .proxy_url
+                .clone();
             (
                 core_session.config.permission_mode,
                 core_session.config.permission_profile.clone(),
                 registry,
+                network_proxy,
             )
         };
-        let network_proxy = self
-            .deps
-            .config_store
-            .lock()
-            .expect("app config store mutex should not be poisoned")
-            .effective_config()
-            .provider_http
-            .proxy_url
-            .clone();
         let turn_cancel_token = self
             .active_turn_cancellations
             .lock()
@@ -1972,7 +1973,13 @@ impl ServerRuntime {
         ) = {
             // Run the model query only after the event pipeline is ready so
             // streamed deltas can be consumed and persisted immediately.
-            let (core_session, agent_scope, agent_tool_policy, session_tool_registry) = {
+            let (
+                core_session,
+                agent_scope,
+                agent_tool_policy,
+                session_tool_registry,
+                runtime_context,
+            ) = {
                 let session = session_arc.lock().await;
                 let agent_scope = if session.summary.parent_session_id.is_some() {
                     ToolAgentScope::Subagent
@@ -1985,6 +1992,7 @@ impl ServerRuntime {
                     agent_scope,
                     session.agent_tool_policy,
                     registry,
+                    Arc::clone(&session.runtime_context),
                 )
             };
             let turn_goal = match &input_mode {
@@ -2035,7 +2043,7 @@ impl ServerRuntime {
                     Arc::new(devo_core::tools::ToolRegistry::new())
                 }
                 devo_protocol::AgentToolPolicy::DeepResearch => Arc::new(
-                    self.deps
+                    runtime_context
                         .registry
                         .restricted_to_specs(research::RESEARCH_WORKER_TOOL_NAMES),
                 ),
@@ -2050,8 +2058,7 @@ impl ServerRuntime {
                 .get(&session_id)
                 .cloned()
                 .unwrap_or_else(CancellationToken::new);
-            let network_proxy = self
-                .deps
+            let network_proxy = runtime_context
                 .config_store
                 .lock()
                 .expect("app config store mutex should not be poisoned")
@@ -2097,8 +2104,7 @@ impl ServerRuntime {
             let result = query(
                 &mut core_session,
                 &turn_config,
-                self.deps
-                    .provider_for_route(turn_config.provider_route.clone()),
+                runtime_context.provider_for_route(turn_config.provider_route.clone()),
                 registry,
                 &runtime,
                 Some(callback),
@@ -2395,8 +2401,8 @@ impl ServerRuntime {
                 .as_deref()
                 .or_else(|| session_model_selection(&session.summary));
             let thinking_override = session.summary.thinking.clone();
-            let turn_config = self
-                .deps
+            let turn_config = session
+                .runtime_context
                 .resolve_turn_config(model_override, thinking_override);
             let resolved_request = turn_config
                 .model
@@ -2534,7 +2540,7 @@ impl ServerRuntime {
                 .as_deref()
                 .or_else(|| session_model_selection(&session.summary));
             let thinking = session.summary.thinking.clone();
-            let tc = self.deps.resolve_turn_config(model, thinking);
+            let tc = session.runtime_context.resolve_turn_config(model, thinking);
             let rr = tc
                 .model
                 .resolve_thinking_selection(tc.thinking_selection.as_deref());

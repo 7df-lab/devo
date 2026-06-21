@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use devo_core::AppConfigStore;
 use devo_core::McpConfig;
 use devo_core::McpOutputLimits;
 use devo_core::McpRootsPolicy;
@@ -268,7 +269,7 @@ impl ServerRuntime {
             return acp_error_response(request_id, code, error);
         }
         let tool_registry = match self
-            .acp_session_tool_registry("session/load", &params.mcp_servers)
+            .acp_session_tool_registry("session/load", &params.mcp_servers, &params.cwd)
             .await
         {
             Ok(tool_registry) => tool_registry,
@@ -338,7 +339,7 @@ impl ServerRuntime {
             return acp_error_response(request_id, AcpErrorCode::InvalidParams, error);
         }
         let tool_registry = match self
-            .acp_session_tool_registry("session/new", &params.mcp_servers)
+            .acp_session_tool_registry("session/new", &params.mcp_servers, &params.cwd)
             .await
         {
             Ok(tool_registry) => tool_registry,
@@ -414,18 +415,23 @@ impl ServerRuntime {
         &self,
         method: &str,
         mcp_servers: &[AcpMcpServer],
+        cwd: &Path,
     ) -> Result<Option<Arc<devo_core::tools::ToolRegistry>>, String> {
         if mcp_servers.is_empty() {
             return Ok(None);
         }
 
         let mcp_config = acp_mcp_config(method, mcp_servers)?;
+        let user_config_dir = self
+            .deps
+            .config_store
+            .lock()
+            .expect("app config store mutex should not be poisoned")
+            .user_config_dir()
+            .to_path_buf();
+        let config_store = AppConfigStore::load(user_config_dir, Some(cwd))
+            .map_err(|error| format!("failed to load {method} workspace config: {error}"))?;
         let (tool_plan, oauth_store_mode) = {
-            let config_store = self
-                .deps
-                .config_store
-                .lock()
-                .expect("app config store mutex should not be poisoned");
             let config = config_store.effective_config();
             (
                 ToolPlanConfig::from_app_config(config),
@@ -470,7 +476,7 @@ impl ServerRuntime {
             return acp_error_response(request_id, code, error);
         }
         let tool_registry = match self
-            .acp_session_tool_registry("session/resume", &params.mcp_servers)
+            .acp_session_tool_registry("session/resume", &params.mcp_servers, &params.cwd)
             .await
         {
             Ok(tool_registry) => tool_registry,

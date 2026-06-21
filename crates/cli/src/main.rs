@@ -185,15 +185,11 @@ async fn run_cli() -> Result<()> {
             }
             Ok(())
         }
-        Some(Command::Server {
-            working_root,
-            transport,
-        }) => {
+        Some(Command::Server { transport }) => {
             let args = ServerProcessArgs {
-                working_root: working_root.clone(),
                 transport: *transport,
             };
-            let _logging = install_server_logging(&args, &cli)?;
+            let _logging = install_server_logging(&cli)?;
             run_server_process(args).await
         }
         None => {
@@ -239,9 +235,6 @@ enum Command {
     /// Start the runtime server process.
     #[command(hide = true)]
     Server {
-        /// Optional workspace root used for project-level config resolution.
-        #[arg(long)]
-        working_root: Option<std::path::PathBuf>,
         /// Override the transport mode used by this server process.
         #[arg(long, value_enum, hide = true, default_value_t = ServerTransportMode::Config)]
         transport: ServerTransportMode,
@@ -290,16 +283,14 @@ fn install_logging(cli: &Cli) -> Result<LoggingRuntime> {
     .map_err(Into::into)
 }
 
-fn install_server_logging(args: &ServerProcessArgs, cli: &Cli) -> Result<LoggingRuntime> {
+fn install_server_logging(cli: &Cli) -> Result<LoggingRuntime> {
     let home_dir = find_devo_home()?;
     let loader = devo_core::FileSystemAppConfigLoader::new(home_dir.clone())
         .with_cli_overrides(cli_logging_overrides(cli));
-    let app_config = loader
-        .load(args.working_root.as_deref())
-        .unwrap_or_else(|err| {
-            eprintln!("warning: failed to load app config for logging: {err}");
-            devo_core::AppConfig::default()
-        });
+    let app_config = loader.load(/*workspace_root*/ None).unwrap_or_else(|err| {
+        eprintln!("warning: failed to load app config for logging: {err}");
+        devo_core::AppConfig::default()
+    });
     LoggingBootstrap {
         process_name: "server",
         config: app_config.logging,
@@ -429,7 +420,6 @@ mod tests {
         };
         let server = Cli {
             command: Some(Command::Server {
-                working_root: None,
                 transport: devo_server::ServerTransportMode::Config,
             }),
             model: None,

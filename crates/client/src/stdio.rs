@@ -182,7 +182,6 @@ fn acp_client_capabilities() -> devo_protocol::AcpClientCapabilities {
 #[derive(Debug, Clone)]
 pub struct StdioServerClientConfig {
     pub program: PathBuf,
-    pub workspace_root: Option<PathBuf>,
     pub args: Vec<String>,
 }
 
@@ -223,15 +222,11 @@ impl StdioServerClient {
     pub async fn spawn(config: StdioServerClientConfig) -> Result<Self> {
         tracing::info!(
             program = %config.program.display(),
-            workspace_root = ?config.workspace_root,
             "spawning stdio server client"
         );
         let mut command = Command::new(&config.program);
         for arg in config.args {
             command.arg(arg);
-        }
-        if let Some(workspace_root) = config.workspace_root {
-            command.arg("--working-root").arg(workspace_root);
         }
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());

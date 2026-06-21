@@ -137,19 +137,21 @@ impl ServerRuntime {
         turn_id: TurnId,
         request: &ToolPermissionRequest,
     ) -> AutoReviewOutcome {
-        let model = {
+        let (model, runtime_context) = {
             let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
                 return AutoReviewOutcome::AskUser;
             };
             let session = session_arc.lock().await;
-            session
-                .summary
-                .model
-                .clone()
-                .unwrap_or_else(|| self.deps.default_model.clone())
+            (
+                session
+                    .summary
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| session.runtime_context.default_model.clone()),
+                Arc::clone(&session.runtime_context),
+            )
         };
-        let response = match self
-            .deps
+        let response = match runtime_context
             .provider
             .completion(build_approval_review_request(model, request))
             .await

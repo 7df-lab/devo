@@ -14,6 +14,8 @@ mod protocol;
 mod provider_config;
 mod runtime;
 mod session;
+mod session_context;
+mod singleton;
 pub mod subagent;
 mod titles;
 mod tool_actions;

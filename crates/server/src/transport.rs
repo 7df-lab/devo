@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::bail;
 use async_trait::async_trait;
 use devo_protocol::ErrorResponse;
 use devo_protocol::NotificationEnvelope;
@@ -15,6 +16,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -121,6 +123,7 @@ impl Default for EventBroadcaster {
 /// Default bind address used when the WebSocket transport is selected without
 /// an explicit host-and-port suffix.
 pub const DEFAULT_WEBSOCKET_BIND_ADDRESS: &str = "127.0.0.1:3210";
+const INTERNAL_PROXY_BIND_ADDRESS: &str = "127.0.0.1:0";
 
 /// Enumerates the supported listener targets parsed from server config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +135,27 @@ pub enum ListenTarget {
         /// The socket address host and port, without the `ws://` prefix.
         bind_address: String,
     },
+}
+
+/// Process-private loopback listener used by stdio proxy child processes.
+pub struct InternalProxyEndpoint {
+    listener: TcpListener,
+    endpoint: String,
+}
+
+impl InternalProxyEndpoint {
+    pub async fn bind() -> Result<Self> {
+        let listener = TcpListener::bind(INTERNAL_PROXY_BIND_ADDRESS).await?;
+        let local_addr = listener.local_addr()?;
+        Ok(Self {
+            listener,
+            endpoint: format!("ws://{local_addr}"),
+        })
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
 }
 
 /// Parses one configured listen-address string into a typed transport target.
@@ -172,11 +196,29 @@ pub fn resolve_listen_targets(listen: &[String]) -> Result<Vec<ListenTarget>> {
 /// Runs every configured listener target until shutdown.
 pub async fn run_listeners(runtime: Arc<ServerRuntime>, listen: &[String]) -> Result<()> {
     let targets = resolve_listen_targets(listen)?;
+    run_listener_tasks(runtime, targets, None).await
+}
 
-    let mut tasks = Vec::new();
+/// Runs configured listener targets plus the internal stdio-proxy endpoint.
+pub async fn run_listeners_with_internal_proxy(
+    runtime: Arc<ServerRuntime>,
+    listen: &[String],
+    internal_proxy: InternalProxyEndpoint,
+    token: String,
+) -> Result<()> {
+    let targets = resolve_listen_targets(listen)?;
+    run_listener_tasks(runtime, targets, Some((internal_proxy, token))).await
+}
+
+async fn run_listener_tasks(
+    runtime: Arc<ServerRuntime>,
+    targets: Vec<ListenTarget>,
+    internal_proxy: Option<(InternalProxyEndpoint, String)>,
+) -> Result<()> {
+    let mut tasks = JoinSet::new();
     for target in targets {
         let runtime = Arc::clone(&runtime);
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             match target {
                 ListenTarget::Stdio => {
                     tracing::info!("stdio listener active on stdin/stdout");
@@ -187,11 +229,17 @@ pub async fn run_listeners(runtime: Arc<ServerRuntime>, listen: &[String]) -> Re
                     run_websocket(runtime, &bind_address).await
                 }
             }
-        }));
+        });
     }
 
-    for task in tasks {
-        task.await??;
+    if let Some((internal_proxy, token)) = internal_proxy {
+        let runtime = Arc::clone(&runtime);
+        tasks.spawn(async move { run_internal_proxy(runtime, internal_proxy, token).await });
+    }
+
+    if let Some(result) = tasks.join_next().await {
+        tasks.abort_all();
+        result??;
     }
     Ok(())
 }
@@ -267,6 +315,89 @@ async fn run_stdio(runtime: Arc<ServerRuntime>) -> Result<()> {
     tracing::info!(connection_id, "stdio connection closed");
     writer_task.abort();
     producer_task.abort();
+    Ok(())
+}
+
+async fn run_internal_proxy(
+    runtime: Arc<ServerRuntime>,
+    internal_proxy: InternalProxyEndpoint,
+    token: String,
+) -> Result<()> {
+    let InternalProxyEndpoint { listener, endpoint } = internal_proxy;
+    tracing::info!(endpoint = %endpoint, "internal stdio proxy listener bound");
+    loop {
+        let (stream, remote_addr) = listener.accept().await?;
+        let runtime = Arc::clone(&runtime);
+        let token = token.clone();
+        tokio::spawn(async move {
+            tracing::info!(remote_addr = %remote_addr, "internal stdio proxy connected");
+            if let Err(error) = handle_internal_proxy_connection(runtime, stream, &token).await {
+                tracing::warn!(remote_addr = %remote_addr, error = %error, "internal stdio proxy closed with error");
+            }
+            tracing::info!(remote_addr = %remote_addr, "internal stdio proxy disconnected");
+        });
+    }
+}
+
+async fn handle_internal_proxy_connection(
+    runtime: Arc<ServerRuntime>,
+    stream: tokio::net::TcpStream,
+    expected_token: &str,
+) -> Result<()> {
+    let websocket = accept_async(stream).await?;
+    let (mut writer, mut reader) = websocket.split();
+    match reader.next().await {
+        Some(Ok(Message::Text(token))) if token.as_str() == expected_token => {}
+        Some(Ok(Message::Close(_))) | None => return Ok(()),
+        Some(Ok(_)) => bail!("internal stdio proxy did not send auth token"),
+        Some(Err(error)) => return Err(error.into()),
+    }
+
+    let (sender, mut receiver) = mpsc::channel(CONNECTION_NOTIFICATION_CHANNEL_CAPACITY);
+    let sender_clone = sender.clone();
+    let connection_id = runtime
+        .register_connection(ClientTransportKind::StdioProxy, sender)
+        .await;
+    tracing::info!(connection_id, "internal stdio proxy connection established");
+
+    let writer_task = tokio::spawn(async move {
+        while let Some(message) = receiver.recv().await {
+            writer
+                .send(Message::Text(
+                    serde_json::to_string(&message)
+                        .expect("serialize internal proxy response")
+                        .into(),
+                ))
+                .await?;
+        }
+        Result::<()>::Ok(())
+    });
+
+    while let Some(frame) = reader.next().await {
+        let frame = frame?;
+        match frame {
+            Message::Text(text) => {
+                let value: serde_json::Value = serde_json::from_str(&text)?;
+                if let Some(response) = runtime.handle_incoming(connection_id, value).await
+                    && !send_transport_queue_message(
+                        &sender_clone,
+                        response,
+                        connection_id,
+                        "internal_proxy_notifications",
+                    )
+                    .await
+                {
+                    break;
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    runtime.unregister_connection(connection_id).await;
+    tracing::info!(connection_id, "internal stdio proxy connection closed");
+    writer_task.abort();
     Ok(())
 }
 

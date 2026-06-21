@@ -42,8 +42,8 @@ impl ServerRuntime {
                 let session = session_arc.lock().await;
                 let requested_model = session_model_selection(&session.summary);
                 let requested_thinking = session.summary.thinking.clone();
-                let turn_config = self
-                    .deps
+                let turn_config = session
+                    .runtime_context
                     .resolve_turn_config(requested_model, requested_thinking);
                 let resolved_request = turn_config
                     .model

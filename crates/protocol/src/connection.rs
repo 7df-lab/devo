@@ -7,6 +7,7 @@ use serde::Serialize;
 #[serde(rename_all = "snake_case")]
 pub enum ClientTransportKind {
     Stdio,
+    StdioProxy,
     WebSocket,
 }
 

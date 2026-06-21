@@ -1,7 +1,7 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use anyhow::bail;
 use clap::Parser;
 use clap::ValueEnum;
 use devo_core::AgentsMdConfig;
@@ -21,7 +21,11 @@ use crate::db::Database;
 use crate::execution::ServerRuntimeDependencies;
 use crate::load_server_provider;
 use crate::resolve_listen_targets;
-use crate::run_listeners;
+use crate::run_listeners_with_internal_proxy;
+use crate::singleton::SingletonRole;
+use crate::singleton::acquire_singleton_role;
+use crate::singleton::run_stdio_proxy;
+use crate::transport::InternalProxyEndpoint;
 #[cfg(windows)]
 use crate::windows_tray::WindowsServerTray;
 
@@ -35,10 +39,6 @@ pub enum ServerTransportMode {
 #[derive(Debug, Clone, Parser)]
 #[command(name = "devo-server", version, about)]
 pub struct ServerProcessArgs {
-    /// Optional workspace root used for project-level config resolution.
-    #[arg(long)]
-    pub working_root: Option<PathBuf>,
-
     /// Override the transport mode used by this server process.
     #[arg(long, value_enum, hide = true, default_value_t = ServerTransportMode::Config)]
     pub transport: ServerTransportMode,
@@ -48,9 +48,31 @@ pub struct ServerProcessArgs {
 /// configuration and listener set.
 pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     let resolver = FileSystemConfigPathResolver::from_env()?;
+    let singleton_role = acquire_singleton_role(&resolver.user_config_dir())?;
+    let real_server_guard = match singleton_role {
+        SingletonRole::Real(guard) => guard,
+        SingletonRole::Proxy(metadata) => {
+            if args.transport != ServerTransportMode::Stdio {
+                bail!(
+                    "devo server is already running for this DEVO_HOME at {}",
+                    metadata.endpoint
+                );
+            }
+            tracing::info!(
+                pid = metadata.pid,
+                endpoint = %metadata.endpoint,
+                "proxying stdio to existing singleton server"
+            );
+            return run_stdio_proxy(metadata).await;
+        }
+    };
+    let internal_proxy = InternalProxyEndpoint::bind().await?;
+    let singleton_metadata =
+        real_server_guard.publish_endpoint(internal_proxy.endpoint().to_string())?;
+
     let config_store = Arc::new(std::sync::Mutex::new(AppConfigStore::load(
         resolver.user_config_dir(),
-        args.working_root.as_deref(),
+        /*workspace_root*/ None,
     )?));
     let config = config_store
         .lock()
@@ -72,11 +94,6 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
 
     tracing::info!(
         user_config = %resolver.user_config_file().display(),
-        project_config = args
-            .working_root
-            .as_deref()
-            .map(|root| resolver.project_config_file(root).display().to_string())
-            .unwrap_or_else(|| "<none>".into()),
         configured_listen = ?config.server.listen,
         effective_listen = ?effective_listen,
         max_connections = config.server.max_connections,
@@ -91,7 +108,7 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     let registry = handlers::build_registry_from_plan_with_mcp(&tool_plan, mcp_manager).await;
     let model_catalog: Arc<dyn ModelCatalog> = Arc::new(PresetModelCatalog::load_from_config(
         &resolver.user_config_dir(),
-        args.working_root.as_deref(),
+        /*workspace_root*/ None,
     )?);
     let default_model = model_catalog.resolve_for_turn(None)?.slug.clone();
     if !config.has_provider_configuration() {
@@ -104,13 +121,10 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
         Some(default_model.as_str()),
         &resolver.user_config_dir(),
     )?;
-    let skill_workspace_root = args.working_root.clone();
     let skill_catalog = Box::new(FileSystemSkillCatalog::with_devo_home(
         config.skills.clone(),
         resolver.user_config_dir(),
-        skill_workspace_root
-            .clone()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         config.project_root_markers.clone(),
     ));
     // Initialize SQLite database
@@ -129,7 +143,6 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
             provider.default_model,
             model_catalog,
             Arc::new(ProviderVendorCatalog::default()),
-            skill_workspace_root,
             skill_catalog,
             AgentsMdConfig {
                 project_root_markers: config.project_root_markers.clone(),
@@ -162,7 +175,12 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     #[cfg(windows)]
     {
         tokio::select! {
-            result = run_listeners(runtime.clone(), &effective_listen) => {
+            result = run_listeners_with_internal_proxy(
+                runtime.clone(),
+                &effective_listen,
+                internal_proxy,
+                singleton_metadata.token.clone(),
+            ) => {
                 result?;
             }
             result = tokio::signal::ctrl_c() => {
@@ -178,7 +196,12 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     #[cfg(not(windows))]
     {
         tokio::select! {
-            result = run_listeners(runtime.clone(), &effective_listen) => {
+            result = run_listeners_with_internal_proxy(
+                runtime.clone(),
+                &effective_listen,
+                internal_proxy,
+                singleton_metadata.token.clone(),
+            ) => {
                 result?;
             }
             result = tokio::signal::ctrl_c() => {
@@ -216,7 +239,6 @@ mod tests {
     fn server_process_args_default_to_config_transport() {
         let args = ServerProcessArgs::parse_from(["devo-server"]);
 
-        assert_eq!(args.working_root, None);
         assert_eq!(args.transport, ServerTransportMode::Config);
     }
 
@@ -224,7 +246,14 @@ mod tests {
     fn server_process_args_accept_stdio_transport_override() {
         let args = ServerProcessArgs::parse_from(["devo-server", "--transport", "stdio"]);
 
-        assert_eq!(args.working_root, None);
         assert_eq!(args.transport, ServerTransportMode::Stdio);
+    }
+
+    #[test]
+    fn server_process_args_reject_working_root() {
+        let error = ServerProcessArgs::try_parse_from(["devo-server", "--working-root", "."])
+            .expect_err("working root is no longer a server bootstrap parameter");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 }

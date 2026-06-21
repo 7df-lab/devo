@@ -32,6 +32,7 @@ use devo_core::tools::tool_handler::ToolHandler;
 use devo_core::tools::tool_spec::ToolExecutionMode;
 use devo_core::tools::tool_spec::ToolOutputMode;
 use devo_core::tools::tool_spec::ToolSpec;
+use devo_protocol::AcpNewSessionResult;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::RequestContent;
@@ -42,6 +43,7 @@ use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_provider::ModelProviderSDK;
 use devo_provider::SingleProviderRouter;
+use devo_server::AcpSuccessResponse;
 use devo_server::ClientTransportKind;
 use devo_server::ErrorResponse;
 use devo_server::ProtocolErrorCode;
@@ -152,6 +154,7 @@ fn build_runtime_with_registry(
         .iter()
         .map(|root| root.join(".devo").join("skills"))
         .collect::<Vec<_>>();
+    write_test_config(data_root, &user_skill_root, &workspace_skill_roots);
     let db_path = data_root.join("test_skills.db");
     let db = Arc::new(devo_server::db::Database::open(db_path).expect("open test database"));
     ServerRuntime::new(
@@ -163,7 +166,6 @@ fn build_runtime_with_registry(
             "test-model".to_string(),
             Arc::new(PresetModelCatalog::default()),
             Arc::new(ProviderVendorCatalog::default()),
-            workspace_root.clone(),
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 enabled: true,
                 user_roots: vec![user_skill_root],
@@ -181,6 +183,40 @@ fn build_runtime_with_registry(
             )),
         ),
     )
+}
+
+fn write_test_config(data_root: &Path, user_skill_root: &Path, workspace_skill_roots: &[PathBuf]) {
+    let workspace_roots = workspace_skill_roots
+        .iter()
+        .map(|root| format!("\"{}\"", toml_path(root)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::create_dir_all(data_root).expect("create test config dir");
+    std::fs::write(
+        data_root.join("config.toml"),
+        format!(
+            r#"[skills]
+enabled = true
+user_roots = ["{}"]
+workspace_roots = [{}]
+watch_for_changes = false
+include_instructions = true
+
+[skills.bundled]
+enabled = false
+"#,
+            toml_path(user_skill_root),
+            workspace_roots
+        ),
+    )
+    .expect("write test app config");
+}
+
+fn toml_path(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 async fn initialize_connection(
@@ -227,58 +263,128 @@ async fn start_session(
             connection_id,
             serde_json::json!({
                 "id": 2,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": cwd,
-                    "ephemeral": false,
-                    "title": "Skills integration",
-                    "model": "test-model"
+                    "additionalDirectories": [],
+                    "mcpServers": []
                 }
             }),
         )
         .await
         .context("session/start response")?;
-    let result: SuccessResponse<devo_server::SessionStartResult> =
-        serde_json::from_value(response)?;
-    Ok(result.result.session.session_id)
+    let result: AcpSuccessResponse<AcpNewSessionResult> = serde_json::from_value(response.clone())
+        .with_context(|| format!("session/start response: {response}"))?;
+    let session_id = result.result.session_id;
+    let title_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 3,
+                "method": "_devo/session/title/update",
+                "params": {
+                    "session_id": session_id,
+                    "title": "Skills integration"
+                }
+            }),
+        )
+        .await
+        .context("session/title/update response")?;
+    let _: SuccessResponse<devo_server::SessionTitleUpdateResult> =
+        serde_json::from_value(title_response.clone())
+            .with_context(|| format!("session/title/update response: {title_response}"))?;
+    Ok(session_id)
 }
 
 async fn wait_for_turn_completed(
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
 ) -> Result<()> {
-    timeout(Duration::from_secs(5), async {
-        while let Some(value) = notifications_rx.recv().await {
-            if value.get("method") == Some(&serde_json::json!("turn/completed")) {
-                return Ok(());
+    let mut seen = Vec::new();
+    loop {
+        match timeout(Duration::from_secs(5), notifications_rx.recv()).await {
+            Ok(Some(value)) => {
+                if is_original_method(&value, "turn/completed") {
+                    return Ok(());
+                }
+                seen.push(value);
+            }
+            Ok(None) => {
+                anyhow::bail!(
+                    "notification channel closed before turn/completed; seen: {}",
+                    serde_json::to_string(&seen)?
+                );
+            }
+            Err(error) => {
+                anyhow::bail!(
+                    "timed out waiting for turn/completed: {error}; seen: {}",
+                    serde_json::to_string(&seen)?
+                );
             }
         }
-        anyhow::bail!("notification channel closed before turn/completed")
-    })
-    .await
-    .context("timed out waiting for turn/completed")??;
-    Ok(())
+    }
+}
+
+fn is_original_method(value: &serde_json::Value, method: &str) -> bool {
+    value.get("method").and_then(serde_json::Value::as_str) == Some(method)
+        || value
+            .get("params")
+            .and_then(|params| params.get("_meta").or_else(|| params.get("meta")))
+            .and_then(|meta| meta.get("devo/originalMethod"))
+            .and_then(serde_json::Value::as_str)
+            == Some(method)
 }
 
 async fn wait_for_approval_request(
     notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
 ) -> Result<()> {
-    timeout(Duration::from_secs(5), async {
-        while let Some(value) = notifications_rx.recv().await {
-            if value.get("method") == Some(&serde_json::json!("item/started"))
-                && value
-                    .get("params")
-                    .and_then(|params| params.get("item"))
-                    .and_then(|item| item.get("item_kind"))
-                    == Some(&serde_json::json!("approval_request"))
-            {
-                return Ok(());
+    let mut seen = Vec::new();
+    loop {
+        match timeout(Duration::from_secs(5), notifications_rx.recv()).await {
+            Ok(Some(value)) => {
+                if is_approval_request_notification(&value) {
+                    return Ok(());
+                }
+                seen.push(value);
+            }
+            Ok(None) => {
+                anyhow::bail!(
+                    "notification channel closed before approval request; seen: {}",
+                    serde_json::to_string(&seen)?
+                );
+            }
+            Err(error) => {
+                anyhow::bail!(
+                    "timed out waiting for approval request: {error}; seen: {}",
+                    serde_json::to_string(&seen)?
+                );
             }
         }
-        anyhow::bail!("notification channel closed before approval request")
-    })
-    .await
-    .context("timed out waiting for approval request")??;
-    Ok(())
+    }
+}
+
+fn is_approval_request_notification(value: &serde_json::Value) -> bool {
+    if value.get("method") == Some(&serde_json::json!("session/request_permission")) {
+        return true;
+    }
+    let direct = value.get("method") == Some(&serde_json::json!("item/started"))
+        && value
+            .get("params")
+            .and_then(|params| params.get("item"))
+            .and_then(|item| item.get("item_kind"))
+            == Some(&serde_json::json!("approval_request"));
+    let original = original_event(value)
+        .filter(|event| event.get("kind") == Some(&serde_json::json!("item_started")))
+        .and_then(|event| event.get("item"))
+        .and_then(|item| item.get("item_kind"))
+        == Some(&serde_json::json!("approval_request"));
+    direct || original
+}
+
+fn original_event(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    value
+        .get("params")
+        .and_then(|params| params.get("_meta").or_else(|| params.get("meta")))
+        .and_then(|meta| meta.get("devo/originalEvent"))
 }
 
 fn user_request_text(request: &ModelRequest) -> Result<String> {
@@ -335,7 +441,7 @@ async fn update_permissions_to_auto_review(
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "session/permissions/update",
+                "method": "_devo/session/permissions/update",
                 "params": {
                     "session_id": session_id,
                     "preset": "auto-review"
@@ -363,7 +469,7 @@ async fn start_auto_review_turn(
             connection_id,
             serde_json::json!({
                 "id": 4,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [
@@ -379,7 +485,9 @@ async fn start_auto_review_turn(
         )
         .await
         .context("turn/start auto-review response")?;
-    let result: SuccessResponse<devo_server::TurnStartResult> = serde_json::from_value(response)?;
+    let result: SuccessResponse<devo_server::TurnStartResult> =
+        serde_json::from_value(response.clone())
+            .with_context(|| format!("turn/start response: {response}"))?;
     assert_eq!(result.result.status(), devo_core::TurnStatus::Running);
     Ok(())
 }
@@ -645,7 +753,7 @@ async fn skills_list_returns_user_and_workspace_skills() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "skills/list",
+                "method": "_devo/skills/list",
                 "params": {
                     "cwd": workspace_root,
                 }
@@ -653,7 +761,8 @@ async fn skills_list_returns_user_and_workspace_skills() -> Result<()> {
         )
         .await
         .context("skills/list response")?;
-    let result: SuccessResponse<SkillListResult> = serde_json::from_value(response)?;
+    let result: SuccessResponse<SkillListResult> = serde_json::from_value(response.clone())
+        .with_context(|| format!("skills/list response: {response}"))?;
     let canonical_rust_skill_path = canonical_skill_path(&rust_skill_path);
     let canonical_team_skill_path = canonical_skill_path(&team_skill_path);
 
@@ -717,7 +826,7 @@ async fn skills_changed_rediscovers_new_workspace_skill() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 4,
-                "method": "skills/changed",
+                "method": "_devo/skills/changed",
                 "params": {
                     "cwd": workspace_root.clone(),
                 }
@@ -754,7 +863,7 @@ async fn skills_changed_rediscovers_new_workspace_skill() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 5,
-                "method": "skills/changed",
+                "method": "_devo/skills/changed",
                 "params": {
                     "cwd": workspace_root,
                 }
@@ -830,7 +939,7 @@ async fn turn_start_resolves_skill_content_into_model_request() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 6,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [
@@ -848,7 +957,8 @@ async fn turn_start_resolves_skill_content_into_model_request() -> Result<()> {
         .await
         .context("turn/start response")?;
     let start_result: SuccessResponse<devo_server::TurnStartResult> =
-        serde_json::from_value(response)?;
+        serde_json::from_value(response.clone())
+            .with_context(|| format!("turn/start response: {response}"))?;
     assert_eq!(start_result.result.status(), devo_core::TurnStatus::Running);
 
     wait_for_turn_completed(&mut notifications_rx).await?;
@@ -889,7 +999,7 @@ async fn turn_start_rejects_missing_skill_references() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 7,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [
@@ -1052,7 +1162,7 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
             connection_id,
             serde_json::json!({
                 "id": 8,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [
@@ -1069,7 +1179,8 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
         .await
         .context("turn/start response for steering test")?;
     let start_result: SuccessResponse<devo_server::TurnStartResult> =
-        serde_json::from_value(response)?;
+        serde_json::from_value(response.clone())
+            .with_context(|| format!("turn/start response: {response}"))?;
     let start_turn_id = start_result
         .result
         .turn_id()
@@ -1084,7 +1195,7 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
             connection_id,
             serde_json::json!({
                 "id": 9,
-                "method": "turn/steer",
+                "method": "_devo/turn/steer",
                 "params": {
                     "session_id": session_id,
                     "expected_turn_id": start_turn_id,

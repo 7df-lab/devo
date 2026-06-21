@@ -97,25 +97,26 @@ impl ServerRuntime {
             };
 
             let model_selection = session_model_selection(&runtime_session.summary)
-                .unwrap_or(&self.deps.default_model);
+                .unwrap_or(&runtime_session.runtime_context.default_model);
             let model_slug = runtime_session
                 .summary
                 .model
                 .as_deref()
                 .unwrap_or(model_selection);
-            let turn_config = self
-                .deps
+            let turn_config = runtime_session
+                .runtime_context
                 .resolve_turn_config(Some(model_selection), /*thinking_selection*/ None);
             let request_model = turn_config.request_model.clone();
-            let max_tokens = self
-                .deps
+            let max_tokens = runtime_session
+                .runtime_context
                 .model_catalog
                 .get(model_slug)
                 .and_then(|m| m.max_tokens.map(|t| t as usize))
                 .unwrap_or(4096);
 
             let summarizer = DefaultHistorySummarizer::with_slug(
-                self.deps
+                runtime_session
+                    .runtime_context
                     .provider_for_route(turn_config.provider_route.clone()),
                 request_model.clone(),
                 max_tokens,

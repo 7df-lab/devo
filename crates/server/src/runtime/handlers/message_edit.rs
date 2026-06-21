@@ -51,12 +51,14 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        let workspace_root = {
+        let (workspace_root, runtime_context) = {
             let session = session_arc.lock().await;
-            session.summary.cwd.clone()
+            (
+                session.summary.cwd.clone(),
+                Arc::clone(&session.runtime_context),
+            )
         };
-        let Some(resolved_input) = (match self
-            .deps
+        let Some(resolved_input) = (match runtime_context
             .resolve_input_items(&edited_input, Some(workspace_root.as_path()))
         {
             Ok(resolved_input) => resolved_input,
@@ -185,10 +187,10 @@ impl ServerRuntime {
         let requested_model =
             requested_model_selection(None, None, &session.summary).map(str::to_string);
         let requested_thinking = session.summary.thinking.clone();
+        let runtime_context = Arc::clone(&session.runtime_context);
         drop(session);
 
-        let turn_config = self
-            .deps
+        let turn_config = runtime_context
             .resolve_turn_config(requested_model.as_deref(), requested_thinking.clone());
         let resolved_request = turn_config
             .model

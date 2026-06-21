@@ -304,7 +304,6 @@ fn build_runtime_with_models(
             default_model.to_string(),
             Arc::new(PresetModelCatalog::new(models)),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()

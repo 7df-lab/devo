@@ -180,7 +180,6 @@ mod tests {
                 "test-model".to_string(),
                 Arc::new(PresetModelCatalog::default()),
                 Arc::new(ProviderVendorCatalog::default()),
-                None,
                 Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                     bundled: Some(BundledSkillsConfig { enabled: false }),
                     ..SkillsConfig::default()

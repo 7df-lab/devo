@@ -291,7 +291,6 @@ pub fn build_runtime_with_registry(
                 ..Model::default()
             }])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()

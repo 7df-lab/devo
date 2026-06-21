@@ -246,12 +246,11 @@ async fn stdio_server_process_supports_handshake_and_session_start() -> Result<(
                 "{}\n",
                 serde_json::json!({
                     "id": 2,
-                    "method": "session/start",
+                    "method": "session/new",
                     "params": {
                         "cwd": test_cwd,
-                        "ephemeral": false,
-                        "title": "End To End",
-                        "model": "test-model"
+                        "additionalDirectories": [],
+                        "mcpServers": []
                     }
                 })
             )
@@ -260,56 +259,172 @@ async fn stdio_server_process_supports_handshake_and_session_start() -> Result<(
         .await?;
     stdin.flush().await?;
 
-    let first_message = read_stdio_line(
+    let session_new_response = read_stdio_json_until_id(
+        &mut child,
         &mut stdout_reader,
-        "first post-session/start message",
+        &mut stderr_reader,
+        "session/new response",
+        serde_json::json!(2),
+        4,
         STDIO_SERVER_LINE_TIMEOUT,
     )
     .await?;
-    let second_message = read_stdio_line(
-        &mut stdout_reader,
-        "second post-session/start message",
-        STDIO_SERVER_LINE_TIMEOUT,
-    )
-    .await?;
 
-    let first_value = parse_stdio_json_line(
-        &mut child,
-        &mut stderr_reader,
-        "first post-session/start message",
-        &first_message,
-    )
-    .await?;
-    let second_value = parse_stdio_json_line(
-        &mut child,
-        &mut stderr_reader,
-        "second post-session/start message",
-        &second_message,
-    )
-    .await?;
-    let messages = [first_value, second_value];
-
-    let session_started = messages
-        .iter()
-        .find(|value| value.get("method") == Some(&serde_json::json!("session/started")))
-        .context("find session/started notification")?;
-    let session_start_response = messages
-        .iter()
-        .find(|value| value.get("id") == Some(&serde_json::json!(2)))
-        .context("find session/start response")?;
-
+    assert!(session_new_response["result"]["sessionId"].is_string());
     assert_eq!(
-        session_started["params"]["session"]["cwd"],
+        session_new_response["result"]["_meta"]["devo/session"]["cwd"],
         serde_json::json!(test_cwd)
-    );
-    assert_eq!(
-        session_start_response["result"]["session"]["model"],
-        serde_json::json!("test-model")
     );
 
     drop(stdin);
     child.kill().await.ok();
     let _ = child.wait().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn second_stdio_server_process_proxies_to_singleton() -> Result<()> {
+    let home_dir = TempDir::new()?;
+    write_test_config(&home_dir, &["stdio://"])?;
+    let devo_home = home_dir.path().join(".devo");
+    let second_workspace = home_dir.path().join("second-workspace");
+    std::fs::create_dir_all(&second_workspace)?;
+    let second_cwd = second_workspace.to_string_lossy().into_owned();
+
+    let mut first_command = devo_command()?;
+    let mut first_child = first_command
+        .arg("server")
+        .arg("--transport")
+        .arg("stdio")
+        .env("DEVO_HOME", &devo_home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawn first devo server process")?;
+    let mut first_stdin = first_child.stdin.take().context("capture first stdin")?;
+    let first_stdout = first_child.stdout.take().context("capture first stdout")?;
+    let first_stderr = first_child.stderr.take().context("capture first stderr")?;
+    let mut first_stdout_reader = AsyncBufReader::new(first_stdout).lines();
+    let mut first_stderr_reader = AsyncBufReader::new(first_stderr);
+
+    first_stdin
+        .write_all(format!("{}\n", initialize_request("stdio")).as_bytes())
+        .await?;
+    first_stdin.flush().await?;
+    let first_initialize = read_stdio_line(
+        &mut first_stdout_reader,
+        "first initialize response",
+        STDIO_SERVER_STARTUP_TIMEOUT,
+    )
+    .await?;
+    let first_initialize_response = parse_stdio_json_line(
+        &mut first_child,
+        &mut first_stderr_reader,
+        "first initialize response",
+        &first_initialize,
+    )
+    .await?;
+    assert_eq!(first_initialize_response["id"], serde_json::json!(1));
+
+    let mut second_command = devo_command()?;
+    let mut second_child = second_command
+        .arg("server")
+        .arg("--transport")
+        .arg("stdio")
+        .env("DEVO_HOME", &devo_home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawn proxy devo server process")?;
+    let mut second_stdin = second_child
+        .stdin
+        .take()
+        .context("capture proxy child stdin")?;
+    let second_stdout = second_child
+        .stdout
+        .take()
+        .context("capture proxy child stdout")?;
+    let second_stderr = second_child
+        .stderr
+        .take()
+        .context("capture proxy child stderr")?;
+    let mut second_stdout_reader = AsyncBufReader::new(second_stdout).lines();
+    let mut second_stderr_reader = AsyncBufReader::new(second_stderr);
+
+    second_stdin
+        .write_all(format!("{}\n", initialize_request("stdio")).as_bytes())
+        .await?;
+    second_stdin.flush().await?;
+    let second_initialize = read_stdio_line(
+        &mut second_stdout_reader,
+        "proxy initialize response",
+        STDIO_SERVER_STARTUP_TIMEOUT,
+    )
+    .await?;
+    let second_initialize_response = parse_stdio_json_line(
+        &mut second_child,
+        &mut second_stderr_reader,
+        "proxy initialize response",
+        &second_initialize,
+    )
+    .await?;
+    assert_eq!(second_initialize_response["id"], serde_json::json!(1));
+
+    second_stdin
+        .write_all(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "id": 2,
+                    "method": "session/new",
+                    "params": {
+                        "cwd": second_cwd,
+                        "additionalDirectories": [],
+                        "mcpServers": []
+                    }
+                })
+            )
+            .as_bytes(),
+        )
+        .await?;
+    second_stdin.flush().await?;
+
+    let mut session_new_response = None;
+    for _ in 0..4 {
+        let proxy_message = read_stdio_line(
+            &mut second_stdout_reader,
+            "proxy session/new message",
+            STDIO_SERVER_LINE_TIMEOUT,
+        )
+        .await?;
+        let proxy_value = parse_stdio_json_line(
+            &mut second_child,
+            &mut second_stderr_reader,
+            "proxy session/new message",
+            &proxy_message,
+        )
+        .await?;
+        if proxy_value.get("id") == Some(&serde_json::json!(2)) {
+            session_new_response = Some(proxy_value);
+            break;
+        }
+    }
+    let session_new_response = session_new_response.context("find proxy session/new response")?;
+
+    assert!(session_new_response["result"]["sessionId"].is_string());
+    assert_eq!(
+        session_new_response["result"]["_meta"]["devo/session"]["cwd"],
+        serde_json::json!(second_cwd)
+    );
+
+    drop(second_stdin);
+    second_child.kill().await.ok();
+    let _ = second_child.wait().await;
+    drop(first_stdin);
+    first_child.kill().await.ok();
+    let _ = first_child.wait().await;
     Ok(())
 }
 
@@ -334,7 +449,6 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
             "test-model".to_string(),
             Arc::new(PresetModelCatalog::default()),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig::default())),
             devo_core::AgentsMdConfig::default(),
             db,
@@ -369,12 +483,11 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
         .send(Message::Text(
             serde_json::json!({
                 "id": 2,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": "C:/repo",
-                    "ephemeral": false,
-                    "title": null,
-                    "model": "test-model"
+                    "additionalDirectories": [],
+                    "mcpServers": []
                 }
             })
             .to_string()
@@ -382,29 +495,34 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
         ))
         .await?;
 
-    let session_start_messages = read_n_websocket_json(&mut socket, 2).await?;
-    let session_started = session_start_messages
-        .iter()
-        .find(|value| value.get("method") == Some(&serde_json::json!("session/started")))
-        .context("find session/started notification")?;
+    let session_start_messages = read_until_websocket_json(
+        &mut socket,
+        |messages| {
+            messages
+                .iter()
+                .any(|value| value.get("id") == Some(&serde_json::json!(2)))
+        },
+        4,
+    )
+    .await?;
     let session_response = session_start_messages
         .iter()
         .find(|value| value.get("id") == Some(&serde_json::json!(2)))
-        .context("find session/start response")?;
-    let session_id = session_response["result"]["session"]["session_id"]
+        .context("find session/new response")?;
+    let session_id = session_response["result"]["sessionId"]
         .as_str()
         .context("extract session id")?
         .to_string();
     assert_eq!(
-        session_started["params"]["session"]["session_id"],
-        serde_json::json!(session_id)
+        session_response["result"]["_meta"]["devo/session"]["cwd"],
+        serde_json::json!("C:/repo")
     );
 
     socket
         .send(Message::Text(
             serde_json::json!({
                 "id": 3,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [{ "type": "text", "text": "hello" }],
@@ -424,7 +542,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
         |messages| {
             messages
                 .iter()
-                .any(|value| value.get("method") == Some(&serde_json::json!("turn/started")))
+                .any(|value| has_original_method(value, "turn/started"))
                 && messages
                     .iter()
                     .any(|value| value.get("id") == Some(&serde_json::json!(3)))
@@ -435,7 +553,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
     .context("read turn/start websocket messages")?;
     let turn_started = turn_start_messages
         .iter()
-        .find(|value| value.get("method") == Some(&serde_json::json!("turn/started")))
+        .find(|value| has_original_method(value, "turn/started"))
         .context("find turn/started notification")?;
     let turn_start_response = turn_start_messages
         .iter()
@@ -446,7 +564,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
         .context("extract turn id")?
         .to_string();
     assert_eq!(
-        turn_started["params"]["turn"]["turn_id"],
+        original_event(turn_started)["turn"]["turn_id"],
         serde_json::json!(turn_id)
     );
 
@@ -454,7 +572,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
         .send(Message::Text(
             serde_json::json!({
                 "id": 4,
-                "method": "turn/interrupt",
+                "method": "_devo/turn/interrupt",
                 "params": {
                     "session_id": session_id,
                     "turn_id": turn_id,
@@ -472,12 +590,12 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
             messages
                 .iter()
                 .any(|value| value.get("id") == Some(&serde_json::json!(4)))
-                && messages.iter().any(|value| {
-                    value.get("method") == Some(&serde_json::json!("turn/interrupted"))
-                })
                 && messages
                     .iter()
-                    .any(|value| value.get("method") == Some(&serde_json::json!("turn/completed")))
+                    .any(|value| has_original_method(value, "turn/interrupted"))
+                && messages
+                    .iter()
+                    .any(|value| has_original_method(value, "turn/completed"))
         },
         8,
     )
@@ -489,11 +607,11 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
         .context("find turn/interrupt response")?;
     let interrupted_event = interrupt_messages
         .iter()
-        .find(|value| value.get("method") == Some(&serde_json::json!("turn/interrupted")))
+        .find(|value| has_original_method(value, "turn/interrupted"))
         .context("find turn/interrupted notification")?;
     let completed_event = interrupt_messages
         .iter()
-        .find(|value| value.get("method") == Some(&serde_json::json!("turn/completed")))
+        .find(|value| has_original_method(value, "turn/completed"))
         .context("find turn/completed notification")?;
 
     assert_eq!(
@@ -501,11 +619,11 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
         serde_json::json!("Interrupted")
     );
     assert_eq!(
-        interrupted_event["params"]["turn"]["status"],
+        original_event(interrupted_event)["turn"]["status"],
         serde_json::json!("Interrupted")
     );
     assert_eq!(
-        completed_event["params"]["turn"]["status"],
+        original_event(completed_event)["turn"]["status"],
         serde_json::json!("Interrupted")
     );
 
@@ -546,7 +664,6 @@ async fn websocket_turn_streams_final_tool_metadata_for_read_and_glob() -> Resul
             "test-model".to_string(),
             Arc::new(PresetModelCatalog::default()),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig::default())),
             devo_core::AgentsMdConfig::default(),
             db,
@@ -575,12 +692,11 @@ async fn websocket_turn_streams_final_tool_metadata_for_read_and_glob() -> Resul
         .send(Message::Text(
             serde_json::json!({
                 "id": 2,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": workspace.path().to_string_lossy(),
-                    "ephemeral": false,
-                    "title": null,
-                    "model": "test-model"
+                    "additionalDirectories": [],
+                    "mcpServers": []
                 }
             })
             .to_string()
@@ -588,12 +704,21 @@ async fn websocket_turn_streams_final_tool_metadata_for_read_and_glob() -> Resul
         ))
         .await?;
 
-    let session_start_messages = read_n_websocket_json(&mut socket, 2).await?;
+    let session_start_messages = read_until_websocket_json(
+        &mut socket,
+        |messages| {
+            messages
+                .iter()
+                .any(|value| value.get("id") == Some(&serde_json::json!(2)))
+        },
+        4,
+    )
+    .await?;
     let session_response = session_start_messages
         .iter()
         .find(|value| value.get("id") == Some(&serde_json::json!(2)))
-        .context("find session/start response")?;
-    let session_id = session_response["result"]["session"]["session_id"]
+        .context("find session/new response")?;
+    let session_id = session_response["result"]["sessionId"]
         .as_str()
         .context("extract session id")?
         .to_string();
@@ -602,7 +727,7 @@ async fn websocket_turn_streams_final_tool_metadata_for_read_and_glob() -> Resul
         .send(Message::Text(
             serde_json::json!({
                 "id": 3,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [{ "type": "text", "text": "read and glob" }],
@@ -622,7 +747,7 @@ async fn websocket_turn_streams_final_tool_metadata_for_read_and_glob() -> Resul
         |messages| {
             messages
                 .iter()
-                .any(|value| value.get("method") == Some(&serde_json::json!("turn/completed")))
+                .any(|value| has_original_method(value, "turn/completed"))
         },
         80,
     )
@@ -632,8 +757,8 @@ async fn websocket_turn_streams_final_tool_metadata_for_read_and_glob() -> Resul
     let completed_tool_calls = messages
         .iter()
         .filter(|value| {
-            value.get("method") == Some(&serde_json::json!("item/completed"))
-                && value["params"]["item"]["item_kind"] == serde_json::json!("tool_call")
+            has_original_method(value, "item/completed")
+                && original_event(value)["item"]["item_kind"] == serde_json::json!("tool_call")
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -644,10 +769,12 @@ async fn websocket_turn_streams_final_tool_metadata_for_read_and_glob() -> Resul
 
     let read_call = completed_tool_calls
         .iter()
-        .find(|value| value["params"]["item"]["payload"]["tool_name"] == serde_json::json!("read"))
+        .find(|value| {
+            original_event(value)["item"]["payload"]["tool_name"] == serde_json::json!("read")
+        })
         .context("find read tool call")?;
     assert_eq!(
-        read_call["params"]["item"]["payload"]["parameters"]["filePath"],
+        original_event(read_call)["item"]["payload"]["parameters"]["filePath"],
         serde_json::json!(
             workspace
                 .path()
@@ -657,20 +784,22 @@ async fn websocket_turn_streams_final_tool_metadata_for_read_and_glob() -> Resul
         )
     );
     assert_eq!(
-        read_call["params"]["item"]["payload"]["command_actions"][0]["name"],
+        original_event(read_call)["item"]["payload"]["command_actions"][0]["name"],
         serde_json::json!("README.md")
     );
 
     let glob_call = completed_tool_calls
         .iter()
-        .find(|value| value["params"]["item"]["payload"]["tool_name"] == serde_json::json!("glob"))
+        .find(|value| {
+            original_event(value)["item"]["payload"]["tool_name"] == serde_json::json!("glob")
+        })
         .context("find glob tool call")?;
     assert_eq!(
-        glob_call["params"]["item"]["payload"]["parameters"]["pattern"],
+        original_event(glob_call)["item"]["payload"]["parameters"]["pattern"],
         serde_json::json!("**/Cargo.toml")
     );
     assert_eq!(
-        glob_call["params"]["item"]["payload"]["command_actions"][0]["path"],
+        original_event(glob_call)["item"]["payload"]["command_actions"][0]["path"],
         serde_json::json!("**/Cargo.toml in crates")
     );
 
@@ -715,6 +844,15 @@ fn devo_binary_path() -> Result<PathBuf> {
     Ok(path)
 }
 
+fn has_original_method(value: &serde_json::Value, method: &str) -> bool {
+    value.get("method").and_then(serde_json::Value::as_str) == Some(method)
+        || value["params"]["_meta"]["devo/originalMethod"].as_str() == Some(method)
+}
+
+fn original_event(value: &serde_json::Value) -> &serde_json::Value {
+    &value["params"]["_meta"]["devo/originalEvent"]
+}
+
 async fn read_websocket_json(
     socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -734,19 +872,6 @@ async fn read_websocket_json(
     .context("timed out waiting for websocket message")?
 }
 
-async fn read_n_websocket_json(
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    count: usize,
-) -> Result<Vec<serde_json::Value>> {
-    let mut values = Vec::with_capacity(count);
-    while values.len() < count {
-        values.push(read_websocket_json(socket).await?);
-    }
-    Ok(values)
-}
-
 async fn read_until_websocket_json<F>(
     socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -764,7 +889,28 @@ where
             return Ok(values);
         }
     }
-    anyhow::bail!("did not observe expected websocket messages within {max_messages} frames")
+    anyhow::bail!(
+        "did not observe expected websocket messages within {max_messages} frames: {values:#?}"
+    )
+}
+
+async fn read_stdio_json_until_id(
+    child: &mut tokio::process::Child,
+    stdout_reader: &mut tokio::io::Lines<AsyncBufReader<tokio::process::ChildStdout>>,
+    stderr_reader: &mut AsyncBufReader<tokio::process::ChildStderr>,
+    context: &str,
+    request_id: serde_json::Value,
+    max_messages: usize,
+    line_timeout: Duration,
+) -> Result<serde_json::Value> {
+    for _ in 0..max_messages {
+        let line = read_stdio_line(stdout_reader, context, line_timeout).await?;
+        let value = parse_stdio_json_line(child, stderr_reader, context, &line).await?;
+        if value.get("id") == Some(&request_id) {
+            return Ok(value);
+        }
+    }
+    anyhow::bail!("did not observe {context} with id {request_id} within {max_messages} messages")
 }
 
 async fn parse_stdio_json_line(

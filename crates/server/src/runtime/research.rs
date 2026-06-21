@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
+use crate::session_context::SessionRuntimeContext;
 
 pub(crate) const RESEARCH_FILE_TOOL_NAMES: &[&str] = &["read", "write", "apply_patch"];
 pub(crate) const RESEARCH_WORKER_TOOL_NAMES: &[&str] =
@@ -186,6 +187,7 @@ struct ResearchSubagentTerminal {
 }
 
 struct ResearchPipelineInput<'a> {
+    runtime_context: Arc<SessionRuntimeContext>,
     turn_config: TurnConfig,
     display_input: &'a str,
     question: &'a str,
@@ -193,7 +195,18 @@ struct ResearchPipelineInput<'a> {
     usage_ledger: ResearchUsageLedgerRef,
 }
 
+struct ExecuteResearchTurnInput {
+    session_id: SessionId,
+    turn: TurnMetadata,
+    runtime_context: Arc<SessionRuntimeContext>,
+    turn_config: TurnConfig,
+    display_input: String,
+    question: String,
+    cwd: String,
+}
+
 struct ResearchModelRuntime<'a> {
+    runtime_context: Arc<SessionRuntimeContext>,
     turn_config: &'a TurnConfig,
     usage_ledger: &'a ResearchUsageLedgerRef,
     session_id: SessionId,
@@ -321,6 +334,36 @@ impl ServerRuntime {
         };
 
         let now = Utc::now();
+        let (effective_cwd, runtime_context) = {
+            let session = session_arc.lock().await;
+            let effective_cwd = params
+                .cwd
+                .clone()
+                .unwrap_or_else(|| session.summary.cwd.clone());
+            let runtime_context = if params
+                .cwd
+                .as_ref()
+                .is_some_and(|cwd| cwd != &session.summary.cwd)
+            {
+                None
+            } else {
+                Some(Arc::clone(&session.runtime_context))
+            };
+            (effective_cwd, runtime_context)
+        };
+        let runtime_context = match runtime_context {
+            Some(runtime_context) => runtime_context,
+            None => match self.deps.context_for_workspace(&effective_cwd).await {
+                Ok(runtime_context) => runtime_context,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to initialize session workspace: {error}"),
+                    );
+                }
+            },
+        };
         let mut cwd_change = None;
         let (turn, turn_config, effective_cwd) = {
             let mut session = session_arc.lock().await;
@@ -340,9 +383,8 @@ impl ServerRuntime {
                 .thinking
                 .clone()
                 .or_else(|| session.summary.thinking.clone());
-            let turn_config = self
-                .deps
-                .resolve_turn_config(requested_model, requested_thinking.clone());
+            let turn_config =
+                runtime_context.resolve_turn_config(requested_model, requested_thinking.clone());
             if matches!(
                 turn_config.web_search,
                 devo_core::ResolvedWebSearchConfig::Disabled
@@ -361,6 +403,7 @@ impl ServerRuntime {
                 let old_cwd = session.summary.cwd.clone();
                 if old_cwd != cwd {
                     cwd_change = Some((old_cwd, cwd.clone()));
+                    session.runtime_context = Arc::clone(&runtime_context);
                 }
                 session.summary.cwd = cwd.clone();
                 session.core_session.lock().await.cwd = cwd;
@@ -516,16 +559,18 @@ impl ServerRuntime {
         let runtime = Arc::clone(self);
         let turn_for_task = turn.clone();
         let display_input_for_task = research_display_input.clone();
+        let runtime_context_for_task = Arc::clone(&runtime_context);
         let task = tokio::spawn(async move {
             runtime
-                .execute_research_turn(
-                    params.session_id,
-                    turn_for_task,
+                .execute_research_turn(ExecuteResearchTurnInput {
+                    session_id: params.session_id,
+                    turn: turn_for_task,
+                    runtime_context: runtime_context_for_task,
                     turn_config,
-                    display_input_for_task,
+                    display_input: display_input_for_task,
                     question,
-                    effective_cwd,
-                )
+                    cwd: effective_cwd,
+                })
                 .await;
         });
         self.active_tasks
@@ -544,21 +589,23 @@ impl ServerRuntime {
         .expect("serialize research turn/start response")
     }
 
-    async fn execute_research_turn(
-        self: Arc<Self>,
-        session_id: SessionId,
-        turn: TurnMetadata,
-        turn_config: TurnConfig,
-        display_input: String,
-        question: String,
-        cwd: String,
-    ) {
+    async fn execute_research_turn(self: Arc<Self>, input: ExecuteResearchTurnInput) {
+        let ExecuteResearchTurnInput {
+            session_id,
+            turn,
+            runtime_context,
+            turn_config,
+            display_input,
+            question,
+            cwd,
+        } = input;
         let usage_ledger = self.research_usage_ledger(session_id).await;
         let result = self
             .run_research_pipeline(
                 session_id,
                 &turn,
                 ResearchPipelineInput {
+                    runtime_context,
                     turn_config: turn_config.clone(),
                     display_input: &display_input,
                     question: &question,
@@ -618,6 +665,7 @@ impl ServerRuntime {
         input: ResearchPipelineInput<'_>,
     ) -> anyhow::Result<()> {
         let ResearchPipelineInput {
+            runtime_context,
             turn_config,
             display_input,
             question,
@@ -625,13 +673,13 @@ impl ServerRuntime {
             usage_ledger,
         } = input;
         let model_runtime = ResearchModelRuntime {
+            runtime_context: Arc::clone(&runtime_context),
             turn_config: &turn_config,
             usage_ledger: &usage_ledger,
             session_id,
             turn_id: turn.turn_id,
         };
-        let research_config = self
-            .deps
+        let research_config = runtime_context
             .config_store
             .lock()
             .expect("app config store mutex should not be poisoned")
@@ -1818,7 +1866,8 @@ impl ServerRuntime {
             scratch.push_message(message);
         }
         let registry = Arc::new(
-            self.deps
+            runtime
+                .runtime_context
                 .registry
                 .restricted_to_specs(RESEARCH_FILE_TOOL_NAMES),
         );
@@ -1835,7 +1884,8 @@ impl ServerRuntime {
             let query_future = query(
                 &mut scratch,
                 &final_turn_config,
-                self.deps
+                runtime
+                    .runtime_context
                     .provider_for_route(final_turn_config.provider_route.clone()),
                 Arc::clone(&registry),
                 &tool_runtime,
@@ -2098,8 +2148,8 @@ impl ServerRuntime {
         display: ResearchModelTextDisplay,
     ) -> anyhow::Result<String> {
         let request = model_text_request(runtime.turn_config, prompt, messages);
-        let mut stream = self
-            .deps
+        let mut stream = runtime
+            .runtime_context
             .provider_for_route(runtime.turn_config.provider_route.clone())
             .completion_stream(request)
             .await?;
@@ -2329,17 +2379,17 @@ impl ServerRuntime {
         let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
             anyhow::bail!("session does not exist");
         };
-        let (cwd, permission_mode, permission_profile) = {
+        let (cwd, permission_mode, permission_profile, runtime_context) = {
             let session = session_arc.lock().await;
             let core_session = session.core_session.lock().await;
             (
                 core_session.cwd.clone(),
                 core_session.config.permission_mode,
                 core_session.config.permission_profile.clone(),
+                Arc::clone(&session.runtime_context),
             )
         };
-        let network_proxy = self
-            .deps
+        let network_proxy = runtime_context
             .config_store
             .lock()
             .expect("app config store mutex should not be poisoned")

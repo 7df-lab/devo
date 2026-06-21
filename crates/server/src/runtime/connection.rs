@@ -30,10 +30,18 @@ const CONNECTION_NOTIFICATION_BACKPRESSURE_LOG_THRESHOLD: Duration = Duration::f
 
 struct PendingConnectionNotification {
     connection_id: u64,
+    kind: PendingConnectionMessageKind,
     method: String,
     event_seq: u64,
     sender: mpsc::Sender<serde_json::Value>,
     value: serde_json::Value,
+}
+
+#[derive(Clone, Copy)]
+enum PendingConnectionMessageKind {
+    Notification,
+    JsonRpcResponse,
+    ClientRequest,
 }
 
 impl ServerRuntime {
@@ -354,10 +362,14 @@ impl ServerRuntime {
             if already {
                 return;
             }
+            let include_child_agents = matches!(
+                connection.transport,
+                ClientTransportKind::Stdio | ClientTransportKind::StdioProxy
+            );
             connection.subscriptions.push(SubscriptionFilter {
                 session_id: Some(session_id),
                 event_types: desired,
-                include_child_agents: false,
+                include_child_agents,
             });
         }
     }
@@ -391,6 +403,7 @@ impl ServerRuntime {
             let (method, value) = acp_notification_from_server_event(method, &event);
             Some(PendingConnectionNotification {
                 connection_id,
+                kind: PendingConnectionMessageKind::Notification,
                 method,
                 event_seq,
                 sender: connection.sender.clone(),
@@ -423,6 +436,7 @@ impl ServerRuntime {
                     let (method, value) = acp_notification_from_server_event(method, &event);
                     Some(PendingConnectionNotification {
                         connection_id: *connection_id,
+                        kind: PendingConnectionMessageKind::Notification,
                         method,
                         event_seq,
                         sender: connection.sender.clone(),
@@ -448,6 +462,7 @@ impl ServerRuntime {
             };
             PendingConnectionNotification {
                 connection_id,
+                kind: PendingConnectionMessageKind::JsonRpcResponse,
                 method: "<response>".to_string(),
                 event_seq: 0,
                 sender: connection.sender.clone(),
@@ -519,6 +534,7 @@ impl ServerRuntime {
                 rx,
                 PendingConnectionNotification {
                     connection_id,
+                    kind: PendingConnectionMessageKind::ClientRequest,
                     method: method.to_string(),
                     event_seq: 0,
                     sender: connection.sender.clone(),
@@ -735,9 +751,6 @@ impl ConnectionRuntime {
         if self.opt_out_notification_methods.contains(method) {
             return false;
         }
-        if self.transport == ClientTransportKind::Stdio {
-            return true;
-        }
         if self.subscriptions.is_empty() {
             return false;
         }
@@ -783,20 +796,22 @@ impl SubscriptionFilter {
 async fn send_connection_notification(notification: PendingConnectionNotification) -> bool {
     let PendingConnectionNotification {
         connection_id,
+        kind,
         method,
         event_seq,
         sender,
         value,
     } = notification;
-    let is_response = method == "<response>";
-    let notification = if is_response {
-        value
-    } else {
-        serde_json::to_value(crate::NotificationEnvelope {
-            method: method.clone(),
-            params: value,
-        })
-        .expect("serialize client notification envelope")
+    let notification = match kind {
+        PendingConnectionMessageKind::Notification => {
+            serde_json::to_value(crate::NotificationEnvelope {
+                method: method.clone(),
+                params: value,
+            })
+            .expect("serialize client notification envelope")
+        }
+        PendingConnectionMessageKind::JsonRpcResponse
+        | PendingConnectionMessageKind::ClientRequest => value,
     };
     let item_id = notification_item_id(&notification);
     let assistant_delta = notification_assistant_delta(&method, &notification);
@@ -1005,7 +1020,6 @@ mod tests {
                 "test-model".to_string(),
                 Arc::new(PresetModelCatalog::default()),
                 Arc::new(ProviderVendorCatalog::default()),
-                None,
                 Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                     bundled: Some(BundledSkillsConfig { enabled: false }),
                     ..SkillsConfig::default()
@@ -1063,8 +1077,13 @@ mod tests {
 
         let request = receiver.recv().await.expect("client request");
         assert_eq!(
-            request.get("method").and_then(serde_json::Value::as_str),
-            Some("fs/read_text_file")
+            request,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "fs/read_text_file",
+                "params": {},
+            })
         );
         assert!(
             result
@@ -1101,8 +1120,13 @@ mod tests {
 
         let request = receiver.recv().await.expect("client request");
         assert_eq!(
-            request.get("method").and_then(serde_json::Value::as_str),
-            Some("fs/write_text_file")
+            request,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "fs/write_text_file",
+                "params": {},
+            })
         );
         assert_eq!(
             result.expect_err("request should be cancelled"),
@@ -1139,8 +1163,13 @@ mod tests {
 
         let request = receiver.recv().await.expect("client request");
         assert_eq!(
-            request.get("method").and_then(serde_json::Value::as_str),
-            Some("fs/read_text_file")
+            request,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "fs/read_text_file",
+                "params": {},
+            })
         );
         handle.abort();
         let join_error = handle.await.expect_err("request task should be aborted");

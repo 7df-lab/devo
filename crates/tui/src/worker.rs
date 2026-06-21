@@ -2846,12 +2846,11 @@ async fn apply_session_permissions(
     Ok(())
 }
 
-async fn spawn_client(cwd: &Path, server_log_level: Option<String>) -> Result<StdioServerClient> {
+async fn spawn_client(_cwd: &Path, server_log_level: Option<String>) -> Result<StdioServerClient> {
     let program = std::env::current_exe().context("resolve current executable for server child")?;
     StdioServerClient::spawn(StdioServerClientConfig {
         // Re-exec the current binary and enter the hidden server subcommand.
         program,
-        workspace_root: Some(cwd.to_path_buf()),
         args: std::iter::once("server".to_string())
             .chain(["--transport".to_string(), "stdio".to_string()])
             .chain(

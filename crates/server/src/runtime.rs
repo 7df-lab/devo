@@ -143,9 +143,6 @@ use crate::subagent::SubagentMailbox;
 use crate::subagent::SubagentMetadata;
 use crate::subagent::SubagentOutputBuffer;
 use crate::subagent::SubagentStatus;
-use crate::titles::build_title_generation_request;
-use crate::titles::derive_provisional_title;
-use crate::titles::normalize_generated_title;
 
 mod acp_fs;
 mod agents;

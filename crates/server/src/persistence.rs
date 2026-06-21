@@ -301,16 +301,13 @@ impl RolloutStore {
     }
 
     /// Loads every durable session that can be rebuilt from canonical rollout files.
-    pub(crate) fn load_sessions(
+    pub(crate) async fn load_sessions(
         &self,
         deps: &ServerRuntimeDependencies,
     ) -> Result<HashMap<SessionId, std::sync::Arc<Mutex<RuntimeSession>>>> {
         let mut sessions = HashMap::new();
         for rollout_path in self.rollout_paths()? {
-            match self
-                .load_session_from_rollout(&rollout_path, deps)
-                .with_context(|| format!("replay rollout {}", rollout_path.display()))
-            {
+            match self.load_session_from_rollout(&rollout_path, deps).await {
                 Ok(recovered) => {
                     sessions.insert(recovered.summary.session_id, recovered.shared());
                 }
@@ -360,7 +357,7 @@ impl RolloutStore {
         Ok(deleted)
     }
 
-    fn load_session_from_rollout(
+    async fn load_session_from_rollout(
         &self,
         rollout_path: &Path,
         deps: &ServerRuntimeDependencies,
@@ -393,7 +390,10 @@ impl RolloutStore {
             }
         }
 
-        replay.into_runtime_session(deps)
+        replay
+            .into_runtime_session(deps)
+            .await
+            .with_context(|| format!("replay rollout {}", rollout_path.display()))
     }
 
     fn rollout_paths(&self) -> Result<Vec<PathBuf>> {
@@ -605,7 +605,10 @@ impl ReplayState {
         Ok(())
     }
 
-    fn into_runtime_session(mut self, deps: &ServerRuntimeDependencies) -> Result<RuntimeSession> {
+    async fn into_runtime_session(
+        mut self,
+        deps: &ServerRuntimeDependencies,
+    ) -> Result<RuntimeSession> {
         // Insert turn summary for the last turn before converting
         if let Some(last_turn) = self.latest_turn_metadata.clone()
             && last_turn.status == devo_core::TurnStatus::Completed
@@ -640,7 +643,8 @@ impl ReplayState {
         }
 
         let mut record = self.session.context("missing SessionMetaLine in rollout")?;
-        let mut core_session = deps.new_session_state(
+        let runtime_context = deps.context_for_workspace(&record.cwd).await?;
+        let mut core_session = runtime_context.new_session_state(
             record.id,
             record.cwd.clone(),
             record.additional_directories.clone(),
@@ -715,8 +719,8 @@ impl ReplayState {
             })
             .or_else(|| record.model_binding_id.clone())
             .or_else(|| record.model.clone())
-            .unwrap_or_else(|| deps.default_model.clone());
-        let turn_config = deps.resolve_turn_config(Some(&summary_model_selection), None);
+            .unwrap_or_else(|| runtime_context.default_model.clone());
+        let turn_config = runtime_context.resolve_turn_config(Some(&summary_model_selection), None);
         let concrete_selection = |selection: Option<&str>| {
             selection
                 .map(str::trim)
@@ -784,6 +788,7 @@ impl ReplayState {
 
         let config = core_session.config.clone();
         Ok(RuntimeSession {
+            runtime_context,
             record: Some(record),
             summary,
             config,

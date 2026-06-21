@@ -197,7 +197,6 @@ fn build_runtime(data_root: &Path) -> Result<Arc<ServerRuntime>> {
                 ..Model::default()
             }])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()

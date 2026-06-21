@@ -14,8 +14,8 @@ use devo_core::ProviderVendorCatalog;
 use devo_core::SkillsConfig;
 use devo_core::tools::ToolRegistry;
 use devo_protocol::AcpAuthMethod;
-use devo_protocol::AcpLogoutCapabilities;
 use devo_protocol::AcpLoadSessionResult;
+use devo_protocol::AcpLogoutCapabilities;
 use devo_protocol::AcpNewSessionResult;
 use devo_protocol::AcpPromptResult;
 use devo_protocol::AcpResumeSessionResult;
@@ -351,16 +351,11 @@ async fn acp_session_prompt_streams_session_updates_without_devo_subscriptions()
         .await;
     assert_eq!(prompt_response, None);
 
-    let (
-        updates_before_response,
-        updates_after_response,
-        prompt_result,
-    ): (
+    let (updates_before_response, updates_after_response, prompt_result): (
         Vec<AcpSessionUpdate>,
         Vec<AcpSessionUpdate>,
         AcpSuccessResponse<AcpPromptResult>,
-    ) =
-        wait_for_prompt_update_and_response(&mut notifications_rx, 51, session_id).await?;
+    ) = wait_for_prompt_update_and_response(&mut notifications_rx, 51, session_id).await?;
     assert_eq!(prompt_result.result.stop_reason, AcpStopReason::EndTurn);
     assert!(
         updates_before_response
@@ -756,7 +751,6 @@ fn build_runtime(data_root: &Path) -> Result<Arc<ServerRuntime>> {
                 ..Model::default()
             }])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()
@@ -790,7 +784,9 @@ async fn initialize_acp_connection_with_transport(
     transport: ClientTransportKind,
 ) -> Result<(u64, mpsc::Receiver<serde_json::Value>, AcpInitializeResult)> {
     let (notifications_tx, notifications_rx) = mpsc::channel(/*buffer*/ 4096);
-    let connection_id = runtime.register_connection(transport, notifications_tx).await;
+    let connection_id = runtime
+        .register_connection(transport, notifications_tx)
+        .await;
     let initialize_response = runtime
         .handle_incoming(
             connection_id,
@@ -869,9 +865,8 @@ async fn wait_for_prompt_update_and_response(
         if value.get("method") != Some(&serde_json::json!("session/update")) {
             continue;
         }
-        let notification: AcpSessionNotification =
-            serde_json::from_value(value["params"].clone())
-                .context("decode ACP trailing session/update notification")?;
+        let notification: AcpSessionNotification = serde_json::from_value(value["params"].clone())
+            .context("decode ACP trailing session/update notification")?;
         if notification.session_id == session_id && notification.meta.is_none() {
             updates_after_response.push(notification.update);
         }

@@ -1,5 +1,9 @@
 use std::borrow::Cow;
 
+use crate::titles::build_title_generation_request;
+use crate::titles::derive_provisional_title;
+use crate::titles::normalize_generated_title;
+
 use super::*;
 
 impl ServerRuntime {
@@ -99,7 +103,7 @@ impl ServerRuntime {
         first_user_input: String,
     ) {
         for attempt in 1..=Self::MAX_TITLE_RETRIES {
-            let (model_selection, thinking, should_skip) = {
+            let (model_selection, thinking, should_skip, runtime_context) = {
                 let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
                     return;
                 };
@@ -107,9 +111,10 @@ impl ServerRuntime {
                 (
                     session_model_selection(&session.summary)
                         .map(str::to_string)
-                        .unwrap_or_else(|| self.deps.default_model.clone()),
+                        .unwrap_or_else(|| session.runtime_context.default_model.clone()),
                     session.summary.thinking.clone(),
                     matches!(session.summary.title_state, SessionTitleState::Final(_)),
+                    Arc::clone(&session.runtime_context),
                 )
             };
 
@@ -117,16 +122,14 @@ impl ServerRuntime {
                 return;
             }
 
-            let turn_config = self
-                .deps
-                .resolve_turn_config(Some(model_selection.as_str()), thinking);
+            let turn_config =
+                runtime_context.resolve_turn_config(Some(model_selection.as_str()), thinking);
             let resolved_request = turn_config
                 .model
                 .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
             let request_model = turn_config.provider_request_model(&resolved_request.request_model);
 
-            let response = match self
-                .deps
+            let response = match runtime_context
                 .provider_router
                 .complete(
                     turn_config.provider_route.clone(),

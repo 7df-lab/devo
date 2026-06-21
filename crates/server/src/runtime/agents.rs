@@ -82,10 +82,17 @@ impl ServerRuntime {
                 stable_items,
                 parent.latest_turn.clone(),
                 parent.tool_registry.clone(),
+                Arc::clone(&parent.runtime_context),
             )
         };
-        let (parent_summary, parent_config, stable_items, parent_latest_turn, parent_tool_registry) =
-            parent_snapshot;
+        let (
+            parent_summary,
+            parent_config,
+            stable_items,
+            parent_latest_turn,
+            parent_tool_registry,
+            runtime_context,
+        ) = parent_snapshot;
 
         let nickname = self
             .generate_unique_agent_name(parent_session_id, child_session_id)
@@ -109,7 +116,7 @@ impl ServerRuntime {
             model.clone(),
             model_binding_id.clone(),
             thinking.clone(),
-            self.deps.provider.name().to_string(),
+            runtime_context.provider.name().to_string(),
             Some(parent_session_id),
         );
         record.agent_path = Some(agent_path.clone());
@@ -125,7 +132,7 @@ impl ServerRuntime {
             Some(record)
         };
 
-        let mut core_session = self.deps.new_session_state(
+        let mut core_session = runtime_context.new_session_state(
             child_session_id,
             parent_summary.cwd.clone(),
             parent_summary.additional_directories.clone(),
@@ -184,8 +191,7 @@ impl ServerRuntime {
             status: SessionRuntimeStatus::Idle,
         };
         if effective_context_mode == AgentContextMode::DeepResearch {
-            let turn_config = self
-                .deps
+            let turn_config = runtime_context
                 .resolve_turn_config(session_model_selection(&summary), summary.thinking.clone());
             core_session.session_context = Some(research::research_session_context(
                 &core_session,
@@ -202,6 +208,7 @@ impl ServerRuntime {
             ));
         }
         let child_session = RuntimeSession {
+            runtime_context,
             record,
             summary: summary.clone(),
             config: parent_config,
@@ -468,7 +475,7 @@ impl ServerRuntime {
 
         let (turn_config, resolved_request) = {
             let session = session_arc.lock().await;
-            let turn_config = self.deps.resolve_turn_config(
+            let turn_config = session.runtime_context.resolve_turn_config(
                 session_model_selection(&session.summary),
                 session.summary.thinking.clone(),
             );

@@ -27,10 +27,20 @@ impl ServerRuntime {
     ) -> serde_json::Value {
         let now = Utc::now();
         let session_id = SessionId::new();
+        let runtime_context = match self.deps.context_for_workspace(&params.cwd).await {
+            Ok(context) => context,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to initialize session workspace: {error}"),
+                );
+            }
+        };
         let model = params
             .model
             .clone()
-            .unwrap_or_else(|| self.deps.default_model.clone());
+            .unwrap_or_else(|| runtime_context.default_model.clone());
         let record = (!params.ephemeral).then(|| {
             self.rollout_store.create_session_record(
                 session_id,
@@ -41,7 +51,7 @@ impl ServerRuntime {
                 Some(model.clone()),
                 params.model_binding_id.clone(),
                 None,
-                self.deps.provider.name().to_string(),
+                runtime_context.provider.name().to_string(),
                 None,
             )
         });
@@ -83,7 +93,7 @@ impl ServerRuntime {
                 format!("failed to persist session metadata: {error}"),
             );
         }
-        let core_session = self.deps.new_session_state(
+        let core_session = runtime_context.new_session_state(
             session_id,
             params.cwd.clone(),
             params.additional_directories.clone(),
@@ -94,6 +104,7 @@ impl ServerRuntime {
         self.sessions.lock().await.insert(
             session_id,
             RuntimeSession {
+                runtime_context,
                 record,
                 summary: summary.clone(),
                 config,
@@ -537,7 +548,7 @@ impl ServerRuntime {
                 forked_runtime.summary.model.clone(),
                 forked_runtime.summary.model_binding_id.clone(),
                 forked_runtime.summary.thinking.clone(),
-                self.deps.provider.name().to_string(),
+                forked_runtime.runtime_context.provider.name().to_string(),
                 Some(params.session_id),
             );
             if let Err(error) = self.rollout_store.append_session_meta(&record) {
@@ -684,9 +695,19 @@ impl ServerRuntime {
 
         let cwd = cwd_override.unwrap_or_else(|| source.summary.cwd.clone());
         let additional_directories = source.summary.additional_directories.clone();
-        let mut core_session =
+        let runtime_context = if cwd == source.summary.cwd {
+            Arc::clone(&source.runtime_context)
+        } else {
             self.deps
-                .new_session_state(session_id, cwd.clone(), additional_directories.clone());
+                .context_for_workspace(&cwd)
+                .await
+                .map_err(|error| format!("failed to initialize session workspace: {error}"))?
+        };
+        let mut core_session = runtime_context.new_session_state(
+            session_id,
+            cwd.clone(),
+            additional_directories.clone(),
+        );
         core_session.session_context = source_core_session.session_context.clone();
         core_session.latest_turn_context = None;
         core_session.total_input_tokens = source_core_session.total_input_tokens;
@@ -725,12 +746,11 @@ impl ServerRuntime {
                         .summary
                         .model
                         .clone()
-                        .unwrap_or_else(|| self.deps.default_model.clone());
+                        .unwrap_or_else(|| runtime_context.default_model.clone());
                     // Synthetic fork metadata follows normal turn semantics:
                     // `model` remains the catalog slug, while `request_model`
                     // is recomputed from the active provider binding.
-                    let request_model = self
-                        .deps
+                    let request_model = runtime_context
                         .resolve_turn_config(
                             source
                                 .summary
@@ -803,6 +823,7 @@ impl ServerRuntime {
         let pending_turn_queue = Arc::clone(&core_session.pending_turn_queue);
         let btw_input_queue = Arc::clone(&core_session.btw_input_queue);
         Ok(RuntimeSession {
+            runtime_context,
             record: None,
             summary,
             config,
