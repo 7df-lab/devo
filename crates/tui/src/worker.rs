@@ -5092,6 +5092,36 @@ mod tests {
     }
 
     #[test]
+    fn acp_agent_message_chunk_with_message_id_emits_text_item_delta() {
+        let session_id = SessionId::new();
+        let item_id = ItemId::new();
+
+        let events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {
+                        "type": "text",
+                        "text": "streamed answer"
+                    },
+                    "messageId": item_id.to_string()
+                }
+            }),
+            Some(session_id),
+        );
+
+        assert_eq!(
+            events,
+            vec![WorkerEvent::TextItemDelta {
+                item_id,
+                kind: TextItemKind::Assistant,
+                delta: "streamed answer".to_string()
+            }]
+        );
+    }
+
+    #[test]
     fn raw_acp_session_state_updates_emit_worker_events() {
         let session_id = SessionId::new();
 

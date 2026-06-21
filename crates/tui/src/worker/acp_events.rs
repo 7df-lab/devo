@@ -10,9 +10,11 @@ use devo_protocol::AcpSessionUpdate;
 use devo_protocol::AcpToolCallContent;
 use devo_protocol::AcpToolCallStatus;
 use devo_protocol::AcpToolKind;
+use devo_protocol::ItemId;
 
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
+use crate::events::TextItemKind;
 use crate::events::WorkerEvent;
 
 struct AcpToolCallEventData {
@@ -79,13 +81,41 @@ pub(super) fn worker_events_from_acp_notification_with_terminal_state(
         return Vec::new();
     }
     match notification.update {
-        AcpSessionUpdate::AgentMessageChunk { content, .. } => acp_content_display_text(&content)
+        AcpSessionUpdate::AgentMessageChunk {
+            content,
+            message_id,
+            ..
+        } => acp_content_display_text(&content)
             .into_iter()
-            .map(WorkerEvent::TextDelta)
+            .map(|delta| {
+                if let Some(item_id) = message_item_id(message_id.as_deref()) {
+                    WorkerEvent::TextItemDelta {
+                        item_id,
+                        kind: TextItemKind::Assistant,
+                        delta,
+                    }
+                } else {
+                    WorkerEvent::TextDelta(delta)
+                }
+            })
             .collect(),
-        AcpSessionUpdate::AgentThoughtChunk { content, .. } => acp_content_display_text(&content)
+        AcpSessionUpdate::AgentThoughtChunk {
+            content,
+            message_id,
+            ..
+        } => acp_content_display_text(&content)
             .into_iter()
-            .map(WorkerEvent::ReasoningDelta)
+            .map(|delta| {
+                if let Some(item_id) = message_item_id(message_id.as_deref()) {
+                    WorkerEvent::TextItemDelta {
+                        item_id,
+                        kind: TextItemKind::Reasoning,
+                        delta,
+                    }
+                } else {
+                    WorkerEvent::ReasoningDelta(delta)
+                }
+            })
             .collect(),
         AcpSessionUpdate::Plan { entries, .. } => vec![WorkerEvent::PlanUpdated {
             explanation: None,
@@ -172,6 +202,10 @@ pub(super) fn worker_events_from_acp_notification_with_terminal_state(
         AcpSessionUpdate::UserMessageChunk { .. }
         | AcpSessionUpdate::SessionInfoUpdate { title: None, .. } => Vec::new(),
     }
+}
+
+fn message_item_id(message_id: Option<&str>) -> Option<ItemId> {
+    message_id.and_then(|message_id| ItemId::try_from(message_id).ok())
 }
 
 fn worker_events_from_acp_tool_call(
