@@ -51,6 +51,11 @@ impl Renderable for ChatWidget {
             return;
         }
 
+        if let Some(onboarding) = &self.onboarding {
+            onboarding.render(area, buf);
+            return;
+        }
+
         let bottom_height = self
             .bottom_pane
             .desired_height(area.width)
@@ -58,9 +63,7 @@ impl Renderable for ChatWidget {
         let [history_area, bottom_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).areas(area);
 
-        if let Some(onboarding) = &self.onboarding {
-            onboarding.render(history_area, buf);
-        } else {
+        {
             if tracing::enabled!(tracing::Level::DEBUG)
                 && let Some(snapshot) = self.active_assistant_render_snapshot(area)
             {
@@ -113,10 +116,7 @@ impl Renderable for ChatWidget {
 
     fn desired_height(&self, width: u16) -> u16 {
         if let Some(onboarding) = &self.onboarding {
-            return onboarding
-                .desired_height(width.max(1))
-                .saturating_add(self.bottom_pane.desired_height(width))
-                .saturating_add(2);
+            return onboarding.desired_height(width.max(1));
         }
         if self.resume_browser.is_some() || self.is_subagent_selector_open() {
             return u16::MAX;
@@ -132,17 +132,15 @@ impl Renderable for ChatWidget {
         if self.resume_browser.is_some() || self.is_subagent_selector_open() {
             return None;
         }
+        if let Some(onboarding) = &self.onboarding {
+            return onboarding.cursor_pos(area);
+        }
         let bottom_height = self
             .bottom_pane
             .desired_height(area.width)
             .min(area.height.saturating_sub(1).max(3));
-        let [history_area, bottom_area] =
+        let [_history_area, bottom_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).areas(area);
-        if let Some(onboarding) = &self.onboarding
-            && let Some(cursor) = onboarding.cursor_pos(history_area)
-        {
-            return Some(cursor);
-        }
         self.bottom_pane.cursor_pos(bottom_area)
     }
 }

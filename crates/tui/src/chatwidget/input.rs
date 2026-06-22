@@ -257,6 +257,7 @@ impl ChatWidget {
                 self.frame_requester.schedule_frame();
             }
             AppEvent::Exit(_)
+            | AppEvent::OnboardingCompleted
             | AppEvent::OpenSlashCommandPopup
             | AppEvent::ClosePopup
             | AppEvent::OpenModelPicker
@@ -345,47 +346,53 @@ impl ChatWidget {
     }
 
     pub(super) fn handle_onboarding_result(&mut self, result: OnboardingResult) {
-        match result {
+        let (model_slug, model_name, display_name, message, hint) = match result {
             OnboardingResult::ValidationSucceeded {
                 model_slug,
                 model_name,
                 display_name,
-            } => {
-                self.apply_session_model_name(model_slug, model_name, display_name);
-                self.add_to_history(history_cell::new_info_event(
-                    "Provider configured successfully".to_string(),
-                    Some("onboarding complete".to_string()),
-                ));
-                self.onboarding = None;
-                self.push_session_header(/*is_first_run*/ false, None);
-                self.bottom_pane
-                    .set_composer_input_enabled(/*enabled*/ true, /*placeholder*/ None);
-                self.set_default_placeholder();
-                self.set_status_message("Onboarding complete");
-            }
+            } => (
+                model_slug,
+                model_name,
+                display_name,
+                "Provider configured successfully".to_string(),
+                Some("onboarding complete".to_string()),
+            ),
             OnboardingResult::ValidationBypassed {
                 model_slug,
                 model_name,
                 display_name,
-            } => {
-                self.apply_session_model_name(model_slug, model_name, display_name);
-                self.add_to_history(history_cell::new_info_event(
-                    "Provider added without validation".to_string(),
-                    Some("onboarding validation skipped".to_string()),
-                ));
-                self.onboarding = None;
-                self.push_session_header(/*is_first_run*/ false, None);
-                self.bottom_pane
-                    .set_composer_input_enabled(/*enabled*/ true, /*placeholder*/ None);
-                self.set_default_placeholder();
-                self.set_status_message("Onboarding complete");
-            }
+            } => (
+                model_slug,
+                model_name,
+                display_name,
+                "Provider added without validation".to_string(),
+                Some("onboarding validation skipped".to_string()),
+            ),
             OnboardingResult::Cancelled => {
                 self.onboarding = None;
                 self.app_event_tx
                     .send(AppEvent::Exit(crate::app_event::ExitMode::ShutdownFirst));
+                return;
             }
+        };
+
+        self.apply_session_model_name(model_slug, model_name, display_name);
+        self.add_to_history(history_cell::new_info_event(message, hint));
+        self.onboarding = None;
+        self.set_status_message("Onboarding complete");
+        self.app_event_tx.send(AppEvent::OnboardingCompleted);
+
+        if self.exit_after_onboarding {
+            self.app_event_tx
+                .send(AppEvent::Exit(crate::app_event::ExitMode::ShutdownFirst));
+            return;
         }
+
+        self.push_session_header(/*is_first_run*/ false, None);
+        self.bottom_pane
+            .set_composer_input_enabled(/*enabled*/ true, /*placeholder*/ None);
+        self.set_default_placeholder();
     }
 
     pub(super) fn drain_onboarding_transcript_events(&mut self) {
@@ -513,7 +520,6 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
-    #[cfg(test)]
     #[cfg(test)]
     pub(crate) fn last_plan_progress_for_test(&self) -> Option<(usize, usize)> {
         self.last_plan_progress

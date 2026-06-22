@@ -146,6 +146,28 @@ fn exit_messages(exit: &devo_tui::AppExit, color_enabled: bool) -> Vec<String> {
     lines
 }
 
+fn onboarding_exit_messages(exit: &devo_tui::AppExit, color_enabled: bool) -> Vec<String> {
+    if !exit.onboarding_completed {
+        return Vec::new();
+    }
+    let complete = if color_enabled {
+        "\u{1b}[1;32mConfiguration complete\u{1b}[0m".to_string()
+    } else {
+        "Configuration complete".to_string()
+    };
+    let command = if color_enabled {
+        "\u{1b}[1;36mdevo\u{1b}[0m".to_string()
+    } else {
+        "devo".to_string()
+    };
+    vec![
+        complete,
+        String::new(),
+        "Next step:".to_string(),
+        format!("  {command}"),
+    ]
+}
+
 async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     let log_level = cli.log_level.map(|level| level.to_string());
@@ -155,8 +177,14 @@ async fn run_cli() -> Result<()> {
             // Resolve logging config early, install the process-wide file subscriber,
             // and keep its non-blocking writer guard alive for the command lifetime.
             let _logging = install_logging(&cli)?;
-            let exit = run_agent(/*force_onboarding*/ true, log_level.as_deref(), None).await?;
-            for line in exit_messages(&exit, /*color_enabled*/ true) {
+            let exit = run_agent(
+                /*force_onboarding*/ true,
+                /*exit_after_onboarding*/ true,
+                log_level.as_deref(),
+                None,
+            )
+            .await?;
+            for line in onboarding_exit_messages(&exit, /*color_enabled*/ true) {
                 println!("{line}");
             }
             Ok(())
@@ -176,6 +204,7 @@ async fn run_cli() -> Result<()> {
             let _logging = install_logging(&cli)?;
             let exit = run_agent(
                 /*force_onboarding*/ false,
+                /*exit_after_onboarding*/ false,
                 log_level.as_deref(),
                 Some(*session_id),
             )
@@ -202,7 +231,13 @@ async fn run_cli() -> Result<()> {
             maybe_print_startup_update(&cli).await;
             let _logging = install_logging(&cli)?;
             tracing::info!("default interactive command starting");
-            let exit = run_agent(/*force_onboarding*/ false, log_level.as_deref(), None).await?;
+            let exit = run_agent(
+                /*force_onboarding*/ false,
+                /*exit_after_onboarding*/ false,
+                log_level.as_deref(),
+                None,
+            )
+            .await?;
             let exit_lines = exit_messages(&exit, /*color_enabled*/ true);
             tracing::info!(
                 line_count = exit_lines.len(),
@@ -339,6 +374,7 @@ mod tests {
     use super::cli_logging_overrides;
     use super::exit_messages;
     use super::format_token_usage_line;
+    use super::onboarding_exit_messages;
 
     #[test]
     fn cli_parses_supported_log_levels() {
@@ -527,6 +563,7 @@ mod tests {
         let session_id = SessionId::new();
         let exit = devo_tui::AppExit {
             session_id: Some(session_id),
+            onboarding_completed: false,
             turn_count: 1,
             total_input_tokens: 10,
             total_output_tokens: 2,
@@ -549,6 +586,7 @@ mod tests {
         let session_id = SessionId::new();
         let exit = devo_tui::AppExit {
             session_id: Some(session_id),
+            onboarding_completed: false,
             turn_count: 1,
             total_input_tokens: 10,
             total_output_tokens: 2,
@@ -560,5 +598,66 @@ mod tests {
 
         let lines = exit_messages(&exit, /*color_enabled*/ true);
         assert!(lines[1].contains("\u{1b}["));
+    }
+
+    #[test]
+    fn onboarding_exit_messages_include_next_step_after_success() {
+        let session_id = SessionId::new();
+        let exit = devo_tui::AppExit {
+            session_id: Some(session_id),
+            onboarding_completed: true,
+            turn_count: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_read_tokens: 0,
+        };
+
+        let lines = onboarding_exit_messages(&exit, /*color_enabled*/ false);
+
+        assert_eq!(
+            lines,
+            vec![
+                "Configuration complete".to_string(),
+                String::new(),
+                "Next step:".to_string(),
+                "  devo".to_string(),
+            ]
+        );
+        assert_eq!(lines.iter().any(|line| line.contains("devo resume")), false);
+    }
+
+    #[test]
+    fn onboarding_exit_messages_are_empty_without_success() {
+        let session_id = SessionId::new();
+        let exit = devo_tui::AppExit {
+            session_id: Some(session_id),
+            onboarding_completed: false,
+            turn_count: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_read_tokens: 0,
+        };
+
+        assert_eq!(
+            onboarding_exit_messages(&exit, /*color_enabled*/ false),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn colorized_onboarding_exit_messages_include_ansi_sequences() {
+        let exit = devo_tui::AppExit {
+            session_id: None,
+            onboarding_completed: true,
+            turn_count: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_read_tokens: 0,
+        };
+
+        let lines = onboarding_exit_messages(&exit, /*color_enabled*/ true);
+
+        assert!(lines[0].contains("\u{1b}["));
+        assert!(lines[3].contains("\u{1b}["));
     }
 }

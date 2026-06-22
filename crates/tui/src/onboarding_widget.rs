@@ -42,6 +42,7 @@ use crate::bottom_pane::scroll_state::ScrollState;
 use crate::exec_cell::spinner;
 use crate::onboarding_viewport::ViewportAnchor;
 use crate::onboarding_viewport::render_lines_with_anchor;
+use crate::onboarding_viewport::render_lines_with_fixed_footer;
 use crate::render::renderable::Renderable;
 use crate::tui::frame_requester::FrameRequester;
 
@@ -796,6 +797,7 @@ impl OnboardingWidget {
         }
         let current = state.selected_idx.unwrap_or(0);
         state.selected_idx = Some(if current == 0 { len - 1 } else { current - 1 });
+        state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
     }
 
     fn model_move_down(state: &mut ScrollState, filtered_indices: &[usize]) {
@@ -805,6 +807,7 @@ impl OnboardingWidget {
         }
         let current = state.selected_idx.unwrap_or(0);
         state.selected_idx = Some((current + 1) % len);
+        state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
     }
 
     fn model_apply_filter(
@@ -832,6 +835,7 @@ impl OnboardingWidget {
         } else {
             Some(0)
         };
+        state.scroll_top = 0;
     }
 
     fn custom_model_name_handle_key(&mut self, key: KeyEvent) {
@@ -2070,15 +2074,9 @@ impl OnboardingWidget {
 
         let max_visible = MAX_POPUP_ROWS.min(filtered_indices.len().max(1));
         let scroll_offset = state
-            .selected_idx
-            .map(|sel| {
-                if sel >= max_visible.saturating_sub(2) {
-                    sel.saturating_sub(max_visible.saturating_sub(3))
-                } else {
-                    0
-                }
-            })
-            .unwrap_or(0);
+            .scroll_top
+            .min(filtered_indices.len().saturating_sub(max_visible));
+        let mut anchor = None;
 
         for (vis_idx, &actual_idx) in filtered_indices
             .iter()
@@ -2088,20 +2086,25 @@ impl OnboardingWidget {
         {
             if let Some(item) = items.get(actual_idx) {
                 let is_selected = state.selected_idx == Some(vis_idx);
+                let start = lines.len();
                 let description = if item.display_name == item.slug {
                     None
                 } else {
                     Some(item.display_name.clone())
                 };
                 Self::render_option_row(&mut lines, item.slug.clone(), description, is_selected);
+                if is_selected {
+                    anchor = Some(ViewportAnchor {
+                        start,
+                        end: lines.len(),
+                    });
+                }
             }
         }
 
-        Self::render_footer(&mut lines, "Enter select", "Esc cancel");
-
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .render(content_area, buf);
+        let mut footer_lines = Vec::new();
+        Self::render_footer(&mut footer_lines, "Enter select", "Esc cancel");
+        render_lines_with_fixed_footer(lines, footer_lines, anchor, content_area, buf);
     }
 
     fn render_custom_model_name(input: &str, cursor_pos: usize, area: Rect, buf: &mut Buffer) {
@@ -2421,10 +2424,24 @@ impl Renderable for OnboardingWidget {
     fn desired_height(&self, _width: u16) -> u16 {
         match &self.state {
             OnboardingState::ModelSelection {
-                filtered_indices, ..
+                items,
+                state,
+                filtered_indices,
+                ..
             } => {
-                let items = MAX_POPUP_ROWS.min(filtered_indices.len().max(1)) as u16;
-                items + 8
+                let max_visible = MAX_POPUP_ROWS.min(filtered_indices.len().max(1));
+                let scroll_offset = state
+                    .scroll_top
+                    .min(filtered_indices.len().saturating_sub(max_visible));
+                let option_rows = filtered_indices
+                    .iter()
+                    .skip(scroll_offset)
+                    .take(max_visible)
+                    .filter_map(|idx| items.get(*idx))
+                    .map(|item| if item.display_name == item.slug { 1 } else { 2 })
+                    .sum::<u16>()
+                    .max(1);
+                option_rows + 9
             }
             OnboardingState::CustomModelName { .. } => 8,
             OnboardingState::ProviderSelection { items, .. } => items.len() as u16 * 2 + 6,

@@ -27,19 +27,28 @@ fn onboarding_widget_with_available_model(
     model: Model,
     cwd: PathBuf,
 ) -> (ChatWidget, mpsc::UnboundedReceiver<AppEvent>) {
+    onboarding_widget_with_models(vec![model.clone()], Some(model), cwd)
+}
+
+fn onboarding_widget_with_models(
+    models: Vec<Model>,
+    initial_model: Option<Model>,
+    cwd: PathBuf,
+) -> (ChatWidget, mpsc::UnboundedReceiver<AppEvent>) {
     let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
     let widget = ChatWidget::new_with_app_event(ChatWidgetInit {
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
-        initial_session: TuiSessionState::new(cwd, Some(model.clone())),
+        initial_session: TuiSessionState::new(cwd, initial_model),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
-        available_models: vec![model],
+        available_models: models,
         saved_models: Vec::new(),
         show_model_onboarding: true,
+        exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
     });
@@ -101,7 +110,7 @@ fn scrollback_plain_lines(lines: &[crate::history_cell::ScrollbackLine]) -> Vec<
 }
 
 #[test]
-fn first_run_onboarding_starts_with_logo_and_renders_inline() {
+fn first_run_onboarding_starts_with_logo_and_hides_composer() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let (mut widget, _app_event_rx) = onboarding_widget_with_available_model(test_model(), cwd);
 
@@ -112,8 +121,42 @@ fn first_run_onboarding_starts_with_logo_and_renders_inline() {
 
     let rows = rendered_rows(&widget, 100, 24).join("\n");
     assert!(rows.contains("Choose model profile"));
-    assert!(rows.contains("Complete onboarding to start chatting"));
+    assert!(rows.contains("Enter select  ·  Esc cancel"));
+    assert!(!rows.contains("Complete onboarding to start chatting"));
+    assert!(!rows.contains("SHIFT+TAB switch"));
     assert!(widget.desired_height(100) < u16::MAX);
+
+    let rows = rendered_rows(&widget, 100, widget.desired_height(100)).join("\n");
+    assert!(rows.contains("Enter select  ·  Esc cancel"));
+}
+
+#[test]
+fn model_selection_footer_stays_visible_in_short_viewport() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let models = (0..12)
+        .map(|idx| Model {
+            slug: format!("model-{idx:02}"),
+            display_name: format!("Model {idx:02} Display Name"),
+            ..Model::default()
+        })
+        .collect::<Vec<_>>();
+    let initial_model = models.first().cloned();
+    let (mut widget, _app_event_rx) = onboarding_widget_with_models(models, initial_model, cwd);
+
+    for _ in 0..10 {
+        widget.handle_key_event(press_key(KeyCode::Down));
+    }
+
+    let rows = rendered_rows(&widget, 80, 8).join("\n");
+    assert!(
+        rows.contains("model-10"),
+        "expected selected model in:\n{rows}"
+    );
+    assert!(
+        rows.contains("Enter select  ·  Esc cancel"),
+        "expected fixed onboarding footer in:\n{rows}"
+    );
+    assert!(!rows.contains("Complete onboarding to start chatting"));
 }
 
 #[test]

@@ -106,6 +106,7 @@ pub(crate) struct ChatWidgetInit {
     /// Configured model bindings from config.toml used by the /model picker.
     pub(crate) saved_models: Vec<SavedModelEntry>,
     pub(crate) show_model_onboarding: bool,
+    pub(crate) exit_after_onboarding: bool,
     pub(crate) startup_tooltip_override: Option<String>,
     pub(crate) initial_theme_name: Option<String>,
 }
@@ -266,6 +267,7 @@ pub(crate) struct ChatWidget {
     acp_config_options: Vec<AcpSessionConfigOption>,
     acp_usage: Option<(u64, u64, Option<AcpCost>)>,
     onboarding: Option<OnboardingWidget>,
+    exit_after_onboarding: bool,
     resume_browser: Option<ResumeBrowserState>,
     resume_browser_loading: bool,
     subagent_monitor: SubagentMonitorState,
@@ -324,6 +326,7 @@ impl ChatWidget {
             available_models,
             saved_models,
             show_model_onboarding,
+            exit_after_onboarding,
             startup_tooltip_override,
             initial_theme_name,
         } = common;
@@ -416,6 +419,7 @@ impl ChatWidget {
             acp_config_options: Vec::new(),
             acp_usage: None,
             onboarding: None,
+            exit_after_onboarding,
             resume_browser: None,
             resume_browser_loading: false,
             subagent_monitor: SubagentMonitorState::default(),

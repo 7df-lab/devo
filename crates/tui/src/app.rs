@@ -11,6 +11,8 @@ use devo_protocol::SessionId;
 pub struct AppExit {
     /// Active session identifier at exit, when one exists.
     pub session_id: Option<SessionId>,
+    /// Whether provider onboarding completed successfully during this TUI run.
+    pub onboarding_completed: bool,
     /// Total turns completed in the session.
     pub turn_count: usize,
     /// Total input tokens accumulated in the session.
@@ -58,6 +60,8 @@ pub struct InteractiveTuiConfig {
     pub saved_models: Vec<SavedModelEntry>,
     /// Whether to open the model picker on startup.
     pub show_model_onboarding: bool,
+    /// Whether successful onboarding should exit the TUI immediately.
+    pub exit_after_onboarding: bool,
     /// Non-fatal startup warnings to show in the transcript before user input.
     pub startup_warnings: Vec<String>,
 }

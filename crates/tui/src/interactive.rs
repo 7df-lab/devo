@@ -109,6 +109,7 @@ fn normalized_display_name(
 #[derive(Debug, Default)]
 struct InteractiveLoopState {
     session_id: Option<devo_core::SessionId>,
+    onboarding_completed: bool,
     turn_count: usize,
     total_input_tokens: usize,
     total_output_tokens: usize,
@@ -296,6 +297,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         available_models,
         saved_models: config.saved_models.clone(),
         show_model_onboarding: config.show_model_onboarding,
+        exit_after_onboarding: config.exit_after_onboarding,
         startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
         initial_theme_name,
     });
@@ -380,6 +382,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
     tracing::info!("worker shutdown completed; returning app exit");
     Ok(AppExit {
         session_id: loop_state.session_id,
+        onboarding_completed: loop_state.onboarding_completed,
         turn_count: loop_state.turn_count,
         total_input_tokens: loop_state.total_input_tokens,
         total_output_tokens: loop_state.total_output_tokens,
@@ -743,6 +746,11 @@ fn handle_app_event(
     if let AppEvent::Exit(mode) = &app_event {
         tracing::info!(?mode, "host received app exit event");
         return Ok(LoopAction::ClearAndExit);
+    }
+
+    if matches!(&app_event, AppEvent::OnboardingCompleted) {
+        loop_state.onboarding_completed = true;
+        return Ok(LoopAction::Continue);
     }
 
     if matches!(&app_event, AppEvent::Interrupt) {

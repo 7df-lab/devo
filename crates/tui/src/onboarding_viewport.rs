@@ -44,6 +44,45 @@ pub(crate) fn render_lines_with_anchor(
     render_scrolled_paragraph(paragraph, total_rows, scroll_offset, area, buf);
 }
 
+pub(crate) fn render_lines_with_fixed_footer(
+    body_lines: Vec<Line<'static>>,
+    footer_lines: Vec<Line<'static>>,
+    anchor: Option<ViewportAnchor>,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let footer_paragraph =
+        Paragraph::new(Text::from(footer_lines.clone())).wrap(Wrap { trim: false });
+    let footer_rows = footer_paragraph.line_count(area.width);
+    let footer_height = u16::try_from(footer_rows)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let body_height = area.height.saturating_sub(footer_height);
+
+    if body_height > 0 {
+        render_lines_with_anchor(
+            body_lines,
+            anchor,
+            Rect {
+                height: body_height,
+                ..area
+            },
+            buf,
+        );
+    }
+
+    let footer_area = Rect {
+        y: area.y.saturating_add(body_height),
+        height: footer_height,
+        ..area
+    };
+    render_footer_paragraph(footer_paragraph, footer_rows, footer_area, buf);
+}
+
 fn scroll_offset_for_anchor(
     lines: &[Line<'static>],
     anchor: ViewportAnchor,
@@ -82,6 +121,26 @@ fn wrapped_row_count(lines: &[Line<'static>], width: u16) -> usize {
     Paragraph::new(Text::from(lines.to_vec()))
         .wrap(Wrap { trim: false })
         .line_count(width)
+}
+
+fn render_footer_paragraph(
+    paragraph: Paragraph<'_>,
+    total_rows: usize,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    if area.height == 0 {
+        return;
+    }
+
+    let visible_rows = area.height as usize;
+    if total_rows <= visible_rows {
+        paragraph.render(area, buf);
+        return;
+    }
+
+    let scroll_offset = total_rows.saturating_sub(visible_rows);
+    render_scrolled_paragraph(paragraph, total_rows, scroll_offset, area, buf);
 }
 
 fn render_scrolled_paragraph(

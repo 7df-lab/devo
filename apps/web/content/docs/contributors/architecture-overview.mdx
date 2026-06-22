@@ -75,8 +75,9 @@ When a user runs `devo`:
    model, model binding id, provider wire API, reasoning effort selection, permission
    preset, and working directory.
 
-`devo onboard` follows the same path, but forces the TUI into provider
-onboarding mode.
+`devo onboard` follows the same setup path, forces provider onboarding mode,
+and exits after the provider/model binding is saved. The CLI then prompts the
+user to run `devo` so the next process starts from the freshly written config.
 
 `devo resume <session_id>` follows the same path with an initial session id.
 

@@ -62,6 +62,7 @@ fn widget_with_model(
         available_models,
         saved_models,
         show_model_onboarding: false,
+        exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
     })
@@ -123,6 +124,7 @@ fn saved_model_metadata_overlays_catalog_display_for_picker() {
             api_key: None,
         }],
         show_model_onboarding: false,
+        exit_after_onboarding: false,
         startup_warnings: Vec::new(),
     };
 
@@ -229,6 +231,7 @@ fn model_picker_distinguishes_same_model_slug_by_provider_binding() {
         available_models: vec![model],
         saved_models,
         show_model_onboarding: false,
+        exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
     });

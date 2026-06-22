@@ -66,7 +66,9 @@ flowchart TD
 4. `run_agent` 调用 `devo_tui::run_interactive_tui`。
 5. TUI 以 `InitialTuiSession` 启动，其中包含当前 session id、model、model binding id、provider wire API、reasoning effort selection、permission preset 和 working directory。
 
-`devo onboard` 使用同一路径，但强制 TUI 进入 provider onboarding mode。
+`devo onboard` 使用同一条 setup 路径，但会强制进入 provider onboarding
+mode，并在 provider/model binding 保存后退出。CLI 随后提示用户运行 `devo`，
+让下一个进程从新写入的配置启动。
 
 `devo resume <session_id>` 使用同一路径，并传入 initial session id。
 

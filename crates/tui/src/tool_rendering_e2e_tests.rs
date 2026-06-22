@@ -29,6 +29,7 @@ fn widget_with_model(
         available_models: Vec::new(),
         saved_models: Vec::new(),
         show_model_onboarding: false,
+        exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
     });

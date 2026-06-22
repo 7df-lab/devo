@@ -430,6 +430,8 @@ async fn second_stdio_server_process_proxies_to_singleton() -> Result<()> {
 
 #[tokio::test]
 async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let test_cwd = workspace.path().to_string_lossy().into_owned();
     let port = {
         let listener = StdTcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
@@ -485,7 +487,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
                 "id": 2,
                 "method": "session/new",
                 "params": {
-                    "cwd": "C:/repo",
+                    "cwd": test_cwd,
                     "additionalDirectories": [],
                     "mcpServers": []
                 }
@@ -515,7 +517,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
         .to_string();
     assert_eq!(
         session_response["result"]["_meta"]["devo/session"]["cwd"],
-        serde_json::json!("C:/repo")
+        serde_json::json!(test_cwd)
     );
 
     socket

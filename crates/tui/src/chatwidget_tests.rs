@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
+use crate::app_event::ExitMode;
 use crate::app_event_sender::AppEventSender;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetInit;
@@ -65,6 +66,7 @@ fn widget_with_model_and_reasoning_effort(
         available_models: Vec::new(),
         saved_models: Vec::new(),
         show_model_onboarding: false,
+        exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
     });
@@ -102,6 +104,7 @@ fn onboarding_widget_with_model(
         available_models: Vec::new(),
         saved_models: Vec::new(),
         show_model_onboarding: true,
+        exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
     });
@@ -111,6 +114,16 @@ fn onboarding_widget_with_model(
 fn onboarding_widget_with_available_model(
     model: Model,
     cwd: PathBuf,
+) -> (ChatWidget, mpsc::UnboundedReceiver<AppEvent>) {
+    onboarding_widget_with_available_model_and_exit_after_onboarding(
+        model, cwd, /*exit_after_onboarding*/ false,
+    )
+}
+
+fn onboarding_widget_with_available_model_and_exit_after_onboarding(
+    model: Model,
+    cwd: PathBuf,
+    exit_after_onboarding: bool,
 ) -> (ChatWidget, mpsc::UnboundedReceiver<AppEvent>) {
     let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
     let widget = ChatWidget::new_with_app_event(ChatWidgetInit {
@@ -125,6 +138,7 @@ fn onboarding_widget_with_available_model(
         available_models: vec![model],
         saved_models: Vec::new(),
         show_model_onboarding: true,
+        exit_after_onboarding,
         startup_tooltip_override: None,
         initial_theme_name: None,
     });
@@ -1595,6 +1609,7 @@ fn permissions_command_marks_initial_project_preset_current() {
         available_models: Vec::new(),
         saved_models: Vec::new(),
         show_model_onboarding: false,
+        exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
     });
@@ -2931,6 +2946,11 @@ fn onboarding_validation_succeeded_waits_for_provider_upsert() {
         }),
     });
 
+    assert_eq!(
+        app_event_rx.try_recv().expect("onboarding completed"),
+        AppEvent::OnboardingCompleted
+    );
+    assert_eq!(app_event_rx.try_recv().is_err(), true);
     assert_eq!(widget.is_onboarding_active(), false);
     assert_eq!(widget.placeholder_text(), "Ask Devo");
     assert_eq!(
@@ -2940,6 +2960,146 @@ fn onboarding_validation_succeeded_waits_for_provider_upsert() {
     assert_eq!(
         widget.status_summary_text().contains("DeepSeek-V4-Flash"),
         true
+    );
+}
+
+#[test]
+fn onboarding_validation_succeeded_exits_when_configured() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "deepseek-v4-flash".to_string(),
+        display_name: "Deepseek V4 Flash".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) =
+        onboarding_widget_with_available_model_and_exit_after_onboarding(
+            model, cwd, /*exit_after_onboarding*/ true,
+        );
+
+    let _ = app_event_rx.try_recv().expect("provider list command");
+    widget.handle_worker_event(crate::events::WorkerEvent::ProviderVendorsListed {
+        provider_vendors: vec![ProviderVendor {
+            name: "Deepseek".to_string(),
+            base_url: Some("https://api.deepseek.com".to_string()),
+            credential: Some("deepseek_api_key".to_string()),
+            headers: None,
+            wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
+            enabled: true,
+        }],
+    });
+    widget.handle_key_event(press_key(KeyCode::Enter));
+    widget.handle_key_event(press_key(KeyCode::Enter));
+    widget.handle_key_event(press_key(KeyCode::Enter));
+    widget.handle_key_event(press_key(KeyCode::Enter));
+    widget.handle_key_event(press_key(KeyCode::Enter));
+    let _ = app_event_rx.try_recv().expect("onboard command");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ProviderValidationSucceeded {
+        reply_preview: "OK".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ProviderVendorUpserted {
+        provider_vendor: ProviderVendor {
+            name: "Deepseek".to_string(),
+            base_url: Some("https://api.deepseek.com".to_string()),
+            credential: Some("deepseek_api_key".to_string()),
+            headers: None,
+            wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
+            enabled: true,
+        },
+        model_binding: Some(ProviderModelBinding {
+            binding_id: "deepseek-v4-flash-deepseek".to_string(),
+            model_slug: "deepseek-v4-flash".to_string(),
+            provider: "Deepseek".to_string(),
+            model_name: "DeepSeek-V4-Flash".to_string(),
+            display_name: Some("DeepSeek-V4-Flash".to_string()),
+            invocation_method: ProviderWireApi::OpenAIChatCompletions,
+            default_reasoning_effort: None,
+            enabled: true,
+        }),
+    });
+
+    assert_eq!(widget.is_onboarding_active(), false);
+    assert_eq!(
+        app_event_rx.try_recv().expect("onboarding completed"),
+        AppEvent::OnboardingCompleted
+    );
+    assert_eq!(
+        app_event_rx.try_recv().expect("exit event"),
+        AppEvent::Exit(ExitMode::ShutdownFirst)
+    );
+}
+
+#[test]
+fn onboarding_validation_bypassed_exits_when_configured() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "deepseek-v4-flash".to_string(),
+        display_name: "Deepseek V4 Flash".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) =
+        onboarding_widget_with_available_model_and_exit_after_onboarding(
+            model, cwd, /*exit_after_onboarding*/ true,
+        );
+
+    let _ = app_event_rx.try_recv().expect("provider list command");
+    widget.handle_worker_event(crate::events::WorkerEvent::ProviderVendorsListed {
+        provider_vendors: vec![ProviderVendor {
+            name: "Deepseek".to_string(),
+            base_url: Some("https://api.deepseek.com".to_string()),
+            credential: Some("deepseek_api_key".to_string()),
+            headers: None,
+            wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
+            enabled: true,
+        }],
+    });
+    widget.handle_key_event(press_key(KeyCode::Enter));
+    widget.handle_key_event(press_key(KeyCode::Enter));
+    widget.handle_key_event(press_key(KeyCode::Enter));
+    widget.handle_key_event(press_key(KeyCode::Enter));
+    widget.handle_key_event(press_key(KeyCode::Enter));
+    let _ = app_event_rx.try_recv().expect("onboard command");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ProviderValidationFailed {
+        message: "validation failed".to_string(),
+    });
+    widget.handle_key_event(press_key(KeyCode::Enter));
+    match app_event_rx.try_recv().expect("skip validation command") {
+        AppEvent::Command(AppCommand::RunUserShellCommand { command }) => {
+            assert_eq!(command.starts_with("onboard-skip-validation "), true);
+        }
+        other => panic!("expected skip validation command, got {other:?}"),
+    }
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ProviderVendorUpserted {
+        provider_vendor: ProviderVendor {
+            name: "Deepseek".to_string(),
+            base_url: Some("https://api.deepseek.com".to_string()),
+            credential: Some("deepseek_api_key".to_string()),
+            headers: None,
+            wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
+            enabled: true,
+        },
+        model_binding: Some(ProviderModelBinding {
+            binding_id: "deepseek-v4-flash-deepseek".to_string(),
+            model_slug: "deepseek-v4-flash".to_string(),
+            provider: "Deepseek".to_string(),
+            model_name: "DeepSeek-V4-Flash".to_string(),
+            display_name: Some("DeepSeek-V4-Flash".to_string()),
+            invocation_method: ProviderWireApi::OpenAIChatCompletions,
+            default_reasoning_effort: None,
+            enabled: true,
+        }),
+    });
+
+    assert_eq!(widget.is_onboarding_active(), false);
+    assert_eq!(
+        app_event_rx.try_recv().expect("onboarding completed"),
+        AppEvent::OnboardingCompleted
+    );
+    assert_eq!(
+        app_event_rx.try_recv().expect("exit event"),
+        AppEvent::Exit(ExitMode::ShutdownFirst)
     );
 }
 
@@ -4873,6 +5033,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
             saved_model_entry("second-model"),
         ],
         show_model_onboarding: false,
+        exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
     });
@@ -5544,6 +5705,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
             saved_model_entry("second-model"),
         ],
         show_model_onboarding: false,
+        exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
     });
@@ -5616,6 +5778,7 @@ fn model_selection_with_reasoning_effort_support_waits_for_second_step() {
         available_models: vec![alt_model.clone()],
         saved_models: vec![saved_model_entry("second-model")],
         show_model_onboarding: false,
+        exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
     });
@@ -5670,6 +5833,7 @@ fn model_selection_without_reasoning_effort_support_finishes_immediately() {
         available_models: vec![alt_model.clone()],
         saved_models: vec![saved_model_entry("plain-model")],
         show_model_onboarding: false,
+        exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
     });

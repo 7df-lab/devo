@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use crate::ProtocolErrorCode;
 use crate::ServerEvent;
 use crate::SuccessResponse;
 use crate::runtime::ServerRuntime;
+use crate::runtime::connection::SubscriptionFilter;
 use devo_protocol::CommandExecExitedPayload;
 use devo_protocol::CommandExecOutputDeltaPayload;
 use devo_protocol::CommandExecOutputStream;
@@ -341,6 +343,23 @@ impl ServerRuntime {
             Ok(cwd) => cwd,
             Err((code, message)) => return self.error_response(request_id, code, message),
         };
+        let command_exec_event_types = HashSet::from([
+            "command/exec/outputDelta".to_string(),
+            "command/exec/exited".to_string(),
+        ]);
+        if let Some(connection) = self.connections.lock().await.get_mut(&connection_id) {
+            let already = connection.subscriptions.iter().any(|subscription| {
+                subscription.session_id == params.session_id
+                    && subscription.event_types == command_exec_event_types
+            });
+            if !already {
+                connection.subscriptions.push(SubscriptionFilter {
+                    session_id: params.session_id,
+                    event_types: command_exec_event_types,
+                    include_child_agents: false,
+                });
+            }
+        }
         match self
             .command_exec_manager
             .start(Arc::clone(self), connection_id, params, cwd)

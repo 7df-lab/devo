@@ -28,6 +28,9 @@ pub(crate) enum AppEvent {
     /// Request to exit the TUI.
     Exit(ExitMode),
 
+    /// Provider onboarding completed successfully.
+    OnboardingCompleted,
+
     /// Submit the current composer text.
     SubmitUserInput { text: String },
 

@@ -20,11 +20,12 @@ use devo_util_paths::find_devo_home;
 /// Runs the interactive coding-agent entrypoint.
 ///
 /// `force_onboarding` forces the TUI to start in provider onboarding mode even
-/// when a provider config already exists. `log_level` is forwarded to the
-/// background server process, and `model_override` replaces the resolved model
-/// for this session without mutating the stored provider config.
+/// when a provider config already exists. `exit_after_onboarding` exits after a
+/// successful onboarding save instead of continuing into the interactive TUI.
+/// `log_level` is forwarded to the background server process.
 pub(crate) async fn run_agent(
     force_onboarding: bool,
+    exit_after_onboarding: bool,
     log_level: Option<&str>,
     initial_session_id: Option<SessionId>,
 ) -> Result<devo_tui::AppExit> {
@@ -107,6 +108,7 @@ pub(crate) async fn run_agent(
         model_catalog,
         saved_models,
         show_model_onboarding: onboarding_mode,
+        exit_after_onboarding,
         startup_warnings,
     })
     .await?;

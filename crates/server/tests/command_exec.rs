@@ -298,28 +298,60 @@ async fn wait_for_command_exec_exit(
             .await
             .context("timed out waiting for command/exec notification")?
             .context("notification channel closed before command/exec exited")?;
-        match notification["method"].as_str() {
-            Some("command/exec/outputDelta") => {
-                if notification["params"]["process_id"] != serde_json::json!(process_id) {
+        let payload = {
+            let method = notification["method"].as_str();
+            match method {
+                Some(method) if method.starts_with("_devo/") => {
+                    let inner_method = method
+                        .strip_prefix("_devo/")
+                        .expect("starts_with checked prefix");
+                    Some((inner_method, &notification["params"]))
+                }
+                Some("session/update") => {
+                    let meta = &notification["params"]["_meta"];
+                    let original_method = meta["devo/originalMethod"].as_str();
+                    let original_event = &meta["devo/originalEvent"];
+                    original_method.map(|method| {
+                        let event_payload = if original_event.get("process_id").is_some() {
+                            original_event
+                        } else {
+                            match method {
+                                "command/exec/outputDelta" => {
+                                    &original_event["CommandExecOutputDelta"]
+                                }
+                                "command/exec/exited" => &original_event["CommandExecExited"],
+                                _ => original_event,
+                            }
+                        };
+                        (method, event_payload)
+                    })
+                }
+                Some(method) => Some((method, &notification["params"])),
+                None => None,
+            }
+        };
+        match payload {
+            Some(("command/exec/outputDelta", params)) => {
+                if params["process_id"] != serde_json::json!(process_id) {
                     continue;
                 }
-                assert_notification_session(&notification["params"], session_id);
-                assert_eq!(notification["params"]["stream"], "pty");
-                let delta_base64 = notification["params"]["delta_base64"]
+                assert_notification_session(params, session_id);
+                assert_eq!(params["stream"], "pty");
+                let delta_base64 = params["delta_base64"]
                     .as_str()
                     .context("delta_base64 should be a string")?;
                 let bytes = BASE64_STANDARD.decode(delta_base64)?;
                 output.push_str(&String::from_utf8_lossy(&bytes));
             }
-            Some("command/exec/exited") => {
-                if notification["params"]["process_id"] != serde_json::json!(process_id) {
+            Some(("command/exec/exited", params)) => {
+                if params["process_id"] != serde_json::json!(process_id) {
                     continue;
                 }
-                assert_notification_session(&notification["params"], session_id);
-                assert_eq!(notification["params"]["exit_code"], 0);
+                assert_notification_session(params, session_id);
+                assert_eq!(params["exit_code"], 0);
                 return Ok(output);
             }
-            Some("session/started") if session_id.is_none() => {
+            Some(("session/started", _)) if session_id.is_none() => {
                 anyhow::bail!("sessionless command/exec unexpectedly created a session")
             }
             _ => {}
