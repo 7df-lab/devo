@@ -31,6 +31,138 @@ struct AcpTerminalRenderState<'a> {
     pending_terminal_output: &'a mut HashMap<String, String>,
 }
 
+struct AcpSessionUpdateRender<'a> {
+    session_id: SessionId,
+    update: AcpSessionUpdate,
+    terminal_state: AcpTerminalRenderState<'a>,
+}
+
+impl From<AcpSessionUpdateRender<'_>> for Vec<WorkerEvent> {
+    fn from(render: AcpSessionUpdateRender<'_>) -> Self {
+        let AcpSessionUpdateRender {
+            session_id,
+            update,
+            terminal_state,
+        } = render;
+        match update {
+            AcpSessionUpdate::AgentMessageChunk {
+                content,
+                message_id,
+                ..
+            } => acp_content_display_text(&content)
+                .into_iter()
+                .map(|delta| {
+                    if let Some(item_id) = message_item_id(message_id.as_deref()) {
+                        WorkerEvent::TextItemDelta {
+                            item_id,
+                            kind: TextItemKind::Assistant,
+                            delta,
+                        }
+                    } else {
+                        WorkerEvent::TextDelta(delta)
+                    }
+                })
+                .collect(),
+            AcpSessionUpdate::AgentThoughtChunk {
+                content,
+                message_id,
+                ..
+            } => acp_content_display_text(&content)
+                .into_iter()
+                .map(|delta| {
+                    if let Some(item_id) = message_item_id(message_id.as_deref()) {
+                        WorkerEvent::TextItemDelta {
+                            item_id,
+                            kind: TextItemKind::Reasoning,
+                            delta,
+                        }
+                    } else {
+                        WorkerEvent::ReasoningDelta(delta)
+                    }
+                })
+                .collect(),
+            AcpSessionUpdate::Plan { entries, .. } => vec![WorkerEvent::PlanUpdated {
+                explanation: None,
+                steps: entries
+                    .into_iter()
+                    .map(|entry| PlanStep {
+                        text: entry.content,
+                        status: match entry.status {
+                            AcpPlanEntryStatus::Pending => PlanStepStatus::Pending,
+                            AcpPlanEntryStatus::InProgress => PlanStepStatus::InProgress,
+                            AcpPlanEntryStatus::Completed => PlanStepStatus::Completed,
+                        },
+                    })
+                    .collect(),
+            }],
+            AcpSessionUpdate::SessionInfoUpdate {
+                title: Some(title), ..
+            } => vec![WorkerEvent::SessionTitleUpdated {
+                session_id: session_id.to_string(),
+                title,
+            }],
+            AcpSessionUpdate::AvailableCommandsUpdate {
+                available_commands, ..
+            } => vec![WorkerEvent::AcpAvailableCommandsUpdated {
+                commands: available_commands,
+            }],
+            AcpSessionUpdate::CurrentModeUpdate {
+                current_mode_id, ..
+            } => vec![WorkerEvent::AcpCurrentModeUpdated { current_mode_id }],
+            AcpSessionUpdate::ConfigOptionUpdate { config_options, .. } => {
+                vec![WorkerEvent::AcpConfigOptionsUpdated { config_options }]
+            }
+            AcpSessionUpdate::UsageUpdate {
+                used, size, cost, ..
+            } => vec![WorkerEvent::AcpUsageUpdated { used, size, cost }],
+            AcpSessionUpdate::ToolCall {
+                tool_call_id,
+                title,
+                kind,
+                status,
+                raw_input,
+                raw_output,
+                content,
+                ..
+            } => worker_events_from_acp_tool_call(
+                AcpToolCallEventData {
+                    tool_call_id,
+                    title: Some(title),
+                    status: Some(status),
+                    raw_input,
+                    raw_output,
+                    content,
+                },
+                kind,
+                terminal_state,
+            ),
+            AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id,
+                title,
+                kind,
+                status,
+                raw_input,
+                raw_output,
+                content,
+                ..
+            } => worker_events_from_acp_tool_call_update(
+                AcpToolCallEventData {
+                    tool_call_id,
+                    title,
+                    status,
+                    raw_input,
+                    raw_output,
+                    content,
+                },
+                kind,
+                terminal_state,
+            ),
+            AcpSessionUpdate::UserMessageChunk { .. }
+            | AcpSessionUpdate::SessionInfoUpdate { title: None, .. } => Vec::new(),
+        }
+    }
+}
+
 pub(super) fn acp_terminal_output_event(
     params: &serde_json::Value,
     visible_terminal_ids: &HashSet<String>,
@@ -80,128 +212,14 @@ pub(super) fn worker_events_from_acp_notification_with_terminal_state(
     if Some(notification.session_id) != active_session_id {
         return Vec::new();
     }
-    match notification.update {
-        AcpSessionUpdate::AgentMessageChunk {
-            content,
-            message_id,
-            ..
-        } => acp_content_display_text(&content)
-            .into_iter()
-            .map(|delta| {
-                if let Some(item_id) = message_item_id(message_id.as_deref()) {
-                    WorkerEvent::TextItemDelta {
-                        item_id,
-                        kind: TextItemKind::Assistant,
-                        delta,
-                    }
-                } else {
-                    WorkerEvent::TextDelta(delta)
-                }
-            })
-            .collect(),
-        AcpSessionUpdate::AgentThoughtChunk {
-            content,
-            message_id,
-            ..
-        } => acp_content_display_text(&content)
-            .into_iter()
-            .map(|delta| {
-                if let Some(item_id) = message_item_id(message_id.as_deref()) {
-                    WorkerEvent::TextItemDelta {
-                        item_id,
-                        kind: TextItemKind::Reasoning,
-                        delta,
-                    }
-                } else {
-                    WorkerEvent::ReasoningDelta(delta)
-                }
-            })
-            .collect(),
-        AcpSessionUpdate::Plan { entries, .. } => vec![WorkerEvent::PlanUpdated {
-            explanation: None,
-            steps: entries
-                .into_iter()
-                .map(|entry| PlanStep {
-                    text: entry.content,
-                    status: match entry.status {
-                        AcpPlanEntryStatus::Pending => PlanStepStatus::Pending,
-                        AcpPlanEntryStatus::InProgress => PlanStepStatus::InProgress,
-                        AcpPlanEntryStatus::Completed => PlanStepStatus::Completed,
-                    },
-                })
-                .collect(),
-        }],
-        AcpSessionUpdate::SessionInfoUpdate {
-            title: Some(title), ..
-        } => vec![WorkerEvent::SessionTitleUpdated {
-            session_id: notification.session_id.to_string(),
-            title,
-        }],
-        AcpSessionUpdate::AvailableCommandsUpdate {
-            available_commands, ..
-        } => vec![WorkerEvent::AcpAvailableCommandsUpdated {
-            commands: available_commands,
-        }],
-        AcpSessionUpdate::CurrentModeUpdate {
-            current_mode_id, ..
-        } => vec![WorkerEvent::AcpCurrentModeUpdated { current_mode_id }],
-        AcpSessionUpdate::ConfigOptionUpdate { config_options, .. } => {
-            vec![WorkerEvent::AcpConfigOptionsUpdated { config_options }]
-        }
-        AcpSessionUpdate::UsageUpdate {
-            used, size, cost, ..
-        } => vec![WorkerEvent::AcpUsageUpdated { used, size, cost }],
-        AcpSessionUpdate::ToolCall {
-            tool_call_id,
-            title,
-            kind,
-            status,
-            raw_input,
-            raw_output,
-            content,
-            ..
-        } => worker_events_from_acp_tool_call(
-            AcpToolCallEventData {
-                tool_call_id,
-                title: Some(title),
-                status: Some(status),
-                raw_input,
-                raw_output,
-                content,
-            },
-            kind,
-            AcpTerminalRenderState {
-                visible_terminal_ids,
-                pending_terminal_output,
-            },
-        ),
-        AcpSessionUpdate::ToolCallUpdate {
-            tool_call_id,
-            title,
-            kind,
-            status,
-            raw_input,
-            raw_output,
-            content,
-            ..
-        } => worker_events_from_acp_tool_call_update(
-            AcpToolCallEventData {
-                tool_call_id,
-                title,
-                status,
-                raw_input,
-                raw_output,
-                content,
-            },
-            kind,
-            AcpTerminalRenderState {
-                visible_terminal_ids,
-                pending_terminal_output,
-            },
-        ),
-        AcpSessionUpdate::UserMessageChunk { .. }
-        | AcpSessionUpdate::SessionInfoUpdate { title: None, .. } => Vec::new(),
-    }
+    Vec::from(AcpSessionUpdateRender {
+        session_id: notification.session_id,
+        update: notification.update,
+        terminal_state: AcpTerminalRenderState {
+            visible_terminal_ids,
+            pending_terminal_output,
+        },
+    })
 }
 
 fn message_item_id(message_id: Option<&str>) -> Option<ItemId> {
