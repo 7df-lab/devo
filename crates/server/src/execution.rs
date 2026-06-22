@@ -409,6 +409,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn context_for_workspace_rebuilds_provider_when_provider_http_changes() {
+        let deps = test_deps(
+            r#"
+[defaults]
+model_binding = "main"
+
+[providers.openrouter]
+enabled = true
+name = "OpenRouter"
+wire_apis = ["openai_chat_completions"]
+
+[model_bindings.main]
+enabled = true
+model_slug = "catalog-slug"
+provider = "openrouter"
+model_name = "vendor/model-name"
+invocation_method = "openai_chat_completions"
+"#,
+        );
+        let workspace = unique_temp_dir("session-context-provider-http");
+        std::fs::create_dir_all(workspace.join(".devo")).expect("create workspace config dir");
+        std::fs::write(
+            workspace.join(".devo").join("config.toml"),
+            r#"
+[provider_http]
+proxy_url = "http://workspace-proxy.example:8080"
+"#,
+        )
+        .expect("write workspace config");
+
+        let context = deps
+            .context_for_workspace(&workspace)
+            .await
+            .expect("load workspace context");
+
+        assert_eq!(context.provider.name(), "openai");
+
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
     #[test]
     fn resolve_turn_config_preserves_catalog_slug_and_uses_binding_model_name_for_request() {
         let deps = test_deps(

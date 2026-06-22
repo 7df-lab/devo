@@ -139,14 +139,14 @@ impl SessionRuntimeContext {
             .effective_config()
             .clone();
         let has_provider_configuration = config.has_provider_configuration();
-        let inherited_provider_config = inherited_context
+        let inherited_config = inherited_context
             .config_store
             .lock()
             .expect("inherited app config store mutex should not be poisoned")
             .effective_config()
-            .provider
             .clone();
-        let provider_config_changed = config.provider != inherited_provider_config;
+        let provider_runtime_config_changed = config.provider != inherited_config.provider
+            || config.provider_http != inherited_config.provider_http;
         let registry = if !has_provider_configuration && config.mcp.servers.is_empty() {
             Arc::clone(&inherited_context.registry)
         } else {
@@ -163,7 +163,7 @@ impl SessionRuntimeContext {
         )?);
         let default_model = model_catalog.resolve_for_turn(None)?.slug.clone();
         let (provider, provider_router, provider_default_model) =
-            if has_provider_configuration && provider_config_changed {
+            if has_provider_configuration && provider_runtime_config_changed {
                 let provider =
                     load_server_provider(&config, Some(default_model.as_str()), &user_config_dir)
                         .context("load server provider for session workspace")?;
