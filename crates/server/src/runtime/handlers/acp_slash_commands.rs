@@ -41,11 +41,22 @@ pub(super) enum AcpSlashCommandPromptResult {
 }
 
 impl ServerRuntime {
-    pub(super) async fn send_acp_available_commands_update(
-        &self,
+    pub(super) fn schedule_acp_session_state_snapshot_after_response(
+        self: &Arc<Self>,
         connection_id: u64,
         session_id: SessionId,
     ) {
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            // Let the request handler return and the transport enqueue the JSON-RPC response first.
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            runtime
+                .send_acp_session_state_snapshot(connection_id, session_id)
+                .await;
+        });
+    }
+
+    async fn send_acp_session_state_snapshot(&self, connection_id: u64, session_id: SessionId) {
         self.send_acp_session_update(
             connection_id,
             session_id,

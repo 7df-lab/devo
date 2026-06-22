@@ -245,7 +245,7 @@ impl ServerRuntime {
     }
 
     pub(crate) async fn handle_acp_session_load(
-        &self,
+        self: &Arc<Self>,
         connection_id: u64,
         request_id: serde_json::Value,
         params: serde_json::Value,
@@ -317,24 +317,24 @@ impl ServerRuntime {
             &legacy.result.history_items,
         )
         .await;
-        self.send_acp_available_commands_update(connection_id, params.session_id)
-            .await;
         let config_options = match self.acp_session_config_options(params.session_id).await {
             Ok(config_options) => config_options,
             Err(error) => return acp_error_response(request_id, AcpErrorCode::ServerError, error),
         };
-        acp_success_response(
+        let response = acp_success_response(
             request_id,
             AcpLoadSessionResult {
                 modes: None,
                 config_options: Some(config_options),
                 meta: None,
             },
-        )
+        );
+        self.schedule_acp_session_state_snapshot_after_response(connection_id, params.session_id);
+        response
     }
 
     pub(crate) async fn handle_acp_session_new(
-        &self,
+        self: &Arc<Self>,
         connection_id: u64,
         request_id: serde_json::Value,
         params: serde_json::Value,
@@ -390,8 +390,6 @@ impl ServerRuntime {
         );
         self.subscribe_connection_to_session(connection_id, legacy.result.session.session_id, None)
             .await;
-        self.send_acp_available_commands_update(connection_id, legacy.result.session.session_id)
-            .await;
         let config_options = match self
             .acp_session_config_options(legacy.result.session.session_id)
             .await
@@ -399,7 +397,7 @@ impl ServerRuntime {
             Ok(config_options) => config_options,
             Err(error) => return acp_error_response(request_id, AcpErrorCode::ServerError, error),
         };
-        acp_success_response(
+        let response = acp_success_response(
             request_id,
             AcpNewSessionResult {
                 session_id: legacy.result.session.session_id,
@@ -407,7 +405,12 @@ impl ServerRuntime {
                 config_options: Some(config_options),
                 meta: Some(meta),
             },
-        )
+        );
+        self.schedule_acp_session_state_snapshot_after_response(
+            connection_id,
+            legacy.result.session.session_id,
+        );
+        response
     }
 
     async fn validate_acp_existing_session_cwd(
@@ -468,7 +471,7 @@ impl ServerRuntime {
     }
 
     pub(crate) async fn handle_acp_session_resume(
-        &self,
+        self: &Arc<Self>,
         connection_id: u64,
         request_id: serde_json::Value,
         params: serde_json::Value,
@@ -545,20 +548,20 @@ impl ServerRuntime {
         );
         self.subscribe_connection_to_session(connection_id, params.session_id, None)
             .await;
-        self.send_acp_available_commands_update(connection_id, params.session_id)
-            .await;
         let config_options = match self.acp_session_config_options(params.session_id).await {
             Ok(config_options) => config_options,
             Err(error) => return acp_error_response(request_id, AcpErrorCode::ServerError, error),
         };
-        acp_success_response(
+        let response = acp_success_response(
             request_id,
             AcpResumeSessionResult {
                 modes: None,
                 config_options: Some(config_options),
                 meta: Some(meta),
             },
-        )
+        );
+        self.schedule_acp_session_state_snapshot_after_response(connection_id, params.session_id);
+        response
     }
 
     async fn apply_acp_session_additional_directories(
