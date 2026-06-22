@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn legacy_error_to_acp(
+pub(in crate::runtime::handlers) fn legacy_error_to_acp(
     request_id: serde_json::Value,
     legacy_response: serde_json::Value,
 ) -> serde_json::Value {

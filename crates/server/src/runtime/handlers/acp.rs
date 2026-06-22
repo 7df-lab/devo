@@ -88,7 +88,7 @@ mod session_support;
 
 use history::acp_update_from_history_item;
 use mcp::acp_mcp_config;
-use response::legacy_error_to_acp;
+pub(super) use response::legacy_error_to_acp;
 use session_support::decode_session_list_cursor;
 use session_support::encode_session_list_cursor;
 use session_support::validate_acp_session_roots;
