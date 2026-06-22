@@ -423,11 +423,20 @@ impl ServerRuntime {
         let method = event.method_name();
         let session_id = event.session_id();
         let child_parent_by_session = self.child_parent_by_session().await;
+        let active_turn_connections = self.active_turn_connections.lock().await.clone();
         let notifications = {
             let mut connections = self.connections.lock().await;
             connections
                 .iter_mut()
                 .filter_map(|(connection_id, connection)| {
+                    if should_skip_non_owner_stdio_stream(
+                        *connection_id,
+                        connection,
+                        &event,
+                        &active_turn_connections,
+                    ) {
+                        return None;
+                    }
                     if !connection.should_deliver(method, session_id, &child_parent_by_session) {
                         return None;
                     }
@@ -726,6 +735,39 @@ async fn remove_pending_client_request(
     if let Some(connection) = connections.lock().await.get_mut(&connection_id) {
         connection.pending_client_requests.remove(&request_id);
     }
+}
+
+fn should_skip_non_owner_stdio_stream(
+    connection_id: u64,
+    connection: &ConnectionRuntime,
+    event: &ServerEvent,
+    active_turn_connections: &HashMap<SessionId, u64>,
+) -> bool {
+    if !matches!(
+        connection.transport,
+        ClientTransportKind::Stdio | ClientTransportKind::StdioProxy
+    ) {
+        return false;
+    }
+
+    let ServerEvent::ItemDelta {
+        delta_kind:
+            ItemDeltaKind::AgentMessageDelta
+            | ItemDeltaKind::ReasoningSummaryTextDelta
+            | ItemDeltaKind::ReasoningTextDelta,
+        payload,
+    } = event
+    else {
+        return false;
+    };
+
+    if payload.context.turn_id.is_none() {
+        return false;
+    }
+
+    active_turn_connections
+        .get(&payload.context.session_id)
+        .is_some_and(|active_connection_id| *active_connection_id != connection_id)
 }
 
 pub(crate) struct ConnectionRuntime {
@@ -1188,6 +1230,75 @@ mod tests {
         let connections = runtime.connections.lock().await;
         let connection = connections.get(&connection_id).expect("connection");
         assert_eq!(connection.pending_client_requests.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stdio_live_agent_deltas_only_deliver_to_active_turn_owner() -> Result<()> {
+        let data_root = TempDir::new()?;
+        let runtime = build_runtime(data_root.path());
+        let session_id = SessionId::new();
+        let turn_id = TurnId::new();
+        let item_id = ItemId::new();
+        let (owner_sender, mut owner_receiver) = mpsc::channel(4);
+        let owner_connection_id = runtime
+            .register_connection(ClientTransportKind::Stdio, owner_sender)
+            .await;
+        let (observer_sender, mut observer_receiver) = mpsc::channel(4);
+        let observer_connection_id = runtime
+            .register_connection(ClientTransportKind::StdioProxy, observer_sender)
+            .await;
+
+        runtime
+            .subscribe_connection_to_session(owner_connection_id, session_id, None)
+            .await;
+        runtime
+            .subscribe_connection_to_session(observer_connection_id, session_id, None)
+            .await;
+        runtime
+            .active_turn_connections
+            .lock()
+            .await
+            .insert(session_id, owner_connection_id);
+
+        runtime
+            .broadcast_event(ServerEvent::ItemDelta {
+                delta_kind: ItemDeltaKind::AgentMessageDelta,
+                payload: ItemDeltaPayload {
+                    context: EventContext {
+                        session_id,
+                        turn_id: Some(turn_id),
+                        item_id: Some(item_id),
+                        seq: 0,
+                    },
+                    delta: "hello".to_string(),
+                    stream_index: None,
+                    channel: None,
+                },
+            })
+            .await;
+
+        let owner_message = tokio::time::timeout(Duration::from_secs(1), owner_receiver.recv())
+            .await?
+            .expect("owner receives live agent delta");
+        assert_eq!(
+            owner_message["params"]["update"],
+            serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {
+                    "type": "text",
+                    "text": "hello",
+                },
+                "messageId": item_id.to_string(),
+            })
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), observer_receiver.recv())
+                .await
+                .is_err(),
+            "non-owner stdio proxy connection must not receive live agent delta"
+        );
 
         Ok(())
     }

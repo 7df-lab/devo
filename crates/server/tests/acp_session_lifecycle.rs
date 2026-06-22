@@ -209,8 +209,9 @@ async fn acp_session_load_replays_history_and_rejects_relative_roots() -> Result
         )
         .await
         .context("session/load response")?;
-    assert_eq!(load_response["result"], serde_json::Value::Null);
-    let _: AcpSuccessResponse<AcpLoadSessionResult> = serde_json::from_value(load_response)?;
+    assert!(load_response["result"].is_object());
+    let loaded: AcpSuccessResponse<AcpLoadSessionResult> = serde_json::from_value(load_response)?;
+    assert!(loaded.result.config_options.is_some());
     let replayed_updates = wait_for_replayed_history(&mut load_notifications_rx).await?;
     assert!(
         replayed_updates
@@ -535,8 +536,9 @@ async fn acp_session_additional_directories_roundtrip_new_load_and_resume() -> R
         )
         .await
         .context("session/load with additionalDirectories response")?;
-    assert_eq!(load_response["result"], serde_json::Value::Null);
-    let _: AcpSuccessResponse<AcpLoadSessionResult> = serde_json::from_value(load_response)?;
+    assert!(load_response["result"].is_object());
+    let loaded: AcpSuccessResponse<AcpLoadSessionResult> = serde_json::from_value(load_response)?;
+    assert!(loaded.result.config_options.is_some());
     let listed = list_acp_sessions(&runtime, connection_id, 16, Some(&cwd), None).await?;
     assert_eq!(listed.sessions[0].additional_directories, vec![load_root]);
 
@@ -647,8 +649,9 @@ async fn acp_session_load_and_resume_accept_mcp_servers() -> Result<()> {
         )
         .await
         .context("session/load with mcpServers response")?;
-    assert_eq!(load_response["result"], serde_json::Value::Null);
-    let _: AcpSuccessResponse<AcpLoadSessionResult> = serde_json::from_value(load_response)?;
+    assert!(load_response["result"].is_object());
+    let loaded: AcpSuccessResponse<AcpLoadSessionResult> = serde_json::from_value(load_response)?;
+    assert!(loaded.result.config_options.is_some());
 
     let resume_response = runtime
         .handle_incoming(

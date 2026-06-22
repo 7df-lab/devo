@@ -8,9 +8,9 @@ use crate::AcpMeta;
 use crate::AcpSessionConfigId;
 use crate::AcpSessionConfigOption;
 use crate::AcpSessionConfigValueId;
-use crate::DEVO_SESSION_META;
 use crate::AcpSessionModeId;
 use crate::AcpSessionModeState;
+use crate::DEVO_SESSION_META;
 use crate::SessionId;
 use crate::SessionMetadata;
 
@@ -76,11 +76,9 @@ pub struct AcpResumeSessionParams {
     pub meta: Option<AcpMeta>,
 }
 
-pub type AcpLoadSessionResult = ();
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AcpResumeSessionResult {
+pub struct AcpLoadSessionResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<AcpSessionModeState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,6 +86,8 @@ pub struct AcpResumeSessionResult {
     #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<AcpMeta>,
 }
+
+pub type AcpResumeSessionResult = AcpLoadSessionResult;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -257,6 +257,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(AcpDeleteSessionResult::default())
                 .expect("serialize delete result"),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            serde_json::to_value(AcpLoadSessionResult::default()).expect("serialize load result"),
             serde_json::json!({})
         );
     }

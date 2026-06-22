@@ -35,7 +35,7 @@ pub(crate) fn write_test_config(
         .join(", ");
     let openai_base_url = toml_string(openai_base_url);
     let config = format!(
-        "[server]\nlisten = [{listen_entries}]\nmax_connections = 32\nevent_buffer_size = 128\nidle_session_timeout_secs = 300\npersist_ephemeral_sessions = false\n\n[defaults]\nmodel_binding = \"test-openai\"\n\n[providers.openai]\nenabled = true\nname = \"OpenAI\"\nbase_url = \"{openai_base_url}\"\nwire_apis = [\"openai_chat_completions\"]\n\n[model_bindings.test-openai]\nenabled = true\nmodel_slug = \"test-model\"\nprovider = \"openai\"\nmodel_name = \"test-model\"\ninvocation_method = \"openai_chat_completions\"\n"
+        "[server]\nlisten = [{listen_entries}]\nmax_connections = 32\nevent_buffer_size = 128\nidle_session_timeout_secs = 300\npersist_ephemeral_sessions = false\n\n[defaults]\nmodel_binding = \"test-openai\"\n\n[providers.openai]\nenabled = true\nname = \"OpenAI\"\nbase_url = \"{openai_base_url}\"\nwire_apis = [\"openai_chat_completions\"]\n\n[model_bindings.alt-openai]\nenabled = true\nmodel_slug = \"alt-model\"\nprovider = \"openai\"\nmodel_name = \"alt-model\"\ninvocation_method = \"openai_chat_completions\"\n\n[model_bindings.test-openai]\nenabled = true\nmodel_slug = \"test-model\"\nprovider = \"openai\"\nmodel_name = \"test-model\"\ninvocation_method = \"openai_chat_completions\"\n"
     );
     std::fs::write(config_dir.join("config.toml"), config)?;
     Ok(())
@@ -110,8 +110,8 @@ pub(crate) fn assert_replayed_history_before_response(
     let (_, before_response) = messages
         .split_last()
         .context("session/load produced at least one message")?;
-    let mut saw_user_message = false;
-    let mut saw_agent_message = false;
+    let mut user_message_id = None;
+    let mut agent_message_id = None;
     for message in before_response {
         if message["method"] != serde_json::json!("session/update")
             || message["params"]["sessionId"].as_str() != Some(session_id)
@@ -119,18 +119,26 @@ pub(crate) fn assert_replayed_history_before_response(
             continue;
         }
         match message["params"]["update"]["sessionUpdate"].as_str() {
-            Some("user_message_chunk") => saw_user_message = true,
-            Some("agent_message_chunk") => saw_agent_message = true,
+            Some("user_message_chunk") => {
+                user_message_id = message["params"]["update"]["messageId"]
+                    .as_str()
+                    .map(ToOwned::to_owned);
+            }
+            Some("agent_message_chunk") => {
+                agent_message_id = message["params"]["update"]["messageId"]
+                    .as_str()
+                    .map(ToOwned::to_owned);
+            }
             _ => {}
         }
     }
     anyhow::ensure!(
-        saw_user_message,
-        "session/load did not replay a user message before responding: {messages:?}"
+        user_message_id.is_some(),
+        "session/load did not replay a user message with messageId before responding: {messages:?}"
     );
     anyhow::ensure!(
-        saw_agent_message,
-        "session/load did not replay an agent message before responding: {messages:?}"
+        agent_message_id.is_some(),
+        "session/load did not replay an agent message with messageId before responding: {messages:?}"
     );
     Ok(())
 }
@@ -578,6 +586,11 @@ pub(crate) fn devo_command() -> Result<Command> {
         return Ok(Command::new(binary_path));
     }
 
+    let binary_path = devo_binary_path()?;
+    if binary_path.is_file() {
+        return Ok(Command::new(binary_path));
+    }
+
     let cargo_path = std::env::var_os("CARGO")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("cargo"));
@@ -592,4 +605,13 @@ pub(crate) fn devo_command() -> Result<Command> {
         .arg("devo")
         .arg("--");
     Ok(command)
+}
+
+fn devo_binary_path() -> Result<PathBuf> {
+    let workspace = workspace_root()?;
+    let mut binary = workspace.join("target").join("debug").join("devo");
+    if cfg!(windows) {
+        binary.set_extension("exe");
+    }
+    Ok(binary)
 }

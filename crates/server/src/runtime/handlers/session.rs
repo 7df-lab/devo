@@ -37,10 +37,13 @@ impl ServerRuntime {
                 );
             }
         };
-        let model = params
-            .model
-            .clone()
-            .unwrap_or_else(|| runtime_context.default_model.clone());
+        let requested_model = params
+            .model_binding_id
+            .as_deref()
+            .or(params.model.as_deref());
+        let initial_turn_config = runtime_context.resolve_turn_config(requested_model, None);
+        let model = initial_turn_config.model.slug.clone();
+        let model_binding_id = initial_turn_config.model_binding_id.clone();
         let record = (!params.ephemeral).then(|| {
             self.rollout_store.create_session_record(
                 session_id,
@@ -49,7 +52,7 @@ impl ServerRuntime {
                 params.additional_directories.clone(),
                 params.title.clone(),
                 Some(model.clone()),
-                params.model_binding_id.clone(),
+                model_binding_id.clone(),
                 None,
                 runtime_context.provider.name().to_string(),
                 None,
@@ -73,7 +76,7 @@ impl ServerRuntime {
             agent_role: None,
             ephemeral: params.ephemeral,
             model: Some(model.clone()),
-            model_binding_id: params.model_binding_id.clone(),
+            model_binding_id: model_binding_id.clone(),
             thinking: None,
             reasoning_effort: None,
             total_input_tokens: 0,

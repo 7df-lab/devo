@@ -38,6 +38,7 @@ use crate::AcpInitializeResult;
 use crate::AcpListSessionsParams;
 use crate::AcpListSessionsResult;
 use crate::AcpLoadSessionParams;
+use crate::AcpLoadSessionResult;
 use crate::AcpMcpCapabilities;
 use crate::AcpMcpServer;
 use crate::AcpMcpServerStdio;
@@ -60,6 +61,7 @@ use crate::AcpSessionNotification;
 use crate::AcpSessionResumeCapabilities;
 use crate::AcpSessionUpdate;
 use crate::AcpSetConfigOptionParams;
+use crate::AcpSetConfigOptionResult;
 use crate::AcpSetModeParams;
 use crate::AcpStopReason;
 use crate::AcpSuccessResponse;
@@ -315,7 +317,18 @@ impl ServerRuntime {
             &legacy.result.history_items,
         )
         .await;
-        acp_success_response(request_id, ())
+        let config_options = match self.acp_session_config_options(params.session_id).await {
+            Ok(config_options) => config_options,
+            Err(error) => return acp_error_response(request_id, AcpErrorCode::ServerError, error),
+        };
+        acp_success_response(
+            request_id,
+            AcpLoadSessionResult {
+                modes: None,
+                config_options: Some(config_options),
+                meta: None,
+            },
+        )
     }
 
     pub(crate) async fn handle_acp_session_new(
@@ -377,12 +390,19 @@ impl ServerRuntime {
             .await;
         self.send_acp_available_commands_update(connection_id, legacy.result.session.session_id)
             .await;
+        let config_options = match self
+            .acp_session_config_options(legacy.result.session.session_id)
+            .await
+        {
+            Ok(config_options) => config_options,
+            Err(error) => return acp_error_response(request_id, AcpErrorCode::ServerError, error),
+        };
         acp_success_response(
             request_id,
             AcpNewSessionResult {
                 session_id: legacy.result.session.session_id,
                 modes: None,
-                config_options: None,
+                config_options: Some(config_options),
                 meta: Some(meta),
             },
         )
@@ -525,11 +545,15 @@ impl ServerRuntime {
             .await;
         self.send_acp_available_commands_update(connection_id, params.session_id)
             .await;
+        let config_options = match self.acp_session_config_options(params.session_id).await {
+            Ok(config_options) => config_options,
+            Err(error) => return acp_error_response(request_id, AcpErrorCode::ServerError, error),
+        };
         acp_success_response(
             request_id,
             AcpResumeSessionResult {
                 modes: None,
-                config_options: None,
+                config_options: Some(config_options),
                 meta: Some(meta),
             },
         )
@@ -838,7 +862,7 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
-        let _params: AcpSetConfigOptionParams = match serde_json::from_value(params) {
+        let params: AcpSetConfigOptionParams = match serde_json::from_value(params) {
             Ok(params) => params,
             Err(error) => {
                 return acp_error_response(
@@ -848,10 +872,16 @@ impl ServerRuntime {
                 );
             }
         };
-        acp_error_response(
+        let config_options = match self.set_acp_session_config_option(params).await {
+            Ok(config_options) => config_options,
+            Err((code, message)) => return acp_error_response(request_id, code, message),
+        };
+        acp_success_response(
             request_id,
-            AcpErrorCode::MethodNotFound,
-            "session/set_config_option is not supported",
+            AcpSetConfigOptionResult {
+                config_options,
+                meta: None,
+            },
         )
     }
 
@@ -1169,21 +1199,22 @@ fn acp_update_from_history_item(
         });
     }
     let content = AcpContentBlock::text(item.body.clone());
+    let message_id = Some(format!("history-{index}"));
     match item.kind {
         SessionHistoryItemKind::User => Some(AcpSessionUpdate::UserMessageChunk {
             content,
-            message_id: None,
+            message_id,
             meta: None,
         }),
         SessionHistoryItemKind::Assistant => Some(AcpSessionUpdate::AgentMessageChunk {
             content,
-            message_id: None,
+            message_id,
             meta: None,
         }),
         SessionHistoryItemKind::Reasoning | SessionHistoryItemKind::TurnSummary => {
             Some(AcpSessionUpdate::AgentThoughtChunk {
                 content,
-                message_id: None,
+                message_id,
                 meta: None,
             })
         }

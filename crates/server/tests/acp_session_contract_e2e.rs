@@ -181,14 +181,9 @@ async fn stdio_acp_load_and_resume_match_session_setup_contract() -> Result<()> 
     let load_response = load_messages
         .last()
         .context("session/load produced a response")?;
-    assert_eq!(
-        load_response,
-        &serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "result": null
-        })
-    );
+    assert_eq!(load_response["jsonrpc"], serde_json::json!("2.0"));
+    assert_eq!(load_response["id"], serde_json::json!(3));
+    let _ = acp_config_option(&load_response["result"], "model")?;
     assert_replayed_history_before_response(&load_messages, &session_id)?;
 
     let load_prompt = "after load, declare load MCP tools";
@@ -301,5 +296,472 @@ async fn stdio_acp_load_and_resume_match_session_setup_contract() -> Result<()> 
     drop(stdin);
     child.kill().await.ok();
     let _ = child.wait().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_acp_session_config_options_select_model_binding() -> Result<()> {
+    let home_dir = TempDir::new()?;
+    let mut provider = spawn_openai_chat_completions_server().await?;
+    write_test_config(&home_dir, &["stdio://"], &provider.base_url)?;
+
+    let cwd = home_dir.path().join("workspace");
+    std::fs::create_dir_all(&cwd)?;
+    let cwd = cwd.to_string_lossy().into_owned();
+
+    let mut command = devo_command()?;
+    let mut child = command
+        .arg("server")
+        .arg("--transport")
+        .arg("stdio")
+        .env("DEVO_HOME", home_dir.path().join(".devo"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawn devo child process in server mode")?;
+
+    let mut stdin = child.stdin.take().context("capture child stdin")?;
+    let stdout = child.stdout.take().context("capture child stdout")?;
+    let stderr = child.stderr.take().context("capture child stderr")?;
+    let mut stdout_reader = AsyncBufReader::new(stdout).lines();
+    let mut stderr_reader = AsyncBufReader::new(stderr);
+
+    write_stdio_json(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {
+                    "name": "acp-config-options-e2e",
+                    "title": "ACP Config Options E2E",
+                    "version": "1.0.0"
+                }
+            }
+        }),
+    )
+    .await?;
+    let initialize_response = read_stdio_json(
+        &mut child,
+        &mut stdout_reader,
+        &mut stderr_reader,
+        "ACP initialize response",
+        STDIO_SERVER_STARTUP_TIMEOUT,
+    )
+    .await?;
+    assert_eq!(initialize_response["jsonrpc"], serde_json::json!("2.0"));
+
+    write_stdio_json(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": {
+                "cwd": cwd,
+                "mcpServers": []
+            }
+        }),
+    )
+    .await?;
+    let session_new_response = read_stdio_json_until(
+        &mut child,
+        &mut stdout_reader,
+        &mut stderr_reader,
+        "ACP session/new response",
+        |value| value.get("id") == Some(&serde_json::json!(1)),
+    )
+    .await?;
+    let session_id = session_new_response["result"]["sessionId"]
+        .as_str()
+        .context("session/new response included a sessionId")?
+        .to_string();
+    let model_option = acp_model_config_option(&session_new_response["result"])?;
+    assert_eq!(model_option["name"], serde_json::json!("Model"));
+    assert_eq!(model_option["category"], serde_json::json!("model"));
+    assert_eq!(
+        model_option["currentValue"],
+        serde_json::json!("test-openai")
+    );
+    assert_model_config_option_values(model_option, &["alt-openai", "test-openai"])?;
+    let mode_option = acp_config_option(&session_new_response["result"], "mode")?;
+    assert_eq!(mode_option["name"], serde_json::json!("Session Mode"));
+    assert_eq!(mode_option["category"], serde_json::json!("mode"));
+    assert_eq!(mode_option["currentValue"], serde_json::json!("default"));
+    assert_config_option_values(
+        mode_option,
+        &["read-only", "default", "auto-review", "full-access"],
+    )?;
+
+    write_stdio_json(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/set_config_option",
+            "params": {
+                "sessionId": session_id,
+                "configId": "model",
+                "value": "alt-openai"
+            }
+        }),
+    )
+    .await?;
+    let set_config_response = read_stdio_json_until(
+        &mut child,
+        &mut stdout_reader,
+        &mut stderr_reader,
+        "ACP session/set_config_option response",
+        |value| value.get("id") == Some(&serde_json::json!(2)),
+    )
+    .await?;
+    let model_option = acp_model_config_option(&set_config_response["result"])?;
+    assert_eq!(
+        model_option["currentValue"],
+        serde_json::json!("alt-openai")
+    );
+    let mode_option = acp_config_option(&set_config_response["result"], "mode")?;
+    assert_eq!(mode_option["currentValue"], serde_json::json!("default"));
+
+    write_stdio_json(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "session/set_config_option",
+            "params": {
+                "sessionId": session_id,
+                "configId": "mode",
+                "value": "full-access"
+            }
+        }),
+    )
+    .await?;
+    let set_mode_response = read_stdio_json_until(
+        &mut child,
+        &mut stdout_reader,
+        &mut stderr_reader,
+        "ACP session/set_config_option mode response",
+        |value| value.get("id") == Some(&serde_json::json!(3)),
+    )
+    .await?;
+    let mode_option = acp_config_option(&set_mode_response["result"], "mode")?;
+    assert_eq!(
+        mode_option["currentValue"],
+        serde_json::json!("full-access")
+    );
+    let model_option = acp_model_config_option(&set_mode_response["result"])?;
+    assert_eq!(
+        model_option["currentValue"],
+        serde_json::json!("alt-openai")
+    );
+
+    let prompt = "use the selected ACP model binding";
+    write_acp_prompt(&mut stdin, 4, &session_id, prompt).await?;
+    let prompt_messages = read_stdio_json_collect_until(
+        &mut child,
+        &mut stdout_reader,
+        &mut stderr_reader,
+        "ACP session/prompt response",
+        |value| value.get("id") == Some(&serde_json::json!(4)),
+    )
+    .await?;
+    let prompt_response = prompt_messages
+        .last()
+        .context("session/prompt produced a response")?;
+    assert_prompt_response(prompt_response, 4);
+    let provider_request = recv_provider_prompt_request(
+        &mut provider.requests,
+        "provider prompt request after config option update",
+        prompt,
+    )
+    .await?;
+    assert_eq!(provider_request["model"], serde_json::json!("alt-model"));
+    assert_eq!(
+        provider_request["web_search_options"],
+        serde_json::json!({})
+    );
+
+    drop(stdin);
+    child.kill().await.ok();
+    let _ = child.wait().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn stdio_proxy_acp_prompt_streams_each_agent_chunk_once() -> Result<()> {
+    let home_dir = TempDir::new()?;
+    let mut provider = spawn_openai_chat_completions_server().await?;
+    write_test_config(&home_dir, &["stdio://"], &provider.base_url)?;
+
+    let devo_home = home_dir.path().join(".devo");
+    let cwd = home_dir.path().join("workspace");
+    std::fs::create_dir_all(&cwd)?;
+    let cwd = cwd.to_string_lossy().into_owned();
+
+    let mut first_command = devo_command()?;
+    let mut first_child = first_command
+        .arg("server")
+        .arg("--transport")
+        .arg("stdio")
+        .env("DEVO_HOME", &devo_home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawn real devo server process")?;
+    let mut first_stdin = first_child.stdin.take().context("capture first stdin")?;
+    let first_stdout = first_child.stdout.take().context("capture first stdout")?;
+    let first_stderr = first_child.stderr.take().context("capture first stderr")?;
+    let mut first_stdout_reader = AsyncBufReader::new(first_stdout).lines();
+    let mut first_stderr_reader = AsyncBufReader::new(first_stderr);
+
+    write_stdio_json(
+        &mut first_stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {
+                    "name": "acp-real-server-holder",
+                    "title": "ACP Real Server Holder",
+                    "version": "1.0.0"
+                }
+            }
+        }),
+    )
+    .await?;
+    let first_initialize_response = read_stdio_json(
+        &mut first_child,
+        &mut first_stdout_reader,
+        &mut first_stderr_reader,
+        "real server initialize response",
+        STDIO_SERVER_STARTUP_TIMEOUT,
+    )
+    .await?;
+    assert_eq!(
+        first_initialize_response["jsonrpc"],
+        serde_json::json!("2.0")
+    );
+
+    write_stdio_json(
+        &mut first_stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": {
+                "cwd": cwd,
+                "mcpServers": []
+            }
+        }),
+    )
+    .await?;
+    let first_session_new_response = read_stdio_json_until(
+        &mut first_child,
+        &mut first_stdout_reader,
+        &mut first_stderr_reader,
+        "real server session/new response",
+        |value| value.get("id") == Some(&serde_json::json!(1)),
+    )
+    .await?;
+    let session_id = first_session_new_response["result"]["sessionId"]
+        .as_str()
+        .context("real server session/new response included a sessionId")?
+        .to_string();
+
+    let first_prompt = "create history before proxy load";
+    write_acp_prompt(&mut first_stdin, 2, &session_id, first_prompt).await?;
+    let first_prompt_messages = read_stdio_json_collect_until(
+        &mut first_child,
+        &mut first_stdout_reader,
+        &mut first_stderr_reader,
+        "real server session/prompt response",
+        |value| value.get("id") == Some(&serde_json::json!(2)),
+    )
+    .await?;
+    let first_prompt_response = first_prompt_messages
+        .last()
+        .context("real server session/prompt produced a response")?;
+    assert_prompt_response(first_prompt_response, 2);
+    assert_prompt_updates_before_response(&first_prompt_messages, &session_id)?;
+    let _ = recv_provider_prompt_request(
+        &mut provider.requests,
+        "real server provider prompt request",
+        first_prompt,
+    )
+    .await?;
+
+    let mut proxy_command = devo_command()?;
+    let mut proxy_child = proxy_command
+        .arg("server")
+        .arg("--transport")
+        .arg("stdio")
+        .env("DEVO_HOME", &devo_home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawn proxy devo server process")?;
+    let mut proxy_stdin = proxy_child.stdin.take().context("capture proxy stdin")?;
+    let proxy_stdout = proxy_child.stdout.take().context("capture proxy stdout")?;
+    let proxy_stderr = proxy_child.stderr.take().context("capture proxy stderr")?;
+    let mut proxy_stdout_reader = AsyncBufReader::new(proxy_stdout).lines();
+    let mut proxy_stderr_reader = AsyncBufReader::new(proxy_stderr);
+
+    write_stdio_json(
+        &mut proxy_stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {
+                    "name": "third-party-acp-proxy-client",
+                    "title": "Third Party ACP Proxy Client",
+                    "version": "1.0.0"
+                }
+            }
+        }),
+    )
+    .await?;
+    let proxy_initialize_response = read_stdio_json(
+        &mut proxy_child,
+        &mut proxy_stdout_reader,
+        &mut proxy_stderr_reader,
+        "proxy initialize response",
+        STDIO_SERVER_STARTUP_TIMEOUT,
+    )
+    .await?;
+    assert_eq!(
+        proxy_initialize_response["jsonrpc"],
+        serde_json::json!("2.0")
+    );
+
+    write_stdio_json(
+        &mut proxy_stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "session/load",
+            "params": {
+                "sessionId": session_id,
+                "cwd": cwd,
+                "additionalDirectories": [],
+                "mcpServers": []
+            }
+        }),
+    )
+    .await?;
+    let session_load_messages = read_stdio_json_collect_until(
+        &mut proxy_child,
+        &mut proxy_stdout_reader,
+        &mut proxy_stderr_reader,
+        "proxy session/load response",
+        |value| value.get("id") == Some(&serde_json::json!(4)),
+    )
+    .await?;
+    let session_load_response = session_load_messages
+        .last()
+        .context("proxy session/load produced a response")?;
+    assert_eq!(session_load_response["jsonrpc"], serde_json::json!("2.0"));
+    assert_eq!(session_load_response["id"], serde_json::json!(4));
+    let _ = acp_config_option(&session_load_response["result"], "model")?;
+    assert_replayed_history_before_response(&session_load_messages, &session_id)?;
+
+    let prompt = "stream one ACP proxy reply";
+    write_acp_prompt(&mut proxy_stdin, 5, &session_id, prompt).await?;
+    let prompt_messages = read_stdio_json_collect_until(
+        &mut proxy_child,
+        &mut proxy_stdout_reader,
+        &mut proxy_stderr_reader,
+        "proxy session/prompt response",
+        |value| value.get("id") == Some(&serde_json::json!(5)),
+    )
+    .await?;
+    let prompt_response = prompt_messages
+        .last()
+        .context("proxy session/prompt produced a response")?;
+    assert_prompt_response(prompt_response, 5);
+    let chunks = prompt_messages
+        .iter()
+        .filter_map(|message| {
+            if message["method"] != serde_json::json!("session/update")
+                || message["params"]["sessionId"].as_str() != Some(session_id.as_str())
+                || message["params"]["update"]["sessionUpdate"].as_str()
+                    != Some("agent_message_chunk")
+            {
+                return None;
+            }
+            message["params"]["update"]["content"]["text"]
+                .as_str()
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(chunks, vec!["ACP compatibility response.".to_string()]);
+    let _ = recv_provider_prompt_request(
+        &mut provider.requests,
+        "proxy provider prompt request",
+        prompt,
+    )
+    .await?;
+
+    drop(proxy_stdin);
+    proxy_child.kill().await.ok();
+    let _ = proxy_child.wait().await;
+    drop(first_stdin);
+    first_child.kill().await.ok();
+    let _ = first_child.wait().await;
+    Ok(())
+}
+
+fn acp_model_config_option(result: &serde_json::Value) -> Result<&serde_json::Value> {
+    acp_config_option(result, "model")
+}
+
+fn acp_config_option<'a>(
+    result: &'a serde_json::Value,
+    config_id: &str,
+) -> Result<&'a serde_json::Value> {
+    result["configOptions"]
+        .as_array()
+        .and_then(|options| {
+            options.iter().find(|option| {
+                option.get("id").and_then(serde_json::Value::as_str) == Some(config_id)
+            })
+        })
+        .with_context(|| format!("ACP result included {config_id} config option"))
+}
+
+fn assert_model_config_option_values(
+    model_option: &serde_json::Value,
+    expected_values: &[&str],
+) -> Result<()> {
+    assert_config_option_values(model_option, expected_values)
+}
+
+fn assert_config_option_values(option: &serde_json::Value, expected_values: &[&str]) -> Result<()> {
+    let values = option["options"]
+        .as_array()
+        .context("config option includes options")?
+        .iter()
+        .filter_map(|option| option.get("value").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>();
+    for expected_value in expected_values {
+        anyhow::ensure!(
+            values.contains(expected_value),
+            "model config option values should contain {expected_value}: {values:?}"
+        );
+    }
     Ok(())
 }
