@@ -102,7 +102,7 @@ fn scrollback_plain_lines(lines: &[crate::history_cell::ScrollbackLine]) -> Vec<
 }
 
 #[test]
-fn first_run_onboarding_starts_with_logo_and_renders_inline() {
+fn first_run_onboarding_starts_with_logo_and_hides_composer() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let (mut widget, _app_event_rx) = onboarding_widget_with_available_model(test_model(), cwd);
 
@@ -113,7 +113,8 @@ fn first_run_onboarding_starts_with_logo_and_renders_inline() {
 
     let rows = rendered_rows(&widget, 100, 24).join("\n");
     assert!(rows.contains("Choose model profile"));
-    assert!(rows.contains("Complete onboarding to start chatting"));
+    assert!(!rows.contains("Complete onboarding to start chatting"));
+    assert!(!rows.contains("SHIFT+TAB switch"));
     assert!(widget.desired_height(100) < u16::MAX);
 }
 
