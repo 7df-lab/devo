@@ -509,6 +509,8 @@ mod tests {
             agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
+            client_filesystem: None,
+            client_terminal: None,
             network_proxy: None,
         }
     }

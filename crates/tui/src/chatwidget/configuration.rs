@@ -1,4 +1,4 @@
-//! Model, thinking, theme, and permission configuration flows for `ChatWidget`.
+//! Model, reasoning effort, theme, and permission configuration flows for `ChatWidget`.
 //!
 //! Picker construction and selection application live here so configuration UI
 //! changes stay separate from transcript and input handling.
@@ -6,11 +6,8 @@
 use devo_protocol::Model;
 use devo_protocol::ProviderModelBinding;
 use devo_protocol::ProviderWireApi;
+use devo_protocol::ReasoningCapability;
 use devo_protocol::ReasoningEffort;
-use devo_protocol::ReasoningEffortPreset;
-use devo_protocol::ThinkingCapability;
-use devo_protocol::ThinkingImplementation;
-use devo_protocol::ThinkingPreset;
 use ratatui::style::Color;
 use ratatui::text::Line;
 
@@ -27,13 +24,14 @@ use super::PendingModelSelection;
 use super::PickerMode;
 use super::permission_preset_items;
 use super::permission_preset_label;
-use super::thinking::ThinkingListEntry;
+use super::reasoning_effort;
+use super::reasoning_effort::ReasoningEffortListEntry;
 
 impl ChatWidget {
     pub(crate) fn set_model(&mut self, model: Model) {
-        self.thinking_selection = model.default_thinking_selection();
+        self.reasoning_effort_selection = model.default_reasoning_effort_selection();
         self.session.reasoning_effort = model
-            .resolve_thinking_selection(self.thinking_selection.as_deref())
+            .resolve_reasoning_effort_selection(self.reasoning_effort_selection.as_deref())
             .effective_reasoning_effort;
         self.session.provider = Some(model.provider_wire_api());
         self.session.model = Some(model);
@@ -83,7 +81,7 @@ impl ChatWidget {
             .cloned()
         {
             self.session.reasoning_effort = model
-                .resolve_thinking_selection(self.thinking_selection.as_deref())
+                .resolve_reasoning_effort_selection(self.reasoning_effort_selection.as_deref())
                 .effective_reasoning_effort;
             self.session.provider = Some(model.provider_wire_api());
             self.session.model = Some(model);
@@ -99,7 +97,7 @@ impl ChatWidget {
             model.slug = slug.clone();
             model.display_name = display_name;
             self.session.reasoning_effort = model
-                .resolve_thinking_selection(self.thinking_selection.as_deref())
+                .resolve_reasoning_effort_selection(self.reasoning_effort_selection.as_deref())
                 .effective_reasoning_effort;
             return;
         }
@@ -117,7 +115,9 @@ impl ChatWidget {
             .session
             .model
             .as_ref()
-            .map(|model| model.resolve_thinking_selection(self.thinking_selection.as_deref()))
+            .map(|model| {
+                model.resolve_reasoning_effort_selection(self.reasoning_effort_selection.as_deref())
+            })
             .and_then(|resolved| resolved.effective_reasoning_effort);
     }
 
@@ -168,20 +168,22 @@ impl ChatWidget {
         self.session.model_binding_id.clone()
     }
 
-    pub(crate) fn set_thinking_selection(&mut self, selection: Option<String>) {
-        self.thinking_selection = selection;
+    pub(crate) fn set_reasoning_effort_selection(&mut self, selection: Option<String>) {
+        self.reasoning_effort_selection = selection;
         self.session.reasoning_effort = self
             .session
             .model
             .as_ref()
-            .map(|model| model.resolve_thinking_selection(self.thinking_selection.as_deref()))
+            .map(|model| {
+                model.resolve_reasoning_effort_selection(self.reasoning_effort_selection.as_deref())
+            })
             .and_then(|resolved| resolved.effective_reasoning_effort);
         self.refresh_header_box();
         self.frame_requester.schedule_frame();
     }
 
-    pub(crate) fn current_thinking_selection(&self) -> Option<&str> {
-        self.thinking_selection.as_deref()
+    pub(crate) fn current_reasoning_effort_selection(&self) -> Option<&str> {
+        self.reasoning_effort_selection.as_deref()
     }
 
     pub(crate) fn current_reasoning_effort(&self) -> Option<ReasoningEffort> {
@@ -189,30 +191,34 @@ impl ChatWidget {
             self.session
                 .model
                 .as_ref()
-                .map(|model| model.resolve_thinking_selection(self.thinking_selection.as_deref()))
+                .map(|model| {
+                    model.resolve_reasoning_effort_selection(
+                        self.reasoning_effort_selection.as_deref(),
+                    )
+                })
                 .and_then(|resolved| resolved.effective_reasoning_effort)
         })
     }
 
-    pub(super) fn normalized_thinking_selection_for_display(
+    pub(super) fn normalized_reasoning_effort_selection_for_display(
         &self,
         model: &Model,
     ) -> Option<String> {
         let current = self
-            .thinking_selection
+            .reasoning_effort_selection
             .as_deref()
             .map(str::trim)
             .filter(|selection| !selection.is_empty())
             .map(str::to_ascii_lowercase)
-            .or_else(|| model.default_thinking_selection());
+            .or_else(|| model.default_reasoning_effort_selection());
 
-        match model.effective_thinking_capability() {
-            ThinkingCapability::ToggleWithLevels(_) => {
+        match model.effective_reasoning_capability() {
+            ReasoningCapability::ToggleWithLevels(_) => {
                 if matches!(current.as_deref(), Some("disabled")) {
                     Some(String::from("disabled"))
                 } else {
                     model
-                        .resolve_thinking_selection(current.as_deref())
+                        .resolve_reasoning_effort_selection(current.as_deref())
                         .effective_reasoning_effort
                         .map(|effort| effort.label().to_lowercase())
                 }
@@ -221,88 +227,21 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn display_thinking_selection(&self) -> Option<String> {
+    pub(super) fn display_reasoning_effort_selection(&self) -> Option<String> {
         let model = self.session.model.as_ref()?;
-        self.normalized_thinking_selection_for_display(model)
+        self.normalized_reasoning_effort_selection_for_display(model)
     }
 
-    pub(crate) fn thinking_entries(&self) -> Vec<ThinkingListEntry> {
+    pub(crate) fn reasoning_effort_entries(&self) -> Vec<ReasoningEffortListEntry> {
         let Some(model) = &self.session.model else {
             return Vec::new();
         };
 
         let current = self
-            .normalized_thinking_selection_for_display(model)
+            .normalized_reasoning_effort_selection_for_display(model)
             .unwrap_or_default();
 
-        model
-            .effective_thinking_capability()
-            .options()
-            .into_iter()
-            .map(|option| ThinkingListEntry {
-                is_current: option.value == current || option.label.to_lowercase() == current,
-                label: option.label,
-                description: option.description,
-                value: option.value,
-            })
-            .collect()
-    }
-
-    pub(crate) fn status_line_reasoning_effort_label(
-        effort: Option<ReasoningEffort>,
-    ) -> &'static str {
-        match effort {
-            Some(ReasoningEffort::None) | None => "default",
-            Some(ReasoningEffort::Minimal) => "minimal",
-            Some(ReasoningEffort::Low) => "low",
-            Some(ReasoningEffort::Medium) => "medium",
-            Some(ReasoningEffort::High) => "high",
-            Some(ReasoningEffort::XHigh) => "xhigh",
-            Some(ReasoningEffort::Max) => "max",
-        }
-    }
-
-    pub(crate) fn reasoning_effort_label(effort: ReasoningEffort) -> &'static str {
-        match effort {
-            ReasoningEffort::None => "None",
-            ReasoningEffort::Minimal => "Minimal",
-            ReasoningEffort::Low => "Low",
-            ReasoningEffort::Medium => "Medium",
-            ReasoningEffort::High => "High",
-            ReasoningEffort::XHigh => "Extra high",
-            ReasoningEffort::Max => "max",
-        }
-    }
-
-    pub(crate) fn thinking_label(
-        capability: &ThinkingCapability,
-        implementation: Option<&ThinkingImplementation>,
-        default_reasoning_effort: Option<ReasoningEffort>,
-    ) -> Option<&'static str> {
-        if matches!(capability, ThinkingCapability::Unsupported)
-            || matches!(implementation, Some(ThinkingImplementation::Disabled))
-        {
-            return None;
-        }
-
-        match capability {
-            ThinkingCapability::Unsupported => None,
-            ThinkingCapability::Toggle => Some("thinking"),
-            ThinkingCapability::ToggleWithLevels(levels) => default_reasoning_effort
-                .or_else(|| levels.first().copied())
-                .map(|effort| Self::status_line_reasoning_effort_label(Some(effort))),
-            ThinkingCapability::Levels(levels) => default_reasoning_effort
-                .or_else(|| levels.first().copied())
-                .map(|effort| Self::status_line_reasoning_effort_label(Some(effort))),
-        }
-    }
-
-    pub(crate) fn reasoning_effort_options(model: &Model) -> Vec<ReasoningEffortPreset> {
-        model.reasoning_effort_options()
-    }
-
-    pub(crate) fn thinking_options(model: &Model) -> Vec<ThinkingPreset> {
-        model.effective_thinking_capability().options()
+        reasoning_effort::reasoning_effort_entries_for_model(model, &current)
     }
 
     fn saved_model_selection_value(entry: &SavedModelEntry) -> &str {
@@ -418,17 +357,17 @@ impl ChatWidget {
     pub(super) fn handle_model_picker_selection(&mut self, slug: String) {
         if let Some(entry) = self.saved_model_entry_for_selection(&slug).cloned() {
             let selected_model = self.apply_saved_model_entry_to_session(&entry);
-            let thinking_selection = selected_model.default_thinking_selection();
+            let reasoning_effort_selection = selected_model.default_reasoning_effort_selection();
             self.pending_model_selection = Some(PendingModelSelection {
                 selection: Self::saved_model_selection_value(&entry).to_string(),
                 display_name: self.saved_model_display_label(&entry),
-                thinking_selection: thinking_selection.clone(),
+                reasoning_effort_selection: reasoning_effort_selection.clone(),
             });
-            self.thinking_selection = thinking_selection;
+            self.reasoning_effort_selection = reasoning_effort_selection;
             self.refresh_header_box();
 
             if selected_model
-                .effective_thinking_capability()
+                .effective_reasoning_capability()
                 .options()
                 .is_empty()
             {
@@ -436,7 +375,7 @@ impl ChatWidget {
                 return;
             }
 
-            self.open_thinking_picker();
+            self.open_reasoning_effort_picker();
             return;
         }
 
@@ -450,22 +389,22 @@ impl ChatWidget {
             return;
         };
 
-        let thinking_selection = selected_model.default_thinking_selection();
+        let reasoning_effort_selection = selected_model.default_reasoning_effort_selection();
         self.pending_model_selection = Some(PendingModelSelection {
             selection: selected_model.slug.clone(),
             display_name: selected_model.display_name.clone(),
-            thinking_selection: thinking_selection.clone(),
+            reasoning_effort_selection: reasoning_effort_selection.clone(),
         });
         self.current_model_binding_id = None;
         self.session.model_binding_id = None;
         self.session.provider = Some(selected_model.provider);
         self.session.model = Some(selected_model.clone());
         self.session.request_model = None;
-        self.thinking_selection = thinking_selection;
+        self.reasoning_effort_selection = reasoning_effort_selection;
         self.refresh_header_box();
 
         if selected_model
-            .effective_thinking_capability()
+            .effective_reasoning_capability()
             .options()
             .is_empty()
         {
@@ -473,7 +412,7 @@ impl ChatWidget {
             return;
         }
 
-        self.open_thinking_picker();
+        self.open_reasoning_effort_picker();
     }
 
     pub(super) fn open_theme_picker(&mut self) {
@@ -535,12 +474,12 @@ impl ChatWidget {
     pub(super) fn apply_model_selection(&mut self, slug: String) {
         if let Some(entry) = self.saved_model_entry_for_selection(&slug).cloned() {
             let selected_model = self.apply_saved_model_entry_to_session(&entry);
-            self.thinking_selection = selected_model.default_thinking_selection();
+            self.reasoning_effort_selection = selected_model.default_reasoning_effort_selection();
             self.app_event_tx
                 .send(AppEvent::Command(AppCommand::override_turn_context(
                     /*cwd*/ None,
                     Some(Self::saved_model_selection_value(&entry).to_string()),
-                    Some(self.thinking_selection.clone()),
+                    Some(self.reasoning_effort_selection.clone()),
                     /*sandbox*/ None,
                     /*approval_policy*/ None,
                 )));
@@ -557,7 +496,7 @@ impl ChatWidget {
             .find(|model| model.slug == slug)
             .cloned()
         {
-            self.thinking_selection = selected_model.default_thinking_selection();
+            self.reasoning_effort_selection = selected_model.default_reasoning_effort_selection();
             self.session.provider = Some(selected_model.provider);
             self.session.model = Some(selected_model.clone());
             self.session.request_model = None;
@@ -567,7 +506,7 @@ impl ChatWidget {
                 .send(AppEvent::Command(AppCommand::override_turn_context(
                     /*cwd*/ None,
                     Some(selected_model.slug.clone()),
-                    Some(self.thinking_selection.clone()),
+                    Some(self.reasoning_effort_selection.clone()),
                     /*sandbox*/ None,
                     /*approval_policy*/ None,
                 )));
@@ -576,27 +515,27 @@ impl ChatWidget {
         }
 
         self.update_session_request_model(slug.clone());
-        self.thinking_selection = self
+        self.reasoning_effort_selection = self
             .session
             .model
             .as_ref()
-            .and_then(Model::default_thinking_selection);
+            .and_then(Model::default_reasoning_effort_selection);
         self.app_event_tx
             .send(AppEvent::Command(AppCommand::override_turn_context(
                 /*cwd*/ None,
                 Some(slug.clone()),
-                Some(self.thinking_selection.clone()),
+                Some(self.reasoning_effort_selection.clone()),
                 /*sandbox*/ None,
                 /*approval_policy*/ None,
             )));
         self.set_status_message(format!("Model set to {slug}"));
     }
 
-    pub(super) fn open_thinking_picker(&mut self) {
-        self.picker_mode = Some(PickerMode::Thinking);
-        let entries = self.thinking_entries();
+    pub(super) fn open_reasoning_effort_picker(&mut self) {
+        self.picker_mode = Some(PickerMode::ReasoningEffort);
+        let entries = self.reasoning_effort_entries();
         if entries.is_empty() {
-            self.set_status_message("Thinking Unsupported");
+            self.set_status_message("Reasoning effort unsupported");
             return;
         }
         let model_entries = entries
@@ -610,13 +549,13 @@ impl ChatWidget {
             })
             .collect();
         self.bottom_pane.open_model_picker(model_entries);
-        self.set_status_message("Select a thinking mode");
+        self.set_status_message("Select reasoning effort");
     }
 
-    pub(super) fn apply_thinking_selection(&mut self, value: String) {
-        self.thinking_selection = Some(value.clone());
+    pub(super) fn apply_reasoning_effort_selection(&mut self, value: String) {
+        self.reasoning_effort_selection = Some(value.clone());
         if let Some(pending) = self.pending_model_selection.as_mut() {
-            pending.thinking_selection = Some(value);
+            pending.reasoning_effort_selection = Some(value);
             self.finalize_pending_model_selection();
             return;
         }
@@ -630,7 +569,7 @@ impl ChatWidget {
                 /*sandbox*/ None,
                 /*approval_policy*/ None,
             )));
-        self.set_status_message(format!("Thinking set to {value}"));
+        self.set_status_message(format!("Reasoning effort set to {value}"));
     }
 
     pub(super) fn finalize_pending_model_selection(&mut self) {
@@ -639,13 +578,13 @@ impl ChatWidget {
         };
 
         self.picker_mode = None;
-        self.thinking_selection = pending.thinking_selection.clone();
+        self.reasoning_effort_selection = pending.reasoning_effort_selection.clone();
         self.refresh_header_box();
         self.app_event_tx
             .send(AppEvent::Command(AppCommand::override_turn_context(
                 /*cwd*/ None,
                 Some(pending.selection.clone()),
-                Some(self.thinking_selection.clone()),
+                Some(self.reasoning_effort_selection.clone()),
                 /*sandbox*/ None,
                 /*approval_policy*/ None,
             )));

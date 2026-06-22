@@ -306,7 +306,7 @@ Most bugs become easier to reason about once the layer is clear.
 - The visible transcript (a `VecDeque` of `HistoryCell` entries).
 - The active streaming cell (an `Option<HistoryCell>` that mutates in place during streaming).
 - The `BottomPane` (composer + footer + popup stack).
-- Session state: model selection, thinking mode, permission preset, scroll position.
+- Session state: model selection, reasoning effort selection, permission preset, scroll position.
 - `StreamController` instances for assistant output and plan streaming.
 - Input dispatch: from `TuiEvent` through keybinding maps to `AppEvent`/`AppCommand` emission.
 

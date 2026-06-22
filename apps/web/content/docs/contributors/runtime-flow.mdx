@@ -47,7 +47,7 @@ approval policy, then sends an `AppCommand` to the host loop.
 For a normal prompt, the worker:
 
 1. ensures a server session exists;
-2. applies current model, binding id, permission preset, and thinking selection;
+2. applies current model, binding id, permission preset, and reasoning effort selection;
 3. sends `TurnStartParams` to the server;
 4. subscribes to turn events;
 5. maps server events into TUI-facing `WorkerEvent` values.

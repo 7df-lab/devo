@@ -4,7 +4,7 @@ impl ServerRuntime {
     /// Loads durable sessions from rollout files and installs them into the runtime map.
     /// Also restores token stats and pending queues from SQLite.
     pub async fn load_persisted_sessions(self: &Arc<Self>) -> anyhow::Result<()> {
-        let sessions = self.rollout_store.load_sessions(&self.deps)?;
+        let sessions = self.rollout_store.load_sessions(&self.deps).await?;
         tracing::info!(session_count = sessions.len(), "loaded persisted sessions");
         let mut restored_goal_stores = std::collections::HashMap::new();
 

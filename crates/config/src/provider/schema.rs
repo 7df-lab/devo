@@ -196,7 +196,7 @@ pub enum AuthCredentialKind {
 }
 
 /// Provider-owned portion of app config, including active model selection.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ProviderConfigSection {
     #[serde(default, skip_serializing_if = "ProviderDefaultsConfig::is_empty")]
     pub defaults: ProviderDefaultsConfig,
@@ -204,16 +204,15 @@ pub struct ProviderConfigSection {
     pub model_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Logical thinking selection for the active model, such as `disabled`,
+    /// Logical reasoning effort selection for the active model, such as `disabled`,
     /// `enabled`, or one effort-like level supported by the selected model.
     ///
     /// This stores the user-facing selection, not a provider-specific request
     /// field. The runtime later resolves it into the final request model,
-    /// request `thinking` parameter, effective reasoning effort, and any
+    /// provider `thinking` parameter, effective reasoning effort, and any
     /// provider-specific extra payload.
-    #[serde(alias = "model_thinking")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_thinking_selection: Option<String>,
+    pub model_reasoning_effort_selection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_auto_compact_token_limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,6 +229,57 @@ pub struct ProviderConfigSection {
     pub model_providers: BTreeMap<String, LegacyModelProviderConfig>,
 }
 
+#[derive(Default, Deserialize)]
+struct ProviderConfigSectionWire {
+    #[serde(default)]
+    defaults: ProviderDefaultsConfig,
+    model_provider: Option<String>,
+    model: Option<String>,
+    model_reasoning_effort_selection: Option<String>,
+    model_thinking_selection: Option<String>,
+    model_thinking: Option<String>,
+    model_auto_compact_token_limit: Option<u32>,
+    model_context_window: Option<u32>,
+    disable_response_storage: Option<bool>,
+    preferred_auth_method: Option<PreferredAuthMethod>,
+    #[serde(default)]
+    providers: BTreeMap<String, ProviderVendorConfig>,
+    #[serde(default)]
+    model_bindings: BTreeMap<String, ModelBindingConfig>,
+    #[serde(default)]
+    model_providers: BTreeMap<String, LegacyModelProviderConfig>,
+}
+
+impl From<ProviderConfigSectionWire> for ProviderConfigSection {
+    fn from(wire: ProviderConfigSectionWire) -> Self {
+        Self {
+            defaults: wire.defaults,
+            model_provider: wire.model_provider,
+            model: wire.model,
+            model_reasoning_effort_selection: wire
+                .model_reasoning_effort_selection
+                .or(wire.model_thinking_selection)
+                .or(wire.model_thinking),
+            model_auto_compact_token_limit: wire.model_auto_compact_token_limit,
+            model_context_window: wire.model_context_window,
+            disable_response_storage: wire.disable_response_storage,
+            preferred_auth_method: wire.preferred_auth_method,
+            providers: wire.providers,
+            model_bindings: wire.model_bindings,
+            model_providers: wire.model_providers,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderConfigSection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(ProviderConfigSectionWire::deserialize(deserializer)?.into())
+    }
+}
+
 impl ProviderConfigSection {
     pub(crate) fn merge_overlay(&mut self, overlay: Self, source: &toml::Value) {
         if overlay.model_provider.is_some() {
@@ -238,8 +288,8 @@ impl ProviderConfigSection {
         if overlay.model.is_some() {
             self.model = overlay.model;
         }
-        if overlay.model_thinking_selection.is_some() {
-            self.model_thinking_selection = overlay.model_thinking_selection;
+        if overlay.model_reasoning_effort_selection.is_some() {
+            self.model_reasoning_effort_selection = overlay.model_reasoning_effort_selection;
         }
         if overlay.model_auto_compact_token_limit.is_some() {
             self.model_auto_compact_token_limit = overlay.model_auto_compact_token_limit;
@@ -371,8 +421,8 @@ pub struct ResolvedProviderSettings {
     pub model_auto_compact_token_limit: Option<u32>,
     /// Optional active model context window override in tokens.
     pub model_context_window: Option<u32>,
-    /// Optional logical thinking selection for the active model.
-    pub model_thinking_selection: Option<String>,
+    /// Optional logical reasoning effort selection for the active model.
+    pub model_reasoning_effort_selection: Option<String>,
     /// Whether provider-side response storage should be disabled.
     pub disable_response_storage: bool,
     /// Preferred authentication method for the active provider.
@@ -415,5 +465,36 @@ mod tests {
             serde_json::from_str::<PreferredAuthMethod>("\"TOKEN\"").expect_err("reject token");
 
         assert_eq!(err.to_string(), "unsupported preferred_auth_method `token`");
+    }
+
+    #[test]
+    fn provider_config_reads_legacy_reasoning_effort_selection_keys() {
+        let config: ProviderConfigSection = toml::from_str(
+            r#"
+model_thinking_selection = "low"
+model_thinking = "medium"
+model_reasoning_effort_selection = "high"
+"#,
+        )
+        .expect("parse provider config");
+
+        assert_eq!(
+            config.model_reasoning_effort_selection.as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn provider_config_writes_reasoning_effort_selection_key() {
+        let config = ProviderConfigSection {
+            model_reasoning_effort_selection: Some("medium".to_string()),
+            ..ProviderConfigSection::default()
+        };
+
+        let serialized = toml::to_string(&config).expect("serialize provider config");
+
+        assert!(serialized.contains("model_reasoning_effort_selection"));
+        assert!(!serialized.contains("model_thinking_selection"));
+        assert!(!serialized.contains("model_thinking"));
     }
 }

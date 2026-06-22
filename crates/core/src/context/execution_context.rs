@@ -108,7 +108,7 @@ pub struct SessionContext {
     pub language: LanguageContext,
     pub persona: Persona,
     pub model: Model,
-    pub thinking_selection: Option<String>,
+    pub reasoning_effort_selection: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     pub system_prompt_mode: SystemPromptMode,
@@ -117,13 +117,15 @@ pub struct SessionContext {
 impl SessionContext {
     pub fn capture(
         model: &Model,
-        thinking_selection: Option<&str>,
+        reasoning_effort_selection: Option<&str>,
         cwd: &Path,
         locked_agents_snapshot: Option<AgentsMdSnapshot>,
         available_skills: Option<String>,
     ) -> Self {
-        let normalized_thinking_selection = model.normalize_thinking_selection(thinking_selection);
-        let resolved = model.resolve_thinking_selection(normalized_thinking_selection.as_deref());
+        let normalized_reasoning_effort_selection =
+            model.normalize_reasoning_effort_selection(reasoning_effort_selection);
+        let resolved = model
+            .resolve_reasoning_effort_selection(normalized_reasoning_effort_selection.as_deref());
         let workspace_instructions = locked_agents_snapshot
             .as_ref()
             .map(|snapshot| snapshot.rendered_instructions.clone());
@@ -136,7 +138,7 @@ impl SessionContext {
             language: LanguageContext::default(),
             persona: Persona::Default,
             model: model.clone(),
-            thinking_selection: normalized_thinking_selection,
+            reasoning_effort_selection: normalized_reasoning_effort_selection,
             reasoning_effort: resolved.effective_reasoning_effort,
             system_prompt_mode: SystemPromptMode::CodingAgent,
         }
@@ -202,7 +204,7 @@ pub struct TurnContext {
     pub environment: EnvironmentContext,
     pub persona: Persona,
     pub model: Model,
-    pub thinking_selection: Option<String>,
+    pub reasoning_effort_selection: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub observed_agents_snapshot: Option<AgentsMdSnapshot>,
     #[serde(default)]
@@ -216,16 +218,18 @@ impl TurnContext {
         observed_agents_snapshot: Option<AgentsMdSnapshot>,
     ) -> Self {
         let model = &turn_config.model;
-        let thinking_selection = turn_config.thinking_selection.as_deref();
+        let reasoning_effort_selection = turn_config.reasoning_effort_selection.as_deref();
         let cwd = &session.cwd;
         let collaboration_mode = session.collaboration_mode;
-        let normalized_thinking_selection = model.normalize_thinking_selection(thinking_selection);
-        let resolved = model.resolve_thinking_selection(normalized_thinking_selection.as_deref());
+        let normalized_reasoning_effort_selection =
+            model.normalize_reasoning_effort_selection(reasoning_effort_selection);
+        let resolved = model
+            .resolve_reasoning_effort_selection(normalized_reasoning_effort_selection.as_deref());
         Self {
             environment: EnvironmentContext::capture(cwd),
             persona: Persona::Default,
             model: model.clone(),
-            thinking_selection: normalized_thinking_selection,
+            reasoning_effort_selection: normalized_reasoning_effort_selection,
             reasoning_effort: resolved.effective_reasoning_effort,
             observed_agents_snapshot,
             collaboration_mode,
@@ -288,11 +292,11 @@ impl TurnContext {
                 self.model.slug.clone(),
             ));
         }
-        if self.thinking_selection != previous.thinking_selection {
+        if self.reasoning_effort_selection != previous.reasoning_effort_selection {
             metadata.push(MetadataContextChange::new(
-                "thinking_selection",
-                format!("{:?}", previous.thinking_selection),
-                format!("{:?}", self.thinking_selection),
+                "reasoning_effort_selection",
+                format!("{:?}", previous.reasoning_effort_selection),
+                format!("{:?}", self.reasoning_effort_selection),
             ));
         }
         if self.reasoning_effort != previous.reasoning_effort {
@@ -468,8 +472,8 @@ mod tests {
     use crate::AgentsMdSnapshot;
     use crate::ContextualUserFragment;
     use crate::Model;
+    use crate::ReasoningCapability;
     use crate::ReasoningEffort;
-    use crate::ThinkingCapability;
     use crate::context::user_instructions::UserInstructions;
 
     #[test]
@@ -556,7 +560,7 @@ mod tests {
                 slug: "a".into(),
                 ..Model::default()
             },
-            thinking_selection: Some("enabled".into()),
+            reasoning_effort_selection: Some("enabled".into()),
             reasoning_effort: Some(ReasoningEffort::Medium),
             observed_agents_snapshot: None,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
@@ -571,10 +575,10 @@ mod tests {
             persona: super::Persona::Default,
             model: Model {
                 slug: "b".into(),
-                thinking_capability: ThinkingCapability::Toggle,
+                reasoning_capability: ReasoningCapability::Toggle,
                 ..Model::default()
             },
-            thinking_selection: Some("disabled".into()),
+            reasoning_effort_selection: Some("disabled".into()),
             reasoning_effort: None,
             observed_agents_snapshot: None,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
@@ -586,7 +590,7 @@ mod tests {
         assert!(rendered.contains("<name>model</name>"));
         assert!(rendered.contains("<previous>a</previous>"));
         assert!(rendered.contains("<current>b</current>"));
-        assert!(rendered.contains("<name>thinking_selection</name>"));
+        assert!(rendered.contains("<name>reasoning_effort_selection</name>"));
         assert!(rendered.contains("<name>reasoning_effort</name>"));
         assert!(rendered.contains("<previous>/tmp/a</previous>"));
         assert!(rendered.contains("<current>/tmp/b</current>"));
@@ -603,7 +607,7 @@ mod tests {
             },
             persona: super::Persona::Default,
             model: Model::default(),
-            thinking_selection: None,
+            reasoning_effort_selection: None,
             reasoning_effort: None,
             observed_agents_snapshot: None,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
@@ -631,7 +635,7 @@ mod tests {
                 slug: "model-a".into(),
                 ..Model::default()
             },
-            thinking_selection: None,
+            reasoning_effort_selection: None,
             reasoning_effort: None,
             observed_agents_snapshot: None,
             collaboration_mode: devo_protocol::CollaborationMode::Plan,

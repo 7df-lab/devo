@@ -7,6 +7,7 @@ use serde::Serialize;
 #[serde(rename_all = "snake_case")]
 pub enum ClientTransportKind {
     Stdio,
+    StdioProxy,
     WebSocket,
 }
 
@@ -17,16 +18,6 @@ pub enum ConnectionState {
     Initializing,
     Ready,
     Closed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InitializeParams {
-    pub client_name: String,
-    pub client_version: String,
-    pub transport: ClientTransportKind,
-    pub supports_streaming: bool,
-    pub supports_binary_images: bool,
-    pub opt_out_notification_methods: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

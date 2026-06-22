@@ -2,8 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::bail;
 use async_trait::async_trait;
 use devo_protocol::ErrorResponse;
 use devo_protocol::NotificationEnvelope;
@@ -15,12 +17,16 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 
 use crate::ClientTransportKind;
 use crate::ServerRuntime;
 use crate::runtime::CONNECTION_NOTIFICATION_CHANNEL_CAPACITY;
+use crate::singleton::SERVER_CONTROL_SHUTDOWN_METHOD;
+use crate::singleton::SERVER_CONTROL_STATUS_METHOD;
 
 const TRANSPORT_WRITE_CHANNEL_CAPACITY: usize = 4096;
 const TRANSPORT_BACKPRESSURE_LOG_THRESHOLD: Duration = Duration::from_millis(50);
@@ -121,6 +127,7 @@ impl Default for EventBroadcaster {
 /// Default bind address used when the WebSocket transport is selected without
 /// an explicit host-and-port suffix.
 pub const DEFAULT_WEBSOCKET_BIND_ADDRESS: &str = "127.0.0.1:3210";
+const INTERNAL_PROXY_BIND_ADDRESS: &str = "127.0.0.1:0";
 
 /// Enumerates the supported listener targets parsed from server config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +139,43 @@ pub enum ListenTarget {
         /// The socket address host and port, without the `ws://` prefix.
         bind_address: String,
     },
+}
+
+/// Process-private loopback listener used by stdio proxy child processes.
+pub struct InternalProxyEndpoint {
+    listener: TcpListener,
+    endpoint: String,
+}
+
+/// Control hooks accepted by the authenticated internal proxy listener.
+#[derive(Clone)]
+pub struct InternalProxyControl {
+    shutdown_token: CancellationToken,
+}
+
+impl InternalProxyControl {
+    pub fn new(shutdown_token: CancellationToken) -> Self {
+        Self { shutdown_token }
+    }
+
+    fn request_shutdown(&self) {
+        self.shutdown_token.cancel();
+    }
+}
+
+impl InternalProxyEndpoint {
+    pub async fn bind() -> Result<Self> {
+        let listener = TcpListener::bind(INTERNAL_PROXY_BIND_ADDRESS).await?;
+        let local_addr = listener.local_addr()?;
+        Ok(Self {
+            listener,
+            endpoint: format!("ws://{local_addr}"),
+        })
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
 }
 
 /// Parses one configured listen-address string into a typed transport target.
@@ -172,11 +216,30 @@ pub fn resolve_listen_targets(listen: &[String]) -> Result<Vec<ListenTarget>> {
 /// Runs every configured listener target until shutdown.
 pub async fn run_listeners(runtime: Arc<ServerRuntime>, listen: &[String]) -> Result<()> {
     let targets = resolve_listen_targets(listen)?;
+    run_listener_tasks(runtime, targets, None).await
+}
 
-    let mut tasks = Vec::new();
+/// Runs configured listener targets plus the internal stdio-proxy endpoint.
+pub async fn run_listeners_with_internal_proxy(
+    runtime: Arc<ServerRuntime>,
+    listen: &[String],
+    internal_proxy: InternalProxyEndpoint,
+    token: String,
+    control: InternalProxyControl,
+) -> Result<()> {
+    let targets = resolve_listen_targets(listen)?;
+    run_listener_tasks(runtime, targets, Some((internal_proxy, token, control))).await
+}
+
+async fn run_listener_tasks(
+    runtime: Arc<ServerRuntime>,
+    targets: Vec<ListenTarget>,
+    internal_proxy: Option<(InternalProxyEndpoint, String, InternalProxyControl)>,
+) -> Result<()> {
+    let mut tasks = JoinSet::new();
     for target in targets {
         let runtime = Arc::clone(&runtime);
-        tasks.push(tokio::spawn(async move {
+        tasks.spawn(async move {
             match target {
                 ListenTarget::Stdio => {
                     tracing::info!("stdio listener active on stdin/stdout");
@@ -187,11 +250,19 @@ pub async fn run_listeners(runtime: Arc<ServerRuntime>, listen: &[String]) -> Re
                     run_websocket(runtime, &bind_address).await
                 }
             }
-        }));
+        });
     }
 
-    for task in tasks {
-        task.await??;
+    if let Some((internal_proxy, token, control)) = internal_proxy {
+        let runtime = Arc::clone(&runtime);
+        tasks.spawn(
+            async move { run_internal_proxy(runtime, internal_proxy, token, control).await },
+        );
+    }
+
+    if let Some(result) = tasks.join_next().await {
+        tasks.abort_all();
+        result??;
     }
     Ok(())
 }
@@ -268,6 +339,178 @@ async fn run_stdio(runtime: Arc<ServerRuntime>) -> Result<()> {
     writer_task.abort();
     producer_task.abort();
     Ok(())
+}
+
+async fn run_internal_proxy(
+    runtime: Arc<ServerRuntime>,
+    internal_proxy: InternalProxyEndpoint,
+    token: String,
+    control: InternalProxyControl,
+) -> Result<()> {
+    let InternalProxyEndpoint { listener, endpoint } = internal_proxy;
+    tracing::info!(endpoint = %endpoint, "internal stdio proxy listener bound");
+    loop {
+        let (stream, remote_addr) = listener.accept().await?;
+        let runtime = Arc::clone(&runtime);
+        let token = token.clone();
+        let control = control.clone();
+        tokio::spawn(async move {
+            tracing::info!(remote_addr = %remote_addr, "internal stdio proxy connected");
+            if let Err(error) =
+                handle_internal_proxy_connection(runtime, stream, &token, control).await
+            {
+                tracing::warn!(remote_addr = %remote_addr, error = %error, "internal stdio proxy closed with error");
+            }
+            tracing::info!(remote_addr = %remote_addr, "internal stdio proxy disconnected");
+        });
+    }
+}
+
+async fn handle_internal_proxy_connection(
+    runtime: Arc<ServerRuntime>,
+    stream: tokio::net::TcpStream,
+    expected_token: &str,
+    control: InternalProxyControl,
+) -> Result<()> {
+    let websocket = accept_async(stream).await?;
+    let (mut writer, mut reader) = websocket.split();
+    match reader.next().await {
+        Some(Ok(Message::Text(token))) if token.as_str() == expected_token => {}
+        Some(Ok(Message::Close(_))) | None => return Ok(()),
+        Some(Ok(_)) => bail!("internal stdio proxy did not send auth token"),
+        Some(Err(error)) => return Err(error.into()),
+    }
+
+    let first_value = loop {
+        match reader.next().await {
+            Some(Ok(Message::Text(text))) => {
+                let value: serde_json::Value = serde_json::from_str(&text)?;
+                if let Some(request) = parse_internal_proxy_control_request(&value) {
+                    let response = internal_proxy_control_response(&request);
+                    writer
+                        .send(Message::Text(response.to_string().into()))
+                        .await
+                        .context("send internal proxy control response")?;
+                    if request.action == InternalProxyControlAction::Shutdown {
+                        control.request_shutdown();
+                    }
+                    return Ok(());
+                }
+                break value;
+            }
+            Some(Ok(Message::Close(_))) | None => return Ok(()),
+            Some(Ok(_)) => {}
+            Some(Err(error)) => return Err(error.into()),
+        }
+    };
+
+    let (sender, mut receiver) = mpsc::channel(CONNECTION_NOTIFICATION_CHANNEL_CAPACITY);
+    let sender_clone = sender.clone();
+    let connection_id = runtime
+        .register_connection(ClientTransportKind::StdioProxy, sender)
+        .await;
+    tracing::info!(connection_id, "internal stdio proxy connection established");
+
+    let writer_task = tokio::spawn(async move {
+        while let Some(message) = receiver.recv().await {
+            writer
+                .send(Message::Text(
+                    serde_json::to_string(&message)
+                        .expect("serialize internal proxy response")
+                        .into(),
+                ))
+                .await?;
+        }
+        Result::<()>::Ok(())
+    });
+
+    if let Some(response) = runtime.handle_incoming(connection_id, first_value).await
+        && !send_transport_queue_message(
+            &sender_clone,
+            response,
+            connection_id,
+            "internal_proxy_notifications",
+        )
+        .await
+    {
+        runtime.unregister_connection(connection_id).await;
+        tracing::info!(connection_id, "internal stdio proxy connection closed");
+        writer_task.abort();
+        return Ok(());
+    }
+
+    while let Some(frame) = reader.next().await {
+        let frame = frame?;
+        match frame {
+            Message::Text(text) => {
+                let value: serde_json::Value = serde_json::from_str(&text)?;
+                if let Some(response) = runtime.handle_incoming(connection_id, value).await
+                    && !send_transport_queue_message(
+                        &sender_clone,
+                        response,
+                        connection_id,
+                        "internal_proxy_notifications",
+                    )
+                    .await
+                {
+                    break;
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    runtime.unregister_connection(connection_id).await;
+    tracing::info!(connection_id, "internal stdio proxy connection closed");
+    writer_task.abort();
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InternalProxyControlAction {
+    Status,
+    Shutdown,
+}
+
+impl InternalProxyControlAction {
+    fn response_status(self) -> &'static str {
+        match self {
+            InternalProxyControlAction::Status => "running",
+            InternalProxyControlAction::Shutdown => "shutting down",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InternalProxyControlRequest {
+    id: serde_json::Value,
+    action: InternalProxyControlAction,
+}
+
+fn parse_internal_proxy_control_request(
+    value: &serde_json::Value,
+) -> Option<InternalProxyControlRequest> {
+    let method = value.get("method")?.as_str()?;
+    let action = match method {
+        SERVER_CONTROL_STATUS_METHOD => InternalProxyControlAction::Status,
+        SERVER_CONTROL_SHUTDOWN_METHOD => InternalProxyControlAction::Shutdown,
+        _ => return None,
+    };
+    Some(InternalProxyControlRequest {
+        id: value.get("id").cloned().unwrap_or(serde_json::Value::Null),
+        action,
+    })
+}
+
+fn internal_proxy_control_response(request: &InternalProxyControlRequest) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request.id.clone(),
+        "result": {
+            "status": request.action.response_status(),
+        },
+    })
 }
 
 async fn run_websocket(runtime: Arc<ServerRuntime>, bind_address: &str) -> Result<()> {
@@ -391,7 +634,11 @@ async fn send_transport_queue_message<T>(
 mod tests {
     use super::DEFAULT_WEBSOCKET_BIND_ADDRESS;
     use super::EventBroadcaster;
+    use super::InternalProxyControlAction;
+    use super::InternalProxyControlRequest;
     use super::ListenTarget;
+    use super::internal_proxy_control_response;
+    use super::parse_internal_proxy_control_request;
     use super::parse_listen_target;
     use super::resolve_listen_targets;
     use pretty_assertions::assert_eq;
@@ -437,6 +684,53 @@ mod tests {
                     bind_address: DEFAULT_WEBSOCKET_BIND_ADDRESS.into(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn internal_proxy_control_request_parses_status_and_shutdown() {
+        assert_eq!(
+            [
+                parse_internal_proxy_control_request(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": crate::singleton::SERVER_CONTROL_STATUS_METHOD,
+                }))
+                .expect("status request"),
+                parse_internal_proxy_control_request(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": crate::singleton::SERVER_CONTROL_SHUTDOWN_METHOD,
+                }))
+                .expect("shutdown request"),
+            ],
+            [
+                InternalProxyControlRequest {
+                    id: serde_json::json!(1),
+                    action: InternalProxyControlAction::Status,
+                },
+                InternalProxyControlRequest {
+                    id: serde_json::json!(2),
+                    action: InternalProxyControlAction::Shutdown,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn internal_proxy_control_response_reports_action_status() {
+        assert_eq!(
+            internal_proxy_control_response(&InternalProxyControlRequest {
+                id: serde_json::json!(2),
+                action: InternalProxyControlAction::Shutdown,
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "status": "shutting down",
+                },
+            })
         );
     }
 

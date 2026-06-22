@@ -21,7 +21,7 @@ fn widget_with_model(
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
-        initial_thinking_selection: None,
+        initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,

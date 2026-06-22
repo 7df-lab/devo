@@ -36,9 +36,9 @@ use crate::version::CLI_VERSION;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::adaptive_wrap_lines;
+use devo_protocol::ReasoningCapability;
 use devo_protocol::ReasoningEffort;
-use devo_protocol::ThinkingCapability;
-use devo_protocol::ThinkingImplementation;
+use devo_protocol::ReasoningImplementation;
 use devo_protocol::protocol::FileChange;
 use devo_protocol::user_input::TextElement;
 use image::DynamicImage;
@@ -1133,9 +1133,9 @@ pub(crate) fn new_session_info(
     requested_model: &str,
     header_model: String,
     resolved_model: String,
-    thinking_capability: ThinkingCapability,
+    reasoning_capability: ReasoningCapability,
     default_reasoning_effort: Option<ReasoningEffort>,
-    thinking_implementation: Option<ThinkingImplementation>,
+    reasoning_implementation: Option<ReasoningImplementation>,
     is_first_event: bool,
     tooltip_override: Option<String>,
     show_fast_status: bool,
@@ -1145,9 +1145,9 @@ pub(crate) fn new_session_info(
     // Header box rendered as history (so it appears at the very top)
     let header = HeaderHistoryCell::new(
         header_model.clone(),
-        thinking_capability,
+        reasoning_capability,
         default_reasoning_effort,
-        thinking_implementation,
+        reasoning_implementation,
         show_fast_status,
         cwd.to_path_buf(),
         CLI_VERSION,
@@ -1197,9 +1197,9 @@ pub(crate) struct HeaderHistoryCell {
     version: &'static str,
     model: String,
     model_style: Style,
-    thinking_capability: ThinkingCapability,
+    reasoning_capability: ReasoningCapability,
     default_reasoning_effort: Option<ReasoningEffort>,
-    thinking_implementation: Option<ThinkingImplementation>,
+    reasoning_implementation: Option<ReasoningImplementation>,
     show_fast_status: bool,
     directory: PathBuf,
     accent_color: Color,
@@ -1210,9 +1210,9 @@ impl HeaderHistoryCell {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         model: String,
-        thinking_capability: ThinkingCapability,
+        reasoning_capability: ReasoningCapability,
         default_reasoning_effort: Option<ReasoningEffort>,
-        thinking_implementation: Option<ThinkingImplementation>,
+        reasoning_implementation: Option<ReasoningImplementation>,
         show_fast_status: bool,
         directory: PathBuf,
         version: &'static str,
@@ -1222,9 +1222,9 @@ impl HeaderHistoryCell {
         Self::new_with_style(
             model,
             Style::default(),
-            thinking_capability,
+            reasoning_capability,
             default_reasoning_effort,
-            thinking_implementation,
+            reasoning_implementation,
             show_fast_status,
             directory,
             version,
@@ -1237,9 +1237,9 @@ impl HeaderHistoryCell {
     pub(crate) fn new_with_style(
         model: String,
         model_style: Style,
-        thinking_capability: ThinkingCapability,
+        reasoning_capability: ReasoningCapability,
         default_reasoning_effort: Option<ReasoningEffort>,
-        thinking_implementation: Option<ThinkingImplementation>,
+        reasoning_implementation: Option<ReasoningImplementation>,
         show_fast_status: bool,
         directory: PathBuf,
         version: &'static str,
@@ -1250,9 +1250,9 @@ impl HeaderHistoryCell {
             version,
             model,
             model_style,
-            thinking_capability,
+            reasoning_capability,
             default_reasoning_effort,
-            thinking_implementation,
+            reasoning_implementation,
             show_fast_status,
             directory,
             accent_color,
@@ -1261,18 +1261,18 @@ impl HeaderHistoryCell {
     }
 
     fn reasoning_label(&self) -> Option<&'static str> {
-        if matches!(self.thinking_capability, ThinkingCapability::Unsupported)
+        if matches!(self.reasoning_capability, ReasoningCapability::Unsupported)
             || matches!(
-                self.thinking_implementation,
-                Some(ThinkingImplementation::Disabled)
+                self.reasoning_implementation,
+                Some(ReasoningImplementation::Disabled)
             )
         {
             return None;
         }
 
-        match &self.thinking_capability {
-            ThinkingCapability::Toggle => Some("thinking"),
-            ThinkingCapability::ToggleWithLevels(levels) => self
+        match &self.reasoning_capability {
+            ReasoningCapability::Toggle => Some("reasoning"),
+            ReasoningCapability::ToggleWithLevels(levels) => self
                 .default_reasoning_effort
                 .or_else(|| levels.first().copied())
                 .map(|effort| match effort {
@@ -1284,7 +1284,7 @@ impl HeaderHistoryCell {
                     ReasoningEffort::XHigh => "xhigh",
                     ReasoningEffort::Max => "max",
                 }),
-            ThinkingCapability::Levels(levels) => self
+            ReasoningCapability::Levels(levels) => self
                 .default_reasoning_effort
                 .or_else(|| levels.first().copied())
                 .map(|effort| match effort {
@@ -1296,7 +1296,7 @@ impl HeaderHistoryCell {
                     ReasoningEffort::XHigh => "xhigh",
                     ReasoningEffort::Max => "max",
                 }),
-            ThinkingCapability::Unsupported => None,
+            ReasoningCapability::Unsupported => None,
         }
     }
 }

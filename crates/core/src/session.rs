@@ -70,7 +70,7 @@ impl Default for SessionConfig {
 #[derive(Debug, Clone)]
 pub struct TurnConfig {
     /// Catalog model keyed by `model_slug`; used for prompts, capabilities,
-    /// thinking metadata, context limits, session metadata, and UI state.
+    /// reasoning metadata, context limits, session metadata, and UI state.
     pub model: Model,
     /// Provider wire model name from the selected binding's `model_name`.
     /// This is the string sent as `ModelRequest.model` for the base model.
@@ -78,7 +78,7 @@ pub struct TurnConfig {
     /// Provider model binding id selected for this turn, when the request was
     /// resolved through configured provider bindings.
     pub model_binding_id: Option<String>,
-    /// Provider-scoped variant lookup used when thinking resolves to another
+    /// Provider-scoped variant lookup used when reasoning resolves to another
     /// catalog slug before the request is built.
     pub provider_request_models: ProviderRequestModelMap,
     /// Provider route selected by the model-provider binding for this turn.
@@ -87,7 +87,7 @@ pub struct TurnConfig {
     pub web_search: ResolvedWebSearchConfig,
     /// Effective web fetch behavior for this turn.
     pub web_fetch: ResolvedWebFetchConfig,
-    pub thinking_selection: Option<String>,
+    pub reasoning_effort_selection: Option<String>,
 }
 
 /// Provider request model names keyed by catalog model slug for one selected provider.
@@ -121,9 +121,10 @@ impl TurnConfig {
         TokenBudget::for_model(&self.model)
     }
 
-    pub fn new(model: Model, thinking_selection: Option<String>) -> Self {
+    pub fn new(model: Model, reasoning_effort_selection: Option<String>) -> Self {
         let request_model = model.slug.clone();
-        let thinking_selection = model.normalize_thinking_selection(thinking_selection.as_deref());
+        let reasoning_effort_selection =
+            model.normalize_reasoning_effort_selection(reasoning_effort_selection.as_deref());
         Self {
             model,
             request_model,
@@ -132,7 +133,7 @@ impl TurnConfig {
             provider_route: ProviderRoute::Default,
             web_search: ResolvedWebSearchConfig::Disabled,
             web_fetch: ResolvedWebFetchConfig::Local,
-            thinking_selection,
+            reasoning_effort_selection,
         }
     }
 
@@ -140,14 +141,14 @@ impl TurnConfig {
         model: Model,
         request_model: String,
         provider_request_models: ProviderRequestModelMap,
-        thinking_selection: Option<String>,
+        reasoning_effort_selection: Option<String>,
     ) -> Self {
         Self::with_provider_route(
             model,
             request_model,
             provider_request_models,
             ProviderRoute::Default,
-            thinking_selection,
+            reasoning_effort_selection,
         )
     }
 
@@ -156,7 +157,7 @@ impl TurnConfig {
         request_model: String,
         provider_request_models: ProviderRequestModelMap,
         provider_route: ProviderRoute,
-        thinking_selection: Option<String>,
+        reasoning_effort_selection: Option<String>,
     ) -> Self {
         Self::with_provider_route_and_web_search(
             model,
@@ -164,7 +165,7 @@ impl TurnConfig {
             provider_request_models,
             provider_route,
             ResolvedWebSearchConfig::Disabled,
-            thinking_selection,
+            reasoning_effort_selection,
         )
     }
 
@@ -174,7 +175,7 @@ impl TurnConfig {
         provider_request_models: ProviderRequestModelMap,
         provider_route: ProviderRoute,
         web_search: ResolvedWebSearchConfig,
-        thinking_selection: Option<String>,
+        reasoning_effort_selection: Option<String>,
     ) -> Self {
         Self::with_provider_route_and_web_tools(
             model,
@@ -183,7 +184,7 @@ impl TurnConfig {
             provider_route,
             web_search,
             ResolvedWebFetchConfig::Local,
-            thinking_selection,
+            reasoning_effort_selection,
         )
     }
 
@@ -194,9 +195,10 @@ impl TurnConfig {
         provider_route: ProviderRoute,
         web_search: ResolvedWebSearchConfig,
         web_fetch: ResolvedWebFetchConfig,
-        thinking_selection: Option<String>,
+        reasoning_effort_selection: Option<String>,
     ) -> Self {
-        let thinking_selection = model.normalize_thinking_selection(thinking_selection.as_deref());
+        let reasoning_effort_selection =
+            model.normalize_reasoning_effort_selection(reasoning_effort_selection.as_deref());
         Self {
             model,
             request_model,
@@ -205,7 +207,7 @@ impl TurnConfig {
             provider_route,
             web_search,
             web_fetch,
-            thinking_selection,
+            reasoning_effort_selection,
         }
     }
 
@@ -416,9 +418,9 @@ impl SessionState {
 
 #[cfg(test)]
 mod tests {
+    use devo_protocol::ReasoningCapability;
     use devo_protocol::ReasoningEffort;
     use devo_protocol::SessionId;
-    use devo_protocol::ThinkingCapability;
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -473,11 +475,11 @@ mod tests {
     }
 
     #[test]
-    fn turn_config_normalizes_default_thinking_selection() {
+    fn turn_config_normalizes_default_reasoning_effort_selection() {
         let model = Model {
             slug: "deepseek-v4-flash".to_string(),
             display_name: "deepseek-v4-flash".to_string(),
-            thinking_capability: ThinkingCapability::ToggleWithLevels(vec![
+            reasoning_capability: ReasoningCapability::ToggleWithLevels(vec![
                 ReasoningEffort::High,
                 ReasoningEffort::Max,
             ]),
@@ -493,8 +495,11 @@ mod tests {
             Some(String::new()),
         );
 
-        assert_eq!(direct.thinking_selection, Some("high".to_string()));
-        assert_eq!(provider_bound.thinking_selection, Some("high".to_string()));
+        assert_eq!(direct.reasoning_effort_selection, Some("high".to_string()));
+        assert_eq!(
+            provider_bound.reasoning_effort_selection,
+            Some("high".to_string())
+        );
     }
 
     #[test]

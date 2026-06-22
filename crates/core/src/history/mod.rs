@@ -70,8 +70,13 @@ pub struct ContextView {
     pub timezone: String,
     /// Active model slug.
     pub model: String,
-    /// Current thinking / reasoning effort selection, if any.
-    pub thinking_effort: Option<String>,
+    /// Current reasoning effort selection, if any.
+    #[serde(
+        default,
+        alias = "thinking_effort",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_effort_selection: Option<String>,
     /// Active persona or system persona identifier, if any.
     pub persona: Option<String>,
     /// Current date in ISO-8601 format (YYYY-MM-DD).
@@ -88,7 +93,7 @@ impl ContextView {
         shell: impl Into<String>,
         timezone: impl Into<String>,
         model: impl Into<String>,
-        thinking_effort: Option<String>,
+        reasoning_effort_selection: Option<String>,
         persona: Option<String>,
         date: impl Into<String>,
         cwd: impl Into<String>,
@@ -98,7 +103,7 @@ impl ContextView {
             shell: shell.into(),
             timezone: timezone.into(),
             model: model.into(),
-            thinking_effort,
+            reasoning_effort_selection,
             persona,
             date: date.into(),
             cwd: cwd.into(),
@@ -118,8 +123,11 @@ impl ContextView {
             prompt,
             "<os>{os}</os>\n<shell>{shell}</shell>\n<timezone>{timezone}</timezone>\n<model>{model}</model>\n<date>{date}</date>\n<cwd>{cwd}</cwd>"
         );
-        if let Some(ref effort) = self.thinking_effort {
-            let _ = write!(prompt, "\n<thinking_effort>{effort}</thinking_effort>");
+        if let Some(ref selection) = self.reasoning_effort_selection {
+            let _ = write!(
+                prompt,
+                "\n<reasoning_effort_selection>{selection}</reasoning_effort_selection>"
+            );
         }
         if let Some(ref persona) = self.persona {
             let _ = write!(prompt, "\n<persona>{persona}</persona>");
@@ -169,15 +177,15 @@ impl ContextView {
             let _ = write!(diff, "model: {previous_model} -> {model}");
             changed = true;
         }
-        if self.thinking_effort != previous.thinking_effort {
+        if self.reasoning_effort_selection != previous.reasoning_effort_selection {
             if changed {
                 diff.push('\n');
             }
-            let previous_thinking_effort = &previous.thinking_effort;
-            let thinking_effort = &self.thinking_effort;
+            let previous_reasoning_effort_selection = &previous.reasoning_effort_selection;
+            let reasoning_effort_selection = &self.reasoning_effort_selection;
             let _ = write!(
                 diff,
-                "thinking_effort: {previous_thinking_effort:?} -> {thinking_effort:?}"
+                "reasoning_effort_selection: {previous_reasoning_effort_selection:?} -> {reasoning_effort_selection:?}"
             );
             changed = true;
         }

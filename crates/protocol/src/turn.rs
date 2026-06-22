@@ -5,7 +5,9 @@ use chrono::{DateTime, Utc};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{ItemId, PendingInputId, ReasoningEffort, SessionId, TurnId, TurnStatus, TurnUsage};
+use crate::{
+    ItemId, PendingInputId, ReasoningEffort, SessionId, StopReason, TurnId, TurnStatus, TurnUsage,
+};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnMetadata {
     pub turn_id: TurnId,
@@ -16,13 +18,24 @@ pub struct TurnMetadata {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_binding_id: Option<String>,
-    pub thinking: Option<String>,
+    #[serde(default, alias = "thinking", skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_selection: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub request_model: String,
     pub request_thinking: Option<String>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub usage: Option<TurnUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<TurnFailureReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnFailureReason {
+    MaxTurnRequests,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -103,7 +116,8 @@ pub struct TurnStartParams {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_binding_id: Option<String>,
-    pub thinking: Option<String>,
+    #[serde(default, alias = "thinking", skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_selection: Option<String>,
     pub sandbox: Option<String>,
     pub approval_policy: Option<String>,
     pub cwd: Option<PathBuf>,
@@ -353,7 +367,7 @@ mod tests {
             kind: TurnKind::Regular,
             model: "logical-model".to_string(),
             model_binding_id: Some("provider-binding".to_string()),
-            thinking: Some("high".to_string()),
+            reasoning_effort_selection: Some("high".to_string()),
             reasoning_effort: Some(ReasoningEffort::High),
             request_model: "provider-model".to_string(),
             request_thinking: Some("medium".to_string()),
@@ -365,6 +379,8 @@ mod tests {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
             }),
+            stop_reason: Some(StopReason::EndTurn),
+            failure_reason: None,
         };
 
         let json = serde_json::to_string(&metadata).expect("serialize");
@@ -421,7 +437,7 @@ mod tests {
             }],
             model: None,
             model_binding_id: None,
-            thinking: None,
+            reasoning_effort_selection: None,
             sandbox: None,
             approval_policy: None,
             cwd: None,

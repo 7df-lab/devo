@@ -137,7 +137,7 @@ pub(crate) fn save_last_used_model(
 }
 
 #[allow(dead_code)]
-pub(crate) fn save_thinking_selection(selection: Option<&str>) -> Result<()> {
+pub(crate) fn save_reasoning_effort_selection(selection: Option<&str>) -> Result<()> {
     let path = find_devo_home()
         .context("could not determine user config path")?
         .join("config.toml");
@@ -149,7 +149,7 @@ pub(crate) fn save_thinking_selection(selection: Option<&str>) -> Result<()> {
     } else {
         Value::Table(Default::default())
     };
-    root = merge_thinking_selection(root, selection)?;
+    root = merge_reasoning_effort_selection(root, selection)?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -269,19 +269,19 @@ fn permission_preset_to_config_value(preset: PermissionPreset) -> &'static str {
 }
 
 #[allow(dead_code)]
-fn merge_thinking_selection(mut root: Value, selection: Option<&str>) -> Result<Value> {
+fn merge_reasoning_effort_selection(mut root: Value, selection: Option<&str>) -> Result<Value> {
     let table = root
         .as_table_mut()
         .context("config root must be a TOML table")?;
     match normalized_optional(selection) {
         Some(value) => {
             table.insert(
-                "model_thinking_selection".to_string(),
+                "model_reasoning_effort_selection".to_string(),
                 Value::String(value.to_string()),
             );
         }
         None => {
-            table.remove("model_thinking_selection");
+            table.remove("model_reasoning_effort_selection");
         }
     }
     Ok(root)
@@ -1147,22 +1147,23 @@ model = "gpt-5.4"
     }
 
     #[test]
-    fn merge_thinking_selection_updates_and_removes_value() {
-        let merged = merge_thinking_selection(Value::Table(Default::default()), Some("medium"))
-            .expect("merge");
+    fn merge_reasoning_effort_selection_updates_and_removes_value() {
+        let merged =
+            merge_reasoning_effort_selection(Value::Table(Default::default()), Some("medium"))
+                .expect("merge");
         assert_eq!(
             merged
                 .as_table()
-                .and_then(|table| table.get("model_thinking_selection"))
+                .and_then(|table| table.get("model_reasoning_effort_selection"))
                 .and_then(Value::as_str),
             Some("medium")
         );
 
-        let removed = merge_thinking_selection(merged, None).expect("remove");
+        let removed = merge_reasoning_effort_selection(merged, None).expect("remove");
         assert_eq!(
             removed
                 .as_table()
-                .and_then(|table| table.get("model_thinking_selection")),
+                .and_then(|table| table.get("model_reasoning_effort_selection")),
             None
         );
     }

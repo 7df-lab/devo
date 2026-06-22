@@ -69,12 +69,12 @@ pub(crate) enum AppEvent {
     ModelSelected { model: String },
 
     #[allow(dead_code)]
-    /// Open the thinking-mode picker.
-    OpenThinkingPicker,
+    /// Open the reasoning-effort picker.
+    OpenReasoningEffortPicker,
 
     #[allow(dead_code)]
-    /// Apply a selected thinking mode.
-    ThinkingSelected { value: Option<String> },
+    /// Apply a selected reasoning effort.
+    ReasoningEffortSelected { value: Option<String> },
 
     #[allow(dead_code)]
     /// Async update of the current git branch for status-line rendering.

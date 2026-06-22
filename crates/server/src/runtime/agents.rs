@@ -81,9 +81,18 @@ impl ServerRuntime {
                 parent.config.clone(),
                 stable_items,
                 parent.latest_turn.clone(),
+                parent.tool_registry.clone(),
+                Arc::clone(&parent.runtime_context),
             )
         };
-        let (parent_summary, parent_config, stable_items, parent_latest_turn) = parent_snapshot;
+        let (
+            parent_summary,
+            parent_config,
+            stable_items,
+            parent_latest_turn,
+            parent_tool_registry,
+            runtime_context,
+        ) = parent_snapshot;
 
         let nickname = self
             .generate_unique_agent_name(parent_session_id, child_session_id)
@@ -96,17 +105,18 @@ impl ServerRuntime {
         let agent_path = AgentPath::new(parent_path).join(&nickname).0;
         let model = parent_summary.model.clone();
         let model_binding_id = parent_summary.model_binding_id.clone();
-        let thinking = parent_summary.thinking.clone();
+        let reasoning_effort_selection = parent_summary.reasoning_effort_selection.clone();
 
         let mut record = self.rollout_store.create_session_record(
             child_session_id,
             now,
             parent_summary.cwd.clone(),
+            parent_summary.additional_directories.clone(),
             Some(nickname.clone()),
             model.clone(),
             model_binding_id.clone(),
-            thinking.clone(),
-            self.deps.provider.name().to_string(),
+            reasoning_effort_selection.clone(),
+            runtime_context.provider.name().to_string(),
             Some(parent_session_id),
         );
         record.agent_path = Some(agent_path.clone());
@@ -122,9 +132,11 @@ impl ServerRuntime {
             Some(record)
         };
 
-        let mut core_session = self
-            .deps
-            .new_session_state(child_session_id, parent_summary.cwd.clone());
+        let mut core_session = runtime_context.new_session_state(
+            child_session_id,
+            parent_summary.cwd.clone(),
+            parent_summary.additional_directories.clone(),
+        );
         core_session.config = parent_config.clone();
         let mut rebuilt_history_items = Vec::new();
         let mut rebuilt_messages = Vec::new();
@@ -156,6 +168,7 @@ impl ServerRuntime {
         let summary = SessionMetadata {
             session_id: child_session_id,
             cwd: parent_summary.cwd.clone(),
+            additional_directories: parent_summary.additional_directories.clone(),
             created_at: now,
             updated_at: now,
             title: Some(nickname.clone()),
@@ -167,7 +180,7 @@ impl ServerRuntime {
             ephemeral: params.ephemeral,
             model: model.clone(),
             model_binding_id: model_binding_id.clone(),
-            thinking,
+            reasoning_effort_selection,
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -178,9 +191,10 @@ impl ServerRuntime {
             status: SessionRuntimeStatus::Idle,
         };
         if effective_context_mode == AgentContextMode::DeepResearch {
-            let turn_config = self
-                .deps
-                .resolve_turn_config(session_model_selection(&summary), summary.thinking.clone());
+            let turn_config = runtime_context.resolve_turn_config(
+                session_model_selection(&summary),
+                summary.reasoning_effort_selection.clone(),
+            );
             core_session.session_context = Some(research::research_session_context(
                 &core_session,
                 &turn_config,
@@ -196,6 +210,7 @@ impl ServerRuntime {
             ));
         }
         let child_session = RuntimeSession {
+            runtime_context,
             record,
             summary: summary.clone(),
             config: parent_config,
@@ -216,6 +231,7 @@ impl ServerRuntime {
             first_user_input: Some(params.message.clone()),
             pending_approvals: HashMap::new(),
             pending_user_inputs: std::collections::HashMap::new(),
+            tool_registry: parent_tool_registry,
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
         };
@@ -461,13 +477,13 @@ impl ServerRuntime {
 
         let (turn_config, resolved_request) = {
             let session = session_arc.lock().await;
-            let turn_config = self.deps.resolve_turn_config(
+            let turn_config = session.runtime_context.resolve_turn_config(
                 session_model_selection(&session.summary),
-                session.summary.thinking.clone(),
+                session.summary.reasoning_effort_selection.clone(),
             );
-            let resolved_request = turn_config
-                .model
-                .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
+            let resolved_request = turn_config.model.resolve_reasoning_effort_selection(
+                turn_config.reasoning_effort_selection.as_deref(),
+            );
             (turn_config, resolved_request)
         };
         let request_model = turn_config.provider_request_model(&resolved_request.request_model);
@@ -485,13 +501,15 @@ impl ServerRuntime {
                 kind: devo_core::TurnKind::Regular,
                 model: turn_config.model.slug.clone(),
                 model_binding_id: turn_config.model_binding_id.clone(),
-                thinking: turn_config.thinking_selection.clone(),
+                reasoning_effort_selection: turn_config.reasoning_effort_selection.clone(),
                 reasoning_effort: resolved_request.effective_reasoning_effort,
                 request_model,
                 request_thinking: resolved_request.request_thinking.clone(),
                 started_at: now,
                 completed_at: None,
                 usage: None,
+                stop_reason: None,
+                failure_reason: None,
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;

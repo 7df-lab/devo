@@ -566,8 +566,8 @@ impl OnboardingWidget {
     fn model_supports_reasoning(&self, slug: &str) -> bool {
         self.model_by_slug(slug).is_some_and(|model| {
             !matches!(
-                model.thinking_capability,
-                devo_protocol::ThinkingCapability::Unsupported
+                model.reasoning_capability,
+                devo_protocol::ReasoningCapability::Unsupported
             )
         })
     }

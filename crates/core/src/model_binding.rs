@@ -23,7 +23,7 @@ pub struct SupportedModelDefinition {
     pub context_window: u64,
     pub effective_context_window: u64,
     pub modalities: Vec<ModelModality>,
-    pub reasoning_capability: ReasoningCapability,
+    pub reasoning_capability: ModelReasoningCapability,
     pub default_reasoning_effort: Option<ReasoningEffort>,
     pub supports_tool_use: bool,
     pub supports_parallel_tool_use: bool,
@@ -44,7 +44,7 @@ pub enum ModelModality {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ReasoningCapability {
+pub enum ModelReasoningCapability {
     None,
     Enabled,
     Required,
@@ -210,7 +210,7 @@ mod tests {
             context_window: 200000,
             effective_context_window: 180000,
             modalities: vec![ModelModality::Text, ModelModality::Image],
-            reasoning_capability: ReasoningCapability::Levels(vec![
+            reasoning_capability: ModelReasoningCapability::Levels(vec![
                 ReasoningEffort::Low,
                 ReasoningEffort::High,
             ]),

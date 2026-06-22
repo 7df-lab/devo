@@ -72,7 +72,10 @@ impl ChatWidget {
                     .as_ref()
                     .map(|m| m.slug.as_str())
                     .unwrap_or("unknown");
-                let thinking = self.thinking_selection.as_deref().unwrap_or("default");
+                let reasoning_effort_selection = self
+                    .reasoning_effort_selection
+                    .as_deref()
+                    .unwrap_or("default");
                 let cwd = self.session.cwd.display().to_string();
                 let turns = self.turn_count;
                 let tokens_in = Self::format_token_count(self.total_input_tokens);
@@ -81,7 +84,9 @@ impl ChatWidget {
                     Line::from("Session Status".bold()),
                     Line::from(""),
                     Line::from(format!("  model:       {model}")),
-                    Line::from(format!("  thinking:    {thinking}")),
+                    Line::from(format!(
+                        "  reasoning_effort_selection:    {reasoning_effort_selection}"
+                    )),
                     Line::from(format!("  cwd:         {cwd}")),
                     Line::from(format!("  turns:       {turns}")),
                     Line::from(format!(

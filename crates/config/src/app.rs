@@ -147,6 +147,7 @@ impl Default for AppConfig {
                 event_buffer_size: 1024,
                 idle_session_timeout_secs: 1800,
                 persist_ephemeral_sessions: false,
+                auth: Default::default(),
             },
             logging: LoggingConfig {
                 level: "info".into(),
@@ -650,6 +651,20 @@ fn validate_app_config(config: &AppConfig) -> Result<(), AppConfigError> {
         return Err(AppConfigError::Validation {
             message: "server.listen must not contain duplicate endpoints".into(),
         });
+    }
+
+    if config.server.auth.enabled {
+        if config.server.auth.method_id.trim().is_empty() {
+            return Err(AppConfigError::Validation {
+                message: "server.auth.method_id must not be empty when server auth is enabled"
+                    .into(),
+            });
+        }
+        if config.server.auth.name.trim().is_empty() {
+            return Err(AppConfigError::Validation {
+                message: "server.auth.name must not be empty when server auth is enabled".into(),
+            });
+        }
     }
 
     if config.logging.file.max_files < 1 {

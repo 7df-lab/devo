@@ -975,7 +975,7 @@ mod tests {
                 top_p: Some(0.7),
                 top_k: Some(12),
             },
-            thinking: Some("medium".to_string()),
+            request_thinking: Some("medium".to_string()),
             reasoning_effort: Some(devo_protocol::ReasoningEffort::Medium),
             extra_body: None,
         };
@@ -1023,7 +1023,7 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: None,
+            request_thinking: None,
             reasoning_effort: None,
             extra_body: None,
         };

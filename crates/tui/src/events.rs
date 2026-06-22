@@ -6,6 +6,9 @@ use crate::app_command::InputHistoryDirection;
 use crate::bottom_pane::SkillMetadata;
 use devo_core::ItemId;
 use devo_core::SessionId;
+use devo_protocol::AcpAvailableCommand;
+use devo_protocol::AcpCost;
+use devo_protocol::AcpSessionConfigOption;
 use devo_protocol::ProviderModelBinding;
 use devo_protocol::ProviderVendor;
 use devo_protocol::ProviderWireApi;
@@ -158,8 +161,8 @@ pub(crate) enum WorkerEvent {
         model: String,
         /// Stable provider model binding id used by the server for this turn.
         model_binding_id: Option<String>,
-        /// The logical thinking selection used for this turn.
-        thinking: Option<String>,
+        /// The logical reasoning effort selection used for this turn.
+        reasoning_effort_selection: Option<String>,
         /// The effective reasoning effort observed for this turn.
         reasoning_effort: Option<ReasoningEffort>,
         /// The server-assigned turn identifier.
@@ -458,6 +461,30 @@ pub(crate) enum WorkerEvent {
         /// Whether this list should be rendered into the transcript.
         show_in_transcript: bool,
     },
+    /// ACP-native available commands changed for the active session.
+    AcpAvailableCommandsUpdated {
+        /// Commands advertised through `session/update`.
+        commands: Vec<AcpAvailableCommand>,
+    },
+    /// ACP-native current session mode changed.
+    AcpCurrentModeUpdated {
+        /// Current ACP session mode id.
+        current_mode_id: String,
+    },
+    /// ACP-native session configuration options changed.
+    AcpConfigOptionsUpdated {
+        /// Full set of ACP config options from the update.
+        config_options: Vec<AcpSessionConfigOption>,
+    },
+    /// ACP-native context window usage changed.
+    AcpUsageUpdated {
+        /// Tokens currently used in the context window.
+        used: u64,
+        /// Total context window size in tokens.
+        size: u64,
+        /// Optional cumulative ACP cost.
+        cost: Option<AcpCost>,
+    },
     /// Server-owned `@` reference search results for the composer popup.
     ReferenceSearchUpdated {
         /// Correlated unified result snapshot returned by `search/*`.
@@ -471,8 +498,8 @@ pub(crate) enum WorkerEvent {
         model: String,
         /// Stable provider model binding id configured for the next session.
         model_binding_id: Option<String>,
-        /// Thinking selection currently configured for the next newly-created session.
-        thinking: Option<String>,
+        /// Reasoning effort selection currently configured for the next newly-created session.
+        reasoning_effort_selection: Option<String>,
         /// Effective reasoning effort currently configured for the next session.
         reasoning_effort: Option<ReasoningEffort>,
         /// Contextual footer label for the active child agent, when viewing one.
@@ -496,8 +523,8 @@ pub(crate) enum WorkerEvent {
         model: Option<String>,
         /// Stable provider model binding id restored from the resumed session.
         model_binding_id: Option<String>,
-        /// The thinking selection restored from the resumed session, when one exists.
-        thinking: Option<String>,
+        /// The reasoning effort selection restored from the resumed session, when one exists.
+        reasoning_effort_selection: Option<String>,
         /// The effective reasoning effort restored from session context, when one exists.
         reasoning_effort: Option<ReasoningEffort>,
         /// Contextual footer label for the active child agent, when viewing one.
@@ -646,7 +673,7 @@ pub(crate) enum TranscriptItemKind {
     User,
     /// Assistant-authored text.
     Assistant,
-    /// Model reasoning/thinking text.
+    /// Model reasoning text.
     Reasoning,
     /// Tool execution start marker.
     ToolCall,

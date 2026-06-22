@@ -266,7 +266,7 @@ Example `models.json` entry:
     "channel": "Custom",
     "provider": "openai_chat_completions",
     "description": "Custom OpenAI-compatible coding model.",
-    "thinking_capability": "unsupported",
+    "reasoning_capability": "unsupported",
     "context_window": 200000,
     "effective_context_window_percent": 95,
     "max_tokens": 4096,

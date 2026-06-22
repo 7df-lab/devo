@@ -102,10 +102,11 @@ impl RolloutStore {
         id: SessionId,
         created_at: chrono::DateTime<Utc>,
         cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
         title: Option<String>,
         model: Option<String>,
         model_binding_id: Option<String>,
-        thinking: Option<String>,
+        reasoning_effort_selection: Option<String>,
         model_provider: String,
         parent_session_id: Option<SessionId>,
     ) -> SessionRecord {
@@ -126,8 +127,9 @@ impl RolloutStore {
             model_provider,
             model,
             model_binding_id,
-            thinking,
+            reasoning_effort_selection,
             cwd,
+            additional_directories,
             cli_version: env!("CARGO_PKG_VERSION").into(),
             title,
             title_state,
@@ -299,16 +301,13 @@ impl RolloutStore {
     }
 
     /// Loads every durable session that can be rebuilt from canonical rollout files.
-    pub(crate) fn load_sessions(
+    pub(crate) async fn load_sessions(
         &self,
         deps: &ServerRuntimeDependencies,
     ) -> Result<HashMap<SessionId, std::sync::Arc<Mutex<RuntimeSession>>>> {
         let mut sessions = HashMap::new();
         for rollout_path in self.rollout_paths()? {
-            match self
-                .load_session_from_rollout(&rollout_path, deps)
-                .with_context(|| format!("replay rollout {}", rollout_path.display()))
-            {
+            match self.load_session_from_rollout(&rollout_path, deps).await {
                 Ok(recovered) => {
                     sessions.insert(recovered.summary.session_id, recovered.shared());
                 }
@@ -324,7 +323,41 @@ impl RolloutStore {
         Ok(sessions)
     }
 
-    fn load_session_from_rollout(
+    /// Deletes canonical rollout files for a session.
+    pub(crate) fn delete_session_rollouts(&self, session_id: &SessionId) -> Result<bool> {
+        let suffix = format!("-{session_id}.jsonl");
+        let mut deleted = false;
+        for rollout_path in self.rollout_paths()? {
+            let Some(file_name) = rollout_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !file_name.ends_with(&suffix) {
+                continue;
+            }
+            let file_lock = {
+                let mut locks = self
+                    .file_locks
+                    .lock()
+                    .expect("rollout file-locks table poisoned");
+                locks
+                    .entry(rollout_path.clone())
+                    .or_insert_with(|| Arc::new(StdMutex::new(())))
+                    .clone()
+            };
+            let _guard = file_lock.lock().expect("rollout per-file lock poisoned");
+            match std::fs::remove_file(&rollout_path) {
+                Ok(()) => deleted = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("delete rollout {}", rollout_path.display()));
+                }
+            }
+        }
+        Ok(deleted)
+    }
+
+    async fn load_session_from_rollout(
         &self,
         rollout_path: &Path,
         deps: &ServerRuntimeDependencies,
@@ -357,7 +390,10 @@ impl RolloutStore {
             }
         }
 
-        replay.into_runtime_session(deps)
+        replay
+            .into_runtime_session(deps)
+            .await
+            .with_context(|| format!("replay rollout {}", rollout_path.display()))
     }
 
     fn rollout_paths(&self) -> Result<Vec<PathBuf>> {
@@ -569,7 +605,10 @@ impl ReplayState {
         Ok(())
     }
 
-    fn into_runtime_session(mut self, deps: &ServerRuntimeDependencies) -> Result<RuntimeSession> {
+    async fn into_runtime_session(
+        mut self,
+        deps: &ServerRuntimeDependencies,
+    ) -> Result<RuntimeSession> {
         // Insert turn summary for the last turn before converting
         if let Some(last_turn) = self.latest_turn_metadata.clone()
             && last_turn.status == devo_core::TurnStatus::Completed
@@ -604,7 +643,12 @@ impl ReplayState {
         }
 
         let mut record = self.session.context("missing SessionMetaLine in rollout")?;
-        let mut core_session = deps.new_session_state(record.id, record.cwd.clone());
+        let runtime_context = deps.context_for_workspace(&record.cwd).await?;
+        let mut core_session = runtime_context.new_session_state(
+            record.id,
+            record.cwd.clone(),
+            record.additional_directories.clone(),
+        );
         let mut ordered_items = self.pending_items;
         ordered_items.sort_by(|left, right| {
             left.seq
@@ -675,8 +719,8 @@ impl ReplayState {
             })
             .or_else(|| record.model_binding_id.clone())
             .or_else(|| record.model.clone())
-            .unwrap_or_else(|| deps.default_model.clone());
-        let turn_config = deps.resolve_turn_config(Some(&summary_model_selection), None);
+            .unwrap_or_else(|| runtime_context.default_model.clone());
+        let turn_config = runtime_context.resolve_turn_config(Some(&summary_model_selection), None);
         let concrete_selection = |selection: Option<&str>| {
             selection
                 .map(str::trim)
@@ -684,12 +728,12 @@ impl ReplayState {
                 .filter(|selection| !selection.eq_ignore_ascii_case("default"))
                 .map(str::to_ascii_lowercase)
         };
-        let explicit_thinking = self
+        let explicit_reasoning_effort_selection = self
             .latest_turn_metadata
             .as_ref()
-            .and_then(|turn| concrete_selection(turn.thinking.as_deref()))
-            .or_else(|| concrete_selection(record.thinking.as_deref()));
-        let context_thinking = core_session
+            .and_then(|turn| concrete_selection(turn.reasoning_effort_selection.as_deref()))
+            .or_else(|| concrete_selection(record.reasoning_effort_selection.as_deref()));
+        let context_reasoning_effort_selection = core_session
             .latest_turn_context
             .as_ref()
             .and_then(|context| context.reasoning_effort)
@@ -700,20 +744,24 @@ impl ReplayState {
                     .and_then(|context| context.reasoning_effort)
             })
             .map(|effort| effort.label().to_lowercase());
-        let summary_thinking = turn_config.model.normalize_thinking_selection(
-            explicit_thinking.as_deref().or(context_thinking.as_deref()),
-        );
+        let summary_reasoning_effort_selection =
+            turn_config.model.normalize_reasoning_effort_selection(
+                explicit_reasoning_effort_selection
+                    .as_deref()
+                    .or(context_reasoning_effort_selection.as_deref()),
+            );
         let summary_reasoning_effort = turn_config
             .model
-            .resolve_thinking_selection(summary_thinking.as_deref())
+            .resolve_reasoning_effort_selection(summary_reasoning_effort_selection.as_deref())
             .effective_reasoning_effort;
         record.model = Some(turn_config.model.slug.clone());
         record.model_binding_id = turn_config.model_binding_id.clone();
-        record.thinking = summary_thinking.clone();
+        record.reasoning_effort_selection = summary_reasoning_effort_selection.clone();
 
         let summary = SessionMetadata {
             session_id: record.id,
             cwd: record.cwd.clone(),
+            additional_directories: record.additional_directories.clone(),
             created_at: record.created_at,
             updated_at: record.updated_at,
             title: record.title.clone(),
@@ -725,7 +773,7 @@ impl ReplayState {
             ephemeral: false,
             model: Some(turn_config.model.slug),
             model_binding_id: turn_config.model_binding_id.clone(),
-            thinking: summary_thinking,
+            reasoning_effort_selection: summary_reasoning_effort_selection,
             reasoning_effort: summary_reasoning_effort,
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,
@@ -743,6 +791,7 @@ impl ReplayState {
 
         let config = core_session.config.clone();
         Ok(RuntimeSession {
+            runtime_context,
             record: Some(record),
             summary,
             config,
@@ -763,6 +812,7 @@ impl ReplayState {
             first_user_input: None,
             pending_approvals: std::collections::HashMap::new(),
             pending_user_inputs: std::collections::HashMap::new(),
+            tool_registry: None,
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
         })
@@ -1350,11 +1400,13 @@ pub(crate) fn build_turn_record(
         kind: turn.kind.clone(),
         model: turn.model.clone(),
         model_binding_id: turn.model_binding_id.clone(),
-        thinking: turn.thinking.clone(),
+        reasoning_effort_selection: turn.reasoning_effort_selection.clone(),
         request_model: turn.request_model.clone(),
         request_thinking: turn.request_thinking.clone(),
         input_token_estimate: None,
         usage: turn.usage.clone(),
+        stop_reason: turn.stop_reason.clone(),
+        failure_reason: turn.failure_reason,
         session_context,
         turn_context,
         schema_version: 2,
@@ -1370,7 +1422,7 @@ fn turn_metadata_from_record(turn: &TurnRecord) -> TurnMetadata {
         kind: turn.kind.clone(),
         model: turn.model.clone(),
         model_binding_id: turn.model_binding_id.clone(),
-        thinking: turn.thinking.clone(),
+        reasoning_effort_selection: turn.reasoning_effort_selection.clone(),
         reasoning_effort: turn
             .turn_context
             .as_ref()
@@ -1385,6 +1437,8 @@ fn turn_metadata_from_record(turn: &TurnRecord) -> TurnMetadata {
         started_at: turn.started_at,
         completed_at: turn.completed_at,
         usage: turn.usage.clone(),
+        stop_reason: turn.stop_reason.clone(),
+        failure_reason: turn.failure_reason,
     }
 }
 
@@ -1565,11 +1619,13 @@ mod tests {
                     kind: TurnKind::Regular,
                     model: "model-a".into(),
                     model_binding_id: None,
-                    thinking: None,
+                    reasoning_effort_selection: None,
                     request_model: "model-a".into(),
                     request_thinking: None,
                     input_token_estimate: None,
                     usage: None,
+                    stop_reason: None,
+                    failure_reason: None,
                     session_context: None,
                     turn_context: None,
                     schema_version: 2,
@@ -1649,11 +1705,13 @@ mod tests {
                     kind: TurnKind::Regular,
                     model: "model-a".into(),
                     model_binding_id: None,
-                    thinking: None,
+                    reasoning_effort_selection: None,
                     request_model: "model-a".into(),
                     request_thinking: None,
                     input_token_estimate: None,
                     usage: None,
+                    stop_reason: None,
+                    failure_reason: None,
                     session_context: None,
                     turn_context: None,
                     schema_version: 2,
@@ -1971,7 +2029,7 @@ mod tests {
                 slug: "model-a".into(),
                 ..Model::default()
             },
-            thinking_selection: None,
+            reasoning_effort_selection: None,
             reasoning_effort: None,
             system_prompt_mode: devo_core::SystemPromptMode::CodingAgent,
         };
@@ -1987,7 +2045,7 @@ mod tests {
                 slug: "model-b".into(),
                 ..Model::default()
             },
-            thinking_selection: Some("enabled".into()),
+            reasoning_effort_selection: Some("enabled".into()),
             reasoning_effort: None,
             observed_agents_snapshot: None,
             collaboration_mode: devo_core::CollaborationMode::Build,
@@ -2009,8 +2067,9 @@ mod tests {
                     model_provider: "test".into(),
                     model: Some("model-a".into()),
                     model_binding_id: None,
-                    thinking: None,
+                    reasoning_effort_selection: None,
                     cwd: PathBuf::from("/tmp/root"),
+                    additional_directories: Vec::new(),
                     cli_version: "0.1.0".into(),
                     title: None,
                     title_state: SessionTitleState::Unset,
@@ -2042,11 +2101,13 @@ mod tests {
                     kind: devo_core::TurnKind::Regular,
                     model: "model-b".into(),
                     model_binding_id: None,
-                    thinking: Some("enabled".into()),
+                    reasoning_effort_selection: Some("enabled".into()),
                     request_model: "model-b".into(),
                     request_thinking: Some("enabled".into()),
                     input_token_estimate: None,
                     usage: None,
+                    stop_reason: None,
+                    failure_reason: None,
                     session_context: Some(session_context.clone()),
                     turn_context: Some(turn_context.clone()),
                     schema_version: 2,

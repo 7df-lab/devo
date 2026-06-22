@@ -26,6 +26,11 @@ struct PendingToolCall {
     command: String,
 }
 
+struct TurnEventStreamSummary {
+    latest_usage: Option<TurnUsage>,
+    stop_reason: Option<devo_core::StopReason>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolDisplayKind {
     CommandExecution,
@@ -49,6 +54,19 @@ impl ToolDisplayKind {
 struct ToolStartItem {
     item_kind: ItemKind,
     payload: serde_json::Value,
+}
+
+fn turn_failure_reason_from_error(
+    error: &devo_core::AgentError,
+) -> Option<devo_protocol::TurnFailureReason> {
+    match error {
+        devo_core::AgentError::MaxTurnsExceeded(_) => {
+            Some(devo_protocol::TurnFailureReason::MaxTurnRequests)
+        }
+        devo_core::AgentError::Provider(_)
+        | devo_core::AgentError::ContextTooLong
+        | devo_core::AgentError::Aborted => None,
+    }
 }
 
 pub(super) struct ExecuteTurnRequest {
@@ -182,6 +200,7 @@ fn query_event_trace_kind(event: &QueryEvent) -> &'static str {
         QueryEvent::ReasoningCompleted => "reasoning_completed",
         QueryEvent::UsageDelta { .. } => "usage_delta",
         QueryEvent::ToolUseStart { .. } => "tool_use_start",
+        QueryEvent::ToolExecutionStart { .. } => "tool_execution_start",
         QueryEvent::ToolProgress { .. } => "tool_progress",
         QueryEvent::ToolResult { .. } => "tool_result",
         QueryEvent::TurnComplete { .. } => "turn_complete",
@@ -192,10 +211,16 @@ fn query_event_trace_kind(event: &QueryEvent) -> &'static str {
 fn query_event_trace_delta_len(event: &QueryEvent) -> usize {
     match event {
         QueryEvent::TextDelta(text) | QueryEvent::ReasoningDelta(text) => text.len(),
-        QueryEvent::ToolProgress { content, .. } => content.len(),
+        QueryEvent::ToolProgress { progress, .. } => match progress {
+            devo_core::tools::ToolProgress::OutputDelta { delta } => delta.len(),
+            devo_core::tools::ToolProgress::StatusUpdate { message, .. } => message.len(),
+            devo_core::tools::ToolProgress::Terminal { terminal_id } => terminal_id.len(),
+            devo_core::tools::ToolProgress::Completion { summary } => summary.len(),
+        },
         QueryEvent::ReasoningCompleted
         | QueryEvent::UsageDelta { .. }
         | QueryEvent::ToolUseStart { .. }
+        | QueryEvent::ToolExecutionStart { .. }
         | QueryEvent::ToolResult { .. }
         | QueryEvent::TurnComplete { .. }
         | QueryEvent::Usage { .. } => 0,
@@ -209,6 +234,7 @@ fn query_event_trace_token_preview(event: &QueryEvent) -> Option<String> {
         | QueryEvent::ReasoningCompleted
         | QueryEvent::UsageDelta { .. }
         | QueryEvent::ToolUseStart { .. }
+        | QueryEvent::ToolExecutionStart { .. }
         | QueryEvent::ToolProgress { .. }
         | QueryEvent::ToolResult { .. }
         | QueryEvent::TurnComplete { .. }
@@ -882,6 +908,16 @@ fn user_shell_command_payload(
 }
 
 impl ServerRuntime {
+    fn tool_registry_for_session(
+        &self,
+        session: &RuntimeSession,
+    ) -> Arc<devo_core::tools::ToolRegistry> {
+        session
+            .tool_registry
+            .clone()
+            .unwrap_or_else(|| Arc::clone(&session.runtime_context.registry))
+    }
+
     pub(super) async fn execute_shell_command_turn(
         self: Arc<Self>,
         session_id: SessionId,
@@ -918,23 +954,26 @@ impl ServerRuntime {
             self.clear_active_turn_runtime_handles(session_id).await;
             return;
         };
-        let (permission_mode, permission_profile) = {
+        let (permission_mode, permission_profile, registry, network_proxy) = {
             let session = session_arc.lock().await;
+            let registry = self.tool_registry_for_session(&session);
             let core_session = session.core_session.lock().await;
+            let network_proxy = session
+                .runtime_context
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned")
+                .effective_config()
+                .provider_http
+                .proxy_url
+                .clone();
             (
                 core_session.config.permission_mode,
                 core_session.config.permission_profile.clone(),
+                registry,
+                network_proxy,
             )
         };
-        let network_proxy = self
-            .deps
-            .config_store
-            .lock()
-            .expect("app config store mutex should not be poisoned")
-            .effective_config()
-            .provider_http
-            .proxy_url
-            .clone();
         let turn_cancel_token = self
             .active_turn_cancellations
             .lock()
@@ -942,8 +981,11 @@ impl ServerRuntime {
             .get(&session_id)
             .cloned()
             .unwrap_or_else(CancellationToken::new);
+        let tool_execution_start_runtime = Arc::clone(&self);
+        let tool_execution_start_session_id = session_id;
+        let tool_execution_start_turn_id = turn.turn_id;
         let runtime = ToolRuntime::new_with_context_and_options(
-            Arc::clone(&self.deps.registry),
+            registry,
             self.build_permission_checker(
                 session_id,
                 turn.turn_id,
@@ -958,12 +1000,31 @@ impl ServerRuntime {
                 agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                 collaboration_mode: devo_protocol::CollaborationMode::Build,
                 agent_coordinator: None,
+                client_filesystem: None,
+                client_terminal: None,
                 local_web_search: None,
                 hooks: self.hook_context_for_session(session_id).await,
                 network_proxy,
             },
             ToolExecutionOptions {
                 cancel_token: turn_cancel_token,
+                on_tool_execution_start: Some(Arc::new(move |call: &ToolCall| {
+                    let runtime = Arc::clone(&tool_execution_start_runtime);
+                    let tool_call_id = call.id.clone();
+                    tokio::spawn(async move {
+                        runtime
+                            .broadcast_event(ServerEvent::ToolCallStatusUpdated(
+                                devo_protocol::ToolCallStatusUpdatedPayload {
+                                    session_id: tool_execution_start_session_id,
+                                    turn_id: tool_execution_start_turn_id,
+                                    tool_call_id,
+                                    status: "in_progress".to_string(),
+                                    terminal_id: None,
+                                },
+                            ))
+                            .await;
+                    });
+                })),
                 ..ToolExecutionOptions::default()
             },
         );
@@ -1111,6 +1172,11 @@ impl ServerRuntime {
         let turn_for_events = turn.clone();
         let turn_for_plan_updates = turn.clone();
         let event_session_arc = Arc::clone(&session_arc);
+        let event_tool_registry = {
+            let session = session_arc.lock().await;
+            self.tool_registry_for_session(&session)
+        };
+        let usage_context_window = Some(turn_config.model.context_window as u64);
         let event_queue_depth_for_task = Arc::clone(&event_queue_depth);
         let event_queue_max_depth_for_task = Arc::clone(&event_queue_max_depth);
         let event_task = tokio::spawn(async move {
@@ -1132,6 +1198,7 @@ impl ServerRuntime {
             let mut proposed_plan_item = ProposedPlanStreamItem::default();
             let mut proposed_plan_leading_normal = String::new();
             let mut latest_usage: Option<TurnUsage> = None;
+            let mut stop_reason: Option<devo_core::StopReason> = None;
             let mut usage_base: Option<(usize, usize, usize)> = None;
             while let Some(event) = event_rx.recv().await {
                 decrement_query_event_queue_depth(&event_queue_depth_for_task);
@@ -1281,8 +1348,7 @@ impl ServerRuntime {
                         }
                         let display_kind = ToolDisplayKind::for_tool_name(&name);
                         let command = command_display_from_input(&name, &input);
-                        let preparation_feedback =
-                            runtime.deps.registry.preparation_feedback(&name);
+                        let preparation_feedback = event_tool_registry.preparation_feedback(&name);
                         let start_item = tool_start_item_from_input(
                             &id,
                             &name,
@@ -1309,6 +1375,19 @@ impl ServerRuntime {
                                 command,
                             },
                         );
+                    }
+                    QueryEvent::ToolExecutionStart { id } => {
+                        runtime
+                            .broadcast_event(ServerEvent::ToolCallStatusUpdated(
+                                devo_protocol::ToolCallStatusUpdatedPayload {
+                                    session_id,
+                                    turn_id: turn_for_events.turn_id,
+                                    tool_call_id: id,
+                                    status: "in_progress".to_string(),
+                                    terminal_id: None,
+                                },
+                            ))
+                            .await;
                     }
                     QueryEvent::ToolResult {
                         tool_use_id,
@@ -1343,7 +1422,7 @@ impl ServerRuntime {
                                 && let Some(tool_name) = tool_name.clone()
                             {
                                 let preparation_feedback =
-                                    runtime.deps.registry.preparation_feedback(&tool_name);
+                                    event_tool_registry.preparation_feedback(&tool_name);
                                 let start_item = tool_start_item_from_result(
                                     &tool_use_id,
                                     &tool_name,
@@ -1495,6 +1574,18 @@ impl ServerRuntime {
                                                         .and_then(serde_json::Value::as_str)
                                                         .unwrap_or("")
                                                         .to_string(),
+                                                    old_text: file
+                                                        .get("oldContent")
+                                                        .or_else(|| file.get("preContent"))
+                                                        .or_else(|| file.get("pre_content"))
+                                                        .and_then(serde_json::Value::as_str)
+                                                        .map(ToOwned::to_owned),
+                                                    new_text: file
+                                                        .get("postContent")
+                                                        .or_else(|| file.get("post_content"))
+                                                        .or_else(|| file.get("content"))
+                                                        .and_then(serde_json::Value::as_str)
+                                                        .map(ToOwned::to_owned),
                                                     move_path: file
                                                         .get("movePath")
                                                         .or_else(|| file.get("move_path"))
@@ -1523,6 +1614,8 @@ impl ServerRuntime {
                                                         .and_then(serde_json::Value::as_str)
                                                         .unwrap_or("")
                                                         .to_string(),
+                                                    old_text: None,
+                                                    new_text: None,
                                                     move_path: None,
                                                 },
                                             )
@@ -1681,8 +1774,35 @@ impl ServerRuntime {
                     }
                     QueryEvent::ToolProgress {
                         tool_use_id,
-                        content,
+                        progress,
                     } => {
+                        let content = match progress {
+                            devo_core::tools::ToolProgress::OutputDelta { delta } => Some(delta),
+                            devo_core::tools::ToolProgress::StatusUpdate { message, percent } => {
+                                Some(match percent {
+                                    Some(percent) => format!("{message} ({percent}%)"),
+                                    None => message,
+                                })
+                            }
+                            devo_core::tools::ToolProgress::Completion { summary } => Some(summary),
+                            devo_core::tools::ToolProgress::Terminal { terminal_id } => {
+                                runtime
+                                    .broadcast_event(ServerEvent::ToolCallStatusUpdated(
+                                        devo_protocol::ToolCallStatusUpdatedPayload {
+                                            session_id,
+                                            turn_id: turn_for_events.turn_id,
+                                            tool_call_id: tool_use_id.clone(),
+                                            status: "in_progress".to_string(),
+                                            terminal_id: Some(terminal_id),
+                                        },
+                                    ))
+                                    .await;
+                                None
+                            }
+                        };
+                        let Some(content) = content else {
+                            continue;
+                        };
                         let item_id = command_execution_item_id_for_progress(
                             &pending_tool_calls,
                             &tool_use_id,
@@ -1756,6 +1876,7 @@ impl ServerRuntime {
                                     total_cache_read_tokens: base.2
                                         + cache_read_input_tokens.unwrap_or(0),
                                     last_query_input_tokens: input_tokens,
+                                    context_window: usage_context_window,
                                 },
                             ))
                             .await;
@@ -1812,11 +1933,16 @@ impl ServerRuntime {
                                     total_cache_read_tokens: base.2
                                         + cache_read_input_tokens.unwrap_or(0),
                                     last_query_input_tokens: input_tokens,
+                                    context_window: usage_context_window,
                                 },
                             ))
                             .await;
                     }
-                    QueryEvent::TurnComplete { .. } => {}
+                    QueryEvent::TurnComplete {
+                        stop_reason: terminal_stop_reason,
+                    } => {
+                        stop_reason = Some(terminal_stop_reason);
+                    }
                 }
             }
             if let Some(parser) = proposed_plan_parser.as_mut() {
@@ -1879,7 +2005,10 @@ impl ServerRuntime {
                     event_queue_depth_for_task.load(Ordering::Acquire),
                 "query event stream drained"
             );
-            latest_usage
+            TurnEventStreamSummary {
+                latest_usage,
+                stop_reason,
+            }
         });
 
         let (
@@ -1893,17 +2022,26 @@ impl ServerRuntime {
         ) = {
             // Run the model query only after the event pipeline is ready so
             // streamed deltas can be consumed and persisted immediately.
-            let (core_session, agent_scope, agent_tool_policy) = {
+            let (
+                core_session,
+                agent_scope,
+                agent_tool_policy,
+                session_tool_registry,
+                runtime_context,
+            ) = {
                 let session = session_arc.lock().await;
                 let agent_scope = if session.summary.parent_session_id.is_some() {
                     ToolAgentScope::Subagent
                 } else {
                     ToolAgentScope::Parent
                 };
+                let registry = self.tool_registry_for_session(&session);
                 (
                     Arc::clone(&session.core_session),
                     agent_scope,
                     session.agent_tool_policy,
+                    registry,
+                    Arc::clone(&session.runtime_context),
                 )
             };
             let turn_goal = match &input_mode {
@@ -1935,6 +2073,7 @@ impl ServerRuntime {
             let callback = std::sync::Arc::new(move |event: QueryEvent| {
                 event_callback_tx.send(event);
             });
+            let tool_execution_start_tx = event_tx.clone();
             let agent_context_mode = core_session
                 .session_context
                 .as_ref()
@@ -1948,12 +2087,12 @@ impl ServerRuntime {
                 })
                 .unwrap_or_default();
             let registry = match agent_tool_policy {
-                devo_protocol::AgentToolPolicy::Inherit => Arc::clone(&self.deps.registry),
+                devo_protocol::AgentToolPolicy::Inherit => session_tool_registry,
                 devo_protocol::AgentToolPolicy::DenyAll => {
                     Arc::new(devo_core::tools::ToolRegistry::new())
                 }
                 devo_protocol::AgentToolPolicy::DeepResearch => Arc::new(
-                    self.deps
+                    runtime_context
                         .registry
                         .restricted_to_specs(research::RESEARCH_WORKER_TOOL_NAMES),
                 ),
@@ -1968,8 +2107,7 @@ impl ServerRuntime {
                 .get(&session_id)
                 .cloned()
                 .unwrap_or_else(CancellationToken::new);
-            let network_proxy = self
-                .deps
+            let network_proxy = runtime_context
                 .config_store
                 .lock()
                 .expect("app config store mutex should not be poisoned")
@@ -1993,6 +2131,8 @@ impl ServerRuntime {
                     agent_context_mode,
                     collaboration_mode,
                     agent_coordinator: Some(Arc::clone(&self) as Arc<dyn AgentToolCoordinator>),
+                    client_filesystem: Some(Arc::clone(&self) as Arc<dyn ClientFilesystem>),
+                    client_terminal: Some(Arc::clone(&self) as Arc<dyn ClientTerminal>),
                     local_web_search: match &turn_config.web_search {
                         devo_core::ResolvedWebSearchConfig::Local(config) => Some(config.clone()),
                         devo_core::ResolvedWebSearchConfig::Disabled
@@ -2003,14 +2143,18 @@ impl ServerRuntime {
                 },
                 ToolExecutionOptions {
                     cancel_token: turn_cancel_token,
+                    on_tool_execution_start: Some(Arc::new(move |call: &ToolCall| {
+                        tool_execution_start_tx.send(QueryEvent::ToolExecutionStart {
+                            id: call.id.clone(),
+                        });
+                    })),
                     ..ToolExecutionOptions::default()
                 },
             );
             let result = query(
                 &mut core_session,
                 &turn_config,
-                self.deps
-                    .provider_for_route(turn_config.provider_route.clone()),
+                runtime_context.provider_for_route(turn_config.provider_route.clone()),
                 registry,
                 &runtime,
                 Some(callback),
@@ -2037,9 +2181,17 @@ impl ServerRuntime {
         }
         // Wait for the event task to finish draining buffered stream events
         // before we persist the terminal turn state.
-        let latest_usage = event_task.await.ok().flatten();
+        let event_summary = event_task.await.ok();
+        let latest_usage = event_summary
+            .as_ref()
+            .and_then(|summary| summary.latest_usage.clone());
+        let terminal_stop_reason = event_summary.and_then(|summary| summary.stop_reason);
         self.active_tasks.lock().await.remove(&session_id);
         self.active_turn_cancellations
+            .lock()
+            .await
+            .remove(&session_id);
+        self.active_turn_connections
             .lock()
             .await
             .remove(&session_id);
@@ -2084,6 +2236,11 @@ impl ServerRuntime {
                 TurnStatus::Failed
             };
             final_turn.usage = latest_usage.clone();
+            final_turn.stop_reason = terminal_stop_reason;
+            final_turn.failure_reason = result
+                .as_ref()
+                .err()
+                .and_then(turn_failure_reason_from_error);
             session.latest_turn = Some(final_turn.clone());
             session.active_turn = None;
             session.summary.status = SessionRuntimeStatus::Idle;
@@ -2124,7 +2281,6 @@ impl ServerRuntime {
 
             final_turn
         };
-
         // The turn is finished, so any queued "btw" input no longer applies.
         // Clear both the in-memory queue and the persisted mirror.
         {
@@ -2206,7 +2362,7 @@ impl ServerRuntime {
             .await;
         self.broadcast_event(ServerEvent::TurnCompleted(TurnEventPayload {
             session_id,
-            turn: final_turn,
+            turn: final_turn.clone(),
         }))
         .await;
         self.broadcast_event(ServerEvent::SessionStatusChanged(
@@ -2215,6 +2371,11 @@ impl ServerRuntime {
                 status: SessionRuntimeStatus::Idle,
             },
         ))
+        .await;
+        self.record_terminal_turn_status(
+            final_turn.turn_id,
+            TerminalTurnSnapshot::from_turn(&final_turn),
+        )
         .await;
 
         // After the turn completes, check for queued inputs and start the next turn.
@@ -2289,13 +2450,14 @@ impl ServerRuntime {
             let model_override = queued_model_selection
                 .as_deref()
                 .or_else(|| session_model_selection(&session.summary));
-            let thinking_override = session.summary.thinking.clone();
-            let turn_config = self
-                .deps
-                .resolve_turn_config(model_override, thinking_override);
-            let resolved_request = turn_config
-                .model
-                .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
+            let reasoning_effort_selection_override =
+                session.summary.reasoning_effort_selection.clone();
+            let turn_config = session
+                .runtime_context
+                .resolve_turn_config(model_override, reasoning_effort_selection_override);
+            let resolved_request = turn_config.model.resolve_reasoning_effort_selection(
+                turn_config.reasoning_effort_selection.as_deref(),
+            );
             (turn_config, resolved_request)
         };
         let request_model = turn_config.provider_request_model(&resolved_request.request_model);
@@ -2318,13 +2480,15 @@ impl ServerRuntime {
             kind: devo_core::TurnKind::Regular,
             model: turn_config.model.slug.clone(),
             model_binding_id: turn_config.model_binding_id.clone(),
-            thinking: turn_config.thinking_selection.clone(),
+            reasoning_effort_selection: turn_config.reasoning_effort_selection.clone(),
             reasoning_effort: resolved_request.effective_reasoning_effort,
             request_model,
             request_thinking: resolved_request.request_thinking.clone(),
             started_at: now,
             completed_at: None,
             usage: None,
+            stop_reason: None,
+            failure_reason: None,
         };
         {
             let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
@@ -2426,11 +2590,13 @@ impl ServerRuntime {
             let model = queued_model_selection
                 .as_deref()
                 .or_else(|| session_model_selection(&session.summary));
-            let thinking = session.summary.thinking.clone();
-            let tc = self.deps.resolve_turn_config(model, thinking);
+            let reasoning_effort_selection = session.summary.reasoning_effort_selection.clone();
+            let tc = session
+                .runtime_context
+                .resolve_turn_config(model, reasoning_effort_selection);
             let rr = tc
                 .model
-                .resolve_thinking_selection(tc.thinking_selection.as_deref());
+                .resolve_reasoning_effort_selection(tc.reasoning_effort_selection.as_deref());
             (tc, rr)
         };
         let request_model = turn_config.provider_request_model(&resolved_request.request_model);
@@ -2453,13 +2619,15 @@ impl ServerRuntime {
             kind: devo_core::TurnKind::Regular,
             model: turn_config.model.slug.clone(),
             model_binding_id: turn_config.model_binding_id.clone(),
-            thinking: turn_config.thinking_selection.clone(),
+            reasoning_effort_selection: turn_config.reasoning_effort_selection.clone(),
             reasoning_effort: resolved_request.effective_reasoning_effort,
             request_model,
             request_thinking: resolved_request.request_thinking.clone(),
             started_at: now,
             completed_at: None,
             usage: None,
+            stop_reason: None,
+            failure_reason: None,
         };
         {
             let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {

@@ -60,7 +60,7 @@ After a binding resolves, Devo resolves provider settings:
 4. confirm the binding's `invocation_method` is allowed by provider
    `wire_apis`;
 5. read the provider credential id from `auth.json`;
-6. merge provider base URL, headers, selected model name, thinking selection,
+6. merge provider base URL, headers, selected model name, reasoning effort selection,
    context settings, and HTTP proxy settings.
 
 If no provider can be resolved, Devo reports:
@@ -69,9 +69,9 @@ If no provider can be resolved, Devo reports:
 No provider configured. Run `devo onboard` to complete setup.
 ```
 
-## Thinking Selection
+## Reasoning Effort Selection
 
-The active thinking selection can come from config or model selection. Devo
+The active reasoning effort selection can come from config or model selection. Devo
 stores it as a user-facing value such as `disabled`, `enabled`, `high`, or
 `max`, then resolves it into provider-specific request fields for the selected
 wire API.
@@ -85,5 +85,5 @@ For models with variants, Devo builds a provider request model map scoped to the
 selected provider. This prevents another provider with the same local slug from
 changing the wire model name for the active provider.
 
-This matters when a thinking variant has a different provider-side model name
+This matters when a reasoning variant has a different provider-side model name
 than the base model.

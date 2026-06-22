@@ -182,7 +182,8 @@ pub struct TurnStartedRecord {
     pub resume_of_turn_id: Option<TurnId>,
     pub submitted_by_client_id: Option<String>,
     pub model: Option<String>,
-    pub thinking: Option<String>,
+    #[serde(default, alias = "thinking", skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_selection: Option<String>,
     pub reasoning_effort: Option<devo_protocol::ReasoningEffort>,
     pub started_at: DateTime<Utc>,
 }
@@ -1335,6 +1336,7 @@ impl ExecutionPhase {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use pretty_assertions::assert_eq;
 
     fn now() -> DateTime<Utc> {
         Utc::now()
@@ -1366,13 +1368,47 @@ mod tests {
             resume_of_turn_id: None,
             submitted_by_client_id: Some("tui-1".into()),
             model: Some("deepseek-v4-pro".into()),
-            thinking: Some("high".into()),
+            reasoning_effort_selection: Some("high".into()),
             reasoning_effort: Some(devo_protocol::ReasoningEffort::High),
             started_at: now(),
         });
         let json = serde_json::to_string(&record).expect("serialize");
         let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(record.record_kind(), restored.record_kind());
+    }
+
+    #[test]
+    fn turn_started_reads_legacy_thinking_field() {
+        let expected = TurnStartedRecord {
+            schema_version: 1,
+            session_id: SessionId::new(),
+            turn_id: TurnId::new(),
+            sequence: 0,
+            status: TurnStatus::Running,
+            kind: TurnKind::Regular,
+            resume_of_turn_id: None,
+            submitted_by_client_id: Some("tui-1".into()),
+            model: Some("deepseek-v4-pro".into()),
+            reasoning_effort_selection: Some("high".into()),
+            reasoning_effort: Some(devo_protocol::ReasoningEffort::High),
+            started_at: now(),
+        };
+        let mut value =
+            serde_json::to_value(DurableRecord::TurnStarted(expected.clone())).expect("serialize");
+        let object = value.as_object_mut().expect("turn-started json object");
+        object.remove("reasoning_effort_selection");
+        object.insert("thinking".to_string(), serde_json::json!("high"));
+
+        let restored: DurableRecord = serde_json::from_value(value).expect("deserialize legacy");
+        let DurableRecord::TurnStarted(restored) = restored else {
+            panic!("expected turn started record");
+        };
+        assert_eq!(restored, expected);
+
+        let serialized =
+            serde_json::to_value(DurableRecord::TurnStarted(restored)).expect("serialize restored");
+        assert_eq!(serialized["reasoning_effort_selection"], "high");
+        assert_eq!(serialized.get("thinking"), None);
     }
 
     #[test]
@@ -1472,7 +1508,7 @@ mod tests {
                 resume_of_turn_id: None,
                 submitted_by_client_id: None,
                 model: None,
-                thinking: None,
+                reasoning_effort_selection: None,
                 reasoning_effort: None,
                 started_at: now(),
             })

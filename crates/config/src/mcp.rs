@@ -158,6 +158,20 @@ pub enum McpTransportConfig {
         #[serde(default)]
         env_http_headers: BTreeMap<String, String>,
     },
+    /// Connect to the server over the deprecated MCP HTTP+SSE transport.
+    Sse {
+        /// The MCP server SSE endpoint URL.
+        url: String,
+        /// Optional authentication configuration.
+        #[serde(default)]
+        auth: Option<McpAuthConfig>,
+        /// Static HTTP headers sent to the MCP server.
+        #[serde(default)]
+        http_headers: BTreeMap<String, String>,
+        /// HTTP headers loaded from local environment variables.
+        #[serde(default)]
+        env_http_headers: BTreeMap<String, String>,
+    },
 }
 
 /// Stores authentication configuration for MCP HTTP transports.

@@ -21,7 +21,7 @@ fn widget_with_model(model: Model, cwd: PathBuf) -> ChatWidget {
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
-        initial_thinking_selection: None,
+        initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
@@ -78,7 +78,7 @@ fn overflowing_live_assistant_viewport_follows_latest_tail() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });

@@ -60,6 +60,8 @@ use crate::elicitation_client_service::ElicitationClientService;
 use crate::http_client_adapter::StreamableHttpClientAdapter;
 use crate::http_client_adapter::StreamableHttpClientAdapterError;
 use crate::in_process_transport::InProcessTransportFactory;
+use crate::legacy_sse_transport::LegacySseTransport;
+use crate::legacy_sse_transport::LegacySseTransportWorker;
 use crate::load_oauth_tokens;
 use crate::oauth::OAuthPersistor;
 use crate::oauth::StoredOAuthTokens;
@@ -80,6 +82,9 @@ enum PendingTransport {
     },
     StreamableHttp {
         transport: StreamableHttpClientTransport<StreamableHttpClientAdapter>,
+    },
+    Sse {
+        transport: LegacySseTransport,
     },
     StreamableHttpWithOAuth {
         transport: StreamableHttpClientTransport<AuthClient<StreamableHttpClientAdapter>>,
@@ -114,6 +119,12 @@ enum TransportRecipe {
         http_headers: Option<HashMap<String, String>>,
         env_http_headers: Option<HashMap<String, String>>,
         store_mode: OAuthCredentialsStoreMode,
+    },
+    Sse {
+        url: String,
+        bearer_token: Option<String>,
+        http_headers: Option<HashMap<String, String>>,
+        env_http_headers: Option<HashMap<String, String>>,
     },
 }
 
@@ -315,6 +326,7 @@ impl RmcpClient {
         let stdio_process = match &transport {
             PendingTransport::Stdio { transport } => Some(transport.process_handle()),
             PendingTransport::InProcess { .. }
+            | PendingTransport::Sse { .. }
             | PendingTransport::StreamableHttp { .. }
             | PendingTransport::StreamableHttpWithOAuth { .. } => None,
         };
@@ -347,6 +359,31 @@ impl RmcpClient {
             http_headers,
             env_http_headers,
             store_mode,
+        };
+        let transport = Self::create_pending_transport(&transport_recipe).await?;
+        Ok(Self {
+            state: Mutex::new(ClientState::Connecting {
+                transport: Some(transport),
+            }),
+            stdio_process: None,
+            transport_recipe,
+            initialize_context: Mutex::new(None),
+            session_recovery_lock: Semaphore::new(/*permits*/ 1),
+            elicitation_pause_state: ElicitationPauseState::new(),
+        })
+    }
+
+    pub async fn new_sse_client(
+        url: &str,
+        bearer_token: Option<String>,
+        http_headers: Option<HashMap<String, String>>,
+        env_http_headers: Option<HashMap<String, String>>,
+    ) -> Result<Self> {
+        let transport_recipe = TransportRecipe::Sse {
+            url: url.to_string(),
+            bearer_token,
+            http_headers,
+            env_http_headers,
         };
         let transport = Self::create_pending_transport(&transport_recipe).await?;
         Ok(Self {
@@ -799,6 +836,22 @@ impl RmcpClient {
                     Ok(PendingTransport::StreamableHttp { transport })
                 }
             }
+            TransportRecipe::Sse {
+                url,
+                bearer_token,
+                http_headers,
+                env_http_headers,
+            } => {
+                let default_headers =
+                    build_default_headers(http_headers.clone(), env_http_headers.clone())?;
+                Ok(PendingTransport::Sse {
+                    transport: LegacySseTransportWorker::transport(
+                        url.clone(),
+                        default_headers,
+                        bearer_token.clone(),
+                    ),
+                })
+            }
         }
     }
 
@@ -820,6 +873,10 @@ impl RmcpClient {
                 None,
             ),
             PendingTransport::StreamableHttp { transport } => (
+                service::serve_client(client_service, transport).boxed(),
+                None,
+            ),
+            PendingTransport::Sse { transport } => (
                 service::serve_client(client_service, transport).boxed(),
                 None,
             ),

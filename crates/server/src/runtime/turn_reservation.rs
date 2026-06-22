@@ -1,9 +1,63 @@
 use super::*;
 
 impl ServerRuntime {
+    pub(super) async fn subscribe_terminal_turn_status(
+        &self,
+        turn_id: TurnId,
+    ) -> oneshot::Receiver<TerminalTurnSnapshot> {
+        let (sender, receiver) = oneshot::channel();
+        self.acp_prompt_waiters
+            .lock()
+            .await
+            .entry(turn_id)
+            .or_default()
+            .push(sender);
+        receiver
+    }
+
+    pub(super) async fn recent_terminal_turn_status(
+        &self,
+        turn_id: TurnId,
+    ) -> Option<TerminalTurnSnapshot> {
+        self.terminal_turn_statuses
+            .lock()
+            .await
+            .iter()
+            .rev()
+            .find_map(|(completed_turn_id, status)| {
+                (*completed_turn_id == turn_id).then(|| status.clone())
+            })
+    }
+
+    pub(super) async fn record_terminal_turn_status(
+        &self,
+        turn_id: TurnId,
+        snapshot: TerminalTurnSnapshot,
+    ) {
+        {
+            let mut statuses = self.terminal_turn_statuses.lock().await;
+            statuses.retain(|(completed_turn_id, _)| *completed_turn_id != turn_id);
+            statuses.push_back((turn_id, snapshot.clone()));
+            while statuses.len() > TERMINAL_TURN_STATUS_LIMIT {
+                statuses.pop_front();
+            }
+        }
+
+        let waiters = self.acp_prompt_waiters.lock().await.remove(&turn_id);
+        if let Some(waiters) = waiters {
+            for waiter in waiters {
+                let _ = waiter.send(snapshot.clone());
+            }
+        }
+    }
+
     pub(super) async fn clear_active_turn_runtime_handles(&self, session_id: SessionId) {
         self.active_tasks.lock().await.remove(&session_id);
         self.active_turn_cancellations
+            .lock()
+            .await
+            .remove(&session_id);
+        self.active_turn_connections
             .lock()
             .await
             .remove(&session_id);
@@ -86,7 +140,6 @@ mod tests {
                 "test-model".to_string(),
                 Arc::new(PresetModelCatalog::default()),
                 Arc::new(ProviderVendorCatalog::default()),
-                None,
                 Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                     bundled: Some(BundledSkillsConfig { enabled: false }),
                     ..SkillsConfig::default()
@@ -103,17 +156,18 @@ mod tests {
 
     async fn start_session(runtime: &Arc<ServerRuntime>, cwd: std::path::PathBuf) -> SessionId {
         let value = runtime
-            .handle_session_start(
+            .start_session_with_registry(
                 /*connection_id*/ 1,
                 serde_json::json!(1),
-                serde_json::to_value(SessionStartParams {
+                SessionStartParams {
                     cwd,
+                    additional_directories: Vec::new(),
                     ephemeral: false,
                     title: None,
                     model: None,
                     model_binding_id: None,
-                })
-                .expect("session start params"),
+                },
+                None,
             )
             .await;
         let response: SuccessResponse<SessionStartResult> =
@@ -145,7 +199,8 @@ mod tests {
         }
 
         let value = runtime
-            .handle_turn_shell_command(
+            .handle_turn_shell_command_for_connection(
+                None,
                 serde_json::json!(2),
                 serde_json::to_value(ShellCommandParams {
                     session_id,
@@ -162,6 +217,77 @@ mod tests {
         assert_eq!(session.active_turn, None);
         assert_eq!(session.summary.status, SessionRuntimeStatus::Idle);
         assert_eq!(session.latest_turn, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reject_active_turn_policy_does_not_enqueue_input() -> Result<()> {
+        let data_root = TempDir::new()?;
+        let runtime = build_runtime(data_root.path());
+        let session_id = start_session(&runtime, data_root.path().to_path_buf()).await;
+        let session_arc = runtime
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .expect("session");
+        let active_turn = TurnMetadata {
+            turn_id: TurnId::new(),
+            session_id,
+            sequence: 1,
+            status: TurnStatus::Running,
+            kind: devo_core::TurnKind::Regular,
+            model: "test-model".to_string(),
+            model_binding_id: None,
+            reasoning_effort_selection: None,
+            reasoning_effort: None,
+            request_model: "test-model".to_string(),
+            request_thinking: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            usage: None,
+            stop_reason: None,
+            failure_reason: None,
+        };
+        {
+            let mut session = session_arc.lock().await;
+            session.active_turn = Some(active_turn);
+        }
+
+        let value = runtime
+            .handle_turn_start_with_queue_policy(
+                None,
+                serde_json::json!(2),
+                TurnStartParams {
+                    session_id,
+                    input: vec![devo_protocol::InputItem::Text {
+                        text: "must not queue".to_string(),
+                    }],
+                    model: None,
+                    model_binding_id: None,
+                    reasoning_effort_selection: None,
+                    sandbox: None,
+                    approval_policy: None,
+                    cwd: None,
+                    collaboration_mode: devo_protocol::CollaborationMode::Build,
+                    execution_mode: devo_protocol::TurnExecutionMode::Regular,
+                },
+                TurnStartQueuePolicy::RejectActive,
+            )
+            .await;
+        let response: ErrorResponse = serde_json::from_value(value).expect("error response");
+        let queued_len = session_arc
+            .lock()
+            .await
+            .pending_turn_queue
+            .lock()
+            .expect("pending turn queue mutex should not be poisoned")
+            .len();
+
+        assert_eq!(response.error.code, ProtocolErrorCode::TurnAlreadyRunning);
+        assert_eq!(queued_len, 0);
 
         Ok(())
     }

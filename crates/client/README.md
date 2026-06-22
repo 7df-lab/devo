@@ -17,8 +17,7 @@ stdout.
 ## StdioServerClient Methods
 
 - `spawn`: start the server process and attach stdin/stdout/stderr readers.
-- `initialize`: perform the protocol handshake and send the `initialized`
-  notification.
+- `initialize`: perform the ACP protocol handshake.
 - `session_start`, `session_resume`, `session_list`: create, resume, and list
   sessions.
 - `session_title_update`, `session_metadata_update`,
@@ -44,4 +43,6 @@ stdout.
   `reference_search_cancel`: control reference search workflows.
 - `recv_notification`: receive the next raw server notification.
 - `recv_event`: receive and decode the next notification as a `ServerEvent`.
+- ACP server-to-client requests: handles permission prompts, client filesystem
+  `fs/read_text_file` / `fs/write_text_file`, and ACP terminal methods.
 - `shutdown`: close stdin, request child termination, and wait briefly for exit.

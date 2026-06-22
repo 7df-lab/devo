@@ -34,17 +34,17 @@ including its provider, request model name, wire API, and display name. When it
 matches a catalog model slug, Devo applies that catalog model. If it does not
 match either, Devo still sets the requested model name for the turn context.
 
-## Thinking Mode
+## Reasoning Effort
 
-Some models expose thinking or reasoning options. When you select one of those
-models, Devo may open a second picker for the thinking mode before finalizing
+Some models expose configurable reasoning effort. When you select one of those
+models, Devo may open a second picker for reasoning effort before finalizing
 the model change.
 
-The thinking picker uses the model's configured capability and reasoning-effort
+The reasoning effort picker uses the model's configured capability and reasoning-effort
 options. If the model does not expose options, Devo applies the model
 immediately.
 
-After selection, Devo updates the header and sends the model and thinking
+After selection, Devo updates the header and sends the model and reasoning effort
 selection to the runtime as turn context.
 
 ## Session Scope

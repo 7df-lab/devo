@@ -13,9 +13,9 @@ use devo_protocol::PermissionPreset;
 use devo_protocol::ProviderModelBinding;
 use devo_protocol::ProviderVendor;
 use devo_protocol::ProviderWireApi;
+use devo_protocol::ReasoningCapability;
 use devo_protocol::ReasoningEffort;
 use devo_protocol::SessionId;
-use devo_protocol::ThinkingCapability;
 use devo_protocol::TurnId;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
@@ -29,7 +29,7 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetInit;
-use crate::chatwidget::ThinkingListEntry;
+use crate::chatwidget::ReasoningEffortListEntry;
 use crate::chatwidget::TuiSessionState;
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
@@ -44,20 +44,20 @@ fn widget_with_model(
     model: Model,
     cwd: PathBuf,
 ) -> (ChatWidget, mpsc::UnboundedReceiver<AppEvent>) {
-    widget_with_model_and_thinking(model, cwd, None)
+    widget_with_model_and_reasoning_effort(model, cwd, None)
 }
 
-fn widget_with_model_and_thinking(
+fn widget_with_model_and_reasoning_effort(
     model: Model,
     cwd: PathBuf,
-    initial_thinking_selection: Option<String>,
+    initial_reasoning_effort_selection: Option<String>,
 ) -> (ChatWidget, mpsc::UnboundedReceiver<AppEvent>) {
     let (app_event_tx, app_event_rx) = mpsc::unbounded_channel();
     let widget = ChatWidget::new_with_app_event(ChatWidgetInit {
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
-        initial_thinking_selection,
+        initial_reasoning_effort_selection,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
@@ -94,7 +94,7 @@ fn onboarding_widget_with_model(
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
-        initial_thinking_selection: None,
+        initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
@@ -117,7 +117,7 @@ fn onboarding_widget_with_available_model(
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
-        initial_thinking_selection: None,
+        initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
@@ -959,7 +959,7 @@ fn research_artifact_completion_does_not_commit_assistant_turn() {
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -1265,7 +1265,7 @@ fn turn_summary_uses_submitted_mode_after_composer_mode_changes() {
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
     });
@@ -1304,7 +1304,7 @@ fn queued_prompt_keeps_submitted_mode_when_promoted_to_history() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
     });
@@ -1325,7 +1325,7 @@ fn queued_prompt_keeps_submitted_mode_when_promoted_to_history() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
     });
@@ -1362,7 +1362,7 @@ fn queued_prompt_promotes_after_active_assistant_stream() {
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
     });
@@ -1548,7 +1548,7 @@ fn permissions_command_opens_bottom_pane_picker_and_updates_default() {
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
     });
@@ -1587,7 +1587,7 @@ fn permissions_command_marks_initial_project_preset_current() {
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
-        initial_thinking_selection: None,
+        initial_reasoning_effort_selection: None,
         initial_permission_preset: PermissionPreset::FullAccess,
         initial_user_message: None,
         enhanced_keys_supported: true,
@@ -1608,11 +1608,11 @@ fn permissions_command_marks_initial_project_preset_current() {
 }
 
 #[test]
-fn thinking_entries_are_generated_from_model_capability_options() {
+fn reasoning_effort_entries_are_generated_from_model_capability_options() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
-        thinking_capability: ThinkingCapability::Levels(vec![
+        reasoning_capability: ReasoningCapability::Levels(vec![
             ReasoningEffort::Low,
             ReasoningEffort::Medium,
         ]),
@@ -1622,15 +1622,15 @@ fn thinking_entries_are_generated_from_model_capability_options() {
     let (widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
 
     assert_eq!(
-        widget.thinking_entries(),
+        widget.reasoning_effort_entries(),
         vec![
-            ThinkingListEntry {
+            ReasoningEffortListEntry {
                 is_current: false,
                 label: "Low".to_string(),
                 description: "Fastest, cheapest, least deliberative".to_string(),
                 value: "low".to_string(),
             },
-            ThinkingListEntry {
+            ReasoningEffortListEntry {
                 is_current: true,
                 label: "Medium".to_string(),
                 description: "Balanced speed and deliberation".to_string(),
@@ -1641,11 +1641,11 @@ fn thinking_entries_are_generated_from_model_capability_options() {
 }
 
 #[test]
-fn initial_thinking_selection_overrides_model_default() {
+fn initial_reasoning_effort_selection_overrides_model_default() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
-        thinking_capability: ThinkingCapability::Levels(vec![
+        reasoning_capability: ReasoningCapability::Levels(vec![
             ReasoningEffort::Low,
             ReasoningEffort::Medium,
         ]),
@@ -1653,9 +1653,9 @@ fn initial_thinking_selection_overrides_model_default() {
         ..Model::default()
     };
     let (widget, _app_event_rx) =
-        widget_with_model_and_thinking(model, PathBuf::from("."), Some("low".to_string()));
+        widget_with_model_and_reasoning_effort(model, PathBuf::from("."), Some("low".to_string()));
 
-    assert_eq!(widget.current_thinking_selection(), Some("low"));
+    assert_eq!(widget.current_reasoning_effort_selection(), Some("low"));
 }
 
 #[test]
@@ -1697,7 +1697,7 @@ fn typed_clear_slash_command_clears_history_and_active_streams() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
     });
@@ -1748,7 +1748,7 @@ fn clear_transcript_event_uses_same_visual_clear_path() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
     });
@@ -1893,7 +1893,7 @@ fn btw_slash_command_clears_composer_and_records_history() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id,
     });
@@ -1984,7 +1984,7 @@ fn busy_widget_blocks_model_change_with_transcript_message() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -2013,32 +2013,35 @@ fn toggle_with_levels_treats_enabled_as_default_effort_in_picker() {
     let model = Model {
         slug: "deepseek-v4".to_string(),
         display_name: "Deepseek V4".to_string(),
-        thinking_capability: ThinkingCapability::ToggleWithLevels(vec![
+        reasoning_capability: ReasoningCapability::ToggleWithLevels(vec![
             ReasoningEffort::High,
             ReasoningEffort::Max,
         ]),
         default_reasoning_effort: Some(ReasoningEffort::High),
         ..Model::default()
     };
-    let (widget, _app_event_rx) =
-        widget_with_model_and_thinking(model, PathBuf::from("."), Some("enabled".to_string()));
+    let (widget, _app_event_rx) = widget_with_model_and_reasoning_effort(
+        model,
+        PathBuf::from("."),
+        Some("enabled".to_string()),
+    );
 
     assert_eq!(
-        widget.thinking_entries(),
+        widget.reasoning_effort_entries(),
         vec![
-            ThinkingListEntry {
+            ReasoningEffortListEntry {
                 is_current: false,
                 label: "Off".to_string(),
-                description: "Disable thinking for this turn".to_string(),
+                description: "Disable reasoning effort for this turn".to_string(),
                 value: "disabled".to_string(),
             },
-            ThinkingListEntry {
+            ReasoningEffortListEntry {
                 is_current: true,
                 label: "High".to_string(),
                 description: "More deliberate for harder tasks".to_string(),
                 value: "high".to_string(),
             },
-            ThinkingListEntry {
+            ReasoningEffortListEntry {
                 is_current: false,
                 label: "Max".to_string(),
                 description: "Most deliberate, highest effort".to_string(),
@@ -2049,11 +2052,11 @@ fn toggle_with_levels_treats_enabled_as_default_effort_in_picker() {
 }
 
 #[test]
-fn thinking_entries_show_off_and_levels_for_toggle_models_with_supported_levels() {
+fn reasoning_effort_entries_show_off_and_levels_for_toggle_models_with_supported_levels() {
     let model = devo_core::ModelPreset {
         slug: "deepseek-v4".to_string(),
         display_name: "Deepseek V4".to_string(),
-        thinking_capability: ThinkingCapability::Toggle,
+        reasoning_capability: ReasoningCapability::Toggle,
         supported_reasoning_levels: vec![ReasoningEffort::High, ReasoningEffort::Max],
         default_reasoning_effort: None,
         ..devo_core::ModelPreset::default()
@@ -2062,21 +2065,21 @@ fn thinking_entries_show_off_and_levels_for_toggle_models_with_supported_levels(
     let (widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
 
     assert_eq!(
-        widget.thinking_entries(),
+        widget.reasoning_effort_entries(),
         vec![
-            ThinkingListEntry {
+            ReasoningEffortListEntry {
                 is_current: false,
                 label: "Off".to_string(),
-                description: "Disable thinking for this turn".to_string(),
+                description: "Disable reasoning effort for this turn".to_string(),
                 value: "disabled".to_string(),
             },
-            ThinkingListEntry {
+            ReasoningEffortListEntry {
                 is_current: true,
                 label: "High".to_string(),
                 description: "More deliberate for harder tasks".to_string(),
                 value: "high".to_string(),
             },
-            ThinkingListEntry {
+            ReasoningEffortListEntry {
                 is_current: false,
                 label: "Max".to_string(),
                 description: "Most deliberate, highest effort".to_string(),
@@ -2087,17 +2090,17 @@ fn thinking_entries_show_off_and_levels_for_toggle_models_with_supported_levels(
 }
 
 #[test]
-fn submit_text_emits_user_turn_with_model_and_thinking() {
+fn submit_text_emits_user_turn_with_model_and_reasoning_effort() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
-        thinking_capability: ThinkingCapability::Toggle,
+        reasoning_capability: ReasoningCapability::Toggle,
         ..Model::default()
     };
     let (mut widget, mut app_event_rx) = widget_with_model(model, cwd.clone());
 
-    widget.set_thinking_selection(Some("disabled".to_string()));
+    widget.set_reasoning_effort_selection(Some("disabled".to_string()));
     widget.submit_text("hello".to_string());
 
     assert_eq!(
@@ -2110,7 +2113,7 @@ fn submit_text_emits_user_turn_with_model_and_thinking() {
             model: Some("test-model".to_string()),
 
             model_binding_id: None,
-            thinking: Some("disabled".to_string()),
+            reasoning_effort_selection: Some("disabled".to_string()),
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
             collaboration_mode: devo_protocol::CollaborationMode::Build,
@@ -2146,7 +2149,7 @@ fn typed_character_submits_after_paste_burst_flush() {
             model: Some("test-model".to_string()),
 
             model_binding_id: None,
-            thinking: None,
+            reasoning_effort_selection: None,
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
             collaboration_mode: devo_protocol::CollaborationMode::Build,
@@ -2257,7 +2260,7 @@ fn key_release_does_not_duplicate_text_input() {
             model: Some("test-model".to_string()),
 
             model_binding_id: None,
-            thinking: None,
+            reasoning_effort_selection: None,
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
             collaboration_mode: devo_protocol::CollaborationMode::Build,
@@ -2496,7 +2499,7 @@ fn session_switch_restores_plan_metadata_into_progress() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,
@@ -2551,7 +2554,7 @@ fn session_switch_restores_explored_metadata_into_history() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,
@@ -2606,6 +2609,8 @@ fn session_switch_restores_edited_metadata_into_history() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -2617,7 +2622,7 @@ fn session_switch_restores_edited_metadata_into_history() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,
@@ -2664,7 +2669,7 @@ fn session_switch_merges_consecutive_explored_items() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,
@@ -2743,7 +2748,7 @@ fn session_switch_restores_error_via_tool_result_cell_style() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,
@@ -2807,7 +2812,7 @@ fn live_and_resume_error_share_same_rendering_chain() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,
@@ -3327,7 +3332,7 @@ fn session_switch_restores_header_and_spacing_before_user_input() {
         model: Some("resumed-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 3,
@@ -3656,7 +3661,7 @@ fn active_response_renders_generating_status_without_devo_title() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -3682,7 +3687,7 @@ fn streaming_pending_ai_reply_respects_wrap_limit_before_finalize() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -3712,7 +3717,7 @@ fn active_assistant_markdown_does_not_double_wrap() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -3739,7 +3744,7 @@ fn active_assistant_multiline_text_has_no_extra_blank_rows() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -3769,7 +3774,7 @@ fn active_assistant_renders_resume_like_markdown_without_fragment_gaps() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -3825,7 +3830,7 @@ fn committed_assistant_markdown_does_not_double_wrap() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -3873,7 +3878,7 @@ fn committed_assistant_multiline_text_has_no_extra_blank_rows() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -3925,7 +3930,7 @@ fn tool_call_start_and_finish_are_both_visible_in_history() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -3980,7 +3985,7 @@ fn web_search_tool_call_renders_title_and_status_without_running_prefix() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -4050,7 +4055,7 @@ fn web_fetch_tool_call_renders_title_and_status_without_running_prefix() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -4224,7 +4229,7 @@ fn interrupted_turn_flushes_explored_cell_before_summary() {
         model: "deepseek-v4-flash".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -4433,7 +4438,7 @@ fn reasoning_text_commits_to_history_when_turn_finishes() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -4461,7 +4466,7 @@ fn reasoning_text_commits_to_history_when_turn_finishes() {
     let scrollback = widget.drain_scrollback_lines(80);
     let scrollback_text = scrollback_plain_lines(&scrollback).join("\n");
     assert!(scrollback_text.contains("Thought: thinking text"));
-    assert!(!scrollback_text.contains("Thinking: thinking text"));
+    assert!(!scrollback_text.contains("reasoning_effort_selection: thinking text"));
 }
 
 #[test]
@@ -4481,7 +4486,7 @@ fn restored_reasoning_text_is_visible_in_transcript() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,
@@ -4503,7 +4508,7 @@ fn restored_reasoning_text_is_visible_in_transcript() {
     let scrollback = widget.drain_scrollback_lines(80);
     let scrollback_text = scrollback_plain_lines(&scrollback).join("\n");
     assert!(scrollback_text.contains("Thought: thinking text"));
-    assert!(!scrollback_text.contains("Thinking: thinking text"));
+    assert!(!scrollback_text.contains("reasoning_effort_selection: thinking text"));
 }
 
 #[test]
@@ -4520,7 +4525,7 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -4592,7 +4597,7 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
         "completed reasoning should use Thought label in scrollback: {committed_after_reasoning_complete:?}"
     );
     assert!(
-        !committed_after_text.contains("Thinking: thinking"),
+        !committed_after_text.contains("reasoning_effort_selection: thinking"),
         "completed reasoning should not keep Thinking label in scrollback: {committed_after_reasoning_complete:?}"
     );
     let after_reasoning_rows = rendered_rows(&widget, 80, 16).join("\n");
@@ -4618,7 +4623,7 @@ fn lifecycle_text_items_render_as_ordered_sibling_cells() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -4679,7 +4684,7 @@ fn lifecycle_text_items_render_as_ordered_sibling_cells() {
         "completed reasoning should use Thought label in scrollback: {committed_after_reasoning:?}"
     );
     assert!(
-        !committed_after_reasoning_text.contains("Thinking: thinking"),
+        !committed_after_reasoning_text.contains("reasoning_effort_selection: thinking"),
         "completed reasoning should not keep Thinking label in scrollback: {committed_after_reasoning:?}"
     );
 }
@@ -4700,7 +4705,7 @@ fn lifecycle_text_items_keep_reasoning_before_assistant_when_events_arrive_out_o
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -4780,7 +4785,7 @@ fn assistant_stream_commit_tick_runs_while_reasoning_is_pending() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -4845,7 +4850,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
     let alt_model = Model {
         slug: "second-model".to_string(),
         display_name: "Second Model".to_string(),
-        thinking_capability: ThinkingCapability::Levels(vec![
+        reasoning_capability: ReasoningCapability::Levels(vec![
             ReasoningEffort::High,
             ReasoningEffort::Max,
         ]),
@@ -4857,7 +4862,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
-        initial_thinking_selection: None,
+        initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
@@ -4906,7 +4911,7 @@ fn session_switch_updates_session_identity_projection() {
         model: Some("resumed-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 3,
@@ -4948,7 +4953,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 12,
@@ -4973,7 +4978,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -5021,7 +5026,7 @@ fn streaming_controller_is_initialized_and_commit_ticks_drain_lines() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -5059,7 +5064,7 @@ fn fragmented_random_assistant_stream_keeps_rendering_without_queue_stall() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -5376,7 +5381,7 @@ fn session_switch_sets_active_agent_footer_label() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: Some("Agent: cr".to_string()),
         total_input_tokens: 0,
@@ -5417,7 +5422,7 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
         model: Some("resumed-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 30,
@@ -5441,7 +5446,7 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
         model: "new-session-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         last_query_total_tokens: 25,
@@ -5492,7 +5497,7 @@ fn new_session_prepared_does_not_duplicate_startup_header_without_history() {
         model: "new-session-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         last_query_total_tokens: 10,
@@ -5516,7 +5521,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
     let alt_model = Model {
         slug: "second-model".to_string(),
         display_name: "Second Model".to_string(),
-        thinking_capability: ThinkingCapability::Levels(vec![
+        reasoning_capability: ReasoningCapability::Levels(vec![
             ReasoningEffort::High,
             ReasoningEffort::Max,
         ]),
@@ -5528,7 +5533,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
-        initial_thinking_selection: None,
+        initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
@@ -5557,7 +5562,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         AppEvent::Command(AppCommand::OverrideTurnContext {
             cwd: None,
             model: Some("second-model".to_string()),
-            thinking: Some(Some("high".to_string())),
+            reasoning_effort_selection: Some(Some("high".to_string())),
             sandbox: None,
             approval_policy: None,
         })
@@ -5572,7 +5577,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
             model: Some("second-model".to_string()),
 
             model_binding_id: None,
-            thinking: Some("high".to_string()),
+            reasoning_effort_selection: Some("high".to_string()),
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
             collaboration_mode: devo_protocol::CollaborationMode::Build,
@@ -5581,7 +5586,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
 }
 
 #[test]
-fn model_selection_with_thinking_support_waits_for_second_step() {
+fn model_selection_with_reasoning_effort_support_waits_for_second_step() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
         slug: "test-model".to_string(),
@@ -5591,7 +5596,7 @@ fn model_selection_with_thinking_support_waits_for_second_step() {
     let alt_model = Model {
         slug: "second-model".to_string(),
         display_name: "Second Model".to_string(),
-        thinking_capability: ThinkingCapability::Levels(vec![
+        reasoning_capability: ReasoningCapability::Levels(vec![
             ReasoningEffort::High,
             ReasoningEffort::Max,
         ]),
@@ -5603,7 +5608,7 @@ fn model_selection_with_thinking_support_waits_for_second_step() {
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
-        initial_thinking_selection: None,
+        initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
@@ -5631,7 +5636,7 @@ fn model_selection_with_thinking_support_waits_for_second_step() {
         AppEvent::Command(AppCommand::OverrideTurnContext {
             cwd: None,
             model: Some("second-model".to_string()),
-            thinking: Some(Some("high".to_string())),
+            reasoning_effort_selection: Some(Some("high".to_string())),
             sandbox: None,
             approval_policy: None,
         })
@@ -5639,7 +5644,7 @@ fn model_selection_with_thinking_support_waits_for_second_step() {
 }
 
 #[test]
-fn model_selection_without_thinking_support_finishes_immediately() {
+fn model_selection_without_reasoning_effort_support_finishes_immediately() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let base_model = Model {
         slug: "test-model".to_string(),
@@ -5649,7 +5654,7 @@ fn model_selection_without_thinking_support_finishes_immediately() {
     let alt_model = Model {
         slug: "plain-model".to_string(),
         display_name: "Plain Model".to_string(),
-        thinking_capability: ThinkingCapability::Unsupported,
+        reasoning_capability: ReasoningCapability::Unsupported,
         ..Model::default()
     };
     let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
@@ -5657,7 +5662,7 @@ fn model_selection_without_thinking_support_finishes_immediately() {
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(base_model)),
-        initial_thinking_selection: None,
+        initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
@@ -5681,7 +5686,7 @@ fn model_selection_without_thinking_support_finishes_immediately() {
         AppEvent::Command(AppCommand::OverrideTurnContext {
             cwd: None,
             model: Some("plain-model".to_string()),
-            thinking: Some(None),
+            reasoning_effort_selection: Some(None),
             sandbox: None,
             approval_policy: None,
         })
@@ -5702,7 +5707,7 @@ fn flushed_assistant_lines_after_reasoning_are_in_one_cell() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -5774,7 +5779,7 @@ fn completed_streaming_assistant_consolidates_to_source_backed_cell() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -5825,7 +5830,7 @@ fn reasoning_appears_exactly_once_after_full_turn() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -5876,7 +5881,7 @@ fn live_reasoning_cell_renders_without_duplication() {
         model: "test-model".to_string(),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: Default::default(),
     });
@@ -6158,6 +6163,8 @@ fn transcript_overlay_lines_include_patch_input_and_diff_output() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -6200,7 +6207,7 @@ fn restored_session_transcript_overlay_preserves_paired_tool_io() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,
@@ -6277,7 +6284,7 @@ fn legacy_restored_session_without_tool_io_keeps_existing_tool_result_rendering(
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,
@@ -7225,6 +7232,8 @@ fn patch_applied_event_renders_edited_block() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -7287,6 +7296,8 @@ fn apply_patch_style_full_git_diff_reports_non_zero_counts() {
         PathBuf::from("update.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "diff --git a/update.txt b/update.txt\n--- a/update.txt\n+++ b/update.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -7336,6 +7347,8 @@ fn write_patch_applied_event_renders_edited_block() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -7363,6 +7376,8 @@ fn write_patch_applied_event_reports_non_zero_counts() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -7394,6 +7409,8 @@ fn patch_applied_event_with_diff_only_reports_non_zero_counts() {
         PathBuf::from("foo.txt"),
         devo_protocol::protocol::FileChange::Update {
             unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: None,
+            new_text: None,
             move_path: None,
         },
     );
@@ -7424,7 +7441,7 @@ fn session_switch_without_rich_edited_metadata_degrades_to_tool_result_path() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,
@@ -7473,7 +7490,7 @@ fn session_switch_restores_added_file_content_in_edited_block() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,
@@ -7524,7 +7541,7 @@ fn session_switch_without_rich_edited_metadata_still_restores_edited_block() {
         model: Some("test-model".to_string()),
 
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         active_agent_label: None,
         total_input_tokens: 0,

@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
+use crate::session_context::SessionRuntimeContext;
 
 pub(crate) const RESEARCH_FILE_TOOL_NAMES: &[&str] = &["read", "write", "apply_patch"];
 pub(crate) const RESEARCH_WORKER_TOOL_NAMES: &[&str] =
@@ -186,6 +187,7 @@ struct ResearchSubagentTerminal {
 }
 
 struct ResearchPipelineInput<'a> {
+    runtime_context: Arc<SessionRuntimeContext>,
     turn_config: TurnConfig,
     display_input: &'a str,
     question: &'a str,
@@ -193,7 +195,18 @@ struct ResearchPipelineInput<'a> {
     usage_ledger: ResearchUsageLedgerRef,
 }
 
+struct ExecuteResearchTurnInput {
+    session_id: SessionId,
+    turn: TurnMetadata,
+    runtime_context: Arc<SessionRuntimeContext>,
+    turn_config: TurnConfig,
+    display_input: String,
+    question: String,
+    cwd: String,
+}
+
 struct ResearchModelRuntime<'a> {
+    runtime_context: Arc<SessionRuntimeContext>,
     turn_config: &'a TurnConfig,
     usage_ledger: &'a ResearchUsageLedgerRef,
     session_id: SessionId,
@@ -321,6 +334,36 @@ impl ServerRuntime {
         };
 
         let now = Utc::now();
+        let (effective_cwd, runtime_context) = {
+            let session = session_arc.lock().await;
+            let effective_cwd = params
+                .cwd
+                .clone()
+                .unwrap_or_else(|| session.summary.cwd.clone());
+            let runtime_context = if params
+                .cwd
+                .as_ref()
+                .is_some_and(|cwd| cwd != &session.summary.cwd)
+            {
+                None
+            } else {
+                Some(Arc::clone(&session.runtime_context))
+            };
+            (effective_cwd, runtime_context)
+        };
+        let runtime_context = match runtime_context {
+            Some(runtime_context) => runtime_context,
+            None => match self.deps.context_for_workspace(&effective_cwd).await {
+                Ok(runtime_context) => runtime_context,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to initialize session workspace: {error}"),
+                    );
+                }
+            },
+        };
         let mut cwd_change = None;
         let (turn, turn_config, effective_cwd) = {
             let mut session = session_arc.lock().await;
@@ -336,13 +379,14 @@ impl ServerRuntime {
                 params.model.as_deref(),
                 &session.summary,
             );
-            let requested_thinking = params
-                .thinking
+            let requested_reasoning_effort_selection = params
+                .reasoning_effort_selection
                 .clone()
-                .or_else(|| session.summary.thinking.clone());
-            let turn_config = self
-                .deps
-                .resolve_turn_config(requested_model, requested_thinking.clone());
+                .or_else(|| session.summary.reasoning_effort_selection.clone());
+            let turn_config = runtime_context.resolve_turn_config(
+                requested_model,
+                requested_reasoning_effort_selection.clone(),
+            );
             if matches!(
                 turn_config.web_search,
                 devo_core::ResolvedWebSearchConfig::Disabled
@@ -361,6 +405,7 @@ impl ServerRuntime {
                 let old_cwd = session.summary.cwd.clone();
                 if old_cwd != cwd {
                     cwd_change = Some((old_cwd, cwd.clone()));
+                    session.runtime_context = Arc::clone(&runtime_context);
                 }
                 session.summary.cwd = cwd.clone();
                 session.core_session.lock().await.cwd = cwd;
@@ -373,9 +418,9 @@ impl ServerRuntime {
                 session.core_session.lock().await.config.permission_mode = permission_mode;
                 session.config.permission_mode = permission_mode;
             }
-            let resolved_request = turn_config
-                .model
-                .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
+            let resolved_request = turn_config.model.resolve_reasoning_effort_selection(
+                turn_config.reasoning_effort_selection.as_deref(),
+            );
             let request_model = turn_config.provider_request_model(&resolved_request.request_model);
             apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
             let turn = TurnMetadata {
@@ -389,13 +434,15 @@ impl ServerRuntime {
                 kind: devo_core::TurnKind::Research,
                 model: turn_config.model.slug.clone(),
                 model_binding_id: turn_config.model_binding_id.clone(),
-                thinking: turn_config.thinking_selection.clone(),
+                reasoning_effort_selection: turn_config.reasoning_effort_selection.clone(),
                 reasoning_effort: resolved_request.effective_reasoning_effort,
                 request_model,
                 request_thinking: resolved_request.request_thinking,
                 started_at: now,
                 completed_at: None,
                 usage: None,
+                stop_reason: None,
+                failure_reason: None,
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
@@ -514,16 +561,18 @@ impl ServerRuntime {
         let runtime = Arc::clone(self);
         let turn_for_task = turn.clone();
         let display_input_for_task = research_display_input.clone();
+        let runtime_context_for_task = Arc::clone(&runtime_context);
         let task = tokio::spawn(async move {
             runtime
-                .execute_research_turn(
-                    params.session_id,
-                    turn_for_task,
+                .execute_research_turn(ExecuteResearchTurnInput {
+                    session_id: params.session_id,
+                    turn: turn_for_task,
+                    runtime_context: runtime_context_for_task,
                     turn_config,
-                    display_input_for_task,
+                    display_input: display_input_for_task,
                     question,
-                    effective_cwd,
-                )
+                    cwd: effective_cwd,
+                })
                 .await;
         });
         self.active_tasks
@@ -542,21 +591,23 @@ impl ServerRuntime {
         .expect("serialize research turn/start response")
     }
 
-    async fn execute_research_turn(
-        self: Arc<Self>,
-        session_id: SessionId,
-        turn: TurnMetadata,
-        turn_config: TurnConfig,
-        display_input: String,
-        question: String,
-        cwd: String,
-    ) {
+    async fn execute_research_turn(self: Arc<Self>, input: ExecuteResearchTurnInput) {
+        let ExecuteResearchTurnInput {
+            session_id,
+            turn,
+            runtime_context,
+            turn_config,
+            display_input,
+            question,
+            cwd,
+        } = input;
         let usage_ledger = self.research_usage_ledger(session_id).await;
         let result = self
             .run_research_pipeline(
                 session_id,
                 &turn,
                 ResearchPipelineInput {
+                    runtime_context,
                     turn_config: turn_config.clone(),
                     display_input: &display_input,
                     question: &question,
@@ -616,6 +667,7 @@ impl ServerRuntime {
         input: ResearchPipelineInput<'_>,
     ) -> anyhow::Result<()> {
         let ResearchPipelineInput {
+            runtime_context,
             turn_config,
             display_input,
             question,
@@ -623,13 +675,13 @@ impl ServerRuntime {
             usage_ledger,
         } = input;
         let model_runtime = ResearchModelRuntime {
+            runtime_context: Arc::clone(&runtime_context),
             turn_config: &turn_config,
             usage_ledger: &usage_ledger,
             session_id,
             turn_id: turn.turn_id,
         };
-        let research_config = self
-            .deps
+        let research_config = runtime_context
             .config_store
             .lock()
             .expect("app config store mutex should not be poisoned")
@@ -1388,6 +1440,7 @@ impl ServerRuntime {
         turn_id: TurnId,
         capture: &mut ResearchQueryCapture,
         usage_ledger: &ResearchUsageLedgerRef,
+        context_window: Option<u64>,
         event: QueryEvent,
     ) {
         match event {
@@ -1421,6 +1474,7 @@ impl ServerRuntime {
                     },
                 );
             }
+            QueryEvent::ToolExecutionStart { .. } => {}
             QueryEvent::ToolResult {
                 tool_use_id,
                 tool_name,
@@ -1508,6 +1562,7 @@ impl ServerRuntime {
                         cache_creation_input_tokens,
                         cache_read_input_tokens,
                     ),
+                    context_window,
                 )
                 .await;
                 capture.usage_invocation_index += 1;
@@ -1530,6 +1585,7 @@ impl ServerRuntime {
                         cache_creation_input_tokens,
                         cache_read_input_tokens,
                     ),
+                    context_window,
                 )
                 .await;
             }
@@ -1812,7 +1868,8 @@ impl ServerRuntime {
             scratch.push_message(message);
         }
         let registry = Arc::new(
-            self.deps
+            runtime
+                .runtime_context
                 .registry
                 .restricted_to_specs(RESEARCH_FILE_TOOL_NAMES),
         );
@@ -1829,7 +1886,8 @@ impl ServerRuntime {
             let query_future = query(
                 &mut scratch,
                 &final_turn_config,
-                self.deps
+                runtime
+                    .runtime_context
                     .provider_for_route(final_turn_config.provider_route.clone()),
                 Arc::clone(&registry),
                 &tool_runtime,
@@ -1846,6 +1904,7 @@ impl ServerRuntime {
                                 runtime.turn_id,
                                 &mut capture,
                                 runtime.usage_ledger,
+                                Some(final_turn_config.model.context_window as u64),
                                 event,
                             )
                             .await;
@@ -1866,6 +1925,7 @@ impl ServerRuntime {
                 runtime.turn_id,
                 &mut capture,
                 runtime.usage_ledger,
+                Some(final_turn_config.model.context_window as u64),
                 event,
             )
             .await;
@@ -2090,8 +2150,8 @@ impl ServerRuntime {
         display: ResearchModelTextDisplay,
     ) -> anyhow::Result<String> {
         let request = model_text_request(runtime.turn_config, prompt, messages);
-        let mut stream = self
-            .deps
+        let mut stream = runtime
+            .runtime_context
             .provider_for_route(runtime.turn_config.provider_route.clone())
             .completion_stream(request)
             .await?;
@@ -2144,6 +2204,7 @@ impl ServerRuntime {
                         runtime.usage_ledger,
                         usage_key.clone(),
                         ResearchUsageTotals::from_usage(&usage),
+                        Some(runtime.turn_config.model.context_window as u64),
                     )
                     .await;
                 }
@@ -2175,6 +2236,7 @@ impl ServerRuntime {
                 runtime.usage_ledger,
                 usage_key,
                 ResearchUsageTotals::from_usage(&response.usage),
+                Some(runtime.turn_config.model.context_window as u64),
             )
             .await;
         }
@@ -2319,17 +2381,17 @@ impl ServerRuntime {
         let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
             anyhow::bail!("session does not exist");
         };
-        let (cwd, permission_mode, permission_profile) = {
+        let (cwd, permission_mode, permission_profile, runtime_context) = {
             let session = session_arc.lock().await;
             let core_session = session.core_session.lock().await;
             (
                 core_session.cwd.clone(),
                 core_session.config.permission_mode,
                 core_session.config.permission_profile.clone(),
+                Arc::clone(&session.runtime_context),
             )
         };
-        let network_proxy = self
-            .deps
+        let network_proxy = runtime_context
             .config_store
             .lock()
             .expect("app config store mutex should not be poisoned")
@@ -2344,6 +2406,7 @@ impl ServerRuntime {
             .get(&session_id)
             .cloned()
             .unwrap_or_else(CancellationToken::new);
+        let tool_execution_start_runtime = Arc::clone(self);
         Ok(ToolRuntime::new_with_context_and_options(
             registry,
             self.build_permission_checker(session_id, turn_id, permission_mode, permission_profile),
@@ -2355,6 +2418,8 @@ impl ServerRuntime {
                 agent_context_mode: devo_protocol::AgentContextMode::DeepResearch,
                 collaboration_mode: devo_protocol::CollaborationMode::Build,
                 agent_coordinator: Some(Arc::clone(self) as Arc<dyn AgentToolCoordinator>),
+                client_filesystem: Some(Arc::clone(self) as Arc<dyn ClientFilesystem>),
+                client_terminal: Some(Arc::clone(self) as Arc<dyn ClientTerminal>),
                 local_web_search: match &turn_config.web_search {
                     devo_core::ResolvedWebSearchConfig::Local(config) => Some(config.clone()),
                     devo_core::ResolvedWebSearchConfig::Disabled
@@ -2365,6 +2430,23 @@ impl ServerRuntime {
             },
             ToolExecutionOptions {
                 cancel_token: turn_cancel_token,
+                on_tool_execution_start: Some(Arc::new(move |call: &ToolCall| {
+                    let runtime = Arc::clone(&tool_execution_start_runtime);
+                    let tool_call_id = call.id.clone();
+                    tokio::spawn(async move {
+                        runtime
+                            .broadcast_event(ServerEvent::ToolCallStatusUpdated(
+                                devo_protocol::ToolCallStatusUpdatedPayload {
+                                    session_id,
+                                    turn_id,
+                                    tool_call_id,
+                                    status: "in_progress".to_string(),
+                                    terminal_id: None,
+                                },
+                            ))
+                            .await;
+                    });
+                })),
                 ..ToolExecutionOptions::default()
             },
         ))
@@ -2454,6 +2536,7 @@ impl ServerRuntime {
         usage_ledger: &ResearchUsageLedgerRef,
         usage_key: String,
         usage: ResearchUsageTotals,
+        context_window: Option<u64>,
     ) {
         let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
             return;
@@ -2487,6 +2570,7 @@ impl ServerRuntime {
             total_output_tokens,
             total_cache_read_tokens,
             last_query_input_tokens: aggregate.input_tokens,
+            context_window,
         }))
         .await;
     }
@@ -2859,9 +2943,11 @@ pub(crate) fn research_session_context(
     system_prompt: String,
 ) -> devo_core::SessionContext {
     let model = &turn_config.model;
-    let thinking_selection = turn_config.thinking_selection.as_deref();
-    let normalized_thinking_selection = model.normalize_thinking_selection(thinking_selection);
-    let resolved = model.resolve_thinking_selection(normalized_thinking_selection.as_deref());
+    let reasoning_effort_selection = turn_config.reasoning_effort_selection.as_deref();
+    let normalized_reasoning_effort_selection =
+        model.normalize_reasoning_effort_selection(reasoning_effort_selection);
+    let resolved =
+        model.resolve_reasoning_effort_selection(normalized_reasoning_effort_selection.as_deref());
     devo_core::SessionContext {
         base_instructions: system_prompt,
         available_skills: None,
@@ -2871,7 +2957,7 @@ pub(crate) fn research_session_context(
         language: devo_core::LanguageContext::default(),
         persona: devo_core::Persona::Default,
         model: model.clone(),
-        thinking_selection: normalized_thinking_selection,
+        reasoning_effort_selection: normalized_reasoning_effort_selection,
         reasoning_effort: resolved.effective_reasoning_effort,
         system_prompt_mode: devo_core::SystemPromptMode::DeepResearch,
     }
@@ -2884,7 +2970,7 @@ fn model_text_request(
 ) -> devo_protocol::ModelRequest {
     let resolved = turn_config
         .model
-        .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
+        .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
     devo_protocol::ModelRequest {
         model: turn_config.provider_request_model(&resolved.request_model),
         system: Some(research_stage_system(stage_prompt))
@@ -2903,7 +2989,7 @@ fn model_text_request(
             top_p: turn_config.model.top_p,
             top_k: turn_config.model.top_k.map(|value| value as u32),
         },
-        thinking: resolved.request_thinking,
+        request_thinking: resolved.request_thinking,
         reasoning_effort: resolved.request_reasoning_effort,
         extra_body: resolved.extra_body,
     }

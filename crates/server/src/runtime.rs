@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,7 +15,6 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use devo_core::ApprovalDecisionItem;
-use devo_core::ApprovalRequestItem;
 use devo_core::CommandExecutionItem;
 use devo_core::ItemId;
 use devo_core::Message;
@@ -43,6 +43,8 @@ use devo_core::history::summarizer::DefaultHistorySummarizer;
 use devo_core::message_to_response_items;
 use devo_core::query;
 use devo_core::tools::AgentToolCoordinator;
+use devo_core::tools::ClientFilesystem;
+use devo_core::tools::ClientTerminal;
 use devo_core::tools::PermissionChecker;
 use devo_core::tools::ToolAgentScope;
 use devo_core::tools::ToolCall;
@@ -58,8 +60,6 @@ use devo_safety::PermissionMode;
 use devo_util_shell_command::parse_command::parse_command;
 
 use crate::ApprovalDecisionValue;
-use crate::ApprovalRequestPayload;
-use crate::ApprovalRespondParams;
 use crate::ApprovalScopeValue;
 use crate::ClientMethod;
 use crate::ClientTransportKind;
@@ -69,14 +69,12 @@ use crate::ErrorResponse;
 use crate::EventContext;
 use crate::EventsSubscribeParams;
 use crate::EventsSubscribeResult;
-use crate::InitializeParams;
 use crate::InitializeResult;
 use crate::ItemDeltaKind;
 use crate::ItemDeltaPayload;
 use crate::ItemEnvelope;
 use crate::ItemEventPayload;
 use crate::ItemKind;
-use crate::NotificationEnvelope;
 use crate::ProtocolError;
 use crate::ProtocolErrorCode;
 use crate::RequestUserInputArgs;
@@ -91,8 +89,6 @@ use crate::SessionCompactionFailedPayload;
 use crate::SessionEventPayload;
 use crate::SessionForkParams;
 use crate::SessionForkResult;
-use crate::SessionListParams;
-use crate::SessionListResult;
 use crate::SessionMetadata;
 use crate::SessionMetadataUpdateParams;
 use crate::SessionMetadataUpdateResult;
@@ -148,10 +144,9 @@ use crate::subagent::SubagentMailbox;
 use crate::subagent::SubagentMetadata;
 use crate::subagent::SubagentOutputBuffer;
 use crate::subagent::SubagentStatus;
-use crate::titles::build_title_generation_request;
-use crate::titles::derive_provisional_title;
-use crate::titles::normalize_generated_title;
 
+mod acp_fs;
+mod acp_terminal;
 mod agents;
 mod approval;
 mod command_exec;
@@ -189,9 +184,12 @@ pub struct ServerRuntime {
     goal_durable_store: GoalDurableStore,
     /// Thread safe hashmap as sessions container, there are allowed multiple sessions.
     sessions: Mutex<HashMap<SessionId, Arc<Mutex<RuntimeSession>>>>,
-    connections: Mutex<HashMap<u64, ConnectionRuntime>>,
+    connections: Arc<Mutex<HashMap<u64, ConnectionRuntime>>>,
     active_tasks: Mutex<HashMap<SessionId, tokio::task::AbortHandle>>,
     active_turn_cancellations: Mutex<HashMap<SessionId, CancellationToken>>,
+    active_turn_connections: Mutex<HashMap<SessionId, u64>>,
+    terminal_turn_statuses: Mutex<VecDeque<(TurnId, TerminalTurnSnapshot)>>,
+    acp_prompt_waiters: Mutex<HashMap<TurnId, Vec<oneshot::Sender<TerminalTurnSnapshot>>>>,
     active_goal_continuation_turns: Mutex<HashMap<SessionId, TurnId>>,
     goal_continuation_turn_goals: Mutex<HashMap<TurnId, GoalId>>,
     next_connection_id: AtomicU64,
@@ -216,6 +214,31 @@ pub struct ServerRuntime {
 enum TurnInputMode {
     VisibleUserMessage,
     HiddenGoalContinuation { goal: devo_protocol::ThreadGoal },
+}
+
+const TERMINAL_TURN_STATUS_LIMIT: usize = 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalTurnSnapshot {
+    status: TurnStatus,
+    stop_reason: Option<devo_core::StopReason>,
+    failure_reason: Option<devo_protocol::TurnFailureReason>,
+}
+
+impl TerminalTurnSnapshot {
+    fn from_turn(turn: &TurnMetadata) -> Self {
+        Self {
+            status: turn.status.clone(),
+            stop_reason: turn.stop_reason.clone(),
+            failure_reason: turn.failure_reason,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnStartQueuePolicy {
+    Queue,
+    RejectActive,
 }
 
 impl TurnInputMode {
@@ -244,7 +267,7 @@ fn requested_model_selection<'a>(
 fn apply_turn_config_to_session_summary(summary: &mut SessionMetadata, turn_config: &TurnConfig) {
     summary.model = Some(turn_config.model.slug.clone());
     summary.model_binding_id = turn_config.model_binding_id.clone();
-    summary.thinking = turn_config.thinking_selection.clone();
+    summary.reasoning_effort_selection = turn_config.reasoning_effort_selection.clone();
 }
 
 fn string_field_from_pending_metadata(
@@ -280,9 +303,12 @@ impl ServerRuntime {
             rollout_store,
             goal_durable_store,
             sessions: Mutex::new(HashMap::new()),
-            connections: Mutex::new(HashMap::new()),
+            connections: Arc::new(Mutex::new(HashMap::new())),
             active_tasks: Mutex::new(HashMap::new()),
             active_turn_cancellations: Mutex::new(HashMap::new()),
+            active_turn_connections: Mutex::new(HashMap::new()),
+            terminal_turn_statuses: Mutex::new(VecDeque::new()),
+            acp_prompt_waiters: Mutex::new(HashMap::new()),
             active_goal_continuation_turns: Mutex::new(HashMap::new()),
             goal_continuation_turn_goals: Mutex::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
@@ -309,6 +335,7 @@ fn permission_mode_from_approval_policy(policy: &str) -> Option<PermissionMode> 
 fn safety_profile_from_protocol(
     preset: devo_protocol::PermissionPreset,
     cwd: std::path::PathBuf,
+    additional_directories: Vec<std::path::PathBuf>,
 ) -> devo_safety::RuntimePermissionProfile {
     let preset = match preset {
         devo_protocol::PermissionPreset::ReadOnly => devo_safety::PermissionPreset::ReadOnly,
@@ -317,6 +344,7 @@ fn safety_profile_from_protocol(
         devo_protocol::PermissionPreset::FullAccess => devo_safety::PermissionPreset::FullAccess,
     };
     devo_safety::RuntimePermissionProfile::from_preset(preset, cwd)
+        .with_additional_roots(additional_directories)
 }
 
 fn protocol_reviewer_from_safety(

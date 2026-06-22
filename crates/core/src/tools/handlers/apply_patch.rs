@@ -6,6 +6,7 @@ use crate::contracts::ToolContext;
 use crate::contracts::ToolProgressSender;
 use crate::contracts::ToolResult;
 use crate::contracts::ToolResultContent;
+use crate::invocation::ToolContent;
 use crate::json_schema::JsonSchema;
 use crate::tool_handler::ToolHandler;
 use crate::tool_spec::ToolCapabilityTag;
@@ -68,18 +69,22 @@ impl ToolHandler for ApplyPatchHandler {
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
 
-        let text = output.content.into_string();
         if output.is_error {
+            let text = output.content.into_string();
             Ok(ToolResult::error(
                 ToolResultContent::Text(text.clone()),
                 "Patch failed",
                 ToolCallError::ExecutionFailed(text),
             ))
         } else {
-            Ok(ToolResult::success(
-                ToolResultContent::Text(text),
-                "Patch applied",
-            ))
+            let content = match output.content {
+                ToolContent::Text(text) => ToolResultContent::Text(text),
+                ToolContent::Json(json) => ToolResultContent::Json(json),
+                ToolContent::Mixed { text, json } => ToolResultContent::Mixed { text, json },
+            };
+            let mut result = ToolResult::success(content, "Patch applied");
+            result.display_content = output.display_content;
+            Ok(result)
         }
     }
 }
@@ -107,5 +112,50 @@ mod tests {
         );
 
         assert_eq!(handler.spec().input_schema, expected);
+    }
+
+    #[tokio::test]
+    async fn apply_patch_success_preserves_file_metadata() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let handler = ApplyPatchHandler::new();
+
+        let result = handler
+            .handle(
+                ToolContext {
+                    tool_call_id: crate::invocation::ToolCallId("call-1".to_string()),
+                    session_id: "session-1".to_string(),
+                    turn_id: Some("turn-1".to_string()),
+                    workspace_root: root.path().to_path_buf(),
+                    budgets: crate::contracts::ToolBudgets {
+                        output_limit_bytes: 1024,
+                        wall_time_limit_ms: None,
+                    },
+                    cancel_token: tokio_util::sync::CancellationToken::new(),
+                    agent_scope: crate::contracts::ToolAgentScope::Parent,
+                    agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
+                    collaboration_mode: devo_protocol::CollaborationMode::Build,
+                    agent_coordinator: None,
+                    client_filesystem: None,
+                    client_terminal: None,
+                    network_proxy: None,
+                },
+                serde_json::json!({
+                    "patchText": "*** Begin Patch\n*** Add File: file.txt\n+hello\n*** End Patch"
+                }),
+                None,
+            )
+            .await
+            .expect("apply_patch succeeds");
+
+        let ToolResultContent::Mixed {
+            text: Some(text),
+            json: Some(json),
+        } = result.content
+        else {
+            panic!("expected mixed output");
+        };
+        assert!(text.contains("Success. Updated the following files:"));
+        assert_eq!(json["files"][0]["kind"], "add");
+        assert_eq!(json["files"][0]["content"], "hello\n");
     }
 }

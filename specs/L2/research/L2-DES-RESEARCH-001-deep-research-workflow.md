@@ -70,7 +70,7 @@ The `[research]` config section defines v1 runtime caps:
 - `fetch_summary_threshold_chars`
 - `max_summary_chars`
 
-All stages reuse the active session model, provider, thinking, web search, and web fetch configuration.
+All stages reuse the active session model, provider, reasoning effort, web search, and web fetch configuration.
 
 ## Traceability
 

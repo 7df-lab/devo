@@ -24,7 +24,7 @@ pub struct AppExit {
 /// Public startup request passed from the CLI into the TUI crate.
 ///
 /// This type intentionally carries config-shaped values: a model slug, provider fallback,
-/// thinking selection, and cwd. `host` resolves the model slug against the catalog before
+/// reasoning effort selection, and cwd. `host` resolves the model slug against the catalog before
 /// constructing the chat widget's runtime session state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialTuiSession {
@@ -38,8 +38,8 @@ pub struct InitialTuiSession {
     pub model_binding_id: Option<String>,
     /// Provider family used for the initial runtime connection and picker fallback.
     pub provider: ProviderWireApi,
-    /// Initial thinking selection restored from persisted config.
-    pub thinking_selection: Option<String>,
+    /// Initial reasoning effort selection restored from persisted config.
+    pub reasoning_effort_selection: Option<String>,
     /// Initial permission preset restored from project-level config.
     pub permission_preset: PermissionPreset,
     /// Working directory used for the initial session.

@@ -9,7 +9,7 @@ use devo_protocol::HostedWebSearchTool;
 use devo_protocol::ModelRequest;
 use devo_protocol::RequestContent;
 use devo_protocol::RequestMessage;
-use devo_protocol::ResolvedThinkingRequest;
+use devo_protocol::ResolvedReasoningRequest;
 use devo_protocol::ResponseContent;
 use devo_protocol::ResponseExtra;
 use devo_protocol::SamplingControls;
@@ -138,10 +138,15 @@ pub enum QueryEvent {
         /// Fully decoded tool input payload, when available.
         input: serde_json::Value,
     },
+    /// A locally executed tool has passed permission checks and started running.
+    ToolExecutionStart {
+        /// Stable provider-issued tool use identifier.
+        id: String,
+    },
     /// Incremental output delta from a running tool.
     ToolProgress {
         tool_use_id: String,
-        content: String,
+        progress: crate::tools::ToolProgress,
     },
     /// A tool call completed.
     ToolResult {
@@ -668,7 +673,7 @@ pub async fn query(
     if session.session_context.is_none() {
         session.session_context = Some(SessionContext::capture(
             &turn_config.model,
-            turn_config.thinking_selection.as_deref(),
+            turn_config.reasoning_effort_selection.as_deref(),
             &session.cwd,
             current_agents_snapshot.clone(),
             session.config.available_skills_instructions.clone(),
@@ -812,8 +817,8 @@ pub async fn query(
             Some(system).filter(|system| !system.trim().is_empty())
         };
 
-        // resolve thinking request parameter
-        let ResolvedThinkingRequest {
+        // Resolve provider-bound reasoning request parameters.
+        let ResolvedReasoningRequest {
             request_model,
             request_thinking,
             request_reasoning_effort,
@@ -821,7 +826,7 @@ pub async fn query(
             effective_reasoning_effort: _,
         } = turn_config
             .model
-            .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
+            .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
         let provider_request_model = turn_config.provider_request_model(&request_model);
 
         let prompt_source_message_count = session.prompt_source_messages().len();
@@ -876,7 +881,7 @@ pub async fn query(
                 top_p: turn_config.model.top_p,
                 top_k: turn_config.model.top_k.map(|value| value as u32),
             },
-            thinking: request_thinking,
+            request_thinking,
             reasoning_effort: request_reasoning_effort,
             extra_body,
         };
@@ -1447,10 +1452,10 @@ pub async fn query(
             runtime
                 .execute_batch_streaming_with_completion(
                     &tool_calls,
-                    move |tool_use_id, content| {
+                    move |tool_use_id, progress| {
                         progress_events(QueryEvent::ToolProgress {
                             tool_use_id: tool_use_id.to_string(),
-                            content: content.to_string(),
+                            progress,
                         });
                     },
                     move |result| {
@@ -1526,13 +1531,13 @@ pub async fn test_model_connection(
     model: &Model,
     prompt: &str,
 ) -> Result<String, AgentError> {
-    let ResolvedThinkingRequest {
+    let ResolvedReasoningRequest {
         request_model,
         request_thinking,
         request_reasoning_effort,
         extra_body,
         effective_reasoning_effort: _,
-    } = model.resolve_thinking_selection(None);
+    } = model.resolve_reasoning_effort_selection(None);
     let request = ModelRequest {
         model: request_model,
         system: None,
@@ -1550,7 +1555,7 @@ pub async fn test_model_connection(
             top_p: model.top_p,
             top_k: model.top_k.map(|value| value as u32),
         },
-        thinking: request_thinking,
+        request_thinking,
         reasoning_effort: request_reasoning_effort,
         extra_body,
     };
@@ -1671,12 +1676,12 @@ mod tests {
             Vec::new()
         );
     }
+    use crate::ReasoningCapability;
+    use crate::ReasoningImplementation;
+    use crate::ReasoningVariant;
+    use crate::ReasoningVariantConfig;
     use crate::SessionConfig;
     use crate::SessionState;
-    use crate::ThinkingCapability;
-    use crate::ThinkingImplementation;
-    use crate::ThinkingVariant;
-    use crate::ThinkingVariantConfig;
     use crate::TruncationMode;
     use crate::TruncationPolicyConfig;
     use crate::TurnConfig;
@@ -3211,7 +3216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_resolves_model_variant_thinking_before_building_request() {
+    async fn query_resolves_reasoning_model_variant_before_building_request() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let provider: Arc<dyn ModelProviderSDK> = Arc::new(CapturingProvider {
             requests: Arc::clone(&requests),
@@ -3223,24 +3228,24 @@ mod tests {
             display_name: "Kimi K2.5".into(),
             provider: devo_protocol::ProviderWireApi::OpenAIChatCompletions,
             description: None,
-            thinking_capability: ThinkingCapability::Toggle,
+            reasoning_capability: ReasoningCapability::Toggle,
             default_reasoning_effort: Some(ReasoningEffort::Medium),
-            thinking_implementation: Some(ThinkingImplementation::ModelVariant(
-                ThinkingVariantConfig {
+            reasoning_implementation: Some(ReasoningImplementation::ModelVariant(
+                ReasoningVariantConfig {
                     variants: vec![
-                        ThinkingVariant {
+                        ReasoningVariant {
                             selection_value: "disabled".into(),
                             model_slug: "kimi-k2.5".into(),
                             reasoning_effort: None,
                             label: "Off".into(),
                             description: "Use the standard model".into(),
                         },
-                        ThinkingVariant {
+                        ReasoningVariant {
                             selection_value: "enabled".into(),
                             model_slug: "kimi-k2.5-thinking".into(),
                             reasoning_effort: Some(ReasoningEffort::Medium),
                             label: "On".into(),
-                            description: "Use the thinking model".into(),
+                            description: "Use the reasoning model".into(),
                         },
                     ],
                 },
@@ -3286,7 +3291,7 @@ mod tests {
         let captured = requests.lock().expect("lock requests");
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].model, "vendor/kimi-k2.5-thinking");
-        assert_eq!(captured[0].thinking, None);
+        assert_eq!(captured[0].request_thinking, None);
     }
 
     #[tokio::test]
@@ -3312,7 +3317,7 @@ mod tests {
                 model,
                 "vendor/model-name".into(),
                 HashMap::new().into(),
-                /*thinking_selection*/ None,
+                /*reasoning_effort_selection*/ None,
             ),
             Arc::clone(&provider),
             registry,
@@ -4369,7 +4374,7 @@ mod tests {
         let model = Model {
             slug: "deepseek-v4-flash".into(),
             provider: devo_protocol::ProviderWireApi::OpenAIChatCompletions,
-            thinking_capability: ThinkingCapability::Toggle,
+            reasoning_capability: ReasoningCapability::Toggle,
             base_instructions: String::new(),
             ..Model::default()
         };
@@ -4390,7 +4395,7 @@ mod tests {
 
         let captured = requests.lock().expect("lock requests");
         assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0].thinking.as_deref(), Some("enabled"));
+        assert_eq!(captured[0].request_thinking.as_deref(), Some("enabled"));
         // Toggle capability does not set reasoning_effort on the request.
         assert_eq!(captured[0].reasoning_effort, None);
     }
@@ -4721,8 +4726,8 @@ mod tests {
                     event,
                     QueryEvent::ToolProgress {
                         tool_use_id,
-                        content,
-                    } if tool_use_id == "tool-1" && content == "stream chunk\n"
+                        progress: crate::tools::ToolProgress::OutputDelta { delta },
+                    } if tool_use_id == "tool-1" && delta == "stream chunk\n"
                 )
             })
             .expect("tool progress event should be emitted");

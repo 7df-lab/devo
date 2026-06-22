@@ -43,7 +43,7 @@ pub struct UserInputItem {
 #[derive(Debug, Clone)]
 pub struct TurnAdmissionOptions {
     pub model: Option<String>,
-    pub thinking: Option<String>,
+    pub reasoning_effort_selection: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub mode_overrides: Option<TurnModeOverrides>,
 }
@@ -511,7 +511,7 @@ pub async fn admit_turn(
         resume_of_turn_id: None,
         submitted_by_client_id: input.submitted_by_client_id,
         model: admission.model,
-        thinking: admission.thinking,
+        reasoning_effort_selection: admission.reasoning_effort_selection,
         reasoning_effort: admission.reasoning_effort,
         started_at: now,
     });
@@ -1276,7 +1276,7 @@ mod tests {
                     resume_of_turn_id: None,
                     submitted_by_client_id: None,
                     model: None,
-                    thinking: None,
+                    reasoning_effort_selection: None,
                     reasoning_effort: None,
                     started_at: Utc::now(),
                 },

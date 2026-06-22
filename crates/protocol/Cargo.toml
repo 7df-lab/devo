@@ -9,6 +9,7 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+agent-client-protocol = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 schemars = { workspace = true }
 serde = { workspace = true }

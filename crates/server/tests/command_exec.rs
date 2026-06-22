@@ -75,7 +75,7 @@ async fn sessionless_command_exec_streams_to_owner_without_session() -> Result<(
             owner_connection_id,
             serde_json::json!({
                 "id": 20,
-                "method": "command/exec",
+                "method": "_devo/command/exec",
                 "params": {
                     "process_id": "sessionless-1",
                     "cwd": data_root.path(),
@@ -125,7 +125,7 @@ async fn sessionless_command_exec_requires_explicit_cwd() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 21,
-                "method": "command/exec",
+                "method": "_devo/command/exec",
                 "params": {
                     "process_id": "sessionless-missing-cwd",
                     "program": {
@@ -165,7 +165,7 @@ async fn session_bound_command_exec_resolves_session_cwd() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 23,
-                "method": "command/exec",
+                "method": "_devo/command/exec",
                 "params": {
                     "session_id": session_id,
                     "process_id": "session-bound-1",
@@ -210,7 +210,6 @@ fn build_runtime(data_root: &std::path::Path) -> Result<Arc<ServerRuntime>> {
             "test-model".to_string(),
             Arc::new(PresetModelCatalog::default()),
             Arc::new(ProviderVendorCatalog::default()),
-            /*skill_workspace_root*/ None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()
@@ -240,28 +239,23 @@ async fn initialize_connection(
                 "id": 10,
                 "method": "initialize",
                 "params": {
-                    "client_name": client_name,
-                    "client_version": "1.0.0",
-                    "transport": "stdio",
-                    "supports_streaming": true,
-                    "supports_binary_images": false,
-                    "opt_out_notification_methods": []
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": client_name,
+                        "title": client_name,
+                        "version": "1.0.0"
+                    }
                 }
             }),
         )
         .await
         .context("initialize response")?;
-    let response: devo_server::SuccessResponse<devo_server::InitializeResult> =
-        serde_json::from_value(initialize_response)?;
-    assert_eq!(response.result.server_name, "devo-server");
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "method": "initialized"
-            }),
-        )
-        .await;
+    let response: serde_json::Value = initialize_response;
+    assert_eq!(
+        response["result"]["agentInfo"]["name"],
+        serde_json::json!("devo-server")
+    );
     Ok((connection_id, notifications_rx))
 }
 

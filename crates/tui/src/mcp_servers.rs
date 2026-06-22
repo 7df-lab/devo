@@ -23,6 +23,7 @@ pub(crate) fn render_mcp_servers_markdown(config: &McpConfig) -> String {
         let transport_kind = match &server.transport {
             McpTransportConfig::Stdio { .. } => "stdio",
             McpTransportConfig::StreamableHttp { .. } => "streamable_http",
+            McpTransportConfig::Sse { .. } => "sse",
         };
         let target = match &server.transport {
             McpTransportConfig::Stdio { command, .. } => {
@@ -33,6 +34,7 @@ pub(crate) fn render_mcp_servers_markdown(config: &McpConfig) -> String {
                 }
             }
             McpTransportConfig::StreamableHttp { url, .. } => url.clone(),
+            McpTransportConfig::Sse { url, .. } => url.clone(),
         };
         let enabled = if server.enabled { "yes" } else { "no" };
 
@@ -99,6 +101,23 @@ mod tests {
                     output_limits: Default::default(),
                     auth_ref: None,
                 },
+                McpServerRecord {
+                    id: McpServerId("events".to_string()),
+                    display_name: "Events".to_string(),
+                    transport: McpTransportConfig::Sse {
+                        url: "https://events.example.com/sse".to_string(),
+                        auth: None,
+                        http_headers: Default::default(),
+                        env_http_headers: Default::default(),
+                    },
+                    startup_policy: McpStartupPolicy::Eager,
+                    enabled: true,
+                    trust_policy: Default::default(),
+                    allowed_capabilities: Vec::new(),
+                    roots_policy: Default::default(),
+                    output_limits: Default::default(),
+                    auth_ref: None,
+                },
             ],
             auto_start: true,
             refresh_on_config_reload: true,
@@ -112,5 +131,8 @@ mod tests {
         assert!(body.contains("enabled: no"));
         assert!(body.contains("transport: streamable_http"));
         assert!(body.contains("target: `https://mcp.example.com`"));
+        assert!(body.contains("`events` - Events"));
+        assert!(body.contains("transport: sse"));
+        assert!(body.contains("target: `https://events.example.com/sse`"));
     }
 }

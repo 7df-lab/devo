@@ -26,8 +26,9 @@ fn pending_turn_metadata(
 }
 
 impl ServerRuntime {
-    pub(crate) async fn handle_turn_start(
+    pub(crate) async fn handle_turn_start_for_connection(
         self: &Arc<Self>,
+        connection_id: Option<u64>,
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
@@ -41,6 +42,22 @@ impl ServerRuntime {
                 );
             }
         };
+        self.handle_turn_start_with_queue_policy(
+            connection_id,
+            request_id,
+            params,
+            TurnStartQueuePolicy::Queue,
+        )
+        .await
+    }
+
+    pub(crate) async fn handle_turn_start_with_queue_policy(
+        self: &Arc<Self>,
+        connection_id: Option<u64>,
+        request_id: serde_json::Value,
+        params: TurnStartParams,
+        queue_policy: TurnStartQueuePolicy,
+    ) -> serde_json::Value {
         if params.input.is_empty() {
             return self.error_response(
                 request_id,
@@ -62,15 +79,37 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        let workspace_root = {
+        let (workspace_root, runtime_context) = {
             let session = session_arc.lock().await;
-            params
+            let workspace_root = params
                 .cwd
                 .clone()
-                .unwrap_or_else(|| session.summary.cwd.clone())
+                .unwrap_or_else(|| session.summary.cwd.clone());
+            let runtime_context = if params
+                .cwd
+                .as_ref()
+                .is_some_and(|cwd| cwd != &session.summary.cwd)
+            {
+                None
+            } else {
+                Some(Arc::clone(&session.runtime_context))
+            };
+            (workspace_root, runtime_context)
         };
-        let Some(resolved_input) = (match self
-            .deps
+        let runtime_context = match runtime_context {
+            Some(runtime_context) => runtime_context,
+            None => match self.deps.context_for_workspace(&workspace_root).await {
+                Ok(runtime_context) => runtime_context,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to initialize session workspace: {error}"),
+                    );
+                }
+            },
+        };
+        let Some(resolved_input) = (match runtime_context
             .resolve_input_items(&params.input, Some(workspace_root.as_path()))
         {
             Ok(resolved_input) => resolved_input,
@@ -133,6 +172,13 @@ impl ServerRuntime {
         let (turn, turn_config) = {
             let mut session = session_arc.lock().await;
             if let Some(active_turn) = session.active_turn.as_ref() {
+                if queue_policy == TurnStartQueuePolicy::RejectActive {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::TurnAlreadyRunning,
+                        "session already has an active prompt turn",
+                    );
+                }
                 let pending_turn_queue = Arc::clone(&session.pending_turn_queue);
                 let active_turn_id = active_turn.turn_id;
                 let is_ephemeral = session.summary.ephemeral;
@@ -202,6 +248,7 @@ impl ServerRuntime {
                 let old_cwd = session.summary.cwd.clone();
                 if old_cwd != cwd {
                     cwd_change = Some((old_cwd, cwd.clone()));
+                    session.runtime_context = Arc::clone(&runtime_context);
                 }
                 session.summary.cwd = cwd.clone();
                 session.core_session.lock().await.cwd = cwd;
@@ -219,16 +266,17 @@ impl ServerRuntime {
                 params.model.as_deref(),
                 &session.summary,
             );
-            let requested_thinking = params
-                .thinking
+            let requested_reasoning_effort_selection = params
+                .reasoning_effort_selection
                 .clone()
-                .or_else(|| session.summary.thinking.clone());
-            let turn_config = self
-                .deps
-                .resolve_turn_config(requested_model, requested_thinking.clone());
-            let resolved_request = turn_config
-                .model
-                .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
+                .or_else(|| session.summary.reasoning_effort_selection.clone());
+            let turn_config = session.runtime_context.resolve_turn_config(
+                requested_model,
+                requested_reasoning_effort_selection.clone(),
+            );
+            let resolved_request = turn_config.model.resolve_reasoning_effort_selection(
+                turn_config.reasoning_effort_selection.as_deref(),
+            );
             let request_model = turn_config.provider_request_model(&resolved_request.request_model);
             apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
             let turn = TurnMetadata {
@@ -242,13 +290,15 @@ impl ServerRuntime {
                 kind: devo_core::TurnKind::Regular,
                 model: turn_config.model.slug.clone(),
                 model_binding_id: turn_config.model_binding_id.clone(),
-                thinking: turn_config.thinking_selection.clone(),
+                reasoning_effort_selection: turn_config.reasoning_effort_selection.clone(),
                 reasoning_effort: resolved_request.effective_reasoning_effort,
                 request_model,
                 request_thinking: resolved_request.request_thinking,
                 started_at: now,
                 completed_at: None,
                 usage: None,
+                stop_reason: None,
+                failure_reason: None,
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
@@ -320,6 +370,12 @@ impl ServerRuntime {
             .lock()
             .await
             .insert(params.session_id, CancellationToken::new());
+        if let Some(connection_id) = connection_id {
+            self.active_turn_connections
+                .lock()
+                .await
+                .insert(params.session_id, connection_id);
+        }
         let runtime = Arc::clone(self);
         let turn_for_task = turn.clone();
         let display_input_for_task = display_input.clone();
@@ -379,8 +435,9 @@ impl ServerRuntime {
         .expect("serialize turn/start response")
     }
 
-    pub(crate) async fn handle_turn_shell_command(
+    pub(crate) async fn handle_turn_shell_command_for_connection(
         self: &Arc<Self>,
+        connection_id: Option<u64>,
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
@@ -410,6 +467,19 @@ impl ServerRuntime {
             );
         };
 
+        let requested_runtime_context = match params.cwd.as_ref() {
+            Some(cwd) => match self.deps.context_for_workspace(cwd).await {
+                Ok(runtime_context) => Some(runtime_context),
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to initialize session workspace: {error}"),
+                    );
+                }
+            },
+            None => None,
+        };
         let now = Utc::now();
         let mut cwd_change = None;
         let (turn, cwd) = {
@@ -429,6 +499,9 @@ impl ServerRuntime {
                 let old_cwd = session.summary.cwd.clone();
                 if old_cwd != cwd {
                     cwd_change = Some((old_cwd, cwd.clone()));
+                    if let Some(runtime_context) = requested_runtime_context.as_ref() {
+                        session.runtime_context = Arc::clone(runtime_context);
+                    }
                 }
                 session.summary.cwd = cwd.clone();
                 session.core_session.lock().await.cwd = cwd;
@@ -445,13 +518,15 @@ impl ServerRuntime {
                 kind: devo_core::TurnKind::Other("shell_command".to_string()),
                 model: model.clone(),
                 model_binding_id: session.summary.model_binding_id.clone(),
-                thinking: session.summary.thinking.clone(),
+                reasoning_effort_selection: session.summary.reasoning_effort_selection.clone(),
                 reasoning_effort: session.summary.reasoning_effort,
                 request_model: model,
-                request_thinking: session.summary.thinking.clone(),
+                request_thinking: session.summary.reasoning_effort_selection.clone(),
                 started_at: now,
                 completed_at: None,
                 usage: None,
+                stop_reason: None,
+                failure_reason: None,
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
@@ -514,6 +589,12 @@ impl ServerRuntime {
             .lock()
             .await
             .insert(params.session_id, CancellationToken::new());
+        if let Some(connection_id) = connection_id {
+            self.active_turn_connections
+                .lock()
+                .await
+                .insert(params.session_id, connection_id);
+        }
         let task = tokio::spawn(async move {
             runtime
                 .execute_shell_command_turn(params.session_id, turn_for_task, command_for_task, cwd)
@@ -718,6 +799,11 @@ impl ServerRuntime {
             },
         ))
         .await;
+        self.record_terminal_turn_status(
+            interrupted_turn.turn_id,
+            TerminalTurnSnapshot::from_turn(&interrupted_turn),
+        )
+        .await;
 
         let runtime = Arc::clone(self);
         let sid = params.session_id;
@@ -772,7 +858,7 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        let (turn_id, workspace_root, btw_input_queue) = {
+        let (turn_id, workspace_root, btw_input_queue, runtime_context) = {
             let session = session_arc.lock().await;
             let Some(turn_id) = session.active_turn.as_ref().map(|turn| turn.turn_id) else {
                 return self.error_response(
@@ -800,10 +886,10 @@ impl ServerRuntime {
                 turn_id,
                 session.summary.cwd.clone(),
                 Arc::clone(&session.btw_input_queue),
+                Arc::clone(&session.runtime_context),
             )
         };
-        let resolved_input = match self
-            .deps
+        let resolved_input = match runtime_context
             .resolve_input_items(&params.input, Some(workspace_root.as_path()))
         {
             Ok(Some(resolved_input)) => resolved_input,

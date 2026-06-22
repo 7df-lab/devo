@@ -8,7 +8,7 @@
 //! Design:
 //! - `Model` is the cross-crate runtime type, not the raw config/catalog input type
 //! - this module keeps behavior that belongs to the executable model itself, such as
-//!   thinking resolution and effective defaults
+//!   reasoning effort resolution and effective defaults
 //! - callers should be able to use this type without knowing how the model catalog was loaded
 //!
 //! Boundary:
@@ -22,11 +22,11 @@ use serde_json::Value;
 use std::fmt;
 
 use crate::HostedToolDefinition;
+use crate::ReasoningCapability;
 use crate::ReasoningEffort;
 use crate::ReasoningEffortPreset;
-use crate::ResolvedThinkingRequest;
-use crate::ThinkingCapability;
-use crate::ThinkingImplementation;
+use crate::ReasoningImplementation;
+use crate::ResolvedReasoningRequest;
 use crate::nearest_effort;
 use crate::truncation::TruncationPolicyConfig;
 
@@ -71,8 +71,8 @@ pub struct ModelRequest {
     pub hosted_tools: Vec<HostedToolDefinition>,
     #[serde(default)]
     pub sampling: SamplingControls,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<String>,
+    #[serde(rename = "thinking", skip_serializing_if = "Option::is_none")]
+    pub request_thinking: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,12 +217,14 @@ pub struct Model {
     pub provider: ProviderWireApi,
     /// Optional short description of the model.
     pub description: Option<String>,
-    /// Thinking control available for this model.
-    pub thinking_capability: ThinkingCapability,
+    /// Reasoning control available for this model.
+    #[serde(alias = "thinking_capability")]
+    pub reasoning_capability: ReasoningCapability,
     /// Default reasoning effort selected for the model when no levels are exposed.
     pub default_reasoning_effort: Option<ReasoningEffort>,
-    /// How the selected thinking mode should be applied to requests.
-    pub thinking_implementation: Option<ThinkingImplementation>,
+    /// How the selected reasoning effort should be applied to requests.
+    #[serde(alias = "thinking_implementation")]
+    pub reasoning_implementation: Option<ReasoningImplementation>,
     /// Base system instructions bundled with the model.
     pub base_instructions: String,
     /// Maximum context window in tokens.
@@ -254,9 +256,9 @@ impl Default for Model {
             display_name: String::new(),
             provider: ProviderWireApi::OpenAIChatCompletions,
             description: None,
-            thinking_capability: ThinkingCapability::Unsupported,
+            reasoning_capability: ReasoningCapability::Unsupported,
             default_reasoning_effort: Some(ReasoningEffort::default()),
-            thinking_implementation: None,
+            reasoning_implementation: None,
             base_instructions: String::new(),
             context_window: 200_000,
             effective_context_window_percent: None,
@@ -278,13 +280,13 @@ impl Model {
     }
 
     pub fn reasoning_effort_options(&self) -> Vec<ReasoningEffortPreset> {
-        match &self.thinking_capability {
-            ThinkingCapability::Levels(levels) => levels
+        match &self.reasoning_capability {
+            ReasoningCapability::Levels(levels) => levels
                 .iter()
                 .copied()
                 .map(|effort| ReasoningEffortPreset::new(effort, effort.description()))
                 .collect(),
-            ThinkingCapability::ToggleWithLevels(levels) => levels
+            ReasoningCapability::ToggleWithLevels(levels) => levels
                 .iter()
                 .copied()
                 .map(|effort| ReasoningEffortPreset::new(effort, effort.description()))
@@ -298,16 +300,16 @@ impl Model {
         }
     }
 
-    pub fn effective_thinking_capability(&self) -> ThinkingCapability {
-        self.thinking_capability.clone()
+    pub fn effective_reasoning_capability(&self) -> ReasoningCapability {
+        self.reasoning_capability.clone()
     }
 
-    pub fn effective_thinking_implementation(&self) -> ThinkingImplementation {
-        self.thinking_implementation.clone().unwrap_or({
-            if matches!(self.thinking_capability, ThinkingCapability::Unsupported) {
-                ThinkingImplementation::Disabled
+    pub fn effective_reasoning_implementation(&self) -> ReasoningImplementation {
+        self.reasoning_implementation.clone().unwrap_or({
+            if matches!(self.reasoning_capability, ReasoningCapability::Unsupported) {
+                ReasoningImplementation::Disabled
             } else {
-                ThinkingImplementation::RequestParameter
+                ReasoningImplementation::RequestParameter
             }
         })
     }
@@ -322,33 +324,33 @@ impl Model {
             / 100
     }
 
-    pub fn default_thinking_selection(&self) -> Option<String> {
-        match &self.thinking_capability {
-            ThinkingCapability::Unsupported => None,
-            ThinkingCapability::Toggle => Some(String::from("enabled")),
-            ThinkingCapability::ToggleWithLevels(levels) => self
+    pub fn default_reasoning_effort_selection(&self) -> Option<String> {
+        match &self.reasoning_capability {
+            ReasoningCapability::Unsupported => None,
+            ReasoningCapability::Toggle => Some(String::from("enabled")),
+            ReasoningCapability::ToggleWithLevels(levels) => self
                 .default_reasoning_effort
                 .or_else(|| levels.first().copied())
                 .map(|effort| effort.label().to_lowercase()),
-            ThinkingCapability::Levels(levels) => self
+            ReasoningCapability::Levels(levels) => self
                 .default_reasoning_effort
                 .or_else(|| levels.first().copied())
                 .map(|effort| effort.label().to_lowercase()),
         }
     }
 
-    pub fn normalize_thinking_selection(&self, selection: Option<&str>) -> Option<String> {
+    pub fn normalize_reasoning_effort_selection(&self, selection: Option<&str>) -> Option<String> {
         selection
             .map(str::trim)
             .filter(|selection| !selection.is_empty())
             .filter(|selection| !selection.eq_ignore_ascii_case("default"))
             .map(|selection| selection.to_ascii_lowercase())
-            .or_else(|| self.default_thinking_selection())
+            .or_else(|| self.default_reasoning_effort_selection())
     }
 
     pub fn nearest_supported_reasoning_effort(&self, target: ReasoningEffort) -> ReasoningEffort {
-        match &self.thinking_capability {
-            ThinkingCapability::Levels(levels) | ThinkingCapability::ToggleWithLevels(levels)
+        match &self.reasoning_capability {
+            ReasoningCapability::Levels(levels) | ReasoningCapability::ToggleWithLevels(levels)
                 if !levels.is_empty() =>
             {
                 nearest_effort(target, levels)
@@ -357,31 +359,34 @@ impl Model {
         }
     }
 
-    pub fn resolve_thinking_selection(&self, selection: Option<&str>) -> ResolvedThinkingRequest {
-        let normalized_selection = self.normalize_thinking_selection(selection);
+    pub fn resolve_reasoning_effort_selection(
+        &self,
+        selection: Option<&str>,
+    ) -> ResolvedReasoningRequest {
+        let normalized_selection = self.normalize_reasoning_effort_selection(selection);
 
-        match self.effective_thinking_implementation() {
-            ThinkingImplementation::Disabled => ResolvedThinkingRequest {
+        match self.effective_reasoning_implementation() {
+            ReasoningImplementation::Disabled => ResolvedReasoningRequest {
                 request_model: self.slug.clone(),
                 request_thinking: None,
                 request_reasoning_effort: None,
                 effective_reasoning_effort: None,
                 extra_body: None,
             },
-            ThinkingImplementation::RequestParameter => {
+            ReasoningImplementation::RequestParameter => {
                 let (request_thinking, request_reasoning_effort, effective_reasoning_effort) =
-                    match self.effective_thinking_capability() {
-                        ThinkingCapability::Unsupported => (None, None, None),
-                        ThinkingCapability::Toggle => {
+                    match self.effective_reasoning_capability() {
+                        ReasoningCapability::Unsupported => (None, None, None),
+                        ReasoningCapability::Toggle => {
                             let request_thinking = normalized_selection
                                 .filter(|selection| {
                                     selection == "enabled" || selection == "disabled"
                                 })
-                                .or_else(|| self.default_thinking_selection());
+                                .or_else(|| self.default_reasoning_effort_selection());
                             let effective_reasoning_effort = self.default_reasoning_effort;
                             (request_thinking, None, effective_reasoning_effort)
                         }
-                        ThinkingCapability::Levels(_) => {
+                        ReasoningCapability::Levels(_) => {
                             let request_reasoning_effort = normalized_selection
                                 .as_deref()
                                 .and_then(|selection| selection.parse::<ReasoningEffort>().ok())
@@ -394,7 +399,7 @@ impl Model {
                                 request_reasoning_effort,
                             )
                         }
-                        ThinkingCapability::ToggleWithLevels(_) => {
+                        ReasoningCapability::ToggleWithLevels(_) => {
                             let request_reasoning_effort = normalized_selection
                                 .as_deref()
                                 .and_then(|selection| match selection {
@@ -430,7 +435,7 @@ impl Model {
                             )
                         }
                     };
-                ResolvedThinkingRequest {
+                ResolvedReasoningRequest {
                     request_model: self.slug.clone(),
                     request_thinking,
                     request_reasoning_effort,
@@ -438,7 +443,7 @@ impl Model {
                     extra_body: None,
                 }
             }
-            ThinkingImplementation::ModelVariant(config) => {
+            ReasoningImplementation::ModelVariant(config) => {
                 let selected_variant = normalized_selection
                     .as_deref()
                     .and_then(|selection| {
@@ -448,7 +453,7 @@ impl Model {
                             .find(|variant| variant.selection_value.eq_ignore_ascii_case(selection))
                     })
                     .or_else(|| {
-                        self.default_thinking_selection()
+                        self.default_reasoning_effort_selection()
                             .as_deref()
                             .and_then(|selection| {
                                 config.variants.iter().find(|variant| {
@@ -458,7 +463,7 @@ impl Model {
                     })
                     .or_else(|| config.variants.first());
                 if let Some(variant) = selected_variant {
-                    ResolvedThinkingRequest {
+                    ResolvedReasoningRequest {
                         request_model: variant.model_slug.clone(),
                         request_thinking: None,
                         request_reasoning_effort: variant.reasoning_effort,
@@ -466,7 +471,7 @@ impl Model {
                         extra_body: None,
                     }
                 } else {
-                    ResolvedThinkingRequest {
+                    ResolvedReasoningRequest {
                         request_model: self.slug.clone(),
                         request_thinking: None,
                         request_reasoning_effort: self.default_reasoning_effort,
@@ -558,7 +563,7 @@ pub struct ModelCatalogEntry {
     pub description: Option<String>,
     pub provider: ProviderWireApi,
     pub context_window: u32,
-    pub thinking_capability: ThinkingCapability,
+    pub reasoning_capability: ReasoningCapability,
     pub input_modalities: Vec<InputModality>,
     pub max_tokens: Option<u32>,
 }
@@ -572,7 +577,7 @@ impl From<&Model> for ModelCatalogEntry {
             description: m.description.clone(),
             provider: m.provider,
             context_window: m.context_window,
-            thinking_capability: m.thinking_capability.clone(),
+            reasoning_capability: m.reasoning_capability.clone(),
             input_modalities: m.input_modalities.clone(),
             max_tokens: m.max_tokens,
         }
@@ -603,9 +608,9 @@ pub struct ModelSavedEntry {
 
 #[cfg(test)]
 mod tests {
+    use crate::ReasoningVariant;
+    use crate::ReasoningVariantConfig;
     use crate::RequestRole;
-    use crate::ThinkingVariant;
-    use crate::ThinkingVariantConfig;
     use pretty_assertions::assert_eq;
 
     use super::InMemoryModelCatalog;
@@ -613,9 +618,9 @@ mod tests {
     use super::Model;
     use super::ModelCatalog;
     use super::ProviderWireApi;
+    use super::ReasoningCapability;
     use super::ReasoningEffort;
-    use super::ThinkingCapability;
-    use super::ThinkingImplementation;
+    use super::ReasoningImplementation;
     use super::TruncationPolicyConfig;
 
     fn model(slug: &str) -> Model {
@@ -624,9 +629,9 @@ mod tests {
             display_name: slug.into(),
             provider: ProviderWireApi::OpenAIChatCompletions,
             description: None,
-            thinking_capability: ThinkingCapability::Unsupported,
+            reasoning_capability: ReasoningCapability::Unsupported,
             default_reasoning_effort: Some(ReasoningEffort::Medium),
-            thinking_implementation: None,
+            reasoning_implementation: None,
             base_instructions: String::new(),
             context_window: 200_000,
             effective_context_window_percent: None,
@@ -699,10 +704,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_thinking_selection_disables_request_thinking_when_capability_is_disabled() {
+    fn resolve_reasoning_effort_selection_disables_request_thinking_when_capability_is_disabled() {
         let preset = model("test");
 
-        let resolved = preset.resolve_thinking_selection(Some("enabled"));
+        let resolved = preset.resolve_reasoning_effort_selection(Some("enabled"));
 
         assert_eq!(resolved.request_model, "test");
         assert_eq!(resolved.request_thinking, None);
@@ -710,11 +715,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_thinking_selection_uses_request_parameter_for_toggle_models() {
+    fn resolve_reasoning_effort_selection_uses_request_parameter_for_toggle_models() {
         let mut preset = model("glm-5.1");
-        preset.thinking_capability = ThinkingCapability::Toggle;
+        preset.reasoning_capability = ReasoningCapability::Toggle;
 
-        let resolved = preset.resolve_thinking_selection(Some("disabled"));
+        let resolved = preset.resolve_reasoning_effort_selection(Some("disabled"));
 
         assert_eq!(resolved.request_model, "glm-5.1");
         assert_eq!(resolved.request_thinking, Some(String::from("disabled")));
@@ -725,13 +730,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_thinking_selection_snaps_effort_for_level_models() {
+    fn resolve_reasoning_effort_selection_snaps_effort_for_level_models() {
         let mut preset = model("o-model");
-        preset.thinking_capability =
-            ThinkingCapability::Levels(vec![ReasoningEffort::Low, ReasoningEffort::High]);
+        preset.reasoning_capability =
+            ReasoningCapability::Levels(vec![ReasoningEffort::Low, ReasoningEffort::High]);
         preset.default_reasoning_effort = Some(ReasoningEffort::Low);
 
-        let resolved = preset.resolve_thinking_selection(Some("medium"));
+        let resolved = preset.resolve_reasoning_effort_selection(Some("medium"));
 
         assert_eq!(resolved.request_model, "o-model");
         assert_eq!(resolved.request_thinking, Some(String::from("low")));
@@ -742,13 +747,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_thinking_selection_supports_toggle_with_levels() {
+    fn resolve_reasoning_effort_selection_supports_toggle_with_levels() {
         let mut preset = model("deepseek-v4");
-        preset.thinking_capability =
-            ThinkingCapability::ToggleWithLevels(vec![ReasoningEffort::High, ReasoningEffort::Max]);
+        preset.reasoning_capability = ReasoningCapability::ToggleWithLevels(vec![
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ]);
         preset.default_reasoning_effort = Some(ReasoningEffort::High);
 
-        let enabled = preset.resolve_thinking_selection(Some("enabled"));
+        let enabled = preset.resolve_reasoning_effort_selection(Some("enabled"));
         assert_eq!(enabled.request_thinking, Some(String::from("enabled")));
         assert_eq!(
             enabled.request_reasoning_effort,
@@ -759,66 +766,74 @@ mod tests {
             Some(ReasoningEffort::High)
         );
 
-        let max = preset.resolve_thinking_selection(Some("max"));
+        let max = preset.resolve_reasoning_effort_selection(Some("max"));
         assert_eq!(max.request_thinking, Some(String::from("enabled")));
         assert_eq!(max.request_reasoning_effort, Some(ReasoningEffort::Max));
         assert_eq!(max.effective_reasoning_effort, Some(ReasoningEffort::Max));
 
-        let disabled = preset.resolve_thinking_selection(Some("disabled"));
+        let disabled = preset.resolve_reasoning_effort_selection(Some("disabled"));
         assert_eq!(disabled.request_thinking, Some(String::from("disabled")));
         assert_eq!(disabled.request_reasoning_effort, None);
         assert_eq!(disabled.effective_reasoning_effort, None);
     }
 
     #[test]
-    fn resolve_thinking_selection_treats_default_as_absent() {
+    fn resolve_reasoning_effort_selection_treats_default_as_absent() {
         let mut toggle = model("toggle-model");
-        toggle.thinking_capability = ThinkingCapability::Toggle;
+        toggle.reasoning_capability = ReasoningCapability::Toggle;
 
         let mut levels = model("levels-model");
-        levels.thinking_capability =
-            ThinkingCapability::Levels(vec![ReasoningEffort::Low, ReasoningEffort::High]);
+        levels.reasoning_capability =
+            ReasoningCapability::Levels(vec![ReasoningEffort::Low, ReasoningEffort::High]);
         levels.default_reasoning_effort = Some(ReasoningEffort::High);
 
         let mut toggle_with_levels = model("toggle-levels-model");
-        toggle_with_levels.thinking_capability =
-            ThinkingCapability::ToggleWithLevels(vec![ReasoningEffort::High, ReasoningEffort::Max]);
+        toggle_with_levels.reasoning_capability = ReasoningCapability::ToggleWithLevels(vec![
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ]);
         toggle_with_levels.default_reasoning_effort = Some(ReasoningEffort::High);
 
         for preset in [toggle, levels, toggle_with_levels] {
-            let absent = preset.resolve_thinking_selection(None);
+            let absent = preset.resolve_reasoning_effort_selection(None);
 
-            assert_eq!(preset.resolve_thinking_selection(Some("default")), absent);
-            assert_eq!(preset.resolve_thinking_selection(Some("  ")), absent);
+            assert_eq!(
+                preset.resolve_reasoning_effort_selection(Some("default")),
+                absent
+            );
+            assert_eq!(
+                preset.resolve_reasoning_effort_selection(Some("  ")),
+                absent
+            );
         }
     }
 
     #[test]
-    fn resolve_thinking_selection_uses_model_variants_when_configured() {
+    fn resolve_reasoning_effort_selection_uses_model_variants_when_configured() {
         let mut preset = model("kimi-k2.5");
-        preset.thinking_capability = ThinkingCapability::Toggle;
-        preset.thinking_implementation = Some(ThinkingImplementation::ModelVariant(
-            ThinkingVariantConfig {
+        preset.reasoning_capability = ReasoningCapability::Toggle;
+        preset.reasoning_implementation = Some(ReasoningImplementation::ModelVariant(
+            ReasoningVariantConfig {
                 variants: vec![
-                    ThinkingVariant {
+                    ReasoningVariant {
                         selection_value: String::from("disabled"),
                         model_slug: String::from("kimi-k2.5"),
                         reasoning_effort: None,
                         label: String::from("Off"),
                         description: String::from("Use the standard model"),
                     },
-                    ThinkingVariant {
+                    ReasoningVariant {
                         selection_value: String::from("enabled"),
                         model_slug: String::from("kimi-k2.5-thinking"),
                         reasoning_effort: Some(ReasoningEffort::Medium),
                         label: String::from("On"),
-                        description: String::from("Use the thinking model"),
+                        description: String::from("Use the reasoning model"),
                     },
                 ],
             },
         ));
 
-        let resolved = preset.resolve_thinking_selection(Some("enabled"));
+        let resolved = preset.resolve_reasoning_effort_selection(Some("enabled"));
 
         assert_eq!(resolved.request_model, "kimi-k2.5-thinking");
         assert_eq!(resolved.request_thinking, None);
@@ -829,12 +844,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_thinking_selection_falls_back_to_first_variant_when_selection_is_invalid() {
+    fn resolve_reasoning_effort_selection_falls_back_to_first_variant_when_selection_is_invalid() {
         let mut preset = model("deepseek-chat");
-        preset.thinking_capability = ThinkingCapability::Toggle;
-        preset.thinking_implementation = Some(ThinkingImplementation::ModelVariant(
-            ThinkingVariantConfig {
-                variants: vec![ThinkingVariant {
+        preset.reasoning_capability = ReasoningCapability::Toggle;
+        preset.reasoning_implementation = Some(ReasoningImplementation::ModelVariant(
+            ReasoningVariantConfig {
+                variants: vec![ReasoningVariant {
                     selection_value: String::from("disabled"),
                     model_slug: String::from("deepseek-chat"),
                     reasoning_effort: None,
@@ -844,7 +859,7 @@ mod tests {
             },
         ));
 
-        let resolved = preset.resolve_thinking_selection(Some("invalid"));
+        let resolved = preset.resolve_reasoning_effort_selection(Some("invalid"));
 
         assert_eq!(resolved.request_model, "deepseek-chat");
         assert_eq!(resolved.request_thinking, None);
@@ -930,7 +945,7 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: None,
+            request_thinking: None,
             reasoning_effort: None,
             extra_body: None,
         };

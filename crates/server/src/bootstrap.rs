@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -21,7 +20,16 @@ use crate::db::Database;
 use crate::execution::ServerRuntimeDependencies;
 use crate::load_server_provider;
 use crate::resolve_listen_targets;
-use crate::run_listeners;
+use crate::run_listeners_with_internal_proxy;
+use crate::singleton::ServerControlAction;
+use crate::singleton::SingletonRole;
+use crate::singleton::acquire_singleton_role;
+use crate::singleton::run_server_control;
+use crate::singleton::run_stdio_proxy;
+use crate::transport::InternalProxyControl;
+use crate::transport::InternalProxyEndpoint;
+#[cfg(windows)]
+use crate::windows_tray::WindowsServerTray;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ServerTransportMode {
@@ -33,22 +41,84 @@ pub enum ServerTransportMode {
 #[derive(Debug, Clone, Parser)]
 #[command(name = "devo-server", version, about)]
 pub struct ServerProcessArgs {
-    /// Optional workspace root used for project-level config resolution.
-    #[arg(long)]
-    pub working_root: Option<PathBuf>,
-
     /// Override the transport mode used by this server process.
     #[arg(long, value_enum, hide = true, default_value_t = ServerTransportMode::Config)]
     pub transport: ServerTransportMode,
+
+    /// Print status for an existing singleton server and exit.
+    #[arg(long, hide = true)]
+    pub status: bool,
+
+    /// Ask an existing singleton server to shut down and exit.
+    #[arg(long, hide = true)]
+    pub shutdown: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerProcessAction {
+    Run,
+    Status,
+    Shutdown,
+}
+
+impl ServerProcessArgs {
+    fn action(&self) -> Result<ServerProcessAction> {
+        match (self.status, self.shutdown) {
+            (false, false) => Ok(ServerProcessAction::Run),
+            (true, false) => Ok(ServerProcessAction::Status),
+            (false, true) => Ok(ServerProcessAction::Shutdown),
+            (true, true) => anyhow::bail!("--status and --shutdown cannot be used together"),
+        }
+    }
 }
 
 /// Starts the transport-facing server runtime using the resolved application
 /// configuration and listener set.
 pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     let resolver = FileSystemConfigPathResolver::from_env()?;
+    let action = args.action()?;
+    let singleton_role = acquire_singleton_role(&resolver.user_config_dir())?;
+    let real_server_guard = match singleton_role {
+        SingletonRole::Real(guard) => match action {
+            ServerProcessAction::Run => guard,
+            ServerProcessAction::Status | ServerProcessAction::Shutdown => {
+                println!("devo server is not running");
+                return Ok(());
+            }
+        },
+        SingletonRole::Proxy(metadata) => match action {
+            ServerProcessAction::Run if args.transport == ServerTransportMode::Stdio => {
+                tracing::info!(
+                    pid = metadata.pid,
+                    endpoint = %metadata.endpoint,
+                    "proxying stdio to existing singleton server"
+                );
+                return run_stdio_proxy(metadata).await;
+            }
+            ServerProcessAction::Run => {
+                print_existing_server_status(&metadata, "already running");
+                println!("Use `devo server --shutdown` to stop it.");
+                return Ok(());
+            }
+            ServerProcessAction::Status => {
+                let result = run_server_control(&metadata, ServerControlAction::Status).await?;
+                print_existing_server_status(&metadata, result.status.as_str());
+                return Ok(());
+            }
+            ServerProcessAction::Shutdown => {
+                let result = run_server_control(&metadata, ServerControlAction::Shutdown).await?;
+                print_existing_server_status(&metadata, result.status.as_str());
+                return Ok(());
+            }
+        },
+    };
+    let internal_proxy = InternalProxyEndpoint::bind().await?;
+    let singleton_metadata =
+        real_server_guard.publish_endpoint(internal_proxy.endpoint().to_string())?;
+
     let config_store = Arc::new(std::sync::Mutex::new(AppConfigStore::load(
         resolver.user_config_dir(),
-        args.working_root.as_deref(),
+        /*workspace_root*/ None,
     )?));
     let config = config_store
         .lock()
@@ -70,11 +140,6 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
 
     tracing::info!(
         user_config = %resolver.user_config_file().display(),
-        project_config = args
-            .working_root
-            .as_deref()
-            .map(|root| resolver.project_config_file(root).display().to_string())
-            .unwrap_or_else(|| "<none>".into()),
         configured_listen = ?config.server.listen,
         effective_listen = ?effective_listen,
         max_connections = config.server.max_connections,
@@ -89,7 +154,7 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     let registry = handlers::build_registry_from_plan_with_mcp(&tool_plan, mcp_manager).await;
     let model_catalog: Arc<dyn ModelCatalog> = Arc::new(PresetModelCatalog::load_from_config(
         &resolver.user_config_dir(),
-        args.working_root.as_deref(),
+        /*workspace_root*/ None,
     )?);
     let default_model = model_catalog.resolve_for_turn(None)?.slug.clone();
     if !config.has_provider_configuration() {
@@ -102,13 +167,10 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
         Some(default_model.as_str()),
         &resolver.user_config_dir(),
     )?;
-    let skill_workspace_root = args.working_root.clone();
     let skill_catalog = Box::new(FileSystemSkillCatalog::with_devo_home(
         config.skills.clone(),
         resolver.user_config_dir(),
-        skill_workspace_root
-            .clone()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         config.project_root_markers.clone(),
     ));
     // Initialize SQLite database
@@ -127,7 +189,6 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
             provider.default_model,
             model_catalog,
             Arc::new(ProviderVendorCatalog::default()),
-            skill_workspace_root,
             skill_catalog,
             AgentsMdConfig {
                 project_root_markers: config.project_root_markers.clone(),
@@ -147,20 +208,86 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     runtime.load_persisted_sessions().await?;
     tracing::info!("persisted session restore completed");
     tracing::info!("server bootstrap completed; starting listeners");
-    tokio::select! {
-        result = run_listeners(runtime.clone(), &effective_listen) => {
-            result?;
+    let shutdown_signal = tokio_util::sync::CancellationToken::new();
+    let internal_proxy_control = InternalProxyControl::new(shutdown_signal.clone());
+
+    #[cfg(windows)]
+    let mut windows_tray = match WindowsServerTray::start() {
+        Ok(tray) => Some(tray),
+        Err(error) => {
+            tracing::warn!(%error, "failed to start Windows server tray icon");
+            None
         }
-        result = tokio::signal::ctrl_c() => {
-            result?;
-            tracing::info!("server shutdown requested");
+    };
+
+    #[cfg(windows)]
+    {
+        tokio::select! {
+            result = run_listeners_with_internal_proxy(
+                runtime.clone(),
+                &effective_listen,
+                internal_proxy,
+                singleton_metadata.token.clone(),
+                internal_proxy_control,
+            ) => {
+                result?;
+            }
+            result = tokio::signal::ctrl_c() => {
+                result?;
+                tracing::info!("server shutdown requested");
+            }
+            _ = wait_for_windows_tray_shutdown(&mut windows_tray) => {
+                tracing::info!("server shutdown requested from Windows tray icon");
+            }
+            _ = shutdown_signal.cancelled() => {
+                tracing::info!("server shutdown requested from singleton control");
+            }
         }
     }
+
+    #[cfg(not(windows))]
+    {
+        tokio::select! {
+            result = run_listeners_with_internal_proxy(
+                runtime.clone(),
+                &effective_listen,
+                internal_proxy,
+                singleton_metadata.token.clone(),
+                internal_proxy_control,
+            ) => {
+                result?;
+            }
+            result = tokio::signal::ctrl_c() => {
+                result?;
+                tracing::info!("server shutdown requested");
+            }
+            _ = shutdown_signal.cancelled() => {
+                tracing::info!("server shutdown requested from singleton control");
+            }
+        }
+    }
+
     tracing::info!("terminating unified exec processes");
     registry.terminate_unified_exec_processes().await;
     tracing::info!("completing deferred items for active turns");
     runtime.shutdown().await;
     Ok(())
+}
+
+fn print_existing_server_status(metadata: &crate::singleton::ServerLockMetadata, status: &str) {
+    println!("devo server {status}");
+    println!("pid: {}", metadata.pid);
+    println!("endpoint: {}", metadata.endpoint);
+    println!("started_at: {}", metadata.started_at);
+}
+
+#[cfg(windows)]
+async fn wait_for_windows_tray_shutdown(windows_tray: &mut Option<WindowsServerTray>) {
+    if let Some(tray) = windows_tray {
+        tray.shutdown_requested().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
 }
 
 #[cfg(test)]
@@ -175,15 +302,59 @@ mod tests {
     fn server_process_args_default_to_config_transport() {
         let args = ServerProcessArgs::parse_from(["devo-server"]);
 
-        assert_eq!(args.working_root, None);
         assert_eq!(args.transport, ServerTransportMode::Config);
+        assert_eq!(
+            args.action().expect("action"),
+            super::ServerProcessAction::Run
+        );
     }
 
     #[test]
     fn server_process_args_accept_stdio_transport_override() {
         let args = ServerProcessArgs::parse_from(["devo-server", "--transport", "stdio"]);
 
-        assert_eq!(args.working_root, None);
         assert_eq!(args.transport, ServerTransportMode::Stdio);
+        assert_eq!(
+            args.action().expect("action"),
+            super::ServerProcessAction::Run
+        );
+    }
+
+    #[test]
+    fn server_process_args_accept_status_action() {
+        let args = ServerProcessArgs::parse_from(["devo-server", "--status"]);
+
+        assert_eq!(
+            args.action().expect("action"),
+            super::ServerProcessAction::Status
+        );
+    }
+
+    #[test]
+    fn server_process_args_accept_shutdown_action() {
+        let args = ServerProcessArgs::parse_from(["devo-server", "--shutdown"]);
+
+        assert_eq!(
+            args.action().expect("action"),
+            super::ServerProcessAction::Shutdown
+        );
+    }
+
+    #[test]
+    fn server_process_args_reject_conflicting_actions() {
+        let args = ServerProcessArgs::parse_from(["devo-server", "--status", "--shutdown"]);
+
+        assert_eq!(
+            args.action().expect_err("conflicting actions").to_string(),
+            "--status and --shutdown cannot be used together"
+        );
+    }
+
+    #[test]
+    fn server_process_args_reject_working_root() {
+        let error = ServerProcessArgs::try_parse_from(["devo-server", "--working-root", "."])
+            .expect_err("working root is no longer a server bootstrap parameter");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 }

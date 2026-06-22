@@ -164,7 +164,7 @@ async fn deep_research_spawn_uses_research_child_context() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 21,
-                "method": "agent/spawn",
+                "method": "_devo/agent/spawn",
                 "params": {
                     "session_id": parent_session_id,
                     "message": "Investigate the delegated research topic and return evidence notes.",
@@ -252,7 +252,7 @@ async fn deep_research_tool_policy_implies_research_child_context() -> Result<()
             connection_id,
             serde_json::json!({
                 "id": 22,
-                "method": "agent/spawn",
+                "method": "_devo/agent/spawn",
                 "params": {
                     "session_id": parent_session_id,
                     "message": "Investigate another delegated research topic.",
@@ -620,7 +620,7 @@ async fn child_to_parent_message_is_rejected() -> Result<()> {
                 connection_id,
                 serde_json::json!({
                     "id": 30,
-                    "method": "agent/send_message",
+                    "method": "_devo/agent/send_message",
                     "params": {
                         "session_id": child.child_session_id,
                         "target": target,
@@ -701,7 +701,7 @@ async fn invalid_agent_requests_return_invalid_params() -> Result<()> {
         (
             serde_json::json!({
                 "id": 10,
-                "method": "agent/spawn",
+                "method": "_devo/agent/spawn",
                 "params": {
                     "session_id": parent_session_id,
                     "message": "bad fork",
@@ -713,7 +713,7 @@ async fn invalid_agent_requests_return_invalid_params() -> Result<()> {
         (
             serde_json::json!({
                 "id": 11,
-                "method": "agent/spawn",
+                "method": "_devo/agent/spawn",
                 "params": {
                     "session_id": parent_session_id,
                     "message": "bad deep research fork",
@@ -726,7 +726,7 @@ async fn invalid_agent_requests_return_invalid_params() -> Result<()> {
         (
             serde_json::json!({
                 "id": 12,
-                "method": "agent/send_message",
+                "method": "_devo/agent/send_message",
                 "params": {
                     "session_id": parent_session_id,
                     "target": "missing",
@@ -738,7 +738,7 @@ async fn invalid_agent_requests_return_invalid_params() -> Result<()> {
         (
             serde_json::json!({
                 "id": 13,
-                "method": "agent/spawn",
+                "method": "_devo/agent/spawn",
                 "params": {
                     "session_id": devo_protocol::SessionId::new(),
                     "message": "missing parent"
@@ -749,14 +749,14 @@ async fn invalid_agent_requests_return_invalid_params() -> Result<()> {
         (
             serde_json::json!({
                 "id": 13,
-                "method": "agent/followup_task",
+                "method": "_devo/agent/followup_task",
                 "params": {
                     "session_id": parent_session_id,
                     "target": "missing",
                     "message": "hello"
                 }
             }),
-            "unknown method: agent/followup_task",
+            "unknown method: _devo/agent/followup_task",
         ),
     ] {
         let response = runtime
@@ -791,7 +791,7 @@ async fn ephemeral_deny_all_child_agent_has_no_tools_and_one_turn() -> Result<()
             connection_id,
             serde_json::json!({
                 "id": 20,
-                "method": "agent/spawn",
+                "method": "_devo/agent/spawn",
                 "params": {
                     "session_id": parent_session_id,
                     "message": "answer this side question",
@@ -820,7 +820,7 @@ async fn ephemeral_deny_all_child_agent_has_no_tools_and_one_turn() -> Result<()
             connection_id,
             serde_json::json!({
                 "id": 21,
-                "method": "agent/send_message",
+                "method": "_devo/agent/send_message",
                 "params": {
                     "session_id": parent_session_id,
                     "target": child.child_session_id.to_string(),

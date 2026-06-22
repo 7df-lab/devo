@@ -110,7 +110,7 @@ impl ChatWidget {
                             Some(self.session.cwd.clone()),
                             self.user_turn_model(),
                             self.user_turn_model_binding_id(),
-                            self.thinking_selection.clone(),
+                            self.reasoning_effort_selection.clone(),
                             /*sandbox*/ None,
                             Some("on-request".to_string()),
                             collaboration_mode,
@@ -151,7 +151,7 @@ impl ChatWidget {
                 self.handle_slash_command(command, argument);
             }
             InputResult::ModelSelected { model } => match self.picker_mode.take() {
-                Some(PickerMode::Thinking) => self.apply_thinking_selection(model),
+                Some(PickerMode::ReasoningEffort) => self.apply_reasoning_effort_selection(model),
                 _ => self.handle_model_picker_selection(model),
             },
             InputResult::ThemeSelected { name } => {
@@ -223,7 +223,9 @@ impl ChatWidget {
             AppEvent::ThemeSelected { name } => {
                 self.apply_theme_selection(name);
             }
-            AppEvent::ThinkingSelected { value } => self.set_thinking_selection(value),
+            AppEvent::ReasoningEffortSelected { value } => {
+                self.set_reasoning_effort_selection(value)
+            }
             AppEvent::StatusMessageChanged { message } => self.set_status_message(message),
             AppEvent::HistoryEntryRequested { .. } => {
                 self.set_status_message("Persistent composer history is not available");
@@ -258,7 +260,7 @@ impl ChatWidget {
             | AppEvent::OpenSlashCommandPopup
             | AppEvent::ClosePopup
             | AppEvent::OpenModelPicker
-            | AppEvent::OpenThinkingPicker
+            | AppEvent::OpenReasoningEffortPicker
             | AppEvent::OpenThemePicker
             | AppEvent::OpenSubagentOverlay { .. }
             | AppEvent::StatusLineBranchUpdated { .. }
@@ -333,7 +335,7 @@ impl ChatWidget {
                 Some(self.session.cwd.clone()),
                 self.user_turn_model(),
                 self.user_turn_model_binding_id(),
-                self.thinking_selection.clone(),
+                self.reasoning_effort_selection.clone(),
                 /*sandbox*/ None,
                 Some("on-request".to_string()),
                 collaboration_mode,

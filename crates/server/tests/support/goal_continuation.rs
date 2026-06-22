@@ -23,6 +23,7 @@ use devo_protocol::ModelResponse;
 use devo_protocol::RequestContent;
 use devo_protocol::ResponseContent;
 use devo_protocol::ResponseMetadata;
+use devo_protocol::ServerEvent;
 use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
@@ -291,7 +292,6 @@ pub fn build_runtime_with_registry(
                 ..Model::default()
             }])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()
@@ -320,28 +320,23 @@ pub async fn initialize_connection(
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "client_name": "goal-test",
-                    "client_version": "1.0.0",
-                    "transport": "stdio",
-                    "supports_streaming": true,
-                    "supports_binary_images": false,
-                    "opt_out_notification_methods": []
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "goal-test",
+                        "title": "goal-test",
+                        "version": "1.0.0"
+                    }
                 }
             }),
         )
         .await
         .context("initialize response")?;
-    let response: devo_server::SuccessResponse<devo_server::InitializeResult> =
-        serde_json::from_value(initialize_response)?;
-    assert_eq!(response.result.server_name, "devo-server");
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "method": "initialized"
-            }),
-        )
-        .await;
+    let response: serde_json::Value = initialize_response;
+    assert_eq!(
+        response["result"]["agentInfo"]["name"],
+        serde_json::json!("devo-server")
+    );
     Ok((connection_id, notifications_rx))
 }
 
@@ -378,7 +373,10 @@ pub async fn wait_for_notification(
     let expected = serde_json::json!(method);
     timeout(Duration::from_secs(/*secs*/ 5), async {
         while let Some(value) = notifications_rx.recv().await {
-            if value.get("method") == Some(&expected) {
+            let value = legacy_event_from_acp_notification(value);
+            if value.get("method") == Some(&expected)
+                || notification_matches_native_acp_update(&value, method)
+            {
                 return Ok(value);
             }
         }
@@ -393,6 +391,14 @@ pub async fn wait_for_approval_request(
 ) -> Result<serde_json::Value> {
     timeout(Duration::from_secs(/*secs*/ 5), async {
         while let Some(value) = notifications_rx.recv().await {
+            if value.get("method")
+                == Some(&serde_json::json!(
+                    devo_protocol::ACP_SESSION_REQUEST_PERMISSION_METHOD
+                ))
+            {
+                return Ok(value);
+            }
+            let value = legacy_event_from_acp_notification(value);
             if value.get("method") == Some(&serde_json::json!("item/started"))
                 && value
                     .get("params")
@@ -444,6 +450,7 @@ pub async fn collect_until_turn_completed(
     timeout(Duration::from_secs(/*secs*/ 5), async {
         let mut values = Vec::new();
         while let Some(value) = notifications_rx.recv().await {
+            let value = legacy_event_from_acp_notification(value);
             let completed = value.get("method") == Some(&serde_json::json!("turn/completed"));
             values.push(value);
             if completed {
@@ -467,7 +474,7 @@ pub async fn pause_goal_and_interrupt_turn(
             connection_id,
             serde_json::json!({
                 "id": 90,
-                "method": "goal/set",
+                "method": "_devo/goal/set",
                 "params": {
                     "sessionId": session_id,
                     "status": "paused"
@@ -481,7 +488,7 @@ pub async fn pause_goal_and_interrupt_turn(
             connection_id,
             serde_json::json!({
                 "id": 91,
-                "method": "turn/interrupt",
+                "method": "_devo/turn/interrupt",
                 "params": {
                     "session_id": session_id,
                     "turn_id": turn_id,
@@ -495,10 +502,54 @@ pub async fn pause_goal_and_interrupt_turn(
 }
 
 pub fn is_user_message_item(value: &serde_json::Value) -> bool {
+    let value = legacy_event_from_acp_notification(value.clone());
     matches!(
         value.get("method").and_then(serde_json::Value::as_str),
         Some("item/started" | "item/completed")
     ) && value["params"]["item"]["item_kind"] == serde_json::json!("user_message")
+}
+
+fn legacy_event_from_acp_notification(value: serde_json::Value) -> serde_json::Value {
+    if value.get("method") != Some(&serde_json::json!("session/update")) {
+        return value;
+    }
+    let Ok(notification) =
+        serde_json::from_value::<devo_protocol::AcpSessionNotification>(value["params"].clone())
+    else {
+        return value;
+    };
+    let Some((method, event)) = devo_protocol::original_event_from_acp_notification(&notification)
+    else {
+        return value;
+    };
+    let params = match event {
+        ServerEvent::TurnCompleted(payload)
+        | ServerEvent::TurnInterrupted(payload)
+        | ServerEvent::TurnFailed(payload)
+        | ServerEvent::TurnStarted(payload) => serde_json::to_value(payload),
+        ServerEvent::ItemCompleted(payload) | ServerEvent::ItemStarted(payload) => {
+            serde_json::to_value(payload)
+        }
+        ServerEvent::ItemDelta {
+            delta_kind,
+            payload,
+        } => serde_json::to_value(serde_json::json!({
+            "delta_kind": delta_kind,
+            "payload": payload,
+        })),
+        other => serde_json::to_value(other),
+    }
+    .expect("serialize legacy event params");
+    serde_json::json!({
+        "method": method,
+        "params": params,
+    })
+}
+
+fn notification_matches_native_acp_update(value: &serde_json::Value, method: &str) -> bool {
+    value.get("method") == Some(&serde_json::json!("session/update"))
+        && method == "item/agentMessage/delta"
+        && value["params"]["update"]["sessionUpdate"] == serde_json::json!("agent_message_chunk")
 }
 
 pub fn request_contains_text(request: &ModelRequest, needle: &str) -> bool {

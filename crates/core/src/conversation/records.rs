@@ -8,6 +8,7 @@ use crate::{
     MessageEditRecordedRecord, SessionContext, TurnContext, TurnKind, TurnSupersededRecord,
     TurnWorkspaceRestoreCompletedRecord, TurnWorkspaceRestoreStartedRecord,
 };
+use devo_protocol::{StopReason, TurnFailureReason};
 
 /// Stores persistent metadata for one session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -35,10 +36,14 @@ pub struct SessionRecord {
     /// The latest selected provider model binding id for the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_binding_id: Option<String>,
-    /// The logical thinking selection used as the default for the next turn.
-    pub thinking: Option<String>,
+    /// The logical reasoning effort selection used as the default for the next turn.
+    #[serde(default, alias = "thinking", skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_selection: Option<String>,
     /// The working directory associated with the session.
     pub cwd: PathBuf,
+    /// Additional absolute workspace roots associated with the session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_directories: Vec<PathBuf>,
     /// The CLI version that created the session.
     pub cli_version: String,
     /// The current best-known title for the session.
@@ -96,8 +101,9 @@ pub struct TurnRecord {
     /// The selected provider model binding id used for the turn, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_binding_id: Option<String>,
-    /// The logical thinking selection used for the turn.
-    pub thinking: Option<String>,
+    /// The logical reasoning effort selection used for the turn.
+    #[serde(default, alias = "thinking", skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_selection: Option<String>,
     /// The concrete request model used to execute the turn.
     pub request_model: String,
     /// The concrete request thinking parameter used to execute the turn.
@@ -106,6 +112,12 @@ pub struct TurnRecord {
     pub input_token_estimate: Option<u32>,
     /// The authoritative provider token usage, when available.
     pub usage: Option<TurnUsage>,
+    /// The terminal provider/model stop reason, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    /// The typed terminal failure reason, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<TurnFailureReason>,
     /// The locked session context used to build the stable request prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_context: Option<SessionContext>,
@@ -508,8 +520,9 @@ mod tests {
             model_provider: "test".into(),
             model: None,
             model_binding_id: None,
-            thinking: None,
+            reasoning_effort_selection: None,
             cwd: ".".into(),
+            additional_directories: Vec::new(),
             cli_version: "0.1.0".into(),
             title: None,
             title_state: SessionTitleState::Unset,
@@ -551,6 +564,23 @@ mod tests {
         assert_eq!(session, restored);
     }
 
+    #[test]
+    fn session_record_reads_legacy_thinking_field() {
+        let mut expected = make_test_session();
+        expected.reasoning_effort_selection = Some("high".into());
+        let mut value = serde_json::to_value(&expected).expect("serialize value");
+        let object = value.as_object_mut().expect("session json object");
+        object.remove("reasoning_effort_selection");
+        object.insert("thinking".to_string(), serde_json::json!("high"));
+
+        let restored: SessionRecord = serde_json::from_value(value).expect("deserialize legacy");
+        assert_eq!(restored, expected);
+
+        let serialized = serde_json::to_value(&restored).expect("serialize restored");
+        assert_eq!(serialized["reasoning_effort_selection"], "high");
+        assert_eq!(serialized.get("thinking"), None);
+    }
+
     // ── TurnRecord ────────────────────────────────────────────
 
     #[test]
@@ -565,6 +595,23 @@ mod tests {
         let json = serde_json::to_string(&turn).expect("serialize");
         let restored: TurnRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(turn, restored);
+    }
+
+    #[test]
+    fn turn_record_reads_legacy_thinking_field() {
+        let mut expected = make_test_turn(TurnStatus::Running);
+        expected.reasoning_effort_selection = Some("high".into());
+        let mut value = serde_json::to_value(&expected).expect("serialize value");
+        let object = value.as_object_mut().expect("turn json object");
+        object.remove("reasoning_effort_selection");
+        object.insert("thinking".to_string(), serde_json::json!("high"));
+
+        let restored: TurnRecord = serde_json::from_value(value).expect("deserialize legacy");
+        assert_eq!(restored, expected);
+
+        let serialized = serde_json::to_value(&restored).expect("serialize restored");
+        assert_eq!(serialized["reasoning_effort_selection"], "high");
+        assert_eq!(serialized.get("thinking"), None);
     }
 
     #[test]
@@ -993,8 +1040,9 @@ mod tests {
             model_provider: "test-provider".into(),
             model: Some("test-model".into()),
             model_binding_id: Some("test-binding".into()),
-            thinking: None,
+            reasoning_effort_selection: None,
             cwd: "/tmp/test".into(),
+            additional_directories: Vec::new(),
             cli_version: "0.1.0".into(),
             title: Some("Test Session".into()),
             title_state: SessionTitleState::Provisional,
@@ -1024,11 +1072,13 @@ mod tests {
             kind: crate::TurnKind::Regular,
             model: "test-model".into(),
             model_binding_id: Some("test-binding".into()),
-            thinking: None,
+            reasoning_effort_selection: None,
             request_model: "test-model".into(),
             request_thinking: None,
             input_token_estimate: Some(100),
             usage: None,
+            stop_reason: None,
+            failure_reason: None,
             session_context: None,
             turn_context: None,
             schema_version: 2,

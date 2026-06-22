@@ -2,6 +2,7 @@ pub mod contracts {
     pub use devo_tools::contracts::*;
 }
 
+pub(crate) mod client_terminal_shell;
 pub mod deferred_loading;
 pub mod errors {
     pub use devo_tools::errors::*;
@@ -44,7 +45,11 @@ pub use contracts::{
     ToolProgress, ToolProgressSender, ToolResult, ToolResultContent, ToolTerminalStatus,
 };
 pub use deferred_loading::*;
-pub use devo_tools::AgentToolCoordinator;
+pub use devo_tools::{
+    AgentToolCoordinator, ClientFilesystem, ClientTerminal, ClientTerminalCreate,
+    ClientTerminalCreateRequest, ClientTerminalEnv, ClientTerminalExitStatus, ClientTerminalOutput,
+    ClientTerminalRequest, ClientTextFileRead, ClientTextFileWrite,
+};
 pub use errors::*;
 pub use events::ToolEvent;
 pub use handler_kind::ToolHandlerKind;

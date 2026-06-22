@@ -13,8 +13,8 @@ use devo_core::FileSystemSkillCatalog;
 use devo_core::Model;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderVendorCatalog;
+use devo_core::ReasoningCapability;
 use devo_core::SkillsConfig;
-use devo_core::ThinkingCapability;
 use devo_core::tools::create_default_tool_registry;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
@@ -22,6 +22,7 @@ use devo_protocol::ProviderWireApi;
 use devo_protocol::ReasoningEffort;
 use devo_protocol::ResponseContent;
 use devo_protocol::ResponseMetadata;
+use devo_protocol::ServerEvent;
 use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
@@ -237,7 +238,6 @@ fn build_runtime(data_root: &std::path::Path) -> Result<Arc<ServerRuntime>> {
             "deepseek-v4-flash".to_string(),
             Arc::new(PresetModelCatalog::new(vec![deepseek_model()])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()
@@ -257,7 +257,7 @@ fn deepseek_model() -> Model {
         slug: "deepseek-v4-flash".to_string(),
         display_name: "DeepSeek V4 Flash".to_string(),
         provider: ProviderWireApi::AnthropicMessages,
-        thinking_capability: ThinkingCapability::Unsupported,
+        reasoning_capability: ReasoningCapability::Unsupported,
         default_reasoning_effort: Some(ReasoningEffort::Low),
         base_instructions: "Follow the developer instructions.".to_string(),
         max_tokens: Some(2048),
@@ -339,26 +339,23 @@ async fn initialize_connection(
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "client_name": "deep-research-boundary-test",
-                    "client_version": "1.0.0",
-                    "transport": "stdio",
-                    "supports_streaming": true,
-                    "supports_binary_images": false,
-                    "opt_out_notification_methods": []
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "deep-research-boundary-test",
+                        "title": "deep-research-boundary-test",
+                        "version": "1.0.0"
+                    }
                 }
             }),
         )
         .await
         .context("initialize response")?;
-    let response: devo_server::SuccessResponse<devo_server::InitializeResult> =
-        serde_json::from_value(initialize_response)?;
-    assert_eq!(response.result.server_name, "devo-server");
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({ "method": "initialized" }),
-        )
-        .await;
+    let response: serde_json::Value = initialize_response;
+    assert_eq!(
+        response["result"]["agentInfo"]["name"],
+        serde_json::json!("devo-server")
+    );
     Ok((connection_id, notifications_rx))
 }
 
@@ -372,21 +369,19 @@ async fn start_session(
             connection_id,
             serde_json::json!({
                 "id": 2,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": cwd,
-                    "ephemeral": false,
-                    "title": null,
-                    "model": "deepseek-v4-flash",
-                    "model_binding_id": null
+                    "additionalDirectories": []
                 }
             }),
         )
         .await
-        .context("session/start response")?;
-    let response: devo_server::SuccessResponse<devo_server::SessionStartResult> =
-        serde_json::from_value(response)?;
-    Ok(response.result.session.session_id)
+        .context("session/new response")?;
+    let response: devo_server::SuccessResponse<devo_protocol::AcpNewSessionResult> =
+        serde_json::from_value(response.clone())
+            .with_context(|| format!("session/new returned {response}"))?;
+    Ok(response.result.session_id)
 }
 
 async fn start_research_turn(
@@ -421,13 +416,13 @@ async fn start_turn(
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [{ "type": "text", "text": text }],
                     "model": "deepseek-v4-flash",
                     "model_binding_id": null,
-                    "thinking": null,
+                    "reasoning_effort_selection": null,
                     "sandbox": null,
                     "approval_policy": null,
                     "cwd": null,
@@ -439,7 +434,8 @@ async fn start_turn(
         .await
         .context("turn/start response")?;
     let _: devo_server::SuccessResponse<devo_server::TurnStartResult> =
-        serde_json::from_value(response)?;
+        serde_json::from_value(response.clone())
+            .with_context(|| format!("turn/start returned {response}"))?;
     Ok(())
 }
 
@@ -465,6 +461,7 @@ async fn wait_for_terminal_turn_event(
     let mut events = Vec::new();
     timeout(Duration::from_secs(60), async {
         while let Some(event) = notifications_rx.recv().await {
+            let event = legacy_event_from_acp_notification(event);
             let method = event
                 .get("method")
                 .and_then(serde_json::Value::as_str)
@@ -484,4 +481,34 @@ async fn wait_for_terminal_turn_event(
     })
     .await
     .with_context(|| format!("timed out waiting for {expected_method}"))?
+}
+
+fn legacy_event_from_acp_notification(value: serde_json::Value) -> serde_json::Value {
+    if value.get("method") != Some(&serde_json::json!("session/update")) {
+        return value;
+    }
+    let Ok(notification) =
+        serde_json::from_value::<devo_protocol::AcpSessionNotification>(value["params"].clone())
+    else {
+        return value;
+    };
+    let Some((method, event)) = devo_protocol::original_event_from_acp_notification(&notification)
+    else {
+        return value;
+    };
+    let params = match event {
+        ServerEvent::TurnCompleted(payload)
+        | ServerEvent::TurnInterrupted(payload)
+        | ServerEvent::TurnFailed(payload)
+        | ServerEvent::TurnStarted(payload) => serde_json::to_value(payload),
+        ServerEvent::ItemCompleted(payload) | ServerEvent::ItemStarted(payload) => {
+            serde_json::to_value(payload)
+        }
+        other => serde_json::to_value(other),
+    }
+    .expect("serialize legacy event params");
+    serde_json::json!({
+        "method": method,
+        "params": params,
+    })
 }

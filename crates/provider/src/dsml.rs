@@ -539,7 +539,7 @@ mod tests {
             tools,
             hosted_tools,
             sampling: SamplingControls::default(),
-            thinking: None,
+            request_thinking: None,
             reasoning_effort: None,
             extra_body: None,
         }

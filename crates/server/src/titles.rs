@@ -69,7 +69,7 @@ pub(crate) fn build_title_generation_request(model: String, user_input: &str) ->
         tools: None,
         hosted_tools: Vec::new(),
         sampling: SamplingControls { temperature: None, top_p: None, top_k: None },
-        thinking: Some("disabled".to_string()),
+        request_thinking: Some("disabled".to_string()),
         reasoning_effort: None,
         extra_body: None,
     }

@@ -89,7 +89,7 @@ Keyboard behavior:
 - Pressing `Enter` on a session row clears the visible session UI for switching, sends `SwitchSession { session_id }`, and closes the browser.
 - Before dispatching the switch, the widget clears completed history, the active streaming cell, active tool calls, pending tool calls, active text items, and the composer, then sets status to `Resuming session`.
 - The host leaves alternate screen before switching, marks `session_switch_pending`, replaces the inline session UI, and asks the worker to resume the selected session.
-- The worker resumes by calling the server session-resume API for the selected session ID. On success it emits `SessionSwitched` with restored working directory, optional title, model, thinking selection, reasoning effort, token counters, history items, rich history items, loaded item count, and pending texts.
+- The worker resumes by calling the server session-resume API for the selected session ID. On success it emits `SessionSwitched` with restored working directory, optional title, model, reasoning effort selection, reasoning effort, token counters, history items, rich history items, loaded item count, and pending texts.
 - On `SessionSwitched`, the widget rebuilds visible history from rich restored items when available, falls back to projected transcript items otherwise, restores pending input queue cells, updates session metadata and token counters, clears busy state, and sets status to `Session switched`.
 - Resuming a session must not delete the previously active persisted session.
 

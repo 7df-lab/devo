@@ -14,11 +14,15 @@ mod protocol;
 mod provider_config;
 mod runtime;
 mod session;
+mod session_context;
+mod singleton;
 pub mod subagent;
 mod titles;
 mod tool_actions;
 mod transport;
 mod turn;
+#[cfg(windows)]
+mod windows_tray;
 
 pub use approval::*;
 pub use bootstrap::*;

@@ -610,7 +610,7 @@ fn minimal_request() -> ModelRequest {
         tools: None,
         hosted_tools: Vec::new(),
         sampling: Default::default(),
-        thinking: None,
+        request_thinking: None,
         reasoning_effort: None,
         extra_body: None,
     }
@@ -663,7 +663,7 @@ fn anthropic_split_tool_result_request() -> ModelRequest {
         tools: None,
         hosted_tools: Vec::new(),
         sampling: Default::default(),
-        thinking: None,
+        request_thinking: None,
         reasoning_effort: None,
         extra_body: None,
     }
@@ -694,7 +694,7 @@ fn deepseek_provider_hosted_web_search_request() -> ModelRequest {
             anthropic_tool_type: None,
         })],
         sampling: Default::default(),
-        thinking: None,
+        request_thinking: None,
         reasoning_effort: None,
         extra_body: None,
     }

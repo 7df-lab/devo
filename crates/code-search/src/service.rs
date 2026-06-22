@@ -28,6 +28,7 @@ use crate::watch::IndexWatcher;
 
 const MANIFEST_SAFETY_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_WARM_INDEXES: usize = 8;
+const WINDOWS_ERROR_INVALID_FUNCTION: i32 = 1;
 
 /// Thread-safe entrypoint used by the Devo tool runtime.
 ///
@@ -302,7 +303,7 @@ fn normalize_source_path(root: &Path, file_path: &Path) -> Result<PathBuf, CodeS
     let relative_path = if file_path.is_absolute() {
         match file_path.canonicalize() {
             Ok(canonical) => strip_source_root(root, &canonical, file_path),
-            Err(error) if error.kind() == ErrorKind::NotFound => {
+            Err(error) if is_missing_source_path_error(&error) => {
                 normalize_missing_absolute_source_path(root, file_path)
             }
             Err(error) => Err(error.into()),
@@ -334,7 +335,7 @@ fn normalize_missing_absolute_source_path(
         resolved.push(component.as_os_str());
         match resolved.canonicalize() {
             Ok(canonical) => resolved = canonical,
-            Err(error) if error.kind() == ErrorKind::NotFound => {
+            Err(error) if is_missing_source_path_error(&error) => {
                 for remaining in components {
                     if remaining != Component::CurDir {
                         resolved.push(remaining.as_os_str());
@@ -347,6 +348,11 @@ fn normalize_missing_absolute_source_path(
         }
     }
     strip_source_root(root, &resolved, file_path)
+}
+
+fn is_missing_source_path_error(error: &std::io::Error) -> bool {
+    error.kind() == ErrorKind::NotFound
+        || cfg!(windows) && error.raw_os_error() == Some(WINDOWS_ERROR_INVALID_FUNCTION)
 }
 
 fn strip_source_root(

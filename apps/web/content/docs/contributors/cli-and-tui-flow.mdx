@@ -50,7 +50,7 @@ The TUI receives an `InitialTuiSession` with:
 | `request_model` | Provider model name when it differs from `model`. |
 | `model_binding_id` | Stable binding id, when the model came from a binding. |
 | `provider` | Selected provider wire API. |
-| `thinking_selection` | Optional thinking mode for new turns. |
+| `reasoning_effort_selection` | Optional reasoning effort selection for new turns. |
 | `permission_preset` | Initial tool approval preset. |
 | `cwd` | Working directory for the session. |
 
@@ -64,7 +64,7 @@ messages, including:
 
 - submit user input;
 - execute or continue a shell command;
-- set model or thinking mode;
+- set model or reasoning effort;
 - validate or upsert provider config;
 - list sessions, skills, and provider vendors;
 - run reference search;

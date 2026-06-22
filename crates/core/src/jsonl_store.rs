@@ -254,7 +254,7 @@ mod tests {
             resume_of_turn_id: None,
             submitted_by_client_id: None,
             model: Some("test-model".into()),
-            thinking: None,
+            reasoning_effort_selection: None,
             reasoning_effort: None,
             started_at: Utc::now(),
         })

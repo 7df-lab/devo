@@ -9,87 +9,59 @@ pub(crate) struct RuntimeSessionTurnCutOptions {
     created_at: chrono::DateTime<Utc>,
 }
 
-impl ServerRuntime {
-    pub(crate) async fn handle_initialize(
-        &self,
-        connection_id: u64,
-        id: Option<serde_json::Value>,
-        params: serde_json::Value,
-    ) -> serde_json::Value {
-        let request_id = id.unwrap_or(serde_json::Value::Null);
-        match serde_json::from_value::<InitializeParams>(params) {
-            Ok(params) => {
-                let transport = params.transport.clone();
-                let opt_out_notification_count = params.opt_out_notification_methods.len();
-                if let Some(connection) = self.connections.lock().await.get_mut(&connection_id) {
-                    connection.state = ConnectionState::Initializing;
-                    connection.transport = params.transport;
-                    connection.opt_out_notification_methods =
-                        params.opt_out_notification_methods.into_iter().collect();
-                }
-                tracing::info!(
-                    connection_id,
-                    client_name = %params.client_name,
-                    client_version = %params.client_version,
-                    transport = ?transport,
-                    supports_streaming = params.supports_streaming,
-                    supports_binary_images = params.supports_binary_images,
-                    opt_out_notification_count,
-                    "accepted initialize request"
-                );
-                serde_json::to_value(SuccessResponse {
-                    id: request_id,
-                    result: self.metadata.clone(),
-                })
-                .expect("serialize initialize result")
-            }
-            Err(error) => self.error_response(
-                request_id,
-                ProtocolErrorCode::InvalidParams,
-                format!("invalid initialize params: {error}"),
-            ),
-        }
-    }
+pub(crate) enum RuntimeSessionToolRegistryUpdate {
+    KeepCurrent,
+    ReplaceIfCwdMatches {
+        cwd: PathBuf,
+        tool_registry: Option<Arc<devo_core::tools::ToolRegistry>>,
+    },
+}
 
-    pub(crate) async fn handle_session_start(
+impl ServerRuntime {
+    pub(crate) async fn start_session_with_registry(
         &self,
         connection_id: u64,
         request_id: serde_json::Value,
-        params: serde_json::Value,
+        params: SessionStartParams,
+        tool_registry: Option<Arc<devo_core::tools::ToolRegistry>>,
     ) -> serde_json::Value {
-        let params: SessionStartParams = match serde_json::from_value(params) {
-            Ok(params) => params,
+        let now = Utc::now();
+        let session_id = SessionId::new();
+        let runtime_context = match self.deps.context_for_workspace(&params.cwd).await {
+            Ok(context) => context,
             Err(error) => {
                 return self.error_response(
                     request_id,
-                    ProtocolErrorCode::InvalidParams,
-                    format!("invalid session/start params: {error}"),
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to initialize session workspace: {error}"),
                 );
             }
         };
-
-        let now = Utc::now();
-        let session_id = SessionId::new();
-        let model = params
-            .model
-            .clone()
-            .unwrap_or_else(|| self.deps.default_model.clone());
+        let requested_model = params
+            .model_binding_id
+            .as_deref()
+            .or(params.model.as_deref());
+        let initial_turn_config = runtime_context.resolve_turn_config(requested_model, None);
+        let model = initial_turn_config.model.slug.clone();
+        let model_binding_id = initial_turn_config.model_binding_id.clone();
         let record = (!params.ephemeral).then(|| {
             self.rollout_store.create_session_record(
                 session_id,
                 now,
                 params.cwd.clone(),
+                params.additional_directories.clone(),
                 params.title.clone(),
                 Some(model.clone()),
-                params.model_binding_id.clone(),
+                model_binding_id.clone(),
                 None,
-                self.deps.provider.name().to_string(),
+                runtime_context.provider.name().to_string(),
                 None,
             )
         });
         let summary = crate::SessionMetadata {
             session_id,
             cwd: params.cwd.clone(),
+            additional_directories: params.additional_directories.clone(),
             created_at: now,
             updated_at: now,
             title: params.title.clone(),
@@ -104,8 +76,8 @@ impl ServerRuntime {
             agent_role: None,
             ephemeral: params.ephemeral,
             model: Some(model.clone()),
-            model_binding_id: params.model_binding_id.clone(),
-            thinking: None,
+            model_binding_id: model_binding_id.clone(),
+            reasoning_effort_selection: None,
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -124,13 +96,18 @@ impl ServerRuntime {
                 format!("failed to persist session metadata: {error}"),
             );
         }
-        let core_session = self.deps.new_session_state(session_id, params.cwd.clone());
+        let core_session = runtime_context.new_session_state(
+            session_id,
+            params.cwd.clone(),
+            params.additional_directories.clone(),
+        );
         let config = core_session.config.clone();
         let pending_turn_queue = Arc::clone(&core_session.pending_turn_queue);
         let btw_input_queue = Arc::clone(&core_session.btw_input_queue);
         self.sessions.lock().await.insert(
             session_id,
             RuntimeSession {
+                runtime_context,
                 record,
                 summary: summary.clone(),
                 config,
@@ -151,6 +128,7 @@ impl ServerRuntime {
                 first_user_input: None,
                 pending_approvals: std::collections::HashMap::new(),
                 pending_user_inputs: std::collections::HashMap::new(),
+                tool_registry,
                 session_approval_cache: crate::execution::ApprovalGrantCache::default(),
                 turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
             }
@@ -200,18 +178,7 @@ impl ServerRuntime {
         .expect("serialize session/start response")
     }
 
-    pub(crate) async fn handle_session_list(
-        &self,
-        request_id: serde_json::Value,
-        params: serde_json::Value,
-    ) -> serde_json::Value {
-        if let Err(error) = serde_json::from_value::<SessionListParams>(params) {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::InvalidParams,
-                format!("invalid session/list params: {error}"),
-            );
-        }
+    pub(crate) async fn list_session_summaries(&self) -> Vec<SessionMetadata> {
         let sessions = self
             .sessions
             .lock()
@@ -224,13 +191,7 @@ impl ServerRuntime {
             summaries.push(session.lock().await.summary.clone());
         }
         summaries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-        serde_json::to_value(SuccessResponse {
-            id: request_id,
-            result: SessionListResult {
-                sessions: summaries,
-            },
-        })
-        .expect("serialize session/list response")
+        summaries
     }
 
     pub(crate) async fn handle_session_metadata_update(
@@ -259,13 +220,13 @@ impl ServerRuntime {
             let mut session = session_arc.lock().await;
             session.summary.model = params.model.clone();
             session.summary.model_binding_id = params.model_binding_id.clone();
-            session.summary.thinking = params.thinking.clone();
+            session.summary.reasoning_effort_selection = params.reasoning_effort_selection.clone();
             let updated_at = Utc::now();
             session.summary.updated_at = updated_at;
             if let Some(record) = session.record.as_mut() {
                 record.model = params.model;
                 record.model_binding_id = params.model_binding_id;
-                record.thinking = params.thinking;
+                record.reasoning_effort_selection = params.reasoning_effort_selection;
                 record.updated_at = updated_at;
                 if let Err(error) = self.rollout_store.append_session_meta(record) {
                     return self.error_response(
@@ -323,7 +284,11 @@ impl ServerRuntime {
 
         let profile = {
             let mut session = session_arc.lock().await;
-            let profile = safety_profile_from_protocol(params.preset, session.summary.cwd.clone());
+            let profile = safety_profile_from_protocol(
+                params.preset,
+                session.summary.cwd.clone(),
+                session.summary.additional_directories.clone(),
+            );
             {
                 let mut core_session = session.core_session.lock().await;
                 core_session.config.permission_mode = profile.permission_mode();
@@ -445,6 +410,22 @@ impl ServerRuntime {
                 );
             }
         };
+        self.restore_existing_session_with_tool_registry_update(
+            connection_id,
+            request_id,
+            params,
+            RuntimeSessionToolRegistryUpdate::KeepCurrent,
+        )
+        .await
+    }
+
+    pub(crate) async fn restore_existing_session_with_tool_registry_update(
+        &self,
+        connection_id: u64,
+        request_id: serde_json::Value,
+        params: SessionResumeParams,
+        tool_registry_update: RuntimeSessionToolRegistryUpdate,
+    ) -> serde_json::Value {
         let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
             return self.error_response(
                 request_id,
@@ -452,7 +433,20 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        let session = session_arc.lock().await;
+        let mut session = session_arc.lock().await;
+        match tool_registry_update {
+            RuntimeSessionToolRegistryUpdate::KeepCurrent => {}
+            RuntimeSessionToolRegistryUpdate::ReplaceIfCwdMatches { cwd, tool_registry } => {
+                if session.summary.cwd != cwd {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InvalidParams,
+                        "session cwd does not match the stored session cwd",
+                    );
+                }
+                session.tool_registry = tool_registry;
+            }
+        }
         let session_summary = session.summary.clone();
         let latest_turn = session.latest_turn.clone();
         let loaded_item_count = session.loaded_item_count;
@@ -552,11 +546,12 @@ impl ServerRuntime {
                 forked_id,
                 now,
                 forked_runtime.summary.cwd.clone(),
+                forked_runtime.summary.additional_directories.clone(),
                 forked_runtime.summary.title.clone(),
                 forked_runtime.summary.model.clone(),
                 forked_runtime.summary.model_binding_id.clone(),
-                forked_runtime.summary.thinking.clone(),
-                self.deps.provider.name().to_string(),
+                forked_runtime.summary.reasoning_effort_selection.clone(),
+                forked_runtime.runtime_context.provider.name().to_string(),
                 Some(params.session_id),
             );
             if let Err(error) = self.rollout_store.append_session_meta(&record) {
@@ -702,7 +697,20 @@ impl ServerRuntime {
         )?;
 
         let cwd = cwd_override.unwrap_or_else(|| source.summary.cwd.clone());
-        let mut core_session = self.deps.new_session_state(session_id, cwd.clone());
+        let additional_directories = source.summary.additional_directories.clone();
+        let runtime_context = if cwd == source.summary.cwd {
+            Arc::clone(&source.runtime_context)
+        } else {
+            self.deps
+                .context_for_workspace(&cwd)
+                .await
+                .map_err(|error| format!("failed to initialize session workspace: {error}"))?
+        };
+        let mut core_session = runtime_context.new_session_state(
+            session_id,
+            cwd.clone(),
+            additional_directories.clone(),
+        );
         core_session.session_context = source_core_session.session_context.clone();
         core_session.latest_turn_context = None;
         core_session.total_input_tokens = source_core_session.total_input_tokens;
@@ -741,19 +749,18 @@ impl ServerRuntime {
                         .summary
                         .model
                         .clone()
-                        .unwrap_or_else(|| self.deps.default_model.clone());
+                        .unwrap_or_else(|| runtime_context.default_model.clone());
                     // Synthetic fork metadata follows normal turn semantics:
                     // `model` remains the catalog slug, while `request_model`
                     // is recomputed from the active provider binding.
-                    let request_model = self
-                        .deps
+                    let request_model = runtime_context
                         .resolve_turn_config(
                             source
                                 .summary
                                 .model_binding_id
                                 .as_deref()
                                 .or(Some(model.as_str())),
-                            source.summary.thinking.clone(),
+                            source.summary.reasoning_effort_selection.clone(),
                         )
                         .request_model;
                     let sequence = kept_items
@@ -768,13 +775,18 @@ impl ServerRuntime {
                         kind: devo_protocol::TurnKind::Regular,
                         model,
                         model_binding_id: source.summary.model_binding_id.clone(),
-                        thinking: source.summary.thinking.clone(),
+                        reasoning_effort_selection: source
+                            .summary
+                            .reasoning_effort_selection
+                            .clone(),
                         reasoning_effort: source.summary.reasoning_effort,
                         request_model,
-                        request_thinking: source.summary.thinking.clone(),
+                        request_thinking: source.summary.reasoning_effort_selection.clone(),
                         started_at: source.summary.created_at,
                         completed_at: Some(source.summary.updated_at),
                         usage: None,
+                        stop_reason: None,
+                        failure_reason: None,
                     })
                 })
         } else {
@@ -785,6 +797,7 @@ impl ServerRuntime {
         let summary = crate::SessionMetadata {
             session_id,
             cwd: cwd.clone(),
+            additional_directories,
             created_at,
             updated_at,
             title: title_override.or_else(|| source.summary.title.clone()),
@@ -796,7 +809,7 @@ impl ServerRuntime {
             ephemeral: source.summary.ephemeral,
             model: source.summary.model.clone(),
             model_binding_id: source.summary.model_binding_id.clone(),
-            thinking: source.summary.thinking.clone(),
+            reasoning_effort_selection: source.summary.reasoning_effort_selection.clone(),
             reasoning_effort: source.summary.reasoning_effort,
             total_input_tokens: source_core_session.total_input_tokens,
             total_output_tokens: source_core_session.total_output_tokens,
@@ -816,6 +829,7 @@ impl ServerRuntime {
         let pending_turn_queue = Arc::clone(&core_session.pending_turn_queue);
         let btw_input_queue = Arc::clone(&core_session.btw_input_queue);
         Ok(RuntimeSession {
+            runtime_context,
             record: None,
             summary,
             config,
@@ -837,6 +851,7 @@ impl ServerRuntime {
             first_user_input: source.first_user_input.clone(),
             pending_approvals: std::collections::HashMap::new(),
             pending_user_inputs: std::collections::HashMap::new(),
+            tool_registry: source.tool_registry.clone(),
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
         })

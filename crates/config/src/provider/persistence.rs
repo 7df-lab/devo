@@ -87,7 +87,9 @@ fn update_provider_config_document(
 
     overlay_optional_key(document, replacement, "model_provider");
     overlay_optional_key(document, replacement, "model");
-    overlay_optional_key(document, replacement, "model_thinking_selection");
+    overlay_optional_key(document, replacement, "model_reasoning_effort_selection");
+    document.remove("model_thinking_selection");
+    document.remove("model_thinking");
     overlay_optional_key(document, replacement, "model_auto_compact_token_limit");
     overlay_optional_key(document, replacement, "model_context_window");
     overlay_optional_key(document, replacement, "disable_response_storage");

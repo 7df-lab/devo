@@ -172,7 +172,7 @@ impl ChatWidget {
         let cwd = Some(self.session.cwd.clone());
         let model = self.user_turn_model();
         let model_binding_id = self.user_turn_model_binding_id();
-        let thinking = self.thinking_selection.clone();
+        let reasoning_effort_selection = self.reasoning_effort_selection.clone();
         let implement_item = SelectionItem {
             name: "Implement Plan".to_string(),
             description: Some("Switch to Build mode and start implementing this plan.".to_string()),
@@ -185,7 +185,7 @@ impl ChatWidget {
                         cwd.clone(),
                         model.clone(),
                         model_binding_id.clone(),
-                        thinking.clone(),
+                        reasoning_effort_selection.clone(),
                         /*sandbox*/ None,
                         Some("on-request".to_string()),
                         CollaborationMode::Build,

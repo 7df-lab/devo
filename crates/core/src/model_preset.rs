@@ -18,9 +18,9 @@
 use devo_protocol::InputModality;
 use devo_protocol::Model;
 use devo_protocol::ProviderWireApi;
+use devo_protocol::ReasoningCapability;
 use devo_protocol::ReasoningEffort;
-use devo_protocol::ThinkingCapability;
-use devo_protocol::ThinkingImplementation;
+use devo_protocol::ReasoningImplementation;
 use devo_protocol::TruncationPolicyConfig;
 use serde::Deserialize;
 use serde::Serialize;
@@ -38,12 +38,13 @@ pub struct ModelPreset {
     /// Optional short description of the model.
     #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub description: Option<String>,
-    /// Thinking control available for this model.
+    /// Reasoning control available for this model.
     #[serde(
-        default = "default_thinking_capability",
-        deserialize_with = "deserialize_thinking_capability"
+        default = "default_reasoning_capability",
+        alias = "thinking_capability",
+        deserialize_with = "deserialize_reasoning_capability"
     )]
-    pub thinking_capability: ThinkingCapability,
+    pub reasoning_capability: ReasoningCapability,
     /// Legacy list of supported reasoning levels used by some bundled presets.
     #[serde(default, alias = "supported_reasoning_levels")]
     pub supported_reasoning_levels: Vec<ReasoningEffort>,
@@ -54,9 +55,9 @@ pub struct ModelPreset {
         deserialize_with = "deserialize_reasoning_effort_option"
     )]
     pub default_reasoning_effort: Option<ReasoningEffort>,
-    /// How the selected thinking mode should be applied to requests.
-    #[serde(default)]
-    pub thinking_implementation: Option<ThinkingImplementation>,
+    /// How the selected reasoning effort should be applied to requests.
+    #[serde(default, alias = "thinking_implementation")]
+    pub reasoning_implementation: Option<ReasoningImplementation>,
     /// Base system instructions bundled with the model.
     pub base_instructions: String,
     /// Maximum context window in tokens.
@@ -99,10 +100,10 @@ impl Default for ModelPreset {
             display_name: String::new(),
             provider: ProviderWireApi::OpenAIChatCompletions,
             description: None,
-            thinking_capability: ThinkingCapability::Unsupported,
+            reasoning_capability: ReasoningCapability::Unsupported,
             supported_reasoning_levels: Vec::new(),
             default_reasoning_effort: Some(ReasoningEffort::default()),
-            thinking_implementation: None,
+            reasoning_implementation: None,
             base_instructions: String::new(),
             context_window: 200_000,
             effective_context_window_percent: None,
@@ -128,14 +129,14 @@ impl From<ModelPreset> for Model {
         // Legacy presets express "toggle with selectable levels" as a plain
         // toggle plus a non-empty level list. Move that list into the runtime
         // shape once; catalog loading can convert many presets at startup.
-        let thinking_capability = match value.thinking_capability {
-            ThinkingCapability::Toggle if !supported_reasoning_levels.is_empty() => {
-                ThinkingCapability::ToggleWithLevels(supported_reasoning_levels)
+        let reasoning_capability = match value.reasoning_capability {
+            ReasoningCapability::Toggle if !supported_reasoning_levels.is_empty() => {
+                ReasoningCapability::ToggleWithLevels(supported_reasoning_levels)
             }
             capability => capability,
         };
-        let default_reasoning_effort = match &thinking_capability {
-            ThinkingCapability::ToggleWithLevels(levels) => {
+        let default_reasoning_effort = match &reasoning_capability {
+            ReasoningCapability::ToggleWithLevels(levels) => {
                 default_reasoning_effort.or_else(|| levels.first().copied())
             }
             _ => default_reasoning_effort,
@@ -146,9 +147,9 @@ impl From<ModelPreset> for Model {
             display_name: value.display_name,
             provider: value.provider,
             description: value.description,
-            thinking_capability,
+            reasoning_capability,
             default_reasoning_effort,
-            thinking_implementation: value.thinking_implementation,
+            reasoning_implementation: value.reasoning_implementation,
             base_instructions: value.base_instructions,
             context_window: value.context_window,
             effective_context_window_percent: value.effective_context_window_percent,
@@ -176,8 +177,8 @@ fn default_input_modalities() -> Vec<InputModality> {
     vec![InputModality::Text, InputModality::Image]
 }
 
-fn default_thinking_capability() -> ThinkingCapability {
-    ThinkingCapability::Unsupported
+fn default_reasoning_capability() -> ReasoningCapability {
+    ReasoningCapability::Unsupported
 }
 
 fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -211,15 +212,17 @@ where
     }
 }
 
-fn deserialize_thinking_capability<'de, D>(deserializer: D) -> Result<ThinkingCapability, D::Error>
+fn deserialize_reasoning_capability<'de, D>(
+    deserializer: D,
+) -> Result<ReasoningCapability, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     match value {
-        serde_json::Value::Null => Ok(default_thinking_capability()),
+        serde_json::Value::Null => Ok(default_reasoning_capability()),
         serde_json::Value::String(text) if text.trim().is_empty() => {
-            Ok(default_thinking_capability())
+            Ok(default_reasoning_capability())
         }
         other => serde_json::from_value(other).map_err(serde::de::Error::custom),
     }
@@ -236,7 +239,7 @@ mod tests {
         let preset = ModelPreset {
             slug: "legacy-toggle".to_string(),
             display_name: "Legacy Toggle".to_string(),
-            thinking_capability: ThinkingCapability::Toggle,
+            reasoning_capability: ReasoningCapability::Toggle,
             supported_reasoning_levels: vec![ReasoningEffort::High, ReasoningEffort::Max],
             default_reasoning_effort: None,
             ..ModelPreset::default()
@@ -249,13 +252,33 @@ mod tests {
             Model {
                 slug: "legacy-toggle".to_string(),
                 display_name: "Legacy Toggle".to_string(),
-                thinking_capability: ThinkingCapability::ToggleWithLevels(vec![
+                reasoning_capability: ReasoningCapability::ToggleWithLevels(vec![
                     ReasoningEffort::High,
                     ReasoningEffort::Max,
                 ]),
                 default_reasoning_effort: Some(ReasoningEffort::High),
                 ..Model::default()
             }
+        );
+    }
+
+    #[test]
+    fn model_preset_reads_legacy_reasoning_keys() {
+        let preset: ModelPreset = serde_json::from_value(serde_json::json!({
+            "slug": "legacy",
+            "display_name": "Legacy",
+            "provider": "openai_chat_completions",
+            "thinking_capability": "toggle",
+            "thinking_implementation": "request_parameter",
+            "base_instructions": "",
+            "supported_in_api": true
+        }))
+        .expect("deserialize legacy preset");
+
+        assert_eq!(preset.reasoning_capability, ReasoningCapability::Toggle);
+        assert_eq!(
+            preset.reasoning_implementation,
+            Some(ReasoningImplementation::RequestParameter)
         );
     }
 }

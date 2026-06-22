@@ -59,11 +59,34 @@ Provider 相关字段被 flatten 到顶层：
 | `providers` | 按 provider id 存储的 provider records。 |
 | `model_bindings` | 按 binding id 存储的 invocable model bindings。 |
 | `model_provider`, `model`, `model_providers` | Legacy provider config compatibility fields。 |
-| `model_thinking_selection` | 当前模型的用户可见 thinking selection。 |
+| `model_reasoning_effort_selection` | 当前模型的用户可见 reasoning effort selection。 |
 | `model_auto_compact_token_limit` | 可选 automatic compaction token threshold。 |
 | `model_context_window` | 可选 context-window override。 |
 | `disable_response_storage` | 可选 response-storage switch。 |
 | `preferred_auth_method` | Preferred provider auth method。目前基于 API key。 |
+
+## `[server]`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `listen` | string array | Server listen endpoints。 |
+| `max_connections` | integer | 最大 concurrent client connections。默认 `32`。 |
+| `event_buffer_size` | integer | 每个 connection 的 event buffer capacity。默认 `1024`。 |
+| `idle_session_timeout_secs` | integer | Idle session timeout 秒数。默认 `1800`。 |
+| `persist_ephemeral_sessions` | bool | 是否持久化 ephemeral sessions。默认 `false`。 |
+
+### `[server.auth]`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `enabled` | bool | 非 initialization server methods 是否需要 server authentication。默认 `false`。 |
+| `method_id` | string | Initialization 时 advertised 的 server authentication method id。默认 `agent-login`。 |
+| `name` | string | 用户可读 authentication method name。默认 `Agent login`。 |
+| `description` | string | 可选 authentication method description。 |
+| `logout` | bool | Auth enabled 时是否 advertise 并支持 ACP `logout`。默认 `true`。 |
+
+启用后，auth state 按 connection 隔离，并同时 gate ACP methods 和 legacy
+Devo server methods。
 
 ## `[defaults]`
 

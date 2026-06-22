@@ -104,6 +104,7 @@ check_interval_hours = 48
                 event_buffer_size: 1024,
                 idle_session_timeout_secs: 1800,
                 persist_ephemeral_sessions: false,
+                auth: Default::default(),
             },
             logging: LoggingConfig {
                 level: "trace".into(),
@@ -152,6 +153,105 @@ fn default_app_config_enables_code_search() {
         AppConfig::default().experimental,
         ExperimentalConfig { code_search: true }
     );
+}
+
+#[test]
+fn default_app_config_disables_server_auth() {
+    assert_eq!(
+        AppConfig::default().server.auth,
+        super::ServerAuthConfig {
+            enabled: false,
+            method_id: "agent-login".to_string(),
+            name: "Agent login".to_string(),
+            description: None,
+            logout: true,
+        }
+    );
+}
+
+#[test]
+fn loader_reads_server_auth_config() {
+    let root = unique_temp_dir("config-server-auth");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        r#"
+[server.auth]
+enabled = true
+method_id = "company-login"
+name = "Company login"
+description = "Sign in with company credentials"
+logout = false
+"#,
+    )
+    .expect("write user config");
+
+    let loader = FileSystemAppConfigLoader::new(home);
+    let config = loader.load(None).expect("load config");
+
+    assert_eq!(
+        config.server.auth,
+        super::ServerAuthConfig {
+            enabled: true,
+            method_id: "company-login".to_string(),
+            name: "Company login".to_string(),
+            description: Some("Sign in with company credentials".to_string()),
+            logout: false,
+        }
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_rejects_empty_server_auth_method_id_when_enabled() {
+    let root = unique_temp_dir("config-server-auth-empty-method");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        "[server.auth]\nenabled = true\nmethod_id = '   '\n",
+    )
+    .expect("write user config");
+
+    let loader = FileSystemAppConfigLoader::new(home);
+    let result = loader.load(None);
+
+    match result {
+        Err(super::AppConfigError::Validation { message }) => assert_eq!(
+            message,
+            "server.auth.method_id must not be empty when server auth is enabled"
+        ),
+        other => panic!("expected server auth validation error, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_rejects_empty_server_auth_name_when_enabled() {
+    let root = unique_temp_dir("config-server-auth-empty-name");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        "[server.auth]\nenabled = true\nname = '   '\n",
+    )
+    .expect("write user config");
+
+    let loader = FileSystemAppConfigLoader::new(home);
+    let result = loader.load(None);
+
+    match result {
+        Err(super::AppConfigError::Validation { message }) => assert_eq!(
+            message,
+            "server.auth.name must not be empty when server auth is enabled"
+        ),
+        other => panic!("expected server auth validation error, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

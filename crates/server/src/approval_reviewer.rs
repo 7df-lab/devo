@@ -35,7 +35,7 @@ pub(crate) fn build_approval_review_request(
             temperature: Some(0.0),
             ..SamplingControls::default()
         },
-        thinking: None,
+        request_thinking: None,
         reasoning_effort: None,
         extra_body: None,
     }

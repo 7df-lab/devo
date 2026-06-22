@@ -29,6 +29,8 @@ pub enum SessionRuntimeStatus {
 pub struct SessionMetadata {
     pub session_id: SessionId,
     pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_directories: Vec<PathBuf>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub title: Option<String>,
@@ -45,7 +47,8 @@ pub struct SessionMetadata {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_binding_id: Option<String>,
-    pub thinking: Option<String>,
+    #[serde(default, alias = "thinking", skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_selection: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
@@ -66,6 +69,8 @@ pub struct SessionMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStartParams {
     pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_directories: Vec<PathBuf>,
     pub ephemeral: bool,
     pub title: Option<String>,
     pub model: Option<String>,
@@ -193,14 +198,6 @@ impl SessionHistoryItem {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct SessionListParams {}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionListResult {
-    pub sessions: Vec<SessionMetadata>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTitleUpdateParams {
     pub session_id: SessionId,
@@ -218,7 +215,8 @@ pub struct SessionMetadataUpdateParams {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_binding_id: Option<String>,
-    pub thinking: Option<String>,
+    #[serde(default, alias = "thinking", skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_selection: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,41 +295,6 @@ pub struct SessionSubscribeResult {
     pub session_snapshot: Option<serde_json::Value>,
 }
 
-// ── Session Delete (L3-BEH-PROTOCOL-001 B10) ──────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionDeleteParams {
-    pub session_id: SessionId,
-    #[serde(default)]
-    pub delete_mode: DeleteMode,
-    #[serde(default)]
-    pub fork_policy: Option<ForkRetentionPolicy>,
-    #[serde(default)]
-    pub confirm_token: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum DeleteMode {
-    #[default]
-    Soft,
-    Hard,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ForkRetentionPolicy {
-    pub retain_forks: bool,
-    pub materialize_inherited_segments: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionDeleteResult {
-    pub session_id: SessionId,
-    pub deleted: bool,
-    pub affected_forks: Vec<SessionId>,
-    pub warnings: Vec<String>,
-}
-
 // ── Message Edit Previous (L3-BEH-PROTOCOL-001 B11) ──────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,10 +349,11 @@ mod tests {
     use crate::SessionTitleState;
 
     #[test]
-    fn session_metadata_roundtrips_with_model_and_thinking() {
+    fn session_metadata_roundtrips_with_model_and_reasoning_effort_selection() {
         let metadata = SessionMetadata {
             session_id: SessionId::new(),
             cwd: "/tmp".into(),
+            additional_directories: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             title: Some("Test".to_string()),
@@ -401,7 +365,7 @@ mod tests {
             ephemeral: false,
             model: Some("test-model".to_string()),
             model_binding_id: Some("test-binding".to_string()),
-            thinking: Some("medium".to_string()),
+            reasoning_effort_selection: Some("medium".to_string()),
             reasoning_effort: Some(crate::ReasoningEffort::Medium),
             total_input_tokens: 12,
             total_output_tokens: 34,

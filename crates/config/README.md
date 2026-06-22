@@ -70,6 +70,11 @@ provider fields without clearing every omitted provider field from lower layers.
 - `server.event_buffer_size = 1024`
 - `server.idle_session_timeout_secs = 1800`
 - `server.persist_ephemeral_sessions = false`
+- `server.auth.enabled = false`
+- `server.auth.method_id = "agent-login"`
+- `server.auth.name = "Agent login"`
+- `server.auth.description = None`
+- `server.auth.logout = true`
 - `logging.level = "info"`
 - `logging.json = false`
 - `logging.redact_secrets_in_logs = true`
@@ -107,6 +112,13 @@ max_connections = 32
 event_buffer_size = 1024
 idle_session_timeout_secs = 1800
 persist_ephemeral_sessions = false
+
+[server.auth]
+enabled = false
+method_id = "agent-login"
+name = "Agent login"
+description = "Sign in using the agent"
+logout = true
 
 [logging]
 level = "info"
@@ -174,6 +186,8 @@ timeout = 30
 `validate_app_config` rejects configs when:
 
 - `server.listen` contains duplicate endpoints.
+- `server.auth.method_id` is empty or whitespace while server auth is enabled.
+- `server.auth.name` is empty or whitespace while server auth is enabled.
 - `logging.file.max_files` is less than `1`.
 - `logging.file.filename_prefix` is empty or whitespace.
 - `updates.check_interval_hours` is less than `1`.
@@ -292,7 +306,7 @@ The current provider schema uses provider vendor entries plus model bindings:
 
 ```toml
 model = "gpt-5.4"
-model_thinking_selection = "medium"
+model_reasoning_effort_selection = "medium"
 model_auto_compact_token_limit = 970000
 model_context_window = 997500
 disable_response_storage = true
@@ -407,7 +421,7 @@ Supported modes:
 ## Deep Research
 
 `[research]` controls the server-owned `/research` workflow. The workflow reuses
-the active session model, provider, thinking, `web_search`, and `web_fetch`
+the active session model, provider, reasoning effort, `web_search`, and `web_fetch`
 configuration for all stages.
 
 Supported keys:
@@ -449,7 +463,7 @@ After a binding is selected, resolution requires:
   `auth.json`.
 
 The resolved runtime settings contain the provider id, wire API, final model
-name, optional base URL, optional API key, model limits, thinking selection,
+name, optional base URL, optional API key, model limits, reasoning effort selection,
 response-storage flag, and preferred auth method.
 
 `model_slug` is the local catalog key matching a `slug` in the effective
@@ -460,7 +474,7 @@ defaults, merged by `slug`. Turn metadata records `model` as the catalog slug
 and `request_model` as the provider request model; these values may be
 identical.
 
-When thinking resolution selects a model variant catalog slug, the provider
+When reasoning effort resolution selects a model variant catalog slug, the provider
 request model is resolved from enabled bindings for the same provider as the
 selected turn binding. Duplicate `model_slug` values under other providers do
 not affect that request.

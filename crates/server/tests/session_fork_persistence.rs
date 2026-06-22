@@ -82,7 +82,7 @@ async fn session_fork_reports_and_replays_parent_session_id() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 4,
-                "method": "session/fork",
+                "method": "_devo/session/fork",
                 "params": {
                     "session_id": source.session_id,
                     "title": "Forked session",
@@ -141,7 +141,7 @@ async fn failed_session_fork_metadata_persistence_does_not_register_fork() -> Re
             connection_id,
             serde_json::json!({
                 "id": 4,
-                "method": "session/fork",
+                "method": "_devo/session/fork",
                 "params": {
                     "session_id": source.session_id,
                     "title": "Unpersistable fork",
@@ -197,7 +197,6 @@ fn build_runtime(data_root: &Path) -> Result<Arc<ServerRuntime>> {
                 ..Model::default()
             }])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()
@@ -226,28 +225,23 @@ async fn initialize_connection(
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "client_name": "session-fork-persistence-test",
-                    "client_version": "1.0.0",
-                    "transport": "stdio",
-                    "supports_streaming": true,
-                    "supports_binary_images": false,
-                    "opt_out_notification_methods": []
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "session-fork-persistence-test",
+                        "title": "session-fork-persistence-test",
+                        "version": "1.0.0"
+                    }
                 }
             }),
         )
         .await
         .context("initialize response")?;
-    let response: devo_server::SuccessResponse<devo_server::InitializeResult> =
-        serde_json::from_value(initialize_response)?;
-    assert_eq!(response.result.server_name, "devo-server");
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "method": "initialized"
-            }),
-        )
-        .await;
+    let response: serde_json::Value = initialize_response;
+    assert_eq!(
+        response["result"]["agentInfo"]["name"],
+        serde_json::json!("devo-server")
+    );
     Ok((connection_id, notifications_rx))
 }
 
@@ -289,7 +283,7 @@ async fn start_and_complete_turn(
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [{ "type": "text", "text": "seed fork history" }],
@@ -314,7 +308,9 @@ async fn wait_for_turn_completed(
 ) -> Result<()> {
     timeout(Duration::from_secs(5), async {
         while let Some(value) = notifications_rx.recv().await {
-            if value.get("method") == Some(&serde_json::json!("turn/completed")) {
+            if value.get("method") == Some(&serde_json::json!("turn/completed"))
+                || has_original_method(&value, "turn/completed")
+            {
                 return Ok(());
             }
         }
@@ -323,6 +319,11 @@ async fn wait_for_turn_completed(
     .await
     .context("timed out waiting for turn/completed")??;
     Ok(())
+}
+
+fn has_original_method(value: &serde_json::Value, method: &str) -> bool {
+    value.get("method") == Some(&serde_json::json!("session/update"))
+        && value["params"]["_meta"]["devo/originalMethod"].as_str() == Some(method)
 }
 
 async fn list_sessions(
@@ -340,7 +341,27 @@ async fn list_sessions(
         )
         .await
         .context("session/list response")?;
-    let response: devo_server::SuccessResponse<devo_server::SessionListResult> =
+    let response: devo_server::AcpSuccessResponse<devo_server::AcpListSessionsResult> =
         serde_json::from_value(response)?;
-    Ok(response.result.sessions)
+    response
+        .result
+        .sessions
+        .into_iter()
+        .map(|session| {
+            session
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(devo_server::DEVO_SESSION_META))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .context("decode Devo session metadata from ACP session/list response")?
+                .with_context(|| {
+                    format!(
+                        "ACP session/list response missing Devo session metadata for {}",
+                        session.session_id
+                    )
+                })
+        })
+        .collect()
 }

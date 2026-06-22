@@ -20,6 +20,8 @@ use devo_core::ReasoningEffort;
 use devo_core::SessionId;
 use devo_core::TurnId;
 use devo_core::TurnStatus;
+use devo_protocol::ACP_SESSION_UPDATE_METHOD;
+use devo_protocol::AcpStopReason;
 use devo_protocol::AgentToolPolicy;
 use devo_protocol::CloseAgentParams;
 use devo_protocol::CommandExecExitedPayload;
@@ -42,9 +44,12 @@ use devo_protocol::SessionHistoryMetadata;
 use devo_protocol::SessionPlanStepStatus;
 use devo_protocol::SpawnAgentParams;
 use devo_protocol::ThreadGoalStatus;
+use devo_server::ACP_PROMPT_COMPLETED_NOTIFICATION_METHOD;
+use devo_server::ACP_PROMPT_STARTED_NOTIFICATION_METHOD;
+use devo_server::ACP_TERMINAL_OUTPUT_NOTIFICATION_METHOD;
 use devo_server::ApprovalDecisionPayload;
 use devo_server::ApprovalRequestPayload;
-use devo_server::ApprovalRespondParams;
+use devo_server::ApprovalResponseParams;
 use devo_server::CollaborationMode;
 use devo_server::CommandExecutionPayload;
 use devo_server::InputItem;
@@ -56,7 +61,6 @@ use devo_server::ServerEvent;
 use devo_server::SessionCompactParams;
 use devo_server::SessionHistoryItem;
 use devo_server::SessionHistoryItemKind;
-use devo_server::SessionListParams;
 use devo_server::SessionResumeParams;
 use devo_server::SessionRollbackMode;
 use devo_server::SessionRollbackParams;
@@ -73,7 +77,6 @@ use devo_server::TurnEventPayload;
 use devo_server::TurnExecutionMode;
 use devo_server::TurnInterruptParams;
 use devo_server::TurnStartParams;
-use devo_server::TurnStartResult;
 use devo_server::TurnSteerParams;
 
 use crate::app_command::GoalObjectiveMode;
@@ -88,7 +91,13 @@ use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
 
+mod acp_events;
 mod subagent_events;
+
+use acp_events::acp_terminal_output_event;
+#[cfg(test)]
+use acp_events::worker_events_from_acp_notification;
+use acp_events::worker_events_from_acp_notification_with_terminal_state;
 
 const WORKER_SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
 const WORKER_ABORT_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -105,9 +114,23 @@ struct EnsureSessionOutcome {
     session_id: SessionId,
     model: Option<String>,
     model_binding_id: Option<String>,
-    thinking: Option<String>,
+    reasoning_effort_selection: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
     created: bool,
+}
+
+fn acp_terminal_snapshot_delta(
+    previous_output: &mut String,
+    output: String,
+    truncated: bool,
+) -> Option<String> {
+    let delta = if truncated || !output.starts_with(previous_output.as_str()) {
+        output.clone()
+    } else {
+        output[previous_output.len()..].to_string()
+    };
+    *previous_output = output;
+    (!delta.is_empty()).then_some(delta)
 }
 
 /// Immutable runtime configuration used to construct the background server client worker.
@@ -122,8 +145,8 @@ pub(crate) struct QueryWorkerConfig {
     pub(crate) cwd: PathBuf,
     /// Optional log-level override forwarded to the server child process.
     pub(crate) server_log_level: Option<String>,
-    /// Initial thinking mode used for new turns.
-    pub(crate) thinking_selection: Option<String>,
+    /// Initial reasoning effort selection used for new turns.
+    pub(crate) reasoning_effort_selection: Option<String>,
     /// Permission preset to apply to the server session when it exists.
     pub(crate) permission_preset: PermissionPreset,
 }
@@ -152,8 +175,8 @@ enum OperationCommand {
         model_binding_id: Option<String>,
     },
     /// TODO: Same with model, should bind at session metadata.
-    /// Update the thinking mode used for future turns.
-    SetThinking(Option<String>),
+    /// Update the reasoning effort selection used for future turns.
+    SetReasoningEffort(Option<String>),
     /// Replace the provider connection settings and restart the server client.
     ReconfigureProvider {
         /// Provider wire protocol to use for future turns.
@@ -391,10 +414,15 @@ impl QueryWorkerHandle {
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
-    /// Updates the thinking mode used for future turns.
-    pub(crate) fn set_thinking(&self, thinking: Option<String>) -> Result<()> {
+    /// Updates the reasoning effort selection used for future turns.
+    pub(crate) fn set_reasoning_effort(
+        &self,
+        reasoning_effort_selection: Option<String>,
+    ) -> Result<()> {
         self.command_tx
-            .send(OperationCommand::SetThinking(thinking))
+            .send(OperationCommand::SetReasoningEffort(
+                reasoning_effort_selection,
+            ))
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -731,9 +759,10 @@ async fn run_worker_inner(
     let mut session_cwd = config.cwd.clone();
     let mut model = config.model;
     let mut model_binding_id = config.model_binding_id;
-    let mut thinking_selection = config.thinking_selection;
+    let mut reasoning_effort_selection = config.reasoning_effort_selection;
     let mut permission_preset = config.permission_preset;
     let mut active_turn_id: Option<TurnId> = None;
+    let mut synthetic_acp_turn_id: Option<TurnId> = None;
     let mut turn_count = 0usize;
     let mut total_input_tokens = 0usize;
     let mut total_output_tokens = 0usize;
@@ -748,6 +777,10 @@ async fn run_worker_inner(
     let mut input_history_cursor: Option<usize> = None;
     let mut active_reference_search_id: Option<ReferenceSearchId> = None;
     let mut active_shell_process_ids: HashSet<String> = HashSet::new();
+    let mut visible_acp_terminal_ids: HashSet<String> = HashSet::new();
+    let mut private_acp_terminal_ids: HashSet<String> = HashSet::new();
+    let mut pending_acp_terminal_output: HashMap<String, String> = HashMap::new();
+    let mut polled_acp_terminal_output: HashMap<String, String> = HashMap::new();
     let mut next_shell_process_index = 1_u64;
 
     if let Some(initial_session_id) = config.initial_session_id {
@@ -768,7 +801,7 @@ async fn run_worker_inner(
                     title: resumed.session.title,
                     model: resumed.session.model.clone(),
                     model_binding_id: resumed.session.model_binding_id.clone(),
-                    thinking: resumed.session.thinking.clone(),
+                    reasoning_effort_selection: resumed.session.reasoning_effort_selection.clone(),
                     reasoning_effort: resumed.session.reasoning_effort,
                     active_agent_label,
                     total_input_tokens: resumed.session.total_input_tokens,
@@ -789,7 +822,7 @@ async fn run_worker_inner(
                 });
                 model = resumed.session.model.clone().unwrap_or(model);
                 model_binding_id = resumed.session.model_binding_id.clone();
-                thinking_selection = resumed.session.thinking.clone();
+                reasoning_effort_selection = resumed.session.reasoning_effort_selection.clone();
                 total_input_tokens = resumed.session.total_input_tokens;
                 total_output_tokens = resumed.session.total_output_tokens;
                 total_cache_read_tokens = resumed.session.total_cache_read_tokens;
@@ -809,6 +842,8 @@ async fn run_worker_inner(
         }
     }
     let _ = emit_skills_list(&mut client, &session_cwd, event_tx, false).await;
+    let mut acp_terminal_poll = tokio::time::interval(Duration::from_millis(250));
+    acp_terminal_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -834,10 +869,10 @@ async fn run_worker_inner(
                             .model_binding_id
                             .clone()
                             .or(model_binding_id);
-                        thinking_selection = session_start
-                            .thinking
+                        reasoning_effort_selection = session_start
+                            .reasoning_effort_selection
                             .clone()
-                            .or(thinking_selection);
+                            .or(reasoning_effort_selection);
                         let active_session_id = session_start.session_id;
                         if session_start.created {
                             let _ = event_tx.send(WorkerEvent::SessionActivated {
@@ -855,7 +890,7 @@ async fn run_worker_inner(
                             input,
                             model: Some(model.clone()),
                             model_binding_id: model_binding_id.clone(),
-                            thinking: thinking_selection.clone(),
+                            reasoning_effort_selection: reasoning_effort_selection.clone(),
                             sandbox: None,
                             approval_policy,
                             cwd: None,
@@ -863,14 +898,7 @@ async fn run_worker_inner(
                             execution_mode: TurnExecutionMode::Regular,
                         }).await;
                         match start_result {
-                            Ok(result) => match result {
-                                TurnStartResult::Started { turn_id, .. } => {
-                                    active_turn_id = Some(turn_id);
-                                }
-                                TurnStartResult::Queued { active_turn_id: queued_active_turn_id, .. } => {
-                                    active_turn_id = Some(queued_active_turn_id);
-                                }
-                            },
+                            Ok(()) => {}
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
                                     message: error.to_string(),
@@ -935,20 +963,20 @@ async fn run_worker_inner(
                                     session_id: active_session_id,
                                     model: Some(model.clone()),
                                     model_binding_id: model_binding_id.clone(),
-                                    thinking: thinking_selection.clone(),
+                                    reasoning_effort_selection: reasoning_effort_selection.clone(),
                                 })
                                 .await;
                         }
                     }
-                    Some(OperationCommand::SetThinking(next_thinking)) => {
-                        thinking_selection = next_thinking;
+                    Some(OperationCommand::SetReasoningEffort(next_reasoning_effort_selection)) => {
+                        reasoning_effort_selection = next_reasoning_effort_selection;
                         if let Some(active_session_id) = session_id {
                             let _ = client
                                 .session_metadata_update(devo_server::SessionMetadataUpdateParams {
                                     session_id: active_session_id,
                                     model: Some(model.clone()),
                                     model_binding_id: model_binding_id.clone(),
-                                    thinking: thinking_selection.clone(),
+                                    reasoning_effort_selection: reasoning_effort_selection.clone(),
                                 })
                                 .await;
                         }
@@ -1084,13 +1112,12 @@ async fn run_worker_inner(
                     Some(OperationCommand::ListSessions) => {
                         match tokio::time::timeout(
                             Duration::from_secs(5),
-                            client.session_list(SessionListParams::default()),
+                            client.session_list(),
                         )
                         .await
                         {
                             Ok(Ok(result)) => {
                                 let sessions = result
-                                    .sessions
                                     .iter()
                                     .map(|session| SessionListEntry {
                                         session_id: session.session_id,
@@ -1207,7 +1234,7 @@ async fn run_worker_inner(
                                     .clone()
                                     .unwrap_or(model);
                                 model_binding_id = result.session.model_binding_id.clone();
-                                thinking_selection = result.session.thinking.clone();
+                                reasoning_effort_selection = result.session.reasoning_effort_selection.clone();
                                 let _ = event_tx.send(WorkerEvent::SessionCompactionStarted);
                             }
                             Err(error) => {
@@ -1290,7 +1317,7 @@ async fn run_worker_inner(
                             .model_binding_id
                             .clone()
                             .or(model_binding_id);
-                        thinking_selection = session_start.thinking.clone().or(thinking_selection);
+                        reasoning_effort_selection = session_start.reasoning_effort_selection.clone().or(reasoning_effort_selection);
                         let active_session_id = session_start.session_id;
                         if session_start.created {
                             let _ = event_tx.send(WorkerEvent::SessionActivated {
@@ -1487,7 +1514,7 @@ async fn run_worker_inner(
                             cwd: session_cwd.clone(),
                             model: model.clone(),
                             model_binding_id: model_binding_id.clone(),
-                            thinking: thinking_selection.clone(),
+                            reasoning_effort_selection: reasoning_effort_selection.clone(),
                             reasoning_effort: None,
                             active_agent_label: None,
                             last_query_total_tokens,
@@ -1538,7 +1565,7 @@ async fn run_worker_inner(
                                     title: result.session.title,
                                     model: result.session.model.clone(),
                                     model_binding_id: result.session.model_binding_id.clone(),
-                                    thinking: result.session.thinking.clone(),
+                                    reasoning_effort_selection: result.session.reasoning_effort_selection.clone(),
                                     reasoning_effort: result.session.reasoning_effort,
                                     active_agent_label,
                                     total_input_tokens: result.session.total_input_tokens,
@@ -1565,7 +1592,7 @@ async fn run_worker_inner(
                                     .clone()
                                     .unwrap_or(model);
                                 model_binding_id = result.session.model_binding_id.clone();
-                                thinking_selection = result.session.thinking.clone();
+                                reasoning_effort_selection = result.session.reasoning_effort_selection.clone();
                                 total_input_tokens = result.session.total_input_tokens;
                                 total_output_tokens = result.session.total_output_tokens;
                                 let _ =
@@ -1675,7 +1702,7 @@ async fn run_worker_inner(
                                     title: result.session.title,
                                     model: result.session.model.clone(),
                                     model_binding_id: result.session.model_binding_id.clone(),
-                                    thinking: result.session.thinking.clone(),
+                                    reasoning_effort_selection: result.session.reasoning_effort_selection.clone(),
                                     reasoning_effort: result.session.reasoning_effort,
                                     active_agent_label,
                                     total_input_tokens: result.session.total_input_tokens,
@@ -1698,7 +1725,7 @@ async fn run_worker_inner(
                                 });
                                 model = result.session.model.clone().unwrap_or(model);
                                 model_binding_id = result.session.model_binding_id.clone();
-                                thinking_selection = result.session.thinking.clone();
+                                reasoning_effort_selection = result.session.reasoning_effort_selection.clone();
                                 total_input_tokens = result.session.total_input_tokens;
                                 total_output_tokens = result.session.total_output_tokens;
                                 last_query_total_tokens =
@@ -1776,7 +1803,7 @@ async fn run_worker_inner(
                                             title: resumed.session.title,
                                             model: resumed.session.model.clone(),
                                             model_binding_id: resumed.session.model_binding_id.clone(),
-                                            thinking: resumed.session.thinking.clone(),
+                                            reasoning_effort_selection: resumed.session.reasoning_effort_selection.clone(),
                                             reasoning_effort: resumed.session.reasoning_effort,
                                             active_agent_label,
                                             total_input_tokens: resumed.session.total_input_tokens,
@@ -1799,7 +1826,7 @@ async fn run_worker_inner(
                                         });
                                         model = resumed.session.model.clone().unwrap_or(model);
                                         model_binding_id = resumed.session.model_binding_id.clone();
-                                        thinking_selection = resumed.session.thinking.clone();
+                                        reasoning_effort_selection = resumed.session.reasoning_effort_selection.clone();
                                         total_input_tokens = resumed.session.total_input_tokens;
                                         total_output_tokens = resumed.session.total_output_tokens;
                                         last_query_total_tokens =
@@ -1906,7 +1933,7 @@ async fn run_worker_inner(
                             .model_binding_id
                             .clone()
                             .or(model_binding_id);
-                        thinking_selection = session_start.thinking.clone().or(thinking_selection);
+                        reasoning_effort_selection = session_start.reasoning_effort_selection.clone().or(reasoning_effort_selection);
                         let active_session_id = session_start.session_id;
                         if session_start.created {
                             let _ = event_tx.send(WorkerEvent::SessionActivated {
@@ -1925,7 +1952,7 @@ async fn run_worker_inner(
                                 input: vec![InputItem::Text { text: question }],
                                 model: Some(model.clone()),
                                 model_binding_id: model_binding_id.clone(),
-                                thinking: thinking_selection.clone(),
+                                reasoning_effort_selection: reasoning_effort_selection.clone(),
                                 sandbox: None,
                                 approval_policy: None,
                                 cwd: Some(session_cwd.clone()),
@@ -1934,9 +1961,7 @@ async fn run_worker_inner(
                             })
                             .await
                         {
-                            Ok(result) => {
-                                active_turn_id = Some(result.active_turn_id());
-                            }
+                            Ok(()) => {}
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
                                     message: error.to_string(),
@@ -1990,7 +2015,7 @@ async fn run_worker_inner(
                         scope,
                     }) => {
                         if let Err(error) = client
-                            .approval_respond(ApprovalRespondParams {
+                            .approval_respond(ApprovalResponseParams {
                                 session_id,
                                 turn_id,
                                 approval_id: approval_id.into(),
@@ -2124,9 +2149,110 @@ async fn run_worker_inner(
                     }
                 }
             }
-            notification = client.recv_event() => {
-                match notification? {
-                    Some((method, event)) => {
+            _ = acp_terminal_poll.tick(), if !visible_acp_terminal_ids.is_empty() => {
+                let terminal_ids = visible_acp_terminal_ids
+                    .iter()
+                    .filter(|terminal_id| !private_acp_terminal_ids.contains(*terminal_id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for terminal_id in terminal_ids {
+                    match client.acp_terminal_output_snapshot(&terminal_id).await {
+                        Ok(snapshot) => {
+                            if let Some(delta) = acp_terminal_snapshot_delta(
+                                polled_acp_terminal_output
+                                    .entry(terminal_id.clone())
+                                    .or_default(),
+                                snapshot.output,
+                                snapshot.truncated,
+                            ) {
+                                let _ = event_tx.send(WorkerEvent::ToolOutputDelta {
+                                    tool_use_id: terminal_id.clone(),
+                                    delta,
+                                });
+                            }
+                            if snapshot.exit_status.is_some() {
+                                visible_acp_terminal_ids.remove(&terminal_id);
+                                polled_acp_terminal_output.remove(&terminal_id);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, terminal_id, "failed to poll ACP terminal output");
+                            visible_acp_terminal_ids.remove(&terminal_id);
+                            polled_acp_terminal_output.remove(&terminal_id);
+                        }
+                    }
+                }
+            }
+            notification = client.recv_notification() => {
+                match notification {
+                    Some(notification) => {
+                        let method = notification.method;
+                        let params = notification.params;
+                        if method == ACP_PROMPT_STARTED_NOTIFICATION_METHOD {
+                            if active_turn_id.is_none()
+                                && let Some((turn_id, event)) = acp_prompt_started_event(
+                                    &params,
+                                    session_id,
+                                    &model,
+                                    &model_binding_id,
+                                    &reasoning_effort_selection,
+                                )
+                            {
+                                active_turn_id = Some(turn_id);
+                                synthetic_acp_turn_id = Some(turn_id);
+                                saw_usage_update_for_turn = false;
+                                let _ = event_tx.send(event);
+                            }
+                            continue;
+                        }
+                        if method == ACP_PROMPT_COMPLETED_NOTIFICATION_METHOD {
+                            if synthetic_acp_turn_id.is_some()
+                                && let Some(event) = acp_prompt_completed_event(
+                                    &params,
+                                    session_id,
+                                    &mut active_turn_id,
+                                    &mut turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cache_read_tokens,
+                                    last_query_total_tokens,
+                                    last_query_input_tokens,
+                                )
+                            {
+                                synthetic_acp_turn_id = None;
+                                let _ = event_tx.send(event);
+                            }
+                            continue;
+                        }
+                        if method == ACP_TERMINAL_OUTPUT_NOTIFICATION_METHOD {
+                            if let Some(terminal_id) =
+                                params.get("terminalId").and_then(serde_json::Value::as_str)
+                            {
+                                private_acp_terminal_ids.insert(terminal_id.to_string());
+                                polled_acp_terminal_output.remove(terminal_id);
+                            }
+                            if let Some(event) = acp_terminal_output_event(
+                                &params,
+                                &visible_acp_terminal_ids,
+                                &mut pending_acp_terminal_output,
+                            ) {
+                                let _ = event_tx.send(event);
+                            }
+                            continue;
+                        }
+                        if method == ACP_SESSION_UPDATE_METHOD {
+                            for event in worker_events_from_acp_notification_with_terminal_state(
+                                &params,
+                                session_id,
+                                &mut visible_acp_terminal_ids,
+                                &mut pending_acp_terminal_output,
+                            ) {
+                                let _ = event_tx.send(event);
+                            }
+                            continue;
+                        }
+                        let event: ServerEvent = serde_json::from_value(params)
+                            .with_context(|| format!("failed to decode server event for method {method}"))?;
                         if handle_btw_agent_event(
                             &method,
                             &event,
@@ -2167,11 +2293,11 @@ async fn run_worker_inner(
                                     saw_usage_update_for_turn = false;
                                     model = payload.turn.model.clone();
                                     model_binding_id = payload.turn.model_binding_id.clone();
-                                    thinking_selection = payload.turn.thinking.clone();
+                                    reasoning_effort_selection = payload.turn.reasoning_effort_selection.clone();
                                     let _ = event_tx.send(WorkerEvent::TurnStarted {
                                         model: payload.turn.model,
                                         model_binding_id: payload.turn.model_binding_id,
-                                        thinking: payload.turn.thinking,
+                                        reasoning_effort_selection: payload.turn.reasoning_effort_selection,
                                         reasoning_effort: payload.turn.reasoning_effort,
                                         turn_id: payload.turn.turn_id,
                                     });
@@ -2680,7 +2806,7 @@ async fn ensure_session_started(
             session_id: *session_id,
             model: Some(model.to_string()),
             model_binding_id: model_binding_id.clone(),
-            thinking: None,
+            reasoning_effort_selection: None,
             reasoning_effort: None,
             created: false,
         });
@@ -2689,6 +2815,7 @@ async fn ensure_session_started(
     let session = client
         .session_start(SessionStartParams {
             cwd: cwd.to_path_buf(),
+            additional_directories: Vec::new(),
             ephemeral: false,
             title: None,
             model: Some(model.to_string()),
@@ -2700,7 +2827,7 @@ async fn ensure_session_started(
         session_id: session.session.session_id,
         model: session.session.model,
         model_binding_id: session.session.model_binding_id,
-        thinking: session.session.thinking,
+        reasoning_effort_selection: session.session.reasoning_effort_selection,
         reasoning_effort: session.session.reasoning_effort,
         created: true,
     })
@@ -2782,12 +2909,11 @@ async fn apply_session_permissions(
     Ok(())
 }
 
-async fn spawn_client(cwd: &Path, server_log_level: Option<String>) -> Result<StdioServerClient> {
+async fn spawn_client(_cwd: &Path, server_log_level: Option<String>) -> Result<StdioServerClient> {
     let program = std::env::current_exe().context("resolve current executable for server child")?;
     StdioServerClient::spawn(StdioServerClientConfig {
         // Re-exec the current binary and enter the hidden server subcommand.
         program,
-        workspace_root: Some(cwd.to_path_buf()),
         args: std::iter::once("server".to_string())
             .chain(["--transport".to_string(), "stdio".to_string()])
             .chain(
@@ -3870,7 +3996,99 @@ fn proposed_plan_text(payload: &serde_json::Value) -> String {
         .to_string()
 }
 
-// TurnPlanUpdated became the primary live source.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpPromptLifecycleNotification {
+    session_id: SessionId,
+    #[serde(default)]
+    stop_reason: Option<AcpStopReason>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+fn acp_prompt_started_event(
+    params: &serde_json::Value,
+    active_session_id: Option<SessionId>,
+    model: &str,
+    model_binding_id: &Option<String>,
+    reasoning_effort_selection: &Option<String>,
+) -> Option<(TurnId, WorkerEvent)> {
+    acp_prompt_lifecycle_notification(params, active_session_id)?;
+    let turn_id = TurnId::new();
+    Some((
+        turn_id,
+        WorkerEvent::TurnStarted {
+            model: model.to_string(),
+            model_binding_id: model_binding_id.clone(),
+            reasoning_effort_selection: reasoning_effort_selection.clone(),
+            reasoning_effort: None,
+            turn_id,
+        },
+    ))
+}
+
+#[expect(clippy::too_many_arguments)]
+fn acp_prompt_completed_event(
+    params: &serde_json::Value,
+    active_session_id: Option<SessionId>,
+    active_turn_id: &mut Option<TurnId>,
+    turn_count: &mut usize,
+    total_input_tokens: usize,
+    total_output_tokens: usize,
+    total_cache_read_tokens: usize,
+    last_query_total_tokens: usize,
+    last_query_input_tokens: usize,
+) -> Option<WorkerEvent> {
+    let notification = acp_prompt_lifecycle_notification(params, active_session_id)?;
+    *active_turn_id = None;
+    if let Some(error) = notification.error {
+        return Some(WorkerEvent::TurnFailed {
+            message: error,
+            turn_count: *turn_count,
+            total_input_tokens,
+            total_output_tokens,
+            total_cache_read_tokens,
+            prompt_token_estimate: total_input_tokens,
+            last_query_input_tokens,
+        });
+    }
+    *turn_count += 1;
+    Some(WorkerEvent::TurnFinished {
+        stop_reason: acp_stop_reason_text(
+            notification.stop_reason.unwrap_or(AcpStopReason::EndTurn),
+        ),
+        turn_count: *turn_count,
+        total_input_tokens,
+        total_output_tokens,
+        total_cache_read_tokens,
+        last_query_total_tokens,
+        last_query_input_tokens,
+        prompt_token_estimate: total_input_tokens,
+    })
+}
+
+fn acp_prompt_lifecycle_notification(
+    params: &serde_json::Value,
+    active_session_id: Option<SessionId>,
+) -> Option<AcpPromptLifecycleNotification> {
+    let Ok(notification) = serde_json::from_value::<AcpPromptLifecycleNotification>(params.clone())
+    else {
+        return None;
+    };
+    (Some(notification.session_id) == active_session_id).then_some(notification)
+}
+
+fn acp_stop_reason_text(stop_reason: AcpStopReason) -> String {
+    match stop_reason {
+        AcpStopReason::EndTurn => "Completed",
+        AcpStopReason::MaxTokens => "MaxTokens",
+        AcpStopReason::MaxTurnRequests => "MaxTurnRequests",
+        AcpStopReason::Refusal => "Refusal",
+        AcpStopReason::Cancelled => "Interrupted",
+    }
+    .to_string()
+}
+
 fn plan_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEvent> {
     let tool_name = payload.tool_name.as_deref()?;
     match tool_name {
@@ -3940,6 +4158,18 @@ fn patch_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEve
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("")
                     .to_string(),
+                old_text: file
+                    .get("oldContent")
+                    .or_else(|| file.get("preContent"))
+                    .or_else(|| file.get("pre_content"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                new_text: file
+                    .get("postContent")
+                    .or_else(|| file.get("post_content"))
+                    .or_else(|| file.get("content"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
                 move_path: file
                     .get("move_path")
                     .and_then(serde_json::Value::as_str)
@@ -4043,6 +4273,8 @@ fn map_worker_join_result(result: std::result::Result<(), JoinError>) -> Result<
 mod tests {
     use chrono::Utc;
     use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::future::pending;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -4058,6 +4290,10 @@ mod tests {
 
     use super::QueryWorkerHandle;
     use super::ShellCommandExecStart;
+    use super::acp_prompt_completed_event;
+    use super::acp_prompt_started_event;
+    use super::acp_terminal_output_event;
+    use super::acp_terminal_snapshot_delta;
     use super::handle_completed_item;
     use super::is_stale_turn_interrupt_error;
     use super::next_shell_command_exec_start;
@@ -4070,6 +4306,8 @@ mod tests {
     use super::tool_call_started_actions;
     use super::tool_call_started_event;
     use super::truncate_tool_output;
+    use super::worker_events_from_acp_notification;
+    use super::worker_events_from_acp_notification_with_terminal_state;
     use crate::events::PlanStep;
     use crate::events::PlanStepStatus;
     use crate::events::SessionListEntry;
@@ -4682,6 +4920,606 @@ mod tests {
     }
 
     #[test]
+    fn acp_prompt_started_emits_turn_started() {
+        let session_id = SessionId::new();
+        let (turn_id, event) = acp_prompt_started_event(
+            &serde_json::json!({ "sessionId": session_id }),
+            Some(session_id),
+            "test-model",
+            &Some("binding".to_string()),
+            &Some("high".to_string()),
+        )
+        .expect("ACP prompt started event");
+
+        assert_eq!(
+            event,
+            WorkerEvent::TurnStarted {
+                model: "test-model".to_string(),
+                model_binding_id: Some("binding".to_string()),
+                reasoning_effort_selection: Some("high".to_string()),
+                reasoning_effort: None,
+                turn_id,
+            }
+        );
+    }
+
+    #[test]
+    fn acp_prompt_completed_emits_turn_finished() {
+        let session_id = SessionId::new();
+        let mut active_turn_id = Some(TurnId::new());
+        let mut turn_count = 2;
+
+        let event = acp_prompt_completed_event(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "stopReason": "end_turn"
+            }),
+            Some(session_id),
+            &mut active_turn_id,
+            &mut turn_count,
+            11,
+            13,
+            17,
+            19,
+            23,
+        )
+        .expect("ACP prompt completed event");
+
+        assert_eq!(active_turn_id, None);
+        assert_eq!(turn_count, 3);
+        assert_eq!(
+            event,
+            WorkerEvent::TurnFinished {
+                stop_reason: "Completed".to_string(),
+                turn_count: 3,
+                total_input_tokens: 11,
+                total_output_tokens: 13,
+                total_cache_read_tokens: 17,
+                last_query_total_tokens: 19,
+                last_query_input_tokens: 23,
+                prompt_token_estimate: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn acp_prompt_error_emits_turn_failed() {
+        let session_id = SessionId::new();
+        let mut active_turn_id = Some(TurnId::new());
+        let mut turn_count = 2;
+
+        let event = acp_prompt_completed_event(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "error": "server -32000: failed"
+            }),
+            Some(session_id),
+            &mut active_turn_id,
+            &mut turn_count,
+            11,
+            13,
+            17,
+            19,
+            23,
+        )
+        .expect("ACP prompt failed event");
+
+        assert_eq!(active_turn_id, None);
+        assert_eq!(turn_count, 2);
+        assert_eq!(
+            event,
+            WorkerEvent::TurnFailed {
+                message: "server -32000: failed".to_string(),
+                turn_count: 2,
+                total_input_tokens: 11,
+                total_output_tokens: 13,
+                total_cache_read_tokens: 17,
+                prompt_token_estimate: 11,
+                last_query_input_tokens: 23,
+            }
+        );
+    }
+
+    #[test]
+    fn acp_plan_notification_emits_plan_updated() {
+        let session_id = SessionId::new();
+        let events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "plan",
+                    "entries": [
+                        {
+                            "content": "Inspect code",
+                            "priority": "medium",
+                            "status": "completed"
+                        },
+                        {
+                            "content": "Patch bug",
+                            "priority": "high",
+                            "status": "in_progress"
+                        },
+                        {
+                            "content": "Run tests",
+                            "priority": "low",
+                            "status": "pending"
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+        );
+
+        assert_eq!(
+            events,
+            vec![WorkerEvent::PlanUpdated {
+                explanation: None,
+                steps: vec![
+                    PlanStep {
+                        text: "Inspect code".to_string(),
+                        status: PlanStepStatus::Completed,
+                    },
+                    PlanStep {
+                        text: "Patch bug".to_string(),
+                        status: PlanStepStatus::InProgress,
+                    },
+                    PlanStep {
+                        text: "Run tests".to_string(),
+                        status: PlanStepStatus::Pending,
+                    },
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn acp_agent_message_chunk_emits_text_delta() {
+        let session_id = SessionId::new();
+
+        let events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {
+                        "type": "text",
+                        "text": "streamed answer"
+                    }
+                }
+            }),
+            Some(session_id),
+        );
+
+        assert_eq!(
+            events,
+            vec![WorkerEvent::TextDelta("streamed answer".to_string())]
+        );
+    }
+
+    #[test]
+    fn acp_agent_message_chunk_with_message_id_emits_text_item_delta() {
+        let session_id = SessionId::new();
+        let item_id = ItemId::new();
+
+        let events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {
+                        "type": "text",
+                        "text": "streamed answer"
+                    },
+                    "messageId": item_id.to_string()
+                }
+            }),
+            Some(session_id),
+        );
+
+        assert_eq!(
+            events,
+            vec![WorkerEvent::TextItemDelta {
+                item_id,
+                kind: TextItemKind::Assistant,
+                delta: "streamed answer".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn raw_acp_session_state_updates_emit_worker_events() {
+        let session_id = SessionId::new();
+
+        assert_eq!(
+            worker_events_from_acp_notification(
+                &serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "available_commands_update",
+                        "availableCommands": [
+                            {
+                                "name": "explain",
+                                "description": "Explain current context",
+                                "input": {
+                                    "hint": "optional focus"
+                                }
+                            }
+                        ]
+                    }
+                }),
+                Some(session_id),
+            ),
+            vec![WorkerEvent::AcpAvailableCommandsUpdated {
+                commands: vec![devo_protocol::AcpAvailableCommand {
+                    name: "explain".to_string(),
+                    description: "Explain current context".to_string(),
+                    input: Some(devo_protocol::AcpAvailableCommandInput {
+                        hint: "optional focus".to_string(),
+                        meta: None,
+                    }),
+                    meta: None,
+                }],
+            }]
+        );
+
+        assert_eq!(
+            worker_events_from_acp_notification(
+                &serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "current_mode_update",
+                        "currentModeId": "build"
+                    }
+                }),
+                Some(session_id),
+            ),
+            vec![WorkerEvent::AcpCurrentModeUpdated {
+                current_mode_id: "build".to_string(),
+            }]
+        );
+
+        assert_eq!(
+            worker_events_from_acp_notification(
+                &serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "config_option_update",
+                        "configOptions": []
+                    }
+                }),
+                Some(session_id),
+            ),
+            vec![WorkerEvent::AcpConfigOptionsUpdated {
+                config_options: Vec::new(),
+            }]
+        );
+
+        assert_eq!(
+            worker_events_from_acp_notification(
+                &serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "usage_update",
+                        "used": 42,
+                        "size": 100
+                    }
+                }),
+                Some(session_id),
+            ),
+            vec![WorkerEvent::AcpUsageUpdated {
+                used: 42,
+                size: 100,
+                cost: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn raw_acp_tool_call_emits_visible_tool_events() {
+        let session_id = SessionId::new();
+        let events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call-1",
+                    "title": "Read file",
+                    "kind": "read",
+                    "status": "pending",
+                    "rawInput": { "path": "src/lib.rs" }
+                }
+            }),
+            Some(session_id),
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                WorkerEvent::ToolCall {
+                    tool_use_id: "call-1".to_string(),
+                    summary: "Read file".to_string(),
+                    preparing: true,
+                    parsed_commands: None,
+                },
+                WorkerEvent::ToolCallDetails {
+                    tool_use_id: "call-1".to_string(),
+                    tool_name: "read".to_string(),
+                    input: serde_json::json!({ "path": "src/lib.rs" }),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_acp_tool_call_update_text_emits_output_and_result_events() {
+        let session_id = SessionId::new();
+        let output_events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "status": "in_progress",
+                    "content": [
+                        {
+                            "type": "content",
+                            "content": {
+                                "type": "text",
+                                "text": "streamed output"
+                            }
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+        );
+        assert_eq!(
+            output_events,
+            vec![
+                WorkerEvent::ToolCallUpdated {
+                    tool_use_id: "call-1".to_string(),
+                    summary: "Running".to_string(),
+                    parsed_commands: Vec::new(),
+                },
+                WorkerEvent::ToolOutputDelta {
+                    tool_use_id: "call-1".to_string(),
+                    delta: "streamed output".to_string(),
+                },
+            ]
+        );
+
+        let result_events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "title": "Read result",
+                    "status": "completed",
+                    "rawInput": { "path": "src/lib.rs" },
+                    "rawOutput": { "ok": true },
+                    "content": [
+                        {
+                            "type": "content",
+                            "content": {
+                                "type": "text",
+                                "text": "done"
+                            }
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+        );
+        assert_eq!(
+            result_events,
+            vec![
+                WorkerEvent::ToolCallDetails {
+                    tool_use_id: "call-1".to_string(),
+                    tool_name: "tool".to_string(),
+                    input: serde_json::json!({ "path": "src/lib.rs" }),
+                },
+                WorkerEvent::ToolCallUpdated {
+                    tool_use_id: "call-1".to_string(),
+                    summary: "Read result".to_string(),
+                    parsed_commands: Vec::new(),
+                },
+                WorkerEvent::ToolResultIo {
+                    tool_use_id: "call-1".to_string(),
+                    tool_name: "Read result".to_string(),
+                    title: "Read result".to_string(),
+                    input: serde_json::json!({ "path": "src/lib.rs" }),
+                    output: serde_json::json!({ "ok": true }),
+                    display_content: Some("done".to_string()),
+                    is_error: false,
+                    truncated: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_acp_diff_content_emits_patch_applied() {
+        let session_id = SessionId::new();
+        let events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "content": [
+                        {
+                            "type": "diff",
+                            "path": "foo.txt",
+                            "newText": "hello\n"
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+        );
+
+        let mut changes = HashMap::new();
+        changes.insert(
+            PathBuf::from("foo.txt"),
+            devo_protocol::protocol::FileChange::Add {
+                content: "hello\n".to_string(),
+            },
+        );
+        assert_eq!(events, vec![WorkerEvent::PatchApplied { changes }]);
+    }
+
+    #[test]
+    fn raw_acp_terminal_content_and_output_emit_command_rows() {
+        let session_id = SessionId::new();
+        let events = worker_events_from_acp_notification(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "content": [
+                        {
+                            "type": "terminal",
+                            "terminalId": "term_1"
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+        );
+        assert_eq!(
+            events,
+            vec![WorkerEvent::ToolCall {
+                tool_use_id: "term_1".to_string(),
+                summary: "Terminal term_1".to_string(),
+                preparing: false,
+                parsed_commands: None,
+            }]
+        );
+
+        let visible_terminal_ids = HashSet::from(["term_1".to_string()]);
+        let mut pending_terminal_output = HashMap::new();
+        assert_eq!(
+            acp_terminal_output_event(
+                &serde_json::json!({
+                    "terminalId": "term_1",
+                    "delta": "hello\n"
+                }),
+                &visible_terminal_ids,
+                &mut pending_terminal_output,
+            ),
+            Some(WorkerEvent::ToolOutputDelta {
+                tool_use_id: "term_1".to_string(),
+                delta: "hello\n".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn raw_acp_terminal_rows_are_deduplicated_and_early_output_is_buffered() {
+        let session_id = SessionId::new();
+        let mut visible_terminal_ids = HashSet::new();
+        let mut pending_terminal_output = HashMap::new();
+
+        assert_eq!(
+            acp_terminal_output_event(
+                &serde_json::json!({
+                    "terminalId": "term_1",
+                    "delta": "early\n"
+                }),
+                &visible_terminal_ids,
+                &mut pending_terminal_output,
+            ),
+            None
+        );
+        assert_eq!(
+            pending_terminal_output.get("term_1"),
+            Some(&"early\n".to_string())
+        );
+
+        let first_events = worker_events_from_acp_notification_with_terminal_state(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "content": [
+                        {
+                            "type": "terminal",
+                            "terminalId": "term_1"
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+            &mut visible_terminal_ids,
+            &mut pending_terminal_output,
+        );
+        assert_eq!(
+            first_events,
+            vec![
+                WorkerEvent::ToolCall {
+                    tool_use_id: "term_1".to_string(),
+                    summary: "Terminal term_1".to_string(),
+                    preparing: false,
+                    parsed_commands: None,
+                },
+                WorkerEvent::ToolOutputDelta {
+                    tool_use_id: "term_1".to_string(),
+                    delta: "early\n".to_string(),
+                },
+            ]
+        );
+
+        let second_events = worker_events_from_acp_notification_with_terminal_state(
+            &serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "content": [
+                        {
+                            "type": "terminal",
+                            "terminalId": "term_1"
+                        }
+                    ]
+                }
+            }),
+            Some(session_id),
+            &mut visible_terminal_ids,
+            &mut pending_terminal_output,
+        );
+        assert_eq!(second_events, Vec::new());
+    }
+
+    #[test]
+    fn acp_terminal_snapshot_delta_emits_incremental_output() {
+        let mut previous_output = String::new();
+
+        assert_eq!(
+            acp_terminal_snapshot_delta(&mut previous_output, "hello".to_string(), false),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            acp_terminal_snapshot_delta(&mut previous_output, "hello world".to_string(), false),
+            Some(" world".to_string())
+        );
+        assert_eq!(
+            acp_terminal_snapshot_delta(&mut previous_output, "hello world".to_string(), false),
+            None
+        );
+        assert_eq!(
+            acp_terminal_snapshot_delta(&mut previous_output, "world".to_string(), true),
+            Some("world".to_string())
+        );
+        assert_eq!(
+            acp_terminal_snapshot_delta(&mut previous_output, "fresh".to_string(), false),
+            Some("fresh".to_string())
+        );
+    }
+
+    #[test]
     fn completed_apply_patch_tool_result_emits_patch_applied() {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         handle_completed_item(
@@ -4922,6 +5760,7 @@ mod tests {
         SessionMetadata {
             session_id,
             cwd: ".".into(),
+            additional_directories: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             title: Some("Saved conversation".to_string()),
@@ -4933,7 +5772,7 @@ mod tests {
             ephemeral: false,
             model: Some("test-model".to_string()),
             model_binding_id: None,
-            thinking: None,
+            reasoning_effort_selection: None,
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -5016,13 +5855,15 @@ mod tests {
                 kind: TurnKind::Regular,
                 model: "test-model".to_string(),
                 model_binding_id: None,
-                thinking: None,
+                reasoning_effort_selection: None,
                 reasoning_effort: None,
                 request_model: "test-model".to_string(),
                 request_thinking: None,
                 started_at: Utc::now(),
                 completed_at: None,
                 usage: None,
+                stop_reason: None,
+                failure_reason: None,
             },
         });
 
@@ -5093,6 +5934,7 @@ mod tests {
         let summary = SessionMetadata {
             session_id: active_session_id,
             cwd: ".".into(),
+            additional_directories: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             title: Some("Saved conversation".to_string()),
@@ -5104,7 +5946,7 @@ mod tests {
             ephemeral: false,
             model: Some("test-model".to_string()),
             model_binding_id: None,
-            thinking: None,
+            reasoning_effort_selection: None,
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -5133,6 +5975,7 @@ mod tests {
         let summary = SessionMetadata {
             session_id: SessionId::new(),
             cwd: ".".into(),
+            additional_directories: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             title: Some("Saved conversation".to_string()),
@@ -5144,7 +5987,7 @@ mod tests {
             ephemeral: false,
             model: Some("test-model".to_string()),
             model_binding_id: None,
-            thinking: None,
+            reasoning_effort_selection: None,
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,

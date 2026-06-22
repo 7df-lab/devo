@@ -1,0 +1,1657 @@
+use std::path::PathBuf;
+
+use crate::CommandExecutionPayload;
+use crate::FileChangePayload;
+use crate::InputItem;
+use crate::ItemDeltaKind;
+use crate::ItemEventPayload;
+use crate::ItemKind;
+use crate::ServerEvent;
+use crate::SessionEventPayload;
+use crate::ToolCallPayload;
+use crate::ToolResultPayload;
+use crate::TurnPlanStepPayload;
+use crate::acp_content::*;
+use crate::acp_session_update::*;
+
+pub const ACP_INITIALIZE_METHOD: &str = "initialize";
+pub const ACP_AUTHENTICATE_METHOD: &str = "authenticate";
+pub const ACP_LOGOUT_METHOD: &str = "logout";
+pub const ACP_SESSION_NEW_METHOD: &str = "session/new";
+pub const ACP_SESSION_LIST_METHOD: &str = "session/list";
+pub const ACP_SESSION_LOAD_METHOD: &str = "session/load";
+pub const ACP_SESSION_RESUME_METHOD: &str = "session/resume";
+pub const ACP_SESSION_CLOSE_METHOD: &str = "session/close";
+pub const ACP_SESSION_DELETE_METHOD: &str = "session/delete";
+pub const ACP_SESSION_PROMPT_METHOD: &str = "session/prompt";
+pub const ACP_SESSION_CANCEL_METHOD: &str = "session/cancel";
+pub const ACP_SESSION_UPDATE_METHOD: &str = "session/update";
+pub const ACP_SESSION_REQUEST_PERMISSION_METHOD: &str = "session/request_permission";
+pub const ACP_SESSION_SET_MODE_METHOD: &str = "session/set_mode";
+pub const ACP_SESSION_SET_CONFIG_OPTION_METHOD: &str = "session/set_config_option";
+pub const ACP_FS_READ_TEXT_FILE_METHOD: &str = "fs/read_text_file";
+pub const ACP_FS_WRITE_TEXT_FILE_METHOD: &str = "fs/write_text_file";
+pub const ACP_TERMINAL_CREATE_METHOD: &str = "terminal/create";
+pub const ACP_TERMINAL_OUTPUT_METHOD: &str = "terminal/output";
+pub const ACP_TERMINAL_WAIT_FOR_EXIT_METHOD: &str = "terminal/wait_for_exit";
+pub const ACP_TERMINAL_KILL_METHOD: &str = "terminal/kill";
+pub const ACP_TERMINAL_RELEASE_METHOD: &str = "terminal/release";
+pub const ACP_JSONRPC_VERSION: &str = "2.0";
+pub const DEVO_EXTENSION_METHOD_PREFIX: &str = "_devo/";
+pub const DEVO_ORIGINAL_METHOD_META: &str = "devo/originalMethod";
+pub const DEVO_ORIGINAL_EVENT_META: &str = "devo/originalEvent";
+pub const DEVO_SESSION_META: &str = "devo/session";
+pub const DEVO_SESSION_RESUME_META: &str = "devo/sessionResume";
+
+pub type AcpMeta = serde_json::Map<String, serde_json::Value>;
+
+pub fn devo_extension_method(method: &str) -> String {
+    format!("{DEVO_EXTENSION_METHOD_PREFIX}{method}")
+}
+
+pub fn devo_extension_inner_method(method: &str) -> Option<&str> {
+    method.strip_prefix(DEVO_EXTENSION_METHOD_PREFIX)
+}
+
+pub fn input_items_from_acp_prompt(prompt: Vec<AcpContentBlock>) -> Result<Vec<InputItem>, String> {
+    let mut input = Vec::new();
+    for block in prompt {
+        input.extend(block.into_input_items()?);
+    }
+    Ok(input)
+}
+
+pub fn acp_notification_from_server_event(
+    method: &str,
+    event: &ServerEvent,
+) -> (String, serde_json::Value) {
+    let Some(session_id) = event.session_id() else {
+        return (
+            devo_extension_method(method),
+            serde_json::to_value(event).expect("serialize devo extension event"),
+        );
+    };
+    let (update, meta) = if let Some(update) = acp_update_from_server_event(event) {
+        (update, None)
+    } else {
+        let mut meta = AcpMeta::new();
+        meta.insert(
+            DEVO_ORIGINAL_METHOD_META.to_string(),
+            serde_json::Value::String(method.to_string()),
+        );
+        meta.insert(
+            DEVO_ORIGINAL_EVENT_META.to_string(),
+            serde_json::to_value(event).expect("serialize original server event"),
+        );
+        (
+            AcpSessionUpdate::SessionInfoUpdate {
+                title: None,
+                updated_at: None,
+                meta: None,
+            },
+            Some(meta),
+        )
+    };
+    (
+        ACP_SESSION_UPDATE_METHOD.to_string(),
+        serde_json::to_value(AcpSessionNotification {
+            session_id,
+            update,
+            meta,
+        })
+        .expect("serialize ACP session update"),
+    )
+}
+
+pub fn original_event_from_acp_notification(
+    notification: &AcpSessionNotification,
+) -> Option<(String, ServerEvent)> {
+    let meta = notification.meta.as_ref()?;
+    let method = meta.get(DEVO_ORIGINAL_METHOD_META)?.as_str()?.to_string();
+    let event = serde_json::from_value(meta.get(DEVO_ORIGINAL_EVENT_META)?.clone()).ok()?;
+    Some((method, event))
+}
+
+fn acp_update_from_server_event(event: &ServerEvent) -> Option<AcpSessionUpdate> {
+    match event {
+        ServerEvent::SessionStarted(SessionEventPayload { session })
+        | ServerEvent::SessionTitleUpdated(SessionEventPayload { session }) => {
+            Some(AcpSessionUpdate::SessionInfoUpdate {
+                title: session.title.clone(),
+                updated_at: Some(session.updated_at.to_rfc3339()),
+                meta: None,
+            })
+        }
+        ServerEvent::TurnPlanUpdated(payload) => Some(AcpSessionUpdate::Plan {
+            entries: payload
+                .plan
+                .iter()
+                .map(acp_plan_entry_from_turn_plan_step)
+                .collect(),
+            meta: None,
+        }),
+        ServerEvent::TurnUsageUpdated(payload) => {
+            let used = (payload.total_input_tokens + payload.total_output_tokens) as u64;
+            Some(AcpSessionUpdate::UsageUpdate {
+                used,
+                size: payload.context_window.unwrap_or_else(|| used.max(1)),
+                cost: None,
+                meta: None,
+            })
+        }
+        ServerEvent::ToolCallStatusUpdated(payload) => {
+            let content = payload
+                .terminal_id
+                .as_ref()
+                .map(|terminal_id| {
+                    vec![AcpToolCallContent::Terminal {
+                        terminal_id: terminal_id.clone(),
+                    }]
+                })
+                .unwrap_or_default();
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: payload.tool_call_id.clone(),
+                title: None,
+                kind: None,
+                status: acp_tool_call_status_from_str(payload.status.as_str()),
+                raw_input: None,
+                raw_output: None,
+                content,
+                locations: Vec::new(),
+                meta: None,
+            })
+        }
+        ServerEvent::ItemDelta {
+            delta_kind,
+            payload,
+        } => acp_update_from_item_delta(delta_kind.clone(), payload),
+        ServerEvent::ItemStarted(payload) => acp_update_from_item_started(payload),
+        ServerEvent::ItemCompleted(payload) => acp_update_from_item_completed(payload),
+        _ => None,
+    }
+}
+
+fn acp_update_from_item_delta(
+    delta_kind: ItemDeltaKind,
+    payload: &crate::ItemDeltaPayload,
+) -> Option<AcpSessionUpdate> {
+    let content = AcpContentBlock::text(payload.delta.clone());
+    let message_id = payload.context.item_id.map(|item_id| item_id.to_string());
+    match delta_kind {
+        ItemDeltaKind::AgentMessageDelta => Some(AcpSessionUpdate::AgentMessageChunk {
+            content,
+            message_id,
+            meta: None,
+        }),
+        ItemDeltaKind::ReasoningSummaryTextDelta | ItemDeltaKind::ReasoningTextDelta => {
+            Some(AcpSessionUpdate::AgentThoughtChunk {
+                content,
+                message_id,
+                meta: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn acp_update_from_item_started(payload: &ItemEventPayload) -> Option<AcpSessionUpdate> {
+    match payload.item.item_kind {
+        ItemKind::ToolCall => {
+            let tool =
+                serde_json::from_value::<ToolCallPayload>(payload.item.payload.clone()).ok()?;
+            Some(AcpSessionUpdate::ToolCall {
+                tool_call_id: tool.tool_call_id,
+                title: tool_title(tool.tool_name.as_str(), &tool.parameters),
+                kind: tool_kind_from_name(tool.tool_name.as_str()),
+                status: AcpToolCallStatus::Pending,
+                locations: tool_locations_from_value(&tool.parameters),
+                raw_input: Some(tool.parameters),
+                raw_output: None,
+                content: Vec::new(),
+                meta: None,
+            })
+        }
+        ItemKind::CommandExecution => {
+            let command =
+                serde_json::from_value::<CommandExecutionPayload>(payload.item.payload.clone())
+                    .ok()?;
+            Some(AcpSessionUpdate::ToolCall {
+                tool_call_id: command.tool_call_id,
+                title: command.command,
+                kind: AcpToolKind::Execute,
+                status: AcpToolCallStatus::Pending,
+                locations: command
+                    .input
+                    .as_ref()
+                    .map(tool_locations_from_value)
+                    .unwrap_or_default(),
+                raw_input: command.input,
+                raw_output: None,
+                content: Vec::new(),
+                meta: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn acp_update_from_item_completed(payload: &ItemEventPayload) -> Option<AcpSessionUpdate> {
+    match payload.item.item_kind {
+        ItemKind::ToolResult => {
+            let result =
+                serde_json::from_value::<ToolResultPayload>(payload.item.payload.clone()).ok()?;
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: result.tool_call_id,
+                title: Some(
+                    (!result.summary.is_empty())
+                        .then_some(result.summary)
+                        .or(result.tool_name.clone())
+                        .unwrap_or_else(|| "Tool result".to_string()),
+                ),
+                kind: result.tool_name.as_deref().map(tool_kind_from_name),
+                status: Some(if result.is_error {
+                    AcpToolCallStatus::Failed
+                } else {
+                    AcpToolCallStatus::Completed
+                }),
+                raw_input: result.input.clone(),
+                raw_output: Some(result.content.clone()),
+                locations: result
+                    .input
+                    .as_ref()
+                    .map(tool_locations_from_value)
+                    .unwrap_or_default(),
+                content: tool_result_content(result.display_content, result.content),
+                meta: None,
+            })
+        }
+        ItemKind::CommandExecution => {
+            let command =
+                serde_json::from_value::<CommandExecutionPayload>(payload.item.payload.clone())
+                    .ok()?;
+            let content = command
+                .output
+                .as_ref()
+                .and_then(serde_json::Value::as_str)
+                .map(|text| {
+                    vec![AcpToolCallContent::Content {
+                        content: AcpContentBlock::text(text),
+                    }]
+                })
+                .unwrap_or_default();
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: command.tool_call_id,
+                title: Some(command.command),
+                kind: Some(AcpToolKind::Execute),
+                status: Some(if command.is_error {
+                    AcpToolCallStatus::Failed
+                } else {
+                    AcpToolCallStatus::Completed
+                }),
+                raw_input: command.input,
+                raw_output: command.output,
+                content,
+                locations: Vec::new(),
+                meta: None,
+            })
+        }
+        ItemKind::FileChange => {
+            let change =
+                serde_json::from_value::<FileChangePayload>(payload.item.payload.clone()).ok()?;
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: change.tool_call_id.clone(),
+                title: change.tool_name.clone(),
+                kind: Some(AcpToolKind::Edit),
+                status: Some(if change.is_error {
+                    AcpToolCallStatus::Failed
+                } else {
+                    AcpToolCallStatus::Completed
+                }),
+                raw_input: change.input.clone(),
+                raw_output: Some(payload.item.payload.clone()),
+                content: file_change_tool_content(&change),
+                locations: file_change_locations(&change),
+                meta: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn acp_plan_entry_from_turn_plan_step(step: &TurnPlanStepPayload) -> AcpPlanEntry {
+    AcpPlanEntry {
+        content: step.step.clone(),
+        priority: AcpPlanEntryPriority::Medium,
+        status: match step.status.as_str() {
+            "completed" => AcpPlanEntryStatus::Completed,
+            "in_progress" => AcpPlanEntryStatus::InProgress,
+            "pending" | "cancelled" => AcpPlanEntryStatus::Pending,
+            _ => AcpPlanEntryStatus::Pending,
+        },
+    }
+}
+
+fn tool_title(tool_name: &str, parameters: &serde_json::Value) -> String {
+    parameters
+        .get("command")
+        .or_else(|| parameters.get("cmd"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| tool_name.to_string())
+}
+
+fn tool_kind_from_name(tool_name: &str) -> AcpToolKind {
+    match tool_name {
+        "read" | "grep" | "glob" | "lsp" => AcpToolKind::Read,
+        "apply_patch" | "edit" | "write" => AcpToolKind::Edit,
+        "bash" | "shell_command" | "exec_command" => AcpToolKind::Execute,
+        "web_search" | "websearch" | "web_fetch" | "websearch_query" => AcpToolKind::Fetch,
+        "agent" => AcpToolKind::Think,
+        _ => AcpToolKind::Other,
+    }
+}
+
+fn acp_tool_call_status_from_str(status: &str) -> Option<AcpToolCallStatus> {
+    Some(match status {
+        "pending" => AcpToolCallStatus::Pending,
+        "in_progress" => AcpToolCallStatus::InProgress,
+        "completed" => AcpToolCallStatus::Completed,
+        "failed" => AcpToolCallStatus::Failed,
+        "cancelled" => AcpToolCallStatus::Cancelled,
+        _ => return None,
+    })
+}
+
+fn file_change_tool_content(change: &FileChangePayload) -> Vec<AcpToolCallContent> {
+    change
+        .changes
+        .iter()
+        .map(|(path, change)| match change {
+            crate::protocol::FileChange::Add { content } => AcpToolCallContent::Diff {
+                path: path.clone(),
+                old_text: None,
+                new_text: content.clone(),
+            },
+            crate::protocol::FileChange::Delete { content } => AcpToolCallContent::Diff {
+                path: path.clone(),
+                old_text: Some(content.clone()),
+                new_text: String::new(),
+            },
+            crate::protocol::FileChange::Update {
+                unified_diff,
+                old_text,
+                new_text,
+                ..
+            } => {
+                if let (Some(old_text), Some(new_text)) = (old_text, new_text) {
+                    AcpToolCallContent::Diff {
+                        path: path.clone(),
+                        old_text: Some(old_text.clone()),
+                        new_text: new_text.clone(),
+                    }
+                } else {
+                    AcpToolCallContent::Content {
+                        content: AcpContentBlock::text(unified_diff.clone()),
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+fn file_change_locations(change: &FileChangePayload) -> Vec<AcpToolCallLocation> {
+    change
+        .changes
+        .iter()
+        .map(|(path, _)| AcpToolCallLocation {
+            path: path.clone(),
+            line: None,
+        })
+        .collect()
+}
+
+fn tool_locations_from_value(value: &serde_json::Value) -> Vec<AcpToolCallLocation> {
+    let mut locations = Vec::new();
+    for key in ["path", "filePath", "file_path"] {
+        if let Some(path) = value.get(key).and_then(serde_json::Value::as_str) {
+            locations.push(AcpToolCallLocation {
+                path: PathBuf::from(path),
+                line: value.get("line").and_then(serde_json::Value::as_u64),
+            });
+        }
+    }
+    for key in ["paths", "files"] {
+        if let Some(items) = value.get(key).and_then(serde_json::Value::as_array) {
+            for item in items {
+                if let Some(path) = item.as_str() {
+                    locations.push(AcpToolCallLocation {
+                        path: PathBuf::from(path),
+                        line: None,
+                    });
+                } else {
+                    push_location_from_object(item, &mut locations);
+                }
+            }
+        }
+    }
+    locations
+}
+
+fn push_location_from_object(value: &serde_json::Value, locations: &mut Vec<AcpToolCallLocation>) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    let path = object
+        .get("path")
+        .or_else(|| object.get("filePath"))
+        .or_else(|| object.get("file_path"))
+        .and_then(serde_json::Value::as_str);
+    if let Some(path) = path {
+        locations.push(AcpToolCallLocation {
+            path: PathBuf::from(path),
+            line: object.get("line").and_then(serde_json::Value::as_u64),
+        });
+    }
+}
+
+fn tool_result_content(
+    display_content: Option<String>,
+    content: serde_json::Value,
+) -> Vec<AcpToolCallContent> {
+    if let Some(display_content) = display_content {
+        return vec![AcpToolCallContent::Content {
+            content: AcpContentBlock::text(display_content),
+        }];
+    }
+
+    if let Some(content) = acp_tool_content_from_value(&content) {
+        return content;
+    }
+
+    let text = match content {
+        serde_json::Value::String(text) => text,
+        other => other.to_string(),
+    };
+    vec![AcpToolCallContent::Content {
+        content: AcpContentBlock::text(text),
+    }]
+}
+
+fn acp_tool_content_from_value(value: &serde_json::Value) -> Option<Vec<AcpToolCallContent>> {
+    if let Ok(content) = serde_json::from_value::<AcpToolCallContent>(value.clone()) {
+        return Some(vec![content]);
+    }
+
+    if let Ok(contents) = serde_json::from_value::<Vec<AcpToolCallContent>>(value.clone()) {
+        return Some(contents);
+    }
+
+    if let Ok(content) = serde_json::from_value::<AcpContentBlock>(value.clone()) {
+        return Some(vec![AcpToolCallContent::Content { content }]);
+    }
+
+    if let Ok(contents) = serde_json::from_value::<Vec<AcpContentBlock>>(value.clone()) {
+        return Some(
+            contents
+                .into_iter()
+                .map(|content| AcpToolCallContent::Content { content })
+                .collect(),
+        );
+    }
+
+    let mcp_contents = value.get("content")?;
+    if let Ok(contents) = serde_json::from_value::<Vec<AcpToolCallContent>>(mcp_contents.clone()) {
+        return Some(contents);
+    }
+    let contents = serde_json::from_value::<Vec<AcpContentBlock>>(mcp_contents.clone()).ok()?;
+    Some(
+        contents
+            .into_iter()
+            .map(|content| AcpToolCallContent::Content { content })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+    use crate::EventContext;
+    use crate::ItemDeltaPayload;
+    use crate::ItemId;
+    use crate::SessionId;
+    use crate::TurnId;
+    use crate::acp_client_io::*;
+    use crate::acp_common::*;
+
+    fn native_absolute_test_path(suffix: &str) -> String {
+        #[cfg(windows)]
+        {
+            format!(r"C:\Users\user\{}", suffix.replace('/', r"\"))
+        }
+        #[cfg(unix)]
+        {
+            format!("/home/user/{suffix}")
+        }
+    }
+
+    #[test]
+    fn initialize_result_uses_acp_field_names() {
+        let result = AcpInitializeResult {
+            protocol_version: 1,
+            agent_capabilities: AcpAgentCapabilities {
+                prompt_capabilities: AcpPromptCapabilities {
+                    embedded_context: true,
+                    ..AcpPromptCapabilities::default()
+                },
+                ..AcpAgentCapabilities::default()
+            },
+            auth_methods: Vec::new(),
+            agent_info: Some(AcpImplementation::new("devo", "1.2.3").with_title("Devo")),
+            meta: None,
+        };
+
+        let json = serde_json::to_value(result).expect("serialize initialize result");
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "protocolVersion": 1,
+                "agentCapabilities": {
+                    "loadSession": false,
+                    "promptCapabilities": {
+                        "image": false,
+                        "audio": false,
+                        "embeddedContext": true
+                    },
+                    "mcpCapabilities": {
+                        "http": false,
+                        "sse": false
+                    },
+                    "sessionCapabilities": {}
+                },
+                "agentInfo": {
+                    "name": "devo",
+                    "title": "Devo",
+                    "version": "1.2.3"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn fs_text_file_params_use_acp_wire_shape() {
+        let session_id = SessionId::new();
+        let path = PathBuf::from(native_absolute_test_path("project/src/main.rs"));
+        let path_json = serde_json::to_value(&path).expect("serialize path");
+
+        let read_params = AcpFsReadTextFileParams {
+            session_id,
+            path: path.clone(),
+            line: Some(10),
+            limit: Some(50),
+            meta: None,
+        };
+        let read_value = serde_json::to_value(&read_params).expect("serialize read params");
+        assert_eq!(
+            read_value,
+            serde_json::json!({
+                "sessionId": session_id,
+                "path": path_json.clone(),
+                "line": 10,
+                "limit": 50
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AcpFsReadTextFileParams>(read_value)
+                .expect("deserialize read params"),
+            read_params
+        );
+
+        let read_result = AcpFsReadTextFileResult {
+            content: "def hello_world():\n    print('Hello, world!')\n".to_string(),
+            meta: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&read_result).expect("serialize read result"),
+            serde_json::json!({
+                "content": "def hello_world():\n    print('Hello, world!')\n"
+            })
+        );
+
+        let write_params = AcpFsWriteTextFileParams {
+            session_id,
+            path,
+            content: "{\n  \"debug\": true\n}".to_string(),
+            meta: None,
+        };
+        let write_value = serde_json::to_value(&write_params).expect("serialize write params");
+        assert_eq!(
+            write_value,
+            serde_json::json!({
+                "sessionId": session_id,
+                "path": path_json,
+                "content": "{\n  \"debug\": true\n}"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AcpFsWriteTextFileParams>(write_value)
+                .expect("deserialize write params"),
+            write_params
+        );
+    }
+
+    #[test]
+    fn new_session_params_accepts_stdio_mcp_server_shape() {
+        #[cfg(windows)]
+        let cwd = r"C:\Users\user\project";
+        #[cfg(windows)]
+        let command = r"C:\mcp\filesystem.exe";
+        #[cfg(unix)]
+        let cwd = "/home/user/project";
+        #[cfg(unix)]
+        let command = "/path/to/mcp-server";
+
+        let params: AcpNewSessionParams = serde_json::from_value(serde_json::json!({
+            "cwd": cwd,
+            "mcpServers": [
+                {
+                    "name": "filesystem",
+                    "command": command,
+                    "args": ["--stdio"],
+                    "env": []
+                }
+            ]
+        }))
+        .expect("deserialize ACP session/new params");
+
+        assert_eq!(
+            params,
+            AcpNewSessionParams {
+                cwd: PathBuf::from(cwd),
+                additional_directories: Vec::new(),
+                mcp_servers: vec![AcpMcpServer::Stdio(AcpMcpServerStdio {
+                    name: "filesystem".to_string(),
+                    command: PathBuf::from(command),
+                    args: vec!["--stdio".to_string()],
+                    env: Vec::new(),
+                    meta: None,
+                })],
+                meta: None,
+            }
+        );
+    }
+
+    #[test]
+    fn mcp_servers_use_transport_type_discriminator() {
+        let params: AcpNewSessionParams = serde_json::from_value(serde_json::json!({
+            "cwd": std::env::current_dir().expect("current dir"),
+            "mcpServers": [
+                {
+                    "type": "http",
+                    "name": "api-server",
+                    "url": "https://api.example.com/mcp",
+                    "headers": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer token123"
+                        }
+                    ]
+                },
+                {
+                    "type": "sse",
+                    "name": "event-stream",
+                    "url": "https://events.example.com/mcp",
+                    "headers": [
+                        {
+                            "name": "X-API-Key",
+                            "value": "apikey456"
+                        }
+                    ]
+                }
+            ]
+        }))
+        .expect("deserialize ACP HTTP/SSE MCP servers");
+
+        assert_eq!(
+            params.mcp_servers,
+            vec![
+                AcpMcpServer::Http(AcpMcpServerHttp {
+                    transport_type: AcpMcpServerHttpType::Http,
+                    name: "api-server".to_string(),
+                    url: "https://api.example.com/mcp".to_string(),
+                    headers: vec![AcpHttpHeader {
+                        name: "Authorization".to_string(),
+                        value: "Bearer token123".to_string(),
+                        meta: None,
+                    }],
+                    meta: None,
+                }),
+                AcpMcpServer::Sse(AcpMcpServerSse {
+                    transport_type: AcpMcpServerSseType::Sse,
+                    name: "event-stream".to_string(),
+                    url: "https://events.example.com/mcp".to_string(),
+                    headers: vec![AcpHttpHeader {
+                        name: "X-API-Key".to_string(),
+                        value: "apikey456".to_string(),
+                        meta: None,
+                    }],
+                    meta: None,
+                }),
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(params.mcp_servers).expect("serialize MCP servers"),
+            serde_json::json!([
+                {
+                    "type": "http",
+                    "name": "api-server",
+                    "url": "https://api.example.com/mcp",
+                    "headers": [
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer token123"
+                        }
+                    ]
+                },
+                {
+                    "type": "sse",
+                    "name": "event-stream",
+                    "url": "https://events.example.com/mcp",
+                    "headers": [
+                        {
+                            "name": "X-API-Key",
+                            "value": "apikey456"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn content_blocks_use_acp_content_shapes() {
+        let text: AcpContentBlock = serde_json::from_value(serde_json::json!({
+            "type": "text",
+            "text": "hello",
+            "annotations": {
+                "audience": ["user"],
+                "lastModified": "2026-06-17T00:00:00Z",
+                "priority": 0.7
+            }
+        }))
+        .expect("deserialize text content");
+        assert_eq!(
+            text,
+            AcpContentBlock::Text {
+                annotations: Some(AcpAnnotations {
+                    audience: Some(vec![AcpRole::User]),
+                    last_modified: Some("2026-06-17T00:00:00Z".to_string()),
+                    priority: Some(0.7),
+                    meta: None,
+                }),
+                text: "hello".to_string(),
+                meta: None,
+            }
+        );
+
+        assert_eq!(
+            serde_json::to_value(AcpContentBlock::Image {
+                annotations: None,
+                data: "iVBORw0KGgo=".to_string(),
+                mime_type: "image/png".to_string(),
+                uri: Some("file:///tmp/image.png".to_string()),
+                meta: None,
+            })
+            .expect("serialize image content"),
+            serde_json::json!({
+                "type": "image",
+                "data": "iVBORw0KGgo=",
+                "mimeType": "image/png",
+                "uri": "file:///tmp/image.png"
+            })
+        );
+
+        assert_eq!(
+            serde_json::from_value::<AcpContentBlock>(serde_json::json!({
+                "type": "audio",
+                "data": "UklGRg==",
+                "mimeType": "audio/wav"
+            }))
+            .expect("deserialize audio content"),
+            AcpContentBlock::Audio {
+                annotations: None,
+                data: "UklGRg==".to_string(),
+                mime_type: "audio/wav".to_string(),
+                meta: None,
+            }
+        );
+
+        assert_eq!(
+            serde_json::to_value(AcpContentBlock::ResourceLink {
+                annotations: None,
+                uri: "file:///tmp/document.pdf".to_string(),
+                name: "document.pdf".to_string(),
+                title: Some("Document".to_string()),
+                description: Some("A PDF".to_string()),
+                mime_type: Some("application/pdf".to_string()),
+                size: Some(1024),
+                meta: None,
+            })
+            .expect("serialize resource link"),
+            serde_json::json!({
+                "type": "resource_link",
+                "uri": "file:///tmp/document.pdf",
+                "name": "document.pdf",
+                "title": "Document",
+                "description": "A PDF",
+                "mimeType": "application/pdf",
+                "size": 1024
+            })
+        );
+    }
+
+    #[test]
+    fn embedded_resource_union_rejects_ambiguous_resource_contents() {
+        let invalid = serde_json::json!({
+            "type": "resource",
+            "resource": {
+                "uri": "file:///tmp/data.bin",
+                "text": "hello",
+                "blob": "AA=="
+            }
+        });
+
+        assert!(serde_json::from_value::<AcpContentBlock>(invalid).is_err());
+    }
+
+    #[test]
+    fn acp_prompt_conversion_rejects_unadvertised_image_and_preserves_blob_resource() {
+        let error = input_items_from_acp_prompt(vec![AcpContentBlock::Image {
+            annotations: None,
+            data: "iVBORw0KGgo=".to_string(),
+            mime_type: "image/png".to_string(),
+            uri: None,
+            meta: None,
+        }])
+        .expect_err("image prompt content should be rejected");
+        assert_eq!(
+            error,
+            "session/prompt image content is not supported by this agent"
+        );
+
+        assert_eq!(
+            input_items_from_acp_prompt(vec![AcpContentBlock::Resource {
+                annotations: None,
+                resource: AcpEmbeddedResource::Blob(AcpBlobResourceContents {
+                    uri: "file:///tmp/data.bin".to_string(),
+                    mime_type: Some("application/octet-stream".to_string()),
+                    blob: "AA==".to_string(),
+                    meta: None,
+                }),
+                meta: None,
+            }])
+            .expect("blob resource converts to prompt text"),
+            vec![InputItem::Text {
+                text: "Resource file:///tmp/data.bin (application/octet-stream; base64):\nAA=="
+                    .to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn tool_result_content_preserves_acp_content_blocks() {
+        assert_eq!(
+            tool_result_content(
+                None,
+                serde_json::json!({
+                    "content": [
+                        {
+                            "type": "image",
+                            "data": "iVBORw0KGgo=",
+                            "mimeType": "image/png"
+                        }
+                    ]
+                })
+            ),
+            vec![AcpToolCallContent::Content {
+                content: AcpContentBlock::Image {
+                    annotations: None,
+                    data: "iVBORw0KGgo=".to_string(),
+                    mime_type: "image/png".to_string(),
+                    uri: None,
+                    meta: None,
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn tool_call_updates_round_trip_full_wire_shape() {
+        let path = PathBuf::from("src/main.rs");
+        let path_json = serde_json::to_value(&path).expect("serialize path");
+        let tool_call = AcpSessionUpdate::ToolCall {
+            tool_call_id: "call-1".to_string(),
+            title: "Read file".to_string(),
+            kind: AcpToolKind::Read,
+            status: AcpToolCallStatus::Pending,
+            raw_input: Some(serde_json::json!({ "path": path_json.clone() })),
+            raw_output: Some(serde_json::json!({ "ok": true })),
+            content: vec![AcpToolCallContent::Content {
+                content: AcpContentBlock::text("reading"),
+            }],
+            locations: vec![AcpToolCallLocation {
+                path: path.clone(),
+                line: Some(7),
+            }],
+            meta: None,
+        };
+        let value = serde_json::to_value(&tool_call).expect("serialize tool call");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-1",
+                "title": "Read file",
+                "kind": "read",
+                "status": "pending",
+                "rawInput": { "path": path_json.clone() },
+                "rawOutput": { "ok": true },
+                "content": [
+                    {
+                        "type": "content",
+                        "content": {
+                            "type": "text",
+                            "text": "reading"
+                        }
+                    }
+                ],
+                "locations": [
+                    {
+                        "path": path_json.clone(),
+                        "line": 7
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AcpSessionUpdate>(value).expect("deserialize tool call"),
+            tool_call
+        );
+
+        let update = AcpSessionUpdate::ToolCallUpdate {
+            tool_call_id: "call-1".to_string(),
+            title: Some("Updated file".to_string()),
+            kind: Some(AcpToolKind::Edit),
+            status: Some(AcpToolCallStatus::Completed),
+            raw_input: Some(serde_json::json!({ "path": path_json.clone() })),
+            raw_output: Some(serde_json::json!({ "changed": true })),
+            content: vec![
+                AcpToolCallContent::Diff {
+                    path: path.clone(),
+                    old_text: Some("old\n".to_string()),
+                    new_text: "new\n".to_string(),
+                },
+                AcpToolCallContent::Terminal {
+                    terminal_id: "term_1".to_string(),
+                },
+            ],
+            locations: vec![AcpToolCallLocation {
+                path: path.clone(),
+                line: None,
+            }],
+            meta: None,
+        };
+        let value = serde_json::to_value(&update).expect("serialize tool call update");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "title": "Updated file",
+                "kind": "edit",
+                "status": "completed",
+                "rawInput": { "path": path_json.clone() },
+                "rawOutput": { "changed": true },
+                "content": [
+                    {
+                        "type": "diff",
+                        "path": path_json.clone(),
+                        "oldText": "old\n",
+                        "newText": "new\n"
+                    },
+                    {
+                        "type": "terminal",
+                        "terminalId": "term_1"
+                    }
+                ],
+                "locations": [
+                    {
+                        "path": path_json
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AcpSessionUpdate>(value)
+                .expect("deserialize tool call update"),
+            update
+        );
+    }
+
+    #[test]
+    fn session_update_variants_round_trip_documented_wire_names() {
+        let commands = AcpSessionUpdate::AvailableCommandsUpdate {
+            available_commands: vec![AcpAvailableCommand {
+                name: "create_plan".to_string(),
+                description: "Create a plan".to_string(),
+                input: Some(AcpAvailableCommandInput {
+                    hint: "task".to_string(),
+                    meta: None,
+                }),
+                meta: None,
+            }],
+            meta: Some(serde_json::Map::from_iter([(
+                "trace".to_string(),
+                serde_json::json!(true),
+            )])),
+        };
+        let commands_value =
+            serde_json::to_value(&commands).expect("serialize available commands update");
+        assert_eq!(
+            commands_value,
+            serde_json::json!({
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": [
+                    {
+                        "name": "create_plan",
+                        "description": "Create a plan",
+                        "input": {
+                            "hint": "task"
+                        }
+                    }
+                ],
+                "_meta": {
+                    "trace": true
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AcpSessionUpdate>(commands_value)
+                .expect("deserialize available commands update"),
+            commands
+        );
+
+        let current_mode = AcpSessionUpdate::CurrentModeUpdate {
+            current_mode_id: "build".to_string(),
+            meta: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&current_mode).expect("serialize current mode update"),
+            serde_json::json!({
+                "sessionUpdate": "current_mode_update",
+                "currentModeId": "build"
+            })
+        );
+
+        let config_update = AcpSessionUpdate::ConfigOptionUpdate {
+            config_options: vec![crate::AcpSessionConfigOption::Select {
+                id: "model".to_string(),
+                name: "Model".to_string(),
+                description: Some("Controls the model used for this session".to_string()),
+                category: Some(crate::AcpSessionConfigOptionCategory::Known(
+                    crate::AcpSessionConfigOptionCategoryKnown::Model,
+                )),
+                current_value: "default".to_string(),
+                options: crate::AcpSessionConfigSelectOptions::Ungrouped(Vec::new()),
+            }],
+            meta: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&config_update).expect("serialize config option update"),
+            serde_json::json!({
+                "sessionUpdate": "config_option_update",
+                "configOptions": [
+                    {
+                        "type": "select",
+                        "id": "model",
+                        "name": "Model",
+                        "description": "Controls the model used for this session",
+                        "category": "model",
+                        "currentValue": "default",
+                        "options": []
+                    }
+                ]
+            })
+        );
+
+        let usage = AcpSessionUpdate::UsageUpdate {
+            used: 42,
+            size: 200_000,
+            cost: Some(AcpCost {
+                amount: 1.25,
+                currency: "USD".to_string(),
+                meta: None,
+            }),
+            meta: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&usage).expect("serialize usage update"),
+            serde_json::json!({
+                "sessionUpdate": "usage_update",
+                "used": 42,
+                "size": 200000,
+                "cost": {
+                    "amount": 1.25,
+                    "currency": "USD"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn file_change_item_emits_acp_diff_content_and_locations() {
+        let session_id = SessionId::new();
+        let path = PathBuf::from("src/lib.rs");
+        let raw_input = serde_json::json!({
+            "path": serde_json::to_value(&path).expect("serialize path"),
+        });
+        let payload_value = serde_json::to_value(FileChangePayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("apply_patch".to_string()),
+            input: Some(raw_input.clone()),
+            changes: vec![(
+                path.clone(),
+                crate::protocol::FileChange::Add {
+                    content: "hello\n".to_string(),
+                },
+            )],
+            is_error: false,
+        })
+        .expect("serialize file change payload");
+        let event = ServerEvent::ItemCompleted(ItemEventPayload {
+            context: EventContext {
+                session_id,
+                turn_id: Some(TurnId::new()),
+                item_id: Some(ItemId::new()),
+                seq: 1,
+            },
+            item: crate::ItemEnvelope {
+                item_id: ItemId::new(),
+                item_kind: ItemKind::FileChange,
+                payload: payload_value.clone(),
+            },
+        });
+
+        assert_eq!(
+            acp_update_from_server_event(&event),
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: "call-1".to_string(),
+                title: Some("apply_patch".to_string()),
+                kind: Some(AcpToolKind::Edit),
+                status: Some(AcpToolCallStatus::Completed),
+                raw_input: Some(raw_input),
+                raw_output: Some(payload_value),
+                content: vec![AcpToolCallContent::Diff {
+                    path: path.clone(),
+                    old_text: None,
+                    new_text: "hello\n".to_string(),
+                }],
+                locations: vec![AcpToolCallLocation { path, line: None }],
+                meta: None,
+            })
+        );
+    }
+
+    #[test]
+    fn file_change_update_emits_text_content_when_old_new_text_is_unavailable() {
+        let path = PathBuf::from("src/lib.rs");
+        let unified_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let change = FileChangePayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("apply_patch".to_string()),
+            input: None,
+            changes: vec![(
+                path,
+                crate::protocol::FileChange::Update {
+                    unified_diff: unified_diff.to_string(),
+                    old_text: None,
+                    new_text: None,
+                    move_path: None,
+                },
+            )],
+            is_error: false,
+        };
+
+        assert_eq!(
+            file_change_tool_content(&change),
+            vec![AcpToolCallContent::Content {
+                content: AcpContentBlock::text(unified_diff)
+            }]
+        );
+    }
+
+    #[test]
+    fn file_change_update_emits_acp_diff_when_old_new_text_is_available() {
+        let path = PathBuf::from("src/lib.rs");
+        let change = FileChangePayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("write".to_string()),
+            input: None,
+            changes: vec![(
+                path.clone(),
+                crate::protocol::FileChange::Update {
+                    unified_diff: "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n"
+                        .to_string(),
+                    old_text: Some("old\n".to_string()),
+                    new_text: Some("new\n".to_string()),
+                    move_path: None,
+                },
+            )],
+            is_error: false,
+        };
+
+        assert_eq!(
+            file_change_tool_content(&change),
+            vec![AcpToolCallContent::Diff {
+                path,
+                old_text: Some("old\n".to_string()),
+                new_text: "new\n".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn request_permission_uses_acp_wire_shape() {
+        let session_id = SessionId::new();
+        let params = AcpRequestPermissionParams {
+            session_id,
+            tool_call: AcpToolCallUpdate {
+                tool_call_id: "call-1".to_string(),
+                title: Some("Run command".to_string()),
+                kind: Some(AcpToolKind::Execute),
+                status: Some(AcpToolCallStatus::Pending),
+                raw_input: Some(serde_json::json!({"command": "cargo test"})),
+                raw_output: None,
+                content: Vec::new(),
+                locations: Vec::new(),
+                meta: None,
+            },
+            options: vec![AcpPermissionOption {
+                option_id: "allow_once".to_string(),
+                name: "Allow once".to_string(),
+                kind: AcpPermissionOptionKind::AllowOnce,
+                meta: None,
+            }],
+            meta: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(params).expect("serialize permission request"),
+            serde_json::json!({
+                "sessionId": session_id,
+                "toolCall": {
+                    "toolCallId": "call-1",
+                    "title": "Run command",
+                    "kind": "execute",
+                    "status": "pending",
+                    "rawInput": { "command": "cargo test" }
+                },
+                "options": [
+                    {
+                        "optionId": "allow_once",
+                        "name": "Allow once",
+                        "kind": "allow_once"
+                    }
+                ]
+            })
+        );
+
+        let response: AcpRequestPermissionResponse = serde_json::from_value(serde_json::json!({
+            "outcome": {
+                "outcome": "selected",
+                "optionId": "allow_once"
+            }
+        }))
+        .expect("deserialize permission response");
+        assert_eq!(
+            response,
+            AcpRequestPermissionResponse {
+                outcome: AcpPermissionOutcome::Selected {
+                    option_id: "allow_once".to_string()
+                },
+                meta: None,
+            }
+        );
+    }
+
+    #[test]
+    fn command_execution_completion_emits_text_content() {
+        let session_id = SessionId::new();
+        let payload_value = serde_json::to_value(CommandExecutionPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "exec_command".to_string(),
+            command: "cargo test".to_string(),
+            input: Some(serde_json::json!({"cmd": "cargo test"})),
+            source: crate::protocol::ExecCommandSource::Agent,
+            command_actions: Vec::new(),
+            output: Some(serde_json::Value::String("tests passed\n".to_string())),
+            is_error: false,
+        })
+        .expect("serialize command execution payload");
+        let event = ServerEvent::ItemCompleted(ItemEventPayload {
+            context: EventContext {
+                session_id,
+                turn_id: Some(TurnId::new()),
+                item_id: Some(ItemId::new()),
+                seq: 1,
+            },
+            item: crate::ItemEnvelope {
+                item_id: ItemId::new(),
+                item_kind: ItemKind::CommandExecution,
+                payload: payload_value.clone(),
+            },
+        });
+
+        assert_eq!(
+            acp_update_from_server_event(&event),
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: "call-1".to_string(),
+                title: Some("cargo test".to_string()),
+                kind: Some(AcpToolKind::Execute),
+                status: Some(AcpToolCallStatus::Completed),
+                raw_input: Some(serde_json::json!({"cmd": "cargo test"})),
+                raw_output: Some(serde_json::Value::String("tests passed\n".to_string())),
+                content: vec![AcpToolCallContent::Content {
+                    content: AcpContentBlock::text("tests passed\n"),
+                }],
+                locations: Vec::new(),
+                meta: None,
+            })
+        );
+    }
+
+    #[test]
+    fn tool_result_metadata_content_can_emit_terminal_content() {
+        let session_id = SessionId::new();
+        let raw_output = serde_json::json!({
+            "content": [
+                {
+                    "type": "terminal",
+                    "terminalId": "term_1"
+                }
+            ],
+            "output": "done\n",
+            "truncated": false,
+            "exitStatus": {
+                "exitCode": 0,
+                "signal": null
+            }
+        });
+        let payload_value = serde_json::to_value(ToolResultPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("shell_command".to_string()),
+            input: Some(serde_json::json!({"command": "echo done"})),
+            content: raw_output.clone(),
+            display_content: None,
+            is_error: false,
+            summary: "Command executed".to_string(),
+        })
+        .expect("serialize tool result payload");
+        let event = ServerEvent::ItemCompleted(ItemEventPayload {
+            context: EventContext {
+                session_id,
+                turn_id: Some(TurnId::new()),
+                item_id: Some(ItemId::new()),
+                seq: 1,
+            },
+            item: crate::ItemEnvelope {
+                item_id: ItemId::new(),
+                item_kind: ItemKind::ToolResult,
+                payload: payload_value,
+            },
+        });
+
+        assert_eq!(
+            acp_update_from_server_event(&event),
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: "call-1".to_string(),
+                title: Some("Command executed".to_string()),
+                kind: Some(AcpToolKind::Execute),
+                status: Some(AcpToolCallStatus::Completed),
+                raw_input: Some(serde_json::json!({"command": "echo done"})),
+                raw_output: Some(raw_output),
+                content: vec![AcpToolCallContent::Terminal {
+                    terminal_id: "term_1".to_string(),
+                }],
+                locations: Vec::new(),
+                meta: None,
+            })
+        );
+    }
+
+    #[test]
+    fn usage_update_size_uses_context_window() {
+        let session_id = SessionId::new();
+        let event = ServerEvent::TurnUsageUpdated(crate::TurnUsageUpdatedPayload {
+            session_id,
+            turn_id: TurnId::new(),
+            usage: crate::TurnUsage {
+                input_tokens: 3,
+                output_tokens: 4,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            },
+            total_input_tokens: 30,
+            total_output_tokens: 12,
+            total_cache_read_tokens: 0,
+            last_query_input_tokens: 3,
+            context_window: Some(200_000),
+        });
+
+        let (_, value) = acp_notification_from_server_event("turn/usage/updated", &event);
+
+        assert_eq!(
+            value["update"],
+            serde_json::json!({
+                "sessionUpdate": "usage_update",
+                "used": 42,
+                "size": 200000
+            })
+        );
+    }
+
+    #[test]
+    fn tool_status_maps_pending_then_in_progress_update() {
+        let session_id = SessionId::new();
+        let turn_id = TurnId::new();
+        let item_id = ItemId::new();
+        let started = ServerEvent::ItemStarted(ItemEventPayload {
+            context: EventContext {
+                session_id,
+                turn_id: Some(turn_id),
+                item_id: Some(item_id),
+                seq: 0,
+            },
+            item: crate::ItemEnvelope {
+                item_id,
+                item_kind: ItemKind::ToolCall,
+                payload: serde_json::to_value(ToolCallPayload {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "read".to_string(),
+                    parameters: serde_json::json!({"path": "src/lib.rs"}),
+                    command_actions: Vec::new(),
+                })
+                .expect("serialize tool payload"),
+            },
+        });
+        let (_, started_value) = acp_notification_from_server_event("item/started", &started);
+
+        assert_eq!(
+            started_value["update"]["status"],
+            serde_json::json!("pending")
+        );
+
+        let update = ServerEvent::ToolCallStatusUpdated(crate::ToolCallStatusUpdatedPayload {
+            session_id,
+            turn_id,
+            tool_call_id: "call-1".to_string(),
+            status: "in_progress".to_string(),
+            terminal_id: None,
+        });
+        let (_, update_value) =
+            acp_notification_from_server_event("tool_call/status_updated", &update);
+
+        assert_eq!(
+            update_value["update"],
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "status": "in_progress"
+            })
+        );
+    }
+
+    #[test]
+    fn tool_status_update_can_emit_terminal_content() {
+        let session_id = SessionId::new();
+        let turn_id = TurnId::new();
+        let update = ServerEvent::ToolCallStatusUpdated(crate::ToolCallStatusUpdatedPayload {
+            session_id,
+            turn_id,
+            tool_call_id: "call-1".to_string(),
+            status: "in_progress".to_string(),
+            terminal_id: Some("term_1".to_string()),
+        });
+        let (_, update_value) =
+            acp_notification_from_server_event("tool_call/status_updated", &update);
+
+        assert_eq!(
+            update_value["update"],
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "status": "in_progress",
+                "content": [
+                    {
+                        "type": "terminal",
+                        "terminalId": "term_1"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn native_session_update_omits_devo_event_meta() {
+        let session_id = SessionId::new();
+        let item_id = ItemId::new();
+        let event = ServerEvent::ItemDelta {
+            delta_kind: ItemDeltaKind::AgentMessageDelta,
+            payload: ItemDeltaPayload {
+                context: EventContext {
+                    session_id,
+                    turn_id: None,
+                    item_id: Some(item_id),
+                    seq: 7,
+                },
+                delta: "hello".to_string(),
+                stream_index: None,
+                channel: None,
+            },
+        };
+
+        let (method, value) = acp_notification_from_server_event("item/agentMessage/delta", &event);
+        let notification: AcpSessionNotification =
+            serde_json::from_value(value.clone()).expect("deserialize ACP notification");
+
+        assert_eq!(method, ACP_SESSION_UPDATE_METHOD);
+        assert_eq!(
+            value["update"],
+            serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {
+                    "type": "text",
+                    "text": "hello"
+                },
+                "messageId": item_id.to_string()
+            })
+        );
+        assert_eq!(value.get("_meta"), None);
+        assert_eq!(original_event_from_acp_notification(&notification), None);
+
+        let reasoning_item_id = ItemId::new();
+        let reasoning = ServerEvent::ItemDelta {
+            delta_kind: ItemDeltaKind::ReasoningTextDelta,
+            payload: ItemDeltaPayload {
+                context: EventContext {
+                    session_id,
+                    turn_id: None,
+                    item_id: Some(reasoning_item_id),
+                    seq: 8,
+                },
+                delta: "thinking".to_string(),
+                stream_index: None,
+                channel: None,
+            },
+        };
+
+        let (method, value) =
+            acp_notification_from_server_event("item/reasoning/textDelta", &reasoning);
+        let notification: AcpSessionNotification =
+            serde_json::from_value(value.clone()).expect("deserialize ACP notification");
+
+        assert_eq!(method, ACP_SESSION_UPDATE_METHOD);
+        assert_eq!(
+            value["update"],
+            serde_json::json!({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {
+                    "type": "text",
+                    "text": "thinking"
+                },
+                "messageId": reasoning_item_id.to_string()
+            })
+        );
+        assert_eq!(value.get("_meta"), None);
+        assert_eq!(original_event_from_acp_notification(&notification), None);
+    }
+
+    #[test]
+    fn unsupported_session_update_preserves_devo_event_in_meta() {
+        let session_id = SessionId::new();
+        let item_id = ItemId::new();
+        let event = ServerEvent::ItemDelta {
+            delta_kind: ItemDeltaKind::ResearchArtifactDelta,
+            payload: ItemDeltaPayload {
+                context: EventContext {
+                    session_id,
+                    turn_id: None,
+                    item_id: Some(item_id),
+                    seq: 7,
+                },
+                delta: "artifact".to_string(),
+                stream_index: None,
+                channel: None,
+            },
+        };
+
+        let (method, value) =
+            acp_notification_from_server_event("item/researchArtifact/delta", &event);
+        let notification: AcpSessionNotification =
+            serde_json::from_value(value.clone()).expect("deserialize ACP notification");
+
+        assert_eq!(method, ACP_SESSION_UPDATE_METHOD);
+        assert_eq!(
+            value["update"],
+            serde_json::json!({
+                "sessionUpdate": "session_info_update"
+            })
+        );
+        assert_eq!(
+            original_event_from_acp_notification(&notification),
+            Some(("item/researchArtifact/delta".to_string(), event))
+        );
+    }
+}

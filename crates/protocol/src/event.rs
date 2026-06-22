@@ -124,6 +124,18 @@ pub struct TurnUsageUpdatedPayload {
     pub total_output_tokens: usize,
     pub total_cache_read_tokens: usize,
     pub last_query_input_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCallStatusUpdatedPayload {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub tool_call_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,6 +330,7 @@ pub enum ServerEvent {
     TurnPlanUpdated(TurnPlanUpdatedPayload),
     TurnDiffUpdated(TurnEventPayload),
     TurnUsageUpdated(TurnUsageUpdatedPayload),
+    ToolCallStatusUpdated(ToolCallStatusUpdatedPayload),
     RequestUserInput(RequestUserInputPayload),
     InputQueueUpdated(InputQueueUpdatedPayload),
     SteerAccepted(SteerAcceptedPayload),
@@ -358,6 +371,7 @@ impl ServerEvent {
             | Self::TurnDiffUpdated(payload) => Some(payload.session_id),
             Self::TurnPlanUpdated(payload) => Some(payload.session_id),
             Self::TurnUsageUpdated(payload) => Some(payload.session_id),
+            Self::ToolCallStatusUpdated(payload) => Some(payload.session_id),
             Self::RequestUserInput(payload) => Some(payload.request.session_id),
             Self::InputQueueUpdated(payload) => Some(payload.session_id),
             Self::SteerAccepted(payload) => Some(payload.session_id),
@@ -396,6 +410,7 @@ impl ServerEvent {
             Self::TurnPlanUpdated(_) => "turn/plan/updated",
             Self::TurnDiffUpdated(_) => "turn/diff/updated",
             Self::TurnUsageUpdated(_) => "turn/usage/updated",
+            Self::ToolCallStatusUpdated(_) => "tool_call/status_updated",
             Self::RequestUserInput(_) => "item/tool/requestUserInput",
             Self::InputQueueUpdated(_) => "inputQueue/updated",
             Self::SteerAccepted(_) => "steer/accepted",
@@ -430,6 +445,7 @@ impl ServerEvent {
             }
             Self::ItemDelta { payload, .. } => payload.context.seq = seq,
             Self::TurnUsageUpdated(_)
+            | Self::ToolCallStatusUpdated(_)
             | Self::RequestUserInput(_)
             | Self::InputQueueUpdated(_)
             | Self::SteerAccepted(_)

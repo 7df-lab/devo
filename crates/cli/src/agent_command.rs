@@ -66,7 +66,7 @@ pub(crate) async fn run_agent(
         model,
         base_url: _,
         api_key: _,
-        model_thinking_selection,
+        model_reasoning_effort_selection,
         ..
     } = resolved;
     let active_model_binding = if onboarding_mode {
@@ -98,7 +98,7 @@ pub(crate) async fn run_agent(
             request_model,
             model_binding_id,
             provider: wire_api,
-            thinking_selection: model_thinking_selection,
+            reasoning_effort_selection: model_reasoning_effort_selection,
             permission_preset,
             // TODO: why do we need cwd here, maybe remove it ?
             cwd,
@@ -143,7 +143,7 @@ fn resolve_initial_provider_settings(
             headers: None,
             model_auto_compact_token_limit: None,
             model_context_window: None,
-            model_thinking_selection: None,
+            model_reasoning_effort_selection: None,
             disable_response_storage: false,
             preferred_auth_method: None,
         }
@@ -304,7 +304,7 @@ mod tests {
                     headers: None,
                     model_auto_compact_token_limit: None,
                     model_context_window: None,
-                    model_thinking_selection: None,
+                    model_reasoning_effort_selection: None,
                     disable_response_storage: false,
                     preferred_auth_method: None,
                 }
@@ -342,7 +342,7 @@ mod tests {
                     headers: None,
                     model_auto_compact_token_limit: None,
                     model_context_window: None,
-                    model_thinking_selection: None,
+                    model_reasoning_effort_selection: None,
                     disable_response_storage: false,
                     preferred_auth_method: None,
                 }
@@ -401,7 +401,7 @@ mod tests {
                     headers: None,
                     model_auto_compact_token_limit: None,
                     model_context_window: None,
-                    model_thinking_selection: None,
+                    model_reasoning_effort_selection: None,
                     disable_response_storage: false,
                     preferred_auth_method: None,
                 }

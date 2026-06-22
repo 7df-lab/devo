@@ -12,8 +12,8 @@ use devo_core::FileSystemSkillCatalog;
 use devo_core::Model;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderVendorCatalog;
+use devo_core::ReasoningCapability;
 use devo_core::SkillsConfig;
-use devo_core::ThinkingCapability;
 use devo_core::tools::create_default_tool_registry;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
@@ -22,6 +22,7 @@ use devo_protocol::ReasoningEffort;
 use devo_protocol::RequestContent;
 use devo_protocol::ResponseContent;
 use devo_protocol::ResponseMetadata;
+use devo_protocol::ServerEvent;
 use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
@@ -487,12 +488,10 @@ async fn deep_research_turn_streams_artifact_reasoning_and_final_report() -> Res
     .await?;
 
     assert!(
-        events.iter().any(|event| {
-            event.get("method") == Some(&serde_json::json!("session/started"))
-                && event["params"]["session"]["parent_session_id"]
-                    == serde_json::json!(session_id.to_string())
-        }),
-        "expected supervisor task to start a delegated child session: {events:#?}"
+        events
+            .iter()
+            .any(|event| child_turn_session_id(event, session_id).is_some()),
+        "expected supervisor task to start delegated child work: {events:#?}"
     );
     assert!(
         events
@@ -502,15 +501,11 @@ async fn deep_research_turn_streams_artifact_reasoning_and_final_report() -> Res
         "expected streamed research artifact delta: {events:#?}"
     );
     assert!(
-        events.iter().any(
-            |event| event.get("method") == Some(&serde_json::json!("item/reasoning/textDelta"))
-        ),
+        events.iter().any(is_reasoning_delta),
         "expected reasoning delta: {events:#?}"
     );
     assert!(
-        events
-            .iter()
-            .any(|event| event.get("method") == Some(&serde_json::json!("item/agentMessage/delta"))),
+        events.iter().any(is_agent_message_delta),
         "expected final report assistant delta: {events:#?}"
     );
     let report_path = assert_final_report_file_written(&events);
@@ -612,6 +607,7 @@ async fn deep_research_streams_researcher_delta_before_query_finishes() -> Resul
 
     timeout(Duration::from_secs(5), async {
         while let Some(event) = notifications_rx.recv().await {
+            let event = legacy_event_from_acp_notification(event);
             let method = event
                 .get("method")
                 .and_then(serde_json::Value::as_str)
@@ -732,15 +728,8 @@ async fn deep_research_restarts_worker_when_continuation_fails() -> Result<()> {
         })
         .count();
     assert_eq!(child_failures, 2);
-    let child_starts = events
-        .iter()
-        .filter(|event| {
-            event.get("method") == Some(&serde_json::json!("session/started"))
-                && event["params"]["session"]["parent_session_id"]
-                    == serde_json::json!(session_id.to_string())
-        })
-        .count();
-    assert_eq!(child_starts, 2);
+    let child_sessions = unique_child_turn_sessions(&events, session_id);
+    assert_eq!(child_sessions.len(), 2);
     let final_report = latest_agent_message(&events).context("expected final report message")?;
     assert!(
         final_report.contains("DeepSeek official website"),
@@ -771,17 +760,13 @@ async fn interrupted_research_closes_delegated_child_agent() -> Result<()> {
         let mut child_session_id = None;
         let mut saw_researcher_delta = false;
         while let Some(event) = notifications_rx.recv().await {
+            let event = legacy_event_from_acp_notification(event);
             let method = event
                 .get("method")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            if method == "session/started"
-                && event["params"]["session"]["parent_session_id"]
-                    == serde_json::json!(session_id.to_string())
-            {
-                child_session_id = event["params"]["session"]["session_id"]
-                    .as_str()
-                    .map(str::to_string);
+            if let Some(session_id) = child_turn_session_id(&event, session_id) {
+                child_session_id = Some(session_id);
             }
             if method == "item/researchArtifact/delta"
                 && event["params"]["payload"]["delta"]
@@ -811,7 +796,7 @@ async fn interrupted_research_closes_delegated_child_agent() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 33,
-                "method": "turn/interrupt",
+                "method": "_devo/turn/interrupt",
                 "params": {
                     "session_id": session_id,
                     "turn_id": turn_id,
@@ -833,7 +818,7 @@ async fn interrupted_research_closes_delegated_child_agent() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 34,
-                "method": "agent/list",
+                "method": "_devo/agent/list",
                 "params": {
                     "session_id": session_id
                 }
@@ -873,6 +858,7 @@ async fn queued_regular_turn_starts_after_research_completes() -> Result<()> {
 
     timeout(Duration::from_secs(5), async {
         while let Some(event) = notifications_rx.recv().await {
+            let event = legacy_event_from_acp_notification(event);
             if event.get("method") == Some(&serde_json::json!("item/researchArtifact/delta"))
                 && event["params"]["payload"]["delta"]
                     .as_str()
@@ -919,7 +905,7 @@ async fn interrupted_research_clears_pending_clarification_request() -> Result<(
             connection_id,
             serde_json::json!({
                 "id": 32,
-                "method": "turn/interrupt",
+                "method": "_devo/turn/interrupt",
                 "params": {
                     "session_id": session_id,
                     "turn_id": turn_id.clone(),
@@ -1107,7 +1093,6 @@ fn build_live_deepseek_runtime(
             "deepseek-v4-flash".to_string(),
             Arc::new(PresetModelCatalog::new(vec![deepseek_model()])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()
@@ -1143,7 +1128,6 @@ fn build_scripted_research_runtime_with_provider(
             "deepseek-v4-flash".to_string(),
             Arc::new(PresetModelCatalog::new(vec![deepseek_model()])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()
@@ -1163,7 +1147,7 @@ fn deepseek_model() -> Model {
         slug: "deepseek-v4-flash".to_string(),
         display_name: "DeepSeek V4 Flash".to_string(),
         provider: ProviderWireApi::AnthropicMessages,
-        thinking_capability: ThinkingCapability::Unsupported,
+        reasoning_capability: ReasoningCapability::Unsupported,
         default_reasoning_effort: Some(ReasoningEffort::Low),
         base_instructions: "Follow the developer instructions. Keep all live test outputs concise."
             .to_string(),
@@ -1375,28 +1359,23 @@ async fn initialize_connection(
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "client_name": "deep-research-e2e-test",
-                    "client_version": "1.0.0",
-                    "transport": "stdio",
-                    "supports_streaming": true,
-                    "supports_binary_images": false,
-                    "opt_out_notification_methods": []
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "deep-research-e2e-test",
+                        "title": "deep-research-e2e-test",
+                        "version": "1.0.0"
+                    }
                 }
             }),
         )
         .await
         .context("initialize response")?;
-    let response: devo_server::SuccessResponse<devo_server::InitializeResult> =
-        serde_json::from_value(initialize_response)?;
-    assert_eq!(response.result.server_name, "devo-server");
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "method": "initialized"
-            }),
-        )
-        .await;
+    let response: serde_json::Value = initialize_response;
+    assert_eq!(
+        response["result"]["agentInfo"]["name"],
+        serde_json::json!("devo-server")
+    );
     Ok((connection_id, notifications_rx))
 }
 
@@ -1410,21 +1389,19 @@ async fn start_session(
             connection_id,
             serde_json::json!({
                 "id": 2,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": cwd,
-                    "ephemeral": false,
-                    "title": null,
-                    "model": "deepseek-v4-flash",
-                    "model_binding_id": null
+                    "additionalDirectories": []
                 }
             }),
         )
         .await
-        .context("session/start response")?;
-    let response: devo_server::SuccessResponse<devo_server::SessionStartResult> =
-        serde_json::from_value(response)?;
-    Ok(response.result.session.session_id)
+        .context("session/new response")?;
+    let response: devo_server::SuccessResponse<devo_protocol::AcpNewSessionResult> =
+        serde_json::from_value(response.clone())
+            .with_context(|| format!("session/new returned {response}"))?;
+    Ok(response.result.session_id)
 }
 
 async fn resume_session(
@@ -1437,7 +1414,7 @@ async fn resume_session(
             connection_id,
             serde_json::json!({
                 "id": 20,
-                "method": "session/resume",
+                "method": "_devo/session/resume",
                 "params": {
                     "session_id": session_id
                 }
@@ -1461,7 +1438,7 @@ async fn start_research_turn(
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [{
@@ -1470,7 +1447,7 @@ async fn start_research_turn(
                     }],
                     "model": "deepseek-v4-flash",
                     "model_binding_id": null,
-                    "thinking": null,
+                    "reasoning_effort_selection": null,
                     "sandbox": null,
                     "approval_policy": null,
                     "cwd": null,
@@ -1500,7 +1477,7 @@ async fn start_regular_turn_after_research(
             connection_id,
             serde_json::json!({
                 "id": 30,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [{
@@ -1509,7 +1486,7 @@ async fn start_regular_turn_after_research(
                     }],
                     "model": "deepseek-v4-flash",
                     "model_binding_id": null,
-                    "thinking": null,
+                    "reasoning_effort_selection": null,
                     "sandbox": null,
                     "approval_policy": null,
                     "cwd": null,
@@ -1539,7 +1516,7 @@ async fn queue_regular_turn_during_research(
             connection_id,
             serde_json::json!({
                 "id": 31,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [{
@@ -1548,7 +1525,7 @@ async fn queue_regular_turn_during_research(
                     }],
                     "model": "deepseek-v4-flash",
                     "model_binding_id": null,
-                    "thinking": null,
+                    "reasoning_effort_selection": null,
                     "sandbox": null,
                     "approval_policy": null,
                     "cwd": null,
@@ -1578,6 +1555,7 @@ async fn wait_for_research_completion(
     let mut events = Vec::new();
     timeout(Duration::from_secs(240), async {
         while let Some(event) = notifications_rx.recv().await {
+            let event = legacy_event_from_acp_notification(event);
             let method = event
                 .get("method")
                 .and_then(serde_json::Value::as_str)
@@ -1617,6 +1595,7 @@ async fn wait_for_completed_turns(
     timeout(Duration::from_secs(240), async {
         let mut completed = 0usize;
         while let Some(event) = notifications_rx.recv().await {
+            let event = legacy_event_from_acp_notification(event);
             let method = event
                 .get("method")
                 .and_then(serde_json::Value::as_str)
@@ -1650,6 +1629,7 @@ async fn wait_for_clarification_request(
 ) -> Result<serde_json::Value> {
     timeout(Duration::from_secs(1), async {
         while let Some(event) = notifications_rx.recv().await {
+            let event = legacy_event_from_acp_notification(event);
             let method = event
                 .get("method")
                 .and_then(serde_json::Value::as_str)
@@ -1669,6 +1649,75 @@ async fn wait_for_clarification_request(
     })
     .await
     .context("timed out waiting for clarification request")?
+}
+
+fn is_reasoning_delta(event: &serde_json::Value) -> bool {
+    event.get("method") == Some(&serde_json::json!("item/reasoning/textDelta"))
+        || (event.get("method") == Some(&serde_json::json!("session/update"))
+            && event["params"]["update"]["sessionUpdate"]
+                == serde_json::json!("agent_thought_chunk"))
+}
+
+fn is_agent_message_delta(event: &serde_json::Value) -> bool {
+    event.get("method") == Some(&serde_json::json!("item/agentMessage/delta"))
+        || (event.get("method") == Some(&serde_json::json!("session/update"))
+            && event["params"]["update"]["sessionUpdate"]
+                == serde_json::json!("agent_message_chunk"))
+}
+fn child_turn_session_id(
+    event: &serde_json::Value,
+    parent_session_id: devo_core::SessionId,
+) -> Option<String> {
+    if event.get("method") != Some(&serde_json::json!("turn/started")) {
+        return None;
+    }
+    let session_id = event["params"]["session_id"].as_str()?;
+    (session_id != parent_session_id.to_string()).then(|| session_id.to_string())
+}
+
+fn unique_child_turn_sessions(
+    events: &[serde_json::Value],
+    parent_session_id: devo_core::SessionId,
+) -> Vec<String> {
+    let mut sessions = Vec::new();
+    for event in events {
+        let Some(session_id) = child_turn_session_id(event, parent_session_id) else {
+            continue;
+        };
+        if !sessions.contains(&session_id) {
+            sessions.push(session_id);
+        }
+    }
+    sessions
+}
+fn legacy_event_from_acp_notification(value: serde_json::Value) -> serde_json::Value {
+    if value.get("method") != Some(&serde_json::json!("session/update")) {
+        return value;
+    }
+    let Ok(notification) =
+        serde_json::from_value::<devo_protocol::AcpSessionNotification>(value["params"].clone())
+    else {
+        return value;
+    };
+    let Some((method, event)) = devo_protocol::original_event_from_acp_notification(&notification)
+    else {
+        return value;
+    };
+    let params = match event {
+        ServerEvent::TurnCompleted(payload)
+        | ServerEvent::TurnInterrupted(payload)
+        | ServerEvent::TurnFailed(payload)
+        | ServerEvent::TurnStarted(payload) => serde_json::to_value(payload),
+        ServerEvent::ItemCompleted(payload) | ServerEvent::ItemStarted(payload) => {
+            serde_json::to_value(payload)
+        }
+        other => serde_json::to_value(other),
+    }
+    .expect("serialize legacy event params");
+    serde_json::json!({
+        "method": method,
+        "params": params,
+    })
 }
 
 fn latest_agent_message(events: &[serde_json::Value]) -> Option<String> {
@@ -1735,7 +1784,7 @@ async fn respond_to_clarification_raw(
             connection_id,
             serde_json::json!({
                 "id": 4,
-                "method": "request_user_input/respond",
+                "method": "_devo/request_user_input/respond",
                 "params": {
                     "session_id": session_id,
                     "turn_id": turn_id,
@@ -1838,20 +1887,32 @@ fn assert_final_report(events: &[serde_json::Value]) {
 }
 
 fn assert_final_report_file_written(events: &[serde_json::Value]) -> std::path::PathBuf {
-    let path = events.iter().find_map(|event| {
-        (event.get("method") == Some(&serde_json::json!("item/completed"))
-            && event["params"]["item"]["item_kind"] == serde_json::json!("tool_result")
-            && event["params"]["item"]["payload"]["tool_name"] == serde_json::json!("write"))
-        .then(|| {
-            event["params"]["item"]["payload"]["content"]["files"]
-                .as_array()
-                .and_then(|files| files.first())
-                .and_then(|file| file["path"].as_str())
-        })
-        .flatten()
-    });
+    let path = events.iter().find_map(final_report_written_path);
     let path = path.unwrap_or_else(|| {
         panic!("expected final report write tool result: {events:#?}");
     });
     std::path::PathBuf::from(path)
+}
+
+fn final_report_written_path(event: &serde_json::Value) -> Option<&str> {
+    if event.get("method") == Some(&serde_json::json!("item/completed"))
+        && event["params"]["item"]["item_kind"] == serde_json::json!("tool_result")
+        && event["params"]["item"]["payload"]["tool_name"] == serde_json::json!("write")
+    {
+        return event["params"]["item"]["payload"]["content"]["files"]
+            .as_array()
+            .and_then(|files| files.first())
+            .and_then(|file| file["path"].as_str());
+    }
+    if event.get("method") == Some(&serde_json::json!("session/update"))
+        && event["params"]["update"]["sessionUpdate"] == serde_json::json!("tool_call_update")
+        && event["params"]["update"]["status"] == serde_json::json!("completed")
+        && event["params"]["update"]["kind"] == serde_json::json!("edit")
+    {
+        return event["params"]["update"]["rawOutput"]["files"]
+            .as_array()
+            .and_then(|files| files.first())
+            .and_then(|file| file["path"].as_str());
+    }
+    None
 }

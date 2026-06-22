@@ -84,7 +84,7 @@ async fn goal_set_objective_generates_session_title_for_new_session() -> Result<
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "goal/set",
+                "method": "_devo/goal/set",
                 "params": {
                     "sessionId": session_id,
                     "objective": "investigate goal title generation",
@@ -108,12 +108,8 @@ async fn goal_set_objective_generates_session_title_for_new_session() -> Result<
         )
         .await
         .context("session/list response")?;
-    let list_result: devo_server::SuccessResponse<devo_server::SessionListResult> =
-        serde_json::from_value(list_response)?;
-    assert_eq!(
-        list_result.result.sessions[0].title.as_deref(),
-        Some("Generated goal title")
-    );
+    let sessions = decode_acp_session_list_response(list_response)?;
+    assert_eq!(sessions[0].title.as_deref(), Some("Generated goal title"));
 
     let title_requests = provider.title_requests.lock().expect("lock title requests");
     assert_eq!(title_requests.len(), 1);
@@ -141,7 +137,7 @@ async fn goal_create_rejects_unknown_session() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 5,
-                "method": "goal/create",
+                "method": "_devo/goal/create",
                 "params": {
                     "sessionId": unknown_session_id,
                     "objective": "unknown session goal",
@@ -179,7 +175,7 @@ async fn goal_set_rejects_unknown_session() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 6,
-                "method": "goal/set",
+                "method": "_devo/goal/set",
                 "params": {
                     "sessionId": unknown_session_id,
                     "objective": "unknown session goal",
@@ -225,7 +221,6 @@ fn build_runtime(
                 ..Model::default()
             }])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()
@@ -254,28 +249,23 @@ async fn initialize_connection(
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "client_name": "goal-title-test",
-                    "client_version": "1.0.0",
-                    "transport": "stdio",
-                    "supports_streaming": true,
-                    "supports_binary_images": false,
-                    "opt_out_notification_methods": []
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "goal-title-test",
+                        "title": "goal-title-test",
+                        "version": "1.0.0"
+                    }
                 }
             }),
         )
         .await
         .context("initialize response")?;
-    let response: devo_server::SuccessResponse<devo_server::InitializeResult> =
-        serde_json::from_value(initialize_response)?;
-    assert_eq!(response.result.server_name, "devo-server");
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "method": "initialized"
-            }),
-        )
-        .await;
+    let response: serde_json::Value = initialize_response;
+    assert_eq!(
+        response["result"]["agentInfo"]["name"],
+        serde_json::json!("devo-server")
+    );
     Ok((connection_id, notifications_rx))
 }
 
@@ -311,10 +301,15 @@ async fn wait_for_title_update(
 ) -> Result<()> {
     timeout(Duration::from_secs(/*secs*/ 5), async {
         while let Some(value) = notifications_rx.recv().await {
-            if value.get("method") != Some(&serde_json::json!("session/title/updated")) {
-                continue;
-            }
-            if value["params"]["session"]["title"] == serde_json::json!(expected_title) {
+            let is_legacy_title_update = value.get("method")
+                == Some(&serde_json::json!("session/title/updated"))
+                && value["params"]["session"]["title"] == serde_json::json!(expected_title);
+            let is_acp_title_update = value.get("method")
+                == Some(&serde_json::json!("session/update"))
+                && value["params"]["update"]["sessionUpdate"]
+                    == serde_json::json!("session_info_update")
+                && value["params"]["update"]["title"] == serde_json::json!(expected_title);
+            if is_legacy_title_update || is_acp_title_update {
                 return Ok(());
             }
         }
@@ -338,6 +333,36 @@ fn title_request_contains(request: &ModelRequest, needle: &str) -> bool {
     })
 }
 
+fn decode_acp_session_list_response(
+    response: serde_json::Value,
+) -> Result<Vec<devo_server::SessionMetadata>> {
+    let response_value = response.clone();
+    let response: devo_server::AcpSuccessResponse<devo_server::AcpListSessionsResult> =
+        serde_json::from_value(response)
+            .with_context(|| format!("decode ACP session/list response: {response_value}"))?;
+    response
+        .result
+        .sessions
+        .into_iter()
+        .map(|session| {
+            session
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get(devo_server::DEVO_SESSION_META))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .context("decode Devo session metadata from ACP session/list response")?
+                .with_context(|| {
+                    format!(
+                        "ACP session/list response missing Devo session metadata for {}",
+                        session.session_id
+                    )
+                })
+        })
+        .collect()
+}
+
 fn assert_session_not_found(response: serde_json::Value) -> Result<()> {
     let response: devo_server::ErrorResponse = serde_json::from_value(response)?;
     assert_eq!(
@@ -357,7 +382,7 @@ async fn assert_goal_status_empty(
             connection_id,
             serde_json::json!({
                 "id": 7,
-                "method": "goal/status",
+                "method": "_devo/goal/status",
                 "params": {
                     "sessionId": session_id
                 }

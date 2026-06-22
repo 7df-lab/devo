@@ -1,8 +1,28 @@
 use super::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
+
+use crate::ACP_AUTHENTICATE_METHOD;
+use crate::ACP_INITIALIZE_METHOD;
+use crate::ACP_LOGOUT_METHOD;
+use crate::ACP_SESSION_CANCEL_METHOD;
+use crate::ACP_SESSION_CLOSE_METHOD;
+use crate::ACP_SESSION_DELETE_METHOD;
+use crate::ACP_SESSION_LIST_METHOD;
+use crate::ACP_SESSION_LOAD_METHOD;
+use crate::ACP_SESSION_NEW_METHOD;
+use crate::ACP_SESSION_PROMPT_METHOD;
+use crate::ACP_SESSION_RESUME_METHOD;
+use crate::ACP_SESSION_SET_CONFIG_OPTION_METHOD;
+use crate::ACP_SESSION_SET_MODE_METHOD;
+use crate::acp_auth_required_response;
+use crate::acp_notification_from_server_event;
+use crate::devo_extension_inner_method;
 
 pub(crate) const CONNECTION_NOTIFICATION_CHANNEL_CAPACITY: usize = 4096;
 
@@ -10,10 +30,18 @@ const CONNECTION_NOTIFICATION_BACKPRESSURE_LOG_THRESHOLD: Duration = Duration::f
 
 struct PendingConnectionNotification {
     connection_id: u64,
+    kind: PendingConnectionMessageKind,
     method: String,
     event_seq: u64,
     sender: mpsc::Sender<serde_json::Value>,
     value: serde_json::Value,
+}
+
+#[derive(Clone, Copy)]
+enum PendingConnectionMessageKind {
+    Notification,
+    JsonRpcResponse,
+    ClientRequest,
 }
 
 impl ServerRuntime {
@@ -29,10 +57,14 @@ impl ServerRuntime {
             ConnectionRuntime {
                 transport,
                 state: ConnectionState::Connected,
+                acp_authenticated: false,
+                acp_client_capabilities: crate::AcpClientCapabilities::default(),
                 sender,
                 opt_out_notification_methods: HashSet::new(),
                 subscriptions: Vec::new(),
                 next_event_seq: 1,
+                next_client_request_id: 1,
+                pending_client_requests: HashMap::new(),
             },
         );
         tracing::info!(
@@ -49,8 +81,17 @@ impl ServerRuntime {
 
     pub async fn unregister_connection(&self, connection_id: u64) {
         let mut connections = self.connections.lock().await;
-        let removed = connections.remove(&connection_id);
+        let mut removed = connections.remove(&connection_id);
         drop(connections);
+        if let Some(connection) = removed.as_mut() {
+            for (_, pending) in connection.pending_client_requests.drain() {
+                let _ = pending.send(Err("client connection closed".to_string()));
+            }
+        }
+        self.active_turn_connections
+            .lock()
+            .await
+            .retain(|_, active_connection_id| *active_connection_id != connection_id);
         self.reference_searches
             .lock()
             .await
@@ -72,6 +113,14 @@ impl ServerRuntime {
         connection_id: u64,
         message: serde_json::Value,
     ) -> Option<serde_json::Value> {
+        if message.get("method").is_none()
+            && message.get("id").is_some()
+            && (message.get("result").is_some() || message.get("error").is_some())
+        {
+            self.resolve_pending_client_response(connection_id, message)
+                .await;
+            return None;
+        }
         let method = message.get("method")?.as_str()?.to_string();
         let id = message.get("id").cloned();
         let params = message
@@ -86,37 +135,108 @@ impl ServerRuntime {
             "received client message"
         );
 
-        if method == "initialized" {
-            if let Some(connection) = self.connections.lock().await.get_mut(&connection_id) {
-                connection.state = ConnectionState::Ready;
-            }
-            tracing::info!(connection_id, "client completed initialized handshake");
-            return None;
+        if method == ACP_INITIALIZE_METHOD {
+            return Some(self.handle_acp_initialize(connection_id, id, params).await);
         }
-        if method == "initialize" {
-            return Some(self.handle_initialize(connection_id, id, params).await);
-        }
-
-        // Before connection enter `Ready` state, only allowed method: "initialized" or "initialize"
+        // Before connection enter `Ready` state, only allowed method: "initialize"
         if !self.connection_ready(connection_id).await {
             return id.map(|request_id| {
                 self.error_response(
                     request_id,
                     ProtocolErrorCode::NotInitialized,
-                    "connection has not completed initialize/initialized",
+                    "connection has not completed initialize",
                 )
             });
         }
 
-        let response = match ClientMethod::parse(method.as_str()) {
-            // start a session
-            Some(ClientMethod::SessionStart) => {
-                Some(self.handle_session_start(connection_id, id?, params).await)
+        if method == ACP_AUTHENTICATE_METHOD {
+            return Some(
+                self.handle_acp_authenticate(connection_id, id, params)
+                    .await,
+            );
+        }
+        if method == ACP_LOGOUT_METHOD {
+            return Some(self.handle_acp_logout(connection_id, id, params).await);
+        }
+
+        if !self.connection_authenticated(connection_id).await {
+            if let Some(request_id) = id {
+                return Some(acp_auth_required_response(request_id));
             }
-            // list sessions
-            // TODO: Should add pagnation
-            Some(ClientMethod::SessionList) => Some(self.handle_session_list(id?, params).await),
-            // update session metadata, current including model and reason effort (thinking), the term 'thinking' should be changed to 'reasoning_effort'
+            tracing::warn!(
+                connection_id,
+                method,
+                "dropping unauthenticated client notification"
+            );
+            return None;
+        }
+
+        if method == ACP_SESSION_CANCEL_METHOD {
+            self.handle_acp_session_cancel(params).await;
+            return None;
+        }
+
+        let client_method = devo_extension_inner_method(&method).and_then(ClientMethod::parse);
+        let response = match client_method {
+            None if method == "session/start" => {
+                let request_id = id?;
+                let params: SessionStartParams = match serde_json::from_value(params) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        return Some(self.error_response(
+                            request_id,
+                            ProtocolErrorCode::InvalidParams,
+                            format!("invalid session/start params: {error}"),
+                        ));
+                    }
+                };
+                let response = self
+                    .start_session_with_registry(connection_id, request_id, params, None)
+                    .await;
+                if let Ok(success) =
+                    serde_json::from_value::<SuccessResponse<SessionStartResult>>(response.clone())
+                {
+                    self.subscribe_connection_to_session(
+                        connection_id,
+                        success.result.session.session_id,
+                        None,
+                    )
+                    .await;
+                }
+                Some(response)
+            }
+            None if method == ACP_SESSION_LIST_METHOD => {
+                Some(self.handle_acp_session_list(id?, params).await)
+            }
+            None if method == ACP_SESSION_LOAD_METHOD => Some(
+                self.handle_acp_session_load(connection_id, id?, params)
+                    .await,
+            ),
+            None if method == ACP_SESSION_NEW_METHOD => Some(
+                self.handle_acp_session_new(connection_id, id?, params)
+                    .await,
+            ),
+            None if method == ACP_SESSION_PROMPT_METHOD => {
+                self.handle_acp_session_prompt(connection_id, id?, params)
+                    .await
+            }
+            None if method == ACP_SESSION_RESUME_METHOD => Some(
+                self.handle_acp_session_resume(connection_id, id?, params)
+                    .await,
+            ),
+            None if method == ACP_SESSION_CLOSE_METHOD => {
+                Some(self.handle_acp_session_close(id?, params).await)
+            }
+            None if method == ACP_SESSION_DELETE_METHOD => {
+                Some(self.handle_acp_session_delete(id?, params).await)
+            }
+            None if method == ACP_SESSION_SET_MODE_METHOD => {
+                Some(self.handle_acp_session_set_mode(id?, params).await)
+            }
+            None if method == ACP_SESSION_SET_CONFIG_OPTION_METHOD => {
+                Some(self.handle_acp_session_set_config_option(id?, params).await)
+            }
+            // Update session metadata, including the current model and reasoning effort.
             Some(ClientMethod::SessionMetadataUpdate) => {
                 Some(self.handle_session_metadata_update(id?, params).await)
             }
@@ -177,20 +297,20 @@ impl ServerRuntime {
                 Some(self.handle_message_edit_previous(id?, params).await)
             }
             // TODO: start a new user turn, maybe should change name to "turn/submit"
-            Some(ClientMethod::TurnStart) => Some(self.handle_turn_start(id?, params).await),
-            Some(ClientMethod::TurnShellCommand) => {
-                Some(self.handle_turn_shell_command(id?, params).await)
-            }
+            Some(ClientMethod::TurnStart) => Some(
+                self.handle_turn_start_for_connection(Some(connection_id), id?, params)
+                    .await,
+            ),
+            Some(ClientMethod::TurnShellCommand) => Some(
+                self.handle_turn_shell_command_for_connection(Some(connection_id), id?, params)
+                    .await,
+            ),
             // interupt the current working turn
             Some(ClientMethod::TurnInterrupt) => {
                 Some(self.handle_turn_interrupt(id?, params).await)
             }
             Some(ClientMethod::TurnSteer) => {
                 Some(self.handle_turn_steer(connection_id, id?, params).await)
-            }
-            // client approval result
-            Some(ClientMethod::ApprovalRespond) => {
-                Some(self.handle_approval_respond(id?, params).await)
             }
             Some(ClientMethod::RequestUserInputRespond) => {
                 Some(self.handle_request_user_input_respond(id?, params).await)
@@ -269,10 +389,14 @@ impl ServerRuntime {
             if already {
                 return;
             }
+            let include_child_agents = matches!(
+                connection.transport,
+                ClientTransportKind::Stdio | ClientTransportKind::StdioProxy
+            );
             connection.subscriptions.push(SubscriptionFilter {
                 session_id: Some(session_id),
                 event_types: desired,
-                include_child_agents: false,
+                include_child_agents,
             });
         }
     }
@@ -302,16 +426,15 @@ impl ServerRuntime {
                 return;
             }
             let event_seq = connection.next_seq();
+            let event = event.with_seq(event_seq);
+            let (method, value) = acp_notification_from_server_event(method, &event);
             Some(PendingConnectionNotification {
                 connection_id,
-                method: method.to_string(),
+                kind: PendingConnectionMessageKind::Notification,
+                method,
                 event_seq,
                 sender: connection.sender.clone(),
-                value: serde_json::to_value(NotificationEnvelope {
-                    method: method.to_string(),
-                    params: event.with_seq(event_seq),
-                })
-                .expect("serialize notification"),
+                value,
             })
         };
         if let Some(notification) = notification {
@@ -327,31 +450,215 @@ impl ServerRuntime {
         let method = event.method_name();
         let session_id = event.session_id();
         let child_parent_by_session = self.child_parent_by_session().await;
+        let active_turn_connections = self.active_turn_connections.lock().await.clone();
         let notifications = {
             let mut connections = self.connections.lock().await;
             connections
                 .iter_mut()
                 .filter_map(|(connection_id, connection)| {
+                    if should_skip_non_owner_stdio_stream(
+                        *connection_id,
+                        connection,
+                        &event,
+                        &active_turn_connections,
+                    ) {
+                        return None;
+                    }
                     if !connection.should_deliver(method, session_id, &child_parent_by_session) {
                         return None;
                     }
                     let event_seq = connection.next_seq();
+                    let event = event.clone().with_seq(event_seq);
+                    let (method, value) = acp_notification_from_server_event(method, &event);
                     Some(PendingConnectionNotification {
                         connection_id: *connection_id,
-                        method: method.to_string(),
+                        kind: PendingConnectionMessageKind::Notification,
+                        method,
                         event_seq,
                         sender: connection.sender.clone(),
-                        value: serde_json::to_value(NotificationEnvelope {
-                            method: method.to_string(),
-                            params: event.clone().with_seq(event_seq),
-                        })
-                        .expect("serialize notification"),
+                        value,
                     })
                 })
                 .collect::<Vec<_>>()
         };
         for notification in notifications {
             send_connection_notification(notification).await;
+        }
+    }
+
+    pub(super) async fn send_raw_to_connection(
+        &self,
+        connection_id: u64,
+        value: serde_json::Value,
+    ) {
+        let notification = {
+            let connections = self.connections.lock().await;
+            let Some(connection) = connections.get(&connection_id) else {
+                return;
+            };
+            PendingConnectionNotification {
+                connection_id,
+                kind: PendingConnectionMessageKind::JsonRpcResponse,
+                method: "<response>".to_string(),
+                event_seq: 0,
+                sender: connection.sender.clone(),
+                value,
+            }
+        };
+        send_connection_notification(notification).await;
+    }
+
+    pub(super) async fn send_request_to_connection(
+        &self,
+        connection_id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.send_request_to_connection_inner(
+            connection_id,
+            method,
+            params,
+            /*timeout_duration*/ None,
+            CancellationToken::new(),
+        )
+        .await
+    }
+
+    pub(super) async fn send_request_to_connection_with_timeout(
+        &self,
+        connection_id: u64,
+        method: &str,
+        params: serde_json::Value,
+        timeout_duration: Duration,
+        cancel_token: CancellationToken,
+    ) -> Result<serde_json::Value, String> {
+        self.send_request_to_connection_inner(
+            connection_id,
+            method,
+            params,
+            Some(timeout_duration),
+            cancel_token,
+        )
+        .await
+    }
+
+    async fn send_request_to_connection_inner(
+        &self,
+        connection_id: u64,
+        method: &str,
+        params: serde_json::Value,
+        timeout_duration: Option<Duration>,
+        cancel_token: CancellationToken,
+    ) -> Result<serde_json::Value, String> {
+        let (request_id, receiver, notification) = {
+            let mut connections = self.connections.lock().await;
+            let Some(connection) = connections.get_mut(&connection_id) else {
+                return Err("client connection does not exist".to_string());
+            };
+            let request_id = connection.next_client_request_id;
+            connection.next_client_request_id += 1;
+            let (tx, rx) = oneshot::channel();
+            connection.pending_client_requests.insert(request_id, tx);
+            let value = serde_json::to_value(devo_protocol::AcpClientRequest::new(
+                serde_json::json!(request_id),
+                method,
+                params,
+            ))
+            .map_err(|error| format!("failed to serialize client request: {error}"))?;
+            (
+                request_id,
+                rx,
+                PendingConnectionNotification {
+                    connection_id,
+                    kind: PendingConnectionMessageKind::ClientRequest,
+                    method: method.to_string(),
+                    event_seq: 0,
+                    sender: connection.sender.clone(),
+                    value,
+                },
+            )
+        };
+        let mut pending_request = PendingClientRequestGuard::new(
+            Arc::clone(&self.connections),
+            connection_id,
+            request_id,
+        );
+        if !send_connection_notification(notification).await {
+            pending_request.remove().await;
+            return Err("client connection closed before request was sent".to_string());
+        }
+        let message = match timeout_duration {
+            Some(timeout_duration) => {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        pending_request.remove().await;
+                        return Err("client request cancelled".to_string());
+                    }
+                    result = tokio::time::timeout(timeout_duration, receiver) => {
+                        match result {
+                            Ok(Ok(message)) => {
+                                pending_request.disarm();
+                                message?
+                            }
+                            Ok(Err(_)) => {
+                                pending_request.disarm();
+                                return Err("client connection closed before responding".to_string());
+                            }
+                            Err(_) => {
+                                pending_request.remove().await;
+                                return Err(format!(
+                                    "client request timed out after {}s",
+                                    timeout_duration.as_secs()
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                let message = receiver
+                    .await
+                    .map_err(|_| "client connection closed before responding".to_string())??;
+                pending_request.disarm();
+                message
+            }
+        };
+        if let Some(error) = message.get("error") {
+            return Err(error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("client returned an error response")
+                .to_string());
+        }
+        Ok(message
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+
+    async fn resolve_pending_client_response(
+        &self,
+        connection_id: u64,
+        message: serde_json::Value,
+    ) {
+        let Some(request_id) = message.get("id").and_then(serde_json::Value::as_u64) else {
+            tracing::warn!(connection_id, "dropping client response with non-u64 id");
+            return;
+        };
+        let pending = {
+            let mut connections = self.connections.lock().await;
+            connections
+                .get_mut(&connection_id)
+                .and_then(|connection| connection.pending_client_requests.remove(&request_id))
+        };
+        if let Some(pending) = pending {
+            let _ = pending.send(Ok(message));
+        } else {
+            tracing::warn!(
+                connection_id,
+                request_id,
+                "dropping response for unknown server-initiated request"
+            );
         }
     }
 
@@ -397,13 +704,110 @@ impl ServerRuntime {
     }
 }
 
+struct PendingClientRequestGuard {
+    connections: Arc<Mutex<HashMap<u64, ConnectionRuntime>>>,
+    connection_id: u64,
+    request_id: u64,
+    active: bool,
+}
+
+impl PendingClientRequestGuard {
+    fn new(
+        connections: Arc<Mutex<HashMap<u64, ConnectionRuntime>>>,
+        connection_id: u64,
+        request_id: u64,
+    ) -> Self {
+        Self {
+            connections,
+            connection_id,
+            request_id,
+            active: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+
+    async fn remove(&mut self) {
+        if !self.active {
+            return;
+        }
+        remove_pending_client_request(&self.connections, self.connection_id, self.request_id).await;
+        self.active = false;
+    }
+}
+
+impl Drop for PendingClientRequestGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let connections = Arc::clone(&self.connections);
+        let connection_id = self.connection_id;
+        let request_id = self.request_id;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                remove_pending_client_request(&connections, connection_id, request_id).await;
+            });
+        }
+    }
+}
+
+async fn remove_pending_client_request(
+    connections: &Mutex<HashMap<u64, ConnectionRuntime>>,
+    connection_id: u64,
+    request_id: u64,
+) {
+    if let Some(connection) = connections.lock().await.get_mut(&connection_id) {
+        connection.pending_client_requests.remove(&request_id);
+    }
+}
+
+fn should_skip_non_owner_stdio_stream(
+    connection_id: u64,
+    connection: &ConnectionRuntime,
+    event: &ServerEvent,
+    active_turn_connections: &HashMap<SessionId, u64>,
+) -> bool {
+    if !matches!(
+        connection.transport,
+        ClientTransportKind::Stdio | ClientTransportKind::StdioProxy
+    ) {
+        return false;
+    }
+
+    let ServerEvent::ItemDelta {
+        delta_kind:
+            ItemDeltaKind::AgentMessageDelta
+            | ItemDeltaKind::ReasoningSummaryTextDelta
+            | ItemDeltaKind::ReasoningTextDelta,
+        payload,
+    } = event
+    else {
+        return false;
+    };
+
+    if payload.context.turn_id.is_none() {
+        return false;
+    }
+
+    active_turn_connections
+        .get(&payload.context.session_id)
+        .is_some_and(|active_connection_id| *active_connection_id != connection_id)
+}
+
 pub(crate) struct ConnectionRuntime {
     pub(crate) transport: ClientTransportKind,
     pub(crate) state: ConnectionState,
+    pub(crate) acp_authenticated: bool,
+    pub(crate) acp_client_capabilities: crate::AcpClientCapabilities,
     pub(crate) sender: mpsc::Sender<serde_json::Value>,
     pub(crate) opt_out_notification_methods: HashSet<String>,
     pub(crate) subscriptions: Vec<SubscriptionFilter>,
     next_event_seq: u64,
+    next_client_request_id: u64,
+    pending_client_requests: HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>,
 }
 
 impl ConnectionRuntime {
@@ -415,9 +819,6 @@ impl ConnectionRuntime {
     ) -> bool {
         if self.opt_out_notification_methods.contains(method) {
             return false;
-        }
-        if self.transport == ClientTransportKind::Stdio {
-            return true;
         }
         if self.subscriptions.is_empty() {
             return false;
@@ -461,16 +862,28 @@ impl SubscriptionFilter {
     }
 }
 
-async fn send_connection_notification(notification: PendingConnectionNotification) {
+async fn send_connection_notification(notification: PendingConnectionNotification) -> bool {
     let PendingConnectionNotification {
         connection_id,
+        kind,
         method,
         event_seq,
         sender,
         value,
     } = notification;
-    let item_id = notification_item_id(&value);
-    let assistant_delta = notification_assistant_delta(&method, &value);
+    let notification = match kind {
+        PendingConnectionMessageKind::Notification => {
+            serde_json::to_value(crate::NotificationEnvelope {
+                method: method.clone(),
+                params: value,
+            })
+            .expect("serialize client notification envelope")
+        }
+        PendingConnectionMessageKind::JsonRpcResponse
+        | PendingConnectionMessageKind::ClientRequest => value,
+    };
+    let item_id = notification_item_id(&notification);
+    let assistant_delta = notification_assistant_delta(&method, &notification);
     let delta_len = assistant_delta.map(str::len);
     let assistant_token_text = assistant_delta.and_then(assistant_token_log_preview);
     if let Some(assistant_token_text) = assistant_token_text.as_deref() {
@@ -510,7 +923,7 @@ async fn send_connection_notification(notification: PendingConnectionNotificatio
                 event_seq,
                 "client notification receiver dropped"
             );
-            return;
+            return false;
         }
         Err(_) => {
             tracing::warn!(
@@ -529,7 +942,7 @@ async fn send_connection_notification(notification: PendingConnectionNotificatio
                         event_seq,
                         "client notification receiver dropped during backpressure"
                     );
-                    return;
+                    return false;
                 }
             }
         }
@@ -544,7 +957,8 @@ async fn send_connection_notification(notification: PendingConnectionNotificatio
             "client notification queue accepted message after backpressure"
         );
     }
-    permit.send(value);
+    permit.send(notification);
+    true
 }
 
 fn stream_trace_elapsed_ms() -> u128 {
@@ -617,10 +1031,77 @@ fn format_assistant_token_log_preview(text: &str, max_chars: usize) -> String {
 mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::Duration;
 
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use devo_core::AppConfigStore;
+    use devo_core::BundledSkillsConfig;
+    use devo_core::FileSystemSkillCatalog;
+    use devo_core::PresetModelCatalog;
+    use devo_core::ProviderVendorCatalog;
+    use devo_core::SkillsConfig;
+    use devo_core::tools::ToolRegistry;
+    use devo_protocol::ModelRequest;
+    use devo_protocol::ModelResponse;
+    use devo_protocol::StreamEvent;
+    use devo_provider::ModelProviderSDK;
+    use devo_provider::SingleProviderRouter;
     use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    struct NoopProvider;
+
+    #[async_trait]
+    impl ModelProviderSDK for NoopProvider {
+        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            anyhow::bail!("noop provider does not support completion")
+        }
+
+        async fn completion_stream(
+            &self,
+            _request: ModelRequest,
+        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>>
+        {
+            anyhow::bail!("noop provider does not support streaming")
+        }
+
+        fn name(&self) -> &str {
+            "noop-provider"
+        }
+    }
+
+    fn build_runtime(data_root: &std::path::Path) -> Arc<ServerRuntime> {
+        let provider: Arc<dyn ModelProviderSDK> = Arc::new(NoopProvider);
+        let db = Arc::new(
+            crate::db::Database::open(data_root.join("connection.db")).expect("open test database"),
+        );
+        ServerRuntime::new(
+            data_root.to_path_buf(),
+            ServerRuntimeDependencies::new(
+                Arc::clone(&provider),
+                Arc::new(SingleProviderRouter::new(provider)),
+                Arc::new(ToolRegistry::new()),
+                "test-model".to_string(),
+                Arc::new(PresetModelCatalog::default()),
+                Arc::new(ProviderVendorCatalog::default()),
+                Box::new(FileSystemSkillCatalog::new(SkillsConfig {
+                    bundled: Some(BundledSkillsConfig { enabled: false }),
+                    ..SkillsConfig::default()
+                })),
+                devo_core::AgentsMdConfig::default(),
+                db,
+                Arc::new(std::sync::Mutex::new(
+                    AppConfigStore::load(data_root.to_path_buf(), None)
+                        .expect("load app config store"),
+                )),
+            ),
+        )
+    }
 
     #[test]
     fn subscription_filter_can_match_direct_child_agents() {
@@ -642,5 +1123,210 @@ mod tests {
                 subscription.session_matches(Some(unrelated), &child_parent_by_session),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn timed_out_client_request_removes_pending_request() -> Result<()> {
+        let data_root = TempDir::new()?;
+        let runtime = build_runtime(data_root.path());
+        let (sender, mut receiver) = mpsc::channel(1);
+        let connection_id = runtime
+            .register_connection(ClientTransportKind::Stdio, sender)
+            .await;
+
+        let result = runtime
+            .send_request_to_connection_with_timeout(
+                connection_id,
+                "fs/read_text_file",
+                serde_json::json!({}),
+                Duration::from_millis(1),
+                CancellationToken::new(),
+            )
+            .await;
+
+        let request = receiver.recv().await.expect("client request");
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "fs/read_text_file",
+                "params": {},
+            })
+        );
+        assert!(
+            result
+                .expect_err("request should time out")
+                .contains("timed out")
+        );
+        let connections = runtime.connections.lock().await;
+        let connection = connections.get(&connection_id).expect("connection");
+        assert_eq!(connection.pending_client_requests.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_client_request_removes_pending_request() -> Result<()> {
+        let data_root = TempDir::new()?;
+        let runtime = build_runtime(data_root.path());
+        let (sender, mut receiver) = mpsc::channel(1);
+        let connection_id = runtime
+            .register_connection(ClientTransportKind::Stdio, sender)
+            .await;
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let result = runtime
+            .send_request_to_connection_with_timeout(
+                connection_id,
+                "fs/write_text_file",
+                serde_json::json!({}),
+                Duration::from_secs(30),
+                cancel_token,
+            )
+            .await;
+
+        let request = receiver.recv().await.expect("client request");
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "fs/write_text_file",
+                "params": {},
+            })
+        );
+        assert_eq!(
+            result.expect_err("request should be cancelled"),
+            "client request cancelled"
+        );
+        let connections = runtime.connections.lock().await;
+        let connection = connections.get(&connection_id).expect("connection");
+        assert_eq!(connection.pending_client_requests.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropped_client_request_removes_pending_request() -> Result<()> {
+        let data_root = TempDir::new()?;
+        let runtime = build_runtime(data_root.path());
+        let (sender, mut receiver) = mpsc::channel(1);
+        let connection_id = runtime
+            .register_connection(ClientTransportKind::Stdio, sender)
+            .await;
+        let runtime_for_request = Arc::clone(&runtime);
+
+        let handle = tokio::spawn(async move {
+            runtime_for_request
+                .send_request_to_connection_with_timeout(
+                    connection_id,
+                    "fs/read_text_file",
+                    serde_json::json!({}),
+                    Duration::from_secs(30),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+
+        let request = receiver.recv().await.expect("client request");
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "fs/read_text_file",
+                "params": {},
+            })
+        );
+        handle.abort();
+        let join_error = handle.await.expect_err("request task should be aborted");
+        assert!(join_error.is_cancelled());
+
+        for _ in 0..10 {
+            let connections = runtime.connections.lock().await;
+            let connection = connections.get(&connection_id).expect("connection");
+            if connection.pending_client_requests.is_empty() {
+                return Ok(());
+            }
+            drop(connections);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let connections = runtime.connections.lock().await;
+        let connection = connections.get(&connection_id).expect("connection");
+        assert_eq!(connection.pending_client_requests.len(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stdio_live_agent_deltas_only_deliver_to_active_turn_owner() -> Result<()> {
+        let data_root = TempDir::new()?;
+        let runtime = build_runtime(data_root.path());
+        let session_id = SessionId::new();
+        let turn_id = TurnId::new();
+        let item_id = ItemId::new();
+        let (owner_sender, mut owner_receiver) = mpsc::channel(4);
+        let owner_connection_id = runtime
+            .register_connection(ClientTransportKind::Stdio, owner_sender)
+            .await;
+        let (observer_sender, mut observer_receiver) = mpsc::channel(4);
+        let observer_connection_id = runtime
+            .register_connection(ClientTransportKind::StdioProxy, observer_sender)
+            .await;
+
+        runtime
+            .subscribe_connection_to_session(owner_connection_id, session_id, None)
+            .await;
+        runtime
+            .subscribe_connection_to_session(observer_connection_id, session_id, None)
+            .await;
+        runtime
+            .active_turn_connections
+            .lock()
+            .await
+            .insert(session_id, owner_connection_id);
+
+        runtime
+            .broadcast_event(ServerEvent::ItemDelta {
+                delta_kind: ItemDeltaKind::AgentMessageDelta,
+                payload: ItemDeltaPayload {
+                    context: EventContext {
+                        session_id,
+                        turn_id: Some(turn_id),
+                        item_id: Some(item_id),
+                        seq: 0,
+                    },
+                    delta: "hello".to_string(),
+                    stream_index: None,
+                    channel: None,
+                },
+            })
+            .await;
+
+        let owner_message = tokio::time::timeout(Duration::from_secs(1), owner_receiver.recv())
+            .await?
+            .expect("owner receives live agent delta");
+        assert_eq!(
+            owner_message["params"]["update"],
+            serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {
+                    "type": "text",
+                    "text": "hello",
+                },
+                "messageId": item_id.to_string(),
+            })
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), observer_receiver.recv())
+                .await
+                .is_err(),
+            "non-owner stdio proxy connection must not receive live agent delta"
+        );
+
+        Ok(())
     }
 }

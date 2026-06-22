@@ -422,8 +422,9 @@ impl ChatWidget {
         match item {
             StatusLineItem::ModelName => Some(self.model_display_name().to_string()),
             StatusLineItem::ModelWithReasoning => {
-                let label =
-                    Self::status_line_reasoning_effort_label(self.effective_reasoning_effort());
+                let label = super::reasoning_effort::status_line_reasoning_effort_label(
+                    self.effective_reasoning_effort(),
+                );
                 let fast_label = if self
                     .should_show_fast_status(self.current_model(), self.config.service_tier)
                 {

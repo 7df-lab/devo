@@ -190,12 +190,10 @@ async fn run_server_dispatch() {
     };
     let loader = devo_core::FileSystemAppConfigLoader::new(home_dir.clone());
     use devo_core::AppConfigLoader;
-    let app_config = loader
-        .load(args.working_root.as_deref())
-        .unwrap_or_else(|err| {
-            eprintln!("warning: failed to load app config for logging: {err}");
-            devo_core::AppConfig::default()
-        });
+    let app_config = loader.load(/*workspace_root*/ None).unwrap_or_else(|err| {
+        eprintln!("warning: failed to load app config for logging: {err}");
+        devo_core::AppConfig::default()
+    });
     let _logging = devo_core::LoggingBootstrap {
         process_name: "server",
         config: app_config.logging,

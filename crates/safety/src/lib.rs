@@ -117,6 +117,22 @@ impl RuntimePermissionProfile {
         }
     }
 
+    pub fn with_additional_roots(
+        mut self,
+        additional_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> RuntimePermissionProfile {
+        for root in additional_roots {
+            self.readable_roots.insert(root.clone());
+            if matches!(
+                self.preset,
+                PermissionPreset::Default | PermissionPreset::AutoReview
+            ) {
+                self.writable_roots.insert(root);
+            }
+        }
+        self
+    }
+
     pub fn permission_mode(&self) -> PermissionMode {
         if self.auto_approve {
             PermissionMode::AutoApprove

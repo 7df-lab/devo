@@ -75,7 +75,7 @@ impl HistorySummarizer for DefaultHistorySummarizer {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: None,
+            request_thinking: None,
             reasoning_effort: None,
             extra_body: None,
         };

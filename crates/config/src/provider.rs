@@ -64,7 +64,7 @@ model_provider = "xxxxx"
 model = "gpt-5.4"
 model_auto_compact_token_limit = 970000
 model_context_window = 997500
-model_thinking_selection = "medium"
+model_reasoning_effort_selection = "medium"
 disable_response_storage = true
 preferred_auth_method = "apikey"
 
@@ -115,7 +115,7 @@ invocation_method = "openai_responses"
                 headers: None,
                 model_auto_compact_token_limit: Some(970000),
                 model_context_window: Some(997500),
-                model_thinking_selection: Some("medium".to_string()),
+                model_reasoning_effort_selection: Some("medium".to_string()),
                 disable_response_storage: true,
                 preferred_auth_method: Some(PreferredAuthMethod::Apikey),
             }

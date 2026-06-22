@@ -12,6 +12,8 @@ use devo_protocol::CollaborationMode;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::client_fs::ClientFilesystem;
+use crate::client_terminal::ClientTerminal;
 use crate::coordinator::AgentToolCoordinator;
 use crate::invocation::ToolCallId;
 use crate::tool_spec::ToolSpec;
@@ -49,6 +51,8 @@ pub struct ToolContext {
     pub agent_context_mode: devo_protocol::AgentContextMode,
     pub collaboration_mode: CollaborationMode,
     pub agent_coordinator: Option<Arc<dyn AgentToolCoordinator>>,
+    pub client_filesystem: Option<Arc<dyn ClientFilesystem>>,
+    pub client_terminal: Option<Arc<dyn ClientTerminal>>,
     pub network_proxy: Option<String>,
 }
 
@@ -67,6 +71,14 @@ impl std::fmt::Debug for ToolContext {
             .field(
                 "agent_coordinator",
                 &self.agent_coordinator.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "client_filesystem",
+                &self.client_filesystem.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "client_terminal",
+                &self.client_terminal.as_ref().map(|_| "<configured>"),
             )
             .field(
                 "network_proxy",
@@ -201,7 +213,7 @@ impl ToolCallError {
 // ── ToolProgress ─────────────────────────────────────────────────────
 
 /// Structured progress updates from long-running tools.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolProgress {
     /// Incremental output delta.
@@ -211,6 +223,8 @@ pub enum ToolProgress {
         message: String,
         percent: Option<u8>,
     },
+    /// A client-owned terminal became visible for this tool call.
+    Terminal { terminal_id: String },
     /// Tool execution completed (terminal).
     Completion { summary: String },
 }
@@ -352,6 +366,9 @@ mod tests {
             ToolProgress::StatusUpdate {
                 message: "50% done".into(),
                 percent: Some(50),
+            },
+            ToolProgress::Terminal {
+                terminal_id: "term_1".into(),
             },
             ToolProgress::Completion {
                 summary: "Build complete".into(),

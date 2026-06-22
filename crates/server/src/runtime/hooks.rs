@@ -20,9 +20,9 @@ impl ServerRuntime {
         &self,
         session_id: SessionId,
     ) -> Option<devo_core::HookRuntimeContext> {
-        let runner = self.hook_runner()?;
         let session_arc = self.sessions.lock().await.get(&session_id).cloned()?;
         let session = session_arc.lock().await;
+        let runner = session.runtime_context.hook_runner()?;
         let transcript_path = session
             .record
             .as_ref()

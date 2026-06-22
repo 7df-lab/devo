@@ -64,7 +64,7 @@ flowchart TD
 2. 默认命令调用 `crates/cli/src/agent_command.rs` 中的 `run_agent`。
 3. `run_agent` 解析当前工作目录、`DEVO_HOME`、effective config、model catalog、permission preset、provider settings 和 saved model entries。
 4. `run_agent` 调用 `devo_tui::run_interactive_tui`。
-5. TUI 以 `InitialTuiSession` 启动，其中包含当前 session id、model、model binding id、provider wire API、thinking selection、permission preset 和 working directory。
+5. TUI 以 `InitialTuiSession` 启动，其中包含当前 session id、model、model binding id、provider wire API、reasoning effort selection、permission preset 和 working directory。
 
 `devo onboard` 使用同一路径，但强制 TUI 进入 provider onboarding mode。
 

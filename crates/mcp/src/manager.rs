@@ -352,6 +352,22 @@ async fn create_client(
             server_id: record.id.clone(),
             message: err.to_string(),
         })?,
+        McpTransportConfig::Sse {
+            url,
+            auth,
+            http_headers,
+            env_http_headers,
+        } => RmcpClient::new_sse_client(
+            url,
+            bearer_token(auth.as_ref()),
+            non_empty_map(http_headers),
+            non_empty_map(env_http_headers),
+        )
+        .await
+        .map_err(|err| McpError::McpStartupFailed {
+            server_id: record.id.clone(),
+            message: err.to_string(),
+        })?,
     };
 
     client

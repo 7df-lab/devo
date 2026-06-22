@@ -44,7 +44,7 @@ Chat widget 附加当前 UI state，例如 collaboration mode 和 approval polic
 对普通 prompt，worker 会：
 
 1. 确认或创建 server session；
-2. 应用当前 model、binding id、permission preset 和 thinking selection；
+2. 应用当前 model、binding id、permission preset 和 reasoning effort selection；
 3. 将 `TurnStartParams` 发送给 server；
 4. 订阅 turn events；
 5. 将 server events 映射为面向 TUI 的 `WorkerEvent`。

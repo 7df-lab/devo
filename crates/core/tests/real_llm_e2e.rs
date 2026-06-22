@@ -11,9 +11,9 @@ use devo_core::Message;
 use devo_core::Model;
 use devo_core::ProviderWireApi;
 use devo_core::QueryEvent;
+use devo_core::ReasoningCapability;
 use devo_core::SessionConfig;
 use devo_core::SessionState;
-use devo_core::ThinkingCapability;
 use devo_core::TokenBudget;
 use devo_core::TurnConfig;
 use devo_core::default_base_instructions;
@@ -54,7 +54,7 @@ impl RealLlmConfig {
             slug: self.model_slug.clone(),
             display_name: self.model_slug.clone(),
             provider: ProviderWireApi::OpenAIChatCompletions,
-            thinking_capability: ThinkingCapability::Unsupported,
+            reasoning_capability: ReasoningCapability::Unsupported,
             base_instructions: default_base_instructions().to_string(),
             max_tokens: Some(self.max_tokens),
             ..Model::default()
@@ -118,7 +118,7 @@ fn last_usage(events: &[QueryEvent]) -> Option<(usize, usize)> {
 async fn run_query(
     session: &mut SessionState,
     model: Model,
-    thinking_selection: Option<String>,
+    reasoning_effort_selection: Option<String>,
 ) -> Result<Vec<QueryEvent>> {
     let registry = Arc::new(ToolRegistry::new());
     let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
@@ -134,7 +134,7 @@ async fn run_query(
 
     query(
         session,
-        &TurnConfig::new(model, thinking_selection),
+        &TurnConfig::new(model, reasoning_effort_selection),
         provider,
         registry,
         &runtime,
@@ -228,7 +228,7 @@ async fn real_llm_context_diffs_and_agents_updates() -> Result<()> {
     let texts = collect_text_messages(&session);
     assert!(
         texts.iter().any(|text| text.contains("<context_changes>")),
-        "expected context diff message after changing cwd/thinking selection"
+        "expected context diff message after changing cwd/reasoning effort selection"
     );
     assert!(
         texts

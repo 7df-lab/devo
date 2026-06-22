@@ -21,10 +21,23 @@ impl ServerRuntime {
             }
         };
 
-        match self
-            .deps
-            .discover_skills(params.cwd.as_deref(), params.force_reload)
-        {
+        let skills = match params.cwd.as_deref() {
+            Some(cwd) => match self.deps.context_for_workspace(cwd).await {
+                Ok(runtime_context) => {
+                    runtime_context.discover_skills(Some(cwd), params.force_reload)
+                }
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to initialize skills workspace: {error}"),
+                    );
+                }
+            },
+            None => self.deps.discover_skills(None, params.force_reload),
+        };
+
+        match skills {
             Ok(skills) => serde_json::to_value(SuccessResponse {
                 id: request_id,
                 result: SkillListResult { skills },
@@ -54,7 +67,21 @@ impl ServerRuntime {
             }
         };
 
-        match self.deps.discover_skills(params.cwd.as_deref(), true) {
+        let skills = match params.cwd.as_deref() {
+            Some(cwd) => match self.deps.context_for_workspace(cwd).await {
+                Ok(runtime_context) => runtime_context.discover_skills(Some(cwd), true),
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to initialize skills workspace: {error}"),
+                    );
+                }
+            },
+            None => self.deps.discover_skills(None, true),
+        };
+
+        match skills {
             Ok(skills) => serde_json::to_value(SuccessResponse {
                 id: request_id,
                 result: SkillChangedResult { skills },

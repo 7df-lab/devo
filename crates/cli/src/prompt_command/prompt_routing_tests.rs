@@ -39,7 +39,7 @@ fn model_request(model: &str) -> ModelRequest {
         tools: None,
         hosted_tools: Vec::new(),
         sampling: Default::default(),
-        thinking: None,
+        request_thinking: None,
         reasoning_effort: None,
         extra_body: None,
     }

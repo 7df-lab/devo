@@ -32,7 +32,7 @@ fn widget_with_model() -> ChatWidget {
                 ..Model::default()
             }),
         ),
-        initial_thinking_selection: None,
+        initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
@@ -65,7 +65,7 @@ fn input_queue_update_growth_adds_pending_cell_from_server_snapshot() {
     widget.handle_worker_event(WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         turn_id: TurnId::new(),
     });

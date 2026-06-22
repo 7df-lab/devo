@@ -5,31 +5,34 @@ use devo_core::{
     ItemId, SessionId, SessionRecord, SessionTitleFinalSource, SessionTitleState, TurnId,
     TurnRecord, TurnStatus,
 };
-use devo_protocol::{SkillChangedParams, SkillListParams, SkillListResult};
+use devo_protocol::{
+    AcpClientCapabilities, AcpInitializeParams, SkillChangedParams, SkillListParams,
+    SkillListResult,
+};
 use devo_server::{
-    ActiveTurnSteeringState, ApprovalDecisionValue, ApprovalRequestPayload, ApprovalRespondParams,
-    ApprovalScopeValue, ClientRequest, ClientTransportKind, DefaultProjection, EventContext,
-    EventsSubscribeParams, InitializeParams, InputItem, ItemDeltaKind, ItemDeltaPayload,
-    PendingServerRequestContext, ProtocolError, ProtocolErrorCode, ServerEvent, ServerRequestKind,
-    SessionMetadata, SessionProjector, SessionRuntimeStatus, SessionTitleUpdateParams,
-    SteerInputRecord, TurnKind, TurnProjector,
+    ActiveTurnSteeringState, ApprovalDecisionValue, ApprovalRequestPayload, ApprovalResponseParams,
+    ApprovalScopeValue, ClientRequest, DefaultProjection, EventContext, EventsSubscribeParams,
+    InputItem, ItemDeltaKind, ItemDeltaPayload, PendingServerRequestContext, ProtocolError,
+    ProtocolErrorCode, ServerEvent, ServerRequestKind, SessionMetadata, SessionProjector,
+    SessionRuntimeStatus, SessionTitleUpdateParams, SteerInputRecord, TurnKind, TurnProjector,
 };
 use pretty_assertions::assert_eq;
 
 #[test]
-fn initialize_params_roundtrip() {
-    let params = InitializeParams {
-        client_name: "desktop".into(),
-        client_version: "1.0.0".into(),
-        transport: ClientTransportKind::Stdio,
-        supports_streaming: true,
-        supports_binary_images: false,
-        opt_out_notification_methods: vec!["turn/plan/updated".into()],
-    };
+fn acp_initialize_params_accept_documented_minimal_shape() {
+    let params: AcpInitializeParams =
+        serde_json::from_value(serde_json::json!({ "protocolVersion": 1 }))
+            .expect("deserialize ACP initialize params");
 
-    let json = serde_json::to_string(&params).expect("serialize");
-    let restored: InitializeParams = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(params, restored);
+    assert_eq!(
+        params,
+        AcpInitializeParams {
+            protocol_version: 1,
+            client_capabilities: AcpClientCapabilities::default(),
+            client_info: None,
+            meta: None,
+        }
+    );
 }
 
 #[test]
@@ -96,7 +99,7 @@ fn skill_list_result_serializes_expected_shape() {
 
 #[test]
 fn approval_response_roundtrip() {
-    let payload = ApprovalRespondParams {
+    let payload = ApprovalResponseParams {
         session_id: SessionId::new(),
         turn_id: TurnId::new(),
         approval_id: "approval-1".into(),
@@ -105,7 +108,7 @@ fn approval_response_roundtrip() {
     };
 
     let json = serde_json::to_string(&payload).expect("serialize");
-    let restored: ApprovalRespondParams = serde_json::from_str(&json).expect("deserialize");
+    let restored: ApprovalResponseParams = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(payload, restored);
 }
 
@@ -225,8 +228,9 @@ fn session_projection_maps_core_record() {
         model_provider: "anthropic".into(),
         model: Some("claude-sonnet".into()),
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         cwd: ".".into(),
+        additional_directories: Vec::new(),
         cli_version: "0.1.0".into(),
         title: Some("Test".into()),
         title_state: SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate),
@@ -262,11 +266,13 @@ fn turn_projection_preserves_turn_status_vocabulary() {
         kind: devo_core::TurnKind::Regular,
         model: "claude-sonnet".into(),
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         request_model: "claude-sonnet".into(),
         request_thinking: None,
         input_token_estimate: None,
         usage: None,
+        stop_reason: None,
+        failure_reason: None,
         session_context: None,
         turn_context: None,
         schema_version: 2,
@@ -328,6 +334,7 @@ fn session_title_updated_event_serializes_expected_kind() {
         session: SessionMetadata {
             session_id: SessionId::new(),
             cwd: ".".into(),
+            additional_directories: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             title: Some("Renamed session".into()),
@@ -339,7 +346,7 @@ fn session_title_updated_event_serializes_expected_kind() {
             ephemeral: false,
             model: Some("claude-sonnet".into()),
             model_binding_id: None,
-            thinking: None,
+            reasoning_effort_selection: None,
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -360,6 +367,7 @@ fn session_compaction_events_serialize_expected_kinds() {
     let metadata = SessionMetadata {
         session_id: SessionId::new(),
         cwd: ".".into(),
+        additional_directories: Vec::new(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
         title: Some("Compacting session".into()),
@@ -371,7 +379,7 @@ fn session_compaction_events_serialize_expected_kinds() {
         ephemeral: false,
         model: Some("claude-sonnet".into()),
         model_binding_id: None,
-        thinking: None,
+        reasoning_effort_selection: None,
         reasoning_effort: None,
         total_input_tokens: 0,
         total_output_tokens: 0,

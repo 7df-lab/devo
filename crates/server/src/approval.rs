@@ -1,4 +1,4 @@
 pub use devo_protocol::{
-    ApprovalDecisionValue, ApprovalRespondParams, ApprovalScopeValue, EventsSubscribeParams,
+    ApprovalDecisionValue, ApprovalResponseParams, ApprovalScopeValue, EventsSubscribeParams,
     EventsSubscribeResult,
 };

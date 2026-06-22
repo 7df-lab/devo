@@ -410,6 +410,18 @@ fn parse_edited_history_metadata(output: &serde_json::Value) -> Option<SessionHi
                     .and_then(serde_json::Value::as_str)
                     .map(ToOwned::to_owned)
                     .unwrap_or_else(|| diff.clone()),
+                old_text: file
+                    .get("oldContent")
+                    .or_else(|| file.get("preContent"))
+                    .or_else(|| file.get("pre_content"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+                new_text: file
+                    .get("postContent")
+                    .or_else(|| file.get("post_content"))
+                    .or_else(|| file.get("content"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
                 move_path: file
                     .get("movePath")
                     .or_else(|| file.get("move_path"))
@@ -426,6 +438,8 @@ fn parse_edited_history_metadata(output: &serde_json::Value) -> Option<SessionHi
                 std::path::PathBuf::from(path),
                 devo_protocol::protocol::FileChange::Update {
                     unified_diff: diff.clone(),
+                    old_text: None,
+                    new_text: None,
                     move_path: None,
                 },
             );
@@ -444,6 +458,7 @@ impl SessionProjector for DefaultProjection {
         SessionMetadata {
             session_id: session.id,
             cwd: session.cwd.clone(),
+            additional_directories: session.additional_directories.clone(),
             created_at: session.created_at,
             updated_at: session.updated_at,
             title: session.title.clone(),
@@ -455,7 +470,7 @@ impl SessionProjector for DefaultProjection {
             ephemeral,
             model: session.model.clone(),
             model_binding_id: session.model_binding_id.clone(),
-            thinking: session.thinking.clone(),
+            reasoning_effort_selection: session.reasoning_effort_selection.clone(),
             reasoning_effort: session
                 .latest_turn_context
                 .as_ref()
@@ -487,7 +502,7 @@ impl TurnProjector for DefaultProjection {
             kind: turn.kind.clone(),
             model: turn.model.clone(),
             model_binding_id: turn.model_binding_id.clone(),
-            thinking: turn.thinking.clone(),
+            reasoning_effort_selection: turn.reasoning_effort_selection.clone(),
             reasoning_effort: turn
                 .turn_context
                 .as_ref()
@@ -502,6 +517,8 @@ impl TurnProjector for DefaultProjection {
             started_at: turn.started_at,
             completed_at: turn.completed_at,
             usage: turn.usage.clone(),
+            stop_reason: turn.stop_reason.clone(),
+            failure_reason: turn.failure_reason,
         }
     }
 }

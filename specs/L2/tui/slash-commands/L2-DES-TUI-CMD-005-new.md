@@ -42,7 +42,7 @@ Rules:
 - The current session remains durable and resumable.
 - The visible transcript is reset to a new session HEADER box.
 - The TUI then waits for the user to send the first message before entering the new session's first turn.
-- The new session starts with current workspace metadata and the current effective model, thinking, and reasoning configuration.
+- The new session starts with current workspace metadata and the current effective model and reasoning effort configuration.
 - Token counters, active streaming cells, active tool state, and pending tool state reset to the fresh-session baseline.
 - If onboarding or model configuration is incomplete, the command should report that model setup is required and direct the user to restart with the onboarding CLI argument defined by `L2-DES-APP-007`.
 

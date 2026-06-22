@@ -96,6 +96,8 @@ pub(crate) async fn run_prompt(
             agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
+            client_filesystem: None,
+            client_terminal: None,
             local_web_search: None,
             hooks: (!app_config.hooks.is_empty()).then(|| devo_core::HookRuntimeContext {
                 runner: devo_core::HookRunner::new(app_config.hooks.clone()),
@@ -242,9 +244,9 @@ fn prompt_turn_config(
         let provider_request_models = devo_core::ProviderRequestModelMap::new(
             provider_request_model_map_for_binding(&app_config.provider, &binding),
         );
-        let thinking_selection = app_config
+        let reasoning_effort_selection = app_config
             .provider
-            .model_thinking_selection
+            .model_reasoning_effort_selection
             .clone()
             .or(binding.default_reasoning_effort.clone());
         let mut turn_config = TurnConfig::with_provider_route(
@@ -252,7 +254,7 @@ fn prompt_turn_config(
             binding.model_name.clone(),
             provider_request_models,
             ProviderRoute::binding(binding.provider_id.clone(), binding.invocation_method),
-            thinking_selection,
+            reasoning_effort_selection,
         );
         turn_config.model_binding_id = Some(binding.binding_id);
         return turn_config;
@@ -261,7 +263,7 @@ fn prompt_turn_config(
     let selected_model = requested_model.unwrap_or(default_model);
     TurnConfig::new(
         catalog_model(selected_model),
-        app_config.provider.model_thinking_selection.clone(),
+        app_config.provider.model_reasoning_effort_selection.clone(),
     )
 }
 
@@ -463,15 +465,30 @@ fn write_query_event_jsonl(session_id: &str, event: &QueryEvent) -> Result<()> {
                 input,
             })
         }
+        QueryEvent::ToolExecutionStart { .. } => Ok(()),
         QueryEvent::ToolProgress {
             tool_use_id,
-            content,
-        } => write_jsonl(&PromptJsonlEvent::ToolProgress {
-            session_id,
-            item_type: "tool_result",
-            tool_call_id: tool_use_id,
-            delta: content,
-        }),
+            progress,
+        } => {
+            let delta = match progress {
+                devo_core::tools::ToolProgress::OutputDelta { delta } => Some(delta.as_str()),
+                devo_core::tools::ToolProgress::StatusUpdate { message, .. } => {
+                    Some(message.as_str())
+                }
+                devo_core::tools::ToolProgress::Completion { summary } => Some(summary.as_str()),
+                devo_core::tools::ToolProgress::Terminal { .. } => None,
+            };
+            if let Some(delta) = delta {
+                write_jsonl(&PromptJsonlEvent::ToolProgress {
+                    session_id,
+                    item_type: "tool_result",
+                    tool_call_id: tool_use_id,
+                    delta,
+                })
+            } else {
+                Ok(())
+            }
+        }
         QueryEvent::ToolResult {
             tool_use_id,
             tool_name,

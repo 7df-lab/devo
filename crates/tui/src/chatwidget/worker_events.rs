@@ -115,7 +115,7 @@ impl ChatWidget {
             WorkerEvent::TurnStarted {
                 model,
                 model_binding_id,
-                thinking,
+                reasoning_effort_selection,
                 reasoning_effort,
                 turn_id,
                 ..
@@ -129,7 +129,7 @@ impl ChatWidget {
                 self.pending_proposed_plan_actions = false;
                 self.current_turn_has_user_shell_command = false;
                 self.update_session_model_selection(model, model_binding_id);
-                self.thinking_selection = thinking;
+                self.reasoning_effort_selection = reasoning_effort_selection;
                 self.session.reasoning_effort = reasoning_effort;
                 self.refresh_header_box();
                 self.busy = true;
@@ -1021,6 +1021,30 @@ impl ChatWidget {
                     self.set_status_message("Skills loaded");
                 }
             }
+            WorkerEvent::AcpAvailableCommandsUpdated { commands } => {
+                self.acp_available_commands = commands;
+                let count = self.acp_available_commands.len();
+                self.set_status_message(format!("ACP commands updated: {count}"));
+                self.frame_requester.schedule_frame();
+            }
+            WorkerEvent::AcpCurrentModeUpdated { current_mode_id } => {
+                self.acp_current_mode_id = Some(current_mode_id);
+                let current_mode_id = self.acp_current_mode_id.as_deref().unwrap_or("unknown");
+                self.set_status_message(format!("ACP mode: {current_mode_id}"));
+                self.frame_requester.schedule_frame();
+            }
+            WorkerEvent::AcpConfigOptionsUpdated { config_options } => {
+                self.acp_config_options = config_options;
+                let count = self.acp_config_options.len();
+                self.set_status_message(format!("ACP config options updated: {count}"));
+                self.frame_requester.schedule_frame();
+            }
+            WorkerEvent::AcpUsageUpdated { used, size, cost } => {
+                self.acp_usage = Some((used, size, cost));
+                let (used, size, _) = self.acp_usage.as_ref().expect("ACP usage was just stored");
+                self.set_status_message(format!("ACP context: {used}/{size} tokens"));
+                self.frame_requester.schedule_frame();
+            }
             WorkerEvent::ReferenceSearchUpdated { snapshot } => {
                 self.bottom_pane.on_reference_search_result(snapshot);
             }
@@ -1028,7 +1052,7 @@ impl ChatWidget {
                 cwd,
                 model,
                 model_binding_id,
-                thinking,
+                reasoning_effort_selection,
                 reasoning_effort,
                 active_agent_label,
                 last_query_total_tokens: _,
@@ -1038,7 +1062,7 @@ impl ChatWidget {
                 self.resume_browser_loading = false;
                 self.session.cwd = cwd;
                 self.update_session_model_selection(model, model_binding_id);
-                self.thinking_selection = thinking;
+                self.reasoning_effort_selection = reasoning_effort_selection;
                 self.session.reasoning_effort = reasoning_effort;
                 self.session.active_agent_label = active_agent_label.clone();
                 self.bottom_pane.set_active_agent_label(active_agent_label);
@@ -1075,7 +1099,7 @@ impl ChatWidget {
                 title,
                 model,
                 model_binding_id,
-                thinking,
+                reasoning_effort_selection,
                 reasoning_effort,
                 active_agent_label,
                 total_input_tokens,
@@ -1094,7 +1118,7 @@ impl ChatWidget {
                 if let Some(model) = model {
                     self.update_session_model_selection(model, model_binding_id);
                 }
-                self.thinking_selection = thinking;
+                self.reasoning_effort_selection = reasoning_effort_selection;
                 self.session.reasoning_effort = reasoning_effort;
                 self.session.active_agent_label = active_agent_label.clone();
                 self.bottom_pane.set_active_agent_label(active_agent_label);

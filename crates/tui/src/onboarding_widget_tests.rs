@@ -7,8 +7,8 @@ use devo_protocol::Model;
 use devo_protocol::ProviderModelBinding;
 use devo_protocol::ProviderVendor;
 use devo_protocol::ProviderWireApi;
+use devo_protocol::ReasoningCapability;
 use devo_protocol::ReasoningEffort;
-use devo_protocol::ThinkingCapability;
 use pretty_assertions::assert_eq;
 use tokio::sync::mpsc;
 
@@ -88,7 +88,7 @@ fn deepseek_model() -> Model {
     devo_core::ModelPreset {
         slug: "deepseek-v4-flash".to_string(),
         display_name: "Deepseek V4 Flash".to_string(),
-        thinking_capability: ThinkingCapability::Toggle,
+        reasoning_capability: ReasoningCapability::Toggle,
         supported_reasoning_levels: vec![ReasoningEffort::High, ReasoningEffort::Max],
         default_reasoning_effort: Some(ReasoningEffort::High),
         ..devo_core::ModelPreset::default()

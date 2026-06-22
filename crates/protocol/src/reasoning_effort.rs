@@ -1,21 +1,21 @@
-//! Thinking and reasoning metadata shared across the catalog, runtime, and UI.
+//! Reasoning effort metadata shared across the catalog, runtime, and UI.
 //!
 //! This module exists to keep the model schema focused while making the
-//! "thinking" design explicit in one place.
+//! reasoning-effort design explicit in one place.
 //!
-//! The motivation is that a user's logical thinking choice is not always
+//! The motivation is that a user's logical reasoning-effort choice is not always
 //! transported the same way to every provider or model family:
 //!
-//! - Some models do not expose thinking at all.
+//! - Some models do not expose configurable reasoning effort at all.
 //! - Some models expose thinking as a request parameter such as `thinking`.
-//! - Some models expose "thinking" by publishing separate model variants, for
+//! - Some models expose reasoning by publishing separate model variants, for
 //!   example "deepseek-chat" vs "deepseek-reasoner".
 //!
 //! Because of that, the runtime should not treat the request `thinking` field
-//! as the only representation of thinking mode. Instead, the system uses a
+//! as the only representation of reasoning effort. Instead, the system uses a
 //! two-step design:
 //!
-//! 1. The user or session stores a logical thinking selection such as
+//! 1. The user or session stores a logical reasoning-effort selection such as
 //!    `disabled`, `enabled`, or `medium`.
 //! 2. The runtime resolves that logical selection into concrete provider
 //!    request fields:
@@ -26,8 +26,8 @@
 //!
 //! This split is represented by two separate concepts:
 //!
-//! - `ThinkingCapability` describes what choices the UI should present.
-//! - `ThinkingImplementation` describes how that choice should be applied to a
+//! - `ReasoningCapability` describes what choices the UI should present.
+//! - `ReasoningImplementation` describes how that choice should be applied to a
 //!   request.
 //!
 //! Keeping those concerns separate lets the UI remain stable while the runtime
@@ -35,14 +35,14 @@
 //! adapters then consume already-resolved request fields instead of embedding
 //! model-variant logic themselves.
 //!
-//! `ResolvedThinkingRequest` is the boundary type produced by resolution. It is
+//! `ResolvedReasoningRequest` is the boundary type produced by resolution. It is
 //! the normalized transport-ready result of combining:
 //!
 //! - a logical model preset
-//! - a logical thinking selection
-//! - model-specific thinking implementation rules
+//! - a logical reasoning-effort selection
+//! - model-specific reasoning implementation rules
 //!
-//! That makes model-variant thinking a catalog/runtime concern rather than a
+//! That makes model-variant reasoning a catalog/runtime concern rather than a
 //! provider-transport concern.
 
 use std::str::FromStr;
@@ -54,28 +54,28 @@ use serde_json::Value;
 use strum_macros::Display;
 use strum_macros::EnumIter;
 
-/// Describes how a logical thinking selection should be applied to a request.
+/// Describes how a logical reasoning-effort selection should be applied to a request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ThinkingImplementation {
-    /// Thinking is not exposed for this model.
+pub enum ReasoningImplementation {
+    /// Reasoning effort is not exposed for this model.
     Disabled,
-    /// Thinking is sent via the provider request payload for the same model slug.
+    /// Reasoning effort is sent via the provider request payload for the same model slug.
     RequestParameter,
-    /// Thinking selects a different wire-model variant instead of a request parameter.
-    ModelVariant(ThinkingVariantConfig),
+    /// Reasoning effort selects a different wire-model variant instead of a request parameter.
+    ModelVariant(ReasoningVariantConfig),
 }
 
-/// Groups the available model variants used to realize thinking selections.
+/// Groups the available model variants used to realize reasoning-effort selections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThinkingVariantConfig {
-    pub variants: Vec<ThinkingVariant>,
+pub struct ReasoningVariantConfig {
+    pub variants: Vec<ReasoningVariant>,
 }
 
-/// Maps one logical thinking selection to a concrete request model and defaults.
+/// Maps one logical reasoning-effort selection to a concrete request model and defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThinkingVariant {
-    /// Logical thinking selection value, such as `enabled` or `disabled`.
+pub struct ReasoningVariant {
+    /// Logical reasoning-effort selection value, such as `enabled` or `disabled`.
     pub selection_value: String,
     /// Concrete wire-model slug to send to the provider for this selection.
     pub model_slug: String,
@@ -87,9 +87,9 @@ pub struct ThinkingVariant {
     pub description: String,
 }
 
-/// Fully resolved request settings derived from a logical model plus thinking selection.
+/// Fully resolved request settings derived from a logical model plus reasoning-effort selection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct ResolvedThinkingRequest {
+pub struct ResolvedReasoningRequest {
     /// Final model slug that should be sent to the provider.
     pub request_model: String,
     /// Final `thinking` request parameter, when the provider expects one.
@@ -121,7 +121,7 @@ pub struct ResolvedThinkingRequest {
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum ReasoningEffort {
-    // GPT thinking reason effor: [none, minimal, low, medium, high, xhigh]
+    // GPT reasoning effort: [none, minimal, low, medium, high, xhigh]
     None,
     Minimal,
     Low,
@@ -129,7 +129,7 @@ pub enum ReasoningEffort {
     Medium,
     High,
     XHigh,
-    // DeepSeek V4 thinking reason effort: [high, max]
+    // DeepSeek V4 reasoning effort: [high, max]
     Max,
 }
 
@@ -192,9 +192,9 @@ fn reasoning_effort_wire_value(effort: ReasoningEffort) -> &'static str {
 mod tests {
     use pretty_assertions::assert_eq;
 
+    use super::ReasoningCapability;
     use super::ReasoningEffort;
-    use super::ThinkingCapability;
-    use super::ThinkingPreset;
+    use super::ReasoningEffortOption;
 
     #[test]
     fn reasoning_effort_from_str_accepts_wire_values() {
@@ -229,16 +229,16 @@ mod tests {
     }
 
     #[test]
-    fn thinking_options_use_reasoning_effort_wire_values() {
+    fn reasoning_options_use_reasoning_effort_wire_values() {
         assert_eq!(
-            ThinkingCapability::ToggleWithLevels(vec![ReasoningEffort::XHigh]).options(),
+            ReasoningCapability::ToggleWithLevels(vec![ReasoningEffort::XHigh]).options(),
             vec![
-                ThinkingPreset {
+                ReasoningEffortOption {
                     label: "Off".to_string(),
-                    description: "Disable thinking for this turn".to_string(),
+                    description: "Disable reasoning effort for this turn".to_string(),
                     value: "disabled".to_string(),
                 },
-                ThinkingPreset {
+                ReasoningEffortOption {
                     label: "XHigh".to_string(),
                     description: "Most deliberate, highest effort".to_string(),
                     value: "xhigh".to_string(),
@@ -291,8 +291,8 @@ impl ReasoningEffortPreset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-/// One selectable thinking option presented to the UI or protocol client.
-pub struct ThinkingPreset {
+/// One selectable reasoning-effort option presented to the UI or protocol client.
+pub struct ReasoningEffortOption {
     pub label: String,
     pub description: String,
     pub value: String,
@@ -300,54 +300,64 @@ pub struct ThinkingPreset {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ThinkingCapability {
-    /// Model thinking cannot be controlled.
+pub enum ReasoningCapability {
+    /// Model reasoning effort cannot be controlled.
     Unsupported,
-    /// Model thinking can be toggled on and off.
+    /// Model reasoning effort can be toggled on and off.
     Toggle,
-    /// Multiple effort levels can be selected for thinking.
+    /// Multiple reasoning effort levels can be selected.
     Levels(Vec<ReasoningEffort>),
-    /// Thinking can be turned off, or enabled with one of several effort levels.
+    /// Reasoning effort can be turned off, or enabled with one of several effort levels.
     ToggleWithLevels(Vec<ReasoningEffort>),
 }
 
-impl ThinkingCapability {
-    pub fn options(&self) -> Vec<ThinkingPreset> {
+impl ReasoningCapability {
+    pub fn options(&self) -> Vec<ReasoningEffortOption> {
         match self {
-            ThinkingCapability::Unsupported => Vec::new(),
-            ThinkingCapability::Toggle => vec![
-                ThinkingPreset {
+            ReasoningCapability::Unsupported => Vec::new(),
+            ReasoningCapability::Toggle => vec![
+                ReasoningEffortOption {
                     label: "Off".to_string(),
-                    description: "Disable thinking for this turn".to_string(),
+                    description: "Disable reasoning effort for this turn".to_string(),
                     value: "disabled".to_string(),
                 },
-                ThinkingPreset {
+                ReasoningEffortOption {
                     label: "On".to_string(),
-                    description: "Enable the model's thinking mode".to_string(),
+                    description: "Enable model reasoning effort".to_string(),
                     value: "enabled".to_string(),
                 },
             ],
-            ThinkingCapability::Levels(levels) => {
+            ReasoningCapability::Levels(levels) => {
                 let mut presets = Vec::with_capacity(levels.len());
-                presets.extend(levels.iter().copied().map(thinking_preset_for_effort));
+                presets.extend(
+                    levels
+                        .iter()
+                        .copied()
+                        .map(reasoning_effort_option_for_effort),
+                );
                 presets
             }
-            ThinkingCapability::ToggleWithLevels(levels) => {
+            ReasoningCapability::ToggleWithLevels(levels) => {
                 let mut presets = Vec::with_capacity(levels.len() + 1);
-                presets.push(ThinkingPreset {
+                presets.push(ReasoningEffortOption {
                     label: "Off".to_string(),
-                    description: "Disable thinking for this turn".to_string(),
+                    description: "Disable reasoning effort for this turn".to_string(),
                     value: "disabled".to_string(),
                 });
-                presets.extend(levels.iter().copied().map(thinking_preset_for_effort));
+                presets.extend(
+                    levels
+                        .iter()
+                        .copied()
+                        .map(reasoning_effort_option_for_effort),
+                );
                 presets
             }
         }
     }
 }
 
-fn thinking_preset_for_effort(effort: ReasoningEffort) -> ThinkingPreset {
-    ThinkingPreset {
+fn reasoning_effort_option_for_effort(effort: ReasoningEffort) -> ReasoningEffortOption {
+    ReasoningEffortOption {
         label: effort.label().to_string(),
         description: effort.description().to_string(),
         value: reasoning_effort_wire_value(effort).to_string(),

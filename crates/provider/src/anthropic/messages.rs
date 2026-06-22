@@ -901,8 +901,11 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                 })
                 .collect::<Vec<_>>()
         }),
-        thinking: request.thinking.as_deref().and_then(build_thinking),
-        output_config: build_output_config(request.thinking.as_deref(), request.reasoning_effort),
+        thinking: request.request_thinking.as_deref().and_then(build_thinking),
+        output_config: build_output_config(
+            request.request_thinking.as_deref(),
+            request.reasoning_effort,
+        ),
         temperature: request.sampling.temperature,
         top_p: request.sampling.top_p,
         top_k: request.sampling.top_k,
@@ -1460,7 +1463,7 @@ mod tests {
                 top_p: Some(0.9),
                 top_k: Some(32),
             },
-            thinking: Some("medium".to_string()),
+            request_thinking: Some("medium".to_string()),
             reasoning_effort: None,
             extra_body: None,
         };
@@ -1510,7 +1513,7 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: Some("enabled".to_string()),
+            request_thinking: Some("enabled".to_string()),
             reasoning_effort: None,
             extra_body: None,
         };
@@ -1554,7 +1557,7 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: Some("enabled".to_string()),
+            request_thinking: Some("enabled".to_string()),
             reasoning_effort: None,
             extra_body: None,
         };
@@ -1602,7 +1605,7 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: None,
+            request_thinking: None,
             reasoning_effort: None,
             extra_body: None,
         };
@@ -1646,13 +1649,13 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: Some("disabled".to_string()),
+            request_thinking: Some("disabled".to_string()),
             reasoning_effort: None,
             extra_body: None,
         };
 
         let disabled = build_request(&request, true);
-        request.thinking = Some("bogus".to_string());
+        request.request_thinking = Some("bogus".to_string());
         let unknown = build_request(&request, true);
 
         assert_eq!(disabled["thinking"]["type"], json!("disabled"));
@@ -1676,7 +1679,7 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: Some("max".to_string()),
+            request_thinking: Some("max".to_string()),
             reasoning_effort: None,
             extra_body: None,
         };
@@ -1702,7 +1705,7 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: Some("enabled".to_string()),
+            request_thinking: Some("enabled".to_string()),
             reasoning_effort: Some(ReasoningEffort::Max),
             extra_body: None,
         };

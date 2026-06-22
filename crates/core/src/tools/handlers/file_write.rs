@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use devo_tools::ClientTextFileRead;
+use devo_tools::ClientTextFileWrite;
 use diffy::PatchFormatter;
 use diffy::create_patch;
 use serde_json::json;
+use tracing::debug;
 use tracing::info;
 
 use crate::contracts::{
@@ -79,6 +82,46 @@ impl ToolHandler for WriteHandler {
 
         let path = resolve_path(&ctx.workspace_root, path_str);
         info!(path = %path.display(), bytes = content.len(), "writing file");
+
+        if let Some(client_filesystem) = ctx.client_filesystem.clone() {
+            let previous = match client_filesystem
+                .clone()
+                .read_text_file(
+                    ctx.session_id.clone(),
+                    path.clone(),
+                    None,
+                    None,
+                    ctx.cancel_token.clone(),
+                )
+                .await
+            {
+                Ok(ClientTextFileRead::Content(previous)) => Some(previous),
+                Ok(ClientTextFileRead::Unsupported) => tokio::fs::read_to_string(&path).await.ok(),
+                Err(error) => {
+                    debug!(
+                        path = %path.display(),
+                        %error,
+                        "failed to read previous client file before write"
+                    );
+                    None
+                }
+            };
+            match client_filesystem
+                .write_text_file(
+                    ctx.session_id.clone(),
+                    path.clone(),
+                    content.to_string(),
+                    ctx.cancel_token.clone(),
+                )
+                .await?
+            {
+                ClientTextFileWrite::Written => {
+                    return Ok(write_tool_result(&path, previous.as_deref(), content));
+                }
+                ClientTextFileWrite::Unsupported => {}
+            }
+        }
+
         let previous = tokio::fs::read_to_string(&path).await.ok();
 
         if let Some(parent) = path.parent() {
@@ -91,23 +134,27 @@ impl ToolHandler for WriteHandler {
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(format!("failed to write file: {e}")))?;
 
-        let metadata = build_write_metadata(&path, previous.as_deref(), content);
-        let summary = format!("wrote {} bytes to {}", content.len(), path.display());
-        let mut result = ToolResult::success(
-            ToolResultContent::Mixed {
-                text: Some(summary.clone()),
-                json: Some(metadata),
-            },
-            &summary,
-        );
-        result.display_content = Some(summary);
-        Ok(result)
+        Ok(write_tool_result(&path, previous.as_deref(), content))
     }
 }
 
 fn resolve_path(cwd: &std::path::Path, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
     if p.is_absolute() { p } else { cwd.join(p) }
+}
+
+fn write_tool_result(path: &std::path::Path, previous: Option<&str>, content: &str) -> ToolResult {
+    let metadata = build_write_metadata(path, previous, content);
+    let summary = format!("wrote {} bytes to {}", content.len(), path.display());
+    let mut result = ToolResult::success(
+        ToolResultContent::Mixed {
+            text: Some(summary.clone()),
+            json: Some(metadata),
+        },
+        &summary,
+    );
+    result.display_content = Some(summary);
+    result
 }
 
 fn build_write_metadata(
@@ -172,7 +219,12 @@ fn build_write_metadata(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use devo_tools::ClientFilesystem;
     use pretty_assertions::assert_eq;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
 
@@ -182,6 +234,58 @@ mod tests {
             build_write_metadata(std::path::Path::new("foo.txt"), None, "hello\nworld\n");
         assert_eq!(metadata["files"][0]["kind"], "add");
         assert_eq!(metadata["files"][0]["additions"], 2);
+    }
+
+    #[tokio::test]
+    async fn client_write_runs_when_previous_client_read_fails() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("new.txt");
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let client_filesystem = Arc::new(ReadFailingClientFilesystem {
+            writes: Arc::clone(&writes),
+        });
+
+        let result = WriteHandler::new()
+            .handle(
+                ToolContext {
+                    tool_call_id: crate::invocation::ToolCallId("call-1".to_string()),
+                    session_id: "session-1".to_string(),
+                    turn_id: Some("turn-1".to_string()),
+                    workspace_root: root.path().to_path_buf(),
+                    budgets: crate::contracts::ToolBudgets {
+                        output_limit_bytes: 32_768,
+                        wall_time_limit_ms: None,
+                    },
+                    cancel_token: CancellationToken::new(),
+                    agent_scope: crate::contracts::ToolAgentScope::Parent,
+                    agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
+                    collaboration_mode: devo_protocol::CollaborationMode::Build,
+                    agent_coordinator: None,
+                    client_filesystem: Some(client_filesystem),
+                    client_terminal: None,
+                    network_proxy: None,
+                },
+                serde_json::json!({
+                    "filePath": path.clone(),
+                    "content": "hello\n"
+                }),
+                None,
+            )
+            .await
+            .expect("client write succeeds");
+
+        assert_eq!(
+            writes.lock().expect("writes lock").as_slice(),
+            &[(path, "hello\n".to_string())]
+        );
+        match result.content {
+            ToolResultContent::Mixed {
+                json: Some(json), ..
+            } => {
+                assert_eq!(json["files"][0]["kind"], "add");
+            }
+            other => panic!("unexpected result content: {other:?}"),
+        }
     }
 
     #[test]
@@ -207,5 +311,37 @@ mod tests {
                 .unwrap_or_default()
                 .contains("@@ -1 +1 @@")
         );
+    }
+
+    struct ReadFailingClientFilesystem {
+        writes: Arc<Mutex<Vec<(PathBuf, String)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ClientFilesystem for ReadFailingClientFilesystem {
+        async fn read_text_file(
+            self: Arc<Self>,
+            _session_id: String,
+            _path: PathBuf,
+            _line: Option<u64>,
+            _limit: Option<u64>,
+            _cancel_token: CancellationToken,
+        ) -> Result<ClientTextFileRead, ToolCallError> {
+            Err(ToolCallError::ExecutionFailed("file not found".to_string()))
+        }
+
+        async fn write_text_file(
+            self: Arc<Self>,
+            _session_id: String,
+            path: PathBuf,
+            content: String,
+            _cancel_token: CancellationToken,
+        ) -> Result<ClientTextFileWrite, ToolCallError> {
+            self.writes
+                .lock()
+                .expect("writes lock")
+                .push((path, content));
+            Ok(ClientTextFileWrite::Written)
+        }
     }
 }

@@ -46,8 +46,6 @@ pub struct ServerRequestEnvelope<T> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMethod {
-    SessionStart,
-    SessionList,
     SessionMetadataUpdate,
     SessionPermissionsUpdate,
     SessionTitleUpdate,
@@ -69,7 +67,6 @@ pub enum ClientMethod {
     TurnShellCommand,
     TurnInterrupt,
     TurnSteer,
-    ApprovalRespond,
     RequestUserInputRespond,
     SearchStart,
     SearchUpdate,
@@ -97,8 +94,6 @@ pub enum ClientMethod {
 impl ClientMethod {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::SessionStart => "session/start",
-            Self::SessionList => "session/list",
             Self::SessionMetadataUpdate => "session/metadata/update",
             Self::SessionPermissionsUpdate => "session/permissions/update",
             Self::SessionTitleUpdate => "session/title/update",
@@ -120,7 +115,6 @@ impl ClientMethod {
             Self::TurnShellCommand => "turn/shell_command",
             Self::TurnInterrupt => "turn/interrupt",
             Self::TurnSteer => "turn/steer",
-            Self::ApprovalRespond => "approval/respond",
             Self::RequestUserInputRespond => "request_user_input/respond",
             Self::SearchStart => "search/start",
             Self::SearchUpdate => "search/update",
@@ -148,8 +142,6 @@ impl ClientMethod {
 
     pub fn parse(method: &str) -> Option<Self> {
         Some(match method {
-            "session/start" => Self::SessionStart,
-            "session/list" => Self::SessionList,
             "session/metadata/update" => Self::SessionMetadataUpdate,
             "session/permissions/update" => Self::SessionPermissionsUpdate,
             "session/title/update" => Self::SessionTitleUpdate,
@@ -171,7 +163,6 @@ impl ClientMethod {
             "turn/shell_command" => Self::TurnShellCommand,
             "turn/interrupt" => Self::TurnInterrupt,
             "turn/steer" => Self::TurnSteer,
-            "approval/respond" => Self::ApprovalRespond,
             "request_user_input/respond" => Self::RequestUserInputRespond,
             "search/start" => Self::SearchStart,
             "search/update" => Self::SearchUpdate,
@@ -293,6 +284,10 @@ pub enum FileChange {
     },
     Update {
         unified_diff: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_text: Option<String>,
         move_path: Option<PathBuf>,
     },
 }
@@ -585,5 +580,10 @@ mod tests {
             ClientMethod::MessageEditPrevious.as_str(),
             "message/editPrevious"
         );
+    }
+
+    #[test]
+    fn client_method_does_not_recognize_legacy_approval_respond() {
+        assert_eq!(ClientMethod::parse("approval/respond"), None);
     }
 }

@@ -47,7 +47,7 @@ async fn goal_clear_interrupts_active_hidden_continuation_turn() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 120,
-                "method": "goal/clear",
+                "method": "_devo/goal/clear",
                 "params": {
                     "sessionId": session_id
                 }
@@ -87,7 +87,7 @@ async fn goal_complete_interrupts_active_hidden_continuation_turn() -> Result<()
             connection_id,
             serde_json::json!({
                 "id": 121,
-                "method": "goal/complete",
+                "method": "_devo/goal/complete",
                 "params": {
                     "sessionId": session_id,
                     "status": "complete"
@@ -129,7 +129,7 @@ async fn goal_cancel_interrupts_active_hidden_continuation_turn() -> Result<()> 
             connection_id,
             serde_json::json!({
                 "id": 126,
-                "method": "goal/cancel",
+                "method": "_devo/goal/cancel",
                 "params": {
                     "session_id": session_id,
                     "goal_id": goal_id
@@ -186,7 +186,7 @@ async fn replacing_goal_interrupts_old_hidden_turn_and_starts_new_goal_cleanly()
             connection_id,
             serde_json::json!({
                 "id": 122,
-                "method": "goal/status",
+                "method": "_devo/goal/status",
                 "params": {
                     "sessionId": session_id
                 }
@@ -238,7 +238,7 @@ async fn pausing_budget_limited_wrapup_preserves_budget_limited_status() -> Resu
             connection_id,
             serde_json::json!({
                 "id": 123,
-                "method": "goal/set",
+                "method": "_devo/goal/set",
                 "params": {
                     "sessionId": session_id,
                     "objective": "preserve budget-limited status",
@@ -261,7 +261,7 @@ async fn pausing_budget_limited_wrapup_preserves_budget_limited_status() -> Resu
             connection_id,
             serde_json::json!({
                 "id": 124,
-                "method": "goal/set",
+                "method": "_devo/goal/set",
                 "params": {
                     "sessionId": session_id,
                     "status": "paused"
@@ -294,7 +294,7 @@ async fn start_created_goal(
             connection_id,
             serde_json::json!({
                 "id": 125,
-                "method": "goal/create",
+                "method": "_devo/goal/create",
                 "params": {
                     "sessionId": session_id,
                     "objective": objective,

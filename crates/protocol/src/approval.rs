@@ -3,9 +3,9 @@ use smol_str::SmolStr;
 
 use crate::{SessionId, TurnId};
 
-/// Describes a client response to a pending approval request.
+/// Describes a UI/client response to a pending approval request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApprovalRespondParams {
+pub struct ApprovalResponseParams {
     pub session_id: SessionId,
     pub turn_id: TurnId,
     pub approval_id: SmolStr,

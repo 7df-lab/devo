@@ -36,7 +36,7 @@ use crate::onboarding::onboarding_provider_model_binding;
 use crate::onboarding::onboarding_provider_vendor;
 use crate::onboarding::save_last_used_model;
 use crate::onboarding::save_project_permission_preset;
-use crate::onboarding::save_thinking_selection;
+use crate::onboarding::save_reasoning_effort_selection;
 use crate::pager_overlay::TranscriptOverlay;
 use crate::render::renderable::Renderable;
 use crate::tui::Tui;
@@ -240,7 +240,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         model_binding_id: initial_session.model_binding_id.clone(),
         cwd: initial_session.cwd.clone(),
         server_log_level: config.server_log_level.clone(),
-        thinking_selection: initial_session.thinking_selection.clone(),
+        reasoning_effort_selection: initial_session.reasoning_effort_selection.clone(),
         permission_preset: initial_session.permission_preset,
     });
 
@@ -268,7 +268,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         });
     let initial_provider = model.provider_wire_api();
     let initial_reasoning_effort = model
-        .resolve_thinking_selection(initial_session.thinking_selection.as_deref())
+        .resolve_reasoning_effort_selection(initial_session.reasoning_effort_selection.as_deref())
         .effective_reasoning_effort;
 
     let mut loop_state = InteractiveLoopState::default();
@@ -288,7 +288,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
             reasoning_effort: initial_reasoning_effort,
             active_agent_label: None,
         },
-        initial_thinking_selection: initial_session.thinking_selection.clone(),
+        initial_reasoning_effort_selection: initial_session.reasoning_effort_selection.clone(),
         initial_permission_preset: initial_session.permission_preset,
         initial_user_message: None,
         enhanced_keys_supported: tui.enhanced_keys_supported(),
@@ -938,6 +938,10 @@ fn handle_worker_event(
         | WorkerEvent::SubagentDiscovered { .. }
         | WorkerEvent::SubagentMonitor { .. }
         | WorkerEvent::SkillsListed { .. }
+        | WorkerEvent::AcpAvailableCommandsUpdated { .. }
+        | WorkerEvent::AcpCurrentModeUpdated { .. }
+        | WorkerEvent::AcpConfigOptionsUpdated { .. }
+        | WorkerEvent::AcpUsageUpdated { .. }
         | WorkerEvent::ReferenceSearchUpdated { .. }
         | WorkerEvent::NewSessionPrepared { .. }
         | WorkerEvent::SessionRenamed { .. }
@@ -993,7 +997,7 @@ fn handle_app_command(
             input,
             model,
             model_binding_id,
-            thinking,
+            reasoning_effort_selection,
             approval_policy,
             collaboration_mode,
             ..
@@ -1001,7 +1005,7 @@ fn handle_app_command(
             if let Some(model) = model {
                 worker.set_model_selection(model.clone(), model_binding_id.clone())?;
             }
-            worker.set_thinking(thinking.clone())?;
+            worker.set_reasoning_effort(reasoning_effort_selection.clone())?;
             worker.submit_input_with_collaboration_mode(
                 input.clone(),
                 approval_policy.clone(),
@@ -1060,7 +1064,9 @@ fn handle_app_command(
             chat_widget.note_permissions_updated(*preset);
         }
         AppCommand::OverrideTurnContext {
-            model, thinking, ..
+            model,
+            reasoning_effort_selection,
+            ..
         } => {
             if let Some(model) = model {
                 worker.set_model(model.clone())?;
@@ -1071,9 +1077,9 @@ fn handle_app_command(
                     .unwrap_or(context.default_provider);
                 save_last_used_model(/*wire_api*/ None, provider, model)?;
             }
-            if let Some(thinking) = thinking {
-                worker.set_thinking(thinking.clone())?;
-                save_thinking_selection(thinking.as_deref())?;
+            if let Some(reasoning_effort_selection) = reasoning_effort_selection {
+                worker.set_reasoning_effort(reasoning_effort_selection.clone())?;
+                save_reasoning_effort_selection(reasoning_effort_selection.as_deref())?;
             }
         }
         AppCommand::RunUserShellCommand { command } => {

@@ -124,8 +124,8 @@ pub fn resolve_provider_settings_from_config_and_auth(
         }
 
         let api_key = resolve_provider_api_key(&binding.provider_id, provider_config, auth)?;
-        let model_thinking_selection = file
-            .model_thinking_selection
+        let model_reasoning_effort_selection = file
+            .model_reasoning_effort_selection
             .clone()
             .or(binding.default_reasoning_effort);
 
@@ -139,7 +139,7 @@ pub fn resolve_provider_settings_from_config_and_auth(
             headers: provider_config.headers.clone(),
             model_auto_compact_token_limit: file.model_auto_compact_token_limit,
             model_context_window: file.model_context_window,
-            model_thinking_selection,
+            model_reasoning_effort_selection,
             disable_response_storage: file.disable_response_storage.unwrap_or(false),
             preferred_auth_method: file.preferred_auth_method,
         });
@@ -270,7 +270,7 @@ pub fn provider_request_model_map_for_binding(
     config: &ProviderConfigSection,
     binding: &ResolvedModelBinding,
 ) -> std::collections::HashMap<String, String> {
-    // Thinking model variants are catalog slugs first. When `kimi-k2.5` resolves
+    // Reasoning model variants are catalog slugs first. When `kimi-k2.5` resolves
     // to variant slug `kimi-k2.5-thinking`, the provider request must use the
     // matching binding's `model_name`, such as `moonshotai/kimi-k2.5-thinking`.
     // Scope this map to the selected provider so another provider with the same

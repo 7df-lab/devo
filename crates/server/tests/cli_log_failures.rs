@@ -121,22 +121,20 @@ async fn restore_seeds_sqlite_metadata_before_initial_stats() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 1,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": data_root.path(),
-                    "ephemeral": false,
-                    "title": null,
-                    "model": "test-model"
+                    "additionalDirectories": []
                 }
             }),
         )
         .await
-        .context("session/start response")?;
+        .context("session/new response")?;
     let session_id = serde_json::from_value::<
-        devo_server::SuccessResponse<devo_server::SessionStartResult>,
-    >(start_response)?
+        devo_server::SuccessResponse<devo_protocol::AcpNewSessionResult>,
+    >(start_response.clone())
+    .with_context(|| format!("session/new returned {start_response}"))?
     .result
-    .session
     .session_id;
 
     let (restored_runtime, restored_db) = build_runtime(
@@ -164,23 +162,40 @@ async fn restore_seeds_sqlite_metadata_before_initial_stats() -> Result<()> {
 #[tokio::test]
 async fn title_generation_uses_resolved_provider_request_model() -> Result<()> {
     let data_root = TempDir::new()?;
+    std::fs::create_dir_all(data_root.path().join(".devo"))?;
     std::fs::write(
-        data_root.path().join("config.toml"),
+        data_root.path().join(".devo").join("models.json"),
         r#"
-[defaults]
-model_binding = "main"
-
-[providers.openrouter]
-enabled = true
-name = "OpenRouter"
-wire_apis = ["openai_chat_completions"]
-
-[model_bindings.main]
-enabled = true
-model_slug = "catalog-title-model"
-provider = "openrouter"
-model_name = "vendor/title-model"
-invocation_method = "openai_chat_completions"
+[
+  {
+    "slug": "catalog-title-model",
+    "display_name": "Catalog Title Model",
+    "provider": "openai_chat_completions",
+    "reasoning_capability": "toggle",
+    "reasoning_implementation": {
+      "model_variant": {
+        "variants": [
+          {
+            "selection_value": "disabled",
+            "model_slug": "catalog-title-model",
+            "reasoning_effort": null,
+            "label": "Off",
+            "description": "Disable reasoning effort"
+          },
+          {
+            "selection_value": "enabled",
+            "model_slug": "vendor/title-model",
+            "reasoning_effort": "medium",
+            "label": "On",
+            "description": "Enable reasoning effort"
+          }
+        ]
+      }
+    },
+    "base_instructions": "Test title model",
+    "priority": 999
+  }
+]
 "#,
     )?;
 
@@ -199,42 +214,36 @@ invocation_method = "openai_chat_completions"
             connection_id,
             serde_json::json!({
                 "id": 2,
-                "method": "session/start",
+                "method": "session/new",
                 "params": {
                     "cwd": data_root.path(),
-                    "ephemeral": false,
-                    "title": null,
-                    "model": "catalog-title-model"
+                    "additionalDirectories": []
                 }
             }),
         )
         .await
-        .context("session/start response")?;
+        .context("session/new response")?;
     let session_id = serde_json::from_value::<
-        devo_server::SuccessResponse<devo_server::SessionStartResult>,
-    >(start_response)?
+        devo_server::SuccessResponse<devo_protocol::AcpNewSessionResult>,
+    >(start_response.clone())
+    .with_context(|| format!("session/new returned {start_response}"))?
     .result
-    .session
     .session_id;
 
-    let _ = runtime
+    let prompt_response = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "turn/start",
+                "method": "session/prompt",
                 "params": {
-                    "session_id": session_id,
-                    "input": [{ "type": "text", "text": "fix title generation routing for CLI logs" }],
-                    "model": null,
-                    "sandbox": null,
-                    "approval_policy": null,
-                    "cwd": null
+                    "sessionId": session_id,
+                    "prompt": [{ "type": "text", "text": "fix title generation routing for CLI logs" }]
                 }
             }),
         )
-        .await
-        .context("turn/start response")?;
+        .await;
+    assert_eq!(prompt_response, None);
 
     wait_for_title_update(&mut notifications_rx, "Generated title from router").await?;
 
@@ -242,7 +251,7 @@ invocation_method = "openai_chat_completions"
     assert_eq!(requests.len(), 1);
     let title_request = requests.into_iter().next().expect("one title request");
     assert_eq!(title_request.model, "vendor/title-model");
-    assert_eq!(title_request.thinking.as_deref(), Some("disabled"));
+    assert_eq!(title_request.request_thinking.as_deref(), Some("disabled"));
     assert!(title_request.tools.is_none());
     assert_eq!(title_request.reasoning_effort, None);
     assert_eq!(title_request.max_tokens, 1024);
@@ -269,7 +278,6 @@ fn build_runtime(
             "test-model".to_string(),
             Arc::new(PresetModelCatalog::default()),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()
@@ -299,28 +307,23 @@ async fn initialize_connection(
                 "id": 10,
                 "method": "initialize",
                 "params": {
-                    "client_name": "test",
-                    "client_version": "1.0.0",
-                    "transport": "stdio",
-                    "supports_streaming": true,
-                    "supports_binary_images": false,
-                    "opt_out_notification_methods": []
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "test",
+                        "title": "test",
+                        "version": "1.0.0"
+                    }
                 }
             }),
         )
         .await
         .context("initialize response")?;
-    let response: devo_server::SuccessResponse<devo_server::InitializeResult> =
-        serde_json::from_value(initialize_response)?;
-    assert_eq!(response.result.server_name, "devo-server");
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "method": "initialized"
-            }),
-        )
-        .await;
+    let response: serde_json::Value = initialize_response;
+    assert_eq!(
+        response["result"]["agentInfo"]["name"],
+        serde_json::json!("devo-server")
+    );
     Ok((connection_id, notifications_rx))
 }
 
@@ -330,17 +333,23 @@ async fn wait_for_title_update(
 ) -> Result<()> {
     timeout(Duration::from_secs(5), async {
         while let Some(value) = notifications_rx.recv().await {
-            if value.get("method") != Some(&serde_json::json!("session/title/updated")) {
-                continue;
+            if value.get("method") == Some(&serde_json::json!("session/title/updated"))
+                && value["params"]["session"]["title"] == serde_json::json!(expected_title)
+            {
+                return Ok(());
             }
-            if value["params"]["session"]["title"] == serde_json::json!(expected_title) {
+            if value.get("method") == Some(&serde_json::json!("session/update"))
+                && value["params"]["update"]["sessionUpdate"]
+                    == serde_json::json!("session_info_update")
+                && value["params"]["update"]["title"] == serde_json::json!(expected_title)
+            {
                 return Ok(());
             }
         }
-        anyhow::bail!("notification channel closed before expected session/title/updated")
+        anyhow::bail!("notification channel closed before expected title update")
     })
     .await
-    .context("timed out waiting for session/title/updated")??;
+    .context("timed out waiting for title update")??;
     Ok(())
 }
 

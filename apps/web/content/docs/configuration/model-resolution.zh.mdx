@@ -53,7 +53,7 @@ Binding 解析完成后，Devo 继续解析 provider 设置：
 3. 确认 binding 已启用；
 4. 确认 binding 的 `invocation_method` 被 provider `wire_apis` 允许；
 5. 从 `auth.json` 读取 provider credential id；
-6. 合并 provider base URL、headers、选中的模型名、thinking selection、context 设置和 HTTP proxy 设置。
+6. 合并 provider base URL、headers、选中的模型名、reasoning effort selection、context 设置和 HTTP proxy 设置。
 
 如果无法解析 provider，Devo 会报告：
 
@@ -61,9 +61,9 @@ Binding 解析完成后，Devo 继续解析 provider 设置：
 No provider configured. Run `devo onboard` to complete setup.
 ```
 
-## Thinking Selection
+## Reasoning Effort Selection
 
-当前 thinking selection 可以来自配置或模型选择。Devo 将它保存为用户可理解的值，例如 `disabled`、`enabled`、`high` 或 `max`，再为选中的 wire API 解析成 provider-specific 请求字段。
+当前 reasoning effort selection 可以来自配置或模型选择。Devo 将它保存为用户可理解的值，例如 `disabled`、`enabled`、`high` 或 `max`，再为选中的 wire API 解析成 provider-specific 请求字段。
 
 当没有更强的 session 或 turn selection 时，会使用 binding 上的 `default_reasoning_effort`。
 
@@ -71,4 +71,4 @@ No provider configured. Run `devo onboard` to complete setup.
 
 对于带变体的模型，Devo 会构造一个按当前 provider 作用域限定的 provider request model map。这避免另一个 provider 上相同的本地 slug 改变当前 provider 的 wire model name。
 
-当 thinking 变体的 provider-side model name 与基础模型不同时，这一点很重要。
+当 reasoning 变体的 provider-side model name 与基础模型不同时，这一点很重要。

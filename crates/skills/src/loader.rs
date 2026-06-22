@@ -328,7 +328,7 @@ fn build_implicit_indexes(outcome: &mut SkillLoadOutcome) {
     outcome.implicit_skills_by_doc_path = Arc::new(by_doc_path);
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::path::Path;
     use std::path::PathBuf;

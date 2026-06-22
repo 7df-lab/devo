@@ -17,11 +17,11 @@ Let users configure supported models for use by the program.
 
 ## Why This Matters
 
-Model behavior depends on capabilities such as context length, reasoning, thinking, supported modalities, and provider availability. Users need clear model configuration to choose a model that fits the task.
+Model behavior depends on capabilities such as context length, reasoning support, supported modalities, and provider availability. Users need clear model configuration to choose a model that fits the task.
 
 ## Background / Context
 
-Models differ in context length, reasoning support, thinking support, supported input modalities, and availability. The program includes a built-in supported-model list that defines model capabilities and default behavior. This built-in list is distinct from user-defined providers, user-provided provider details such as base URL and API key, and model-provider binding details such as provider-specific model name, configurable model display name, and invocation method.
+Models differ in context length, reasoning support, reasoning support, supported input modalities, and availability. The program includes a built-in supported-model list that defines model capabilities and default behavior. This built-in list is distinct from user-defined providers, user-provided provider details such as base URL and API key, and model-provider binding details such as provider-specific model name, configurable model display name, and invocation method.
 
 Initially, supported model definitions may exist even when no models have been configured for actual invocation. A model becomes invocable only after the user binds a supported model to a user-defined provider, provider-specific model name, configurable model display name, invocation method, and required reasoning settings where applicable.
 
@@ -47,7 +47,7 @@ The program must support built-in supported model definitions and user-configure
 
 - The program must include a built-in supported-model list.
 - The built-in supported-model list must be defined by a single comprehensive configuration source, such as a JSON file.
-- Built-in supported model definitions must include intrinsic model information such as base instructions, context window length, effective context window length, reasoning or thinking capabilities, supported modalities, and a default human-readable model display name.
+- Built-in supported model definitions must include intrinsic model information such as base instructions, context window length, effective context window length, reasoning capabilities, supported modalities, and a default human-readable model display name.
 - Built-in supported model definitions must not include user-specific provider invocation details such as provider name, base URL, API key, provider-specific model name, user-configured display name, or invocation method.
 - The program must distinguish supported model definitions from user-configured invocable models.
 - The program must distinguish reusable user-defined providers from model-provider bindings.

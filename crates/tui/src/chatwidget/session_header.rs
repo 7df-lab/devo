@@ -26,7 +26,7 @@ pub(super) struct SessionHeaderParams<'a> {
     pub cwd: &'a Path,
     pub model: Option<&'a Model>,
     pub request_model: Option<&'a str>,
-    pub thinking_selection: Option<&'a str>,
+    pub reasoning_effort_selection: Option<&'a str>,
     pub is_first_run: bool,
     pub startup_tooltip_override: Option<String>,
     pub accent_color: Color,
@@ -64,11 +64,11 @@ impl ChatWidget {
             header_model.as_str(),
             header_model.clone(),
             header_model.clone(),
-            model.thinking_capability.clone(),
+            model.reasoning_capability.clone(),
             model
-                .resolve_thinking_selection(params.thinking_selection)
+                .resolve_reasoning_effort_selection(params.reasoning_effort_selection)
                 .effective_reasoning_effort,
-            model.thinking_implementation.clone(),
+            model.reasoning_implementation.clone(),
             params.is_first_run,
             params.startup_tooltip_override,
             /*show_fast_status*/ false,
@@ -294,16 +294,17 @@ impl ChatWidget {
 
     fn session_summary_text_with_context(&self, include_context: bool) -> String {
         let model = self.model_display_name();
-        let thinking = self
-            .display_thinking_selection()
+        let reasoning_effort_selection = self
+            .display_reasoning_effort_selection()
             .unwrap_or_else(|| "default".to_string());
         let cached_input_percent =
             Self::percent_of(self.total_cache_read_tokens, self.total_input_tokens);
 
-        let mut summary = String::with_capacity(model.len() + thinking.len() + 96);
+        let mut summary =
+            String::with_capacity(model.len() + reasoning_effort_selection.len() + 96);
         summary.push_str(model);
         summary.push(' ');
-        summary.push_str(&thinking);
+        summary.push_str(&reasoning_effort_selection);
         summary.push_str("  ↑");
         Self::push_compact_token_count(&mut summary, self.total_input_tokens);
         summary.push_str("  (cached ");
@@ -362,7 +363,7 @@ impl ChatWidget {
             cwd: &self.session.cwd,
             model: self.session.model.as_ref(),
             request_model: self.session.request_model.as_deref(),
-            thinking_selection: self.thinking_selection.as_deref(),
+            reasoning_effort_selection: self.reasoning_effort_selection.as_deref(),
             is_first_run,
             startup_tooltip_override,
             accent_color: accent,
@@ -401,7 +402,7 @@ impl ChatWidget {
             cwd: &self.session.cwd,
             model: self.session.model.as_ref(),
             request_model: self.session.request_model.as_deref(),
-            thinking_selection: self.thinking_selection.as_deref(),
+            reasoning_effort_selection: self.reasoning_effort_selection.as_deref(),
             is_first_run: false,
             startup_tooltip_override: None,
             accent_color: accent,
@@ -519,8 +520,8 @@ mod tests {
     use std::time::Instant;
 
     use devo_protocol::PermissionPreset;
+    use devo_protocol::ReasoningCapability;
     use devo_protocol::ReasoningEffort;
-    use devo_protocol::ThinkingCapability;
     use pretty_assertions::assert_eq;
     use std::hint::black_box;
     use tokio::sync::mpsc;
@@ -545,7 +546,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             app_event_tx: AppEventSender::new(app_event_tx),
             initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
-            initial_thinking_selection: None,
+            initial_reasoning_effort_selection: None,
             initial_permission_preset: PermissionPreset::Default,
             initial_user_message: None,
             enhanced_keys_supported: true,
@@ -569,7 +570,7 @@ mod tests {
         let model = Model {
             slug: "deepseek-v4-flash".to_string(),
             display_name: "deepseek-v4-flash".to_string(),
-            thinking_capability: ThinkingCapability::ToggleWithLevels(vec![
+            reasoning_capability: ReasoningCapability::ToggleWithLevels(vec![
                 ReasoningEffort::High,
                 ReasoningEffort::Max,
             ]),
@@ -581,7 +582,7 @@ mod tests {
             frame_requester: FrameRequester::test_dummy(),
             app_event_tx: AppEventSender::new(app_event_tx),
             initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
-            initial_thinking_selection: None,
+            initial_reasoning_effort_selection: None,
             initial_permission_preset: PermissionPreset::Default,
             initial_user_message: None,
             enhanced_keys_supported: true,

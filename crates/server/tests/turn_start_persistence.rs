@@ -106,7 +106,7 @@ async fn turn_start_append_failure_does_not_launch_model_turn_or_leave_session_a
             connection_id,
             serde_json::json!({
                 "id": 3,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": turn_start_params(session.session_id)
             }),
         )
@@ -135,7 +135,7 @@ async fn turn_start_append_failure_does_not_launch_model_turn_or_leave_session_a
             connection_id,
             serde_json::json!({
                 "id": 4,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": turn_start_params(session.session_id)
             }),
         )
@@ -172,7 +172,7 @@ async fn message_edit_previous_accepts_skip_restore_and_replaces_prompt_branch()
             connection_id,
             serde_json::json!({
                 "id": 6,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": turn_start_params(session.session_id)
             }),
         )
@@ -204,7 +204,7 @@ async fn message_edit_previous_accepts_skip_restore_and_replaces_prompt_branch()
             connection_id,
             serde_json::json!({
                 "id": 7,
-                "method": "message/editPrevious",
+                "method": "_devo/message/editPrevious",
                 "params": {
                     "session_id": session.session_id,
                     "expected_target_message_id": null,
@@ -268,7 +268,7 @@ async fn message_edit_previous_default_safe_restore_records_and_broadcasts() -> 
             connection_id,
             serde_json::json!({
                 "id": 6,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": turn_start_params(session.session_id)
             }),
         )
@@ -297,7 +297,7 @@ async fn message_edit_previous_default_safe_restore_records_and_broadcasts() -> 
             connection_id,
             serde_json::json!({
                 "id": 7,
-                "method": "message/editPrevious",
+                "method": "_devo/message/editPrevious",
                 "params": {
                     "session_id": session.session_id,
                     "expected_target_message_id": null,
@@ -371,7 +371,7 @@ async fn message_edit_previous_dispatches_to_edit_handler() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 6,
-                "method": "message/editPrevious",
+                "method": "_devo/message/editPrevious",
                 "params": {
                     "session_id": session.session_id,
                     "expected_target_message_id": null,
@@ -410,7 +410,7 @@ async fn message_edit_previous_rejects_malformed_edited_content_parts() -> Resul
             connection_id,
             serde_json::json!({
                 "id": 6,
-                "method": "message/editPrevious",
+                "method": "_devo/message/editPrevious",
                 "params": {
                     "session_id": session.session_id,
                     "expected_target_message_id": null,
@@ -450,9 +450,13 @@ async fn collect_notification_methods(
     while let Ok(Some(notification)) =
         timeout(Duration::from_millis(10), notifications_rx.recv()).await
     {
-        if let Some(method) = notification
-            .get("method")
-            .and_then(serde_json::Value::as_str)
+        if let Some(method) = notification["params"]["_meta"]["devo/originalMethod"]
+            .as_str()
+            .or_else(|| {
+                notification
+                    .get("method")
+                    .and_then(serde_json::Value::as_str)
+            })
         {
             methods.push(method.to_string());
         }
@@ -492,7 +496,6 @@ fn build_runtime(
                 ..Model::default()
             }])),
             Arc::new(ProviderVendorCatalog::default()),
-            None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig {
                 bundled: Some(BundledSkillsConfig { enabled: false }),
                 ..SkillsConfig::default()
@@ -525,28 +528,23 @@ async fn initialize_connection(
                 "id": 1,
                 "method": "initialize",
                 "params": {
-                    "client_name": "turn-start-persistence-test",
-                    "client_version": "1.0.0",
-                    "transport": "stdio",
-                    "supports_streaming": true,
-                    "supports_binary_images": false,
-                    "opt_out_notification_methods": []
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {
+                        "name": "turn-start-persistence-test",
+                        "title": "turn-start-persistence-test",
+                        "version": "1.0.0"
+                    }
                 }
             }),
         )
         .await
         .context("initialize response")?;
-    let response: devo_server::SuccessResponse<devo_server::InitializeResult> =
-        serde_json::from_value(initialize_response)?;
-    assert_eq!(response.result.server_name, "devo-server");
-    let _ = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "method": "initialized"
-            }),
-        )
-        .await;
+    let response: serde_json::Value = initialize_response;
+    assert_eq!(
+        response["result"]["agentInfo"]["name"],
+        serde_json::json!("devo-server")
+    );
     Ok((connection_id, notifications_rx))
 }
 
@@ -588,7 +586,7 @@ async fn interrupt_turn(
             connection_id,
             serde_json::json!({
                 "id": 5,
-                "method": "turn/interrupt",
+                "method": "_devo/turn/interrupt",
                 "params": {
                     "session_id": session_id,
                     "turn_id": turn_id,

@@ -1,6 +1,9 @@
+use std::fmt::Write as _;
+use std::path::Path;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use devo_tools::ClientTextFileRead;
 
 use crate::contracts::{
     ToolCallError, ToolContext, ToolProgressSender, ToolResult, ToolResultContent,
@@ -111,14 +114,6 @@ impl ToolHandler for ReadHandler {
         }
 
         let path = PathBuf::from(&filepath);
-        if !path.exists() {
-            return Ok(ToolResult::error(
-                ToolResultContent::Text(missing_file_message(&filepath)),
-                "File not found",
-                ToolCallError::ExecutionFailed(format!("file not found: {filepath}")),
-            ));
-        }
-
         if path.is_dir() {
             let output = read_directory(&path, limit.unwrap_or(usize::MAX), offset.unwrap_or(1));
             let output = output.map_err(|e| ToolCallError::ExecutionFailed(format!("{e}")))?;
@@ -127,6 +122,36 @@ impl ToolHandler for ReadHandler {
             let mut result = ToolResult::success(ToolResultContent::Text(text), "Directory read");
             result.display_content = display;
             return Ok(result);
+        }
+
+        if let Some(client_filesystem) = ctx.client_filesystem.clone() {
+            match client_filesystem
+                .read_text_file(
+                    ctx.session_id.clone(),
+                    path.clone(),
+                    offset.map(|value| value as u64),
+                    limit.map(|value| value as u64),
+                    ctx.cancel_token.clone(),
+                )
+                .await?
+            {
+                ClientTextFileRead::Content(content) => {
+                    return Ok(client_text_file_result(
+                        &path,
+                        offset.unwrap_or(1),
+                        &content,
+                    ));
+                }
+                ClientTextFileRead::Unsupported => {}
+            }
+        }
+
+        if !path.exists() {
+            return Ok(ToolResult::error(
+                ToolResultContent::Text(missing_file_message(&filepath)),
+                "File not found",
+                ToolCallError::ExecutionFailed(format!("file not found: {filepath}")),
+            ));
         }
 
         let is_bin =
@@ -146,6 +171,30 @@ impl ToolHandler for ReadHandler {
         let mut result = ToolResult::success(ToolResultContent::Text(text), "File read");
         result.display_content = display;
         Ok(result)
+    }
+}
+
+fn client_text_file_result(path: &Path, offset: usize, content: &str) -> ToolResult {
+    let display_content = numbered_client_text_content(offset, content);
+    let output = format!(
+        "<path>{}</path>\n<type>file</type>\n<content>\n{display_content}\n</content>",
+        path.display()
+    );
+    let mut result = ToolResult::success(ToolResultContent::Text(output), "File read");
+    result.display_content = Some(display_content);
+    result
+}
+
+fn numbered_client_text_content(offset: usize, content: &str) -> String {
+    let mut display_content = String::new();
+    for (index, line) in content.lines().enumerate() {
+        let _ = writeln!(display_content, "{}: {}", offset + index, line);
+    }
+    if display_content.is_empty() {
+        "(Client file is empty or requested range returned no lines)".to_string()
+    } else {
+        display_content.push_str("\n(Loaded from client filesystem)");
+        display_content
     }
 }
 
@@ -180,6 +229,8 @@ mod tests {
                     agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                     collaboration_mode: devo_protocol::CollaborationMode::Build,
                     agent_coordinator: None,
+                    client_filesystem: None,
+                    client_terminal: None,
                     network_proxy: None,
                 },
                 serde_json::json!({

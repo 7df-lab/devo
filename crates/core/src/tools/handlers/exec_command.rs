@@ -9,6 +9,7 @@ use crate::contracts::ToolContext;
 use crate::contracts::ToolProgressSender;
 use crate::contracts::ToolResult;
 use crate::contracts::ToolResultContent;
+use crate::invocation::ToolContent;
 use crate::json_schema::JsonSchema;
 use crate::tool_handler::ToolHandler;
 use crate::tool_spec::ToolCapabilityTag;
@@ -153,14 +154,25 @@ impl ToolHandler for ExecCommandHandler {
             )
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
-            let content = format_apply_patch_intercept_response(
-                output.content.text_part().unwrap_or_default(),
-            );
+            let (text, metadata) = match output.content {
+                ToolContent::Text(text) => (text, None),
+                ToolContent::Json(json) => (json.to_string(), Some(json)),
+                ToolContent::Mixed { text, json } => (text.unwrap_or_default(), json),
+            };
+            let content = format_apply_patch_intercept_response(&text);
             return if output.is_error {
                 Ok(ToolResult::error(
                     ToolResultContent::Text(content.clone()),
                     "Patch failed",
                     ToolCallError::ExecutionFailed(content),
+                ))
+            } else if metadata.is_some() {
+                Ok(ToolResult::success(
+                    ToolResultContent::Mixed {
+                        text: Some(content),
+                        json: metadata,
+                    },
+                    "Patch applied",
                 ))
             } else {
                 Ok(ToolResult::success(
@@ -527,6 +539,18 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tokio_util::sync::CancellationToken;
 
+    fn result_text_and_metadata(
+        content: &crate::contracts::ToolResultContent,
+    ) -> (String, Option<&serde_json::Value>) {
+        match content {
+            crate::contracts::ToolResultContent::Text(text) => (text.clone(), None),
+            crate::contracts::ToolResultContent::Json(json) => (json.to_string(), Some(json)),
+            crate::contracts::ToolResultContent::Mixed { text, json } => {
+                (text.clone().unwrap_or_default(), json.as_ref())
+            }
+        }
+    }
+
     fn test_ctx(cwd: std::path::PathBuf) -> crate::contracts::ToolContext {
         crate::contracts::ToolContext {
             tool_call_id: crate::invocation::ToolCallId("test".into()),
@@ -549,6 +573,8 @@ mod tests {
             agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
+            client_filesystem: None,
+            client_terminal: None,
             network_proxy: None,
         }
     }
@@ -665,10 +691,7 @@ mod tests {
             .await
             .expect("handle exec command");
 
-        let text = match &output.content {
-            crate::contracts::ToolResultContent::Text(t) => t.clone(),
-            other => format!("{other:?}"),
-        };
+        let (text, _) = result_text_and_metadata(&output.content);
         assert!(
             text.contains("first"),
             "output should contain initial output: {text:?}"
@@ -790,13 +813,17 @@ mod tests {
             .await
             .expect("handle exec command");
 
-        let text = match &output.content {
-            crate::contracts::ToolResultContent::Text(t) => t.clone(),
-            other => format!("{other:?}"),
-        };
+        let (text, metadata) = result_text_and_metadata(&output.content);
         assert!(text.starts_with("Wall time: 0.0000 seconds\nOutput:\n"));
         assert!(text.contains("Success. Updated the following files:"));
         assert!(!text.contains("\"diagnostics\""));
+        assert_eq!(
+            metadata
+                .and_then(|json| json.get("files"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
         assert_eq!(
             std::fs::read_to_string(root.join("file.txt")).expect("read patched file"),
             "hello\n"
@@ -821,13 +848,17 @@ mod tests {
             .await
             .expect("handle exec command");
 
-        let text = match &output.content {
-            crate::contracts::ToolResultContent::Text(t) => t.clone(),
-            other => format!("{other:?}"),
-        };
+        let (text, metadata) = result_text_and_metadata(&output.content);
         assert!(text.starts_with("Wall time: 0.0000 seconds\nOutput:\n"));
         assert!(text.contains("Success. Updated the following files:"));
         assert!(!text.contains("\"diagnostics\""));
+        assert_eq!(
+            metadata
+                .and_then(|json| json.get("files"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
         assert_eq!(
             std::fs::read_to_string(subdir.join("nested.txt")).expect("read patched file"),
             "hello\n"

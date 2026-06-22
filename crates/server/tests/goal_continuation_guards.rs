@@ -59,7 +59,7 @@ async fn goal_set_does_not_start_continuation_in_plan_mode() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 40,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [{ "type": "text", "text": "plan first" }],
@@ -81,7 +81,7 @@ async fn goal_set_does_not_start_continuation_in_plan_mode() -> Result<()> {
             connection_id,
             serde_json::json!({
                 "id": 41,
-                "method": "goal/set",
+                "method": "_devo/goal/set",
                 "params": {
                     "sessionId": session_id,
                     "objective": "do not continue in plan mode",
@@ -222,7 +222,7 @@ async fn goal_set_does_not_start_continuation_while_approval_is_pending() -> Res
             connection_id,
             serde_json::json!({
                 "id": 50,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [{ "type": "text", "text": "ask for approval" }],
@@ -245,7 +245,7 @@ async fn goal_set_does_not_start_continuation_while_approval_is_pending() -> Res
             connection_id,
             serde_json::json!({
                 "id": 51,
-                "method": "goal/set",
+                "method": "_devo/goal/set",
                 "params": {
                     "sessionId": session_id,
                     "objective": "wait for approval first",
@@ -294,7 +294,7 @@ async fn goal_set_does_not_start_continuation_while_user_input_is_pending() -> R
             connection_id,
             serde_json::json!({
                 "id": 60,
-                "method": "turn/start",
+                "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
                     "input": [{ "type": "text", "text": "ask the user" }],
@@ -318,7 +318,7 @@ async fn goal_set_does_not_start_continuation_while_user_input_is_pending() -> R
             connection_id,
             serde_json::json!({
                 "id": 61,
-                "method": "goal/set",
+                "method": "_devo/goal/set",
                 "params": {
                     "sessionId": session_id,
                     "objective": "wait for user input first",

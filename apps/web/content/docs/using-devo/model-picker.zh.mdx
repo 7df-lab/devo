@@ -27,13 +27,13 @@ Picker 来自保存的 model bindings。每个条目显示 display name，并在
 
 当参数匹配已保存 model binding 时，Devo 使用该 binding，包括 provider、request model name、wire API 和 display name。当它匹配 catalog model slug 时，Devo 应用该 catalog model。如果两者都不匹配，Devo 仍会把请求的 model name 设置到 turn context。
 
-## Thinking Mode
+## Reasoning Effort
 
-某些模型暴露 thinking 或 reasoning options。当你选择这些模型时，Devo 可能先打开第二个 picker 选择 thinking mode，再完成模型切换。
+某些模型暴露 configurable reasoning effort。当你选择这些模型时，Devo 可能先打开第二个 picker 选择 reasoning effort，再完成模型切换。
 
-Thinking picker 使用模型配置的 capability 和 reasoning-effort options。如果模型没有暴露选项，Devo 会直接应用模型。
+Reasoning effort picker 使用模型配置的 capability 和 reasoning-effort options。如果模型没有暴露选项，Devo 会直接应用模型。
 
-选择后，Devo 更新 header，并把 model 和 thinking selection 作为 turn context 发送给 runtime。
+选择后，Devo 更新 header，并把 model 和 reasoning effort selection 作为 turn context 发送给 runtime。
 
 ## Session Scope
 

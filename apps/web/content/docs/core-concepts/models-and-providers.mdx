@@ -11,7 +11,7 @@ DeepSeek, OpenRouter, local gateways, and other compatible providers.
 
 | Layer | What It Describes | Contains Secrets? |
 | --- | --- | --- |
-| Model profile | The model's capabilities, display name, context window, thinking support, modalities, and max output tokens. | No |
+| Model profile | The model's capabilities, display name, context window, reasoning support, modalities, and max output tokens. | No |
 | Provider vendor | A configured provider endpoint, base URL, credential reference, headers, and supported wire APIs. | Credential reference only |
 | Model binding | The link between a model slug and a provider vendor, including provider model name, display name, wire API, and default reasoning effort. | No |
 
@@ -30,7 +30,7 @@ requests. It includes fields like:
 - display name;
 - base instructions;
 - context window and effective usable context;
-- thinking or reasoning capability;
+- reasoning capability;
 - default reasoning effort;
 - tool-use support;
 - image support;
@@ -93,7 +93,7 @@ runtime combines:
 - the configured binding;
 - the provider vendor;
 - any session or turn override from `/model`;
-- the selected thinking or reasoning mode.
+- the selected reasoning effort.
 
 The result is the concrete provider request Devo sends for that turn.
 

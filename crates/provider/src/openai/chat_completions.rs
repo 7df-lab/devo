@@ -566,7 +566,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
     let include_empty_reasoning_content = profile.require_reasoning_content
         && !matches!(
             request
-                .thinking
+                .request_thinking
                 .as_deref()
                 .map(str::trim)
                 .unwrap_or_default()
@@ -674,7 +674,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
 
     if let Some(payload) = reasoning_value(
         profile,
-        request.thinking.as_deref(),
+        request.request_thinking.as_deref(),
         request.reasoning_effort,
     ) {
         match payload {
@@ -1224,7 +1224,7 @@ mod tests {
                 temperature: Some(0.2),
                 ..SamplingControls::default()
             },
-            thinking: Some("medium".to_string()),
+            request_thinking: Some("medium".to_string()),
             reasoning_effort: Some(devo_protocol::ReasoningEffort::Medium),
             extra_body: None,
         };
@@ -1266,7 +1266,7 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: Some("disabled".to_string()),
+            request_thinking: Some("disabled".to_string()),
             reasoning_effort: None,
             extra_body: None,
         };
@@ -1296,7 +1296,7 @@ mod tests {
                 top_p: Some(0.9),
                 top_k: Some(40),
             },
-            thinking: Some("enabled".to_string()),
+            request_thinking: Some("enabled".to_string()),
             reasoning_effort: None,
             extra_body: None,
         };
@@ -1328,7 +1328,7 @@ mod tests {
                 top_p: Some(0.95),
                 top_k: None,
             },
-            thinking: Some("enabled".to_string()),
+            request_thinking: Some("enabled".to_string()),
             reasoning_effort: None,
             extra_body: None,
         };
@@ -1611,7 +1611,7 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: None,
+            request_thinking: None,
             reasoning_effort: None,
             extra_body: None,
         };
@@ -1641,7 +1641,7 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: Some("enabled".to_string()),
+            request_thinking: Some("enabled".to_string()),
             reasoning_effort: Some(devo_protocol::ReasoningEffort::Max),
             extra_body: None,
         };
@@ -1667,7 +1667,7 @@ mod tests {
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            thinking: Some("enabled".to_string()),
+            request_thinking: Some("enabled".to_string()),
             reasoning_effort: Some(devo_protocol::ReasoningEffort::High),
             extra_body: None,
         };

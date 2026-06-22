@@ -1,3 +1,7 @@
+mod acp;
+mod acp_auth;
+mod acp_config_options;
+mod acp_slash_commands;
 mod compaction;
 pub mod goal;
 mod message_edit;

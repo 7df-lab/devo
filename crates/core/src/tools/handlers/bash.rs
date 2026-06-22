@@ -10,6 +10,9 @@ use crate::shell_exec::{
 };
 use crate::tool_handler::ToolHandler;
 use crate::tool_spec::{ToolCapabilityTag, ToolExecutionMode, ToolOutputMode, ToolSpec};
+use crate::tools::client_terminal_shell::{
+    ClientTerminalShellRequest, execute_with_client_terminal,
+};
 
 pub struct BashHandler {
     spec: ToolSpec,
@@ -67,7 +70,7 @@ impl ToolHandler for BashHandler {
         &self,
         ctx: ToolContext,
         input: serde_json::Value,
-        _progress: Option<ToolProgressSender>,
+        progress: Option<ToolProgressSender>,
     ) -> Result<ToolResult, ToolCallError> {
         let command = input
             .get("command")
@@ -97,6 +100,29 @@ impl ToolHandler for BashHandler {
             .as_u64()
             .map(|v| v as usize)
             .unwrap_or(default_max_output_tokens());
+        let terminal_workdir = if workdir.is_absolute() {
+            workdir.clone()
+        } else {
+            ctx.workspace_root.join(&workdir)
+        };
+
+        if let Some(result) = execute_with_client_terminal(
+            &ctx,
+            ClientTerminalShellRequest {
+                command: command.to_string(),
+                workdir: terminal_workdir,
+                description: description.clone(),
+                shell_override: shell_override.clone(),
+                login,
+                timeout_ms,
+                max_output_tokens,
+            },
+            progress,
+        )
+        .await?
+        {
+            return Ok(result);
+        }
 
         let output = execute_shell_command(
             ShellExecRequest {
