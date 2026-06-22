@@ -2,6 +2,8 @@ use super::super::*;
 
 use std::collections::BTreeSet;
 
+use chrono::DateTime;
+
 use crate::AcpErrorCode;
 use crate::AcpSetConfigOptionParams;
 use crate::execution::RuntimeSession;
@@ -10,11 +12,13 @@ use devo_protocol::AcpSessionConfigOptionCategory;
 use devo_protocol::AcpSessionConfigOptionCategoryKnown;
 use devo_protocol::AcpSessionConfigSelectOption;
 use devo_protocol::AcpSessionConfigSelectOptions;
+use devo_protocol::Model;
 use devo_protocol::PermissionPreset;
 use devo_protocol::SessionId;
 
 const ACP_MODE_CONFIG_ID: &str = "mode";
 const ACP_MODEL_CONFIG_ID: &str = "model";
+const ACP_THOUGHT_LEVEL_CONFIG_ID: &str = "thought_level";
 
 impl ServerRuntime {
     pub(super) async fn acp_session_config_options(
@@ -59,27 +63,67 @@ impl ServerRuntime {
                         ));
                     }
 
-                    let turn_config = session.runtime_context.resolve_turn_config(
+                    let mut turn_config = session.runtime_context.resolve_turn_config(
                         Some(params.value.as_str()),
                         session.summary.thinking.clone(),
+                    );
+                    turn_config.thinking_selection = current_thinking_value(
+                        &turn_config.model,
+                        session.summary.thinking.as_deref(),
                     );
                     apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
                     let updated_at = Utc::now();
                     session.summary.updated_at = updated_at;
-                    let model = session.summary.model.clone();
-                    let model_binding_id = session.summary.model_binding_id.clone();
-                    let thinking = session.summary.thinking.clone();
-                    if let Some(record) = session.record.as_mut() {
-                        record.model = model;
-                        record.model_binding_id = model_binding_id;
-                        record.thinking = thinking;
-                        record.updated_at = updated_at;
-                        if let Err(error) = self.rollout_store.append_session_meta(record) {
-                            return Err((
-                                AcpErrorCode::ServerError,
-                                format!("failed to persist ACP session config option: {error}"),
-                            ));
+                    if let Err(error) = persist_session_config_summary(
+                        &self.rollout_store,
+                        &mut session,
+                        updated_at,
+                    ) {
+                        return Err((AcpErrorCode::ServerError, error));
+                    }
+                    (
+                        Some(session.summary.clone()),
+                        acp_config_options_for_session(&session),
+                    )
+                }
+                ACP_THOUGHT_LEVEL_CONFIG_ID => {
+                    let Some(thought_option) =
+                        acp_thought_level_config_option_for_session(&session)
+                    else {
+                        return Err((
+                            AcpErrorCode::InvalidParams,
+                            format!("unknown session config option '{}'", params.config_id),
+                        ));
+                    };
+                    let value_is_allowed = match &thought_option {
+                        AcpSessionConfigOption::Select { options, .. } => {
+                            select_options_contain_value(options, &params.value)
                         }
+                    };
+                    if !value_is_allowed {
+                        return Err((
+                            AcpErrorCode::InvalidParams,
+                            format!(
+                                "invalid value '{}' for session config option '{}'",
+                                params.value, params.config_id
+                            ),
+                        ));
+                    }
+
+                    let mut turn_config = session.runtime_context.resolve_turn_config(
+                        session_model_selection(&session.summary),
+                        Some(params.value.clone()),
+                    );
+                    turn_config.thinking_selection = Some(params.value.clone());
+                    apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
+                    let updated_at = Utc::now();
+                    session.summary.updated_at = updated_at;
+                    if let Err(error) = persist_session_config_summary(
+                        &self.rollout_store,
+                        &mut session,
+                        updated_at,
+                    ) {
+                        return Err((AcpErrorCode::ServerError, error));
                     }
                     (
                         Some(session.summary.clone()),
@@ -138,10 +182,12 @@ impl ServerRuntime {
 }
 
 fn acp_config_options_for_session(session: &RuntimeSession) -> Vec<AcpSessionConfigOption> {
-    vec![
-        acp_model_config_option_for_session(session),
-        acp_mode_config_option_for_session(session),
-    ]
+    let mut options = vec![acp_model_config_option_for_session(session)];
+    if let Some(thought_option) = acp_thought_level_config_option_for_session(session) {
+        options.push(thought_option);
+    }
+    options.push(acp_mode_config_option_for_session(session));
+    options
 }
 
 fn acp_mode_config_option_for_session(session: &RuntimeSession) -> AcpSessionConfigOption {
@@ -211,12 +257,10 @@ fn acp_model_config_option_for_session(session: &RuntimeSession) -> AcpSessionCo
 
     let mut options = Vec::new();
     let mut seen_values = BTreeSet::new();
-    let mut seen_model_slugs = BTreeSet::new();
     for (binding_id, binding) in &config.provider.model_bindings {
         if !binding.enabled || !seen_values.insert(binding_id.clone()) {
             continue;
         }
-        seen_model_slugs.insert(binding.model_slug.clone());
         let model_display_name = session
             .runtime_context
             .model_catalog
@@ -248,20 +292,6 @@ fn acp_model_config_option_for_session(session: &RuntimeSession) -> AcpSessionCo
         });
     }
 
-    for model in session.runtime_context.model_catalog.list_visible() {
-        if seen_model_slugs.contains(&model.slug) || !seen_values.insert(model.slug.clone()) {
-            continue;
-        }
-        options.push(AcpSessionConfigSelectOption {
-            value: model.slug.clone(),
-            name: non_empty_str(model.display_name.as_str())
-                .unwrap_or(model.slug.as_str())
-                .to_string(),
-            description: None,
-            meta: None,
-        });
-    }
-
     if !seen_values.contains(&current_value) {
         options.insert(
             0,
@@ -284,6 +314,100 @@ fn acp_model_config_option_for_session(session: &RuntimeSession) -> AcpSessionCo
         current_value,
         options: AcpSessionConfigSelectOptions::Ungrouped(options),
     }
+}
+
+fn acp_thought_level_config_option_for_session(
+    session: &RuntimeSession,
+) -> Option<AcpSessionConfigOption> {
+    let turn_config = session.runtime_context.resolve_turn_config(
+        session_model_selection(&session.summary),
+        session.summary.thinking.clone(),
+    );
+    let current_value =
+        current_thinking_value(&turn_config.model, session.summary.thinking.as_deref())?;
+    let mut seen_values = BTreeSet::new();
+    let mut options = Vec::new();
+    for preset in turn_config.model.effective_thinking_capability().options() {
+        if !seen_values.insert(preset.value.clone()) {
+            continue;
+        }
+        options.push(AcpSessionConfigSelectOption {
+            value: preset.value,
+            name: preset.label,
+            description: Some(preset.description),
+            meta: None,
+        });
+    }
+
+    if options.is_empty() {
+        return None;
+    }
+
+    if !seen_values.contains(&current_value) {
+        options.insert(
+            0,
+            AcpSessionConfigSelectOption {
+                value: current_value.clone(),
+                name: current_value.clone(),
+                description: None,
+                meta: None,
+            },
+        );
+    }
+
+    Some(AcpSessionConfigOption::Select {
+        id: ACP_THOUGHT_LEVEL_CONFIG_ID.to_string(),
+        name: "Reasoning Effort".to_string(),
+        description: Some("Controls the model reasoning effort used for this session".to_string()),
+        category: Some(AcpSessionConfigOptionCategory::Known(
+            AcpSessionConfigOptionCategoryKnown::ThoughtLevel,
+        )),
+        current_value,
+        options: AcpSessionConfigSelectOptions::Ungrouped(options),
+    })
+}
+
+fn current_thinking_value(model: &Model, selection: Option<&str>) -> Option<String> {
+    let option_values = model
+        .effective_thinking_capability()
+        .options()
+        .into_iter()
+        .map(|option| option.value)
+        .collect::<Vec<_>>();
+    if option_values.is_empty() {
+        return None;
+    }
+    model
+        .normalize_thinking_selection(selection)
+        .filter(|value| option_values.contains(value))
+        .or_else(|| {
+            model
+                .default_thinking_selection()
+                .filter(|value| option_values.contains(value))
+        })
+        .or_else(|| option_values.first().cloned())
+}
+
+fn persist_session_config_summary(
+    rollout_store: &crate::persistence::RolloutStore,
+    session: &mut RuntimeSession,
+    updated_at: DateTime<Utc>,
+) -> Result<(), String> {
+    let model = session.summary.model.clone();
+    let model_binding_id = session.summary.model_binding_id.clone();
+    let thinking = session.summary.thinking.clone();
+    if let Some(record) = session.record.as_mut() {
+        record.model = model;
+        record.model_binding_id = model_binding_id;
+        record.thinking = thinking;
+        record.updated_at = updated_at;
+        if let Err(error) = rollout_store.append_session_meta(record) {
+            return Err(format!(
+                "failed to persist ACP session config option: {error}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn select_options_contain_value(options: &AcpSessionConfigSelectOptions, value: &str) -> bool {

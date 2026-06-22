@@ -307,6 +307,34 @@ async fn stdio_acp_session_config_options_select_model_binding() -> Result<()> {
 
     let cwd = home_dir.path().join("workspace");
     std::fs::create_dir_all(&cwd)?;
+    std::fs::create_dir_all(cwd.join(".devo"))?;
+    std::fs::write(
+        cwd.join(".devo").join("models.json"),
+        serde_json::to_string(&serde_json::json!([
+            {
+                "slug": "test-model",
+                "display_name": "Test Model",
+                "thinking_capability": {
+                    "levels": ["low", "medium", "high"]
+                },
+                "default_reasoning_effort": "medium",
+                "base_instructions": "Test model instructions",
+                "supported_in_api": true
+            },
+            {
+                "slug": "alt-model",
+                "display_name": "Alt Model",
+                "base_instructions": "Alt model instructions",
+                "supported_in_api": true
+            },
+            {
+                "slug": "catalog-only-model",
+                "display_name": "Catalog Only Model",
+                "base_instructions": "Catalog-only model instructions",
+                "supported_in_api": true
+            }
+        ]))?,
+    )?;
     let cwd = cwd.to_string_lossy().into_owned();
 
     let mut command = devo_command()?;
@@ -388,6 +416,18 @@ async fn stdio_acp_session_config_options_select_model_binding() -> Result<()> {
         serde_json::json!("test-openai")
     );
     assert_model_config_option_values(model_option, &["alt-openai", "test-openai"])?;
+    assert_config_option_lacks_value(model_option, "catalog-only-model")?;
+    let thought_option = acp_config_option(&session_new_response["result"], "thought_level")?;
+    assert_eq!(
+        thought_option["name"],
+        serde_json::json!("Reasoning Effort")
+    );
+    assert_eq!(
+        thought_option["category"],
+        serde_json::json!("thought_level")
+    );
+    assert_eq!(thought_option["currentValue"], serde_json::json!("medium"));
+    assert_config_option_values(thought_option, &["low", "medium", "high"])?;
     let mode_option = acp_config_option(&session_new_response["result"], "mode")?;
     assert_eq!(mode_option["name"], serde_json::json!("Session Mode"));
     assert_eq!(mode_option["category"], serde_json::json!("mode"));
@@ -405,6 +445,62 @@ async fn stdio_acp_session_config_options_select_model_binding() -> Result<()> {
             "method": "session/set_config_option",
             "params": {
                 "sessionId": session_id,
+                "configId": "thought_level",
+                "value": "high"
+            }
+        }),
+    )
+    .await?;
+    let set_thought_response = read_stdio_json_until(
+        &mut child,
+        &mut stdout_reader,
+        &mut stderr_reader,
+        "ACP session/set_config_option thought response",
+        |value| value.get("id") == Some(&serde_json::json!(2)),
+    )
+    .await?;
+    let thought_option = acp_config_option(&set_thought_response["result"], "thought_level")?;
+    assert_eq!(thought_option["currentValue"], serde_json::json!("high"));
+    let model_option = acp_model_config_option(&set_thought_response["result"])?;
+    assert_eq!(
+        model_option["currentValue"],
+        serde_json::json!("test-openai")
+    );
+
+    let thought_prompt = "use the selected ACP reasoning effort";
+    write_acp_prompt(&mut stdin, 3, &session_id, thought_prompt).await?;
+    let thought_prompt_messages = read_stdio_json_collect_until(
+        &mut child,
+        &mut stdout_reader,
+        &mut stderr_reader,
+        "ACP session/prompt response after thought update",
+        |value| value.get("id") == Some(&serde_json::json!(3)),
+    )
+    .await?;
+    let thought_prompt_response = thought_prompt_messages
+        .last()
+        .context("session/prompt after thought update produced a response")?;
+    assert_prompt_response(thought_prompt_response, 3);
+    let provider_request = recv_provider_prompt_request(
+        &mut provider.requests,
+        "provider prompt request after thought option update",
+        thought_prompt,
+    )
+    .await?;
+    assert_eq!(provider_request["model"], serde_json::json!("test-model"));
+    assert_eq!(
+        provider_request["reasoning_effort"],
+        serde_json::json!("high")
+    );
+
+    write_stdio_json(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "session/set_config_option",
+            "params": {
+                "sessionId": session_id,
                 "configId": "model",
                 "value": "alt-openai"
             }
@@ -416,7 +512,7 @@ async fn stdio_acp_session_config_options_select_model_binding() -> Result<()> {
         &mut stdout_reader,
         &mut stderr_reader,
         "ACP session/set_config_option response",
-        |value| value.get("id") == Some(&serde_json::json!(2)),
+        |value| value.get("id") == Some(&serde_json::json!(4)),
     )
     .await?;
     let model_option = acp_model_config_option(&set_config_response["result"])?;
@@ -424,6 +520,7 @@ async fn stdio_acp_session_config_options_select_model_binding() -> Result<()> {
         model_option["currentValue"],
         serde_json::json!("alt-openai")
     );
+    assert!(acp_config_option_optional(&set_config_response["result"], "thought_level").is_none());
     let mode_option = acp_config_option(&set_config_response["result"], "mode")?;
     assert_eq!(mode_option["currentValue"], serde_json::json!("default"));
 
@@ -431,7 +528,7 @@ async fn stdio_acp_session_config_options_select_model_binding() -> Result<()> {
         &mut stdin,
         serde_json::json!({
             "jsonrpc": "2.0",
-            "id": 3,
+            "id": 5,
             "method": "session/set_config_option",
             "params": {
                 "sessionId": session_id,
@@ -446,7 +543,7 @@ async fn stdio_acp_session_config_options_select_model_binding() -> Result<()> {
         &mut stdout_reader,
         &mut stderr_reader,
         "ACP session/set_config_option mode response",
-        |value| value.get("id") == Some(&serde_json::json!(3)),
+        |value| value.get("id") == Some(&serde_json::json!(5)),
     )
     .await?;
     let mode_option = acp_config_option(&set_mode_response["result"], "mode")?;
@@ -461,19 +558,19 @@ async fn stdio_acp_session_config_options_select_model_binding() -> Result<()> {
     );
 
     let prompt = "use the selected ACP model binding";
-    write_acp_prompt(&mut stdin, 4, &session_id, prompt).await?;
+    write_acp_prompt(&mut stdin, 6, &session_id, prompt).await?;
     let prompt_messages = read_stdio_json_collect_until(
         &mut child,
         &mut stdout_reader,
         &mut stderr_reader,
         "ACP session/prompt response",
-        |value| value.get("id") == Some(&serde_json::json!(4)),
+        |value| value.get("id") == Some(&serde_json::json!(6)),
     )
     .await?;
     let prompt_response = prompt_messages
         .last()
         .context("session/prompt produced a response")?;
-    assert_prompt_response(prompt_response, 4);
+    assert_prompt_response(prompt_response, 6);
     let provider_request = recv_provider_prompt_request(
         &mut provider.requests,
         "provider prompt request after config option update",
@@ -733,14 +830,19 @@ fn acp_config_option<'a>(
     result: &'a serde_json::Value,
     config_id: &str,
 ) -> Result<&'a serde_json::Value> {
-    result["configOptions"]
-        .as_array()
-        .and_then(|options| {
-            options.iter().find(|option| {
-                option.get("id").and_then(serde_json::Value::as_str) == Some(config_id)
-            })
-        })
+    acp_config_option_optional(result, config_id)
         .with_context(|| format!("ACP result included {config_id} config option"))
+}
+
+fn acp_config_option_optional<'a>(
+    result: &'a serde_json::Value,
+    config_id: &str,
+) -> Option<&'a serde_json::Value> {
+    result["configOptions"].as_array().and_then(|options| {
+        options
+            .iter()
+            .find(|option| option.get("id").and_then(serde_json::Value::as_str) == Some(config_id))
+    })
 }
 
 fn assert_model_config_option_values(
@@ -763,5 +865,22 @@ fn assert_config_option_values(option: &serde_json::Value, expected_values: &[&s
             "model config option values should contain {expected_value}: {values:?}"
         );
     }
+    Ok(())
+}
+
+fn assert_config_option_lacks_value(
+    option: &serde_json::Value,
+    unexpected_value: &str,
+) -> Result<()> {
+    let values = option["options"]
+        .as_array()
+        .context("config option includes options")?
+        .iter()
+        .filter_map(|option| option.get("value").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !values.contains(&unexpected_value),
+        "config option values should not contain {unexpected_value}: {values:?}"
+    );
     Ok(())
 }
