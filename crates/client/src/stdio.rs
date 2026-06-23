@@ -162,22 +162,11 @@ pub use crate::acp_terminal::ACP_TERMINAL_OUTPUT_NOTIFICATION_METHOD;
 
 type PendingResponses = Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>>;
 
-fn acp_client_capabilities() -> devo_protocol::AcpClientCapabilities {
-    devo_protocol::AcpClientCapabilities {
-        fs: devo_protocol::AcpFileSystemCapabilities {
-            read_text_file: true,
-            write_text_file: true,
-            meta: None,
-        },
-        terminal: true,
-        meta: None,
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct StdioServerClientConfig {
     pub program: PathBuf,
     pub args: Vec<String>,
+    pub client_capabilities: devo_protocol::AcpClientCapabilities,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +182,7 @@ pub struct StdioServerClient {
     acp_pending_permissions: AcpPendingPermissions,
     acp_terminals: AcpTerminalManager,
     acp_agent_capabilities: Option<AcpAgentCapabilities>,
+    client_capabilities: devo_protocol::AcpClientCapabilities,
     next_request_id: AtomicU64,
     notifications_rx: mpsc::UnboundedReceiver<ServerNotificationMessage>,
     notifications_tx: mpsc::UnboundedSender<ServerNotificationMessage>,
@@ -244,6 +234,7 @@ impl StdioServerClient {
             acp_pending_permissions,
             acp_terminals,
             acp_agent_capabilities: None,
+            client_capabilities: config.client_capabilities,
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
@@ -258,7 +249,7 @@ impl StdioServerClient {
                 ACP_INITIALIZE_METHOD,
                 AcpInitializeParams {
                     protocol_version: 1,
-                    client_capabilities: acp_client_capabilities(),
+                    client_capabilities: self.client_capabilities.clone(),
                     client_info: Some(
                         AcpImplementation::new("devo", env!("CARGO_PKG_VERSION"))
                             .with_title("Devo"),
@@ -1348,19 +1339,67 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    #[test]
-    fn acp_client_capabilities_advertise_fs_and_terminal_support() {
+    #[tokio::test]
+    async fn initialize_uses_configured_client_capabilities() {
+        let (child, stdin, stdout) = request_capture_child_for_turn_start_test().await;
+        let stdin = Arc::new(Mutex::new(stdin));
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let acp_pending_permissions = Arc::new(Mutex::new(HashMap::new()));
+        let acp_terminals = AcpTerminalManager::new();
+        let (notifications_tx, notifications_rx) = mpsc::unbounded_channel();
+        let client_capabilities = devo_protocol::AcpClientCapabilities {
+            fs: devo_protocol::AcpFileSystemCapabilities {
+                read_text_file: true,
+                write_text_file: false,
+                meta: None,
+            },
+            terminal: true,
+            meta: None,
+        };
+        let mut client = StdioServerClient {
+            child,
+            stdin,
+            pending: Arc::clone(&pending),
+            acp_pending_permissions,
+            acp_terminals,
+            acp_agent_capabilities: None,
+            client_capabilities: client_capabilities.clone(),
+            next_request_id: AtomicU64::new(1),
+            notifications_rx,
+            notifications_tx,
+        };
+        let mut stdout_lines = BufReader::new(stdout).lines();
+
+        let initialize = tokio::spawn(async move {
+            let result = client.initialize().await;
+            (result, client)
+        });
+
+        let request = read_request_line(&mut stdout_lines).await;
+        assert_eq!(request["method"], ACP_INITIALIZE_METHOD);
+        assert_eq!(request["params"]["protocolVersion"], serde_json::json!(1));
         assert_eq!(
-            serde_json::to_value(acp_client_capabilities())
-                .expect("serialize ACP client capabilities"),
-            serde_json::json!({
-                "fs": {
-                    "readTextFile": true,
-                    "writeTextFile": true
-                },
-                "terminal": true
-            })
+            request["params"]["clientCapabilities"],
+            serde_json::to_value(&client_capabilities).expect("serialize client capabilities")
         );
+        pending
+            .lock()
+            .await
+            .remove(&1)
+            .expect("initialize has pending response")
+            .send(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": 1
+                }
+            }))
+            .expect("send initialize response");
+
+        let (result, mut client) = initialize.await.expect("initialize task joins");
+        result.expect("initialize response is accepted");
+        let _ = client.child.start_kill();
+        let _ = client.child.wait().await;
     }
 
     #[tokio::test]
@@ -1378,6 +1417,7 @@ mod tests {
             acp_pending_permissions,
             acp_terminals,
             acp_agent_capabilities: None,
+            client_capabilities: Default::default(),
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
@@ -1472,6 +1512,7 @@ mod tests {
                 },
                 ..Default::default()
             }),
+            client_capabilities: Default::default(),
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
@@ -1577,6 +1618,7 @@ mod tests {
                 },
                 ..Default::default()
             }),
+            client_capabilities: Default::default(),
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
@@ -1704,6 +1746,7 @@ mod tests {
             acp_pending_permissions,
             acp_terminals,
             acp_agent_capabilities: None,
+            client_capabilities: Default::default(),
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
@@ -1786,6 +1829,7 @@ mod tests {
             acp_pending_permissions,
             acp_terminals,
             acp_agent_capabilities: None,
+            client_capabilities: Default::default(),
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,

@@ -2922,6 +2922,15 @@ async fn spawn_client(_cwd: &Path, server_log_level: Option<String>) -> Result<S
                     .flat_map(|level| ["--log-level".to_string(), level]),
             )
             .collect(),
+        client_capabilities: devo_protocol::AcpClientCapabilities {
+            fs: devo_protocol::AcpFileSystemCapabilities {
+                read_text_file: false,
+                write_text_file: false,
+                meta: None,
+            },
+            terminal: false,
+            meta: None,
+        },
     })
     .await
 }

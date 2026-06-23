@@ -8,7 +8,8 @@ stdout.
 ## Public Interfaces
 
 - `StdioServerClientConfig`: spawn configuration for the stdio server process,
-  including the program path, optional workspace root, and extra arguments.
+  including the program path, extra arguments, and ACP client capabilities to
+  advertise during initialization.
 - `ServerNotificationMessage`: raw server notification with a method name and
   JSON params.
 - `StdioServerClient`: async stdio transport client. It owns the child process,
