@@ -1454,6 +1454,8 @@ mod tests {
             output_tokens: 50,
             cache_creation_input_tokens: Some(0),
             cache_read_input_tokens: Some(0),
+            reasoning_output_tokens: None,
+            total_tokens: None,
         };
         let record = DurableRecord::TurnCompleted(TurnCompletedRecord {
             schema_version: 1,

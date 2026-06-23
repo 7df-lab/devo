@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use ratatui::prelude::*;
 use ratatui::style::Color;
-use ratatui::style::Modifier;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 
@@ -18,20 +17,18 @@ use crate::wrapping::adaptive_wrap_lines;
 
 #[derive(Debug)]
 pub(crate) struct ResearchArtifactCell {
-    title: String,
     markdown_source: String,
     cwd: PathBuf,
 }
 
 impl ResearchArtifactCell {
     pub(crate) fn new(
-        title: impl Into<String>,
+        _title: impl Into<String>,
         markdown_source: impl Into<String>,
         cwd: &Path,
     ) -> Self {
-        let (title, markdown_source) = split_leading_title(title.into(), markdown_source.into());
+        let markdown_source = strip_leading_title(markdown_source.into());
         Self {
-            title,
             markdown_source,
             cwd: cwd.to_path_buf(),
         }
@@ -39,24 +36,14 @@ impl ResearchArtifactCell {
 
     fn content_lines(&self) -> Vec<Line<'static>> {
         let style = user_message_style();
-        let mut lines = vec![Line::from(Span::styled(
-            self.title.clone(),
-            style.add_modifier(Modifier::BOLD),
-        ))];
-
-        let mut body_lines = Vec::new();
+        let mut lines = Vec::new();
         append_markdown(
             &self.markdown_source,
             /*width*/ None,
             Some(self.cwd.as_path()),
-            &mut body_lines,
+            &mut lines,
         );
-        let body_lines = collapse_consecutive_blank_lines(body_lines);
-        if body_lines.iter().any(|line| !line_is_blank(line)) {
-            lines.push(Line::from(""));
-            lines.extend(body_lines);
-        }
-
+        let mut lines = collapse_consecutive_blank_lines(lines);
         patch_lines_style(&mut lines, style);
         lines
     }
@@ -76,8 +63,12 @@ impl ResearchArtifactCell {
                 LIVE_PREFIX_COLS + 1, /* keep a one-column right margin for wrapping */
             )
             .max(1);
+        let content_lines = self.content_lines();
+        if !content_lines.iter().any(|line| !line_is_blank(line)) {
+            return Vec::new();
+        }
         let content_lines = adaptive_wrap_lines(
-            self.content_lines(),
+            content_lines,
             RtOptions::new(usize::from(wrap_width))
                 .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
         );
@@ -100,7 +91,11 @@ impl HistoryCell for ResearchArtifactCell {
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        Paragraph::new(Text::from(self.lines(width)))
+        let lines = self.lines(width);
+        if lines.is_empty() {
+            return 0;
+        }
+        Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
             .line_count(width)
             .try_into()
@@ -108,26 +103,15 @@ impl HistoryCell for ResearchArtifactCell {
     }
 }
 
-fn split_leading_title(default_title: String, markdown_source: String) -> (String, String) {
+fn strip_leading_title(markdown_source: String) -> String {
     let trimmed = markdown_source.trim_start();
     let Some(rest) = trimmed.strip_prefix("### ") else {
-        return (default_title, markdown_source);
+        return markdown_source;
     };
-    let Some((heading, body)) = rest.split_once('\n') else {
-        let heading = rest.trim();
-        if heading.is_empty() {
-            return (default_title, markdown_source);
-        }
-        return (heading.to_string(), String::new());
+    let Some((_heading, body)) = rest.split_once('\n') else {
+        return String::new();
     };
-    let heading = heading.trim();
-    if heading.is_empty() {
-        return (default_title, markdown_source);
-    }
-    (
-        heading.to_string(),
-        body.trim_start_matches(['\r', '\n']).to_string(),
-    )
+    body.trim_start_matches(['\r', '\n']).to_string()
 }
 
 fn patch_lines_style(lines: &mut [Line<'static>], style: Style) {
@@ -173,19 +157,40 @@ mod tests {
 
         let rows = trimmed_plain_rows(cell.display_lines(80));
 
-        assert_eq!(
-            vec!["", "▌ Finding", "", "  - first item", "  - second item", "",],
-            rows
-        );
+        assert_eq!(vec!["", "▌ - first item", "  - second item", "",], rows);
     }
 
     #[test]
-    fn keeps_generic_title_when_body_has_no_completed_heading() {
+    fn renders_body_without_generic_title_when_body_has_no_heading() {
         let cell = ResearchArtifactCell::new("Research", "partial finding", Path::new("."));
 
         let rows = trimmed_plain_rows(cell.display_lines(80));
 
-        assert_eq!(vec!["", "▌ Research", "", "  partial finding", ""], rows);
+        assert_eq!(vec!["", "▌ partial finding", ""], rows);
+    }
+
+    #[test]
+    fn strips_research_title_heading() {
+        let cell = ResearchArtifactCell::new(
+            "Research",
+            "### Research Brief\n\nUnderstand the current behavior.",
+            Path::new("."),
+        );
+
+        let rows = trimmed_plain_rows(cell.display_lines(80));
+
+        assert_eq!(vec!["", "▌ Understand the current behavior.", ""], rows);
+    }
+
+    #[test]
+    fn title_only_artifact_is_not_visible() {
+        let cell = ResearchArtifactCell::new("Research", "### Compressed Finding", Path::new("."));
+
+        assert_eq!(
+            Vec::<String>::new(),
+            trimmed_plain_rows(cell.display_lines(80))
+        );
+        assert_eq!(0, cell.desired_height(80));
     }
 
     #[test]

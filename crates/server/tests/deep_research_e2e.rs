@@ -537,6 +537,7 @@ async fn deep_research_turn_streams_artifact_reasoning_and_final_report() -> Res
         serde_json::json!({
             "input_tokens": 5,
             "output_tokens": 5,
+            "total_tokens": 10,
             "cache_creation_input_tokens": null,
             "cache_read_input_tokens": null
         })
@@ -583,6 +584,64 @@ async fn deep_research_accepts_write_tool_only_final_report() -> Result<()> {
     assert!(
         final_report.contains("DeepSeek official website"),
         "expected final response to summarize written report: {final_report}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn deep_research_read_only_write_permission_uses_active_connection() -> Result<()> {
+    // Trace: L2-DES-RESEARCH-001
+    // Verifies: research turns can route write-tool approval requests to the active client.
+    let workspace = TempDir::new()?;
+    write_live_research_config(workspace.path())?;
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(
+        ScriptedResearchProvider::with_write_tool_only_final_report(workspace.path()),
+    );
+    let runtime = build_scripted_research_runtime_with_provider(workspace.path(), provider)?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, workspace.path()).await?;
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 21,
+                "method": "_devo/session/permissions/update",
+                "params": {
+                    "session_id": session_id,
+                    "preset": "read-only"
+                }
+            }),
+        )
+        .await
+        .context("session/permissions/update response")?;
+    let response: devo_server::SuccessResponse<devo_server::SessionPermissionsUpdateResult> =
+        serde_json::from_value(response)?;
+    assert_eq!(
+        response.result.preset,
+        devo_protocol::PermissionPreset::ReadOnly
+    );
+    start_research_turn(&runtime, connection_id, session_id).await?;
+
+    let (events, saw_permission_request) = wait_for_research_completion_allowing_permission(
+        &runtime,
+        connection_id,
+        session_id,
+        &mut notifications_rx,
+        "Use the provided scope.",
+    )
+    .await?;
+
+    assert!(
+        saw_permission_request,
+        "expected read-only research report write to request client permission"
+    );
+    let report_path = assert_final_report_file_written(&events);
+    let report_contents =
+        std::fs::read_to_string(&report_path).context("read written research report")?;
+    assert!(
+        report_contents.contains("DeepSeek official website"),
+        "expected approved write to produce report content: {report_contents}"
     );
 
     Ok(())
@@ -1327,6 +1386,8 @@ fn model_response(text: impl Into<String>) -> ModelResponse {
             output_tokens: 1,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
         },
         metadata: ResponseMetadata::default(),
     }
@@ -1578,6 +1639,73 @@ async fn wait_for_research_completion(
             events.push(event);
             if done {
                 return Ok(events);
+            }
+        }
+        anyhow::bail!("notification channel closed before turn/completed")
+    })
+    .await
+    .context("timed out waiting for research completion")?
+}
+
+async fn wait_for_research_completion_allowing_permission(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: devo_core::SessionId,
+    notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
+    clarification_answer: &str,
+) -> Result<(Vec<serde_json::Value>, bool)> {
+    let mut events = Vec::new();
+    timeout(Duration::from_secs(240), async {
+        let mut saw_permission_request = false;
+        while let Some(raw_event) = notifications_rx.recv().await {
+            if raw_event.get("method") == Some(&serde_json::json!("session/request_permission")) {
+                saw_permission_request = true;
+                assert_eq!(
+                    raw_event["params"]["sessionId"],
+                    serde_json::json!(session_id)
+                );
+                let response = runtime
+                    .handle_incoming(
+                        connection_id,
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": raw_event["id"].clone(),
+                            "result": {
+                                "outcome": {
+                                    "outcome": "selected",
+                                    "optionId": "allow_once"
+                                }
+                            }
+                        }),
+                    )
+                    .await;
+                assert_eq!(response, None);
+                events.push(raw_event);
+                continue;
+            }
+            let event = legacy_event_from_acp_notification(raw_event);
+            let method = event
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if method == "item/tool/requestUserInput" {
+                respond_to_clarification(runtime, connection_id, &event, clarification_answer)
+                    .await?;
+            }
+            let is_parent_event =
+                event["params"]["session_id"] == serde_json::json!(session_id.to_string());
+            let done = method == "turn/completed" && is_parent_event;
+            if method == "turn/failed" && is_parent_event {
+                anyhow::bail!(
+                    "research turn failed: {}",
+                    latest_agent_message(&events)
+                        .unwrap_or_else(|| "no failure message was emitted".to_string())
+                );
+            }
+            events.push(event);
+            if done {
+                return Ok((events, saw_permission_request));
             }
         }
         anyhow::bail!("notification channel closed before turn/completed")

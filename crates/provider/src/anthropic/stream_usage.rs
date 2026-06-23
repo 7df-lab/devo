@@ -33,6 +33,8 @@ impl AnthropicStreamUsage {
             output_tokens: self.output_tokens,
             cache_creation_input_tokens: self.cache_creation_input_tokens,
             cache_read_input_tokens: self.cache_read_input_tokens,
+            reasoning_output_tokens: None,
+            total_tokens: None,
         }
     }
 

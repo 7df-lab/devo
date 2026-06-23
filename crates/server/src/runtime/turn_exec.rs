@@ -1199,7 +1199,7 @@ impl ServerRuntime {
             let mut proposed_plan_leading_normal = String::new();
             let mut latest_usage: Option<TurnUsage> = None;
             let mut stop_reason: Option<devo_core::StopReason> = None;
-            let mut usage_base: Option<(usize, usize, usize)> = None;
+            let mut usage_base: Option<(usize, usize, usize, usize)> = None;
             while let Some(event) = event_rx.recv().await {
                 decrement_query_event_queue_depth(&event_queue_depth_for_task);
                 let assistant_token_text = query_event_trace_token_preview(&event);
@@ -1828,21 +1828,11 @@ impl ServerRuntime {
                             })
                             .await;
                     }
-                    QueryEvent::UsageDelta {
-                        input_tokens,
-                        output_tokens,
-                        cache_creation_input_tokens,
-                        cache_read_input_tokens,
-                    } => {
-                        let usage = TurnUsage {
-                            input_tokens: input_tokens as u32,
-                            output_tokens: output_tokens as u32,
-                            cache_creation_input_tokens: cache_creation_input_tokens
-                                .map(|value| value as u32),
-                            cache_read_input_tokens: cache_read_input_tokens
-                                .map(|value| value as u32),
-                        };
-                        latest_usage = Some(usage.clone());
+                    QueryEvent::UsageDelta { usage } | QueryEvent::Usage { usage } => {
+                        let turn_usage = TurnUsage::from_usage(&usage);
+                        latest_usage = Some(turn_usage.clone());
+                        let display_total_tokens = usage.display_total_tokens();
+                        let cache_read_input_tokens = usage.cache_read_input_tokens.unwrap_or(0);
 
                         let base = if let Some(base) = usage_base {
                             base
@@ -1852,87 +1842,36 @@ impl ServerRuntime {
                                 (
                                     session.summary.total_input_tokens,
                                     session.summary.total_output_tokens,
+                                    session.summary.total_tokens,
                                     session.summary.total_cache_read_tokens,
                                 )
                             };
                             usage_base = Some(base);
                             base
                         };
+                        let total_input_tokens = base.0 + usage.input_tokens;
+                        let total_output_tokens = base.1 + usage.output_tokens;
+                        let total_tokens = base.2 + display_total_tokens;
+                        let total_cache_read_tokens = base.3 + cache_read_input_tokens;
                         {
                             let mut session = event_session_arc.lock().await;
-                            session.summary.total_input_tokens =
-                                base.0 + usage.input_tokens as usize;
-                            session.summary.total_output_tokens =
-                                base.1 + usage.output_tokens as usize;
+                            session.summary.total_input_tokens = total_input_tokens;
+                            session.summary.total_output_tokens = total_output_tokens;
+                            session.summary.total_tokens = total_tokens;
+                            session.summary.total_cache_read_tokens = total_cache_read_tokens;
+                            session.summary.last_query_total_tokens = display_total_tokens;
                         }
                         let _ = runtime
                             .broadcast_event(ServerEvent::TurnUsageUpdated(
                                 TurnUsageUpdatedPayload {
                                     session_id,
                                     turn_id: turn_for_events.turn_id,
-                                    usage,
-                                    total_input_tokens: base.0 + input_tokens,
-                                    total_output_tokens: base.1 + output_tokens,
-                                    total_cache_read_tokens: base.2
-                                        + cache_read_input_tokens.unwrap_or(0),
-                                    last_query_input_tokens: input_tokens,
-                                    context_window: usage_context_window,
-                                },
-                            ))
-                            .await;
-                    }
-                    QueryEvent::Usage {
-                        input_tokens,
-                        output_tokens,
-                        cache_creation_input_tokens,
-                        cache_read_input_tokens,
-                    } => {
-                        let usage = TurnUsage {
-                            input_tokens: input_tokens as u32,
-                            output_tokens: output_tokens as u32,
-                            cache_creation_input_tokens: cache_creation_input_tokens
-                                .map(|value| value as u32),
-                            cache_read_input_tokens: cache_read_input_tokens
-                                .map(|value| value as u32),
-                        };
-                        latest_usage = Some(usage.clone());
-
-                        let base = if let Some(base) = usage_base {
-                            base
-                        } else {
-                            let base = {
-                                let session = event_session_arc.lock().await;
-                                (
-                                    session.summary.total_input_tokens,
-                                    session.summary.total_output_tokens,
-                                    session.summary.total_cache_read_tokens,
-                                )
-                            };
-                            usage_base = Some(base);
-                            base
-                        };
-                        {
-                            let mut session = event_session_arc.lock().await;
-                            session.summary.total_input_tokens =
-                                base.0 + usage.input_tokens as usize;
-                            session.summary.total_output_tokens =
-                                base.1 + usage.output_tokens as usize;
-                            session.summary.total_cache_read_tokens =
-                                base.2 + usage.cache_read_input_tokens.unwrap_or(0) as usize;
-                            session.summary.last_query_total_tokens =
-                                usage.input_tokens as usize + usage.output_tokens as usize;
-                        }
-                        let _ = runtime
-                            .broadcast_event(ServerEvent::TurnUsageUpdated(
-                                TurnUsageUpdatedPayload {
-                                    session_id,
-                                    turn_id: turn_for_events.turn_id,
-                                    usage,
-                                    total_input_tokens: base.0 + input_tokens,
-                                    total_output_tokens: base.1 + output_tokens,
-                                    total_cache_read_tokens: base.2
-                                        + cache_read_input_tokens.unwrap_or(0),
-                                    last_query_input_tokens: input_tokens,
+                                    usage: turn_usage,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_tokens,
+                                    total_cache_read_tokens,
+                                    last_query_input_tokens: usage.input_tokens,
                                     context_window: usage_context_window,
                                 },
                             ))
@@ -2015,6 +1954,7 @@ impl ServerRuntime {
             result,
             session_total_input_tokens,
             session_total_output_tokens,
+            session_total_tokens,
             session_total_cache_creation_tokens,
             session_total_cache_read_tokens,
             session_last_input_tokens,
@@ -2164,6 +2104,7 @@ impl ServerRuntime {
                 result,
                 core_session.total_input_tokens,
                 core_session.total_output_tokens,
+                core_session.total_tokens,
                 core_session.total_cache_creation_tokens,
                 core_session.total_cache_read_tokens,
                 core_session.last_input_tokens,
@@ -2247,12 +2188,12 @@ impl ServerRuntime {
             session.summary.updated_at = Utc::now();
             session.summary.total_input_tokens = session_total_input_tokens;
             session.summary.total_output_tokens = session_total_output_tokens;
+            session.summary.total_tokens = session_total_tokens;
             session.summary.total_cache_creation_tokens = session_total_cache_creation_tokens;
             session.summary.total_cache_read_tokens = session_total_cache_read_tokens;
             session.summary.prompt_token_estimate = session_prompt_token_estimate;
             if let Some(usage) = &final_turn.usage {
-                session.summary.last_query_total_tokens =
-                    usage.input_tokens as usize + usage.output_tokens as usize;
+                session.summary.last_query_total_tokens = usage.display_total_tokens();
             }
 
             // Persist token stats to SQLite (skip for ephemeral sessions)
@@ -2260,6 +2201,7 @@ impl ServerRuntime {
                 let stats = SessionStats {
                     total_input_tokens: session_total_input_tokens,
                     total_output_tokens: session_total_output_tokens,
+                    total_tokens: session_total_tokens,
                     total_cache_creation_tokens: session_total_cache_creation_tokens,
                     total_cache_read_tokens: session_total_cache_read_tokens,
                     last_input_tokens: final_turn

@@ -138,9 +138,13 @@ impl ChatWidget {
                 self.stream_chunking_policy.reset();
                 self.bottom_pane.set_task_running(true);
             }
-            WorkerEvent::TextItemStarted { item_id, kind } => {
+            WorkerEvent::TextItemStarted {
+                item_id,
+                kind,
+                research,
+            } => {
                 self.flush_active_cell();
-                self.start_text_item(ActiveTextItemId::Server(item_id), kind);
+                self.start_text_item(ActiveTextItemId::Server(item_id), kind, research);
                 self.set_status_message(match kind {
                     TextItemKind::Assistant => "Generating",
                     TextItemKind::Reasoning => "Thinking",
@@ -150,9 +154,15 @@ impl ChatWidget {
             WorkerEvent::TextItemDelta {
                 item_id,
                 kind,
+                research,
                 delta,
             } => {
-                self.push_text_item_delta(ActiveTextItemId::Server(item_id), kind, &delta);
+                self.push_text_item_delta(
+                    ActiveTextItemId::Server(item_id),
+                    kind,
+                    research,
+                    &delta,
+                );
                 self.set_status_message(match kind {
                     TextItemKind::Assistant => "Generating",
                     TextItemKind::Reasoning => "Thinking",
@@ -162,9 +172,15 @@ impl ChatWidget {
             WorkerEvent::TextItemCompleted {
                 item_id,
                 kind,
+                research,
                 final_text,
             } => {
-                self.complete_text_item(ActiveTextItemId::Server(item_id), kind, final_text);
+                self.complete_text_item(
+                    ActiveTextItemId::Server(item_id),
+                    kind,
+                    research,
+                    final_text,
+                );
                 self.set_status_message(match kind {
                     TextItemKind::Assistant => "Generating",
                     TextItemKind::Reasoning => "Thought",
@@ -189,6 +205,7 @@ impl ChatWidget {
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Assistant),
                         TextItemKind::Assistant,
+                        None,
                         &text,
                     );
                 }
@@ -200,6 +217,7 @@ impl ChatWidget {
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Reasoning),
                         TextItemKind::Reasoning,
+                        None,
                         &text,
                     );
                 }
@@ -216,6 +234,7 @@ impl ChatWidget {
                     self.complete_text_item(
                         ActiveTextItemId::Legacy(TextItemKind::Assistant),
                         TextItemKind::Assistant,
+                        None,
                         text,
                     );
                 }
@@ -226,6 +245,7 @@ impl ChatWidget {
                     self.complete_text_item(
                         ActiveTextItemId::Legacy(TextItemKind::Reasoning),
                         TextItemKind::Reasoning,
+                        None,
                         text,
                     );
                 }
@@ -775,7 +795,7 @@ impl ChatWidget {
                 self.bottom_pane
                     .open_request_user_input(session_id, turn_id, request_id, questions);
                 self.busy = true;
-                self.bottom_pane.set_task_running(false);
+                self.bottom_pane.set_task_running(true);
                 self.set_status_message("Input requested");
             }
             WorkerEvent::ApprovalDecision {
@@ -794,6 +814,7 @@ impl ChatWidget {
             WorkerEvent::UsageUpdated {
                 total_input_tokens,
                 total_output_tokens,
+                total_tokens: _,
                 total_cache_read_tokens,
                 last_query_total_tokens,
                 last_query_input_tokens,
@@ -811,6 +832,7 @@ impl ChatWidget {
                 turn_count,
                 total_input_tokens,
                 total_output_tokens,
+                total_tokens: _,
                 total_cache_read_tokens,
                 last_query_total_tokens,
                 last_query_input_tokens,
@@ -886,6 +908,7 @@ impl ChatWidget {
                 turn_count,
                 total_input_tokens,
                 total_output_tokens,
+                total_tokens: _,
                 total_cache_read_tokens,
                 prompt_token_estimate,
                 last_query_input_tokens,
@@ -1104,6 +1127,7 @@ impl ChatWidget {
                 active_agent_label,
                 total_input_tokens,
                 total_output_tokens,
+                total_tokens: _,
                 total_cache_read_tokens,
                 last_query_total_tokens,
                 last_query_input_tokens,
@@ -1214,6 +1238,7 @@ impl ChatWidget {
             WorkerEvent::SessionCompacted {
                 total_input_tokens,
                 total_output_tokens,
+                total_tokens: _,
                 prompt_token_estimate,
             } => {
                 self.busy = false;

@@ -1293,6 +1293,8 @@ fn map_usage(usage: &AnthropicUsage) -> Usage {
         output_tokens: usage.output_tokens,
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         cache_read_input_tokens: usage.cache_read_input_tokens,
+        reasoning_output_tokens: None,
+        total_tokens: None,
     }
 }
 

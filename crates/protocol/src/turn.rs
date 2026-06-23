@@ -378,6 +378,8 @@ mod tests {
                 output_tokens: 20,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                total_tokens: None,
             }),
             stop_reason: Some(StopReason::EndTurn),
             failure_reason: None,

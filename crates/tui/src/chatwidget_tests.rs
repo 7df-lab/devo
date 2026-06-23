@@ -15,6 +15,8 @@ use devo_protocol::ProviderVendor;
 use devo_protocol::ProviderWireApi;
 use devo_protocol::ReasoningCapability;
 use devo_protocol::ReasoningEffort;
+use devo_protocol::RequestUserInputOption;
+use devo_protocol::RequestUserInputQuestion;
 use devo_protocol::SessionId;
 use devo_protocol::TurnId;
 use pretty_assertions::assert_eq;
@@ -34,12 +36,14 @@ use crate::chatwidget::ReasoningEffortListEntry;
 use crate::chatwidget::TuiSessionState;
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
+use crate::events::ResearchArtifactMetadata;
 use crate::events::SavedModelEntry;
 use crate::events::TextItemKind;
 use crate::history_cell::HistoryCell;
 use crate::render::renderable::Renderable;
 use crate::slash_command::built_in_slash_commands;
 use crate::tui::frame_requester::FrameRequester;
+use crate::ui_consts::LIVE_PREFIX_COLS;
 
 fn widget_with_model(
     model: Model,
@@ -914,15 +918,18 @@ fn approval_request_does_not_duplicate_already_committed_assistant_text() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id,
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id,
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
         delta: text.clone(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id,
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
         final_text: text.clone(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::AssistantMessageCompleted(
@@ -980,10 +987,12 @@ fn research_artifact_completion_does_not_commit_assistant_turn() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: artifact_id,
         kind: crate::events::TextItemKind::ResearchArtifact,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: artifact_id,
         kind: crate::events::TextItemKind::ResearchArtifact,
+        research: None,
         delta: "partial finding".to_string(),
     });
     let live_rows = rendered_rows(&widget, 80, 16).join("\n");
@@ -995,6 +1004,7 @@ fn research_artifact_completion_does_not_commit_assistant_turn() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id: artifact_id,
         kind: crate::events::TextItemKind::ResearchArtifact,
+        research: None,
         final_text: "### Finding\n\npartial finding".to_string(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::AssistantMessageCompleted(
@@ -1013,6 +1023,177 @@ fn research_artifact_completion_does_not_commit_assistant_turn() {
         committed.contains("final report"),
         "research artifact completion must not suppress assistant completion:\n{committed}"
     );
+}
+
+#[test]
+fn research_artifact_finding_updates_inline_preview_without_research_cell() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let artifact_id = ItemId::new();
+    let research = Some(ResearchArtifactMetadata {
+        artifact_type: "finding".to_string(),
+        title: "Research Finding: API behavior".to_string(),
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        research: research.clone(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        research: research.clone(),
+        delta: "child agent found the API contract".to_string(),
+    });
+
+    let live_rows = rendered_rows(&widget, 100, 16).join("\n");
+    assert!(
+        live_rows.contains("Research Finding: API behavior: working"),
+        "finding should render as an inline research preview row:\n{live_rows}"
+    );
+    assert!(
+        live_rows.contains("child agent found the API contract"),
+        "finding delta should update the inline preview:\n{live_rows}"
+    );
+    assert!(
+        !live_rows.contains("▌ Research"),
+        "finding should not render the generic research artifact cell:\n{live_rows}"
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        research,
+        final_text: "### Research Finding: API behavior\n\nchild agent found the API contract"
+            .to_string(),
+    });
+
+    let after_completion = rendered_rows(&widget, 100, 16).join("\n");
+    assert!(
+        !after_completion.contains("Research Finding: API behavior"),
+        "completed finding preview should disappear:\n{after_completion}"
+    );
+    let transcript = line_texts(widget.transcript_overlay_lines(100)).join("\n");
+    assert!(
+        !transcript.contains("child agent found the API contract"),
+        "finding should not commit to the parent transcript:\n{transcript}"
+    );
+}
+
+#[test]
+fn research_artifact_brief_and_plan_still_render_research_cells() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    for (artifact_type, title, content) in [
+        (
+            "brief",
+            "Research Brief",
+            "Understand the current behavior.",
+        ),
+        (
+            "plan",
+            "Research Plan",
+            "Compare the relevant implementation paths.",
+        ),
+    ] {
+        let artifact_id = ItemId::new();
+        let research = Some(ResearchArtifactMetadata {
+            artifact_type: artifact_type.to_string(),
+            title: title.to_string(),
+        });
+        widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+            item_id: artifact_id,
+            kind: crate::events::TextItemKind::ResearchArtifact,
+            research: research.clone(),
+        });
+        widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+            item_id: artifact_id,
+            kind: crate::events::TextItemKind::ResearchArtifact,
+            research: research.clone(),
+            delta: content.to_string(),
+        });
+        let live_rows = rendered_rows(&widget, 100, 16).join("\n");
+        assert!(
+            live_rows.contains(content),
+            "{title} body should still render as a research artifact cell:\n{live_rows}"
+        );
+        assert!(
+            live_rows.contains('▌'),
+            "{title} should keep the research artifact block style:\n{live_rows}"
+        );
+        assert!(
+            !live_rows.contains(title),
+            "{title} title should not be visible:\n{live_rows}"
+        );
+        widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+            item_id: artifact_id,
+            kind: crate::events::TextItemKind::ResearchArtifact,
+            research,
+            final_text: format!("### {title}\n\n{content}"),
+        });
+    }
+
+    let transcript = line_texts(widget.transcript_overlay_lines(100)).join("\n");
+    assert!(
+        transcript.contains("Understand the current behavior."),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("Compare the relevant implementation paths."),
+        "{transcript}"
+    );
+    assert!(!transcript.contains("Research Brief"), "{transcript}");
+    assert!(!transcript.contains("Research Plan"), "{transcript}");
+}
+
+#[test]
+fn research_artifact_title_only_heading_does_not_render_empty_cell() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let artifact_id = ItemId::new();
+    let research = Some(ResearchArtifactMetadata {
+        artifact_type: "brief".to_string(),
+        title: "Research Brief".to_string(),
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        research: research.clone(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        research: research.clone(),
+        delta: "### Research Brief".to_string(),
+    });
+    let live_rows = rendered_rows(&widget, 100, 16).join("\n");
+    assert!(!live_rows.contains("Research Brief"), "{live_rows}");
+    assert!(!live_rows.contains('▌'), "{live_rows}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        research,
+        final_text: "### Research Brief".to_string(),
+    });
+
+    let transcript = line_texts(widget.transcript_overlay_lines(100)).join("\n");
+    assert!(!transcript.contains("Research Brief"), "{transcript}");
+    assert!(!transcript.contains('▌'), "{transcript}");
 }
 
 #[test]
@@ -1288,6 +1469,7 @@ fn turn_summary_uses_submitted_mode_after_composer_mode_changes() {
         turn_count: 1,
         total_input_tokens: 10,
         total_output_tokens: 20,
+        total_tokens: 30,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 30,
         last_query_input_tokens: 10,
@@ -1348,6 +1530,7 @@ fn queued_prompt_keeps_submitted_mode_when_promoted_to_history() {
         turn_count: 2,
         total_input_tokens: 10,
         total_output_tokens: 20,
+        total_tokens: 30,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 30,
         last_query_input_tokens: 10,
@@ -1384,10 +1567,12 @@ fn queued_prompt_promotes_after_active_assistant_stream() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id,
         kind: TextItemKind::Assistant,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id,
         kind: TextItemKind::Assistant,
+        research: None,
         delta: "assistant before promotion".to_string(),
     });
 
@@ -1399,6 +1584,7 @@ fn queued_prompt_promotes_after_active_assistant_stream() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id,
         kind: TextItemKind::Assistant,
+        research: None,
         final_text: "assistant before promotion".to_string(),
     });
 
@@ -2345,10 +2531,12 @@ fn proposed_plan_keeps_assistant_preamble_before_plan() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: TextItemKind::Assistant,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: assistant_id,
         kind: TextItemKind::Assistant,
+        research: None,
         delta: "现在我已经了解了代码库。以下是计划：\n".to_string(),
     });
     widget
@@ -2390,10 +2578,12 @@ fn proposed_plan_completion_does_not_duplicate_boundary_preamble() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: TextItemKind::Assistant,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: assistant_id,
         kind: TextItemKind::Assistant,
+        research: None,
         delta: "Intro before plan.\n".to_string(),
     });
     widget
@@ -2405,6 +2595,7 @@ fn proposed_plan_completion_does_not_duplicate_boundary_preamble() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id: assistant_id,
         kind: TextItemKind::Assistant,
+        research: None,
         final_text: "Intro before plan.\n".to_string(),
     });
 
@@ -2519,6 +2710,7 @@ fn session_switch_restores_plan_metadata_into_progress() {
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -2574,6 +2766,7 @@ fn session_switch_restores_explored_metadata_into_history() {
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -2642,6 +2835,7 @@ fn session_switch_restores_edited_metadata_into_history() {
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -2689,6 +2883,7 @@ fn session_switch_merges_consecutive_explored_items() {
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -2768,6 +2963,7 @@ fn session_switch_restores_error_via_tool_result_cell_style() {
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -2832,6 +3028,7 @@ fn live_and_resume_error_share_same_rendering_chain() {
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -3355,6 +3552,7 @@ fn streamed_lines_stay_in_live_viewport_until_turn_finishes() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -3389,6 +3587,7 @@ fn committed_history_drains_to_scrollback_lines() {
         turn_count: 1,
         total_input_tokens: 10,
         total_output_tokens: 20,
+        total_tokens: 30,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 30,
         last_query_input_tokens: 10,
@@ -3497,6 +3696,7 @@ fn session_switch_restores_header_and_spacing_before_user_input() {
         active_agent_label: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        total_tokens: 8,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 8,
         last_query_input_tokens: 3,
@@ -3567,6 +3767,7 @@ fn turn_finished_does_not_add_completion_status_line_to_history() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -3600,6 +3801,7 @@ fn completed_turn_summary_keeps_duration_for_text_turns() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -4000,6 +4202,7 @@ fn committed_assistant_markdown_does_not_double_wrap() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -4050,6 +4253,7 @@ fn committed_assistant_multiline_text_has_no_extra_blank_rows() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -4422,6 +4626,7 @@ fn interrupted_turn_flushes_explored_cell_before_summary() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -4617,6 +4822,7 @@ fn reasoning_text_commits_to_history_when_turn_finishes() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -4651,6 +4857,7 @@ fn restored_reasoning_text_is_visible_in_transcript() {
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -4790,19 +4997,23 @@ fn lifecycle_text_items_render_as_ordered_sibling_cells() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
+        research: None,
         delta: "thinking".to_string(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
         delta: "Line1\nLine2\n".to_string(),
     });
 
@@ -4821,6 +5032,7 @@ fn lifecycle_text_items_render_as_ordered_sibling_cells() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
+        research: None,
         final_text: "thinking".to_string(),
     });
     let rows_after_reasoning = rendered_rows(&widget, 80, 16);
@@ -4872,19 +5084,23 @@ fn lifecycle_text_items_keep_reasoning_before_assistant_when_events_arrive_out_o
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
         delta: "answer line\n".to_string(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
+        research: None,
         delta: "thinking text".to_string(),
     });
 
@@ -4900,6 +5116,7 @@ fn lifecycle_text_items_keep_reasoning_before_assistant_when_events_arrive_out_o
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
         final_text: "answer line".to_string(),
     });
     let committed_before_reasoning = widget.drain_scrollback_lines(80);
@@ -4911,6 +5128,7 @@ fn lifecycle_text_items_keep_reasoning_before_assistant_when_events_arrive_out_o
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
+        research: None,
         final_text: "thinking text".to_string(),
     });
     let committed = scrollback_plain_lines(&trim_trailing_blank_scrollback_lines(
@@ -4952,19 +5170,23 @@ fn assistant_stream_commit_tick_runs_while_reasoning_is_pending() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
+        research: None,
         delta: "thinking text".to_string(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
         delta: "first line\nsecond line\n".to_string(),
     });
 
@@ -5077,6 +5299,7 @@ fn session_switch_updates_session_identity_projection() {
         active_agent_label: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        total_tokens: 8,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 8,
         last_query_input_tokens: 3,
@@ -5119,6 +5342,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
         active_agent_label: None,
         total_input_tokens: 12,
         total_output_tokens: 18,
+        total_tokens: 30,
         total_cache_read_tokens: 4,
         last_query_total_tokens: 42,
         last_query_input_tokens: 42,
@@ -5146,6 +5370,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
     widget.handle_worker_event(crate::events::WorkerEvent::UsageUpdated {
         total_input_tokens: 7,
         total_output_tokens: 2,
+        total_tokens: 9,
         total_cache_read_tokens: 6,
         last_query_total_tokens: 9,
         last_query_input_tokens: 7,
@@ -5161,6 +5386,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
         turn_count: 2,
         total_input_tokens: 19,
         total_output_tokens: 20,
+        total_tokens: 39,
         total_cache_read_tokens: 6,
         last_query_total_tokens: 9,
         last_query_input_tokens: 7,
@@ -5232,6 +5458,7 @@ fn fragmented_random_assistant_stream_keeps_rendering_without_queue_stall() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
     });
 
     let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
@@ -5247,6 +5474,7 @@ fn fragmented_random_assistant_stream_keeps_rendering_without_queue_stall() {
             widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
                 item_id: assistant_id,
                 kind: crate::events::TextItemKind::Assistant,
+                research: None,
                 delta: delta.to_string(),
             });
             widget.pre_draw_tick();
@@ -5305,8 +5533,28 @@ fn monitor_agent(
     }
 }
 
+fn request_user_input_question() -> RequestUserInputQuestion {
+    RequestUserInputQuestion {
+        id: "scope".to_string(),
+        header: "Scope".to_string(),
+        question: "Which scope should research use?".to_string(),
+        is_other: false,
+        is_secret: false,
+        options: Some(vec![
+            RequestUserInputOption {
+                label: "Narrow".to_string(),
+                description: "Inspect only the current behavior.".to_string(),
+            },
+            RequestUserInputOption {
+                label: "Broad".to_string(),
+                description: "Inspect related behavior too.".to_string(),
+            },
+        ]),
+    }
+}
+
 #[test]
-fn subagent_discovery_shows_ctrl_x_hint_without_auto_opening_selector() {
+fn subagent_discovery_shows_inline_live_list_without_focusing_it() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
@@ -5333,13 +5581,100 @@ fn subagent_discovery_shows_ctrl_x_hint_without_auto_opening_selector() {
     assert_eq!(widget.selected_subagent_for_test(), Some(child));
     let rows = rendered_rows(&widget, 160, 18).join("\n");
     assert!(rows.contains("ctrl + x agents"), "rows:\n{rows}");
-    assert!(!rows.contains("checking files"), "rows:\n{rows}");
+    assert!(rows.contains("reviewer: running"), "rows:\n{rows}");
+    assert!(rows.contains("checking files"), "rows:\n{rows}");
+    let rendered = rendered_rows(&widget, 160, 18);
+    let live_prefix = " ".repeat(usize::from(LIVE_PREFIX_COLS));
+    assert!(
+        rendered
+            .iter()
+            .any(|row| row.starts_with(&format!("{live_prefix}● reviewer: running"))),
+        "live-list title should use the shared live prefix only:\n{}",
+        rendered.join("\n")
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|row| row.starts_with(&format!("{live_prefix}> checking files"))),
+        "live-list preview should use the shared live prefix only:\n{}",
+        rendered.join("\n")
+    );
     let parent_transcript = line_texts(widget.transcript_overlay_lines(80)).join("\n");
     assert!(!parent_transcript.contains("checking files"));
 }
 
 #[test]
-fn ctrl_x_selector_selects_live_subagents_and_q_exits() {
+fn request_user_input_keeps_working_status_indicator_visible() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let turn_id = TurnId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::RequestUserInput {
+        session_id: SessionId::new(),
+        turn_id,
+        request_id: "request-1".to_string(),
+        questions: vec![request_user_input_question()],
+    });
+
+    let rows = rendered_rows(&widget, 120, 24).join("\n");
+    assert!(rows.contains("Working"), "rows:\n{rows}");
+    assert!(
+        rows.contains("Which scope should research use?"),
+        "rows:\n{rows}"
+    );
+}
+
+#[test]
+fn request_user_input_and_subagent_live_list_are_visible_together() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+    let turn_id = TurnId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "researcher"),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::RequestUserInput {
+        session_id: parent,
+        turn_id,
+        request_id: "request-1".to_string(),
+        questions: vec![request_user_input_question()],
+    });
+
+    let rows = rendered_rows(&widget, 120, 28).join("\n");
+    assert!(rows.contains("researcher: running"), "rows:\n{rows}");
+    assert!(rows.contains("Working"), "rows:\n{rows}");
+    assert!(
+        rows.contains("Which scope should research use?"),
+        "rows:\n{rows}"
+    );
+}
+
+#[test]
+fn ctrl_x_focuses_inline_live_list_and_q_exits() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
@@ -5361,9 +5696,11 @@ fn ctrl_x_selector_selects_live_subagents_and_q_exits() {
     assert!(widget.is_subagent_monitor_open_for_test());
     assert_eq!(widget.selected_subagent_for_test(), Some(second));
     let rows = rendered_rows(&widget, 160, 18).join("\n");
-    assert!(rows.contains("Sub-agents"), "rows:\n{rows}");
+    assert!(!rows.contains("Sub-agents"), "rows:\n{rows}");
+    assert!(rows.contains("first: running"), "rows:\n{rows}");
+    assert!(rows.contains("second: running"), "rows:\n{rows}");
     assert!(rows.contains("run first"), "rows:\n{rows}");
-    assert!(rows.contains("root/second"), "rows:\n{rows}");
+    assert!(!rows.contains("root/second"), "rows:\n{rows}");
 
     widget.handle_key_event(press_key(KeyCode::Up));
     assert_eq!(widget.selected_subagent_for_test(), Some(first));
@@ -5372,6 +5709,50 @@ fn ctrl_x_selector_selects_live_subagents_and_q_exits() {
 
     widget.handle_key_event(press_key(KeyCode::Char('q')));
     assert!(!widget.is_subagent_monitor_open_for_test());
+}
+
+#[test]
+fn subagent_live_list_scrolls_with_three_visible_rows() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let first = SessionId::new();
+    let second = SessionId::new();
+    let third = SessionId::new();
+    let fourth = SessionId::new();
+
+    for (session_id, nickname) in [
+        (first, "first"),
+        (second, "second"),
+        (third, "third"),
+        (fourth, "fourth"),
+    ] {
+        widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+            agent: monitor_agent(session_id, parent, nickname),
+        });
+    }
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    assert_eq!(widget.selected_subagent_for_test(), Some(fourth));
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(!rows.contains("run first"), "rows:\n{rows}");
+    assert!(rows.contains("run second"), "rows:\n{rows}");
+    assert!(rows.contains("run third"), "rows:\n{rows}");
+    assert!(rows.contains("run fourth"), "rows:\n{rows}");
+
+    widget.handle_key_event(press_key(KeyCode::Up));
+    widget.handle_key_event(press_key(KeyCode::Up));
+    widget.handle_key_event(press_key(KeyCode::Up));
+    assert_eq!(widget.selected_subagent_for_test(), Some(first));
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(rows.contains("run first"), "rows:\n{rows}");
+    assert!(rows.contains("run second"), "rows:\n{rows}");
+    assert!(rows.contains("run third"), "rows:\n{rows}");
+    assert!(!rows.contains("run fourth"), "rows:\n{rows}");
 }
 
 #[test]
@@ -5406,7 +5787,281 @@ fn terminal_subagent_status_hides_ctrl_x_hint_when_no_live_children_remain() {
 }
 
 #[test]
-fn subagent_selector_enter_emits_overlay_request_for_selected_child() {
+fn terminal_cancelled_subagent_disappears_from_live_list() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "builder"),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TurnFinished {
+            session_id: child,
+            status: "cancelled".to_string(),
+        },
+    });
+
+    assert!(!widget.has_live_subagents_for_test());
+    let rows = rendered_rows(&widget, 100, 18).join("\n");
+    assert!(!rows.contains("builder: cancelled"), "rows:\n{rows}");
+    assert!(!rows.contains("ctrl + x agents"), "rows:\n{rows}");
+}
+
+#[test]
+fn subagent_live_list_latest_preview_updates_without_parent_transcript_pollution() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+    let item_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "researcher"),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TextItemDelta {
+            session_id: child,
+            item_id: Some(item_id),
+            kind: crate::events::TextItemKind::Assistant,
+            delta: "reading design notes".to_string(),
+        },
+    });
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(rows.contains("reading design notes"), "rows:\n{rows}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::ToolCall {
+            session_id: child,
+            tool_use_id: "tool-1".to_string(),
+            summary: "rg query".to_string(),
+        },
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::ToolOutputDelta {
+            session_id: child,
+            tool_use_id: "tool-1".to_string(),
+            delta: "found matches".to_string(),
+        },
+    });
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(rows.contains("rg query: found matches"), "rows:\n{rows}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::ToolResult {
+            session_id: child,
+            tool_use_id: "tool-1".to_string(),
+            title: "rg query".to_string(),
+            preview: "matches summarized".to_string(),
+            is_error: false,
+        },
+    });
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(rows.contains("matches summarized"), "rows:\n{rows}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::PlanUpdated {
+            session_id: child,
+            explanation: Some("Checking candidate files".to_string()),
+            steps: vec![PlanStep {
+                text: "Inspect TUI state".to_string(),
+                status: PlanStepStatus::InProgress,
+            }],
+        },
+    });
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(rows.contains("[~] Inspect TUI state"), "rows:\n{rows}");
+
+    let parent_transcript = line_texts(widget.transcript_overlay_lines(80)).join("\n");
+    assert!(!parent_transcript.contains("reading design notes"));
+    assert!(!parent_transcript.contains("matches summarized"));
+    assert!(!parent_transcript.contains("Checking candidate files"));
+}
+
+#[test]
+fn subagent_live_list_preview_uses_latest_streaming_tail() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+    let item_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "researcher"),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TextItemDelta {
+            session_id: child,
+            item_id: Some(item_id),
+            kind: crate::events::TextItemKind::Assistant,
+            delta: "first line should disappear\nsecond line should remain".to_string(),
+        },
+    });
+    let rows = rendered_rows(&widget, 180, 18).join("\n");
+    assert!(
+        !rows.contains("first line should disappear"),
+        "rows:\n{rows}"
+    );
+    assert!(rows.contains("second line should remain"), "rows:\n{rows}");
+
+    let long_tail = format!("{}LATEST", "x".repeat(150));
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TextItemDelta {
+            session_id: child,
+            item_id: Some(item_id),
+            kind: crate::events::TextItemKind::Assistant,
+            delta: format!("\n{long_tail}"),
+        },
+    });
+    let rows = rendered_rows(&widget, 220, 18).join("\n");
+    assert!(rows.contains("LATEST"), "rows:\n{rows}");
+    assert!(
+        !rows.contains("second line should remain"),
+        "rows should show the latest tail, not the prior line:\n{rows}"
+    );
+}
+
+#[test]
+fn subagent_live_list_preview_uses_rolling_tail_across_chunks() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+    let item_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "researcher"),
+    });
+    for delta in [
+        "the opening sentence should not stay visible after enough chunks ",
+        "middle chunk adds more text and should also age out ",
+        "latest chunk tail stays visible",
+    ] {
+        widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+            event: crate::events::SubagentMonitorEvent::TextItemDelta {
+                session_id: child,
+                item_id: Some(item_id),
+                kind: crate::events::TextItemKind::Assistant,
+                delta: delta.to_string(),
+            },
+        });
+    }
+
+    let rows = rendered_rows(&widget, 220, 18).join("\n");
+    assert!(
+        rows.contains("latest chunk tail stays visible"),
+        "rows:\n{rows}"
+    );
+    assert!(
+        !rows.contains("the opening sentence should not stay visible"),
+        "rows should keep the rolling tail, not the first chunk:\n{rows}"
+    );
+}
+
+#[test]
+fn subagent_live_list_preview_preserves_right_tail_when_narrow() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+    let item_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "researcher"),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TextItemDelta {
+            session_id: child,
+            item_id: Some(item_id),
+            kind: crate::events::TextItemKind::Assistant,
+            delta: "very long preview text whose beginning must disappear and RIGHT_TAIL"
+                .to_string(),
+        },
+    });
+
+    let rows = rendered_rows(&widget, 42, 18).join("\n");
+    assert!(rows.contains("RIGHT_TAIL"), "rows:\n{rows}");
+    assert!(
+        !rows.contains("very long preview text"),
+        "narrow preview should preserve the right tail, not the left prefix:\n{rows}"
+    );
+}
+
+#[test]
+fn subagent_live_list_preview_updates_from_completed_reasoning_tool_and_plan_tails() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "researcher"),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TextItemCompleted {
+            session_id: child,
+            item_id: Some(ItemId::new()),
+            kind: crate::events::TextItemKind::Reasoning,
+            final_text: "old thought\nnew thought tail".to_string(),
+        },
+    });
+    let rows = rendered_rows(&widget, 180, 18).join("\n");
+    assert!(rows.contains("new thought tail"), "rows:\n{rows}");
+    assert!(!rows.contains("old thought"), "rows:\n{rows}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::ToolOutputDelta {
+            session_id: child,
+            tool_use_id: "tool-1".to_string(),
+            delta: "first output\nlatest output".to_string(),
+        },
+    });
+    let rows = rendered_rows(&widget, 180, 18).join("\n");
+    assert!(rows.contains("latest output"), "rows:\n{rows}");
+    assert!(!rows.contains("first output"), "rows:\n{rows}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::PlanUpdated {
+            session_id: child,
+            explanation: Some("old plan note".to_string()),
+            steps: vec![PlanStep {
+                text: "latest plan step".to_string(),
+                status: PlanStepStatus::InProgress,
+            }],
+        },
+    });
+    let rows = rendered_rows(&widget, 180, 18).join("\n");
+    assert!(rows.contains("[~] latest plan step"), "rows:\n{rows}");
+    assert!(!rows.contains("old plan note"), "rows:\n{rows}");
+}
+
+#[test]
+fn subagent_live_list_enter_emits_overlay_request_for_selected_child() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
@@ -5547,6 +6202,7 @@ fn session_switch_sets_active_agent_footer_label() {
         active_agent_label: Some("Agent: cr".to_string()),
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -5588,6 +6244,7 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
         active_agent_label: None,
         total_input_tokens: 30,
         total_output_tokens: 5,
+        total_tokens: 35,
         total_cache_read_tokens: 12,
         last_query_total_tokens: 25,
         last_query_input_tokens: 20,
@@ -5902,6 +6559,7 @@ fn flushed_assistant_lines_after_reasoning_are_in_one_cell() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -5959,6 +6617,7 @@ fn completed_streaming_assistant_consolidates_to_source_backed_cell() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -6012,6 +6671,7 @@ fn reasoning_appears_exactly_once_after_full_turn() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -6376,6 +7036,7 @@ fn restored_session_transcript_overlay_preserves_paired_tool_io() {
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -6453,6 +7114,7 @@ fn legacy_restored_session_without_tool_io_keeps_existing_tool_result_rendering(
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -7078,6 +7740,7 @@ fn reasoning_start_closes_current_explored_group() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: devo_core::ItemId::new(),
         kind: crate::events::TextItemKind::Reasoning,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-2".to_string(),
@@ -7132,6 +7795,7 @@ fn assistant_text_start_closes_current_explored_group() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: devo_core::ItemId::new(),
         kind: crate::events::TextItemKind::Assistant,
+        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-2".to_string(),
@@ -7610,6 +8274,7 @@ fn session_switch_without_rich_edited_metadata_degrades_to_tool_result_path() {
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -7659,6 +8324,7 @@ fn session_switch_restores_added_file_content_in_edited_block() {
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,
@@ -7710,6 +8376,7 @@ fn session_switch_without_rich_edited_metadata_still_restores_edited_block() {
         active_agent_label: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_tokens: 0,
         total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
         last_query_input_tokens: 0,

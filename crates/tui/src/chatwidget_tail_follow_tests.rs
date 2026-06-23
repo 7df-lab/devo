@@ -86,12 +86,14 @@ fn overflowing_live_assistant_viewport_follows_latest_tail() {
     widget.handle_worker_event(WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: TextItemKind::Assistant,
+        research: None,
     });
 
     for index in 0..28 {
         widget.handle_worker_event(WorkerEvent::TextItemDelta {
             item_id: assistant_id,
             kind: TextItemKind::Assistant,
+            research: None,
             delta: format!("stream-tail-line-{index:02}\n"),
         });
         widget.pre_draw_tick();

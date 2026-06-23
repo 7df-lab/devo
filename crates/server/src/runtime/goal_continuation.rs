@@ -517,6 +517,7 @@ impl ServerRuntime {
                 (
                     core_session.total_input_tokens,
                     core_session.total_output_tokens,
+                    core_session.total_tokens,
                     core_session.total_cache_creation_tokens,
                     core_session.total_cache_read_tokens,
                     core_session.prompt_token_estimate,
@@ -525,6 +526,7 @@ impl ServerRuntime {
             if let Some((
                 total_input_tokens,
                 total_output_tokens,
+                total_tokens,
                 total_cache_creation_tokens,
                 total_cache_read_tokens,
                 prompt_token_estimate,
@@ -532,6 +534,7 @@ impl ServerRuntime {
             {
                 session.summary.total_input_tokens = total_input_tokens;
                 session.summary.total_output_tokens = total_output_tokens;
+                session.summary.total_tokens = total_tokens;
                 session.summary.total_cache_creation_tokens = total_cache_creation_tokens;
                 session.summary.total_cache_read_tokens = total_cache_read_tokens;
                 session.summary.prompt_token_estimate = prompt_token_estimate;

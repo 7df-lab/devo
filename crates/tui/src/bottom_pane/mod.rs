@@ -932,6 +932,13 @@ impl Renderable for BottomPane {
         if area.is_empty() {
             return;
         }
+        if let Some(view) = self.active_view()
+            && let Some(status) = &self.status
+        {
+            let children: [&dyn Renderable; 3] = [&STATUS_SEPARATOR, status, view];
+            self.render_children(area, buf, &children);
+            return;
+        }
         if let Some(view) = self.active_view() {
             view.render(area, buf);
             return;
@@ -958,6 +965,12 @@ impl Renderable for BottomPane {
     }
 
     fn desired_height(&self, width: u16) -> u16 {
+        if let Some(view) = self.active_view()
+            && let Some(status) = &self.status
+        {
+            let children: [&dyn Renderable; 3] = [&STATUS_SEPARATOR, status, view];
+            return self.desired_children_height(width, &children);
+        }
         if let Some(view) = self.active_view() {
             return view.desired_height(width);
         }
@@ -981,6 +994,12 @@ impl Renderable for BottomPane {
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if let Some(view) = self.active_view()
+            && let Some(status) = &self.status
+        {
+            let children: [&dyn Renderable; 3] = [&STATUS_SEPARATOR, status, view];
+            return self.child_cursor_pos(area, &children);
+        }
         if let Some(view) = self.active_view() {
             return view.cursor_pos(area);
         }

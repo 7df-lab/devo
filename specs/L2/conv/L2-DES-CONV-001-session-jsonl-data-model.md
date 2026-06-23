@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-25
+last_updated: 2026-06-23
 ---
 
 # L2-DES-CONV-001 — Session JSONL Data Model
@@ -609,18 +609,26 @@ Compaction lifecycle records should preserve whether compaction was triggered ma
 
 ## Token Usage
 
-Token usage should be recorded as per-invocation deltas and derived totals.
+Token usage should be recorded as per-invocation deltas and replayed into session totals.
 
 Conceptual usage fields:
 
 - `input_tokens`
-- `cached_input_tokens`
 - `output_tokens`
-- `reasoning_output_tokens`
 - `cache_creation_input_tokens`
+- `cache_read_input_tokens`
+- `reasoning_output_tokens`
 - `total_tokens`
 
-`reasoning_output_tokens` is an optional breakdown when a provider reports it. It should not be added a second time if the provider already includes it inside output or completion tokens.
+These are the canonical provider/model usage fields for durable turn usage and session replay. `output_tokens` is the provider-mapped primary output token count. `reasoning_output_tokens` is an optional breakdown when a provider reports it, and replay must never add it separately to `output_tokens` or `total_tokens`.
+
+`total_tokens` is present only when a provider reported a total or when a persisted aggregate stores the display total. For a single usage delta, display total selection is:
+
+```text
+display_total_tokens = total_tokens.unwrap_or(input_tokens + output_tokens)
+```
+
+Session `total_tokens` is the sum of each invocation's display total. This preserves provider totals when they are available and avoids double-counting reasoning tokens when no provider total exists.
 
 For context pressure, the active context token estimate should be tracked separately from billing or response totals.
 
@@ -736,3 +744,4 @@ Clients also do not need persistent-memory internals. Persistent memory may affe
 | 1 | 2026-05-22 | Human | Refinement | Added durable command descriptions and natural-language result summaries. |
 | 1 | 2026-05-23 | Human | Refinement | Added durable Ralph Loop goal records and active-goal projection fields. |
 | 1 | 2026-05-25 | Human | Refinement | Added manual versus automatic compaction trigger provenance for transcript-area compaction notices. |
+| 1 | 2026-06-23 | Assistant | Refinement | Added conservative usage fields, provider-total fallback semantics, and reasoning breakdown double-count protection. |

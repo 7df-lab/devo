@@ -31,11 +31,13 @@ use super::ActiveCellTranscriptKey;
 use super::ChatWidget;
 use super::DotStatus;
 use super::TranscriptOverlayCell;
-use super::subagent_selector;
+use super::subagent_live_list;
+use super::subagent_live_list::SubagentLiveListRow;
+use super::subagent_live_list::SubagentLiveListRowKey;
 
 #[derive(Debug, Default)]
 pub(super) struct SubagentMonitorState {
-    selector_open: bool,
+    live_list_focused: bool,
     agents: Vec<SubagentMonitorAgent>,
     selected: Option<SessionId>,
     user_selected: bool,
@@ -50,6 +52,8 @@ struct SubagentSessionView {
     active_text: HashMap<String, MonitorTextItem>,
     active_tools: HashMap<String, MonitorToolItem>,
     active_turn: Option<devo_core::TurnId>,
+    latest_preview: String,
+    has_runtime_update: bool,
     revision: u64,
 }
 
@@ -57,6 +61,7 @@ struct SubagentSessionView {
 struct MonitorTextItem {
     kind: TextItemKind,
     text: String,
+    preview_tail: String,
 }
 
 #[derive(Debug)]
@@ -84,32 +89,32 @@ struct MonitorTranscriptItem {
 }
 
 impl ChatWidget {
-    pub(super) fn is_subagent_selector_open(&self) -> bool {
-        self.subagent_monitor.selector_open
+    pub(super) fn is_subagent_live_list_focused(&self) -> bool {
+        self.subagent_monitor.live_list_focused
     }
 
-    pub(super) fn open_subagent_selector(&mut self) {
+    pub(super) fn focus_subagent_live_list(&mut self) {
         if !self.has_live_subagents() {
-            self.subagent_monitor.selector_open = false;
+            self.subagent_monitor.live_list_focused = false;
             self.set_status_message("No active sub-agents");
             self.frame_requester.schedule_frame();
             return;
         }
 
-        self.subagent_monitor.selector_open = true;
+        self.subagent_monitor.live_list_focused = true;
         self.ensure_live_subagent_selected();
         self.set_status_message("Select sub-agent");
         self.frame_requester.schedule_frame();
     }
 
-    pub(super) fn handle_subagent_selector_key_event(&mut self, key: KeyEvent) {
+    pub(super) fn handle_subagent_live_list_key_event(&mut self, key: KeyEvent) {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
         }
 
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.subagent_monitor.selector_open = false;
+                self.subagent_monitor.live_list_focused = false;
                 self.set_status_message("Ready");
                 self.frame_requester.schedule_frame();
             }
@@ -121,7 +126,7 @@ impl ChatWidget {
             }
             KeyCode::Enter => {
                 if let Some(session_id) = self.selected_live_subagent() {
-                    self.subagent_monitor.selector_open = false;
+                    self.subagent_monitor.live_list_focused = false;
                     self.app_event_tx
                         .send(AppEvent::OpenSubagentOverlay { session_id });
                     self.frame_requester.schedule_frame();
@@ -153,34 +158,20 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn render_subagent_selector_if_open(&self, area: Rect, buf: &mut Buffer) -> bool {
-        if !self.subagent_monitor.selector_open {
-            return false;
-        }
+    pub(super) fn subagent_live_list_desired_height(&self) -> u16 {
+        subagent_live_list::desired_height(self.subagent_live_list_rows().len())
+    }
 
-        let agents = self
-            .live_subagent_ids()
-            .into_iter()
-            .filter_map(|session_id| {
-                let agent = self.subagent_agent(session_id)?;
-                Some(subagent_selector::SubagentSelectorAgent {
-                    session_id,
-                    nickname: &agent.nickname,
-                    role: &agent.role,
-                    status: self.subagent_status_for_agent(agent),
-                    task: agent.last_task_message.as_deref(),
-                    agent_path: &agent.agent_path,
-                })
-            })
-            .collect::<Vec<_>>();
-        subagent_selector::render(
+    pub(super) fn render_subagent_live_list(&self, area: Rect, buf: &mut Buffer) {
+        let rows = self.subagent_live_list_rows();
+        subagent_live_list::render(
             area,
             buf,
-            &agents,
+            &rows,
             self.subagent_monitor.selected,
+            self.subagent_monitor.live_list_focused,
             self.active_accent_color(),
         );
-        true
     }
 
     pub(crate) fn on_subagent_discovered(&mut self, agent: SubagentMonitorAgent) {
@@ -286,7 +277,7 @@ impl ChatWidget {
 
     #[cfg(test)]
     pub(crate) fn is_subagent_monitor_open_for_test(&self) -> bool {
-        self.subagent_monitor.selector_open
+        self.subagent_monitor.live_list_focused
     }
 
     #[cfg(test)]
@@ -324,7 +315,7 @@ impl ChatWidget {
     fn sync_subagent_hint(&mut self) {
         let has_live = self.has_live_subagents();
         if !has_live {
-            self.subagent_monitor.selector_open = false;
+            self.subagent_monitor.live_list_focused = false;
             self.subagent_monitor.selected = None;
             self.subagent_monitor.user_selected = false;
         } else {
@@ -349,7 +340,7 @@ impl ChatWidget {
 
     fn ensure_live_subagent_selected(&mut self) {
         if self.selected_live_subagent().is_some()
-            && (self.subagent_monitor.selector_open || self.subagent_monitor.user_selected)
+            && (self.subagent_monitor.live_list_focused || self.subagent_monitor.user_selected)
         {
             return;
         }
@@ -390,6 +381,47 @@ impl ChatWidget {
             .filter(|agent| is_live_status(&self.subagent_status_for_agent(agent)))
             .map(|agent| agent.session_id)
             .collect()
+    }
+
+    fn subagent_live_list_rows(&self) -> Vec<SubagentLiveListRow> {
+        let mut rows = self
+            .subagent_monitor
+            .agents
+            .iter()
+            .filter(|agent| is_live_status(&self.subagent_status_for_agent(agent)))
+            .map(|agent| {
+                let view = self.subagent_monitor.sessions.get(&agent.session_id);
+                let preview = if let Some(view) = view
+                    && view.has_runtime_update
+                {
+                    single_line_preview(&view.latest_preview)
+                        .unwrap_or_else(|| "Waiting for updates".to_string())
+                } else {
+                    agent
+                        .last_task_message
+                        .as_deref()
+                        .and_then(tail_preview)
+                        .unwrap_or_else(|| "Waiting for updates".to_string())
+                };
+                SubagentLiveListRow {
+                    key: SubagentLiveListRowKey::Session(agent.session_id),
+                    name: agent.nickname.clone(),
+                    status: self.subagent_status_for_agent(agent),
+                    preview,
+                }
+            })
+            .collect::<Vec<_>>();
+        rows.extend(
+            self.research_task_previews
+                .iter()
+                .map(|preview| SubagentLiveListRow {
+                    key: SubagentLiveListRowKey::Research(preview.item_id),
+                    name: preview.title.clone(),
+                    status: "working".to_string(),
+                    preview: preview.preview.clone(),
+                }),
+        );
+        rows
     }
 
     fn subagent_agent(&self, session_id: SessionId) -> Option<&SubagentMonitorAgent> {
@@ -540,6 +572,7 @@ impl SubagentSessionView {
             } => {
                 self.status = "running".to_string();
                 self.active_turn = Some(turn_id);
+                self.set_latest_preview("Started turn");
             }
             SubagentMonitorEvent::TextItemStarted {
                 session_id: _,
@@ -551,8 +584,10 @@ impl SubagentSessionView {
                     MonitorTextItem {
                         kind,
                         text: String::new(),
+                        preview_tail: String::new(),
                     },
                 );
+                self.set_latest_preview(format!("{} started", text_title(kind)));
             }
             SubagentMonitorEvent::TextItemDelta {
                 session_id: _,
@@ -560,14 +595,21 @@ impl SubagentSessionView {
                 kind,
                 delta,
             } => {
-                self.active_text
-                    .entry(text_key(item_id, kind))
-                    .or_insert_with(|| MonitorTextItem {
-                        kind,
-                        text: String::new(),
-                    })
-                    .text
-                    .push_str(&delta);
+                let latest_preview = {
+                    let latest = self
+                        .active_text
+                        .entry(text_key(item_id, kind))
+                        .or_insert_with(|| MonitorTextItem {
+                            kind,
+                            text: String::new(),
+                            preview_tail: String::new(),
+                        });
+                    latest.text.push_str(&delta);
+                    update_preview_tail(&mut latest.preview_tail, &delta)
+                };
+                if let Some(latest_preview) = latest_preview {
+                    self.set_latest_preview_tail(latest_preview);
+                }
             }
             SubagentMonitorEvent::TextItemCompleted {
                 session_id: _,
@@ -576,6 +618,7 @@ impl SubagentSessionView {
                 final_text,
             } => {
                 self.active_text.remove(&text_key(item_id, kind));
+                self.set_latest_preview_tail(final_text.clone());
                 self.transcript.push(MonitorTranscriptItem {
                     kind: transcript_kind_for_text(kind),
                     title: text_title(kind).to_string(),
@@ -593,29 +636,39 @@ impl SubagentSessionView {
                 tool_use_id,
                 summary,
             } => {
+                let latest_preview = format!("Running {summary}");
                 self.active_tools
                     .entry(tool_use_id)
                     .and_modify(|tool| tool.title = summary.clone())
-                    .or_insert(MonitorToolItem {
-                        title: summary,
+                    .or_insert_with(|| MonitorToolItem {
+                        title: summary.clone(),
                         output: String::new(),
                         is_error: false,
                     });
+                self.set_latest_preview_tail(latest_preview);
             }
             SubagentMonitorEvent::ToolOutputDelta {
                 session_id: _,
                 tool_use_id,
                 delta,
             } => {
-                self.active_tools
-                    .entry(tool_use_id)
-                    .or_insert(MonitorToolItem {
-                        title: "tool".to_string(),
-                        output: String::new(),
-                        is_error: false,
-                    })
-                    .output
-                    .push_str(&delta);
+                let latest_preview = {
+                    let tool = self
+                        .active_tools
+                        .entry(tool_use_id)
+                        .or_insert(MonitorToolItem {
+                            title: "tool".to_string(),
+                            output: String::new(),
+                            is_error: false,
+                        });
+                    tool.output.push_str(&delta);
+                    if tool.output.trim().is_empty() {
+                        format!("Running {}", tool.title)
+                    } else {
+                        format!("{}: {}", tool.title, tool.output)
+                    }
+                };
+                self.set_latest_preview_tail(latest_preview);
             }
             SubagentMonitorEvent::ToolResult {
                 session_id: _,
@@ -625,6 +678,11 @@ impl SubagentSessionView {
                 is_error,
             } => {
                 self.active_tools.remove(&tool_use_id);
+                if preview.trim().is_empty() {
+                    self.set_latest_preview_tail(title.clone());
+                } else {
+                    self.set_latest_preview_tail(preview.clone());
+                }
                 self.transcript.push(MonitorTranscriptItem {
                     kind: MonitorTranscriptKind::Tool,
                     title,
@@ -650,6 +708,11 @@ impl SubagentSessionView {
                     });
                     body.push_str(&step.text);
                 }
+                if body.trim().is_empty() {
+                    self.set_latest_preview("Plan updated");
+                } else {
+                    self.set_latest_preview_tail(body.clone());
+                }
                 self.transcript.push(MonitorTranscriptItem {
                     kind: MonitorTranscriptKind::Plan,
                     title: "Plan updated".to_string(),
@@ -664,6 +727,7 @@ impl SubagentSessionView {
                 self.status = status.clone();
                 self.active_turn = None;
                 self.flush_active_items();
+                self.set_latest_preview(format!("Turn {status}"));
                 self.transcript.push(MonitorTranscriptItem {
                     kind: MonitorTranscriptKind::Status,
                     title: format!("Turn {status}"),
@@ -678,6 +742,7 @@ impl SubagentSessionView {
                 self.status = "failed".to_string();
                 self.active_turn = None;
                 self.flush_active_items();
+                self.set_latest_preview_tail(message.clone());
                 self.transcript.push(MonitorTranscriptItem {
                     kind: MonitorTranscriptKind::Status,
                     title: "Turn failed".to_string(),
@@ -691,6 +756,7 @@ impl SubagentSessionView {
             } => {
                 if !is_terminal_status(&self.status) {
                     self.status = format!("{status:?}").to_lowercase();
+                    self.set_latest_preview(format!("Status {}", self.status));
                 }
             }
         }
@@ -698,6 +764,22 @@ impl SubagentSessionView {
 
     fn has_live_tail(&self) -> bool {
         !self.active_text.is_empty() || !self.active_tools.is_empty()
+    }
+
+    fn set_latest_preview(&mut self, preview: impl Into<String>) {
+        let preview = preview.into();
+        if let Some(preview) = single_line_preview(&preview) {
+            self.latest_preview = preview;
+            self.has_runtime_update = true;
+        }
+    }
+
+    fn set_latest_preview_tail(&mut self, preview: impl Into<String>) {
+        let preview = preview.into();
+        if let Some(preview) = tail_preview(&preview) {
+            self.latest_preview = preview;
+            self.has_runtime_update = true;
+        }
     }
 
     fn flush_active_items(&mut self) {
@@ -748,8 +830,60 @@ fn is_live_status(status: &str) -> bool {
 fn is_terminal_status(status: &str) -> bool {
     matches!(
         status.to_ascii_lowercase().as_str(),
-        "completed" | "failed" | "interrupted" | "closed"
+        "done" | "completed" | "failed" | "cancelled" | "canceled" | "interrupted" | "closed"
     )
+}
+
+fn single_line_preview(text: &str) -> Option<String> {
+    let preview = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    (!preview.is_empty()).then_some(preview)
+}
+
+fn tail_preview(text: &str) -> Option<String> {
+    let last_line = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let normalized = last_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(tail_chars(&normalized, MAX_PREVIEW_TAIL_CHARS))
+}
+
+const MAX_PREVIEW_TAIL_CHARS: usize = 80;
+
+fn update_preview_tail(current: &mut String, delta: &str) -> Option<String> {
+    if delta.contains('\n') {
+        if let Some(last_line) = delta
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+        {
+            let normalized = last_line.split_whitespace().collect::<Vec<_>>().join(" ");
+            *current = tail_chars(&normalized, MAX_PREVIEW_TAIL_CHARS);
+        }
+    } else {
+        current.push_str(delta);
+        let normalized = current.split_whitespace().collect::<Vec<_>>().join(" ");
+        *current = tail_chars(&normalized, MAX_PREVIEW_TAIL_CHARS);
+    }
+    (!current.is_empty()).then(|| current.clone())
+}
+
+fn tail_chars(text: &str, max_chars: usize) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
+        return text.to_string();
+    }
+    text.chars().skip(total_chars - max_chars).collect()
 }
 
 fn text_key(item_id: Option<ItemId>, kind: TextItemKind) -> String {

@@ -271,6 +271,7 @@ fn prompt_turn_config(
 struct PromptUsage {
     input_tokens: usize,
     output_tokens: usize,
+    total_tokens: usize,
     cache_creation_input_tokens: usize,
     cache_read_input_tokens: usize,
 }
@@ -280,6 +281,7 @@ impl PromptUsage {
         Self {
             input_tokens: session.total_input_tokens,
             output_tokens: session.total_output_tokens,
+            total_tokens: session.total_tokens,
             cache_creation_input_tokens: session.total_cache_creation_tokens,
             cache_read_input_tokens: session.total_cache_read_tokens,
         }
@@ -390,23 +392,24 @@ struct PromptUsageDelta {
     input_tokens: usize,
     output_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_output_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cache_creation_input_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_read_input_tokens: Option<usize>,
 }
 
 impl PromptUsageDelta {
-    fn new(
-        input_tokens: usize,
-        output_tokens: usize,
-        cache_creation_input_tokens: Option<usize>,
-        cache_read_input_tokens: Option<usize>,
-    ) -> Self {
+    fn new(usage: &devo_protocol::Usage) -> Self {
         Self {
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            reasoning_output_tokens: usage.reasoning_output_tokens,
+            total_tokens: usage.total_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
         }
     }
 }
@@ -442,19 +445,9 @@ fn write_query_event_jsonl(session_id: &str, event: &QueryEvent) -> Result<()> {
             session_id,
             item_type: "reasoning",
         }),
-        QueryEvent::UsageDelta {
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
-        } => write_jsonl(&PromptJsonlEvent::UsageDelta {
+        QueryEvent::UsageDelta { usage } => write_jsonl(&PromptJsonlEvent::UsageDelta {
             session_id,
-            usage: PromptUsageDelta::new(
-                *input_tokens,
-                *output_tokens,
-                *cache_creation_input_tokens,
-                *cache_read_input_tokens,
-            ),
+            usage: PromptUsageDelta::new(usage),
         }),
         QueryEvent::ToolUseStart { id, name, input } => {
             write_jsonl(&PromptJsonlEvent::ToolCallStarted {
@@ -512,19 +505,9 @@ fn write_query_event_jsonl(session_id: &str, event: &QueryEvent) -> Result<()> {
             session_id,
             stop_reason,
         }),
-        QueryEvent::Usage {
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
-        } => write_jsonl(&PromptJsonlEvent::Usage {
+        QueryEvent::Usage { usage } => write_jsonl(&PromptJsonlEvent::Usage {
             session_id,
-            usage: PromptUsageDelta::new(
-                *input_tokens,
-                *output_tokens,
-                *cache_creation_input_tokens,
-                *cache_read_input_tokens,
-            ),
+            usage: PromptUsageDelta::new(usage),
         }),
     }
 }
@@ -591,6 +574,7 @@ mod tests {
             usage: PromptUsage {
                 input_tokens: 3,
                 output_tokens: 5,
+                total_tokens: 8,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 2,
             },
@@ -608,6 +592,7 @@ mod tests {
                 "usage": {
                     "input_tokens": 3,
                     "output_tokens": 5,
+                    "total_tokens": 8,
                     "cache_creation_input_tokens": 0,
                     "cache_read_input_tokens": 2
                 }

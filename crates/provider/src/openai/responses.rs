@@ -435,6 +435,16 @@ fn parse_usage(value: &Value) -> Option<Usage> {
             .and_then(Value::as_u64)? as usize,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
+        reasoning_output_tokens: value
+            .get("output_tokens_details")
+            .or_else(|| value.get("completion_tokens_details"))
+            .and_then(|details| details.get("reasoning_tokens"))
+            .and_then(Value::as_u64)
+            .map(|tokens| tokens as usize),
+        total_tokens: value
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .map(|tokens| tokens as usize),
     })
 }
 
@@ -1058,13 +1068,19 @@ mod tests {
             ],
             "usage": {
                 "input_tokens": 10,
-                "output_tokens": 5
+                "output_tokens": 5,
+                "total_tokens": 21,
+                "output_tokens_details": {
+                    "reasoning_tokens": 6
+                }
             }
         }))
         .expect("parse response");
 
         assert_eq!(response.id, "resp_123");
         assert_eq!(response.content.len(), 2);
+        assert_eq!(response.usage.reasoning_output_tokens, Some(6));
+        assert_eq!(response.usage.total_tokens, Some(21));
         assert!(matches!(response.content[0], ResponseContent::Text(_)));
         assert!(matches!(
             response.content[1],

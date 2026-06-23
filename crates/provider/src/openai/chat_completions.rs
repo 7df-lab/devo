@@ -851,6 +851,11 @@ fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<Mode
                 .prompt_tokens_details
                 .as_ref()
                 .and_then(|details| details.cached_tokens),
+            reasoning_output_tokens: usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            total_tokens: usage.total_tokens,
         })
         .unwrap_or_default();
 
@@ -1022,12 +1027,9 @@ fn build_provider_specific_message_payload(message: &OpenAIChatCompletionMessage
 ///       Cached tokens present in the prompt.
 ///
 /// Notes about this implementation:
-/// - `parse_usage` currently maps only `prompt_tokens` to
-///   `Usage::input_tokens` and `completion_tokens` to
-///   `Usage::output_tokens`.
-/// - `total_tokens`, `completion_tokens_details`, and
-///   `prompt_tokens_details` are documented here but not yet fully projected
-///   into the crate's `Usage` type.
+/// - `parse_usage` maps `prompt_tokens`, `completion_tokens`, cached prompt
+///   details, reasoning completion details, and provider-reported totals into
+///   the crate's conservative `Usage` fields.
 ///
 /// Example:
 /// ```json
@@ -1060,6 +1062,11 @@ fn parse_usage(value: &Value) -> Option<Usage> {
             .prompt_tokens_details
             .as_ref()
             .and_then(|details| details.cached_tokens),
+        reasoning_output_tokens: usage
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens),
+        total_tokens: usage.total_tokens,
     })
 }
 
@@ -1373,6 +1380,10 @@ mod tests {
                     "prompt_tokens_details": {
                         "cached_tokens": 12,
                         "audio_tokens": 0
+                    },
+                    "completion_tokens_details": {
+                        "reasoning_tokens": 4,
+                        "audio_tokens": 0
                     }
                 },
                 "service_tier": "default"
@@ -1386,6 +1397,8 @@ mod tests {
         assert_eq!(response.usage.input_tokens, 82);
         assert_eq!(response.usage.output_tokens, 17);
         assert_eq!(response.usage.cache_read_input_tokens, Some(12));
+        assert_eq!(response.usage.reasoning_output_tokens, Some(4));
+        assert_eq!(response.usage.total_tokens, Some(99));
         assert_eq!(response.content.len(), 1);
         match &response.content[0] {
             ResponseContent::ToolUse { id, name, input } => {
@@ -1492,6 +1505,8 @@ mod tests {
         assert_eq!(usage.output_tokens, 7);
         assert_eq!(usage.cache_creation_input_tokens, None);
         assert_eq!(usage.cache_read_input_tokens, Some(5));
+        assert_eq!(usage.reasoning_output_tokens, Some(2));
+        assert_eq!(usage.total_tokens, Some(18));
     }
 
     #[test]

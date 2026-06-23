@@ -43,6 +43,8 @@ async fn goal_token_budget_reached_after_turn_enters_budget_limited() -> Result<
             output_tokens: 30,
             cache_creation_input_tokens: Some(40),
             cache_read_input_tokens: Some(70),
+            reasoning_output_tokens: None,
+            total_tokens: None,
         },
     });
     let runtime = build_runtime(data_root.path(), provider.clone())?;
@@ -110,6 +112,8 @@ async fn budget_limited_goal_pause_interrupts_pending_wrapup_turn() -> Result<()
             output_tokens: 30,
             cache_creation_input_tokens: Some(40),
             cache_read_input_tokens: Some(70),
+            reasoning_output_tokens: None,
+            total_tokens: None,
         },
     });
     let runtime = build_runtime(data_root.path(), provider.clone())?;

@@ -122,6 +122,8 @@ pub struct TurnUsageUpdatedPayload {
     pub usage: TurnUsage,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
+    #[serde(default)]
+    pub total_tokens: usize,
     pub total_cache_read_tokens: usize,
     pub last_query_input_tokens: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]

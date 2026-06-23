@@ -10,6 +10,7 @@ use std::time::Instant;
 use devo_core::ItemId;
 use ratatui::text::Span;
 
+use crate::events::ResearchArtifactMetadata;
 use crate::events::TextItemKind;
 use crate::history_cell;
 use crate::markdown::append_markdown;
@@ -20,6 +21,7 @@ use crate::streaming::controller::StreamController;
 
 use super::ChatWidget;
 use super::DotStatus;
+use super::ResearchTaskPreview;
 
 pub(super) struct ActiveTextItem {
     pub(super) item_id: ActiveTextItemId,
@@ -31,6 +33,7 @@ pub(super) struct ActiveTextItem {
     stream_stall_warned: bool,
     delta_seq: u64,
     raw_text: String,
+    research: Option<ResearchArtifactMetadata>,
     pub(super) cell: Option<Box<dyn history_cell::HistoryCell>>,
 }
 
@@ -86,12 +89,26 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
-    pub(super) fn start_text_item(&mut self, item_id: ActiveTextItemId, kind: TextItemKind) {
+    pub(super) fn start_text_item(
+        &mut self,
+        item_id: ActiveTextItemId,
+        kind: TextItemKind,
+        research: Option<ResearchArtifactMetadata>,
+    ) {
         if self
             .active_text_items
             .iter()
             .any(|item| item.item_id == item_id)
         {
+            if let Some(research) = research
+                && let Some(item) = self
+                    .active_text_items
+                    .iter_mut()
+                    .find(|item| item.item_id == item_id)
+                && item.research.is_none()
+            {
+                item.research = Some(research);
+            }
             return;
         }
 
@@ -119,6 +136,7 @@ impl ChatWidget {
                 stream_stall_warned: false,
                 delta_seq: 0,
                 raw_text: String::new(),
+                research,
                 cell: None,
             },
         );
@@ -133,9 +151,10 @@ impl ChatWidget {
         &mut self,
         item_id: ActiveTextItemId,
         kind: TextItemKind,
+        research: Option<ResearchArtifactMetadata>,
         delta: &str,
     ) {
-        let index = self.ensure_text_item(item_id, kind);
+        let index = self.ensure_text_item(item_id, kind, research);
         let active_items = self.active_text_item_log_order();
         let active_cell_revision_before = self.active_cell_revision;
         let delta_seq = {
@@ -192,6 +211,7 @@ impl ChatWidget {
             }
             TextItemKind::ResearchArtifact => {
                 self.active_text_items[index].raw_text.push_str(delta);
+                self.sync_research_task_preview(index);
             }
         }
         self.sync_text_item_cell(index);
@@ -214,6 +234,7 @@ impl ChatWidget {
         &mut self,
         item_id: ActiveTextItemId,
         kind: TextItemKind,
+        research: Option<ResearchArtifactMetadata>,
         final_text: String,
     ) {
         let boundary_committed = matches!(
@@ -232,7 +253,7 @@ impl ChatWidget {
             };
             index
         } else {
-            self.ensure_text_item(item_id, kind)
+            self.ensure_text_item(item_id, kind, research)
         };
         tracing::debug!(
             item_id = %item_id.log_label(),
@@ -245,6 +266,9 @@ impl ChatWidget {
         if !boundary_committed && !final_text.trim().is_empty() {
             self.active_text_items[index].raw_text = final_text;
         }
+        if self.active_text_items[index].kind == TextItemKind::ResearchArtifact {
+            self.sync_research_task_preview(index);
+        }
         self.sync_text_item_cell(index);
         self.commit_completed_text_items();
         if matches!(item_id, ActiveTextItemId::Server(_)) && kind == TextItemKind::Assistant {
@@ -252,16 +276,26 @@ impl ChatWidget {
         }
     }
 
-    fn ensure_text_item(&mut self, item_id: ActiveTextItemId, kind: TextItemKind) -> usize {
+    fn ensure_text_item(
+        &mut self,
+        item_id: ActiveTextItemId,
+        kind: TextItemKind,
+        research: Option<ResearchArtifactMetadata>,
+    ) -> usize {
         if let Some(index) = self
             .active_text_items
             .iter()
             .position(|item| item.item_id == item_id)
         {
+            if let Some(research) = research
+                && self.active_text_items[index].research.is_none()
+            {
+                self.active_text_items[index].research = Some(research);
+            }
             return index;
         }
 
-        self.start_text_item(item_id, kind);
+        self.start_text_item(item_id, kind, research);
         self.active_text_items
             .iter()
             .position(|item| item.item_id == item_id)
@@ -324,6 +358,10 @@ impl ChatWidget {
                 }
             }
             TextItemKind::ResearchArtifact => {
+                if item.is_delegated_research_finding() {
+                    self.remove_research_task_preview(item.item_id);
+                    return;
+                }
                 if !item.raw_text.trim().is_empty() {
                     self.add_history_entry_without_redraw(Box::new(ResearchArtifactCell::new(
                         "Research",
@@ -544,6 +582,9 @@ impl ChatWidget {
         &self,
         item: &ActiveTextItem,
     ) -> Option<Box<dyn history_cell::HistoryCell>> {
+        if item.is_delegated_research_finding() {
+            return None;
+        }
         if item.raw_text.trim().is_empty() {
             return None;
         }
@@ -553,6 +594,56 @@ impl ChatWidget {
             item.raw_text.clone(),
             &self.session.cwd,
         )))
+    }
+
+    fn sync_research_task_preview(&mut self, index: usize) {
+        let item = &self.active_text_items[index];
+        if !item.is_delegated_research_finding() {
+            return;
+        }
+        let ActiveTextItemId::Server(item_id) = item.item_id else {
+            return;
+        };
+        let title = item
+            .research
+            .as_ref()
+            .map(|research| research.title.clone())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "Research Finding".to_string());
+        let preview = single_line_text_preview(&item.raw_text)
+            .unwrap_or_else(|| "Waiting for updates".to_string());
+        if let Some(existing) = self
+            .research_task_previews
+            .iter_mut()
+            .find(|preview| preview.item_id == item_id)
+        {
+            existing.title = title;
+            existing.preview = preview;
+        } else {
+            self.research_task_previews.push(ResearchTaskPreview {
+                item_id,
+                title,
+                preview,
+            });
+        }
+    }
+
+    fn remove_research_task_preview(&mut self, item_id: ActiveTextItemId) {
+        let ActiveTextItemId::Server(item_id) = item_id else {
+            return;
+        };
+        self.research_task_previews
+            .retain(|preview| preview.item_id != item_id);
+    }
+}
+
+impl ActiveTextItem {
+    fn is_delegated_research_finding(&self) -> bool {
+        self.kind == TextItemKind::ResearchArtifact
+            && self
+                .research
+                .as_ref()
+                .is_some_and(ResearchArtifactMetadata::is_delegated_finding)
     }
 }
 
@@ -681,6 +772,13 @@ fn ascii_log_preview_fast_path(text: &str, max_chars: usize) -> Option<String> {
     preview.push_str(&text[..prefix_len]);
     preview.push_str("...");
     Some(preview)
+}
+
+fn single_line_text_preview(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]

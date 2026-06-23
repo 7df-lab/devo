@@ -52,10 +52,15 @@ pub struct SessionMetadata {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
+    #[serde(default)]
+    pub total_tokens: usize,
     pub total_cache_creation_tokens: usize,
     pub total_cache_read_tokens: usize,
     pub prompt_token_estimate: usize,
-    /// Last completed query token usage, measured as `input_tokens + output_tokens`.
+    /// Last completed query display total.
+    ///
+    /// Provider-reported `total_tokens` is used when available; otherwise this
+    /// falls back to `input_tokens + output_tokens`.
     ///
     /// This value is refreshed on every completed model invoke so the UI can
     /// show the latest completed-query usage after each request, and it remains
@@ -369,6 +374,7 @@ mod tests {
             reasoning_effort: Some(crate::ReasoningEffort::Medium),
             total_input_tokens: 12,
             total_output_tokens: 34,
+            total_tokens: 46,
             total_cache_creation_tokens: 5,
             total_cache_read_tokens: 7,
             prompt_token_estimate: 21,

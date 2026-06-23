@@ -464,6 +464,7 @@ struct ReplayState {
     turns_seen: u32,
     total_input_tokens: usize,
     total_output_tokens: usize,
+    total_tokens: usize,
     total_cache_creation_tokens: usize,
     total_cache_read_tokens: usize,
     last_input_tokens: usize,
@@ -531,13 +532,13 @@ impl ReplayState {
                 if let Some(usage) = &turn.usage {
                     self.total_input_tokens += usage.input_tokens as usize;
                     self.total_output_tokens += usage.output_tokens as usize;
+                    self.total_tokens += usage.display_total_tokens();
                     self.total_cache_creation_tokens +=
                         usage.cache_creation_input_tokens.unwrap_or(0) as usize;
                     self.total_cache_read_tokens +=
                         usage.cache_read_input_tokens.unwrap_or(0) as usize;
                     self.last_input_tokens = usage.input_tokens as usize;
-                    self.last_turn_tokens =
-                        usage.input_tokens as usize + usage.output_tokens as usize;
+                    self.last_turn_tokens = usage.display_total_tokens();
                 }
                 self.latest_turn_metadata = Some(turn_metadata_from_record(&turn));
                 self.turn_kinds_by_id.insert(turn.id, turn.kind.clone());
@@ -696,6 +697,7 @@ impl ReplayState {
         core_session.turn_count = self.turns_seen as usize;
         core_session.total_input_tokens = self.total_input_tokens;
         core_session.total_output_tokens = self.total_output_tokens;
+        core_session.total_tokens = self.total_tokens;
         core_session.total_cache_creation_tokens = self.total_cache_creation_tokens;
         core_session.total_cache_read_tokens = self.total_cache_read_tokens;
         core_session.last_input_tokens = self.last_input_tokens;
@@ -777,6 +779,7 @@ impl ReplayState {
             reasoning_effort: summary_reasoning_effort,
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,
+            total_tokens: self.total_tokens,
             total_cache_creation_tokens: self.total_cache_creation_tokens,
             total_cache_read_tokens: self.total_cache_read_tokens,
             prompt_token_estimate: core_session.prompt_token_estimate,
@@ -784,7 +787,7 @@ impl ReplayState {
                 .latest_turn_metadata
                 .as_ref()
                 .and_then(|turn| turn.usage.as_ref())
-                .map(|usage| usage.input_tokens as usize + usage.output_tokens as usize)
+                .map(devo_protocol::TurnUsage::display_total_tokens)
                 .unwrap_or(0),
             status: SessionRuntimeStatus::Idle,
         };
@@ -955,6 +958,7 @@ impl ReplayState {
         self.turns_seen = 0;
         self.total_input_tokens = 0;
         self.total_output_tokens = 0;
+        self.total_tokens = 0;
         self.total_cache_creation_tokens = 0;
         self.total_cache_read_tokens = 0;
         self.last_input_tokens = 0;
@@ -968,11 +972,12 @@ impl ReplayState {
             if let Some(usage) = &turn.usage {
                 self.total_input_tokens += usage.input_tokens as usize;
                 self.total_output_tokens += usage.output_tokens as usize;
+                self.total_tokens += usage.display_total_tokens();
                 self.total_cache_creation_tokens +=
                     usage.cache_creation_input_tokens.unwrap_or(0) as usize;
                 self.total_cache_read_tokens += usage.cache_read_input_tokens.unwrap_or(0) as usize;
                 self.last_input_tokens = usage.input_tokens as usize;
-                self.last_turn_tokens = usage.input_tokens as usize + usage.output_tokens as usize;
+                self.last_turn_tokens = usage.display_total_tokens();
             }
         }
     }

@@ -27,12 +27,14 @@ impl ServerRuntime {
                 Ok(Some(stats)) => {
                     session.summary.total_input_tokens = stats.total_input_tokens;
                     session.summary.total_output_tokens = stats.total_output_tokens;
+                    session.summary.total_tokens = stats.total_tokens;
                     session.summary.total_cache_creation_tokens = stats.total_cache_creation_tokens;
                     session.summary.total_cache_read_tokens = stats.total_cache_read_tokens;
                     session.summary.prompt_token_estimate = stats.prompt_token_estimate;
                     if let Ok(mut core) = session.core_session.try_lock() {
                         core.total_input_tokens = stats.total_input_tokens;
                         core.total_output_tokens = stats.total_output_tokens;
+                        core.total_tokens = stats.total_tokens;
                         core.total_cache_creation_tokens = stats.total_cache_creation_tokens;
                         core.total_cache_read_tokens = stats.total_cache_read_tokens;
                         core.last_input_tokens = stats.last_input_tokens;
@@ -49,6 +51,7 @@ impl ServerRuntime {
                     let stats = crate::db::SessionStats {
                         total_input_tokens: session.summary.total_input_tokens,
                         total_output_tokens: session.summary.total_output_tokens,
+                        total_tokens: session.summary.total_tokens,
                         total_cache_creation_tokens: session.summary.total_cache_creation_tokens,
                         total_cache_read_tokens: session.summary.total_cache_read_tokens,
                         last_input_tokens: 0,
@@ -249,14 +252,17 @@ impl ServerRuntime {
                 session.latest_turn = Some(turn.clone());
                 session.summary.status = SessionRuntimeStatus::Idle;
                 session.summary.updated_at = Utc::now();
-                let token_totals = session
-                    .core_session
-                    .try_lock()
-                    .ok()
-                    .map(|core| (core.total_input_tokens, core.total_output_tokens));
-                if let Some((input, output)) = token_totals {
+                let token_totals = session.core_session.try_lock().ok().map(|core| {
+                    (
+                        core.total_input_tokens,
+                        core.total_output_tokens,
+                        core.total_tokens,
+                    )
+                });
+                if let Some((input, output, total)) = token_totals {
                     session.summary.total_input_tokens = input;
                     session.summary.total_output_tokens = output;
+                    session.summary.total_tokens = total;
                 }
                 turn
             };

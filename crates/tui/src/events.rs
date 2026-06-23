@@ -177,18 +177,24 @@ pub(crate) enum WorkerEvent {
     },
     /// A steer (/btw) was accepted by the server.
     SteerAccepted { turn_id: TurnId },
-    /// A streamed assistant or reasoning text item started.
-    TextItemStarted { item_id: ItemId, kind: TextItemKind },
+    /// A streamed assistant, reasoning, or research artifact text item started.
+    TextItemStarted {
+        item_id: ItemId,
+        kind: TextItemKind,
+        research: Option<ResearchArtifactMetadata>,
+    },
     /// Incremental text for a streamed assistant or reasoning item.
     TextItemDelta {
         item_id: ItemId,
         kind: TextItemKind,
+        research: Option<ResearchArtifactMetadata>,
         delta: String,
     },
-    /// A streamed assistant or reasoning text item completed.
+    /// A streamed assistant, reasoning, or research artifact text item completed.
     TextItemCompleted {
         item_id: ItemId,
         kind: TextItemKind,
+        research: Option<ResearchArtifactMetadata>,
         final_text: String,
     },
     /// A streamed Plan Mode proposal item started.
@@ -324,6 +330,8 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated in the session.
         total_output_tokens: usize,
+        /// Display total tokens accumulated in the session.
+        total_tokens: usize,
         /// Total cached input tokens accumulated in the session.
         total_cache_read_tokens: usize,
         /// Last completed query token usage, measured as input plus output tokens.
@@ -341,6 +349,8 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated in the session.
         total_output_tokens: usize,
+        /// Display total tokens accumulated in the session.
+        total_tokens: usize,
         /// Total cached input tokens accumulated in the session.
         total_cache_read_tokens: usize,
         /// Last completed turn token usage, measured as input plus output tokens.
@@ -360,6 +370,8 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated in the session.
         total_output_tokens: usize,
+        /// Display total tokens accumulated in the session.
+        total_tokens: usize,
         /// Total cached input tokens accumulated in the session.
         total_cache_read_tokens: usize,
         /// Estimated prompt tokens for the last attempted request.
@@ -533,6 +545,8 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated for the resumed session.
         total_output_tokens: usize,
+        /// Display total tokens accumulated for the resumed session.
+        total_tokens: usize,
         /// Total cached input tokens accumulated for the resumed session.
         total_cache_read_tokens: usize,
         /// Last completed turn token usage, measured as input plus output tokens.
@@ -565,6 +579,8 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated in the compacted session.
         total_output_tokens: usize,
+        /// Display total tokens accumulated in the compacted session.
+        total_tokens: usize,
         /// Estimated prompt tokens currently visible to the model.
         prompt_token_estimate: usize,
     },
@@ -599,6 +615,18 @@ pub(crate) enum TextItemKind {
     Assistant,
     Reasoning,
     ResearchArtifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResearchArtifactMetadata {
+    pub(crate) artifact_type: String,
+    pub(crate) title: String,
+}
+
+impl ResearchArtifactMetadata {
+    pub(crate) fn is_delegated_finding(&self) -> bool {
+        self.artifact_type.eq_ignore_ascii_case("finding")
+    }
 }
 
 /// One rendered transcript item shown in the history pane.

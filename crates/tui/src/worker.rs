@@ -85,6 +85,7 @@ use crate::bottom_pane::SkillInterfaceMetadata;
 use crate::bottom_pane::SkillMetadata;
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
+use crate::events::ResearchArtifactMetadata;
 use crate::events::SessionListEntry;
 use crate::events::TextItemKind;
 use crate::events::TranscriptItem;
@@ -739,6 +740,7 @@ async fn run_worker(
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_tokens: 0,
             total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
             last_query_input_tokens: 0,
@@ -766,6 +768,7 @@ async fn run_worker_inner(
     let mut turn_count = 0usize;
     let mut total_input_tokens = 0usize;
     let mut total_output_tokens = 0usize;
+    let mut total_tokens = 0usize;
     let mut total_cache_read_tokens = 0usize;
     let mut last_query_total_tokens = 0usize;
     let mut last_query_input_tokens = 0usize;
@@ -774,6 +777,8 @@ async fn run_worker_inner(
     let mut child_agent_sessions: HashSet<SessionId> = HashSet::new();
     let mut latest_completed_agent_messages_by_child: HashMap<SessionId, String> = HashMap::new();
     let mut btw_agent_sessions: HashMap<SessionId, BtwQuestionState> = HashMap::new();
+    let mut research_artifacts: HashMap<devo_core::ItemId, ResearchArtifactMetadata> =
+        HashMap::new();
     let mut input_history_cursor: Option<usize> = None;
     let mut active_reference_search_id: Option<ReferenceSearchId> = None;
     let mut active_shell_process_ids: HashSet<String> = HashSet::new();
@@ -806,6 +811,7 @@ async fn run_worker_inner(
                     active_agent_label,
                     total_input_tokens: resumed.session.total_input_tokens,
                     total_output_tokens: resumed.session.total_output_tokens,
+                    total_tokens: resumed.session.total_tokens,
                     total_cache_read_tokens: resumed.session.total_cache_read_tokens,
                     last_query_total_tokens: resumed.session.last_query_total_tokens,
                     last_query_input_tokens: resumed
@@ -825,6 +831,7 @@ async fn run_worker_inner(
                 reasoning_effort_selection = resumed.session.reasoning_effort_selection.clone();
                 total_input_tokens = resumed.session.total_input_tokens;
                 total_output_tokens = resumed.session.total_output_tokens;
+                total_tokens = resumed.session.total_tokens;
                 total_cache_read_tokens = resumed.session.total_cache_read_tokens;
                 last_query_total_tokens = resumed.session.last_query_total_tokens;
             }
@@ -834,6 +841,7 @@ async fn run_worker_inner(
                     turn_count,
                     total_input_tokens,
                     total_output_tokens,
+                    total_tokens,
                     total_cache_read_tokens,
                     prompt_token_estimate: total_input_tokens,
                     last_query_input_tokens,
@@ -905,6 +913,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -922,6 +931,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_tokens,
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
@@ -1031,6 +1041,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -1042,6 +1053,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -1140,6 +1152,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -1151,6 +1164,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -1167,6 +1181,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_tokens,
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
@@ -1203,6 +1218,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_tokens,
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
@@ -1215,6 +1231,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_tokens,
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
@@ -1243,6 +1260,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -1476,6 +1494,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -1507,6 +1526,7 @@ async fn run_worker_inner(
                         turn_count = 0;
                         total_input_tokens = 0;
                         total_output_tokens = 0;
+                        total_tokens = 0;
                         total_cache_read_tokens = 0;
                         last_query_total_tokens = 0;
                         last_query_input_tokens = 0;
@@ -1570,6 +1590,7 @@ async fn run_worker_inner(
                                     active_agent_label,
                                     total_input_tokens: result.session.total_input_tokens,
                                     total_output_tokens: result.session.total_output_tokens,
+                                    total_tokens: result.session.total_tokens,
                                     total_cache_read_tokens: result.session.total_cache_read_tokens,
                                     last_query_total_tokens: result
                                         .session
@@ -1595,6 +1616,7 @@ async fn run_worker_inner(
                                 reasoning_effort_selection = result.session.reasoning_effort_selection.clone();
                                 total_input_tokens = result.session.total_input_tokens;
                                 total_output_tokens = result.session.total_output_tokens;
+                                total_tokens = result.session.total_tokens;
                                 let _ =
                                     emit_skills_list(&mut client, &session_cwd, event_tx, false)
                                         .await;
@@ -1607,6 +1629,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -1621,6 +1644,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_tokens,
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
@@ -1649,6 +1673,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -1666,6 +1691,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_tokens,
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
@@ -1707,6 +1733,7 @@ async fn run_worker_inner(
                                     active_agent_label,
                                     total_input_tokens: result.session.total_input_tokens,
                                     total_output_tokens: result.session.total_output_tokens,
+                                    total_tokens: result.session.total_tokens,
                                     total_cache_read_tokens: result.session.total_cache_read_tokens,
                                     last_query_total_tokens: result
                                         .session
@@ -1728,6 +1755,7 @@ async fn run_worker_inner(
                                 reasoning_effort_selection = result.session.reasoning_effort_selection.clone();
                                 total_input_tokens = result.session.total_input_tokens;
                                 total_output_tokens = result.session.total_output_tokens;
+                                total_tokens = result.session.total_tokens;
                                 last_query_total_tokens =
                                     result.session.last_query_total_tokens;
                             }
@@ -1737,6 +1765,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -1751,6 +1780,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_tokens,
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
@@ -1808,6 +1838,7 @@ async fn run_worker_inner(
                                             active_agent_label,
                                             total_input_tokens: resumed.session.total_input_tokens,
                                             total_output_tokens: resumed.session.total_output_tokens,
+                                            total_tokens: resumed.session.total_tokens,
                                             total_cache_read_tokens: resumed.session.total_cache_read_tokens,
                                             last_query_total_tokens: resumed
                                                 .session
@@ -1829,6 +1860,7 @@ async fn run_worker_inner(
                                         reasoning_effort_selection = resumed.session.reasoning_effort_selection.clone();
                                         total_input_tokens = resumed.session.total_input_tokens;
                                         total_output_tokens = resumed.session.total_output_tokens;
+                                        total_tokens = resumed.session.total_tokens;
                                         last_query_total_tokens =
                                             resumed.session.last_query_total_tokens;
                                     }
@@ -1838,6 +1870,7 @@ async fn run_worker_inner(
                                             turn_count,
                                             total_input_tokens,
                                             total_output_tokens,
+                                            total_tokens,
                                             total_cache_read_tokens,
                                             prompt_token_estimate: total_input_tokens,
                                             last_query_input_tokens,
@@ -1851,6 +1884,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -1873,6 +1907,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_tokens,
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
@@ -1968,6 +2003,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -1999,6 +2035,7 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
                                     last_query_input_tokens,
@@ -2029,6 +2066,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_tokens,
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
@@ -2055,6 +2093,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_tokens,
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
@@ -2074,6 +2113,7 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_tokens,
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
@@ -2131,6 +2171,7 @@ async fn run_worker_inner(
                                         turn_count,
                                         total_input_tokens,
                                         total_output_tokens,
+                                        total_tokens,
                                         total_cache_read_tokens,
                                         prompt_token_estimate: total_input_tokens,
                                         last_query_input_tokens,
@@ -2214,6 +2255,7 @@ async fn run_worker_inner(
                                     &mut turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_tokens,
                                     total_cache_read_tokens,
                                     last_query_total_tokens,
                                     last_query_input_tokens,
@@ -2316,18 +2358,27 @@ async fn run_worker_inner(
                                             let _ = event_tx.send(WorkerEvent::TextItemStarted {
                                                 item_id: payload.item.item_id,
                                                 kind: TextItemKind::Assistant,
+                                                research: None,
                                             });
                                         }
                                         ItemKind::Reasoning => {
                                             let _ = event_tx.send(WorkerEvent::TextItemStarted {
                                                 item_id: payload.item.item_id,
                                                 kind: TextItemKind::Reasoning,
+                                                research: None,
                                             });
                                         }
                                         ItemKind::ResearchArtifact => {
+                                            let research =
+                                                research_artifact_metadata(&payload.item.payload);
+                                            if let Some(research) = research.clone() {
+                                                research_artifacts
+                                                    .insert(payload.item.item_id, research);
+                                            }
                                             let _ = event_tx.send(WorkerEvent::TextItemStarted {
                                                 item_id: payload.item.item_id,
                                                 kind: TextItemKind::ResearchArtifact,
+                                                research,
                                             });
                                         }
                                         ItemKind::Plan => {
@@ -2406,6 +2457,7 @@ async fn run_worker_inner(
                                         let _ = event_tx.send(WorkerEvent::TextItemDelta {
                                             item_id,
                                             kind: TextItemKind::Assistant,
+                                            research: None,
                                             delta: payload.delta,
                                         });
                                     } else {
@@ -2416,7 +2468,7 @@ async fn run_worker_inner(
                             "item/researchArtifact/delta" => {
                                 if let ServerEvent::ItemDelta { payload, .. } = event
                                     && let Some(worker_event) =
-                                        research_artifact_delta_event(payload)
+                                        research_artifact_delta_event(payload, &research_artifacts)
                                 {
                                     let _ = event_tx.send(worker_event);
                                 }
@@ -2511,6 +2563,7 @@ async fn run_worker_inner(
                                         let _ = event_tx.send(WorkerEvent::TextItemDelta {
                                             item_id,
                                             kind: TextItemKind::Reasoning,
+                                            research: None,
                                             delta: payload.delta,
                                         });
                                     } else {
@@ -2527,6 +2580,9 @@ async fn run_worker_inner(
                                     );
                                     if let Some(text) = completed_agent_message_text(&payload) {
                                         latest_completed_agent_message = Some(text);
+                                    }
+                                    if payload.item.item_kind == ItemKind::ResearchArtifact {
+                                        research_artifacts.remove(&payload.item.item_id);
                                     }
                                     // Completed tool items are mapped into compact UI events
                                     // with pre-rendered summaries and previews.
@@ -2547,11 +2603,11 @@ async fn run_worker_inner(
                                         turn_count += 1;
                                         if let Some(usage) = &payload.turn.usage {
                                             last_query_input_tokens = usage.input_tokens as usize;
-                                            last_query_total_tokens = usage.input_tokens as usize
-                                                + usage.output_tokens as usize;
+                                            last_query_total_tokens = usage.display_total_tokens();
                                             if !saw_usage_update_for_turn {
                                                 total_input_tokens += usage.input_tokens as usize;
                                                 total_output_tokens += usage.output_tokens as usize;
+                                                total_tokens += usage.display_total_tokens();
                                                 total_cache_read_tokens += usage
                                                     .cache_read_input_tokens
                                                     .unwrap_or(0) as usize;
@@ -2563,6 +2619,7 @@ async fn run_worker_inner(
                                         turn_count,
                                         total_input_tokens,
                                         total_output_tokens,
+                                        total_tokens,
                                         total_cache_read_tokens,
                                         last_query_total_tokens,
                                         last_query_input_tokens,
@@ -2581,14 +2638,15 @@ async fn run_worker_inner(
                                     saw_usage_update_for_turn = true;
                                     total_input_tokens = payload.total_input_tokens;
                                     total_output_tokens = payload.total_output_tokens;
+                                    total_tokens = payload.total_tokens;
                                     total_cache_read_tokens = payload.total_cache_read_tokens;
                                     last_query_input_tokens = payload.last_query_input_tokens;
                                     let _ = event_tx.send(WorkerEvent::UsageUpdated {
                                         total_input_tokens: payload.total_input_tokens,
                                         total_output_tokens: payload.total_output_tokens,
+                                        total_tokens: payload.total_tokens,
                                         total_cache_read_tokens: payload.total_cache_read_tokens,
-                                        last_query_total_tokens: payload.usage.input_tokens as usize
-                                            + payload.usage.output_tokens as usize,
+                                        last_query_total_tokens: payload.usage.display_total_tokens(),
                                         last_query_input_tokens: payload.last_query_input_tokens,
                                     });
                                 }
@@ -2601,11 +2659,11 @@ async fn run_worker_inner(
                                         .unwrap_or_else(|| format!("turn failed with status {:?}", turn.status));
                                     if let Some(usage) = &turn.usage {
                                         last_query_input_tokens = usage.input_tokens as usize;
-                                        last_query_total_tokens = usage.input_tokens as usize
-                                            + usage.output_tokens as usize;
+                                        last_query_total_tokens = usage.display_total_tokens();
                                         if !saw_usage_update_for_turn {
                                             total_input_tokens += usage.input_tokens as usize;
                                             total_output_tokens += usage.output_tokens as usize;
+                                            total_tokens += usage.display_total_tokens();
                                             total_cache_read_tokens += usage
                                                 .cache_read_input_tokens
                                                 .unwrap_or(0) as usize;
@@ -2616,6 +2674,7 @@ async fn run_worker_inner(
                                         turn_count,
                                         total_input_tokens,
                                         total_output_tokens,
+                                        total_tokens,
                                         total_cache_read_tokens,
                                         prompt_token_estimate: turn
                                             .usage
@@ -2714,9 +2773,11 @@ async fn run_worker_inner(
                                 if let ServerEvent::SessionCompactionCompleted(payload) = event {
                                     total_input_tokens = payload.session.total_input_tokens;
                                     total_output_tokens = payload.session.total_output_tokens;
+                                    total_tokens = payload.session.total_tokens;
                                     let _ = event_tx.send(WorkerEvent::SessionCompacted {
                                         total_input_tokens,
                                         total_output_tokens,
+                                        total_tokens,
                                         prompt_token_estimate: payload.session.prompt_token_estimate,
                                     });
                                 }
@@ -3062,15 +3123,42 @@ fn completed_agent_message_text(payload: &ItemEventPayload) -> Option<String> {
     }
 }
 
-fn research_artifact_delta_event(payload: devo_server::ItemDeltaPayload) -> Option<WorkerEvent> {
-    payload
-        .context
-        .item_id
-        .map(|item_id| WorkerEvent::TextItemDelta {
+fn research_artifact_delta_event(
+    payload: devo_server::ItemDeltaPayload,
+    research_artifacts: &HashMap<devo_core::ItemId, ResearchArtifactMetadata>,
+) -> Option<WorkerEvent> {
+    payload.context.item_id.map(|item_id| {
+        let research = research_artifacts.get(&item_id).cloned();
+        WorkerEvent::TextItemDelta {
             item_id,
             kind: TextItemKind::ResearchArtifact,
+            research,
             delta: payload.delta,
+        }
+    })
+}
+
+fn research_artifact_metadata(payload: &serde_json::Value) -> Option<ResearchArtifactMetadata> {
+    let artifact_type = payload
+        .get("artifact_type")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            payload
+                .get("artifactType")
+                .and_then(serde_json::Value::as_str)
         })
+        .map(str::trim)
+        .filter(|artifact_type| !artifact_type.is_empty())?;
+    let title = payload
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Research Artifact");
+    Some(ResearchArtifactMetadata {
+        artifact_type: artifact_type.to_string(),
+        title: title.to_string(),
+    })
 }
 
 fn btw_agent_prompt(question: &str) -> String {
@@ -3184,6 +3272,7 @@ pub(crate) fn handle_completed_item(
                 let _ = event_tx.send(WorkerEvent::TextItemCompleted {
                     item_id,
                     kind: TextItemKind::Assistant,
+                    research: None,
                     final_text: text,
                 });
             }
@@ -3209,6 +3298,7 @@ pub(crate) fn handle_completed_item(
                 let _ = event_tx.send(WorkerEvent::TextItemCompleted {
                     item_id,
                     kind: TextItemKind::Reasoning,
+                    research: None,
                     final_text: text,
                 });
             }
@@ -3230,6 +3320,7 @@ pub(crate) fn handle_completed_item(
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|text| !text.is_empty());
+            let research = research_artifact_metadata(&payload);
             let final_text = match content {
                 Some(content) => format!("### {title}\n\n{content}"),
                 None => format!("### {title}"),
@@ -3237,6 +3328,7 @@ pub(crate) fn handle_completed_item(
             let _ = event_tx.send(WorkerEvent::TextItemCompleted {
                 item_id,
                 kind: TextItemKind::ResearchArtifact,
+                research,
                 final_text,
             });
         }
@@ -4044,6 +4136,7 @@ fn acp_prompt_completed_event(
     turn_count: &mut usize,
     total_input_tokens: usize,
     total_output_tokens: usize,
+    total_tokens: usize,
     total_cache_read_tokens: usize,
     last_query_total_tokens: usize,
     last_query_input_tokens: usize,
@@ -4056,6 +4149,7 @@ fn acp_prompt_completed_event(
             turn_count: *turn_count,
             total_input_tokens,
             total_output_tokens,
+            total_tokens,
             total_cache_read_tokens,
             prompt_token_estimate: total_input_tokens,
             last_query_input_tokens,
@@ -4069,6 +4163,7 @@ fn acp_prompt_completed_event(
         turn_count: *turn_count,
         total_input_tokens,
         total_output_tokens,
+        total_tokens,
         total_cache_read_tokens,
         last_query_total_tokens,
         last_query_input_tokens,
@@ -4369,23 +4464,27 @@ mod tests {
         let session_id = SessionId::new();
         let turn_id = TurnId::new();
         let item_id = ItemId::new();
-        let event = research_artifact_delta_event(ItemDeltaPayload {
-            context: EventContext {
-                session_id,
-                turn_id: Some(turn_id),
-                item_id: Some(item_id),
-                seq: 0,
+        let event = research_artifact_delta_event(
+            ItemDeltaPayload {
+                context: EventContext {
+                    session_id,
+                    turn_id: Some(turn_id),
+                    item_id: Some(item_id),
+                    seq: 0,
+                },
+                delta: "partial finding".to_string(),
+                stream_index: None,
+                channel: None,
             },
-            delta: "partial finding".to_string(),
-            stream_index: None,
-            channel: None,
-        });
+            &HashMap::new(),
+        );
 
         assert_eq!(
             event,
             Some(WorkerEvent::TextItemDelta {
                 item_id,
                 kind: TextItemKind::ResearchArtifact,
+                research: None,
                 delta: "partial finding".to_string()
             })
         );
@@ -4968,6 +5067,7 @@ mod tests {
             &mut turn_count,
             11,
             13,
+            24,
             17,
             19,
             23,
@@ -4983,6 +5083,7 @@ mod tests {
                 turn_count: 3,
                 total_input_tokens: 11,
                 total_output_tokens: 13,
+                total_tokens: 24,
                 total_cache_read_tokens: 17,
                 last_query_total_tokens: 19,
                 last_query_input_tokens: 23,
@@ -5007,6 +5108,7 @@ mod tests {
             &mut turn_count,
             11,
             13,
+            24,
             17,
             19,
             23,
@@ -5022,6 +5124,7 @@ mod tests {
                 turn_count: 2,
                 total_input_tokens: 11,
                 total_output_tokens: 13,
+                total_tokens: 24,
                 total_cache_read_tokens: 17,
                 prompt_token_estimate: 11,
                 last_query_input_tokens: 23,
@@ -5130,6 +5233,7 @@ mod tests {
             vec![WorkerEvent::TextItemDelta {
                 item_id,
                 kind: TextItemKind::Assistant,
+                research: None,
                 delta: "streamed answer".to_string()
             }]
         );
@@ -5785,6 +5889,7 @@ mod tests {
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_tokens: 0,
             total_cache_creation_tokens: 0,
             total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
@@ -5959,6 +6064,7 @@ mod tests {
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_tokens: 0,
             total_cache_creation_tokens: 0,
             total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
@@ -6000,6 +6106,7 @@ mod tests {
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_tokens: 0,
             total_cache_creation_tokens: 0,
             total_cache_read_tokens: 0,
             prompt_token_estimate: 0,

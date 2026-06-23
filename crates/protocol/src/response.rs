@@ -24,7 +24,11 @@ pub enum ResponseContent {
     },
 }
 
-/// Token usage statistics.
+/// Provider/model token usage statistics.
+///
+/// `output_tokens` is the provider-mapped primary output count.
+/// `reasoning_output_tokens` is an optional breakdown and must not be added
+/// again when deriving totals.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// Number of tokens in the prompt.
@@ -37,6 +41,23 @@ pub struct Usage {
     /// The number of input tokens read from the cache.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<usize>,
+    /// Optional provider-reported reasoning output token breakdown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<usize>,
+    /// Optional provider-reported total token count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<usize>,
+}
+
+impl Usage {
+    pub fn derived_total_tokens(&self) -> usize {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    pub fn display_total_tokens(&self) -> usize {
+        self.total_tokens
+            .unwrap_or_else(|| self.derived_total_tokens())
+    }
 }
 
 /// Why the model stopped generating.
@@ -142,19 +163,68 @@ mod tests {
         assert_eq!(usage.output_tokens, 0);
         assert_eq!(usage.cache_creation_input_tokens, None);
         assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.reasoning_output_tokens, None);
+        assert_eq!(usage.total_tokens, None);
     }
 
     #[test]
-    fn usage_serde_skips_none_cache() {
+    fn usage_totals_follow_conservative_accounting() {
         let usage = Usage {
             input_tokens: 100,
             output_tokens: 50,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
+            reasoning_output_tokens: Some(25),
+            total_tokens: None,
+        };
+
+        assert_eq!(usage.derived_total_tokens(), 150);
+        assert_eq!(usage.display_total_tokens(), 150);
+
+        let provider_total = Usage {
+            total_tokens: Some(175),
+            ..usage
+        };
+        assert_eq!(provider_total.derived_total_tokens(), 150);
+        assert_eq!(provider_total.display_total_tokens(), 175);
+    }
+
+    #[test]
+    fn usage_serde_skips_none_optional_usage_fields() {
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
         };
         let json = serde_json::to_string(&usage).expect("serialize usage");
         assert!(!json.contains("cache_creation"));
         assert!(!json.contains("cache_read"));
+        assert!(!json.contains("reasoning_output"));
+        assert!(!json.contains("total_tokens"));
+    }
+
+    #[test]
+    fn usage_serde_defaults_missing_optional_usage_fields() {
+        let usage: Usage = serde_json::from_value(json!({
+            "input_tokens": 100,
+            "output_tokens": 50
+        }))
+        .expect("deserialize legacy usage");
+
+        assert_eq!(
+            usage,
+            Usage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                total_tokens: None,
+            }
+        );
     }
 
     #[test]
@@ -183,6 +253,8 @@ mod tests {
                 output_tokens: 5,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                total_tokens: None,
             },
             metadata: ResponseMetadata::default(),
         };

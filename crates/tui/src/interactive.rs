@@ -113,6 +113,7 @@ struct InteractiveLoopState {
     turn_count: usize,
     total_input_tokens: usize,
     total_output_tokens: usize,
+    total_tokens: usize,
     total_cache_read_tokens: usize,
     pending_onboarding: Option<PendingOnboarding>,
     // True while the resume browser is waiting for the worker's session list.
@@ -386,6 +387,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         turn_count: loop_state.turn_count,
         total_input_tokens: loop_state.total_input_tokens,
         total_output_tokens: loop_state.total_output_tokens,
+        total_tokens: loop_state.total_tokens,
         total_cache_read_tokens: loop_state.total_cache_read_tokens,
     })
 }
@@ -818,6 +820,7 @@ fn handle_worker_event(
             turn_count: next_turn_count,
             total_input_tokens: next_total_input_tokens,
             total_output_tokens: next_total_output_tokens,
+            total_tokens: next_total_tokens,
             total_cache_read_tokens: next_total_cache_read_tokens,
             ..
         }
@@ -825,6 +828,7 @@ fn handle_worker_event(
             turn_count: next_turn_count,
             total_input_tokens: next_total_input_tokens,
             total_output_tokens: next_total_output_tokens,
+            total_tokens: next_total_tokens,
             total_cache_read_tokens: next_total_cache_read_tokens,
             ..
         } => {
@@ -832,6 +836,7 @@ fn handle_worker_event(
             loop_state.turn_count = *next_turn_count;
             loop_state.total_input_tokens = *next_total_input_tokens;
             loop_state.total_output_tokens = *next_total_output_tokens;
+            loop_state.total_tokens = *next_total_tokens;
             loop_state.total_cache_read_tokens = *next_total_cache_read_tokens;
             loop_state.session_switch_pending = false;
         }
@@ -847,11 +852,13 @@ fn handle_worker_event(
         WorkerEvent::UsageUpdated {
             total_input_tokens: next_total_input_tokens,
             total_output_tokens: next_total_output_tokens,
+            total_tokens: next_total_tokens,
             total_cache_read_tokens: next_total_cache_read_tokens,
             ..
         } => {
             loop_state.total_input_tokens = *next_total_input_tokens;
             loop_state.total_output_tokens = *next_total_output_tokens;
+            loop_state.total_tokens = *next_total_tokens;
             loop_state.total_cache_read_tokens = *next_total_cache_read_tokens;
         }
         WorkerEvent::ProviderValidationSucceeded { .. } => {
@@ -900,11 +907,13 @@ fn handle_worker_event(
         WorkerEvent::SessionCompacted {
             total_input_tokens: next_total_input_tokens,
             total_output_tokens: next_total_output_tokens,
+            total_tokens: next_total_tokens,
             prompt_token_estimate: _,
         } => {
             loop_state.busy = false;
             loop_state.total_input_tokens = *next_total_input_tokens;
             loop_state.total_output_tokens = *next_total_output_tokens;
+            loop_state.total_tokens = *next_total_tokens;
         }
         WorkerEvent::SessionCompactionFailed { .. } => {
             loop_state.busy = false;
@@ -913,6 +922,7 @@ fn handle_worker_event(
             session_id,
             total_input_tokens,
             total_output_tokens,
+            total_tokens,
             total_cache_read_tokens,
             ..
         } => {
@@ -920,6 +930,7 @@ fn handle_worker_event(
             loop_state.session_id = devo_core::SessionId::try_from(session_id.as_str()).ok();
             loop_state.total_input_tokens = *total_input_tokens;
             loop_state.total_output_tokens = *total_output_tokens;
+            loop_state.total_tokens = *total_tokens;
             loop_state.total_cache_read_tokens = *total_cache_read_tokens;
         }
         WorkerEvent::TextDelta(_)

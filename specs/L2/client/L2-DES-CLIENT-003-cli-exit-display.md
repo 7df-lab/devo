@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-05-27
+last_updated: 2026-06-23
 ---
 
 # L2-DES-CLIENT-003 — CLI Exit Session Display
@@ -90,10 +90,11 @@ Token usage: total=1,889,658 input=111,103 (+ 1,758,464 cached) output=20,091
 
 **Computation rules**:
 
-- `total = input_tokens + output_tokens`
-- `non_cached_input = input_tokens - cache_read_tokens` (saturating subtraction)
+- `total = total_tokens`, where the session aggregate uses provider-reported `total_tokens` for each invocation when available and otherwise falls back to `input_tokens + output_tokens`.
+- `non_cached_input = total_input_tokens - total_cache_read_tokens` (saturating subtraction)
 - The cached parenthetical is omitted when `cache_read_tokens` is zero.
 - All numeric values use thousands-separator formatting (e.g., `1,889,658`).
+- Separately reported `reasoning_output_tokens` are breakdowns only and are not added to `total`.
 
 **Suppression**: The token usage line is suppressed when both `total` and `cache_read_tokens` are zero — this occurs when no work was performed.
 
@@ -149,6 +150,7 @@ AppExit {
     turn_count: usize,
     total_input_tokens: usize,
     total_output_tokens: usize,
+    total_tokens: usize,
     total_cache_read_tokens: usize,
 }
 ```
@@ -159,9 +161,10 @@ AppExit {
 | `turn_count` | `InteractiveLoopState::turn_count` | `TurnFinished`, `TurnFailed` worker events |
 | `total_input_tokens` | `InteractiveLoopState::total_input_tokens` | `TurnFinished`, `TurnFailed`, `UsageUpdated`, `SessionCompacted`, `SessionSwitched` |
 | `total_output_tokens` | `InteractiveLoopState::total_output_tokens` | Same as above |
+| `total_tokens` | `InteractiveLoopState::total_tokens` | Same as above |
 | `total_cache_read_tokens` | `InteractiveLoopState::total_cache_read_tokens` | Same as above |
 
-Token values are running totals accumulated over the session lifetime. They are surfaced by the server process through `TurnUsageUpdated` events, which the TUI worker translates to `WorkerEvent::UsageUpdated`, `WorkerEvent::TurnFinished`, and `WorkerEvent::TurnFailed`.
+Token values are running totals accumulated over the session lifetime. The `total_tokens` field carries the display total already selected by server/runtime accounting: provider total when present, otherwise `input_tokens + output_tokens`. They are surfaced by the server process through `TurnUsageUpdated` events, which the TUI worker translates to `WorkerEvent::UsageUpdated`, `WorkerEvent::TurnFinished`, and `WorkerEvent::TurnFailed`.
 
 ### Integration Points
 
@@ -228,3 +231,4 @@ The `exit_messages` function is called after `run_agent()` returns, in every CLI
 | Revision | Date | Author | Change Type | Notes |
 |---:|---|---|---|---|
 | 1 | 2026-05-27 | Assistant | Initial | Initial CLI exit session display design. |
+| 1 | 2026-06-23 | Assistant | Refinement | Added `total_tokens` to the AppExit contract and aligned total display with conservative provider-total fallback semantics. |

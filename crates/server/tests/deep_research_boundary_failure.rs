@@ -307,6 +307,8 @@ fn model_response(text: impl Into<String>) -> ModelResponse {
             output_tokens: 1,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
         },
         metadata: ResponseMetadata::default(),
     }

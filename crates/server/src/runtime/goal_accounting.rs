@@ -138,6 +138,8 @@ mod tests {
             output_tokens: 30,
             cache_creation_input_tokens: Some(40),
             cache_read_input_tokens: Some(70),
+            reasoning_output_tokens: None,
+            total_tokens: None,
         };
 
         assert_eq!(goal_token_delta(&usage), 80);

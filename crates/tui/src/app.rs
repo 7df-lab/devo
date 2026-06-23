@@ -19,6 +19,8 @@ pub struct AppExit {
     pub total_input_tokens: usize,
     /// Total output tokens accumulated in the session.
     pub total_output_tokens: usize,
+    /// Display total tokens accumulated in the session.
+    pub total_tokens: usize,
     /// Total cached input tokens accumulated in the session.
     pub total_cache_read_tokens: usize,
 }

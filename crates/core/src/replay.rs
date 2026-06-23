@@ -77,6 +77,7 @@ pub struct PendingItemProjection {
 pub struct UsageTotals {
     pub total_input_tokens: i64,
     pub total_output_tokens: i64,
+    pub total_tokens: i64,
     pub total_cache_read_tokens: i64,
     pub total_cache_creation_tokens: i64,
     pub total_reasoning_tokens: i64,
@@ -264,7 +265,9 @@ pub fn build_replay_projection(
                         crate::durable_record::UsageMetricKind::ReasoningOutputTokens => {
                             usage_totals.total_reasoning_tokens += m.value;
                         }
-                        _ => {}
+                        crate::durable_record::UsageMetricKind::TotalTokens => {
+                            usage_totals.total_tokens += m.value;
+                        }
                     }
                 }
             }
@@ -431,8 +434,10 @@ fn accumulate_usage(totals: &mut UsageTotals, usage: &Option<TurnUsage>) {
     if let Some(u) = usage {
         totals.total_input_tokens += u.input_tokens as i64;
         totals.total_output_tokens += u.output_tokens as i64;
+        totals.total_tokens += u.display_total_tokens() as i64;
         totals.total_cache_creation_tokens += u.cache_creation_input_tokens.unwrap_or(0) as i64;
         totals.total_cache_read_tokens += u.cache_read_input_tokens.unwrap_or(0) as i64;
+        totals.total_reasoning_tokens += u.reasoning_output_tokens.unwrap_or(0) as i64;
     }
 }
 
@@ -509,6 +514,8 @@ mod tests {
                         output_tokens: 50,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
+                        reasoning_output_tokens: None,
+                        total_tokens: None,
                     }),
                     workspace_change_set_id: None,
                     completed_at: now(),

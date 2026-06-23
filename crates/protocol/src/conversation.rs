@@ -4,7 +4,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{RequestContent, RequestMessage};
+use crate::{RequestContent, RequestMessage, Usage};
 
 macro_rules! define_id {
     ($name:ident) => {
@@ -97,6 +97,40 @@ pub struct TurnUsage {
     pub output_tokens: u32,
     pub cache_creation_input_tokens: Option<u32>,
     pub cache_read_input_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u32>,
+}
+
+impl TurnUsage {
+    pub fn from_usage(usage: &Usage) -> Self {
+        Self {
+            input_tokens: saturating_u32(usage.input_tokens),
+            output_tokens: saturating_u32(usage.output_tokens),
+            cache_creation_input_tokens: usage.cache_creation_input_tokens.map(saturating_u32),
+            cache_read_input_tokens: usage.cache_read_input_tokens.map(saturating_u32),
+            reasoning_output_tokens: usage.reasoning_output_tokens.map(saturating_u32),
+            total_tokens: usage.total_tokens.map(saturating_u32),
+        }
+    }
+
+    pub fn derived_total_tokens(&self) -> usize {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .try_into()
+            .unwrap_or(usize::MAX)
+    }
+
+    pub fn display_total_tokens(&self) -> usize {
+        self.total_tokens
+            .map(|tokens| tokens.try_into().unwrap_or(usize::MAX))
+            .unwrap_or_else(|| self.derived_total_tokens())
+    }
+}
+
+fn saturating_u32(value: usize) -> u32 {
+    value.try_into().unwrap_or(u32::MAX)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +320,34 @@ mod tests {
         let msg = Message::system("system instruction");
         let req = msg.to_request_message();
         assert_eq!(req.role, "system");
+    }
+
+    #[test]
+    fn turn_usage_from_usage_preserves_provider_total_breakdown() {
+        let usage = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_input_tokens: Some(2),
+            cache_read_input_tokens: Some(3),
+            reasoning_output_tokens: Some(7),
+            total_tokens: Some(20),
+        };
+
+        let turn_usage = TurnUsage::from_usage(&usage);
+
+        assert_eq!(
+            turn_usage,
+            TurnUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_creation_input_tokens: Some(2),
+                cache_read_input_tokens: Some(3),
+                reasoning_output_tokens: Some(7),
+                total_tokens: Some(20),
+            }
+        );
+        assert_eq!(turn_usage.derived_total_tokens(), 15);
+        assert_eq!(turn_usage.display_total_tokens(), 20);
     }
 
     #[test]

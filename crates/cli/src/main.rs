@@ -83,7 +83,7 @@ fn format_with_separators(value: usize) -> String {
 }
 
 fn format_token_usage_line(exit: &devo_tui::AppExit, color_enabled: bool) -> Option<String> {
-    let total = exit.total_input_tokens + exit.total_output_tokens;
+    let total = exit.total_tokens;
     let non_cached_input = exit
         .total_input_tokens
         .saturating_sub(exit.total_cache_read_tokens);
@@ -567,6 +567,7 @@ mod tests {
             turn_count: 1,
             total_input_tokens: 10,
             total_output_tokens: 2,
+            total_tokens: 12,
             total_cache_read_tokens: 5,
         };
 
@@ -590,6 +591,7 @@ mod tests {
             turn_count: 1,
             total_input_tokens: 10,
             total_output_tokens: 2,
+            total_tokens: 12,
             total_cache_read_tokens: 5,
         };
 
@@ -601,6 +603,24 @@ mod tests {
     }
 
     #[test]
+    fn exit_usage_uses_accumulated_display_total() {
+        let exit = devo_tui::AppExit {
+            session_id: Some(SessionId::new()),
+            onboarding_completed: false,
+            turn_count: 1,
+            total_input_tokens: 10,
+            total_output_tokens: 2,
+            total_tokens: 25,
+            total_cache_read_tokens: 0,
+        };
+
+        assert_eq!(
+            format_token_usage_line(&exit, /*color_enabled*/ false),
+            Some("Token usage: total=25 input=10 output=2".to_string())
+        );
+    }
+
+    #[test]
     fn onboarding_exit_messages_include_next_step_after_success() {
         let session_id = SessionId::new();
         let exit = devo_tui::AppExit {
@@ -609,6 +629,7 @@ mod tests {
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_tokens: 0,
             total_cache_read_tokens: 0,
         };
 
@@ -635,6 +656,7 @@ mod tests {
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_tokens: 0,
             total_cache_read_tokens: 0,
         };
 
@@ -652,6 +674,7 @@ mod tests {
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_tokens: 0,
             total_cache_read_tokens: 0,
         };
 

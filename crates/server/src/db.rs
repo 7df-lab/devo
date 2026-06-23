@@ -36,6 +36,7 @@ impl QueueType {
 pub struct SessionStats {
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
+    pub total_tokens: usize,
     pub total_cache_creation_tokens: usize,
     pub total_cache_read_tokens: usize,
     pub last_input_tokens: usize,
@@ -83,6 +84,7 @@ impl Database {
                 session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
                 total_input_tokens INTEGER NOT NULL DEFAULT 0,
                 total_output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
                 total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
                 total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 last_input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -151,6 +153,34 @@ impl Database {
                 [],
             )
             .context("failed to add pending_input_id column")?;
+        }
+        let has_session_stats_total_tokens = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(session_stats)")
+                .context("failed to inspect session_stats schema")?;
+            let columns = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .context("failed to read session_stats schema")?;
+            let mut found = false;
+            for column in columns {
+                if column? == "total_tokens" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_session_stats_total_tokens {
+            conn.execute(
+                "ALTER TABLE session_stats ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .context("failed to add total_tokens column")?;
+            conn.execute(
+                "UPDATE session_stats SET total_tokens = total_input_tokens + total_output_tokens",
+                [],
+            )
+            .context("failed to backfill total_tokens column")?;
         }
         Ok(())
     }
@@ -252,6 +282,7 @@ impl Database {
                 reasoning_effort: None,
                 total_input_tokens: 0,
                 total_output_tokens: 0,
+                total_tokens: 0,
                 total_cache_creation_tokens: 0,
                 total_cache_read_tokens: 0,
                 prompt_token_estimate: 0,
@@ -325,6 +356,7 @@ impl Database {
                     reasoning_effort: None,
                     total_input_tokens: 0,
                     total_output_tokens: 0,
+                    total_tokens: 0,
                     total_cache_creation_tokens: 0,
                     total_cache_read_tokens: 0,
                     prompt_token_estimate: 0,
@@ -359,12 +391,13 @@ impl Database {
         let conn = self.conn.lock().expect("database mutex poisoned");
         conn.execute(
             "INSERT INTO session_stats (session_id, total_input_tokens, total_output_tokens,
-                total_cache_creation_tokens, total_cache_read_tokens, last_input_tokens,
+                total_tokens, total_cache_creation_tokens, total_cache_read_tokens, last_input_tokens,
                 turn_count, prompt_token_estimate)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(session_id) DO UPDATE SET
                 total_input_tokens = excluded.total_input_tokens,
                 total_output_tokens = excluded.total_output_tokens,
+                total_tokens = excluded.total_tokens,
                 total_cache_creation_tokens = excluded.total_cache_creation_tokens,
                 total_cache_read_tokens = excluded.total_cache_read_tokens,
                 last_input_tokens = excluded.last_input_tokens,
@@ -374,6 +407,7 @@ impl Database {
                 id.to_string(),
                 stats.total_input_tokens as i64,
                 stats.total_output_tokens as i64,
+                stats.total_tokens as i64,
                 stats.total_cache_creation_tokens as i64,
                 stats.total_cache_read_tokens as i64,
                 stats.last_input_tokens as i64,
@@ -389,7 +423,7 @@ impl Database {
     pub fn get_stats(&self, id: &SessionId) -> Result<Option<SessionStats>> {
         let conn = self.conn.lock().expect("database mutex poisoned");
         let result = conn.query_row(
-            "SELECT total_input_tokens, total_output_tokens, total_cache_creation_tokens,
+            "SELECT total_input_tokens, total_output_tokens, total_tokens, total_cache_creation_tokens,
                     total_cache_read_tokens, last_input_tokens, turn_count, prompt_token_estimate
              FROM session_stats WHERE session_id = ?1",
             params![id.to_string()],
@@ -397,11 +431,12 @@ impl Database {
                 Ok(SessionStats {
                     total_input_tokens: row.get::<_, i64>(0)? as usize,
                     total_output_tokens: row.get::<_, i64>(1)? as usize,
-                    total_cache_creation_tokens: row.get::<_, i64>(2)? as usize,
-                    total_cache_read_tokens: row.get::<_, i64>(3)? as usize,
-                    last_input_tokens: row.get::<_, i64>(4)? as usize,
-                    turn_count: row.get::<_, i64>(5)? as usize,
-                    prompt_token_estimate: row.get::<_, i64>(6)? as usize,
+                    total_tokens: row.get::<_, i64>(2)? as usize,
+                    total_cache_creation_tokens: row.get::<_, i64>(3)? as usize,
+                    total_cache_read_tokens: row.get::<_, i64>(4)? as usize,
+                    last_input_tokens: row.get::<_, i64>(5)? as usize,
+                    turn_count: row.get::<_, i64>(6)? as usize,
+                    prompt_token_estimate: row.get::<_, i64>(7)? as usize,
                 })
             },
         );
@@ -630,6 +665,45 @@ mod tests {
         (db, dir)
     }
 
+    #[test]
+    fn migration_backfills_legacy_session_stats_total_tokens() {
+        let dir = TempDir::new().expect("create temp dir");
+        let db_path = dir.path().join("legacy.db");
+        let session_id = SessionId::new();
+        {
+            let conn = Connection::open(&db_path).expect("open legacy database");
+            conn.execute_batch(
+                "
+                CREATE TABLE session_stats (
+                    session_id TEXT PRIMARY KEY,
+                    total_input_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_output_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                    last_input_tokens INTEGER NOT NULL DEFAULT 0,
+                    turn_count INTEGER NOT NULL DEFAULT 0,
+                    prompt_token_estimate INTEGER NOT NULL DEFAULT 0
+                );
+                ",
+            )
+            .expect("create legacy session_stats");
+            conn.execute(
+                "INSERT INTO session_stats (session_id, total_input_tokens, total_output_tokens)
+                 VALUES (?1, ?2, ?3)",
+                params![session_id.to_string(), 40_i64, 2_i64],
+            )
+            .expect("insert legacy stats");
+        }
+
+        let db = Database::open(db_path).expect("migrate database");
+        let stats = db
+            .get_stats(&session_id)
+            .expect("get migrated stats")
+            .expect("stats row exists");
+
+        assert_eq!(stats.total_tokens, 42);
+    }
+
     fn sample_session(id: &str) -> SessionMetadata {
         SessionMetadata {
             session_id: SessionId::from_str(id).unwrap_or_default(),
@@ -650,6 +724,7 @@ mod tests {
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_tokens: 0,
             total_cache_creation_tokens: 0,
             total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
@@ -742,6 +817,7 @@ mod tests {
         let stats = SessionStats {
             total_input_tokens: 1000,
             total_output_tokens: 500,
+            total_tokens: 600,
             total_cache_creation_tokens: 100,
             total_cache_read_tokens: 50,
             last_input_tokens: 200,

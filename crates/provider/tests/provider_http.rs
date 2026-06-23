@@ -286,6 +286,8 @@ async fn anthropic_messages_stream_uses_nested_message_start_usage() {
                 output_tokens: 0,
                 cache_creation_input_tokens: Some(0),
                 cache_read_input_tokens: Some(85_888),
+                reasoning_output_tokens: None,
+                total_tokens: None,
             }),
             StreamEvent::TextStart { index: 0 },
             StreamEvent::TextDelta {
@@ -297,6 +299,8 @@ async fn anthropic_messages_stream_uses_nested_message_start_usage() {
                 output_tokens: 3_211,
                 cache_creation_input_tokens: Some(0),
                 cache_read_input_tokens: Some(85_888),
+                reasoning_output_tokens: None,
+                total_tokens: None,
             }),
             StreamEvent::MessageDone {
                 response: ModelResponse {
@@ -308,6 +312,8 @@ async fn anthropic_messages_stream_uses_nested_message_start_usage() {
                         output_tokens: 3_211,
                         cache_creation_input_tokens: Some(0),
                         cache_read_input_tokens: Some(85_888),
+                        reasoning_output_tokens: None,
+                        total_tokens: None,
                     },
                     metadata: ResponseMetadata::default(),
                 },
@@ -339,6 +345,8 @@ async fn anthropic_messages_stream_keeps_legacy_top_level_start_usage() {
                 output_tokens: 0,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: Some(1),
+                reasoning_output_tokens: None,
+                total_tokens: None,
             }),
             StreamEvent::TextStart { index: 0 },
             StreamEvent::TextDelta {
@@ -350,6 +358,8 @@ async fn anthropic_messages_stream_keeps_legacy_top_level_start_usage() {
                 output_tokens: 3,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: Some(1),
+                reasoning_output_tokens: None,
+                total_tokens: None,
             }),
             StreamEvent::MessageDone {
                 response: ModelResponse {
@@ -361,6 +371,8 @@ async fn anthropic_messages_stream_keeps_legacy_top_level_start_usage() {
                         output_tokens: 3,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: Some(1),
+                        reasoning_output_tokens: None,
+                        total_tokens: None,
                     },
                     metadata: ResponseMetadata::default(),
                 },
@@ -391,6 +403,8 @@ async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
                 output_tokens: 0,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                total_tokens: None,
             }),
             StreamEvent::ReasoningStart { index: 0 },
             StreamEvent::ReasoningDelta {
@@ -408,6 +422,8 @@ async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
                 output_tokens: 1,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                total_tokens: None,
             }),
             StreamEvent::MessageDone {
                 response: ModelResponse {
@@ -428,6 +444,8 @@ async fn anthropic_messages_stream_completes_thinking_blocks_before_text() {
                         output_tokens: 1,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
+                        reasoning_output_tokens: None,
+                        total_tokens: None,
                     },
                     metadata: ResponseMetadata {
                         extras: vec![ResponseExtra::ReasoningText {

@@ -239,8 +239,10 @@ type ResearchUsageLedgerRef = Arc<Mutex<ResearchUsageLedger>>;
 struct ResearchUsageTotals {
     input_tokens: usize,
     output_tokens: usize,
+    total_tokens: usize,
     cache_creation_input_tokens: usize,
     cache_read_input_tokens: usize,
+    reasoning_output_tokens: usize,
 }
 
 impl ResearchUsageTotals {
@@ -248,41 +250,34 @@ impl ResearchUsageTotals {
         Self {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
+            total_tokens: usage.display_total_tokens(),
             cache_creation_input_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
             cache_read_input_tokens: usage.cache_read_input_tokens.unwrap_or(0),
-        }
-    }
-
-    fn from_parts(
-        input_tokens: usize,
-        output_tokens: usize,
-        cache_creation_input_tokens: Option<usize>,
-        cache_read_input_tokens: Option<usize>,
-    ) -> Self {
-        Self {
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens: cache_creation_input_tokens.unwrap_or(0),
-            cache_read_input_tokens: cache_read_input_tokens.unwrap_or(0),
+            reasoning_output_tokens: usage.reasoning_output_tokens.unwrap_or(0),
         }
     }
 
     fn add(&mut self, other: Self) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
+        self.total_tokens += other.total_tokens;
         self.cache_creation_input_tokens += other.cache_creation_input_tokens;
         self.cache_read_input_tokens += other.cache_read_input_tokens;
+        self.reasoning_output_tokens += other.reasoning_output_tokens;
     }
 
     fn to_turn_usage(self) -> TurnUsage {
-        TurnUsage {
-            input_tokens: self.input_tokens as u32,
-            output_tokens: self.output_tokens as u32,
+        TurnUsage::from_usage(&devo_protocol::Usage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
             cache_creation_input_tokens: (self.cache_creation_input_tokens > 0)
-                .then_some(self.cache_creation_input_tokens as u32),
+                .then_some(self.cache_creation_input_tokens),
             cache_read_input_tokens: (self.cache_read_input_tokens > 0)
-                .then_some(self.cache_read_input_tokens as u32),
-        }
+                .then_some(self.cache_read_input_tokens),
+            reasoning_output_tokens: (self.reasoning_output_tokens > 0)
+                .then_some(self.reasoning_output_tokens),
+            total_tokens: (self.total_tokens > 0).then_some(self.total_tokens),
+        })
     }
 }
 
@@ -312,6 +307,7 @@ impl ResearchUsageLedger {
 impl ServerRuntime {
     pub(crate) async fn handle_research_turn_start(
         self: &Arc<Self>,
+        connection_id: Option<u64>,
         request_id: serde_json::Value,
         params: TurnStartParams,
         display_input: String,
@@ -472,6 +468,12 @@ impl ServerRuntime {
             .lock()
             .await
             .insert(params.session_id, CancellationToken::new());
+        if let Some(connection_id) = connection_id {
+            self.active_turn_connections
+                .lock()
+                .await
+                .insert(params.session_id, connection_id);
+        }
         let research_display_input = research_display_input(&display_input);
         self.maybe_assign_provisional_title(params.session_id, &research_display_input)
             .await;
@@ -514,10 +516,8 @@ impl ServerRuntime {
                 build_turn_record(&turn, session_context, turn_context),
             )
         {
-            self.active_turn_cancellations
-                .lock()
-                .await
-                .remove(&params.session_id);
+            self.clear_active_turn_runtime_handles(params.session_id)
+                .await;
             {
                 let mut session = session_arc.lock().await;
                 if session
@@ -624,11 +624,7 @@ impl ServerRuntime {
             self.clear_research_child_agents(session_id).await;
         }
         let final_usage = usage_ledger.lock().await.aggregate();
-        self.active_tasks.lock().await.remove(&session_id);
-        self.active_turn_cancellations
-            .lock()
-            .await
-            .remove(&session_id);
+        self.clear_active_turn_runtime_handles(session_id).await;
 
         match result {
             Ok(()) => {
@@ -1544,47 +1540,27 @@ impl ServerRuntime {
                 )
                 .await;
             }
-            QueryEvent::Usage {
-                input_tokens,
-                output_tokens,
-                cache_creation_input_tokens,
-                cache_read_input_tokens,
-            } => {
+            QueryEvent::Usage { usage } => {
                 let usage_key = format!("final_report_call_{}", capture.usage_invocation_index);
                 self.apply_research_usage(
                     session_id,
                     turn_id,
                     usage_ledger,
                     usage_key,
-                    ResearchUsageTotals::from_parts(
-                        input_tokens,
-                        output_tokens,
-                        cache_creation_input_tokens,
-                        cache_read_input_tokens,
-                    ),
+                    ResearchUsageTotals::from_usage(&usage),
                     context_window,
                 )
                 .await;
                 capture.usage_invocation_index += 1;
             }
-            QueryEvent::UsageDelta {
-                input_tokens,
-                output_tokens,
-                cache_creation_input_tokens,
-                cache_read_input_tokens,
-            } => {
+            QueryEvent::UsageDelta { usage } => {
                 let usage_key = format!("final_report_call_{}", capture.usage_invocation_index);
                 self.apply_research_usage(
                     session_id,
                     turn_id,
                     usage_ledger,
                     usage_key,
-                    ResearchUsageTotals::from_parts(
-                        input_tokens,
-                        output_tokens,
-                        cache_creation_input_tokens,
-                        cache_read_input_tokens,
-                    ),
+                    ResearchUsageTotals::from_usage(&usage),
                     context_window,
                 )
                 .await;
@@ -2546,19 +2522,20 @@ impl ServerRuntime {
             ledger.by_invocation.insert(usage_key, usage);
             (ledger.base, ledger.aggregate())
         };
-        let (total_input_tokens, total_output_tokens, total_cache_read_tokens) = {
+        let (total_input_tokens, total_output_tokens, total_tokens, total_cache_read_tokens) = {
             let mut session = session_arc.lock().await;
             session.summary.total_input_tokens = base.input_tokens + aggregate.input_tokens;
             session.summary.total_output_tokens = base.output_tokens + aggregate.output_tokens;
+            session.summary.total_tokens = base.total_tokens + aggregate.total_tokens;
             session.summary.total_cache_creation_tokens =
                 base.cache_creation_input_tokens + aggregate.cache_creation_input_tokens;
             session.summary.total_cache_read_tokens =
                 base.cache_read_input_tokens + aggregate.cache_read_input_tokens;
-            session.summary.last_query_total_tokens =
-                aggregate.input_tokens + aggregate.output_tokens;
+            session.summary.last_query_total_tokens = aggregate.total_tokens;
             (
                 session.summary.total_input_tokens,
                 session.summary.total_output_tokens,
+                session.summary.total_tokens,
                 session.summary.total_cache_read_tokens,
             )
         };
@@ -2568,6 +2545,7 @@ impl ServerRuntime {
             usage: aggregate.to_turn_usage(),
             total_input_tokens,
             total_output_tokens,
+            total_tokens,
             total_cache_read_tokens,
             last_query_input_tokens: aggregate.input_tokens,
             context_window,
@@ -2581,8 +2559,10 @@ impl ServerRuntime {
             ResearchUsageTotals {
                 input_tokens: session.summary.total_input_tokens,
                 output_tokens: session.summary.total_output_tokens,
+                total_tokens: session.summary.total_tokens,
                 cache_creation_input_tokens: session.summary.total_cache_creation_tokens,
                 cache_read_input_tokens: session.summary.total_cache_read_tokens,
+                reasoning_output_tokens: 0,
             }
         } else {
             ResearchUsageTotals::default()

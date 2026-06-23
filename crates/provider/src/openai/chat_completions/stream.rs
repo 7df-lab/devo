@@ -550,12 +550,19 @@ impl ChatCompletionStreamState {
             usage: self.usage.as_ref().map(|usage| OpenAICompletionUsage {
                 prompt_tokens: usage.input_tokens,
                 completion_tokens: usage.output_tokens,
-                total_tokens: Some(usage.input_tokens + usage.output_tokens),
+                total_tokens: usage.total_tokens,
                 prompt_tokens_details: Some(super::OpenAIPromptTokenDetails {
                     audio_tokens: None,
                     cached_tokens: usage.cache_read_input_tokens,
                 }),
-                completion_tokens_details: None,
+                completion_tokens_details: usage.reasoning_output_tokens.map(|reasoning_tokens| {
+                    super::OpenAICompletionTokenDetails {
+                        accepted_prediction_tokens: None,
+                        audio_tokens: None,
+                        reasoning_tokens: Some(reasoning_tokens),
+                        rejected_prediction_tokens: None,
+                    }
+                }),
             }),
         }
     }
@@ -684,6 +691,11 @@ fn usage_from_completion_usage(usage: OpenAICompletionUsage) -> Usage {
             .prompt_tokens_details
             .as_ref()
             .and_then(|details| details.cached_tokens),
+        reasoning_output_tokens: usage
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens),
+        total_tokens: usage.total_tokens,
     }
 }
 
@@ -997,6 +1009,9 @@ mod tests {
                 "total_tokens": 18,
                 "prompt_tokens_details": {
                     "cached_tokens": 3
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 2
                 }
             }
         })));
@@ -1037,6 +1052,8 @@ mod tests {
         assert_eq!(response.usage.input_tokens, 11);
         assert_eq!(response.usage.output_tokens, 7);
         assert_eq!(response.usage.cache_read_input_tokens, Some(3));
+        assert_eq!(response.usage.reasoning_output_tokens, Some(2));
+        assert_eq!(response.usage.total_tokens, Some(18));
         assert_eq!(response.content.len(), 1);
         match &response.content[0] {
             ResponseContent::ToolUse { id, name, input } => {

@@ -160,6 +160,7 @@ impl ServerRuntime {
                     let (
                         compacted_total_input_tokens,
                         compacted_total_output_tokens,
+                        compacted_total_tokens,
                         compacted_total_cache_creation_tokens,
                         compacted_total_cache_read_tokens,
                         compacted_prompt_token_estimate,
@@ -178,6 +179,7 @@ impl ServerRuntime {
                         (
                             core_session.total_input_tokens,
                             core_session.total_output_tokens,
+                            core_session.total_tokens,
                             core_session.total_cache_creation_tokens,
                             core_session.total_cache_read_tokens,
                             compacted_prompt_token_estimate,
@@ -185,6 +187,7 @@ impl ServerRuntime {
                     };
                     runtime_session.summary.total_input_tokens = compacted_total_input_tokens;
                     runtime_session.summary.total_output_tokens = compacted_total_output_tokens;
+                    runtime_session.summary.total_tokens = compacted_total_tokens;
                     runtime_session.summary.total_cache_creation_tokens =
                         compacted_total_cache_creation_tokens;
                     runtime_session.summary.total_cache_read_tokens =

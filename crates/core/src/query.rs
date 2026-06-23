@@ -123,12 +123,7 @@ pub enum QueryEvent {
     ReasoningCompleted,
     /// Incremental token usage update from the provider stream.
     /// TODO: Review the mechanism from the OpenAI API / Anthropic API documentation.
-    UsageDelta {
-        input_tokens: usize,
-        output_tokens: usize,
-        cache_creation_input_tokens: Option<usize>,
-        cache_read_input_tokens: Option<usize>,
-    },
+    UsageDelta { usage: devo_protocol::Usage },
     /// The assistant started a tool call.
     ToolUseStart {
         /// Stable provider-issued tool use identifier.
@@ -162,12 +157,7 @@ pub enum QueryEvent {
     /// A turn is complete (model stopped generating).
     TurnComplete { stop_reason: StopReason },
     /// Token usage update.
-    Usage {
-        input_tokens: usize,
-        output_tokens: usize,
-        cache_creation_input_tokens: Option<usize>,
-        cache_read_input_tokens: Option<usize>,
-    },
+    Usage { usage: devo_protocol::Usage },
 }
 
 /// Callback for streaming query events to the UI layer.
@@ -1050,30 +1040,20 @@ pub async fn query(
                     // Accumulate all usage counters at completion time.
                     session.total_input_tokens += response.usage.input_tokens;
                     session.total_output_tokens += response.usage.output_tokens;
+                    session.total_tokens += response.usage.display_total_tokens();
                     session.total_cache_creation_tokens +=
                         response.usage.cache_creation_input_tokens.unwrap_or(0);
                     session.total_cache_read_tokens +=
                         response.usage.cache_read_input_tokens.unwrap_or(0);
                     session.last_input_tokens = response.usage.input_tokens;
-                    session.last_turn_tokens = response
-                        .usage
-                        .input_tokens
-                        .saturating_add(response.usage.output_tokens);
+                    session.last_turn_tokens = response.usage.display_total_tokens();
 
                     emit(QueryEvent::Usage {
-                        input_tokens: response.usage.input_tokens,
-                        output_tokens: response.usage.output_tokens,
-                        cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
-                        cache_read_input_tokens: response.usage.cache_read_input_tokens,
+                        usage: response.usage.clone(),
                     });
                 }
                 Ok(StreamEvent::UsageDelta(usage)) => {
-                    emit(QueryEvent::UsageDelta {
-                        input_tokens: usage.input_tokens,
-                        output_tokens: usage.output_tokens,
-                        cache_creation_input_tokens: usage.cache_creation_input_tokens,
-                        cache_read_input_tokens: usage.cache_read_input_tokens,
-                    });
+                    emit(QueryEvent::UsageDelta { usage });
                 }
                 Err(e) => {
                     warn!(
@@ -1597,6 +1577,7 @@ fn retry_backoff_duration(attempt: usize) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use devo_protocol::Usage;
     use std::collections::HashMap;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -1632,7 +1613,6 @@ mod tests {
     use devo_protocol::StreamEvent;
     use devo_protocol::ThreadGoal;
     use devo_protocol::ThreadGoalStatus;
-    use devo_protocol::Usage;
     use devo_provider::ModelProviderSDK;
     use devo_safety::PermissionMode;
     use futures::Stream;

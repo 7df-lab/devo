@@ -6,7 +6,7 @@ active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-06-10
+last_updated: 2026-06-23
 ---
 
 # L2-DES-GOAL-001 — Ralph Loop Goals
@@ -133,7 +133,7 @@ Conceptual persistent goal fields:
 | `token_budget` | Optional token budget. |
 | `time_budget_seconds` | Optional wall-clock budget. |
 | `turn_budget` | Optional continuation-turn budget. |
-| `tokens_used` | Accounted non-cached input plus output tokens. |
+| `tokens_used` | Accounted non-cached input plus output tokens; reasoning breakdowns are not added separately. |
 | `time_used_seconds` | Accounted wall-clock runtime. |
 | `turns_used` | Counted goal-driven turns. |
 | `progress_summary` | Current concise progress state for display and continuation. |
@@ -231,6 +231,8 @@ goal_token_delta = non_cached_input_tokens + output_tokens
 ```
 
 Cached input tokens are excluded because they represent reused context rather than newly consumed context cost for the current goal. If a provider reports reasoning tokens separately, the model usage normalization layer must state whether they are already included in `output_tokens`. Goal accounting must not double-count reasoning tokens.
+
+For goal accounting, `reasoning_output_tokens` is always treated as observability breakdown only. It must not be added to `output_tokens`, `goal_token_delta`, or any configured token-budget comparison unless a future design explicitly changes the accounting model.
 
 When a configured token budget is reached, the server should allow one final hidden budget-limit wrap-up turn. That wrap-up prompt must tell the model not to start new substantive work and to summarize useful progress, remaining work, or blockers. The runtime should switch the goal to `budget_limited` when the wrap-up turn is reserved, preventing any further autonomous continuation after the wrap-up.
 
@@ -435,3 +437,4 @@ After restart, the server must not blindly continue just because the last durabl
 | 1 | 2026-05-25 | Human | Refinement | Set first-milestone `/goal <objective>` creation to default to no explicit budget. |
 | 1 | 2026-05-25 | Assistant | Refinement | Clarified that budget fields are optional, usage accounting still occurs without a configured budget, and hidden context must not fabricate a default budget. |
 | 1 | 2026-06-10 | Assistant | Refinement | Aligned v1 with Codex-style goal continuation: no evaluator LLM, no public blocked wire state, JSONL-only durable goal source, model tool accepts only `complete`, hidden context preserves tool-call adjacency, and unrecoverable provider/protocol errors suppress continuation. |
+| 1 | 2026-06-23 | Assistant | Refinement | Clarified conservative token accounting: goal usage remains non-cached input plus output, and reasoning breakdowns are never added separately. |

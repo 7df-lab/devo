@@ -242,6 +242,7 @@ pub struct SessionState {
     pub turn_count: usize,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
+    pub total_tokens: usize,
     pub total_cache_creation_tokens: usize, // TODO: from Anthropic Messages API, indicate how many tokens utlized to create cache.
     pub total_cache_read_tokens: usize,     // TODO: same with `total_input_cached_tokens`.
     pub prompt_token_estimate: usize,
@@ -278,6 +279,7 @@ impl SessionState {
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_tokens: 0,
             total_cache_creation_tokens: 0,
             total_cache_read_tokens: 0,
             prompt_token_estimate: 0,

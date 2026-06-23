@@ -45,6 +45,8 @@ async fn responses_stream_completion_closes_tagged_reasoning_before_message_done
                         output_tokens: 1,
                         cache_creation_input_tokens: None,
                         cache_read_input_tokens: None,
+                        reasoning_output_tokens: None,
+                        total_tokens: None,
                     },
                     metadata: ResponseMetadata {
                         extras: vec![ResponseExtra::ReasoningText {

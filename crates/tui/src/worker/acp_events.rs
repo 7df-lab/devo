@@ -56,6 +56,7 @@ impl From<AcpSessionUpdateRender<'_>> for Vec<WorkerEvent> {
                         WorkerEvent::TextItemDelta {
                             item_id,
                             kind: TextItemKind::Assistant,
+                            research: None,
                             delta,
                         }
                     } else {
@@ -74,6 +75,7 @@ impl From<AcpSessionUpdateRender<'_>> for Vec<WorkerEvent> {
                         WorkerEvent::TextItemDelta {
                             item_id,
                             kind: TextItemKind::Reasoning,
+                            research: None,
                             delta,
                         }
                     } else {

@@ -106,11 +106,7 @@ fn collect_text_messages(session: &SessionState) -> Vec<String> {
 
 fn last_usage(events: &[QueryEvent]) -> Option<(usize, usize)> {
     events.iter().rev().find_map(|event| match event {
-        QueryEvent::Usage {
-            input_tokens,
-            output_tokens,
-            ..
-        } => Some((*input_tokens, *output_tokens)),
+        QueryEvent::Usage { usage } => Some((usage.input_tokens, usage.output_tokens)),
         _ => None,
     })
 }
