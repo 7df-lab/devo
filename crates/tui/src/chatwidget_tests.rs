@@ -5306,7 +5306,7 @@ fn monitor_agent(
 }
 
 #[test]
-fn subagent_discovery_shows_ctrl_x_hint_without_auto_opening_selector() {
+fn subagent_discovery_shows_inline_live_list_without_focusing_it() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
@@ -5333,13 +5333,14 @@ fn subagent_discovery_shows_ctrl_x_hint_without_auto_opening_selector() {
     assert_eq!(widget.selected_subagent_for_test(), Some(child));
     let rows = rendered_rows(&widget, 160, 18).join("\n");
     assert!(rows.contains("ctrl + x agents"), "rows:\n{rows}");
-    assert!(!rows.contains("checking files"), "rows:\n{rows}");
+    assert!(rows.contains("reviewer: running"), "rows:\n{rows}");
+    assert!(rows.contains("checking files"), "rows:\n{rows}");
     let parent_transcript = line_texts(widget.transcript_overlay_lines(80)).join("\n");
     assert!(!parent_transcript.contains("checking files"));
 }
 
 #[test]
-fn ctrl_x_selector_selects_live_subagents_and_q_exits() {
+fn ctrl_x_focuses_inline_live_list_and_q_exits() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
@@ -5361,9 +5362,11 @@ fn ctrl_x_selector_selects_live_subagents_and_q_exits() {
     assert!(widget.is_subagent_monitor_open_for_test());
     assert_eq!(widget.selected_subagent_for_test(), Some(second));
     let rows = rendered_rows(&widget, 160, 18).join("\n");
-    assert!(rows.contains("Sub-agents"), "rows:\n{rows}");
+    assert!(!rows.contains("Sub-agents"), "rows:\n{rows}");
+    assert!(rows.contains("first: running"), "rows:\n{rows}");
+    assert!(rows.contains("second: running"), "rows:\n{rows}");
     assert!(rows.contains("run first"), "rows:\n{rows}");
-    assert!(rows.contains("root/second"), "rows:\n{rows}");
+    assert!(!rows.contains("root/second"), "rows:\n{rows}");
 
     widget.handle_key_event(press_key(KeyCode::Up));
     assert_eq!(widget.selected_subagent_for_test(), Some(first));
@@ -5372,6 +5375,50 @@ fn ctrl_x_selector_selects_live_subagents_and_q_exits() {
 
     widget.handle_key_event(press_key(KeyCode::Char('q')));
     assert!(!widget.is_subagent_monitor_open_for_test());
+}
+
+#[test]
+fn subagent_live_list_scrolls_with_three_visible_rows() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let first = SessionId::new();
+    let second = SessionId::new();
+    let third = SessionId::new();
+    let fourth = SessionId::new();
+
+    for (session_id, nickname) in [
+        (first, "first"),
+        (second, "second"),
+        (third, "third"),
+        (fourth, "fourth"),
+    ] {
+        widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+            agent: monitor_agent(session_id, parent, nickname),
+        });
+    }
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    assert_eq!(widget.selected_subagent_for_test(), Some(fourth));
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(!rows.contains("run first"), "rows:\n{rows}");
+    assert!(rows.contains("run second"), "rows:\n{rows}");
+    assert!(rows.contains("run third"), "rows:\n{rows}");
+    assert!(rows.contains("run fourth"), "rows:\n{rows}");
+
+    widget.handle_key_event(press_key(KeyCode::Up));
+    widget.handle_key_event(press_key(KeyCode::Up));
+    widget.handle_key_event(press_key(KeyCode::Up));
+    assert_eq!(widget.selected_subagent_for_test(), Some(first));
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(rows.contains("run first"), "rows:\n{rows}");
+    assert!(rows.contains("run second"), "rows:\n{rows}");
+    assert!(rows.contains("run third"), "rows:\n{rows}");
+    assert!(!rows.contains("run fourth"), "rows:\n{rows}");
 }
 
 #[test]
@@ -5406,7 +5453,108 @@ fn terminal_subagent_status_hides_ctrl_x_hint_when_no_live_children_remain() {
 }
 
 #[test]
-fn subagent_selector_enter_emits_overlay_request_for_selected_child() {
+fn terminal_cancelled_subagent_disappears_from_live_list() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "builder"),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TurnFinished {
+            session_id: child,
+            status: "cancelled".to_string(),
+        },
+    });
+
+    assert!(!widget.has_live_subagents_for_test());
+    let rows = rendered_rows(&widget, 100, 18).join("\n");
+    assert!(!rows.contains("builder: cancelled"), "rows:\n{rows}");
+    assert!(!rows.contains("ctrl + x agents"), "rows:\n{rows}");
+}
+
+#[test]
+fn subagent_live_list_latest_preview_updates_without_parent_transcript_pollution() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let parent = SessionId::new();
+    let child = SessionId::new();
+    let item_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentDiscovered {
+        agent: monitor_agent(child, parent, "researcher"),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::TextItemDelta {
+            session_id: child,
+            item_id: Some(item_id),
+            kind: crate::events::TextItemKind::Assistant,
+            delta: "reading design notes".to_string(),
+        },
+    });
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(rows.contains("reading design notes"), "rows:\n{rows}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::ToolCall {
+            session_id: child,
+            tool_use_id: "tool-1".to_string(),
+            summary: "rg query".to_string(),
+        },
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::ToolOutputDelta {
+            session_id: child,
+            tool_use_id: "tool-1".to_string(),
+            delta: "found matches".to_string(),
+        },
+    });
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(rows.contains("rg query: found matches"), "rows:\n{rows}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::ToolResult {
+            session_id: child,
+            tool_use_id: "tool-1".to_string(),
+            title: "rg query".to_string(),
+            preview: "matches summarized".to_string(),
+            is_error: false,
+        },
+    });
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(rows.contains("matches summarized"), "rows:\n{rows}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SubagentMonitor {
+        event: crate::events::SubagentMonitorEvent::PlanUpdated {
+            session_id: child,
+            explanation: Some("Checking candidate files".to_string()),
+            steps: vec![PlanStep {
+                text: "Inspect TUI state".to_string(),
+                status: PlanStepStatus::InProgress,
+            }],
+        },
+    });
+    let rows = rendered_rows(&widget, 160, 18).join("\n");
+    assert!(rows.contains("Checking candidate files"), "rows:\n{rows}");
+
+    let parent_transcript = line_texts(widget.transcript_overlay_lines(80)).join("\n");
+    assert!(!parent_transcript.contains("reading design notes"));
+    assert!(!parent_transcript.contains("matches summarized"));
+    assert!(!parent_transcript.contains("Checking candidate files"));
+}
+
+#[test]
+fn subagent_live_list_enter_emits_overlay_request_for_selected_child() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),

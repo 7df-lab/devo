@@ -62,7 +62,7 @@ mod session_header;
 
 mod subagent_monitor;
 
-mod subagent_selector;
+mod subagent_live_list;
 
 mod permission_presets;
 
