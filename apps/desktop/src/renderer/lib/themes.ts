@@ -75,7 +75,7 @@ export interface ThemeDefinition {
 
 	/**
 	 * Glass transparency tuning. Only takes effect when the window has
-	 * native transparency (liquid glass or vibrancy). Themes can adjust
+	 * native or BrowserWindow transparency. Themes can adjust
 	 * opacity per surface, blur intensity, or disable glass entirely.
 	 *
 	 * Values override the CSS custom properties defined in globals.css.

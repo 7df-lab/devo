@@ -2,7 +2,6 @@ import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
-	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@devo/ui/components/dropdown-menu"
 import { Input } from "@devo/ui/components/input"
@@ -33,9 +32,14 @@ import type {
 	VcsData,
 } from "../hooks/use-devo-data"
 import type { ChatTurn } from "../hooks/use-session-chat"
+import { formatShortcut } from "../lib/shortcut-display"
 import type { Agent, FileAttachment, QuestionAnswer } from "../lib/types"
-import { fetchOpenInTargets, isElectron, openInTarget } from "../services/backend"
-import { useSetAppBarContent } from "./app-bar-context"
+import {
+	fetchOpenInTargets,
+	isElectron,
+	openInTarget,
+	setOpenInPreferred,
+} from "../services/backend"
 import { ChatView } from "./chat"
 import { ReviewPanel } from "./review/review-panel"
 import { SessionMetricsBar } from "./session-metrics-bar"
@@ -129,7 +133,6 @@ export function AgentDetail({
 }: AgentDetailProps) {
 	const navigate = useNavigate()
 	const { projectSlug } = useParams({ strict: false }) as { projectSlug?: string }
-	const setAppBarContent = useSetAppBarContent()
 
 	const [isEditingTitle, setIsEditingTitle] = useState(false)
 	const [titleValue, setTitleValue] = useState(agent.name)
@@ -139,7 +142,7 @@ export function AgentDetail({
 	const [reviewPanelOpen, setReviewPanelOpen] = useAtom(reviewPanelOpenAtom)
 	const [reviewSettings, setReviewSettings] = useAtom(reviewPanelSettingsAtom)
 
-	// Keyboard shortcut: Cmd+Shift+D to toggle review panel
+	// Keyboard shortcut: Cmd/Ctrl+Shift+D to toggle review panel
 	useEffect(() => {
 		const handleKeyDown = (e: KeyboardEvent) => {
 			if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "d") {
@@ -195,10 +198,9 @@ export function AgentDetail({
 		}
 	}, [isEditingTitle])
 
-	// ===== Inject session info into AppBar right section =====
-	useEffect(() => {
-		setAppBarContent(
-			<SessionAppBarContent
+	const chatContent = (
+		<>
+			<SessionPanelHeader
 				agent={agent}
 				isEditingTitle={isEditingTitle}
 				titleValue={titleValue}
@@ -211,37 +213,20 @@ export function AgentDetail({
 				projectSlug={projectSlug}
 				reviewPanelOpen={reviewPanelOpen}
 				onToggleReviewPanel={() => setReviewPanelOpen((prev) => !prev)}
-			/>,
-		)
+			/>
 
-		// Clean up when unmounting
-		return () => setAppBarContent(null)
-	}, [
-		agent,
-		isEditingTitle,
-		titleValue,
-		startEditingTitle,
-		confirmTitle,
-		cancelEditingTitle,
-		onRename,
-		projectSlug,
-		setAppBarContent,
-		reviewPanelOpen,
-		setReviewPanelOpen,
-	])
-
-	const chatContent = (
-		<>
 			{/* Sub-agent breadcrumb -- navigate back to parent */}
 			{agent.parentId && (
 				<button
 					type="button"
-					onClick={() =>
+					onClick={() => {
+						const parentId = agent.parentId
+						if (!parentId) return
 						navigate({
 							to: "/project/$projectSlug/session/$sessionId",
-							params: { projectSlug: projectSlug ?? agent.projectSlug, sessionId: agent.parentId! },
+							params: { projectSlug: projectSlug ?? agent.projectSlug, sessionId: parentId },
 						})
-					}
+					}}
 					className="flex items-center gap-1.5 border-b border-border bg-muted/30 px-4 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
 				>
 					<ArrowLeftIcon className="size-3" />
@@ -279,10 +264,10 @@ export function AgentDetail({
 					onUndo={onUndo}
 					onRedo={onRedo}
 					isReverted={isReverted}
-				onRevertToMessage={onRevertToMessage}
-				onForkFromTurn={onForkFromTurn}
-				onDeletePart={onDeletePart}
-				reviewPanelOpen={reviewPanelOpen}
+					onRevertToMessage={onRevertToMessage}
+					onForkFromTurn={onForkFromTurn}
+					onDeletePart={onDeletePart}
+					reviewPanelOpen={reviewPanelOpen}
 				/>
 			</div>
 		</>
@@ -308,10 +293,10 @@ export function AgentDetail({
 }
 
 // ============================================================
-// Session header content injected into the AppBar
+// Session panel header
 // ============================================================
 
-function SessionAppBarContent({
+function SessionPanelHeader({
 	agent,
 	isEditingTitle,
 	titleValue,
@@ -340,19 +325,14 @@ function SessionAppBarContent({
 }) {
 	const navigate = useNavigate()
 	const diffStats = useAtomValue(sessionDiffStatsFamily(agent.sessionId))
+	const toggleReviewPanelShortcut = formatShortcut(["shift", "mod", "D"])
 
 	return (
-		<div className="flex h-full w-full min-w-0 items-center gap-2.5">
+		<div className="flex h-[46px] w-full min-w-0 shrink-0 items-center gap-2.5 border-b border-border/50 px-4">
 			{/* Breadcrumb: project / [branch badge] / session name */}
-			<div
-				className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden"
-				style={{
-					// @ts-expect-error -- vendor-prefixed CSS property
-					WebkitAppRegion: "no-drag",
-				}}
-			>
+			<div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
 				{/* Project name */}
-				<span className="hidden shrink-0 text-xs leading-none text-muted-foreground sm:inline">
+				<span className="hidden shrink-0 text-xs font-semibold leading-none text-foreground sm:inline">
 					{agent.project}
 				</span>
 
@@ -400,13 +380,7 @@ function SessionAppBarContent({
 			</div>
 
 			{/* Right-aligned items */}
-			<div
-				className="flex min-w-0 shrink-0 items-center gap-2.5 overflow-hidden"
-				style={{
-					// @ts-expect-error -- vendor-prefixed CSS property
-					WebkitAppRegion: "no-drag",
-				}}
-			>
+			<div className="flex min-w-0 shrink-0 items-center gap-2.5 overflow-hidden">
 				{/* Worktree actions (Apply to local, Commit & push) */}
 				{agent.worktreePath && <WorktreeActions agent={agent} />}
 
@@ -437,7 +411,7 @@ function SessionAppBarContent({
 						)}
 					</TooltipTrigger>
 					<TooltipContent>
-						{reviewPanelOpen ? "Hide changes panel" : "Show changes panel"} (Cmd+Shift+D)
+						{`${reviewPanelOpen ? "Hide changes panel" : "Show changes panel"} (${toggleReviewPanelShortcut})`}
 					</TooltipContent>
 				</Tooltip>
 
@@ -547,6 +521,19 @@ function OpenInButton({ directory }: { directory: string }) {
 		[directory],
 	)
 
+	const handleSelectTarget = useCallback(
+		async (targetId: string) => {
+			const previousTarget = preferred
+			setPreferred(targetId)
+			try {
+				await setOpenInPreferred(targetId)
+			} catch {
+				setPreferred(previousTarget)
+			}
+		},
+		[preferred],
+	)
+
 	const handlePrimaryClick = useCallback(async () => {
 		const { targets: availableTargets, preferredTarget } = loaded
 			? { targets, preferredTarget: preferred }
@@ -566,7 +553,7 @@ function OpenInButton({ directory }: { directory: string }) {
 	const preferredTarget = targets.find((t) => t.id === preferred)
 
 	return (
-		<div className="flex items-center rounded-md border border-border/60">
+		<div className="flex items-center rounded-md border border-border/80 ring-1 ring-border/25">
 			<button
 				type="button"
 				onClick={handlePrimaryClick}
@@ -578,7 +565,7 @@ function OpenInButton({ directory }: { directory: string }) {
 				) : (
 					<ExternalLinkIcon className="size-3" />
 				)}
-				<span>Open</span>
+				<span>Open in</span>
 			</button>
 
 			<DropdownMenu onOpenChange={(open) => open && loadTargets()}>
@@ -586,7 +573,7 @@ function OpenInButton({ directory }: { directory: string }) {
 					render={
 						<button
 							type="button"
-							className="rounded-r-md border-l border-border/60 px-1 py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+							className="rounded-r-md border-l border-border/70 px-1 py-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
 						/>
 					}
 				>
@@ -598,26 +585,20 @@ function OpenInButton({ directory }: { directory: string }) {
 					) : targets.length === 0 ? (
 						<DropdownMenuItem disabled>No editors found</DropdownMenuItem>
 					) : (
-						<>
-							{targets.map((target) => (
-								<DropdownMenuItem
-									key={target.id}
-									onClick={() => handleOpen(target.id)}
-									disabled={opening === target.id}
-									className="flex items-center gap-2"
-								>
-									<TargetIcon iconDataUrl={target.iconDataUrl} className="size-4" />
-									<span className="flex-1">{target.label}</span>
-									{preferred === target.id && (
-										<CheckIcon className="size-3 shrink-0 text-muted-foreground/60" />
-									)}
-								</DropdownMenuItem>
-							))}
-							<DropdownMenuSeparator />
-							<DropdownMenuItem disabled className="text-[11px] text-muted-foreground/50">
-								{directory}
+						targets.map((target) => (
+							<DropdownMenuItem
+								key={target.id}
+								onClick={() => handleSelectTarget(target.id)}
+								disabled={opening !== null}
+								className="flex items-center gap-2"
+							>
+								<TargetIcon iconDataUrl={target.iconDataUrl} className="size-4" />
+								<span className="flex-1">{target.label}</span>
+								{preferred === target.id && (
+									<CheckIcon className="size-3 shrink-0 text-muted-foreground/60" />
+								)}
 							</DropdownMenuItem>
-						</>
+						))
 					)}
 				</DropdownMenuContent>
 			</DropdownMenu>
@@ -659,6 +640,7 @@ function WorktreeBranchBadge({ branch }: { branch: string }) {
 
 function TerminalToggleButton() {
 	const setTerminalPanelOpen = useSetAtom(terminalPanelOpenAtom)
+	const toggleTerminalShortcut = formatShortcut(["mod", "J"])
 
 	return (
 		<Tooltip>
@@ -674,7 +656,7 @@ function TerminalToggleButton() {
 			>
 				<TerminalIcon className="size-3.5" aria-hidden="true" />
 			</TooltipTrigger>
-			<TooltipContent>Toggle terminal (Cmd+J)</TooltipContent>
+			<TooltipContent>Toggle terminal ({toggleTerminalShortcut})</TooltipContent>
 		</Tooltip>
 	)
 }

@@ -99,9 +99,8 @@ export function useThemeEffect() {
 		const styleEl = getOrCreateStyleElement()
 		styleEl.textContent = buildThemeCss(theme)
 
-		// Sync native theme with macOS so the glass tint matches the CSS color scheme.
-		// Without this, macOS applies its system appearance (dark/light) to the native
-		// glass layer regardless of what the app's CSS says — causing mismatched tinting.
+		// Sync native theme with OS chrome so macOS glass tint and Windows window
+		// control symbols match the app's CSS color scheme.
 		if ("devo" in window) {
 			window.devo.setNativeTheme(colorScheme === "system" ? "system" : cls)
 		}

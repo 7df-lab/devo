@@ -4,6 +4,7 @@ import { messagesFamily } from "../atoms/messages"
 import { partsFamily, partStorageKey } from "../atoms/parts"
 import { sessionFamily } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
+import { formatShortcut } from "../lib/shortcut-display"
 import type { Session, TextPart } from "../lib/types"
 import { getProjectClient } from "../services/connection-manager"
 import { useServerCommands } from "./use-devo-data"
@@ -162,6 +163,8 @@ export function useCommands(
 	const entry = useAtomValue(sessionFamily(sessionId ?? ""))
 	const sessionStatus = entry?.status
 	const isIdle = sessionStatus?.type === "idle" || !sessionStatus
+	const undoShortcut = formatShortcut(["mod", "Z"])
+	const redoShortcut = formatShortcut(["shift", "mod", "Z"])
 
 	const clientCommands = useMemo<AppCommand[]>(() => {
 		const cmds: AppCommand[] = []
@@ -171,7 +174,7 @@ export function useCommands(
 			label: "Undo",
 			description: "Undo the last turn and restore file changes",
 			enabled: canUndo,
-			shortcut: "⌘Z",
+			shortcut: undoShortcut,
 			source: "client",
 			execute: async () => {
 				const text = await undo()
@@ -186,7 +189,7 @@ export function useCommands(
 			label: "Redo",
 			description: "Restore previously undone messages",
 			enabled: canRedo,
-			shortcut: "⇧⌘Z",
+			shortcut: redoShortcut,
 			source: "client",
 			execute: async () => {
 				await redo()
@@ -213,6 +216,8 @@ export function useCommands(
 		canRedo,
 		undo,
 		redo,
+		undoShortcut,
+		redoShortcut,
 		directory,
 		sessionId,
 		isIdle,

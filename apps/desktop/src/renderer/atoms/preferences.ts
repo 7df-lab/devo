@@ -80,7 +80,8 @@ export const opaqueWindowsAtom = atomWithStorage<boolean>("devo:opaqueWindows", 
 
 /**
  * The active window chrome tier, set by the main process on load.
- * "liquid-glass" = macOS 26+, "vibrancy" = older macOS, "opaque" = non-macOS or user pref.
+ * "liquid-glass" = macOS 26+, "vibrancy" = older macOS, "transparent" = Windows,
+ * "opaque" = Linux or user pref.
  * Defaults to "opaque" for browser-mode dev (no Electron).
  */
 export const chromeTierAtom = atom<WindowChromeTier>("opaque")
@@ -92,7 +93,7 @@ export const chromeTierAtom = atom<WindowChromeTier>("opaque")
 export const isTransparentAtom = atom((get) => {
 	const tier = get(chromeTierAtom)
 	const opaque = get(opaqueWindowsAtom)
-	return !opaque && (tier === "liquid-glass" || tier === "vibrancy")
+	return !opaque && (tier === "liquid-glass" || tier === "vibrancy" || tier === "transparent")
 })
 
 export const draftsAtom = atomWithStorage<Record<string, string>>("devo:drafts", {})

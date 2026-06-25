@@ -14,6 +14,12 @@ import {
 	DropdownMenuTrigger,
 } from "@devo/ui/components/dropdown-menu"
 import { Input } from "@devo/ui/components/input"
+import {
+	optionMenuContentClass,
+	optionMenuIconClass,
+	optionMenuItemClass,
+	optionMenuSeparatorClass,
+} from "@devo/ui/components/option-menu-styles"
 import { cn } from "@devo/ui/lib/utils"
 import { useNavigate } from "@tanstack/react-router"
 import {
@@ -23,8 +29,8 @@ import {
 	ChevronDownIcon,
 	ChevronRightIcon,
 	CheckCircle2Icon,
+	FolderClosedIcon,
 	FolderOpenIcon,
-	FolderIcon,
 	GitForkIcon,
 	Loader2Icon,
 	MoreHorizontalIcon,
@@ -88,14 +94,24 @@ function statusIndicatorClass(status: AgentStatus): string {
 }
 
 const rowMenuContentClass =
-	"w-44 rounded-2xl border border-border/70 bg-popover/95 p-1 shadow-lg shadow-black/10"
-const rowMenuItemClass =
-	"h-7 gap-2 rounded-xl px-2 text-[13px] leading-none text-popover-foreground focus:bg-accent"
-const rowMenuIconClass = "size-3.5 shrink-0 text-muted-foreground"
-const floatingRowActionButtonClass =
-	"absolute right-2 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-[background-color,color,opacity] duration-150 hover:bg-black/[0.06] hover:text-sidebar-foreground focus-visible:bg-black/[0.06] focus-visible:text-sidebar-foreground focus-visible:opacity-100 focus-visible:outline-none group-hover/sidebar-row:opacity-100 group-focus-within/sidebar-row:opacity-100 data-popup-open:opacity-100 dark:hover:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]"
+	cn(optionMenuContentClass, "w-[232px]")
+const rowMenuItemClass = cn(optionMenuItemClass, "focus:bg-accent")
+const rowMenuIconClass = optionMenuIconClass
+const sidebarPrimaryIconClass = "size-4 stroke-[1.6]"
+const floatingRowActionButtonBaseClass =
+	"absolute right-2 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-[background-color,color,opacity] duration-150 hover:bg-black/[0.06] hover:text-sidebar-foreground focus-visible:bg-black/[0.06] focus-visible:text-sidebar-foreground focus-visible:opacity-100 focus-visible:outline-none data-popup-open:opacity-100 dark:hover:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]"
+const floatingRowActionButtonClass = cn(
+	floatingRowActionButtonBaseClass,
+	"group-hover/sidebar-row:opacity-100 group-focus-within/sidebar-row:opacity-100",
+)
 const inlineRowActionButtonClass =
 	"flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-black/[0.06] hover:text-sidebar-foreground focus-visible:bg-black/[0.06] focus-visible:text-sidebar-foreground focus-visible:outline-none dark:hover:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]"
+const projectInlineRowActionButtonClass = cn(inlineRowActionButtonClass, "size-[22px] rounded-[6px]")
+const projectInlineCollapseButtonClass = cn(
+	projectInlineRowActionButtonClass,
+	"ml-1 opacity-0 transition-[background-color,color,opacity] group-hover/sidebar-row:opacity-100 group-focus-within/sidebar-row:opacity-100 focus-visible:opacity-100",
+)
+const projectInlineRowActionIconClass = "size-3.5 stroke-[1.5]"
 
 function sessionActionIcon(actionId: SessionRowActionId) {
 	if (actionId === "rename") return <PencilIcon className={rowMenuIconClass} />
@@ -123,7 +139,9 @@ function ActionMenuItems<TId extends string>({
 }) {
 	return actions.map((action, index) => (
 		<Fragment key={action.id}>
-			{index > 0 && action.variant === "destructive" && <DropdownMenuSeparator className="my-1" />}
+			{index > 0 && action.variant === "destructive" && (
+				<DropdownMenuSeparator className={optionMenuSeparatorClass} />
+			)}
 			<DropdownMenuItem
 				disabled={action.disabled}
 				variant={action.variant}
@@ -147,6 +165,7 @@ function RowActionsDropdown<TId extends string>({
 	iconForAction,
 	onAction,
 	triggerClassName = floatingRowActionButtonClass,
+	triggerIconClassName = "size-4",
 	contentSide = "right",
 	contentAlign = "start",
 }: {
@@ -155,6 +174,7 @@ function RowActionsDropdown<TId extends string>({
 	iconForAction: (actionId: TId) => ReactNode
 	onAction: (actionId: TId) => void
 	triggerClassName?: string
+	triggerIconClassName?: string
 	contentSide?: "top" | "right" | "bottom" | "left"
 	contentAlign?: "start" | "center" | "end"
 }) {
@@ -171,7 +191,7 @@ function RowActionsDropdown<TId extends string>({
 						onClick={(event) => event.stopPropagation()}
 						onMouseDown={(event) => event.stopPropagation()}
 					>
-						<MoreHorizontalIcon className="size-4" />
+						<MoreHorizontalIcon className={triggerIconClassName} />
 					</button>
 				}
 			/>
@@ -199,7 +219,9 @@ function SessionContextMenuItems({
 }) {
 	return actions.map((action, index) => (
 		<Fragment key={action.id}>
-			{index > 0 && action.variant === "destructive" && <ContextMenuSeparator className="my-1" />}
+			{index > 0 && action.variant === "destructive" && (
+				<ContextMenuSeparator className={optionMenuSeparatorClass} />
+			)}
 			<ContextMenuItem
 				variant={action.variant}
 				className={rowMenuItemClass}
@@ -266,57 +288,67 @@ export const ProjectRow = memo(function ProjectRow({
 		[onToggleCollapsed],
 	)
 	const CollapseIcon = isCollapsed ? ChevronRightIcon : ChevronDownIcon
+	const ProjectFolderIcon = canToggleSessions && !isCollapsed ? FolderOpenIcon : FolderClosedIcon
 
 	return (
 		<div
+			onClick={onSelect}
 			className={cn(
 				"group/sidebar-row relative flex h-8 w-full items-center rounded-lg text-sidebar-foreground transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]",
 				isSelected && "bg-black/[0.07] dark:bg-white/[0.08]",
 			)}
 		>
-			<button
-				type="button"
-				onClick={onSelect}
-				className="flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-lg py-0 pr-24 pl-1.5 text-left text-sm leading-none"
-			>
-				<FolderIcon className="size-[18px] shrink-0 stroke-[1.8] text-sidebar-foreground/90" />
-				<span className="min-w-0 flex-1 truncate font-normal tracking-normal">{project.name}</span>
-				{showCount && project.agentCount > 0 && (
-					<span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground transition-opacity duration-150 group-hover/sidebar-row:opacity-0 group-focus-within/sidebar-row:opacity-0">
-						{project.agentCount}
-					</span>
-				)}
-			</button>
-			<div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/sidebar-row:opacity-100 group-focus-within/sidebar-row:opacity-100">
+			<div className="flex h-full min-w-0 flex-1 items-center pr-[52px]">
+				<button
+					type="button"
+					onClick={(event) => {
+						event.stopPropagation()
+						onSelect()
+					}}
+					className="flex h-full min-w-0 items-center gap-2.5 rounded-lg py-0 pr-1 pl-1.5 text-left text-sm leading-none"
+				>
+					<ProjectFolderIcon
+						className={cn(sidebarPrimaryIconClass, "shrink-0 text-sidebar-foreground/90")}
+					/>
+					<span className="min-w-0 truncate font-normal tracking-normal">{project.name}</span>
+					{showCount && project.agentCount > 0 && (
+						<span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground transition-opacity duration-150 group-hover/sidebar-row:opacity-0 group-focus-within/sidebar-row:opacity-0">
+							{project.agentCount}
+						</span>
+					)}
+				</button>
 				{canToggleSessions && (
 					<button
 						type="button"
 						aria-label={isCollapsed ? `Expand ${project.name}` : `Collapse ${project.name}`}
 						aria-pressed={isCollapsed}
-						className={inlineRowActionButtonClass}
+						className={projectInlineCollapseButtonClass}
 						onClick={handleToggle}
 						onMouseDown={(event) => event.stopPropagation()}
 					>
-						<CollapseIcon className="size-4" />
+						<CollapseIcon className={projectInlineRowActionIconClass} />
 					</button>
 				)}
+			</div>
+			<div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/sidebar-row:opacity-100 group-focus-within/sidebar-row:opacity-100">
 				<RowActionsDropdown
 					actions={actions}
 					label={`Project actions for ${project.name}`}
 					iconForAction={projectActionIcon}
 					onAction={handleAction}
-					triggerClassName={inlineRowActionButtonClass}
+					triggerClassName={projectInlineRowActionButtonClass}
+					triggerIconClassName={projectInlineRowActionIconClass}
 					contentSide="bottom"
 					contentAlign="end"
 				/>
 				<button
 					type="button"
 					aria-label={`New session in ${project.name}`}
-					className={inlineRowActionButtonClass}
+					className={projectInlineRowActionButtonClass}
 					onClick={handleNewChat}
 					onMouseDown={(event) => event.stopPropagation()}
 				>
-					<PenLineIcon className="size-4" />
+					<PenLineIcon className={projectInlineRowActionIconClass} />
 				</button>
 			</div>
 		</div>
@@ -404,7 +436,8 @@ export const SessionRow = memo(function SessionRow({
 	const row = (
 		<div
 			className={cn(
-				"group/sidebar-row relative flex min-h-8 w-full items-center rounded-lg text-sidebar-foreground transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]",
+				"group/sidebar-row relative flex min-h-8 w-full items-center rounded-lg text-sidebar-foreground transition-colors",
+				!isSelected && "hover:bg-black/[0.04] dark:hover:bg-white/[0.06]",
 				isSelected && "bg-black/[0.07] dark:bg-white/[0.08]",
 			)}
 		>
@@ -425,11 +458,13 @@ export const SessionRow = memo(function SessionRow({
 						}}
 						onBlur={confirmRename}
 						onClick={(event) => event.stopPropagation()}
-						className="h-6 min-w-0 flex-1 border-none bg-transparent p-0 text-sm shadow-none focus-visible:ring-0"
+						className="h-6 min-w-0 flex-1 border-none bg-transparent p-0 text-[13px] shadow-none focus-visible:ring-0"
 					/>
 				) : (
 					<div className="min-w-0 flex-1">
-						<span className="block truncate font-normal tracking-normal">{agent.name}</span>
+						<span className="block truncate text-[13px] font-normal tracking-normal">
+							{agent.name}
+						</span>
 						{showProject && (
 							<span className="block truncate text-[11px] leading-4 text-muted-foreground">
 								{agent.project}
@@ -439,7 +474,12 @@ export const SessionRow = memo(function SessionRow({
 				)}
 			</button>
 			{!isEditing && (
-				<span className="pointer-events-none absolute right-2 top-1/2 flex h-7 min-w-7 -translate-y-1/2 items-center justify-center gap-1.5 rounded-lg px-1 text-[13px] tabular-nums text-muted-foreground transition-opacity duration-150 group-hover/sidebar-row:opacity-0 group-focus-within/sidebar-row:opacity-0">
+				<span
+					className={cn(
+						"pointer-events-none absolute right-2 top-1/2 flex h-7 min-w-7 -translate-y-1/2 items-center justify-center gap-1.5 rounded-lg px-1 text-[13px] tabular-nums text-muted-foreground transition-opacity duration-150 group-focus-within/sidebar-row:opacity-0",
+						!isSelected && "group-hover/sidebar-row:opacity-0",
+					)}
+				>
 					{agent.status === "running" || agent.status === "waiting" || agent.status === "failed" ? (
 						<span className={cn("size-2 rounded-full", statusIndicatorClass(agent.status))} />
 					) : (
@@ -455,6 +495,7 @@ export const SessionRow = memo(function SessionRow({
 					label={`Session actions for ${agent.name}`}
 					iconForAction={sessionActionIcon}
 					onAction={handleSessionAction}
+					triggerClassName={isSelected ? floatingRowActionButtonBaseClass : undefined}
 				/>
 			)}
 		</div>

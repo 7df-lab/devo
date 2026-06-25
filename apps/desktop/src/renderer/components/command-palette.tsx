@@ -47,6 +47,7 @@ import {
 	useSetTheme,
 } from "../hooks/use-theme"
 import { createLogger } from "../lib/logger"
+import { formatShortcut } from "../lib/shortcut-display"
 import type { ColorScheme } from "../lib/themes"
 import type { Agent } from "../lib/types"
 import { reloadConfig } from "../services/connection-manager"
@@ -92,6 +93,9 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 	const automationsEnabled = useAtomValue(automationsEnabledAtom)
 	const toggleAutomations = useSetAtom(toggleAutomationsAtom)
 	const [reloading, setReloading] = useState(false)
+	const newSessionShortcut = formatShortcut(["mod", "N"])
+	const undoShortcut = formatShortcut(["mod", "Z"])
+	const redoShortcut = formatShortcut(["shift", "mod", "Z"])
 
 	const isElectron = typeof window !== "undefined" && "devo" in window
 
@@ -159,7 +163,7 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 					>
 						<PlusIcon />
 						<span>New Session</span>
-						<CommandShortcut>&#8984;N</CommandShortcut>
+						<CommandShortcut>{newSessionShortcut}</CommandShortcut>
 					</CommandItem>
 					{hasSession && canUndo && (
 						<CommandItem
@@ -170,7 +174,7 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 						>
 							<Undo2Icon />
 							<span>Undo Last Turn</span>
-							<CommandShortcut>&#8984;Z</CommandShortcut>
+							<CommandShortcut>{undoShortcut}</CommandShortcut>
 						</CommandItem>
 					)}
 					{hasSession && canRedo && (
@@ -182,7 +186,7 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 						>
 							<Redo2Icon />
 							<span>Redo</span>
-							<CommandShortcut>&#8679;&#8984;Z</CommandShortcut>
+							<CommandShortcut>{redoShortcut}</CommandShortcut>
 						</CommandItem>
 					)}
 				{hasSession && (

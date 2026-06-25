@@ -17,12 +17,12 @@ const GLASS_CLASSES = ["electron-transparent", "electron-vibrancy", "electron-op
  * Subscribes to the chrome tier from the main process and syncs it to the Jotai store.
  * Manages three mutually exclusive CSS classes on <html>:
  *
- *   - `electron-transparent` — Tier 1: Liquid Glass (macOS 26+). CSS adds
- *     semi-transparent backgrounds + backdrop-blur on floating panels.
+ *   - `electron-transparent` — Liquid Glass (macOS 26+) or Windows transparency.
+ *     CSS adds semi-transparent backgrounds + backdrop-blur on floating panels.
  *   - `electron-vibrancy` — Tier 2: Legacy vibrancy (older macOS). CSS adds
  *     semi-transparent backgrounds but NO backdrop-blur (native handles it).
- *   - `electron-opaque` — Tier 3: Solid backgrounds (non-macOS, user pref,
- *     or glass-disabled theme). Identical to current/stock look.
+ *   - `electron-opaque` — Tier 3: Solid backgrounds (Linux, user pref, or
+ *     glass-disabled theme). Identical to current/stock look.
  *
  * In browser-mode dev (no Electron), no class is applied — globals.css glass
  * rules use `:root.electron-transparent` / `:root.electron-vibrancy` selectors,
@@ -70,7 +70,7 @@ export function useChromeTier() {
 
 		if (isOpaque || chromeTier === "opaque") {
 			root.classList.add("electron-opaque")
-		} else if (chromeTier === "liquid-glass") {
+		} else if (chromeTier === "liquid-glass" || chromeTier === "transparent") {
 			root.classList.add("electron-transparent")
 		} else if (chromeTier === "vibrancy") {
 			root.classList.add("electron-vibrancy")
@@ -84,6 +84,28 @@ export function useChromeTier() {
 	useEffect(() => {
 		if (!isElectron()) return
 		document.documentElement.dataset.platform = window.devo.platform
+	}, [])
+
+	// Track native window focus for Windows chrome styling.
+	useEffect(() => {
+		if (!isElectron()) return
+
+		const root = document.documentElement
+		const setWindowFocus = (focused: boolean) => {
+			root.dataset.windowFocused = focused ? "true" : "false"
+		}
+		const handleFocus = () => setWindowFocus(true)
+		const handleBlur = () => setWindowFocus(false)
+
+		setWindowFocus(document.hasFocus())
+		window.addEventListener("focus", handleFocus)
+		window.addEventListener("blur", handleBlur)
+
+		return () => {
+			window.removeEventListener("focus", handleFocus)
+			window.removeEventListener("blur", handleBlur)
+			delete root.dataset.windowFocused
+		}
 	}, [])
 
 	return { isTransparent, isOpaque, chromeTier }

@@ -9,6 +9,12 @@ import {
 	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
 } from "@devo/ui/components/dropdown-menu"
+import {
+	optionMenuContentClass,
+	optionMenuIconClass,
+	optionMenuItemClass,
+	optionMenuSeparatorClass,
+} from "@devo/ui/components/option-menu-styles"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
 import { cn } from "@devo/ui/lib/utils"
 import {
@@ -32,10 +38,9 @@ import type {
 } from "./sidebar-data"
 
 const menuContentClass =
-	"w-[280px] rounded-[20px] border border-border/70 bg-popover/95 p-2 shadow-xl shadow-black/10"
-const menuItemClass =
-	"h-9 gap-2.5 rounded-xl px-3 text-sm leading-none text-popover-foreground focus:bg-accent"
-const menuIconClass = "size-[18px] shrink-0 text-muted-foreground"
+	cn(optionMenuContentClass, "w-[232px]")
+const menuItemClass = cn(optionMenuItemClass, "focus:bg-accent")
+const menuIconClass = optionMenuIconClass
 
 type HeaderIconButtonProps = ComponentPropsWithoutRef<"button"> & {
 	label: string
@@ -129,7 +134,7 @@ export function SidebarMainMenu({
 					<DisabledMenuItem icon={<ArchiveIcon className={menuIconClass} />}>
 						Archive all chats
 					</DisabledMenuItem>
-					<DropdownMenuSeparator className="my-2" />
+					<DropdownMenuSeparator className={optionMenuSeparatorClass} />
 					<DropdownMenuSub>
 						<DropdownMenuSubTrigger className={menuItemClass}>
 							<FolderIcon className={menuIconClass} />
@@ -191,7 +196,7 @@ export function SidebarMainMenu({
 							</DropdownMenuGroup>
 						</DropdownMenuSubContent>
 					</DropdownMenuSub>
-					<DropdownMenuSeparator className="my-2" />
+					<DropdownMenuSeparator className={optionMenuSeparatorClass} />
 					<DropdownMenuItem className={menuItemClass} onClick={onOpenCommandPalette}>
 						<CommandIcon className={menuIconClass} />
 						Command palette

@@ -5,6 +5,7 @@
 @import "@fontsource/ibm-plex-mono/600.css";
 
 @import "@devo/ui/styles/globals.css";
+@import "./desktop-chrome.css";
 
 body {
 	margin: 0;

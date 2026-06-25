@@ -15,8 +15,13 @@ import {
 	createFileMention,
 	insertMentionIntoText,
 } from "./chat/prompt-mentions"
+import {
+	optionMenuContentClass,
+	optionMenuItemClass,
+} from "@devo/ui/components/option-menu-styles"
 import { Popover, PopoverContent, PopoverTrigger } from "@devo/ui/components/popover"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
+import { cn } from "@devo/ui/lib/utils"
 import { useNavigate, useParams } from "@tanstack/react-router"
 import { useAtomValue } from "jotai"
 import {
@@ -584,15 +589,15 @@ export function NewChat() {
 	const hasToolbar = providers
 
 	return (
-		<div className="relative flex h-full flex-col items-center justify-center px-0 py-10 sm:px-8">
-			<div className="w-full max-w-5xl">
-				<div className="mb-16 text-center">
-					<h1 className="text-[38px] font-normal leading-tight tracking-normal text-foreground">
-						What should we build?
+		<div className="relative flex h-full flex-col items-center justify-center px-0 py-8 sm:px-8">
+			<div className="w-full max-w-3xl">
+				<div className="mb-6 text-center">
+					<h1 className="select-none text-[34px] font-normal leading-tight tracking-normal text-foreground">
+						What can I do for you today?
 					</h1>
 				</div>
 
-				<div className="overflow-hidden rounded-[28px] bg-muted/30 shadow-[0_18px_70px_rgba(0,0,0,0.08)]">
+				<div className="devo-composer-shell bg-muted/30 shadow-[0_12px_48px_rgba(0,0,0,0.07)]">
 					<PromptInputProvider key={draftKey} initialInput={draft}>
 						<DraftSync setDraft={setDraft} />
 						<MentionBridge controllerRef={controllerRef} />
@@ -613,7 +618,7 @@ export function NewChat() {
 								onClose={() => setMentionOpen(false)}
 							/>
 							<PromptInput
-								className="rounded-[28px] border-border/60 bg-background/95 shadow-none"
+								className="devo-composer border-border/60 bg-background/95 shadow-none"
 								accept="image/png,image/jpeg,image/gif,image/webp,application/pdf"
 								multiple
 								maxFileSize={10 * 1024 * 1024}
@@ -634,11 +639,11 @@ export function NewChat() {
 									placeholder="Do anything"
 									autoFocus
 									disabled={launching || !selectedDirectory || projects.length === 0}
-									className="min-h-[112px] px-5 pt-5 text-lg"
+									className="min-h-[52px] px-4 pt-3 text-base"
 									onKeyDown={handleTextareaKeyDown}
 								/>
 
-								<PromptInputFooter className="px-5 pb-4">
+								<PromptInputFooter className="px-4 pb-2">
 									<PromptInputTools>
 										<AttachButton disabled={launching || !selectedDirectory} />
 										{hasToolbar && (
@@ -667,22 +672,28 @@ export function NewChat() {
 					</PromptInputProvider>
 
 					{providers && (
-						<div className="px-5 pb-4">
-							<div className="flex min-w-0 items-center gap-3 text-sm text-muted-foreground">
+						<div className="px-4 pb-2">
+							<div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
 								{projects.length > 1 ? (
 									<Popover open={projectPickerOpen} onOpenChange={setProjectPickerOpen}>
 										<PopoverTrigger
 											render={
 												<button
 													type="button"
-													className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-black/[0.04] hover:text-foreground"
+													className="flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md px-1.5 transition-colors hover:bg-black/[0.04] hover:text-foreground"
 												/>
 											}
 										>
 											<span className="truncate">{selectedProject?.name ?? "select project"}</span>
 											<ChevronDownIcon className="size-4 shrink-0" />
 										</PopoverTrigger>
-										<PopoverContent className="w-64 p-1" align="start">
+										<PopoverContent
+											className={cn(
+												optionMenuContentClass,
+												"w-[232px] max-w-[calc(100vw-24px)] gap-0",
+											)}
+											align="start"
+										>
 											{projects.map((p) => (
 												<button
 													key={p.directory}
@@ -696,14 +707,16 @@ export function NewChat() {
 															params: { projectSlug: p.slug },
 														})
 													}}
-													className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
+													className={cn(
+														"flex w-full items-center text-left transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none",
+														optionMenuItemClass,
 														p.directory === selectedDirectory
-															? "bg-muted text-foreground"
-															: "text-muted-foreground"
-													}`}
+															? "bg-accent text-accent-foreground"
+															: "text-muted-foreground",
+													)}
 												>
-													<span className="truncate font-normal">{p.name}</span>
-													<span className="ml-auto text-xs text-muted-foreground/60">
+													<span className="min-w-0 flex-1 truncate font-normal">{p.name}</span>
+													<span className="w-5 shrink-0 text-right text-xs text-muted-foreground/60">
 														{p.agentCount}
 													</span>
 												</button>
@@ -711,27 +724,31 @@ export function NewChat() {
 										</PopoverContent>
 									</Popover>
 								) : (
-									<span className="truncate px-1.5 py-1">{selectedProject?.name ?? ""}</span>
+									<span className="flex h-7 shrink-0 items-center truncate px-1.5">
+										{selectedProject?.name ?? ""}
+									</span>
 								)}
-								<StatusBar
-									vcs={vcs ?? null}
-									isConnected={true}
-									branchSlot={
-										selectedDirectory ? (
-											<BranchPicker
-												directory={selectedDirectory}
-												currentBranch={vcs?.branch}
-												onBranchChanged={handleBranchChanged}
-												activeSessionCount={activeSessionCount}
-											/>
-										) : undefined
-									}
-									extraSlot={
-										vcs ? (
-											<WorktreeToggle mode={worktreeMode} onModeChange={setWorktreeMode} />
-										) : undefined
-									}
-								/>
+								<div className="min-w-0 flex-1 [&>div]:px-0 [&>div]:pt-0">
+									<StatusBar
+										vcs={vcs ?? null}
+										isConnected={true}
+										branchSlot={
+											selectedDirectory ? (
+												<BranchPicker
+													directory={selectedDirectory}
+													currentBranch={vcs?.branch}
+													onBranchChanged={handleBranchChanged}
+													activeSessionCount={activeSessionCount}
+												/>
+											) : undefined
+										}
+										extraSlot={
+											vcs ? (
+												<WorktreeToggle mode={worktreeMode} onModeChange={setWorktreeMode} />
+											) : undefined
+										}
+									/>
+								</div>
 							</div>
 						</div>
 					)}

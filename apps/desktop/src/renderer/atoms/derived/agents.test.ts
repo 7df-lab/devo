@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { SidebarProject } from "../../lib/types"
-import { sortSidebarProjectsForDefaultList } from "./agents"
+import { projectDisplayName, projectNameFromDir, sortSidebarProjectsForDefaultList } from "./agents"
 
 function project(
 	name: string,
@@ -50,5 +50,38 @@ describe("project list ordering", () => {
 			beta,
 			gamma,
 		])
+	})
+})
+
+describe("project display names", () => {
+	test("derives folder names from platform-specific paths", () => {
+		expect({
+			windows: projectNameFromDir("C:\\Users\\lenovo\\Desktop\\devo"),
+			windowsTrailingSlash: projectNameFromDir("C:\\Users\\lenovo\\Desktop\\devo\\"),
+			unix: projectNameFromDir("/repo/seo_0623"),
+			unixTrailingSlash: projectNameFromDir("/repo/seo_0623/"),
+		}).toEqual({
+			windows: "devo",
+			windowsTrailingSlash: "devo",
+			unix: "seo_0623",
+			unixTrailingSlash: "seo_0623",
+		})
+	})
+
+	test("keeps short project names and normalizes path-like API names", () => {
+		expect({
+			shortName: projectDisplayName("seo_0623", "C:\\Users\\lenovo\\Desktop\\seo_0623"),
+			windowsPathName: projectDisplayName(
+				"C:\\Users\\lenovo\\Desktop\\devo",
+				"C:\\Users\\lenovo\\Desktop\\devo",
+			),
+			unixPathName: projectDisplayName("/repo/devo", "/repo/devo"),
+			blankName: projectDisplayName("  ", "/repo/devo"),
+		}).toEqual({
+			shortName: "seo_0623",
+			windowsPathName: "devo",
+			unixPathName: "devo",
+			blankName: "devo",
+		})
 	})
 })

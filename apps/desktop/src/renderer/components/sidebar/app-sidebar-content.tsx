@@ -56,6 +56,8 @@ function groupAgentsByProject(agents: Agent[]): Map<string, Agent[]> {
 	return grouped
 }
 
+const sidebarPrimaryIconClass = "size-4 stroke-[1.6]"
+
 function TopActionRow({
 	children,
 	icon,
@@ -71,7 +73,7 @@ function TopActionRow({
 			onClick={onClick}
 			className="flex h-8 w-full items-center gap-2.5 rounded-lg px-1.5 text-left text-sm font-normal text-sidebar-foreground transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
 		>
-			<span className="flex size-[18px] shrink-0 items-center justify-center text-sidebar-foreground/90">
+			<span className="flex size-4 shrink-0 items-center justify-center text-sidebar-foreground/90">
 				{icon}
 			</span>
 			<span className="min-w-0 flex-1 truncate">{children}</span>
@@ -184,7 +186,7 @@ function ProjectSection({
 					inert={isCollapsed}
 				>
 					<div className={cn("min-h-0 overflow-hidden", isCollapsed && "pointer-events-none")}>
-						<div className="flex flex-col">
+						<div className="flex flex-col gap-y-1">
 							{pagination.loading && item.sessions.length === 0 && (
 								<div className="flex h-8 items-center gap-2 py-1 pr-1.5 pl-[34px] text-xs text-muted-foreground">
 									<Loader2Icon className="size-3.5 animate-spin" />
@@ -233,7 +235,7 @@ const ChronologicalSessionList = memo(function ChronologicalSessionList({
 	onForkSession?: (agent: Agent) => Promise<void>
 }) {
 	return (
-		<div className="flex flex-col">
+		<div className="flex flex-col gap-y-1">
 			{items.map((item) => (
 				<SessionRow
 					key={item.agent.id}
@@ -365,18 +367,21 @@ export function AppSidebarContent({
 		<>
 			<SidebarContent className="gap-0 bg-transparent px-0 pb-3">
 				<div className="flex shrink-0 flex-col gap-1 px-3 pb-7">
-					<TopActionRow icon={<PenLineIcon className="size-[18px]" />} onClick={handleNewChat}>
+					<TopActionRow
+						icon={<PenLineIcon className={sidebarPrimaryIconClass} />}
+						onClick={handleNewChat}
+					>
 						New chat
 					</TopActionRow>
 					<TopActionRow
-						icon={<SearchIcon className="size-[18px]" />}
+						icon={<SearchIcon className={sidebarPrimaryIconClass} />}
 						onClick={onOpenCommandPalette}
 					>
 						Search
 					</TopActionRow>
 					{automationsEnabled && isLocalServer && (
 						<TopActionRow
-							icon={<Clock3Icon className="size-[18px]" />}
+							icon={<Clock3Icon className={sidebarPrimaryIconClass} />}
 							onClick={() => navigate({ to: "/automations" })}
 						>
 							Automations
@@ -415,7 +420,7 @@ export function AppSidebarContent({
 				)}
 
 				{hasContent && (
-					<div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-3 pb-2">
+					<div className="scrollbar-comfort flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-3 pb-2">
 						{preferences.organization === "chronological" ? (
 							<ChronologicalSessionList
 								items={sidebarItems.filter(
@@ -428,7 +433,7 @@ export function AppSidebarContent({
 								onForkSession={onForkSession}
 							/>
 						) : (
-							<div className="flex flex-col gap-4">
+							<div className="flex flex-col gap-1">
 								{sidebarItems.map((item) => {
 									if (item.type !== "project") return null
 									return (
@@ -463,7 +468,7 @@ export function AppSidebarContent({
 						"flex h-8 w-full items-center gap-2.5 rounded-lg px-1.5 text-left text-sm font-normal text-muted-foreground transition-colors hover:bg-black/[0.04] hover:text-sidebar-foreground dark:hover:bg-white/[0.06]",
 					)}
 				>
-					<SettingsIcon className="size-[18px]" />
+					<SettingsIcon className={sidebarPrimaryIconClass} />
 					<span className="truncate">Settings</span>
 				</button>
 			</SidebarFooter>

@@ -13,12 +13,13 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
 import { Outlet, useNavigate, useParams } from "@tanstack/react-router"
 import { useAtom, useAtomValue, useSetAtom } from "jotai"
-import { PanelLeftIcon, PlusIcon } from "lucide-react"
-import { useCallback, useEffect, useRef } from "react"
+import { PanelLeftIcon } from "lucide-react"
+import { type MouseEvent, useCallback, useEffect, useRef } from "react"
 import { serverConnectedAtom } from "../atoms/connection"
 import { terminalPanelOpenAtom } from "../atoms/terminal"
 import { useAgents, useProjectList, useSetCommandPaletteOpen } from "../hooks/use-agents"
 import { useAgentActions } from "../hooks/use-server"
+import { formatShortcut } from "../lib/shortcut-display"
 import type { Agent } from "../lib/types"
 import { pickDirectory } from "../services/backend"
 import { loadProjectSessions } from "../services/connection-manager"
@@ -36,11 +37,13 @@ import { UpdateBanner } from "./update-banner"
 const isMac =
 	typeof window !== "undefined" && "devo" in window && window.devo.platform === "darwin"
 const isElectronEnv = typeof window !== "undefined" && "devo" in window
+const isWindowsElectron = isElectronEnv && window.devo.platform === "win32"
 
-/** Pixel offset from the left edge where window controls (toggle + new session) start */
+/** Pixel offset from the left edge where window controls start */
 const WINDOW_CONTROLS_LEFT = isMac && isElectronEnv ? 93 : 8
-/** Total width reserved for traffic lights + window control buttons */
-const WINDOW_CONTROLS_INSET = isMac && isElectronEnv ? 160 : 72
+/** Total width reserved for traffic lights or custom titlebar controls */
+const WINDOW_CONTROLS_INSET = isMac && isElectronEnv ? 160 : isWindowsElectron ? 200 : 72
+const WINDOW_CONTROLS_RIGHT_INSET = isWindowsElectron ? 138 : 12
 
 // ============================================================
 // NarrowWindowCollapser
@@ -86,21 +89,58 @@ function NarrowWindowCollapser() {
 // WindowControls
 // ============================================================
 
+const APP_MENU_ITEMS = [
+	{ id: "edit", label: "Edit" },
+	{ id: "view", label: "View" },
+	{ id: "window", label: "Window" },
+] as const
+
+function AppMenuBar() {
+	const handleMenuClick = useCallback(
+		(event: MouseEvent<HTMLButtonElement>, id: (typeof APP_MENU_ITEMS)[number]["id"]) => {
+			const rect = event.currentTarget.getBoundingClientRect()
+			void window.devo.appMenu.popup(id, {
+				x: Math.round(rect.left),
+				y: Math.round(rect.bottom),
+			})
+		},
+		[],
+	)
+
+	if (!isWindowsElectron) {
+		return null
+	}
+
+	return (
+		<nav aria-label="Application menu" className="ml-2 flex items-center gap-0.5">
+			{APP_MENU_ITEMS.map((item) => (
+				<button
+					key={item.id}
+					type="button"
+					className="h-7 rounded-md px-2 text-sm font-normal text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+					onClick={(event) => handleMenuClick(event, item.id)}
+				>
+					{item.label}
+				</button>
+			))}
+		</nav>
+	)
+}
+
 /**
- * Absolutely positioned window controls (sidebar toggle + new session) that
+ * Absolutely positioned window controls that
  * stay next to the macOS traffic lights regardless of sidebar state.
  * Must be rendered inside a SidebarProvider.
  */
 function WindowControls() {
 	const { toggleSidebar } = useSidebar()
-	const navigate = useNavigate()
-	const { projectSlug } = useParams({ strict: false }) as { projectSlug?: string }
+	const toggleSidebarShortcut = formatShortcut(["mod", "B"])
 
 	return (
 		<div
 			className="absolute z-50 flex items-center gap-0.5"
 			style={{
-				top: 8,
+				top: 6,
 				left: WINDOW_CONTROLS_LEFT,
 				// @ts-expect-error -- vendor-prefixed CSS property
 				WebkitAppRegion: "no-drag",
@@ -119,32 +159,9 @@ function WindowControls() {
 				>
 					<PanelLeftIcon className="size-3.5" />
 				</TooltipTrigger>
-				<TooltipContent>Toggle sidebar (&#8984;B)</TooltipContent>
+				<TooltipContent>Toggle sidebar ({toggleSidebarShortcut})</TooltipContent>
 			</Tooltip>
-			<Tooltip>
-				<TooltipTrigger
-					render={
-						<Button
-							variant="ghost"
-							size="icon"
-							className="size-7 shrink-0"
-							onClick={() => {
-								if (projectSlug) {
-									navigate({
-										to: "/project/$projectSlug",
-										params: { projectSlug },
-									})
-									return
-								}
-								navigate({ to: "/" })
-							}}
-						/>
-					}
-				>
-					<PlusIcon className="size-3.5" />
-				</TooltipTrigger>
-				<TooltipContent>New session (&#8984;N)</TooltipContent>
-			</Tooltip>
+			<AppMenuBar />
 		</div>
 	)
 }
@@ -219,6 +236,7 @@ export function SidebarLayout() {
 			style={
 				{
 					"--window-controls-inset": `${WINDOW_CONTROLS_INSET}px`,
+					"--window-controls-right-inset": `${WINDOW_CONTROLS_RIGHT_INSET}px`,
 				} as React.CSSProperties
 			}
 		>
@@ -229,7 +247,7 @@ export function SidebarLayout() {
 					 * sidebar content aligns with the main content area. Also clears
 					 * the traffic lights + the absolutely-positioned toggle button. */}
 					<SidebarHeader
-						className="flex-row items-center gap-1 shrink-0"
+						className="flex-row items-center gap-1 shrink-0 transition-colors duration-150"
 						style={{
 							height: APP_BAR_HEIGHT,
 							// Make header draggable on Electron (acts as title bar above sidebar)

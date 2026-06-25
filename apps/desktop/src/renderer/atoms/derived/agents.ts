@@ -95,8 +95,20 @@ export function formatElapsed(startMs: number): string {
 	return `${hours}h ${remainingMinutes}m`
 }
 
-function projectNameFromDir(directory: string): string {
-	return directory.split("/").pop() || "/"
+export function projectNameFromDir(directory: string): string {
+	const trimmed = directory.replace(/[\\/]+$/, "")
+	if (!trimmed) return "/"
+	return trimmed.split(/[\\/]/).filter(Boolean).at(-1) ?? trimmed
+}
+
+function isPathLikeProjectName(name: string): boolean {
+	return /[\\/]/.test(name)
+}
+
+export function projectDisplayName(name: string | null | undefined, directory: string): string {
+	const trimmed = name?.trim()
+	if (!trimmed || isPathLikeProjectName(trimmed)) return projectNameFromDir(directory)
+	return trimmed
 }
 
 // ============================================================
@@ -109,7 +121,9 @@ interface ProjectEntry {
 	directory: string
 }
 
-function buildProjectSlugMap(projects: ProjectEntry[]): Map<string, { id: string; slug: string }> {
+function buildProjectSlugMap(
+	projects: ProjectEntry[],
+): Map<string, { id: string; name: string; slug: string }> {
 	const byDir = new Map<string, ProjectEntry>()
 	for (const p of projects) {
 		const existing = byDir.get(p.directory)
@@ -118,10 +132,10 @@ function buildProjectSlugMap(projects: ProjectEntry[]): Map<string, { id: string
 		}
 	}
 
-	const result = new Map<string, { id: string; slug: string }>()
+	const result = new Map<string, { id: string; name: string; slug: string }>()
 	for (const entry of byDir.values()) {
 		const slug = `${entry.name}-${entry.id.slice(0, 12)}`
-		result.set(entry.directory, { id: entry.id, slug })
+		result.set(entry.directory, { id: entry.id, name: entry.name, slug })
 	}
 	return result
 }
@@ -220,7 +234,7 @@ function collectAllProjects(
 			seenDirs.add(project.worktree)
 			entries.push({
 				id: project.id,
-				name: project.name ?? projectNameFromDir(project.worktree),
+				name: projectDisplayName(project.name, project.worktree),
 				directory: project.worktree,
 			})
 		}
@@ -239,7 +253,7 @@ function collectAllProjects(
 		}
 		entries.push({
 			id: `dir-${Math.abs(hash).toString(16).padStart(8, "0")}`,
-			name: projectNameFromDir(directory),
+			name: projectDisplayName(undefined, directory),
 			directory,
 		})
 	}
@@ -326,13 +340,14 @@ export const agentFamily = atomFamily((sessionId: string) => {
 
 		const { permissions, questions } = entry
 		const created = session.time.created
-		const lastActiveAt = session.time.updated ?? session.time.created
+		const lastActiveAt = session.time.lastActivity ?? session.time.updated ?? session.time.created
 
 		// If this session's directory is a sandbox (worktree), resolve the parent
 		// project directory for name/slug display so it groups visually under the parent.
 		const parentDir = sandboxToParent.get(directory)
 		const displayDir = parentDir ?? directory
 		const projectInfo = slugMap.get(displayDir)
+		const projectName = projectInfo?.name ?? projectNameFromDir(displayDir)
 
 		// Derive currentActivity from tree-scoped requests first, then own status.
 		// This ensures "waiting for approval" shows even when the permission is from a sub-agent.
@@ -345,8 +360,8 @@ export const agentFamily = atomFamily((sessionId: string) => {
 			name: session.title || "Untitled",
 			status: agentStatus,
 			environment: "local" as const,
-			project: projectNameFromDir(displayDir),
-			projectSlug: projectInfo?.slug ?? projectNameFromDir(displayDir),
+			project: projectName,
+			projectSlug: projectInfo?.slug ?? projectName,
 			directory,
 			projectDirectory: displayDir,
 			branch: entry.branch ?? "",
@@ -520,8 +535,12 @@ export const projectListAtom = (() => {
 			const parentDir = sandboxToParent.get(entry.directory)
 			const dir = parentDir ?? entry.directory
 			const projectInfo = slugMap.get(dir)
-			const name = projectNameFromDir(dir)
-			const sessionTime = entry.session.time.updated ?? entry.session.time.created ?? 0
+			const name = projectInfo?.name ?? projectNameFromDir(dir)
+			const sessionTime =
+				entry.session.time.lastActivity ??
+				entry.session.time.updated ??
+				entry.session.time.created ??
+				0
 
 			// A session is "active" if it is busy or has pending permissions/questions
 			const isActive =
@@ -564,7 +583,7 @@ export const projectListAtom = (() => {
 				if (sandboxDirs.has(project.worktree)) continue
 
 				const projectInfo = slugMap.get(project.worktree)
-				const name = project.name ?? projectNameFromDir(project.worktree)
+				const name = projectDisplayName(project.name, project.worktree)
 
 				projects.set(project.worktree, {
 					id: projectInfo?.id ?? project.id,
