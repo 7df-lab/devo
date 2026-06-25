@@ -157,6 +157,34 @@ function completedTurnEnd(turn: ChatTurn): number | undefined {
 	return fallback
 }
 
+function terminalPartTimestamp(part: Part): number | undefined {
+	if (part.type === "tool") {
+		const end = part.state?.time?.end
+		return typeof end === "number" ? end : undefined
+	}
+
+	const end = part.time?.end
+	return typeof end === "number" ? end : undefined
+}
+
+function completedTurnStopTime(turn: ChatTurn): number | undefined {
+	for (let i = turn.assistantMessages.length - 1; i >= 0; i--) {
+		const completed = turn.assistantMessages[i].info.time.completed
+		if (typeof completed === "number") return completed
+	}
+
+	let fallback: number | undefined
+	for (const entry of turn.assistantMessages) {
+		for (const part of entry.parts) {
+			const timestamp = terminalPartTimestamp(part)
+			if (timestamp !== undefined) {
+				fallback = fallback === undefined ? timestamp : Math.max(fallback, timestamp)
+			}
+		}
+	}
+	return fallback
+}
+
 /**
  * Compute end-to-end elapsed time for a single turn.
  * Starts at the user message creation time and ends at the turn completion time.
@@ -185,6 +213,55 @@ export function computeTurnWorkTimeSplit(turn: ChatTurn): {
 	activeStartMs: number | null
 } {
 	return { completedMs: 0, activeStartMs: turn.userMessage.info.time.created ?? null }
+}
+
+export type LatestTurnTimerMode = "running" | "stopped"
+
+/**
+ * Compute the top-bar timer split for the latest turn only.
+ * This intentionally ignores earlier turns so each user message resets the
+ * app-bar timer, while session-level metrics can still remain cumulative.
+ */
+export function computeLatestTurnTimerSplit(
+	turns: ChatTurn[],
+	options: {
+		mode: LatestTurnTimerMode
+		now?: () => number
+		fallbackCompletedMs?: number
+	},
+): { completedMs: number; activeStartMs: number | null } {
+	const turn = turns.at(-1)
+	if (!turn) return { completedMs: 0, activeStartMs: null }
+
+	switch (options.mode) {
+		case "running": {
+			const start = turn.userMessage.info.time.created
+			const now = options.now?.() ?? Date.now()
+			if (typeof start === "number" && isPlausibleEpochMs(start, now)) {
+				return { completedMs: 0, activeStartMs: start }
+			}
+			return { completedMs: 0, activeStartMs: null }
+		}
+		case "stopped": {
+			const fallback =
+				typeof options.fallbackCompletedMs === "number" &&
+				Number.isFinite(options.fallbackCompletedMs)
+					? Math.max(0, options.fallbackCompletedMs)
+					: 0
+			const start = turn.userMessage.info.time.created
+			const end = completedTurnStopTime(turn)
+			if (typeof start === "number" && typeof end === "number") {
+				const completedMs = Math.max(0, end - start)
+				if (completedMs <= MAX_COMPLETED_TURN_WORK_TIME_MS) {
+					return { completedMs, activeStartMs: null }
+				}
+			}
+			return {
+				completedMs: fallback,
+				activeStartMs: null,
+			}
+		}
+	}
 }
 
 /**

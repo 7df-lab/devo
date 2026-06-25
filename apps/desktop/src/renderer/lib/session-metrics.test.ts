@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import type { ChatTurn } from "../atoms/derived/session-chat"
 import type { Message } from "./types"
-import { computeSessionMetrics, computeTurnWorkTime, computeTurnWorkTimeSplit } from "./session-metrics"
+import {
+	computeLatestTurnTimerSplit,
+	computeSessionMetrics,
+	computeTurnWorkTime,
+	computeTurnWorkTimeSplit,
+	formatWorkDuration,
+} from "./session-metrics"
 
 const originalNow = Date.now
 
@@ -9,15 +15,26 @@ afterEach(() => {
 	Date.now = originalNow
 })
 
-function turnWith(assistantMessages: ChatTurn["assistantMessages"]): ChatTurn {
+function turnWith(
+	assistantMessages: ChatTurn["assistantMessages"],
+	userCreated = 1_000,
+	id = "u1",
+): ChatTurn {
 	return {
-		id: "u1",
+		id,
 		userMessage: {
-			info: { id: "u1", role: "user", time: { created: 1_000 } },
+			info: { id, role: "user", time: { created: userCreated } },
 			parts: [],
 		},
 		assistantMessages,
 	} as ChatTurn
+}
+
+function formatTimerSplit(
+	split: { completedMs: number; activeStartMs: number | null },
+	now: number,
+): string {
+	return formatWorkDuration(split.completedMs + (split.activeStartMs != null ? now - split.activeStartMs : 0))
 }
 
 describe("turn duration metrics", () => {
@@ -118,6 +135,152 @@ describe("turn duration metrics", () => {
 			errorCount: 0,
 			avgExchangeCost: 0,
 			avgExchangeTimeMs: 0,
+		})
+	})
+})
+
+describe("top bar turn timer metrics", () => {
+	test("returns zero when there are no turns yet", () => {
+		const split = computeLatestTurnTimerSplit([], { mode: "stopped" })
+
+		expect({ split, label: formatTimerSplit(split, 0) }).toEqual({
+			split: { completedMs: 0, activeStartMs: null },
+			label: "0s",
+		})
+	})
+
+	test("starts a new optimistic user turn from the user message timestamp", () => {
+		const start = Date.parse("2026-06-25T12:00:00.000Z")
+		const now = start + 500
+		const split = computeLatestTurnTimerSplit([turnWith([], start, "optimistic-1")], {
+			mode: "running",
+			now: () => now,
+		})
+
+		expect({ split, label: formatTimerSplit(split, now) }).toEqual({
+			split: { completedMs: 0, activeStartMs: start },
+			label: "0s",
+		})
+	})
+
+	test("uses only the latest user turn so the timer resets on the next message", () => {
+		const firstStart = Date.parse("2026-06-25T12:00:00.000Z")
+		const nextStart = firstStart + 120_000
+		const now = nextStart + 3_000
+		const firstTurn = turnWith(
+			[
+				{
+					info: {
+						id: "a1",
+						role: "assistant",
+						time: { created: firstStart + 1_000, completed: firstStart + 60_000 },
+					},
+					parts: [],
+				},
+			] as ChatTurn["assistantMessages"],
+			firstStart,
+			"u1",
+		)
+		const nextTurn = turnWith([], nextStart, "optimistic-2")
+
+		const split = computeLatestTurnTimerSplit([firstTurn, nextTurn], {
+			mode: "running",
+			now: () => now,
+		})
+
+		expect({ split, label: formatTimerSplit(split, now) }).toEqual({
+			split: { completedMs: 0, activeStartMs: nextStart },
+			label: "3s",
+		})
+	})
+
+	test("stops on the completed turn timestamp when the session becomes idle", () => {
+		const start = Date.parse("2026-06-25T12:00:00.000Z")
+		const turn = turnWith(
+			[
+				{
+					info: {
+						id: "a1",
+						role: "assistant",
+						time: { created: start + 1_000, completed: start + 42_000 },
+					},
+					parts: [],
+				},
+			] as ChatTurn["assistantMessages"],
+			start,
+			"u1",
+		)
+
+		const split = computeLatestTurnTimerSplit([turn], { mode: "stopped" })
+
+		expect({ split, label: formatTimerSplit(split, start + 99_000) }).toEqual({
+			split: { completedMs: 42_000, activeStartMs: null },
+			label: "42s",
+		})
+	})
+
+	test("prefers the completed turn timestamp over a stale live fallback", () => {
+		const start = Date.parse("2026-06-25T12:00:00.000Z")
+		const turn = turnWith(
+			[
+				{
+					info: {
+						id: "a1",
+						role: "assistant",
+						time: { created: start + 1_000, completed: start + 42_000 },
+					},
+					parts: [],
+				},
+			] as ChatTurn["assistantMessages"],
+			start,
+			"u1",
+		)
+
+		const split = computeLatestTurnTimerSplit([turn], {
+			mode: "stopped",
+			fallbackCompletedMs: 99_000,
+		})
+
+		expect({ split, label: formatTimerSplit(split, start + 120_000) }).toEqual({
+			split: { completedMs: 42_000, activeStartMs: null },
+			label: "42s",
+		})
+	})
+
+	test("keeps the last live elapsed value when an interrupted turn has no completion timestamp", () => {
+		const start = Date.parse("2026-06-25T12:00:00.000Z")
+		const turn = turnWith(
+			[
+				{
+					info: { id: "a1", role: "assistant", time: { created: start + 1_000 } },
+					parts: [],
+				},
+			] as ChatTurn["assistantMessages"],
+			start,
+			"u1",
+		)
+
+		const split = computeLatestTurnTimerSplit([turn], {
+			mode: "stopped",
+			fallbackCompletedMs: 17_000,
+		})
+
+		expect({ split, label: formatTimerSplit(split, start + 99_000) }).toEqual({
+			split: { completedMs: 17_000, activeStartMs: null },
+			label: "17s",
+		})
+	})
+
+	test("does not start a huge live timer from historical ordering timestamps", () => {
+		const now = Date.parse("2026-06-25T12:00:00.000Z")
+		const split = computeLatestTurnTimerSplit([turnWith([], 1, "history-1")], {
+			mode: "running",
+			now: () => now,
+		})
+
+		expect({ split, label: formatTimerSplit(split, now) }).toEqual({
+			split: { completedMs: 0, activeStartMs: null },
+			label: "0s",
 		})
 	})
 })

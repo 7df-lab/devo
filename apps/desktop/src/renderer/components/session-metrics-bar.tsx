@@ -12,9 +12,10 @@ import { Popover, PopoverContent, PopoverTrigger } from "@devo/ui/components/pop
 import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
 import { useAtomValue } from "jotai"
 import { BarChart3Icon, CoinsIcon, TimerIcon } from "lucide-react"
-import { Fragment, memo, useEffect, useState } from "react"
+import { Fragment, memo, useCallback, useEffect, useRef, useState } from "react"
 import { type SessionMetricsValue, sessionMetricsFamily } from "../atoms/derived/session-metrics"
-import { formatTokens, formatWorkDuration } from "../lib/session-metrics"
+import type { ChatTurn } from "../hooks/use-session-chat"
+import { computeLatestTurnTimerSplit, formatTokens, formatWorkDuration } from "../lib/session-metrics"
 
 // ============================================================
 // Tool category display labels
@@ -37,6 +38,8 @@ const TOOL_CATEGORY_LABELS: Record<string, string> = {
 
 interface SessionMetricsBarProps {
 	sessionId: string
+	turns: ChatTurn[]
+	isWorking: boolean
 }
 
 /**
@@ -47,14 +50,32 @@ interface SessionMetricsBarProps {
  */
 export const SessionMetricsBar = memo(function SessionMetricsBar({
 	sessionId,
+	turns,
+	isWorking,
 }: SessionMetricsBarProps) {
 	const metrics = useAtomValue(sessionMetricsFamily(sessionId))
-
-	if (metrics.exchangeCount === 0 && metrics.assistantMessageCount === 0) return null
+	const lastTurn = turns.at(-1)
+	const lastLiveElapsedRef = useRef<{ turnId: string; elapsedMs: number } | null>(null)
+	const lastLiveElapsed = lastLiveElapsedRef.current
+	const fallbackCompletedMs =
+		!isWorking && lastTurn && lastLiveElapsed && lastTurn.id === lastLiveElapsed.turnId
+			? lastLiveElapsed.elapsedMs
+			: undefined
+	const turnTimer = computeLatestTurnTimerSplit(turns, {
+		mode: isWorking ? "running" : "stopped",
+		fallbackCompletedMs,
+	})
+	const handleLiveElapsedChange = useCallback(
+		(elapsedMs: number) => {
+			if (!lastTurn) return
+			lastLiveElapsedRef.current = { turnId: lastTurn.id, elapsedMs }
+		},
+		[lastTurn],
+	)
 
 	return (
 		<div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
-			{/* Work time */}
+			{/* Current turn time */}
 			<Tooltip>
 				<TooltipTrigger
 					render={
@@ -62,19 +83,20 @@ export const SessionMetricsBar = memo(function SessionMetricsBar({
 					}
 				>
 					<TimerIcon className="size-3" aria-hidden="true" />
-					{metrics.activeStartMs != null ? (
+					{turnTimer.activeStartMs != null ? (
 						<LiveWorkTime
-							completedMs={metrics.completedWorkTimeMs}
-							activeStartMs={metrics.activeStartMs}
+							completedMs={turnTimer.completedMs}
+							activeStartMs={turnTimer.activeStartMs}
+							onElapsedChange={handleLiveElapsedChange}
 						/>
 					) : (
-						metrics.workTime
+						formatWorkDuration(turnTimer.completedMs)
 					)}
 				</TooltipTrigger>
 				<TooltipContent side="bottom" align="end">
 					<div className="space-y-1 text-xs">
-						<p className="font-medium">Work Time</p>
-						<p className="text-background/60">Avg per exchange: {metrics.avgExchangeTime}</p>
+						<p className="font-medium">Current Turn</p>
+						<p className="text-background/60">Latest turn elapsed time</p>
 					</div>
 				</TooltipContent>
 			</Tooltip>
@@ -262,20 +284,26 @@ function MetricCell({ label, value }: { label: string; value: string }) {
 function LiveWorkTime({
 	completedMs,
 	activeStartMs,
+	onElapsedChange,
 }: {
 	completedMs: number
 	activeStartMs: number
+	onElapsedChange?: (elapsedMs: number) => void
 }) {
 	const [display, setDisplay] = useState(() =>
-		formatWorkDuration(completedMs + (Date.now() - activeStartMs)),
+		formatWorkDuration(Math.max(0, completedMs + (Date.now() - activeStartMs))),
 	)
 
 	useEffect(() => {
-		const tick = () => setDisplay(formatWorkDuration(completedMs + (Date.now() - activeStartMs)))
+		const tick = () => {
+			const elapsedMs = Math.max(0, completedMs + (Date.now() - activeStartMs))
+			onElapsedChange?.(elapsedMs)
+			setDisplay(formatWorkDuration(elapsedMs))
+		}
 		tick()
 		const id = setInterval(tick, 1_000)
 		return () => clearInterval(id)
-	}, [completedMs, activeStartMs])
+	}, [completedMs, activeStartMs, onElapsedChange])
 
 	return <>{display}</>
 }

@@ -202,6 +202,7 @@ export function AgentDetail({
 		<>
 			<SessionPanelHeader
 				agent={agent}
+				turns={chatTurns}
 				isEditingTitle={isEditingTitle}
 				titleValue={titleValue}
 				titleInputRef={titleInputRef}
@@ -298,6 +299,7 @@ export function AgentDetail({
 
 function SessionPanelHeader({
 	agent,
+	turns,
 	isEditingTitle,
 	titleValue,
 	titleInputRef,
@@ -311,6 +313,7 @@ function SessionPanelHeader({
 	onToggleReviewPanel,
 }: {
 	agent: Agent
+	turns: ChatTurn[]
 	isEditingTitle: boolean
 	titleValue: string
 	titleInputRef: React.RefObject<HTMLInputElement | null>
@@ -417,7 +420,11 @@ function SessionPanelHeader({
 
 				{/* Session metrics bar */}
 				<div className="hidden min-w-0 shrink lg:block">
-					<SessionMetricsBar sessionId={agent.sessionId} />
+					<SessionMetricsBar
+						sessionId={agent.sessionId}
+						turns={turns}
+						isWorking={agent.status === "running"}
+					/>
 				</div>
 
 				{/* Open in external editor */}
