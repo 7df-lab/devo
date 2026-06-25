@@ -1,9 +1,11 @@
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::SessionId;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "kebab-case")]
 #[derive(Default)]
 pub enum PermissionPreset {
@@ -20,7 +22,7 @@ pub enum PermissionPreset {
     FullAccess,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovalsReviewer {
     #[default]
@@ -28,13 +30,13 @@ pub enum ApprovalsReviewer {
     AutoReview,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionPermissionsUpdateParams {
     pub session_id: SessionId,
     pub preset: PermissionPreset,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionPermissionsUpdateResult {
     pub session_id: SessionId,
     pub preset: PermissionPreset,

@@ -1,12 +1,14 @@
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::AcpAuthMethodId;
 use crate::AcpErrorCode;
 use crate::AcpLogoutCapabilities;
 use crate::AcpMeta;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAuthenticateParams {
     #[serde(rename = "methodId")]
@@ -15,7 +17,7 @@ pub struct AcpAuthenticateParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpEmptyAuthResult {
     #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
@@ -25,7 +27,7 @@ pub struct AcpEmptyAuthResult {
 pub type AcpAuthenticateResult = AcpEmptyAuthResult;
 pub type AcpLogoutResult = AcpEmptyAuthResult;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAuthMethod {
     pub id: AcpAuthMethodId,
@@ -58,7 +60,7 @@ impl AcpAuthMethod {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpAuthMethodType {
     #[default]
@@ -71,7 +73,7 @@ impl AcpAuthMethodType {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAuthCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]

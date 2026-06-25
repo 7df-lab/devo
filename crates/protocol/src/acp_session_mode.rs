@@ -1,11 +1,13 @@
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::acp::AcpMeta;
 
 pub type AcpSessionModeId = String;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionMode {
     pub id: AcpSessionModeId,
@@ -16,7 +18,7 @@ pub struct AcpSessionMode {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionModeState {
     #[serde(rename = "availableModes")]

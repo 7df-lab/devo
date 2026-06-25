@@ -1,4 +1,6 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// A content block in the model's response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,7 +63,7 @@ impl Usage {
 }
 
 /// Why the model stopped generating.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub enum StopReason {
     EndTurn,
     ToolUse,

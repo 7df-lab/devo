@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use strum_macros::Display;
+use ts_rs::TS;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientRequest<T> {
@@ -57,6 +58,7 @@ pub enum ClientMethod {
     SkillsChanged,
     SkillsSetEnabled,
     ModelCatalog,
+    ModelConfig,
     ModelSaved,
     CommandExec,
     CommandExecWrite,
@@ -105,6 +107,7 @@ impl ClientMethod {
             Self::SkillsChanged => "skills/changed",
             Self::SkillsSetEnabled => "skills/set_enabled",
             Self::ModelCatalog => "model/catalog",
+            Self::ModelConfig => "model/config",
             Self::ModelSaved => "model/saved",
             Self::CommandExec => "command/exec",
             Self::CommandExecWrite => "command/exec/write",
@@ -153,6 +156,7 @@ impl ClientMethod {
             "skills/changed" => Self::SkillsChanged,
             "skills/set_enabled" => Self::SkillsSetEnabled,
             "model/catalog" => Self::ModelCatalog,
+            "model/config" => Self::ModelConfig,
             "model/saved" => Self::ModelSaved,
             "command/exec" => Self::CommandExec,
             "command/exec/write" => Self::CommandExecWrite,
@@ -262,7 +266,7 @@ pub struct ProtocolError {
 }
 
 #[derive(
-    Debug, Clone, Copy, Display, Deserialize, Serialize, PartialEq, Eq, JsonSchema, Default,
+    Debug, Clone, Copy, Display, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq, Default,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ExecCommandSource {
@@ -273,7 +277,7 @@ pub enum ExecCommandSource {
     UnifiedExecInteraction,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FileChange {
     Add {
@@ -294,7 +298,7 @@ pub enum FileChange {
 
 /// Context/compaction display token usage, not the canonical provider response
 /// usage shape. Provider/model usage is represented by `devo_protocol::Usage`.
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input_tokens: i64,
     pub cached_input_tokens: i64,
@@ -361,7 +365,7 @@ impl TokenUsage {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
 pub struct TokenUsageInfo {
     pub total_token_usage: TokenUsage,
     pub last_token_usage: TokenUsage,
@@ -426,7 +430,7 @@ impl TokenUsageInfo {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct McpStartupUpdateEvent {
     /// Server name being started.
     pub server: String,
@@ -434,7 +438,7 @@ pub struct McpStartupUpdateEvent {
     pub status: McpStartupStatus,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum McpStartupStatus {
     Starting,
@@ -443,20 +447,20 @@ pub enum McpStartupStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, Default)]
 pub struct McpStartupCompleteEvent {
     pub ready: Vec<String>,
     pub failed: Vec<McpStartupFailure>,
     pub cancelled: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct McpStartupFailure {
     pub server: String,
     pub error: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum McpAuthStatus {
     Unsupported,

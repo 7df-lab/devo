@@ -1,5 +1,7 @@
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::acp::AcpMeta;
 
@@ -7,7 +9,7 @@ pub type AcpSessionConfigGroupId = String;
 pub type AcpSessionConfigId = String;
 pub type AcpSessionConfigValueId = String;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpSessionConfigOptionCategoryKnown {
     Mode,
@@ -16,14 +18,14 @@ pub enum AcpSessionConfigOptionCategoryKnown {
     Other,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(untagged)]
 pub enum AcpSessionConfigOptionCategory {
     Known(AcpSessionConfigOptionCategoryKnown),
     Custom(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionConfigSelectOption {
     pub value: AcpSessionConfigValueId,
@@ -34,7 +36,7 @@ pub struct AcpSessionConfigSelectOption {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionConfigSelectGroup {
     pub group: AcpSessionConfigGroupId,
@@ -44,14 +46,14 @@ pub struct AcpSessionConfigSelectGroup {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(untagged)]
 pub enum AcpSessionConfigSelectOptions {
     Ungrouped(Vec<AcpSessionConfigSelectOption>),
     Grouped(Vec<AcpSessionConfigSelectGroup>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionConfigSelect {
     #[serde(rename = "currentValue")]
@@ -59,7 +61,7 @@ pub struct AcpSessionConfigSelect {
     pub options: AcpSessionConfigSelectOptions,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AcpSessionConfigOption {
     Select {

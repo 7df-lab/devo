@@ -3,3 +3,4 @@
 .claude
 __pycache__/
 node_modules
+/apps/desktop/packages/devo-ai-sdk/src/v2/generated/

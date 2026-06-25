@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(transparent)]
 pub struct ReferenceSearchId(pub uuid::Uuid);
 
@@ -24,37 +26,37 @@ impl std::fmt::Display for ReferenceSearchId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ReferenceSearchStartParams {
     pub cwd: Option<PathBuf>,
     pub query: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ReferenceSearchStartResult {
     pub snapshot: ReferenceSearchSnapshot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ReferenceSearchUpdateParams {
     pub search_id: ReferenceSearchId,
     pub query: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ReferenceSearchUpdateResult {
     pub snapshot: ReferenceSearchSnapshot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ReferenceSearchCancelParams {
     pub search_id: ReferenceSearchId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS, Default)]
 pub struct ReferenceSearchCancelResult {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ReferenceSearchSnapshot {
     pub search_id: ReferenceSearchId,
     pub query: String,
@@ -64,7 +66,7 @@ pub struct ReferenceSearchSnapshot {
     pub file_search_complete: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ReferenceSearchResult {
     pub kind: ReferenceSearchResultKind,
     pub display_name: String,
@@ -83,7 +85,7 @@ pub struct ReferenceSearchResult {
     pub disabled_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ReferenceSearchResultKind {
     Skill,
@@ -91,7 +93,7 @@ pub enum ReferenceSearchResultKind {
     File,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ReferenceSearchFailedPayload {
     pub search_id: ReferenceSearchId,
     pub query: String,
