@@ -144,6 +144,89 @@ function partCacheKey(sessionId: string, messageId: string): string {
 	return `${sessionId}\u001f${messageId}`
 }
 
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined
+}
+
+function sessionMeta(value: unknown): Record<string, unknown> | undefined {
+	const meta = objectRecord(value)
+	return objectRecord(meta?.["devo/session"])
+}
+
+function parseTimestampMs(value: unknown): number | undefined {
+	if (typeof value !== "string") return undefined
+	const parsed = Date.parse(value)
+	return Number.isFinite(parsed) ? parsed : undefined
+}
+
+type LoadedSessionLimit = number | null
+const HISTORY_MESSAGE_ID_RE = /^(?:tool-)?history-(\d+)$/
+const DEVO_TURN_ID_META = "devo/turnId"
+const DEVO_HISTORY_INDEX_META = "devo/historyIndex"
+const DEVO_PARENT_MESSAGE_ID_META = "devo/parentMessageId"
+
+function normalizedHistoryLimit(limit: unknown): number | undefined {
+	if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) return undefined
+	return Math.floor(limit)
+}
+
+function loadedLimitCovers(loaded: LoadedSessionLimit | undefined, requested: number | undefined): boolean {
+	if (loaded === undefined) return false
+	if (loaded === null) return true
+	return requested !== undefined && loaded >= requested
+}
+
+function historyMessageCreatedAt(messageId: string): number | undefined {
+	const match = HISTORY_MESSAGE_ID_RE.exec(messageId)
+	if (!match) return undefined
+	const index = Number.parseInt(match[1], 10)
+	return Number.isFinite(index) ? index + 1 : undefined
+}
+
+function updateMeta(update: Record<string, unknown>): Record<string, unknown> | undefined {
+	return objectRecord(update._meta)
+}
+
+function updateMetaString(update: Record<string, unknown>, key: string): string | undefined {
+	const value = updateMeta(update)?.[key]
+	return typeof value === "string" && value ? value : undefined
+}
+
+function updateHistoryCreatedAt(update: Record<string, unknown>): number | undefined {
+	const value = updateMeta(update)?.[DEVO_HISTORY_INDEX_META]
+	const index =
+		typeof value === "number"
+			? value
+			: typeof value === "string"
+				? Number.parseInt(value, 10)
+				: undefined
+	return typeof index === "number" && Number.isFinite(index) && index >= 0
+		? Math.floor(index) + 1
+		: undefined
+}
+
+function messageCreatedAt(message: Message): number {
+	const historyCreated = historyMessageCreatedAt(message.id)
+	if (historyCreated !== undefined) return historyCreated
+	const created = message.time?.created
+	return typeof created === "number" && Number.isFinite(created) ? created : 0
+}
+
+function compareMessages(left: Message, right: Message): number {
+	const byCreated = messageCreatedAt(left) - messageCreatedAt(right)
+	return byCreated === 0 ? left.id.localeCompare(right.id) : byCreated
+}
+
+function sortedMessages(messages: Message[]): Message[] {
+	return [...messages].sort(compareMessages)
+}
+
+function recentMessages(messages: Message[], limit: number | undefined): Message[] {
+	const sorted = sortedMessages(messages)
+	if (limit === undefined || sorted.length <= limit) return sorted
+	return sorted.slice(-limit)
+}
+
 class AcpClient {
 	private transport: DevoAcpTransport | null = null
 	private openPromise: Promise<void> | null = null
@@ -154,8 +237,10 @@ class AcpClient {
 	private sessionStatuses = new Map<string, SessionStatus>()
 	private messages = new Map<string, Message[]>()
 	private parts = new Map<string, Part[]>()
-	private loadedSessions = new Set<string>()
+	private loadedSessionLimits = new Map<string, LoadedSessionLimit>()
 	private lastUserMessageBySession = new Map<string, string>()
+	private userMessageByTurn = new Map<string, string>()
+	private messageTurnIds = new Map<string, string>()
 	private configOptionsBySession = new Map<string, AcpConfigOption[]>()
 	private configOptionsByDirectory = new Map<string, AcpConfigOption[]>()
 	private pendingPermissions = new Map<string, PendingPermission>()
@@ -206,6 +291,7 @@ class AcpClient {
 			}
 			const directory = this.sessionDirectories.get(params.sessionID) ?? this.options.directory ?? defaultCwd()
 			this.lastUserMessageBySession.delete(params.sessionID)
+			const promptStartedAt = Math.max(Date.now(), this.lastEventTime + 1)
 			const busyStatus = { type: "busy" }
 			this.sessionStatuses.set(params.sessionID, busyStatus)
 			this.emit(directory, {
@@ -214,6 +300,7 @@ class AcpClient {
 			})
 			void this.request("session/prompt", promptParams)
 				.then(() => {
+					this.completeOpenAssistantMessages(params.sessionID, directory, promptStartedAt)
 					const idleStatus = { type: "idle" }
 					this.sessionStatuses.set(params.sessionID, idleStatus)
 					this.emit(directory, {
@@ -222,6 +309,7 @@ class AcpClient {
 					})
 				})
 				.catch((error) => {
+					this.completeOpenAssistantMessages(params.sessionID, directory, promptStartedAt)
 					const idleStatus = { type: "idle" }
 					this.sessionStatuses.set(params.sessionID, idleStatus)
 					this.emit(directory, sessionErrorEvent(params.sessionID, error))
@@ -261,7 +349,7 @@ class AcpClient {
 			this.sessions.delete(params.sessionID)
 			this.sessionStatuses.delete(params.sessionID)
 			this.sessionDirectories.delete(params.sessionID)
-			this.loadedSessions.delete(params.sessionID)
+			this.loadedSessionLimits.delete(params.sessionID)
 			this.messages.delete(params.sessionID)
 			for (const [messageId, parts] of this.parts) {
 				if (parts.some((part) => part.sessionID === params.sessionID)) {
@@ -296,8 +384,8 @@ class AcpClient {
 				parts: [{ type: "text", text: "/compact" }],
 			})
 		},
-		messages: async (params: { sessionID: string }) => ({
-			data: await this.sessionMessages(params.sessionID),
+		messages: async (params: { sessionID: string; limit?: number }) => ({
+			data: await this.sessionMessages(params.sessionID, normalizedHistoryLimit(params.limit)),
 		}),
 		fork: async (params: { sessionID: string }) => ({
 			data: this.sessions.get(params.sessionID),
@@ -404,7 +492,7 @@ class AcpClient {
 			const directory = session.directory ?? this.options.directory
 			if (!directory) continue
 			const previous = byDirectory.get(directory)
-			const updated = session.time.updated
+			const updated = session.time.lastActivity ?? session.time.updated ?? session.time.created
 			if (previous) {
 				previous.time.updated = Math.max(previous.time.updated ?? 0, updated)
 				continue
@@ -474,16 +562,21 @@ class AcpClient {
 		})
 		return session
 		}
-		private async sessionMessages(sessionId: string): Promise<Array<{ info: Message; parts: Part[] }>> {
-		await this.loadSession(sessionId)
-		const messages = this.messages.get(sessionId) ?? []
+	private async sessionMessages(sessionId: string, limit?: number): Promise<Array<{ info: Message; parts: Part[] }>> {
+		await this.loadSession(sessionId, limit)
+		const loadedLimit = this.loadedSessionLimits.get(sessionId)
+		const messages =
+			limit === undefined || loadedLimit === limit
+				? sortedMessages(this.messages.get(sessionId) ?? [])
+				: recentMessages(this.messages.get(sessionId) ?? [], limit)
 		return messages.map((info) => ({
 			info,
 			parts: this.parts.get(partCacheKey(sessionId, info.id)) ?? [],
 		}))
 	}
-		private async loadSession(sessionId: string): Promise<void> {
-		if (this.loadedSessions.has(sessionId)) return
+		private async loadSession(sessionId: string, limit?: number): Promise<void> {
+		const loadedLimit = this.loadedSessionLimits.get(sessionId)
+		if (loadedLimitCovers(loadedLimit, limit)) return
 		await this.ensureInitialized()
 		const session = await this.getSessionById(sessionId)
 		const cwd = session?.directory ?? this.sessionDirectories.get(sessionId)
@@ -493,9 +586,10 @@ class AcpClient {
 			cwd,
 			additionalDirectories: [],
 			mcpServers: [],
+			...(limit === undefined ? {} : { _meta: { "devo/historyLimit": limit } }),
 		})) as AcpLoadSessionResult
 		this.rememberConfigOptions(sessionId, cwd, result.configOptions)
-		this.loadedSessions.add(sessionId)
+		this.loadedSessionLimits.set(sessionId, limit ?? null)
 	}
 
 	private async getSessionById(sessionId: string): Promise<Session | undefined> {
@@ -517,26 +611,39 @@ class AcpClient {
 	}
 
 	private rememberSession(info: AcpSessionInfo): Session {
-		const meta = info._meta?.["devo/session"]
-		const created = Date.parse(meta?.created_at ?? info.updatedAt ?? "") || Date.now()
-		const updated = Date.parse(meta?.updated_at ?? info.updatedAt ?? "") || created
+		const existing = this.sessions.get(info.sessionId)
+		const meta = sessionMeta(info._meta)
+		const parsedCreated = parseTimestampMs(meta?.created_at ?? info.updatedAt)
+		const created = parsedCreated ?? existing?.time.created ?? Date.now()
+		const parsedUpdated = parseTimestampMs(meta?.updated_at ?? info.updatedAt)
+		const updated = parsedUpdated ?? existing?.time.updated ?? created
+		const parsedLastActivity = parseTimestampMs(
+			meta?.last_activity_at ?? info.updatedAt ?? meta?.updated_at ?? meta?.created_at,
+		)
+		const lastActivity = parsedLastActivity ?? existing?.time.lastActivity ?? updated ?? created
 		const session: Session = {
 			id: info.sessionId,
-			title: info.title ?? "New session",
-			parentID: meta?.parent_session_id ?? undefined,
-			time: { created, updated },
+			title: info.title ?? existing?.title ?? "New session",
+			parentID: meta?.parent_session_id ?? existing?.parentID ?? undefined,
+			time: { created, updated, lastActivity },
 			directory: info.cwd,
-			totalInputTokens: meta?.total_input_tokens ?? 0,
-			totalOutputTokens: meta?.total_output_tokens ?? 0,
-			totalTokens: meta?.total_tokens ?? 0,
-			totalCacheCreationTokens: meta?.total_cache_creation_tokens ?? 0,
-			totalCacheReadTokens: meta?.total_cache_read_tokens ?? 0,
-			promptTokenEstimate: meta?.prompt_token_estimate ?? 0,
-			lastQueryTotalTokens: meta?.last_query_total_tokens ?? 0,
+			totalInputTokens: meta?.total_input_tokens ?? existing?.totalInputTokens ?? 0,
+			totalOutputTokens: meta?.total_output_tokens ?? existing?.totalOutputTokens ?? 0,
+			totalTokens: meta?.total_tokens ?? existing?.totalTokens ?? 0,
+			totalCacheCreationTokens:
+				meta?.total_cache_creation_tokens ?? existing?.totalCacheCreationTokens ?? 0,
+			totalCacheReadTokens: meta?.total_cache_read_tokens ?? existing?.totalCacheReadTokens ?? 0,
+			promptTokenEstimate: meta?.prompt_token_estimate ?? existing?.promptTokenEstimate ?? 0,
+			lastQueryTotalTokens: meta?.last_query_total_tokens ?? existing?.lastQueryTotalTokens ?? 0,
 		}
 		this.sessions.set(session.id, session)
 		this.sessionDirectories.set(session.id, info.cwd)
-		this.sessionStatuses.set(session.id, statusFromDevo(meta?.status))
+		this.sessionStatuses.set(
+			session.id,
+			meta?.status === undefined
+				? this.sessionStatuses.get(session.id) ?? statusFromDevo(meta?.status)
+				: statusFromDevo(meta.status),
+		)
 		return session
 	}
 
@@ -746,28 +853,40 @@ class AcpClient {
 				kind === "toolCallUpdate" ||
 				kind?.includes("tool") ||
 				Boolean(update.toolCallId)
-			if (canApplyWithoutDiscoveredSession) {
-				directory = this.options.directory ?? defaultCwd()
-				session = this.rememberSession({ sessionId, cwd: directory })
-			} else {
-				void this.discoverSession(sessionId)
-					.then((discovered) => {
-						if (discovered) this.handleSessionUpdate(notification)
-					})
-					.catch((error) => {
+			void this.discoverSession(sessionId)
+				.then((discovered) => {
+					if (discovered) {
+						this.handleSessionUpdate(notification)
+						return
+					}
+					if (!canApplyWithoutDiscoveredSession) return
+					const fallbackDirectory = this.options.directory ?? defaultCwd()
+					this.rememberSession({ sessionId, cwd: fallbackDirectory })
+					this.handleSessionUpdate(notification)
+				})
+				.catch((error) => {
+					if (canApplyWithoutDiscoveredSession) {
+						const fallbackDirectory = this.options.directory ?? defaultCwd()
+						this.rememberSession({ sessionId, cwd: fallbackDirectory })
+						this.handleSessionUpdate(notification)
+					} else {
 						this.emit(this.options.directory ?? defaultCwd(), sessionErrorEvent(sessionId, error))
-					})
-				return
-			}
+					}
+				})
+			return
 		}
 		if (kind === "session_info_update" || kind === "sessionInfoUpdate") {
 			if (typeof update.title === "string") session.title = update.title
-			let updated = typeof update.updatedAt === "string" ? Date.parse(update.updatedAt) : NaN
-			if (!Number.isFinite(updated)) {
+			const meta = sessionMeta(update._meta)
+			const metadataUpdated = parseTimestampMs(meta?.updated_at)
+			if (metadataUpdated !== undefined) session.time.updated = metadataUpdated
+
+			let activity = parseTimestampMs(meta?.last_activity_at)
+			if (activity === undefined && meta === undefined) activity = parseTimestampMs(update.updatedAt)
+			if (activity === undefined) {
 				const original = notification._meta?.["devo/originalEvent"]
-				const originalEvent = original && typeof original === "object" ? (original as Record<string, unknown>) : {}
-				const turn = originalEvent.turn
-				const turnValue = turn && typeof turn === "object" ? (turn as Record<string, unknown>) : {}
+				const originalEvent = objectRecord(original) ?? {}
+				const turnValue = objectRecord(originalEvent.turn) ?? {}
 				const completedAt =
 					typeof turnValue.completed_at === "string"
 						? turnValue.completed_at
@@ -780,9 +899,9 @@ class AcpClient {
 						: typeof turnValue.startedAt === "string"
 							? turnValue.startedAt
 							: undefined
-				updated = Date.parse(completedAt ?? startedAt ?? "")
+				activity = parseTimestampMs(completedAt ?? startedAt)
 			}
-			if (Number.isFinite(updated)) session.time.updated = updated
+			if (activity !== undefined) session.time.lastActivity = activity
 		}
 		this.emit(directory, { type: "session.updated", properties: { info: session, session } })
 		this.handleOriginalEvent(sessionId, directory, notification)
@@ -901,6 +1020,92 @@ class AcpClient {
 		})
 	}
 
+	private turnKey(sessionId: string, turnId: string): string {
+		return `${sessionId}\u001f${turnId}`
+	}
+
+	private turnIdForUpdate(update: Record<string, unknown>): string | undefined {
+		return updateMetaString(update, DEVO_TURN_ID_META)
+	}
+
+	private parentMessageIdForUpdate(
+		sessionId: string,
+		update: Record<string, unknown>,
+		existingMessage?: Message,
+	): string | undefined {
+		const turnId = this.turnIdForUpdate(update)
+		return (
+			updateMetaString(update, DEVO_PARENT_MESSAGE_ID_META) ??
+			(turnId ? this.userMessageByTurn.get(this.turnKey(sessionId, turnId)) : undefined) ??
+			existingMessage?.parentID ??
+			this.lastUserMessageBySession.get(sessionId)
+		)
+	}
+
+	private earliestMessageCreatedForTurn(sessionId: string, turnId: string): number | undefined {
+		let earliest: number | undefined
+		for (const message of this.messages.get(sessionId) ?? []) {
+			if (this.messageTurnIds.get(partCacheKey(sessionId, message.id)) !== turnId) continue
+			const created = message.time?.created
+			if (typeof created !== "number" || !Number.isFinite(created)) continue
+			earliest = earliest === undefined ? created : Math.min(earliest, created)
+		}
+		return earliest
+	}
+
+	private messageCreatedAtForUpdate(
+		sessionId: string,
+		role: "assistant" | "user",
+		messageId: string,
+		update: Record<string, unknown>,
+		existingMessage: Message | undefined,
+		now: number,
+	): number {
+		let created =
+			existingMessage?.time?.created ?? updateHistoryCreatedAt(update) ?? historyMessageCreatedAt(messageId) ?? now
+		const turnId = this.turnIdForUpdate(update)
+		if (role === "user" && turnId) {
+			const earliest = this.earliestMessageCreatedForTurn(sessionId, turnId)
+			if (earliest !== undefined && earliest <= created) {
+				created = Math.max(0, earliest - 1)
+			}
+		}
+		return created
+	}
+
+	private rememberMessageTurn(
+		sessionId: string,
+		directory: string,
+		messageId: string,
+		role: "assistant" | "user",
+		update: Record<string, unknown>,
+	): void {
+		const turnId = this.turnIdForUpdate(update)
+		if (!turnId) return
+		this.messageTurnIds.set(partCacheKey(sessionId, messageId), turnId)
+		if (role !== "user") return
+		this.userMessageByTurn.set(this.turnKey(sessionId, turnId), messageId)
+		this.reparentTurnMessages(sessionId, directory, turnId, messageId)
+	}
+
+	private reparentTurnMessages(
+		sessionId: string,
+		directory: string,
+		turnId: string,
+		userMessageId: string,
+	): void {
+		const messages = this.messages.get(sessionId)
+		if (!messages) return
+		for (let index = 0; index < messages.length; index++) {
+			const message = messages[index]
+			if (message.role !== "assistant") continue
+			if (this.messageTurnIds.get(partCacheKey(sessionId, message.id)) !== turnId) continue
+			if (message.parentID === userMessageId) continue
+			const updated = { ...message, parentID: userMessageId } as Message
+			messages[index] = updated
+			this.emit(directory, { type: "message.updated", properties: { info: updated, message: updated } })
+		}
+	}
 	private appendText(
 		sessionId: string,
 		directory: string,
@@ -916,32 +1121,44 @@ class AcpClient {
 				? update.messageId
 				: `${role}-${sessionId}-${now}`
 		const existingMessage = this.messages.get(sessionId)?.find((message) => message.id === messageId)
-		const message =
-			existingMessage ??
-			({
-				id: messageId,
-				sessionID: sessionId,
-				role,
-				...(role === "assistant" && this.lastUserMessageBySession.get(sessionId)
-					? { parentID: this.lastUserMessageBySession.get(sessionId) }
-					: {}),
-				time: { created: now },
-			} as Message)
+		const parentID =
+			role === "assistant" ? this.parentMessageIdForUpdate(sessionId, update, existingMessage) : undefined
+		const created = this.messageCreatedAtForUpdate(
+			sessionId,
+			role,
+			messageId,
+			update,
+			existingMessage,
+			now,
+		)
+		const message = {
+			...(existingMessage ?? {}),
+			id: messageId,
+			sessionID: sessionId,
+			role,
+			...(parentID ? { parentID } : {}),
+			time: { ...(existingMessage?.time ?? {}), created },
+		} as Message
 		this.appendMessage(sessionId, message)
 		if (role === "user") this.lastUserMessageBySession.set(sessionId, messageId)
 		this.emit(directory, { type: "message.updated", properties: { info: message, message } })
+		this.rememberMessageTurn(sessionId, directory, messageId, role, update)
 
 		const partId = `${messageId}-${partType === "reasoning" ? "reasoning" : "text"}`
 		const existingPart = this.parts
 			.get(partCacheKey(sessionId, messageId))
 			?.find((part) => part.id === partId)
 		const field = partType === "reasoning" ? "text" : "text"
+		const existingText =
+			messageId.startsWith("history-") || typeof existingPart?.[field] !== "string"
+				? ""
+				: existingPart[field]
 		const part = {
 			id: partId,
 			sessionID: sessionId,
 			messageID: messageId,
 			type: partType,
-			[field]: `${typeof existingPart?.[field] === "string" ? existingPart[field] : ""}${text}`,
+			[field]: `${existingText}${text}`,
 			time: partTime(existingPart, now),
 		} as TextPart | ReasoningPart
 		this.appendPart(sessionId, messageId, part)
@@ -967,20 +1184,55 @@ class AcpClient {
 		const now = this.nextEventTime()
 		const toolCallId = toolCallIdFromUpdate(update, now)
 		const messageId = `tool-${toolCallId}`
+		const existingMessage = this.messages.get(sessionId)?.find((message) => message.id === messageId)
 		const existingPart = this.parts
 			.get(partCacheKey(sessionId, messageId))
 			?.find((part) => part.id === `${messageId}-part`)
-		const message: Message = {
+		const parentID = this.parentMessageIdForUpdate(sessionId, update, existingMessage)
+		const created = this.messageCreatedAtForUpdate(
+			sessionId,
+			"assistant",
+			messageId,
+			update,
+			existingMessage,
+			now,
+		)
+		const message = {
+			...(existingMessage ?? {}),
 			id: messageId,
 			sessionID: sessionId,
 			role: "assistant",
-			time: { created: now },
-		}
+			...(parentID ? { parentID } : {}),
+			time: { ...(existingMessage?.time ?? {}), created },
+		} as Message
 		const part = toolPartFromUpdate(sessionId, update, existingPart, now) as ToolPart
 		this.appendMessage(sessionId, message)
+		this.rememberMessageTurn(sessionId, directory, messageId, "assistant", update)
 		this.appendPart(sessionId, message.id, part)
 		this.emit(directory, { type: "message.updated", properties: { info: message, message } })
 		this.emit(directory, { type: "message.part.updated", properties: { part } })
+	}
+
+	private completeOpenAssistantMessages(
+		sessionId: string,
+		directory: string,
+		promptStartedAt: number,
+	): void {
+		const messages = this.messages.get(sessionId)
+		if (!messages) return
+		let completedAt: number | null = null
+		for (let index = 0; index < messages.length; index++) {
+			const message = messages[index]
+			if (message.role !== "assistant" || message.time.completed != null) continue
+			if (message.time.created < promptStartedAt) continue
+			completedAt ??= this.nextEventTime()
+			const updated = {
+				...message,
+				time: { ...message.time, completed: completedAt },
+			} as Message
+			messages[index] = updated
+			this.emit(directory, { type: "message.updated", properties: { info: updated, message: updated } })
+		}
 	}
 
 	private appendMessage(sessionId: string, message: Message): void {

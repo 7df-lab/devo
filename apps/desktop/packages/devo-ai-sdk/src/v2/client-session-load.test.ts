@@ -98,6 +98,113 @@ describe("ACP desktop SDK session cwd discovery", () => {
 		])
 	})
 
+	test("passes history limit through session/load meta and reloads larger windows", async () => {
+		const transport = new FakeTransport((method, params, _directory, tx) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") return { sessions: [storedSession] }
+			if (method === "session/load") {
+				const limit = (params as { _meta?: Record<string, number> })._meta?.["devo/historyLimit"]
+				if (limit === 1) {
+					tx?.emitSessionUpdate({
+						sessionId: "stored-session",
+						update: {
+							sessionUpdate: "user_message_chunk",
+							messageId: "history-1",
+							content: { type: "text", text: "new" },
+						},
+					} satisfies AcpSessionNotification)
+				} else if (limit === 2) {
+					tx?.emitSessionUpdate({
+						sessionId: "stored-session",
+						update: {
+							sessionUpdate: "user_message_chunk",
+							messageId: "history-0",
+							content: { type: "text", text: "old" },
+						},
+					} satisfies AcpSessionNotification)
+					tx?.emitSessionUpdate({
+						sessionId: "stored-session",
+						update: {
+							sessionUpdate: "user_message_chunk",
+							messageId: "history-1",
+							content: { type: "text", text: "new" },
+						},
+					} satisfies AcpSessionNotification)
+				}
+				return {}
+			}
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ transport })
+
+		const first = await client.session.messages({ sessionID: "stored-session", limit: 1 })
+		const second = await client.session.messages({ sessionID: "stored-session", limit: 2 })
+		const firstAgain = await client.session.messages({ sessionID: "stored-session", limit: 1 })
+
+		expect(first.data.map((message) => message.parts[0]?.text)).toEqual(["new"])
+		expect(second.data.map((message) => message.parts[0]?.text)).toEqual(["old", "new"])
+		expect(firstAgain.data.map((message) => message.parts[0]?.text)).toEqual(["new"])
+		expect(transport.requests.filter((request) => request.method === "session/load")).toEqual([
+			{
+				method: "session/load",
+				directory: undefined,
+				params: {
+					sessionId: "stored-session",
+					cwd: "/stored/repo",
+					additionalDirectories: [],
+					mcpServers: [],
+					_meta: { "devo/historyLimit": 1 },
+				},
+			},
+			{
+				method: "session/load",
+				directory: undefined,
+				params: {
+					sessionId: "stored-session",
+					cwd: "/stored/repo",
+					additionalDirectories: [],
+					mcpServers: [],
+					_meta: { "devo/historyLimit": 2 },
+				},
+			},
+		])
+	})
+
+	test("keeps server-expanded limited history windows intact", async () => {
+		const transport = new FakeTransport((method, params, _directory, tx) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") return { sessions: [storedSession] }
+			if (method === "session/load") {
+				expect((params as { _meta?: Record<string, number> })._meta).toEqual({
+					"devo/historyLimit": 1,
+				})
+				tx?.emitSessionUpdate({
+					sessionId: "stored-session",
+					update: {
+						sessionUpdate: "user_message_chunk",
+						messageId: "history-0",
+						content: { type: "text", text: "user" },
+					},
+				} satisfies AcpSessionNotification)
+				tx?.emitSessionUpdate({
+					sessionId: "stored-session",
+					update: {
+						sessionUpdate: "agent_message_chunk",
+						messageId: "history-1",
+						content: { type: "text", text: "assistant" },
+					},
+				} satisfies AcpSessionNotification)
+				return {}
+			}
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ transport })
+
+		const result = await client.session.messages({ sessionID: "stored-session", limit: 1 })
+
+		expect(result.data.map((message) => message.parts[0]?.text)).toEqual(["user", "assistant"])
+	})
+
 	test("does not synthesize a default cwd for unknown session updates", async () => {
 		const transport = new FakeTransport((method) => {
 			if (method === "initialize") return initializeResult
@@ -113,6 +220,13 @@ describe("ACP desktop SDK session cwd discovery", () => {
 				sessionUpdate: "session_info_update",
 				title: "Stored session renamed",
 				updatedAt: "2026-06-24T00:01:00.000Z",
+				_meta: {
+					"devo/session": {
+						created_at: "2026-06-24T00:00:00.000Z",
+						updated_at: "2026-06-24T00:01:00.000Z",
+						last_activity_at: "2026-06-24T00:00:00.000Z",
+					},
+				},
 			},
 		} satisfies AcpSessionNotification)
 
@@ -127,6 +241,7 @@ describe("ACP desktop SDK session cwd discovery", () => {
 					time: {
 						created: Date.parse("2026-06-24T00:00:00.000Z"),
 						updated: Date.parse("2026-06-24T00:01:00.000Z"),
+						lastActivity: Date.parse("2026-06-24T00:00:00.000Z"),
 					},
 					totalInputTokens: 0,
 					totalOutputTokens: 0,
@@ -144,6 +259,7 @@ describe("ACP desktop SDK session cwd discovery", () => {
 					time: {
 						created: Date.parse("2026-06-24T00:00:00.000Z"),
 						updated: Date.parse("2026-06-24T00:01:00.000Z"),
+						lastActivity: Date.parse("2026-06-24T00:00:00.000Z"),
 					},
 					totalInputTokens: 0,
 					totalOutputTokens: 0,

@@ -249,6 +249,206 @@ describe("ACP desktop SDK session mapping", () => {
 		})
 	})
 
+	test("uses ACP metadata to keep historical tools attached to their turns", async () => {
+		Date.now = () => 1_772_000_000_000
+		const transport = new FakeTransport((method, _params, _directory, tx) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") return { sessions: [sessionInfo] }
+			if (method === "session/load") {
+				tx?.emitSessionUpdate({
+					sessionId: "s1",
+					update: {
+						sessionUpdate: "user_message_chunk",
+						messageId: "history-0",
+						content: { type: "text", text: "first prompt" },
+						_meta: { "devo/historyIndex": 0 },
+					},
+				} satisfies AcpSessionNotification)
+				tx?.emitSessionUpdate({
+					sessionId: "s1",
+					update: {
+						sessionUpdate: "tool_call",
+						toolCallId: "read-real-a",
+						title: "Read A",
+						kind: "read",
+						status: "pending",
+						_meta: { "devo/historyIndex": 1, "devo/parentMessageId": "history-0" },
+					},
+				} satisfies AcpSessionNotification)
+				tx?.emitSessionUpdate({
+					sessionId: "s1",
+					update: {
+						sessionUpdate: "tool_call_update",
+						toolCallId: "read-real-a",
+						title: "Read A",
+						status: "completed",
+						rawOutput: "A done",
+						_meta: { "devo/historyIndex": 2, "devo/parentMessageId": "history-0" },
+					},
+				} satisfies AcpSessionNotification)
+				tx?.emitSessionUpdate({
+					sessionId: "s1",
+					update: {
+						sessionUpdate: "agent_message_chunk",
+						messageId: "history-3",
+						content: { type: "text", text: "first answer" },
+						_meta: { "devo/historyIndex": 3, "devo/parentMessageId": "history-0" },
+					},
+				} satisfies AcpSessionNotification)
+				tx?.emitSessionUpdate({
+					sessionId: "s1",
+					update: {
+						sessionUpdate: "user_message_chunk",
+						messageId: "history-4",
+						content: { type: "text", text: "second prompt" },
+						_meta: { "devo/historyIndex": 4 },
+					},
+				} satisfies AcpSessionNotification)
+				tx?.emitSessionUpdate({
+					sessionId: "s1",
+					update: {
+						sessionUpdate: "tool_call_update",
+						toolCallId: "read-real-b",
+						title: "Read B",
+						status: "completed",
+						rawOutput: "B done",
+						_meta: { "devo/historyIndex": 5, "devo/parentMessageId": "history-4" },
+					},
+				} satisfies AcpSessionNotification)
+				tx?.emitSessionUpdate({
+					sessionId: "s1",
+					update: {
+						sessionUpdate: "agent_message_chunk",
+						messageId: "history-6",
+						content: { type: "text", text: "second answer" },
+						_meta: { "devo/historyIndex": 6, "devo/parentMessageId": "history-4" },
+					},
+				} satisfies AcpSessionNotification)
+				return { configOptions }
+			}
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+
+		await client.session.list()
+		const result = await client.session.messages({ sessionID: "s1" })
+
+		expect(
+			result.data.map((entry) => ({
+				id: entry.info.id,
+				role: entry.info.role,
+				parentID: entry.info.parentID,
+				created: entry.info.time.created,
+				parts: entry.parts.map((part) => ({
+					type: part.type,
+					text: part.text,
+					callID: part.callID,
+					output: part.state?.output,
+				})),
+			})),
+		).toEqual([
+			{
+				id: "history-0",
+				role: "user",
+				parentID: undefined,
+				created: 1,
+				parts: [{ type: "text", text: "first prompt", callID: undefined, output: undefined }],
+			},
+			{
+				id: "tool-read-real-a",
+				role: "assistant",
+				parentID: "history-0",
+				created: 2,
+				parts: [{ type: "tool", text: undefined, callID: "read-real-a", output: "A done" }],
+			},
+			{
+				id: "history-3",
+				role: "assistant",
+				parentID: "history-0",
+				created: 4,
+				parts: [{ type: "text", text: "first answer", callID: undefined, output: undefined }],
+			},
+			{
+				id: "history-4",
+				role: "user",
+				parentID: undefined,
+				created: 5,
+				parts: [{ type: "text", text: "second prompt", callID: undefined, output: undefined }],
+			},
+			{
+				id: "tool-read-real-b",
+				role: "assistant",
+				parentID: "history-4",
+				created: 6,
+				parts: [{ type: "tool", text: undefined, callID: "read-real-b", output: "B done" }],
+			},
+			{
+				id: "history-6",
+				role: "assistant",
+				parentID: "history-4",
+				created: 7,
+				parts: [{ type: "text", text: "second answer", callID: undefined, output: undefined }],
+			},
+		])
+	})
+
+	test("reparents same-turn assistant updates when the user echo arrives late", async () => {
+		Date.now = () => 1_772_000_000_000
+		const transport = new FakeTransport((method) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") return { sessions: [sessionInfo] }
+			if (method === "session/load") return { configOptions }
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+
+		await client.session.list()
+		await client.session.messages({ sessionID: "s1" })
+		transport.emitSessionUpdate({
+			sessionId: "s1",
+			update: {
+				sessionUpdate: "agent_message_chunk",
+				messageId: "assistant-live",
+				content: { type: "text", text: "late answer" },
+				_meta: { "devo/turnId": "turn-live", "devo/itemId": "assistant-live" },
+			},
+		} satisfies AcpSessionNotification)
+		transport.emitSessionUpdate({
+			sessionId: "s1",
+			update: {
+				sessionUpdate: "tool_call",
+				toolCallId: "tool-live",
+				title: "Read live",
+				kind: "read",
+				status: "pending",
+				_meta: { "devo/turnId": "turn-live", "devo/itemId": "tool-live-item" },
+			},
+		} satisfies AcpSessionNotification)
+		transport.emitSessionUpdate({
+			sessionId: "s1",
+			update: {
+				sessionUpdate: "user_message_chunk",
+				messageId: "user-live",
+				content: { type: "text", text: "new prompt" },
+				_meta: { "devo/turnId": "turn-live", "devo/itemId": "user-live" },
+			},
+		} satisfies AcpSessionNotification)
+
+		const result = await client.session.messages({ sessionID: "s1" })
+
+		expect(
+			result.data.map((entry) => ({
+				id: entry.info.id,
+				role: entry.info.role,
+				parentID: entry.info.parentID,
+				created: entry.info.time.created,
+			})),
+		).toEqual([
+			{ id: "user-live", role: "user", parentID: undefined, created: 1_771_999_999_999 },
+			{ id: "assistant-live", role: "assistant", parentID: "user-live", created: 1_772_000_000_000 },
+			{ id: "tool-tool-live", role: "assistant", parentID: "user-live", created: 1_772_000_000_001 },
+		])
+	})
 	test("uses ACP config options for model list and applies selected model before prompting", async () => {
 		const transport = new FakeTransport((method, _params, _directory, tx) => {
 			if (method === "initialize") return initializeResult
@@ -403,6 +603,50 @@ describe("ACP desktop SDK session mapping", () => {
 				sessionID: "s1",
 				status: { type: "idle" },
 			},
+		})
+	})
+
+	test("marks streamed assistant messages completed when detached ACP prompt resolves", async () => {
+		Date.now = () => 1_772_000_000_000
+		const transport = new FakeTransport((method, _params, _directory, tx) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") return { sessions: [sessionInfo] }
+			if (method === "session/prompt") {
+				tx?.emitSessionUpdate({
+					sessionId: "s1",
+					update: {
+						sessionUpdate: "agent_message_chunk",
+						messageId: "a1",
+						content: { type: "text", text: "done" },
+					},
+				} satisfies AcpSessionNotification)
+				return { stopReason: "end_turn" }
+			}
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
+
+		await client.session.list()
+		await client.session.promptAsync({
+			sessionID: "s1",
+			parts: [{ type: "text", text: "stream now" }],
+		})
+
+		const payloads = []
+		for (let i = 0; i < 6; i++) {
+			payloads.push(await nextPayload(stream, `completion-${i}`))
+		}
+		const completedMessage = payloads.find(
+			(payload) =>
+				payload.type === "message.updated" &&
+				payload.properties.info.id === "a1" &&
+				payload.properties.info.time.completed != null,
+		)
+
+		expect(completedMessage?.properties.info.time).toEqual({
+			created: 1_772_000_000_000,
+			completed: 1_772_000_000_001,
 		})
 	})
 
@@ -875,6 +1119,13 @@ describe("ACP desktop SDK session mapping", () => {
 				sessionUpdate: "session_info_update",
 				title: "Renamed by server",
 				updatedAt: "2026-06-24T01:00:00.000Z",
+				_meta: {
+					"devo/session": {
+						created_at: "2026-06-24T00:00:00.000Z",
+						updated_at: "2026-06-24T01:00:00.000Z",
+						last_activity_at: "2026-06-24T00:00:00.000Z",
+					},
+				},
 			},
 		} satisfies AcpSessionNotification)
 
@@ -889,6 +1140,7 @@ describe("ACP desktop SDK session mapping", () => {
 					time: {
 						created: Date.parse("2026-06-24T00:00:00.000Z"),
 						updated: Date.parse("2026-06-24T01:00:00.000Z"),
+						lastActivity: Date.parse("2026-06-24T00:00:00.000Z"),
 					},
 					totalInputTokens: 0,
 					totalOutputTokens: 0,
@@ -906,6 +1158,7 @@ describe("ACP desktop SDK session mapping", () => {
 					time: {
 						created: Date.parse("2026-06-24T00:00:00.000Z"),
 						updated: Date.parse("2026-06-24T01:00:00.000Z"),
+						lastActivity: Date.parse("2026-06-24T00:00:00.000Z"),
 					},
 					totalInputTokens: 0,
 					totalOutputTokens: 0,
@@ -950,6 +1203,7 @@ describe("ACP desktop SDK session mapping", () => {
 					time: {
 						created: Date.parse("2026-06-24T00:00:00.000Z"),
 						updated: Date.parse("2026-06-24T00:00:00.000Z"),
+						lastActivity: Date.parse("2026-06-24T00:00:00.000Z"),
 					},
 					totalInputTokens: 0,
 					totalOutputTokens: 0,
@@ -967,6 +1221,7 @@ describe("ACP desktop SDK session mapping", () => {
 					time: {
 						created: Date.parse("2026-06-24T00:00:00.000Z"),
 						updated: Date.parse("2026-06-24T00:00:00.000Z"),
+						lastActivity: Date.parse("2026-06-24T00:00:00.000Z"),
 					},
 					totalInputTokens: 0,
 					totalOutputTokens: 0,
@@ -991,6 +1246,7 @@ describe("ACP desktop SDK session mapping", () => {
 						cwd: "/repo",
 						created_at: "2026-06-24T01:00:00.000Z",
 						updated_at: "2026-06-24T01:00:00.000Z",
+						last_activity_at: "2026-06-24T00:00:00.000Z",
 						title: "New title",
 						title_state: { Final: "UserRename" },
 						ephemeral: false,
@@ -1033,6 +1289,7 @@ describe("ACP desktop SDK session mapping", () => {
 					time: {
 						created: Date.parse("2026-06-24T01:00:00.000Z"),
 						updated: Date.parse("2026-06-24T01:00:00.000Z"),
+						lastActivity: Date.parse("2026-06-24T00:00:00.000Z"),
 					},
 					totalInputTokens: 0,
 					totalOutputTokens: 0,
@@ -1050,6 +1307,7 @@ describe("ACP desktop SDK session mapping", () => {
 					time: {
 						created: Date.parse("2026-06-24T01:00:00.000Z"),
 						updated: Date.parse("2026-06-24T01:00:00.000Z"),
+						lastActivity: Date.parse("2026-06-24T00:00:00.000Z"),
 					},
 					totalInputTokens: 0,
 					totalOutputTokens: 0,
