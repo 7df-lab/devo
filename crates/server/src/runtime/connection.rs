@@ -630,6 +630,7 @@ impl ServerRuntime {
         if let ServerEvent::TurnCompleted(payload) = &event {
             self.account_goal_turn_completed(&payload.turn).await;
         }
+        self.update_session_last_activity_from_event(&event).await;
         self.record_subagent_output_event(&event).await;
         let method = event.method_name();
         let session_id = event.session_id();
@@ -668,6 +669,17 @@ impl ServerRuntime {
         for notification in notifications {
             send_connection_notification(notification).await;
         }
+    }
+
+    async fn update_session_last_activity_from_event(&self, event: &ServerEvent) {
+        let Some(session_id) = session_activity_event_id(event) else {
+            return;
+        };
+        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+            return;
+        };
+        let mut session = session_arc.lock().await;
+        session.summary.last_activity_at = session.summary.last_activity_at.max(chrono::Utc::now());
     }
 
     pub(super) async fn send_raw_to_connection(
@@ -945,6 +957,39 @@ async fn remove_pending_client_request(
 ) {
     if let Some(connection) = connections.lock().await.get_mut(&connection_id) {
         connection.pending_client_requests.remove(&request_id);
+    }
+}
+
+fn session_activity_event_id(event: &ServerEvent) -> Option<SessionId> {
+    match event {
+        ServerEvent::ToolCallStatusUpdated(payload) => Some(payload.session_id),
+        ServerEvent::ItemDelta {
+            delta_kind:
+                ItemDeltaKind::AgentMessageDelta
+                | ItemDeltaKind::ReasoningSummaryTextDelta
+                | ItemDeltaKind::ReasoningTextDelta,
+            payload,
+        } => Some(payload.context.session_id),
+        ServerEvent::ItemStarted(payload)
+            if matches!(
+                payload.item.item_kind,
+                ItemKind::ToolCall | ItemKind::CommandExecution
+            ) =>
+        {
+            Some(payload.context.session_id)
+        }
+        ServerEvent::ItemCompleted(payload)
+            if matches!(
+                payload.item.item_kind,
+                ItemKind::UserMessage
+                    | ItemKind::ToolResult
+                    | ItemKind::CommandExecution
+                    | ItemKind::FileChange
+            ) =>
+        {
+            Some(payload.context.session_id)
+        }
+        _ => None,
     }
 }
 

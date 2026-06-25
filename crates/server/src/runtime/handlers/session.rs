@@ -192,7 +192,12 @@ impl ServerRuntime {
         for session in sessions {
             summaries.push(session.lock().await.summary.clone());
         }
-        summaries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        summaries.sort_by(|left, right| {
+            right
+                .last_activity_at
+                .cmp(&left.last_activity_at)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+        });
         summaries
     }
 
