@@ -51,6 +51,7 @@ import {
 	type MouseEvent,
 	type ReactNode,
 } from "react"
+import { formatRelativeTime } from "../../atoms/derived/agents"
 import type { Agent, AgentStatus, SidebarProject } from "../../lib/types"
 import {
 	buildProjectRowActions,
@@ -69,20 +70,14 @@ const STATUS_ICON: Record<AgentStatus, typeof Loader2Icon> = {
 	idle: CheckCircle2Icon,
 }
 
-function useLiveLastActive(agent: Agent): string {
-	const isActive = agent.status === "running" || agent.status === "waiting"
-	const [display, setDisplay] = useState(agent.duration)
+function useLiveLastActive(lastActiveAt: number): string {
+	const [display, setDisplay] = useState(() => formatRelativeTime(lastActiveAt))
 
 	useEffect(() => {
-		if (!isActive) {
-			setDisplay(agent.duration)
-			return
-		}
-
-		setDisplay("now")
-		const id = setInterval(() => setDisplay("now"), 60_000)
+		setDisplay(formatRelativeTime(lastActiveAt))
+		const id = setInterval(() => setDisplay(formatRelativeTime(lastActiveAt)), 60_000)
 		return () => clearInterval(id)
-	}, [isActive, agent.duration])
+	}, [lastActiveAt])
 
 	return display
 }
@@ -373,7 +368,7 @@ export const SessionRow = memo(function SessionRow({
 	const navigate = useNavigate()
 	const [, startTransition] = useTransition()
 	const StatusIcon = STATUS_ICON[agent.status]
-	const lastActive = useLiveLastActive(agent)
+	const lastActive = useLiveLastActive(agent.lastActiveAt)
 	const isWorktree = !!agent.worktreePath
 	const [isEditing, setIsEditing] = useState(false)
 	const [editValue, setEditValue] = useState(agent.name)
