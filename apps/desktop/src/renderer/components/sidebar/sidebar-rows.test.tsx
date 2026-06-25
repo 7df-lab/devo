@@ -79,4 +79,36 @@ describe("SessionRow", () => {
 			showsActionsOnHover: true,
 		})
 	})
+
+	test("renders last active text from timestamp instead of cached duration", () => {
+		const originalNow = Date.now
+		Date.now = () => Date.parse("2026-06-24T02:00:00.000Z")
+		try {
+			const staleAgent = {
+				...agent(),
+				duration: "now",
+				lastActiveAt: Date.parse("2026-06-24T00:00:00.000Z"),
+			}
+
+			const markup = renderToStaticMarkup(
+				<SessionRow
+					agent={staleAgent}
+					isSelected={false}
+					onRename={async () => {}}
+					onDelete={async () => {}}
+					onFork={async () => {}}
+				/>,
+			)
+
+			expect({
+				usesTimestamp: markup.includes("2h"),
+				usesCachedDuration: markup.includes(">now<"),
+			}).toEqual({
+				usesTimestamp: true,
+				usesCachedDuration: false,
+			})
+		} finally {
+			Date.now = originalNow
+		}
+	})
 })

@@ -1,6 +1,13 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import type { ChatTurn } from "../atoms/derived/session-chat"
-import { computeTurnWorkTime, computeTurnWorkTimeSplit } from "./session-metrics"
+import type { Message } from "./types"
+import { computeSessionMetrics, computeTurnWorkTime, computeTurnWorkTimeSplit } from "./session-metrics"
+
+const originalNow = Date.now
+
+afterEach(() => {
+	Date.now = originalNow
+})
 
 function turnWith(assistantMessages: ChatTurn["assistantMessages"]): ChatTurn {
 	return {
@@ -76,5 +83,41 @@ describe("turn duration metrics", () => {
 		] as ChatTurn["assistantMessages"])
 
 		expect(computeTurnWorkTime(turn)).toBe(0)
+	})
+
+	test("does not treat historical ordering timestamps as active session timers", () => {
+		Date.now = () => Date.parse("2026-06-25T12:00:00.000Z")
+		const messages = [
+			{ id: "history-0", role: "user", time: { created: 1 } },
+			{
+				id: "history-1",
+				role: "assistant",
+				parentID: "history-0",
+				time: { created: 2 },
+			},
+		] as Message[]
+
+		expect(computeSessionMetrics(messages)).toEqual({
+			workTimeMs: 0,
+			completedWorkTimeMs: 0,
+			activeStartMs: null,
+			cost: 0,
+			tokens: {
+				input: 0,
+				output: 0,
+				reasoning: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				total: 0,
+			},
+			exchangeCount: 1,
+			userMessageCount: 1,
+			assistantMessageCount: 1,
+			modelDistribution: {},
+			cacheEfficiency: 0,
+			errorCount: 0,
+			avgExchangeCost: 0,
+			avgExchangeTimeMs: 0,
+		})
 	})
 })

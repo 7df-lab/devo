@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test"
 import type { SidebarProject } from "../../lib/types"
-import { projectDisplayName, projectNameFromDir, sortSidebarProjectsForDefaultList } from "./agents"
+import {
+	formatRelativeTime,
+	projectDisplayName,
+	projectNameFromDir,
+	sortSidebarProjectsForDefaultList,
+} from "./agents"
 
 function project(
 	name: string,
@@ -82,6 +87,24 @@ describe("project display names", () => {
 			windowsPathName: "devo",
 			unixPathName: "devo",
 			blankName: "devo",
+		})
+	})
+})
+
+describe("relative session time formatting", () => {
+	test("formats relative time from an explicit clock", () => {
+		const now = Date.parse("2026-06-24T02:00:00.000Z")
+
+		expect({
+			now: formatRelativeTime(now - 30_000, now),
+			minutes: formatRelativeTime(now - 42 * 60_000, now),
+			hours: formatRelativeTime(now - 2 * 60 * 60_000, now),
+			days: formatRelativeTime(now - 3 * 24 * 60 * 60_000, now),
+		}).toEqual({
+			now: "now",
+			minutes: "42m",
+			hours: "2h",
+			days: "3d",
 		})
 	})
 })

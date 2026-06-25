@@ -68,6 +68,8 @@ export interface SessionMetricsExtended extends SessionMetrics {
 }
 
 const MAX_COMPLETED_TURN_WORK_TIME_MS = 24 * 60 * 60 * 1000
+const MIN_PLAUSIBLE_EPOCH_MS = Date.UTC(2020, 0, 1)
+const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
 
 // ============================================================
 // Extraction helpers
@@ -94,12 +96,25 @@ export function getAssistantMessages(messages: Message[]): AssistantMessage[] {
  */
 export function computeAgentWorkTime(messages: Message[]): number {
 	let total = 0
+	const now = Date.now()
 	for (const msg of messages) {
 		if (msg.role !== "assistant") continue
-		const end = msg.time.completed ?? Date.now()
-		total += Math.max(0, end - msg.time.created)
+		if (msg.time.completed != null) {
+			const elapsed = Math.max(0, msg.time.completed - msg.time.created)
+			if (elapsed <= MAX_COMPLETED_TURN_WORK_TIME_MS) total += elapsed
+		} else if (isPlausibleEpochMs(msg.time.created, now)) {
+			total += Math.max(0, now - msg.time.created)
+		}
 	}
 	return total
+}
+
+function isPlausibleEpochMs(timestamp: number, nowMs: number): boolean {
+	return (
+		Number.isFinite(timestamp) &&
+		timestamp >= MIN_PLAUSIBLE_EPOCH_MS &&
+		timestamp <= nowMs + MAX_FUTURE_SKEW_MS
+	)
 }
 
 function partTimestamp(part: Part): number | undefined {
@@ -244,6 +259,7 @@ export function computeSessionMetrics(messages: Message[]): SessionMetrics {
 	let workTimeMs = 0
 	let completedWorkTimeMs = 0
 	let activeStartMs: number | null = null
+	const now = Date.now()
 	let cost = 0
 	let userMessageCount = 0
 	let assistantMessageCount = 0
@@ -276,14 +292,17 @@ export function computeSessionMetrics(messages: Message[]): SessionMetrics {
 			userIdsWithResponses.add(msg.parentID)
 		}
 
-		// Work time
-		const end = msg.time.completed ?? Date.now()
-		workTimeMs += Math.max(0, end - msg.time.created)
-
-		// Track completed vs in-progress for live ticking
+		// Work time. History replay uses small ordering timestamps (1, 2, 3...)
+		// for stable sorting; those are not wall-clock epoch values and must not
+		// be treated as active timers.
 		if (msg.time.completed != null) {
-			completedWorkTimeMs += Math.max(0, msg.time.completed - msg.time.created)
-		} else {
+			const elapsed = Math.max(0, msg.time.completed - msg.time.created)
+			if (elapsed <= MAX_COMPLETED_TURN_WORK_TIME_MS) {
+				workTimeMs += elapsed
+				completedWorkTimeMs += elapsed
+			}
+		} else if (isPlausibleEpochMs(msg.time.created, now)) {
+			workTimeMs += Math.max(0, now - msg.time.created)
 			activeStartMs = msg.time.created
 		}
 
