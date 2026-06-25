@@ -24,7 +24,9 @@ export function resolveDevoProgram({
 
 	const checkoutRoot = path.resolve(appPath, "../..")
 	const candidates = [
+		path.join(checkoutRoot, "target", "debug", "devo.exe"),
 		path.join(checkoutRoot, "target", "debug", "devo"),
+		path.join(checkoutRoot, "target", "release", "devo.exe"),
 		path.join(checkoutRoot, "target", "release", "devo"),
 	]
 
