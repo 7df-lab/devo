@@ -429,6 +429,7 @@ impl ServerRuntime {
             session.latest_compaction_snapshot = None;
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
+            session.summary.last_activity_at = now;
             session.active_turn = Some(replacement_turn.clone());
             let mut core_session = session.core_session.lock().await;
             core_session.messages = rebuilt_messages;

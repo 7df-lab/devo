@@ -1,0 +1,30 @@
+{
+	"root": false,
+	"$schema": "https://biomejs.dev/schemas/2.4.2/schema.json",
+	"extends": "//",
+	"linter": {
+		"rules": {
+			"style": {
+				"useFilenamingConvention": "off"
+			},
+			"a11y": {
+				"useSemanticElements": "off",
+				"useFocusableInteractive": "off",
+				"useKeyWithClickEvents": "off",
+				"useAriaPropsForRole": "off",
+				"noRedundantRoles": "off"
+			},
+			"correctness": {
+				"useExhaustiveDependencies": "off"
+			},
+			"suspicious": {
+				"noArrayIndexKey": "off",
+				"noDoubleEquals": "off",
+				"noDocumentCookie": "off"
+			},
+			"security": {
+				"noDangerouslySetInnerHtml": "off"
+			}
+		}
+	}
+}

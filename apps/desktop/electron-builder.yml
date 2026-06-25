@@ -1,0 +1,91 @@
+appId: com.devo.desktop
+productName: Devo
+copyright: Copyright (c) 2025 Devo Contributors
+directories:
+  buildResources: resources
+  output: release
+
+files:
+  - "out/**/*"
+  # Native N-API addon for macOS liquid glass / vibrancy effects.
+  # Must be included because externalizeDepsPlugin keeps it external.
+  - "node_modules/electron-liquid-glass/**/*"
+
+# Bundle the CLI launcher script into the app package.
+# macOS: Contents/Resources/bin/devo
+# Linux: resources/bin/devo
+# Windows: resources/bin/devo.cmd
+extraResources:
+  - from: resources/bin
+    to: bin
+    filter:
+      - "**/*"
+  # Tray icon assets — must be at the root of process.resourcesPath
+  # so tray.ts can find them via path.join(process.resourcesPath, "...").
+  - from: resources/iconTemplate.png
+    to: iconTemplate.png
+  - from: resources/iconTemplate@2x.png
+    to: iconTemplate@2x.png
+  - from: resources/icon.png
+    to: icon.png
+  - from: resources/icon-macos.png
+    to: icon-macos.png
+  - from: resources/iconTray.png
+    to: iconTray.png
+
+# Rebuild native modules for Electron's Node.js ABI during packaging.
+npmRebuild: true
+
+artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
+
+# Inject version from package.json into the built app
+extraMetadata:
+  main: ./out/main/index.js
+
+mac:
+  icon: resources/icon.icns
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  # Notarization — uncomment when Apple credentials are configured
+  # notarize:
+  #   teamId: ${env.APPLE_TEAM_ID}
+
+win:
+  icon: resources/icon.ico
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+
+linux:
+  executableName: devo
+  icon: resources/linux-icons
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+    - target: rpm
+      arch: [x64]
+  category: Development
+  maintainer: devo
+  desktop:
+    entry:
+      Name: Devo
+      Comment: AI-powered coding assistant
+      Categories: Development;IDE;
+      StartupWMClass: Devo
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+publish:
+  provider: github
+  releaseType: draft

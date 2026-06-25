@@ -2,13 +2,15 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
+use ts_rs::TS;
 
 use crate::{
     ItemId, PendingInputId, ReasoningEffort, SessionId, StopReason, TurnId, TurnStatus, TurnUsage,
 };
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct TurnMetadata {
     pub turn_id: TurnId,
     pub session_id: SessionId,
@@ -32,13 +34,13 @@ pub struct TurnMetadata {
     pub failure_reason: Option<TurnFailureReason>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnFailureReason {
     MaxTurnRequests,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputItem {
     Text { text: String },
@@ -89,7 +91,7 @@ impl<'de> Deserialize<'de> for InputItem {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CollaborationMode {
     #[default]
@@ -97,7 +99,7 @@ pub enum CollaborationMode {
     Plan,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnExecutionMode {
     #[default]
@@ -109,7 +111,7 @@ fn is_default_turn_execution_mode(mode: &TurnExecutionMode) -> bool {
     *mode == TurnExecutionMode::Regular
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct TurnStartParams {
     pub session_id: SessionId,
     pub input: Vec<InputItem>,
@@ -127,7 +129,7 @@ pub struct TurnStartParams {
     pub execution_mode: TurnExecutionMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnInputDisposition {
     #[default]
@@ -140,7 +142,7 @@ fn default_steered_disposition() -> TurnInputDisposition {
     TurnInputDisposition::Steered
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "disposition", rename_all = "snake_case")]
 pub enum TurnStartResult {
     Started {
@@ -185,14 +187,14 @@ impl TurnStartResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ShellCommandParams {
     pub session_id: SessionId,
     pub command: String,
     pub cwd: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ShellCommandResult {
     pub turn_id: TurnId,
     pub status: TurnStatus,
@@ -205,34 +207,34 @@ impl ShellCommandResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct TurnInterruptParams {
     pub session_id: SessionId,
     pub turn_id: TurnId,
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct TurnInterruptResult {
     pub turn_id: TurnId,
     pub status: TurnStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct TurnSteerParams {
     pub session_id: SessionId,
     pub expected_turn_id: TurnId,
     pub input: Vec<InputItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct TurnSteerResult {
     pub turn_id: TurnId,
     #[serde(default = "default_steered_disposition")]
     pub disposition: TurnInputDisposition,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnKind {
     #[default]
@@ -292,21 +294,21 @@ impl<'de> Deserialize<'de> for TurnKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SteerInputRecord {
     pub item_id: ItemId,
     pub received_at: DateTime<Utc>,
     pub input: Vec<InputItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ActiveTurnSteeringState {
     pub turn_id: TurnId,
     pub turn_kind: TurnKind,
     pub pending_inputs: VecDeque<SteerInputRecord>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PendingInputItem {
     #[serde(default)]
     pub id: PendingInputId,
@@ -330,7 +332,7 @@ impl PendingInputItem {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PendingInputKind {
     UserText {

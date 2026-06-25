@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::AcpMcpServer;
 use crate::AcpMeta;
@@ -14,7 +16,7 @@ use crate::DEVO_SESSION_META;
 use crate::SessionId;
 use crate::SessionMetadata;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpListSessionsParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -25,7 +27,7 @@ pub struct AcpListSessionsParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpListSessionsResult {
     pub sessions: Vec<AcpSessionInfo>,
@@ -35,7 +37,7 @@ pub struct AcpListSessionsResult {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionInfo {
     pub session_id: SessionId,
@@ -50,7 +52,7 @@ pub struct AcpSessionInfo {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpLoadSessionParams {
     pub session_id: SessionId,
@@ -63,7 +65,7 @@ pub struct AcpLoadSessionParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpResumeSessionParams {
     pub session_id: SessionId,
@@ -76,7 +78,7 @@ pub struct AcpResumeSessionParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpLoadSessionResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,7 +91,7 @@ pub struct AcpLoadSessionResult {
 
 pub type AcpResumeSessionResult = AcpLoadSessionResult;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionActionParams {
     pub session_id: SessionId,
@@ -100,7 +102,7 @@ pub struct AcpSessionActionParams {
 pub type AcpCloseSessionParams = AcpSessionActionParams;
 pub type AcpDeleteSessionParams = AcpSessionActionParams;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpEmptyResult {
     #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
@@ -111,7 +113,7 @@ pub type AcpCloseSessionResult = AcpEmptyResult;
 pub type AcpDeleteSessionResult = AcpEmptyResult;
 pub type AcpSetModeResult = AcpEmptyResult;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSetModeParams {
     pub session_id: SessionId,
@@ -120,7 +122,7 @@ pub struct AcpSetModeParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSetConfigOptionParams {
     pub session_id: SessionId,
@@ -130,7 +132,7 @@ pub struct AcpSetConfigOptionParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSetConfigOptionResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -149,7 +151,7 @@ pub fn acp_session_info_from_metadata(session: &SessionMetadata) -> AcpSessionIn
         session_id: session.session_id,
         cwd: session.cwd.clone(),
         title: session.title.clone(),
-        updated_at: Some(session.updated_at.to_rfc3339()),
+        updated_at: Some(session.last_activity_at.to_rfc3339()),
         additional_directories: session.additional_directories.clone(),
         meta: Some(meta),
     }
@@ -166,12 +168,16 @@ mod tests {
 
     #[test]
     fn session_info_uses_acp_field_names_and_preserves_devo_metadata() {
+        let created_at = Utc::now();
+        let updated_at = created_at + chrono::TimeDelta::minutes(2);
+        let last_activity_at = created_at + chrono::TimeDelta::minutes(1);
         let session = SessionMetadata {
             session_id: SessionId::new(),
             cwd: ".".into(),
             additional_directories: vec!["/workspace/shared".into()],
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at,
+            updated_at,
+            last_activity_at,
             title: Some("Work".to_string()),
             title_state: SessionTitleState::Unset,
             parent_session_id: None,
@@ -198,6 +204,10 @@ mod tests {
 
         assert_eq!(json["sessionId"], serde_json::json!(session.session_id));
         assert_eq!(json["title"], serde_json::json!("Work"));
+        assert_eq!(
+            json["updatedAt"],
+            serde_json::json!(last_activity_at.to_rfc3339())
+        );
         assert_eq!(
             json["additionalDirectories"],
             serde_json::json!(["/workspace/shared"])

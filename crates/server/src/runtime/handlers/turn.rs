@@ -303,6 +303,7 @@ impl ServerRuntime {
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
+            session.summary.last_activity_at = now;
             session.active_turn = Some(turn.clone());
             (turn, turn_config)
         };
@@ -350,6 +351,7 @@ impl ServerRuntime {
                     session.active_turn = None;
                     session.summary.status = SessionRuntimeStatus::Idle;
                     session.summary.updated_at = Utc::now();
+                    session.summary.last_activity_at = session.summary.updated_at;
                 }
             }
             return self.error_response(
@@ -531,6 +533,7 @@ impl ServerRuntime {
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
+            session.summary.last_activity_at = now;
             session.active_turn = Some(turn.clone());
             (turn, cwd)
         };
@@ -726,6 +729,7 @@ impl ServerRuntime {
             session.latest_turn = Some(turn.clone());
             session.summary.status = SessionRuntimeStatus::Idle;
             session.summary.updated_at = Utc::now();
+            session.summary.last_activity_at = session.summary.updated_at;
             let totals = session.core_session.try_lock().ok().map(|core_session| {
                 (
                     core_session.total_input_tokens,

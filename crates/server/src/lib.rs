@@ -13,6 +13,8 @@ mod projection;
 mod protocol;
 mod provider_config;
 mod runtime;
+#[cfg(any(windows, target_os = "macos"))]
+mod server_tray;
 mod session;
 mod session_context;
 mod singleton;
@@ -21,8 +23,6 @@ mod titles;
 mod tool_actions;
 mod transport;
 mod turn;
-#[cfg(windows)]
-mod windows_tray;
 
 pub use approval::*;
 pub use bootstrap::*;

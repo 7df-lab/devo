@@ -651,6 +651,7 @@ async fn resume_normalizes_historical_default_reasoning_effort() -> Result<()> {
             rollout_path: rollout_path.clone(),
             created_at: now,
             updated_at: now,
+            last_activity_at: Some(now),
             source: "cli".into(),
             agent_nickname: None,
             agent_role: None,

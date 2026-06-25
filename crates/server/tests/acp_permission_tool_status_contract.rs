@@ -26,6 +26,7 @@ use devo_core::tools::json_schema::JsonSchema;
 use devo_core::tools::tool_spec::ToolExecutionMode;
 use devo_core::tools::tool_spec::ToolOutputMode;
 use devo_core::tools::tool_spec::ToolSpec;
+use devo_protocol::AcpEmptyResult;
 use devo_protocol::AcpNewSessionResult;
 use devo_protocol::AcpPromptResult;
 use devo_protocol::AcpSessionNotification;
@@ -144,6 +145,38 @@ async fn acp_permission_cancellation_fails_tool_without_executing() -> Result<()
 
     wait_for_failed_tool_and_prompt_response(&mut prompt.notifications_rx, 3).await?;
     assert_eq!(prompt.tool_calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn acp_session_cancel_returns_empty_result_to_json_rpc_request() -> Result<()> {
+    let prompt = start_permission_prompt(3).await?;
+    let cancel_response = prompt
+        .runtime
+        .handle_incoming(
+            prompt.connection_id,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "session/cancel",
+                "params": {
+                    "sessionId": prompt.session_id
+                }
+            }),
+        )
+        .await
+        .context("session/cancel response")?;
+    let cancel_response: AcpSuccessResponse<AcpEmptyResult> =
+        serde_json::from_value(cancel_response)?;
+
+    assert_eq!(
+        cancel_response,
+        AcpSuccessResponse {
+            jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(4),
+            result: AcpEmptyResult::default(),
+        }
+    );
     Ok(())
 }
 

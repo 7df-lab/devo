@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# devo — Open the installed Devo desktop application.
+#
+# This script is bundled inside the Devo.app package and symlinked
+# to /usr/local/bin/devo by the "Install CLI Command" action.
+#
+# Usage:
+#   devo              Open Devo (or focus existing window)
+#   devo /path/to/dir Open Devo with a specific project directory
+
+set -euo pipefail
+
+case "$(uname -s)" in
+	Darwin)
+		# Resolve the .app bundle — this script lives at
+		# Devo.app/Contents/Resources/bin/devo
+		SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+		APP_BUNDLE="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+		if [ $# -gt 0 ]; then
+			open -a "$APP_BUNDLE" --args "$@"
+		else
+			open -a "$APP_BUNDLE"
+		fi
+		;;
+	Linux)
+		# On Linux the binary is typically at a known location
+		SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+		ELECTRON_BIN="$(cd "$SCRIPT_DIR/.." && pwd)/devo"
+
+		if [ -x "$ELECTRON_BIN" ]; then
+			exec "$ELECTRON_BIN" "$@"
+		else
+			# Fallback: try system PATH
+			echo "Error: Could not find Devo binary at $ELECTRON_BIN" >&2
+			echo "Try launching from your application menu instead." >&2
+			exit 1
+		fi
+		;;
+	*)
+		echo "Error: Unsupported platform $(uname -s)" >&2
+		echo "On Windows, use 'devo.cmd' instead." >&2
+		exit 1
+		;;
+esac

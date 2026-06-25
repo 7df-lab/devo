@@ -3,8 +3,10 @@ use std::path::PathBuf;
 
 use chrono::DateTime;
 use chrono::Utc;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::ItemId;
 use crate::ReasoningEffort;
@@ -15,7 +17,7 @@ use crate::parse_command::ParsedCommand;
 use crate::protocol::FileChange;
 use crate::turn::TurnMetadata;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionRuntimeStatus {
     Idle,
@@ -25,7 +27,7 @@ pub enum SessionRuntimeStatus {
     Unloaded,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionMetadata {
     pub session_id: SessionId,
     pub cwd: PathBuf,
@@ -33,6 +35,7 @@ pub struct SessionMetadata {
     pub additional_directories: Vec<PathBuf>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub last_activity_at: DateTime<Utc>,
     pub title: Option<String>,
     pub title_state: SessionTitleState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,7 +74,7 @@ pub struct SessionMetadata {
     pub status: SessionRuntimeStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionStartParams {
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -83,17 +86,17 @@ pub struct SessionStartParams {
     pub model_binding_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionStartResult {
     pub session: SessionMetadata,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionResumeParams {
     pub session_id: SessionId,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionResumeResult {
     pub session: SessionMetadata,
     pub latest_turn: Option<TurnMetadata>,
@@ -103,7 +106,7 @@ pub struct SessionResumeResult {
     pub pending_texts: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionHistoryItemKind {
     User,
@@ -116,7 +119,7 @@ pub enum SessionHistoryItemKind {
     TurnSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionPlanStepStatus {
     Pending,
@@ -125,13 +128,13 @@ pub enum SessionPlanStepStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionPlanStep {
     pub text: String,
     pub status: SessionPlanStepStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionHistoryMetadata {
     Explored {
@@ -146,7 +149,7 @@ pub enum SessionHistoryMetadata {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionHistoryToolIo {
     pub tool_name: String,
     pub input: serde_json::Value,
@@ -160,7 +163,7 @@ pub struct SessionHistoryToolIo {
     pub display_content: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionHistoryItem {
     pub tool_call_id: Option<String>,
     pub kind: SessionHistoryItemKind,
@@ -203,18 +206,18 @@ impl SessionHistoryItem {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionTitleUpdateParams {
     pub session_id: SessionId,
     pub title: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionTitleUpdateResult {
     pub session: SessionMetadata,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionMetadataUpdateParams {
     pub session_id: SessionId,
     pub model: Option<String>,
@@ -224,22 +227,22 @@ pub struct SessionMetadataUpdateParams {
     pub reasoning_effort_selection: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionMetadataUpdateResult {
     pub session: SessionMetadata,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionCompactParams {
     pub session_id: SessionId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionCompactResult {
     pub session: SessionMetadata,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionForkParams {
     pub session_id: SessionId,
     pub title: Option<String>,
@@ -248,13 +251,13 @@ pub struct SessionForkParams {
     pub user_turn_index: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionForkResult {
     pub session: SessionMetadata,
     pub forked_from_session_id: SessionId,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionRollbackMode {
     #[default]
@@ -262,7 +265,7 @@ pub enum SessionRollbackMode {
     BeforeUserTurn,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionRollbackParams {
     pub session_id: SessionId,
     pub user_turn_index: u32,
@@ -270,7 +273,7 @@ pub struct SessionRollbackParams {
     pub mode: SessionRollbackMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionRollbackResult {
     pub session: SessionMetadata,
     pub latest_turn: Option<TurnMetadata>,
@@ -281,7 +284,7 @@ pub struct SessionRollbackResult {
 
 // ── Session Subscribe (L3-BEH-PROTOCOL-001 B3) ───────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionSubscribeParams {
     pub session_id: SessionId,
     #[serde(default)]
@@ -292,7 +295,7 @@ pub struct SessionSubscribeParams {
     pub projection: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionSubscribeResult {
     pub subscription_id: String,
     pub session_id: SessionId,
@@ -302,7 +305,7 @@ pub struct SessionSubscribeResult {
 
 // ── Message Edit Previous (L3-BEH-PROTOCOL-001 B11) ──────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct MessageEditPreviousParams {
     pub session_id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -321,7 +324,7 @@ pub struct MessageEditPreviousParams {
     pub workspace_restore_policy: Option<MessageEditWorkspaceRestorePolicy>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EditMode {
     #[default]
@@ -329,7 +332,7 @@ pub enum EditMode {
     QueuedOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageEditWorkspaceRestorePolicy {
     Safe,
@@ -337,7 +340,7 @@ pub enum MessageEditWorkspaceRestorePolicy {
     ConfiguredRestore,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct MessageEditPreviousResult {
     pub edit_id: String,
     pub replacement_message_id: ItemId,
@@ -361,6 +364,7 @@ mod tests {
             additional_directories: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            last_activity_at: Utc::now(),
             title: Some("Test".to_string()),
             title_state: SessionTitleState::Unset,
             parent_session_id: None,

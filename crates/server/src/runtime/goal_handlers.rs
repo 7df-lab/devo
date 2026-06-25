@@ -394,17 +394,16 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
-        let params: crate::runtime::handlers::goal::GoalCancelParams =
-            match serde_json::from_value(params) {
-                Ok(p) => p,
-                Err(e) => {
-                    return self.error_response(
-                        request_id,
-                        ProtocolErrorCode::InvalidParams,
-                        format!("invalid goal/cancel params: {e}"),
-                    );
-                }
-            };
+        let params: devo_protocol::GoalCancelParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    format!("invalid goal/cancel params: {e}"),
+                );
+            }
+        };
 
         let mut stores = self.goal_stores.lock().await;
         let Some(store) = stores.get_mut(&params.session_id) else {

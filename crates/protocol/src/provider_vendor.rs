@@ -1,9 +1,11 @@
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::ProviderWireApi;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ProviderVendor {
     pub name: String,
     pub base_url: Option<String>,
@@ -13,7 +15,7 @@ pub struct ProviderVendor {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ProviderModelBinding {
     pub binding_id: String,
     pub model_slug: String,
@@ -25,15 +27,15 @@ pub struct ProviderModelBinding {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ProviderVendorListParams {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ProviderVendorListResult {
     pub provider_vendors: Vec<ProviderVendor>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ProviderVendorUpsertParams {
     pub provider_vendor: ProviderVendor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,14 +46,14 @@ pub struct ProviderVendorUpsertParams {
     pub api_key: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ProviderVendorUpsertResult {
     pub provider_vendor: ProviderVendor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_binding: Option<ProviderModelBinding>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ProviderValidateParams {
     pub provider_vendor: ProviderVendor,
     pub model_binding: ProviderModelBinding,
@@ -59,7 +61,7 @@ pub struct ProviderValidateParams {
     pub api_key: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ProviderValidateResult {
     pub reply_preview: String,
 }

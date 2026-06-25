@@ -53,9 +53,10 @@ use serde::Serialize;
 use serde_json::Value;
 use strum_macros::Display;
 use strum_macros::EnumIter;
+use ts_rs::TS;
 
 /// Describes how a logical reasoning-effort selection should be applied to a request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningImplementation {
     /// Reasoning effort is not exposed for this model.
@@ -67,13 +68,13 @@ pub enum ReasoningImplementation {
 }
 
 /// Groups the available model variants used to realize reasoning-effort selections.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ReasoningVariantConfig {
     pub variants: Vec<ReasoningVariant>,
 }
 
 /// Maps one logical reasoning-effort selection to a concrete request model and defaults.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ReasoningVariant {
     /// Logical reasoning-effort selection value, such as `enabled` or `disabled`.
     pub selection_value: String,
@@ -88,7 +89,7 @@ pub struct ReasoningVariant {
 }
 
 /// Fully resolved request settings derived from a logical model plus reasoning-effort selection.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, JsonSchema, TS)]
 pub struct ResolvedReasoningRequest {
     /// Final model slug that should be sent to the provider.
     pub request_model: String,
@@ -115,6 +116,7 @@ pub struct ResolvedReasoningRequest {
     Eq,
     Display,
     JsonSchema,
+    TS,
     EnumIter,
     Hash,
 )]
@@ -274,7 +276,7 @@ pub(crate) fn nearest_effort(
         .unwrap_or(target)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 /// One selectable reasoning-effort option presented to the UI or protocol client.
 pub struct ReasoningEffortPreset {
     pub effort: ReasoningEffort,
@@ -290,7 +292,7 @@ impl ReasoningEffortPreset {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 /// One selectable reasoning-effort option presented to the UI or protocol client.
 pub struct ReasoningEffortOption {
     pub label: String,
@@ -298,7 +300,7 @@ pub struct ReasoningEffortOption {
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningCapability {
     /// Model reasoning effort cannot be controlled.

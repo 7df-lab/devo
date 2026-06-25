@@ -69,6 +69,9 @@ impl ServerRuntime {
         };
         let (summary, core_session, profile) = {
             let mut session = session_arc.lock().await;
+            if session.summary.additional_directories == additional_directories {
+                return Ok(session.summary.clone());
+            }
             let updated_at = Utc::now();
             session.summary.additional_directories = additional_directories.clone();
             session.summary.updated_at = updated_at;
@@ -113,9 +116,17 @@ impl ServerRuntime {
         connection_id: u64,
         session_id: SessionId,
         history_items: &[SessionHistoryItem],
+        history_limit: Option<usize>,
     ) {
-        for (index, item) in history_items.iter().enumerate() {
-            let Some(update) = acp_update_from_history_item(index, item) else {
+        let replay_start = history_replay_start(history_items, history_limit);
+        let mut parent_message_id: Option<String> = None;
+        for (index, item) in history_items.iter().enumerate().skip(replay_start) {
+            if item.kind == SessionHistoryItemKind::User {
+                parent_message_id = Some(format!("history-{index}"));
+            }
+            let Some(update) =
+                acp_update_from_history_item(index, item, parent_message_id.as_deref())
+            else {
                 continue;
             };
             let notification = AcpClientNotification::new(
@@ -134,6 +145,31 @@ impl ServerRuntime {
         }
     }
 }
+
+pub(super) fn history_limit_from_meta(meta: &Option<AcpMeta>) -> Option<usize> {
+    let value = meta.as_ref()?.get("devo/historyLimit")?;
+    let limit = value.as_u64()?;
+    usize::try_from(limit).ok().filter(|limit| *limit > 0)
+}
+
+fn history_replay_start(
+    history_items: &[SessionHistoryItem],
+    history_limit: Option<usize>,
+) -> usize {
+    let Some(limit) = history_limit else {
+        return 0;
+    };
+    if history_items.len() <= limit {
+        return 0;
+    }
+
+    let mut start = history_items.len() - limit;
+    while start > 0 && history_items[start].kind != SessionHistoryItemKind::User {
+        start -= 1;
+    }
+    start
+}
+
 pub(super) fn validate_acp_session_roots(
     method: &str,
     cwd: &Path,
@@ -170,4 +206,46 @@ pub(super) fn decode_session_list_cursor(cursor: &str) -> Result<usize, String> 
     start
         .parse::<usize>()
         .map_err(|_| "session/list cursor is invalid".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn history_item(kind: SessionHistoryItemKind) -> SessionHistoryItem {
+        SessionHistoryItem::new(None, kind, String::new(), String::new())
+    }
+
+    #[test]
+    fn history_limit_meta_accepts_positive_integer() {
+        let mut meta = AcpMeta::new();
+        meta.insert("devo/historyLimit".to_string(), serde_json::json!(30));
+
+        assert_eq!(history_limit_from_meta(&Some(meta)), Some(30));
+    }
+
+    #[test]
+    fn history_replay_start_expands_to_user_turn_boundary() {
+        let items = vec![
+            history_item(SessionHistoryItemKind::User),
+            history_item(SessionHistoryItemKind::Assistant),
+            history_item(SessionHistoryItemKind::ToolCall),
+            history_item(SessionHistoryItemKind::User),
+            history_item(SessionHistoryItemKind::Assistant),
+            history_item(SessionHistoryItemKind::ToolResult),
+        ];
+
+        assert_eq!(history_replay_start(&items, Some(2)), 3);
+    }
+
+    #[test]
+    fn history_replay_start_keeps_full_history_when_limit_covers_items() {
+        let items = vec![
+            history_item(SessionHistoryItemKind::User),
+            history_item(SessionHistoryItemKind::Assistant),
+        ];
+
+        assert_eq!(history_replay_start(&items, Some(2)), 0);
+    }
 }

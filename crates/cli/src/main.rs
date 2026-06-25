@@ -23,6 +23,8 @@ use devo_core::format_update_notification;
 use devo_server::ServerProcessArgs;
 use devo_server::ServerTransportMode;
 use devo_server::run_server_process;
+#[cfg(target_os = "macos")]
+use devo_server::run_server_process_with_macos_tray;
 use devo_util_paths::find_devo_home;
 use tracing_subscriber::filter::LevelFilter;
 
@@ -61,11 +63,14 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    devo_arg0::run_as(|_paths| async {
-        let result = run_cli().await;
-        tracing::info!(success = result.is_ok(), "run_cli future completed");
-        result
-    })
+    devo_arg0::run_as_with_early_dispatch(
+        |_paths| async {
+            let result = run_cli().await;
+            tracing::info!(success = result.is_ok(), "run_cli future completed");
+            result
+        },
+        |_paths| direct_server_early_dispatch(),
+    )
 }
 
 fn format_with_separators(value: usize) -> String {
@@ -215,15 +220,11 @@ async fn run_cli() -> Result<()> {
             Ok(())
         }
         Some(Command::Server {
-            transport,
-            status,
-            shutdown,
+            transport: _,
+            status: _,
+            shutdown: _,
         }) => {
-            let args = ServerProcessArgs {
-                transport: *transport,
-                status: *status,
-                shutdown: *shutdown,
-            };
+            let args = server_process_args_from_cli(&cli).expect("server command args");
             let _logging = install_server_logging(&cli)?;
             run_server_process(args).await
         }
@@ -249,6 +250,57 @@ async fn run_cli() -> Result<()> {
             tracing::info!("default interactive command completed");
             Ok(())
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn direct_server_early_dispatch() -> devo_arg0::EarlyDispatch {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(_) => return devo_arg0::EarlyDispatch::Continue,
+    };
+    if !should_direct_dispatch_macos_server(&cli, devo_arg0::suppress_server_tray_from_env()) {
+        return devo_arg0::EarlyDispatch::Continue;
+    }
+    let Some(args) = server_process_args_from_cli(&cli) else {
+        return devo_arg0::EarlyDispatch::Continue;
+    };
+    devo_arg0::EarlyDispatch::Handled(run_macos_server_process_from_cli(&cli, args))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn direct_server_early_dispatch() -> devo_arg0::EarlyDispatch {
+    devo_arg0::EarlyDispatch::Continue
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_server_process_from_cli(cli: &Cli, args: ServerProcessArgs) -> Result<()> {
+    let _logging = install_server_logging(cli)?;
+    run_server_process_with_macos_tray(args)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn should_direct_dispatch_macos_server(cli: &Cli, suppress_server_tray: bool) -> bool {
+    !suppress_server_tray && server_process_args_from_cli(cli).is_some()
+}
+
+fn server_process_args_from_cli(cli: &Cli) -> Option<ServerProcessArgs> {
+    match &cli.command {
+        Some(Command::Server {
+            transport,
+            status,
+            shutdown,
+        }) => Some(ServerProcessArgs {
+            transport: *transport,
+            status: *status,
+            shutdown: *shutdown,
+        }),
+        Some(Command::Onboard)
+        | Some(Command::Resume { .. })
+        | Some(Command::Prompt { .. })
+        | Some(Command::Doctor)
+        | Some(Command::Upgrade)
+        | None => None,
     }
 }
 
@@ -556,6 +608,68 @@ mod tests {
             }
             other => panic!("expected server command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_websocket_server_transport_override() {
+        let cli = Cli::try_parse_from(["devo", "server", "--transport", "websocket"])
+            .expect("parse websocket server transport");
+
+        match cli.command {
+            Some(Command::Server { transport, .. }) => {
+                assert_eq!(transport, devo_server::ServerTransportMode::WebSocket);
+            }
+            other => panic!("expected server command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_process_args_from_cli_extracts_stdio_server_command() {
+        let cli =
+            Cli::try_parse_from(["devo", "server", "--transport", "stdio"]).expect("parse server");
+
+        assert_eq!(
+            super::server_process_args_from_cli(&cli),
+            Some(devo_server::ServerProcessArgs {
+                transport: devo_server::ServerTransportMode::Stdio,
+                status: false,
+                shutdown: false,
+            })
+        );
+    }
+
+    #[test]
+    fn server_process_args_from_cli_preserves_global_log_level_parse() {
+        let cli = Cli::try_parse_from(["devo", "--log-level", "debug", "server", "--status"])
+            .expect("parse server");
+
+        assert_eq!(cli.log_level, Some(LevelFilter::DEBUG));
+        assert_eq!(
+            super::server_process_args_from_cli(&cli),
+            Some(devo_server::ServerProcessArgs {
+                transport: devo_server::ServerTransportMode::Config,
+                status: true,
+                shutdown: false,
+            })
+        );
+    }
+
+    #[test]
+    fn direct_server_dispatch_suppresses_macos_tray_when_requested() {
+        let cli =
+            Cli::try_parse_from(["devo", "server", "--transport", "stdio"]).expect("parse server");
+
+        assert_eq!(
+            super::should_direct_dispatch_macos_server(&cli, /*suppress_server_tray*/ true),
+            false
+        );
+    }
+
+    #[test]
+    fn server_process_args_from_cli_skips_non_server_command() {
+        let cli = Cli::try_parse_from(["devo", "doctor"]).expect("parse doctor");
+
+        assert_eq!(super::server_process_args_from_cli(&cli), None);
     }
 
     #[test]

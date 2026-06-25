@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 
 use anyhow::Result;
 use clap::Parser;
@@ -21,24 +22,30 @@ use crate::execution::ServerRuntimeDependencies;
 use crate::load_server_provider;
 use crate::resolve_listen_targets;
 use crate::run_listeners_with_internal_proxy;
+#[cfg(windows)]
+use crate::server_tray::ServerTray;
 use crate::singleton::ServerControlAction;
 use crate::singleton::SingletonRole;
 use crate::singleton::acquire_singleton_role;
 use crate::singleton::run_server_control;
 use crate::singleton::run_stdio_proxy;
+use crate::transport::DEFAULT_WEBSOCKET_BIND_ADDRESS;
 use crate::transport::InternalProxyControl;
 use crate::transport::InternalProxyEndpoint;
-#[cfg(windows)]
-use crate::windows_tray::WindowsServerTray;
+
+/// Matches `devo_arg0::SUPPRESS_SERVER_TRAY_ENV` without adding a dependency cycle.
+const SUPPRESS_SERVER_TRAY_ENV: &str = "DEVO_SUPPRESS_SERVER_TRAY";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ServerTransportMode {
     Config,
     Stdio,
+    #[value(name = "websocket")]
+    WebSocket,
 }
 
 /// Command-line arguments accepted by the standalone server process entrypoint.
-#[derive(Debug, Clone, Parser)]
+#[derive(Debug, Clone, PartialEq, Eq, Parser)]
 #[command(name = "devo-server", version, about)]
 pub struct ServerProcessArgs {
     /// Override the transport mode used by this server process.
@@ -72,9 +79,57 @@ impl ServerProcessArgs {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServerTrayStartup {
+    Enabled,
+    Disabled,
+}
+
+pub(crate) struct ServerProcessRunOptions {
+    pub(crate) external_shutdown: Option<tokio_util::sync::CancellationToken>,
+    pub(crate) tray_startup: ServerTrayStartup,
+    pub(crate) real_server_started: Option<Sender<()>>,
+}
+
+impl Default for ServerProcessRunOptions {
+    fn default() -> Self {
+        Self {
+            external_shutdown: None,
+            tray_startup: server_tray_startup_from_env(),
+            real_server_started: None,
+        }
+    }
+}
+
+fn server_tray_startup_from_env() -> ServerTrayStartup {
+    let value = std::env::var(SUPPRESS_SERVER_TRAY_ENV).ok();
+    server_tray_startup_for(value.as_deref() == Some("1"))
+}
+
+fn server_tray_startup_for(suppress_server_tray: bool) -> ServerTrayStartup {
+    if suppress_server_tray {
+        ServerTrayStartup::Disabled
+    } else {
+        ServerTrayStartup::Enabled
+    }
+}
+
 /// Starts the transport-facing server runtime using the resolved application
 /// configuration and listener set.
 pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
+    run_server_process_inner(args, ServerProcessRunOptions::default()).await
+}
+
+/// Starts the macOS server process with AppKit owned by the process main thread.
+#[cfg(target_os = "macos")]
+pub fn run_server_process_with_macos_tray(args: ServerProcessArgs) -> Result<()> {
+    crate::server_tray::run_server_process_with_macos_tray(args)
+}
+
+pub(crate) async fn run_server_process_inner(
+    args: ServerProcessArgs,
+    mut options: ServerProcessRunOptions,
+) -> Result<()> {
     let resolver = FileSystemConfigPathResolver::from_env()?;
     let action = args.action()?;
     let singleton_role = acquire_singleton_role(&resolver.user_config_dir())?;
@@ -128,6 +183,9 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     let effective_listen = match args.transport {
         ServerTransportMode::Config => config.server.listen.clone(),
         ServerTransportMode::Stdio => vec!["stdio://".to_string()],
+        ServerTransportMode::WebSocket => {
+            vec![format!("ws://{DEFAULT_WEBSOCKET_BIND_ADDRESS}")]
+        }
     };
     let listen_targets = resolve_listen_targets(&effective_listen)?;
     let effective_listen = listen_targets
@@ -208,16 +266,27 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     runtime.load_persisted_sessions().await?;
     tracing::info!("persisted session restore completed");
     tracing::info!("server bootstrap completed; starting listeners");
+    if let Some(real_server_started) = options.real_server_started.take() {
+        let _ = real_server_started.send(());
+    }
     let shutdown_signal = tokio_util::sync::CancellationToken::new();
     let internal_proxy_control = InternalProxyControl::new(shutdown_signal.clone());
+    let external_shutdown = options.external_shutdown.clone();
+    #[cfg(not(windows))]
+    match options.tray_startup {
+        ServerTrayStartup::Enabled | ServerTrayStartup::Disabled => {}
+    }
 
     #[cfg(windows)]
-    let mut windows_tray = match WindowsServerTray::start() {
-        Ok(tray) => Some(tray),
-        Err(error) => {
-            tracing::warn!(%error, "failed to start Windows server tray icon");
-            None
-        }
+    let mut server_tray = match options.tray_startup {
+        ServerTrayStartup::Enabled => match ServerTray::start() {
+            Ok(tray) => Some(tray),
+            Err(error) => {
+                tracing::warn!(%error, "failed to start server tray icon");
+                None
+            }
+        },
+        ServerTrayStartup::Disabled => None,
     };
 
     #[cfg(windows)]
@@ -236,8 +305,11 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
                 result?;
                 tracing::info!("server shutdown requested");
             }
-            _ = wait_for_windows_tray_shutdown(&mut windows_tray) => {
-                tracing::info!("server shutdown requested from Windows tray icon");
+            _ = wait_for_server_tray_shutdown(&mut server_tray) => {
+                tracing::info!("server shutdown requested from tray icon");
+            }
+            _ = wait_for_external_shutdown(external_shutdown.as_ref()) => {
+                tracing::info!("server shutdown requested from external process controller");
             }
             _ = shutdown_signal.cancelled() => {
                 tracing::info!("server shutdown requested from singleton control");
@@ -261,6 +333,9 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
                 result?;
                 tracing::info!("server shutdown requested");
             }
+            _ = wait_for_external_shutdown(external_shutdown.as_ref()) => {
+                tracing::info!("server shutdown requested from external process controller");
+            }
             _ = shutdown_signal.cancelled() => {
                 tracing::info!("server shutdown requested from singleton control");
             }
@@ -282,9 +357,19 @@ fn print_existing_server_status(metadata: &crate::singleton::ServerLockMetadata,
 }
 
 #[cfg(windows)]
-async fn wait_for_windows_tray_shutdown(windows_tray: &mut Option<WindowsServerTray>) {
-    if let Some(tray) = windows_tray {
+async fn wait_for_server_tray_shutdown(server_tray: &mut Option<ServerTray>) {
+    if let Some(tray) = server_tray {
         tray.shutdown_requested().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn wait_for_external_shutdown(
+    external_shutdown: Option<&tokio_util::sync::CancellationToken>,
+) {
+    if let Some(token) = external_shutdown {
+        token.cancelled().await;
     } else {
         std::future::pending::<()>().await;
     }
@@ -310,10 +395,35 @@ mod tests {
     }
 
     #[test]
+    fn server_tray_startup_honors_desktop_suppression() {
+        assert_eq!(
+            [
+                super::server_tray_startup_for(/*suppress_server_tray*/ false),
+                super::server_tray_startup_for(/*suppress_server_tray*/ true),
+            ],
+            [
+                super::ServerTrayStartup::Enabled,
+                super::ServerTrayStartup::Disabled,
+            ]
+        );
+    }
+
+    #[test]
     fn server_process_args_accept_stdio_transport_override() {
         let args = ServerProcessArgs::parse_from(["devo-server", "--transport", "stdio"]);
 
         assert_eq!(args.transport, ServerTransportMode::Stdio);
+        assert_eq!(
+            args.action().expect("action"),
+            super::ServerProcessAction::Run
+        );
+    }
+
+    #[test]
+    fn server_process_args_accept_websocket_transport_override() {
+        let args = ServerProcessArgs::parse_from(["devo-server", "--transport", "websocket"]);
+
+        assert_eq!(args.transport, ServerTransportMode::WebSocket);
         assert_eq!(
             args.action().expect("action"),
             super::ServerProcessAction::Run

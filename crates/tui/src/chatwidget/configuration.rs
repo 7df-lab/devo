@@ -6,7 +6,6 @@
 use devo_protocol::Model;
 use devo_protocol::ProviderModelBinding;
 use devo_protocol::ProviderWireApi;
-use devo_protocol::ReasoningCapability;
 use devo_protocol::ReasoningEffort;
 use ratatui::style::Color;
 use ratatui::text::Line;
@@ -29,7 +28,11 @@ use super::reasoning_effort::ReasoningEffortListEntry;
 
 impl ChatWidget {
     pub(crate) fn set_model(&mut self, model: Model) {
-        self.reasoning_effort_selection = model.default_reasoning_effort_selection();
+        self.reasoning_effort_selection =
+            reasoning_effort::current_reasoning_effort_selection_for_model(
+                &model,
+                self.reasoning_effort_selection.as_deref(),
+            );
         self.session.reasoning_effort = model
             .resolve_reasoning_effort_selection(self.reasoning_effort_selection.as_deref())
             .effective_reasoning_effort;
@@ -204,27 +207,10 @@ impl ChatWidget {
         &self,
         model: &Model,
     ) -> Option<String> {
-        let current = self
-            .reasoning_effort_selection
-            .as_deref()
-            .map(str::trim)
-            .filter(|selection| !selection.is_empty())
-            .map(str::to_ascii_lowercase)
-            .or_else(|| model.default_reasoning_effort_selection());
-
-        match model.effective_reasoning_capability() {
-            ReasoningCapability::ToggleWithLevels(_) => {
-                if matches!(current.as_deref(), Some("disabled")) {
-                    Some(String::from("disabled"))
-                } else {
-                    model
-                        .resolve_reasoning_effort_selection(current.as_deref())
-                        .effective_reasoning_effort
-                        .map(|effort| effort.label().to_lowercase())
-                }
-            }
-            _ => current,
-        }
+        reasoning_effort::current_reasoning_effort_selection_for_model(
+            model,
+            self.reasoning_effort_selection.as_deref(),
+        )
     }
 
     pub(super) fn display_reasoning_effort_selection(&self) -> Option<String> {
@@ -237,11 +223,10 @@ impl ChatWidget {
             return Vec::new();
         };
 
-        let current = self
-            .normalized_reasoning_effort_selection_for_display(model)
-            .unwrap_or_default();
-
-        reasoning_effort::reasoning_effort_entries_for_model(model, &current)
+        reasoning_effort::reasoning_effort_entries_for_model(
+            model,
+            self.reasoning_effort_selection.as_deref(),
+        )
     }
 
     fn saved_model_selection_value(entry: &SavedModelEntry) -> &str {
@@ -357,7 +342,11 @@ impl ChatWidget {
     pub(super) fn handle_model_picker_selection(&mut self, slug: String) {
         if let Some(entry) = self.saved_model_entry_for_selection(&slug).cloned() {
             let selected_model = self.apply_saved_model_entry_to_session(&entry);
-            let reasoning_effort_selection = selected_model.default_reasoning_effort_selection();
+            let reasoning_effort_selection =
+                reasoning_effort::current_reasoning_effort_selection_for_model(
+                    &selected_model,
+                    self.reasoning_effort_selection.as_deref(),
+                );
             self.pending_model_selection = Some(PendingModelSelection {
                 selection: Self::saved_model_selection_value(&entry).to_string(),
                 display_name: self.saved_model_display_label(&entry),
@@ -389,7 +378,11 @@ impl ChatWidget {
             return;
         };
 
-        let reasoning_effort_selection = selected_model.default_reasoning_effort_selection();
+        let reasoning_effort_selection =
+            reasoning_effort::current_reasoning_effort_selection_for_model(
+                &selected_model,
+                self.reasoning_effort_selection.as_deref(),
+            );
         self.pending_model_selection = Some(PendingModelSelection {
             selection: selected_model.slug.clone(),
             display_name: selected_model.display_name.clone(),
@@ -474,7 +467,11 @@ impl ChatWidget {
     pub(super) fn apply_model_selection(&mut self, slug: String) {
         if let Some(entry) = self.saved_model_entry_for_selection(&slug).cloned() {
             let selected_model = self.apply_saved_model_entry_to_session(&entry);
-            self.reasoning_effort_selection = selected_model.default_reasoning_effort_selection();
+            self.reasoning_effort_selection =
+                reasoning_effort::current_reasoning_effort_selection_for_model(
+                    &selected_model,
+                    self.reasoning_effort_selection.as_deref(),
+                );
             self.app_event_tx
                 .send(AppEvent::Command(AppCommand::override_turn_context(
                     /*cwd*/ None,
@@ -496,7 +493,11 @@ impl ChatWidget {
             .find(|model| model.slug == slug)
             .cloned()
         {
-            self.reasoning_effort_selection = selected_model.default_reasoning_effort_selection();
+            self.reasoning_effort_selection =
+                reasoning_effort::current_reasoning_effort_selection_for_model(
+                    &selected_model,
+                    self.reasoning_effort_selection.as_deref(),
+                );
             self.session.provider = Some(selected_model.provider);
             self.session.model = Some(selected_model.clone());
             self.session.request_model = None;
@@ -515,11 +516,12 @@ impl ChatWidget {
         }
 
         self.update_session_request_model(slug.clone());
-        self.reasoning_effort_selection = self
-            .session
-            .model
-            .as_ref()
-            .and_then(Model::default_reasoning_effort_selection);
+        self.reasoning_effort_selection = self.session.model.as_ref().and_then(|model| {
+            reasoning_effort::current_reasoning_effort_selection_for_model(
+                model,
+                self.reasoning_effort_selection.as_deref(),
+            )
+        });
         self.app_event_tx
             .send(AppEvent::Command(AppCommand::override_turn_context(
                 /*cwd*/ None,

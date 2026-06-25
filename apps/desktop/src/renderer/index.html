@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />
+    <title>Devo</title>
+    <style>
+      /* Splash screen styles -- inlined so they render before any JS loads. */
+      #splash {
+        position: fixed;
+        inset: 0;
+        z-index: 99999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        /* Transparent so macOS glass/vibrancy shows through. The native
+           window chrome provides the visual backdrop. */
+        background: transparent;
+        transition: opacity 300ms ease-out;
+        /* Allow dragging the window from the splash on macOS */
+        -webkit-app-region: drag;
+      }
+      #splash.hiding {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .devo-splash-brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        color: hsl(var(--foreground, 0 0% 93%));
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-size: 32px;
+        font-weight: 650;
+        letter-spacing: 0;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+      .devo-splash-brand-mark-frame {
+        display: inline-flex;
+        width: 64px;
+        height: 64px;
+        flex-shrink: 0;
+        align-items: center;
+        justify-content: center;
+      }
+      .devo-splash-brand-mark {
+        width: 64px;
+        height: 64px;
+        flex-shrink: 0;
+      }
+      .devo-brand-mark-attention {
+        animation: devo-brand-mark-attention 1.45s cubic-bezier(0.18, 0.82, 0.22, 1)
+          both;
+        transform-origin: center;
+      }
+      .devo-brand-word {
+        display: inline-grid;
+        height: 1.2em;
+        line-height: 1.2;
+        overflow: hidden;
+      }
+      .devo-brand-word-track {
+        display: flex;
+        flex-direction: column;
+        transform: translateY(-2.4em);
+      }
+      .devo-brand-word-track > span {
+        height: 1.2em;
+      }
+      .devo-brand-word-attention .devo-brand-word-track {
+        animation: devo-brand-word-carousel 1.05s cubic-bezier(0.18, 0.82, 0.22, 1)
+          both;
+      }
+      #splash .devo-loading-dots {
+        --devo-loading-dot-idle: color-mix(in srgb, #60a5fa 18%, rgb(176 174 173));
+        --devo-loading-dot-active: #60a5fa;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-top: 32px;
+      }
+      #splash .devo-loading-dots span {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--devo-loading-dot-idle);
+        animation: devo-loading-dot 1.16s ease-in-out infinite;
+        opacity: 0.45;
+        transform: scale(0.86);
+      }
+      #splash .devo-loading-dots span:nth-child(2) { animation-delay: 160ms; }
+      #splash .devo-loading-dots span:nth-child(3) { animation-delay: 320ms; }
+      @keyframes devo-loading-dot {
+        0%, 100% {
+          background: var(--devo-loading-dot-idle);
+          box-shadow: 0 0 0 rgb(96 165 250 / 0);
+          opacity: 0.45;
+          transform: translateY(0) scale(0.86);
+        }
+        28% {
+          background: var(--devo-loading-dot-active);
+          box-shadow: 0 0 12px rgb(96 165 250 / 0.5);
+          opacity: 1;
+          transform: translateY(-1px) scale(1.18);
+        }
+        56% {
+          background: var(--devo-loading-dot-idle);
+          box-shadow: 0 0 0 rgb(96 165 250 / 0);
+          opacity: 0.55;
+          transform: translateY(0) scale(0.92);
+        }
+      }
+      @keyframes devo-brand-mark-attention {
+        0% {
+          transform: rotate(0deg) scale(1);
+        }
+
+        42% {
+          transform: rotate(285deg) scale(1.08);
+        }
+
+        72% {
+          transform: rotate(368deg) scale(0.98);
+        }
+
+        100% {
+          transform: rotate(360deg) scale(1);
+        }
+      }
+      @keyframes devo-brand-word-carousel {
+        0% {
+          filter: blur(1.5px);
+          opacity: 0.58;
+          transform: translateY(0);
+        }
+
+        34% {
+          filter: blur(0.8px);
+          opacity: 0.82;
+          transform: translateY(-1.2em);
+        }
+
+        74%,
+        100% {
+          filter: blur(0);
+          opacity: 1;
+          transform: translateY(-2.4em);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .devo-brand-mark-attention,
+        .devo-brand-word-attention .devo-brand-word-track {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <script>
+      // Prevent flash of wrong color scheme before React hydrates.
+      // Reads from the same localStorage keys used by Jotai atomWithStorage.
+      try {
+        var scheme = JSON.parse(localStorage.getItem('devo:colorScheme') || '"dark"');
+        var themeId = JSON.parse(localStorage.getItem('devo:theme') || '"default"');
+        var cls = scheme;
+        if (scheme === 'system') {
+          cls = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        document.documentElement.classList.add(cls);
+        if (themeId !== 'default') {
+          document.documentElement.classList.add('theme-' + themeId);
+        }
+      } catch (e) {
+        document.documentElement.classList.add('dark');
+      }
+    </script>
+    <script>
+      // React Scan: dev-only render visualizer. Loaded via script tag outside
+      // Vite's module graph so it survives HMR. Uses document.write to ensure
+      // the script loads synchronously before React's module script executes.
+      // Toggle via Command Palette (Cmd+K > "React Scan"). Only active in dev
+      // since production React builds don't expose the DevTools hook.
+      try {
+        if (localStorage.getItem('devo:reactScan') === 'true') {
+          document.write('<script src="https://unpkg.com/react-scan/dist/auto.global.js"><\/script>');
+        }
+      } catch (e) {}
+    </script>
+    <!-- Splash screen: renders immediately before React/JS loads.
+         The React StartupOverlay component removes this element once it mounts. -->
+    <div id="splash">
+      <span class="devo-splash-brand" role="img" aria-label="Devo">
+        <span class="devo-splash-brand-mark-frame" aria-hidden="true">
+          <svg viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" class="devo-splash-brand-mark devo-brand-mark-attention">
+            <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="6">
+              <path d="M64 17.5C78.5 25.2 86.2 40.8 82.6 56.8C67.4 57.6 54.3 49.9 48.8 36.1C51.9 26.7 57.2 20.4 64 17.5Z" />
+              <path d="M64 17.5C78.5 25.2 86.2 40.8 82.6 56.8C67.4 57.6 54.3 49.9 48.8 36.1C51.9 26.7 57.2 20.4 64 17.5Z" transform="rotate(60 64 64)" />
+              <path d="M64 17.5C78.5 25.2 86.2 40.8 82.6 56.8C67.4 57.6 54.3 49.9 48.8 36.1C51.9 26.7 57.2 20.4 64 17.5Z" transform="rotate(120 64 64)" />
+              <path d="M64 17.5C78.5 25.2 86.2 40.8 82.6 56.8C67.4 57.6 54.3 49.9 48.8 36.1C51.9 26.7 57.2 20.4 64 17.5Z" transform="rotate(180 64 64)" />
+              <path d="M64 17.5C78.5 25.2 86.2 40.8 82.6 56.8C67.4 57.6 54.3 49.9 48.8 36.1C51.9 26.7 57.2 20.4 64 17.5Z" transform="rotate(240 64 64)" />
+              <path d="M64 17.5C78.5 25.2 86.2 40.8 82.6 56.8C67.4 57.6 54.3 49.9 48.8 36.1C51.9 26.7 57.2 20.4 64 17.5Z" transform="rotate(300 64 64)" />
+            </g>
+            <circle cx="64" cy="64" r="9.5" fill="#60A5FA" />
+          </svg>
+        </span>
+        <span aria-hidden="true" class="devo-brand-word devo-brand-word-attention">
+          <span class="devo-brand-word-track">
+            <span>DEVO</span>
+            <span>devo</span>
+            <span>Devo</span>
+          </span>
+        </span>
+      </span>
+      <div class="devo-loading-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

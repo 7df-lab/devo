@@ -134,9 +134,8 @@ impl ModelProviderSDK for ScriptedResearchProvider {
         if is_research_request(&request) {
             assert_research_environment_contains_cwd(&request, &self.expected_cwd);
         }
-        let text = if prompt_has_stage(&prompt, "clarification gate")
-            || prompt.contains("\"need_clarification\"")
-        {
+        let text = if request_has_stage(&request, "clarification gate") {
+            assert_request_exposes_tools(&request, &["request_user_input"]);
             assert!(
                 request.messages.iter().any(|message| {
                     request_message_text(message)
@@ -154,13 +153,13 @@ impl ModelProviderSDK for ScriptedResearchProvider {
             );
             r#"{"need_clarification":false,"question":"","verification":"Research DeepSeek official website."}"#
                 .to_string()
-        } else if prompt_has_stage(&prompt, "research brief") {
+        } else if request_has_stage(&request, "research brief") {
             "## Objective\nResearch DeepSeek official website.\n\n## Scope\nCurrent official website.\n\n## Constraints And Preferences\nKeep it short.\n\n## Source Preferences\nOpen-ended.\n\n## Open Dimensions\nNone.\n\n## Report Language\nEnglish"
                 .to_string()
-        } else if prompt_has_stage(&prompt, "supervisor task plan") {
-            r#"{"tasks":[{"title":"Official website","research_topic":"Find the current official DeepSeek website and citation details.","purpose":"Answer the brief","source_strategy":"Use official and search-result sources","success_criteria":"A visible URL and citation details are captured"}]}"#
+        } else if request_has_stage(&request, "supervisor worker orchestration") {
+            "Supervisor notes: Researcher notes before completion; official source https://www.deepseek.com/."
                 .to_string()
-        } else if prompt_has_stage(&prompt, "evidence pack compression") {
+        } else if request_has_stage(&request, "evidence pack compression") {
             assert_compress_request_uses_structured_context(&request);
             "Evidence pack: DeepSeek official website is https://www.deepseek.com/".to_string()
         } else {
@@ -178,9 +177,8 @@ impl ModelProviderSDK for ScriptedResearchProvider {
             assert_research_environment_contains_cwd(&request, &self.expected_cwd);
         }
         let _stream_call_index = self.stream_calls.fetch_add(1, Ordering::SeqCst);
-        let events = if prompt_has_stage(&prompt, "clarification gate")
-            || prompt.contains("\"need_clarification\"")
-        {
+        let events = if request_has_stage(&request, "clarification gate") {
+            assert_request_exposes_tools(&request, &["request_user_input"]);
             assert!(
                 request.messages.iter().any(|message| {
                     request_message_text(message)
@@ -199,22 +197,21 @@ impl ModelProviderSDK for ScriptedResearchProvider {
             streamed_text_events(
                 r#"{"need_clarification":false,"question":"","verification":"Research DeepSeek official website."}"#,
             )
-        } else if prompt_has_stage(&prompt, "research brief") {
+        } else if request_has_stage(&request, "research brief") {
+            assert_request_exposes_tools(&request, &[]);
             streamed_text_events(
                 "## Objective\nResearch DeepSeek official website.\n\n## Scope\nCurrent official website.\n\n## Constraints And Preferences\nKeep it short.\n\n## Source Preferences\nOpen-ended.\n\n## Open Dimensions\nNone.\n\n## Report Language\nEnglish",
             )
-        } else if prompt_has_stage(&prompt, "supervisor task plan") {
-            streamed_text_events(
-                r#"{"tasks":[{"title":"Official website","research_topic":"Find the current official DeepSeek website and citation details.","purpose":"Answer the brief","source_strategy":"Use official and search-result sources","success_criteria":"A visible URL and citation details are captured"}]}"#,
-            )
-        } else if prompt_has_stage(&prompt, "evidence pack compression") {
+        } else if request_has_stage(&request, "supervisor worker orchestration") {
+            supervisor_stream_events(&request)
+        } else if request_has_stage(&request, "evidence pack compression") {
             assert_compress_request_uses_structured_context(&request);
             streamed_text_events(
                 "Evidence pack: DeepSeek official website is https://www.deepseek.com/",
             )
-        } else if prompt_has_stage(&prompt, "fetched webpage summarization") {
+        } else if request_has_stage(&request, "fetched webpage summarization") {
             streamed_text_events(r#"{"summary":"DeepSeek official website details."}"#)
-        } else if prompt_has_stage(&prompt, "delegated deep research worker") {
+        } else if request_has_stage(&request, "delegated deep research worker") {
             assert!(
                 prompt.contains("<research_brief>"),
                 "delegated worker prompt should include overall brief"
@@ -238,13 +235,10 @@ impl ModelProviderSDK for ScriptedResearchProvider {
                 vec!["read", "write", "apply_patch", "webfetch"],
                 "delegated worker requests should expose research worker tools without coordination tools"
             );
-            assert!(
-                request
-                    .hosted_tools
-                    .iter()
-                    .any(|tool| matches!(tool, devo_protocol::HostedToolDefinition::WebSearch(_))),
-                "delegated worker requests should preserve provider-hosted web search"
-            );
+            let has_hosted_web_search = request
+                .hosted_tools
+                .iter()
+                .any(|tool| matches!(tool, devo_protocol::HostedToolDefinition::WebSearch(_)));
             if self
                 .delegated_worker_failures_before_success
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -296,14 +290,21 @@ impl ModelProviderSDK for ScriptedResearchProvider {
                 }),
                 Ok(StreamEvent::TextDelta {
                     index: 1,
-                    text: "Researcher notes: official source https://www.deepseek.com/".to_string(),
+                    text: "Researcher notes before completion: official source https://www.deepseek.com/"
+                        .to_string(),
                 }),
                 Ok(StreamEvent::ReasoningDone { index: 0 }),
                 Ok(StreamEvent::MessageDone {
-                    response: hosted_web_search_researcher_response(),
+                    response: if has_hosted_web_search {
+                        hosted_web_search_researcher_response()
+                    } else {
+                        model_response(
+                            "Researcher notes before completion: web search unavailable; no source URLs visible.",
+                        )
+                    },
                 }),
             ]
-        } else if prompt_has_stage(&prompt, "final report writing") {
+        } else if request_has_stage(&request, "final report writing") {
             let final_report_call_index = self
                 .final_report_stream_calls
                 .fetch_add(1, Ordering::SeqCst);
@@ -403,6 +404,7 @@ impl ModelProviderSDK for ScriptedResearchProvider {
                 "Evidence pack:",
                 "<research_brief>",
                 "You are a research assistant",
+                "Stage: supervisor worker orchestration",
                 "Stage: researcher evidence gathering",
                 "Stage: delegated deep research worker",
                 "Stage: evidence pack compression",
@@ -436,10 +438,7 @@ struct ClarifyingResearchProvider;
 #[async_trait]
 impl ModelProviderSDK for ClarifyingResearchProvider {
     async fn completion(&self, request: ModelRequest) -> Result<ModelResponse> {
-        let prompt = request_text(&request);
-        let text = if prompt_has_stage(&prompt, "clarification gate")
-            || prompt.contains("\"need_clarification\"")
-        {
+        let text = if request_has_stage(&request, "clarification gate") {
             r#"{"need_clarification":true,"question":"Which scope should the research use?","verification":""}"#
         } else {
             "Deep research mock title"
@@ -451,10 +450,7 @@ impl ModelProviderSDK for ClarifyingResearchProvider {
         &self,
         request: ModelRequest,
     ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
-        let prompt = request_text(&request);
-        let text = if prompt_has_stage(&prompt, "clarification gate")
-            || prompt.contains("\"need_clarification\"")
-        {
+        let text = if request_has_stage(&request, "clarification gate") {
             r#"{"need_clarification":true,"question":"Which scope should the research use?","verification":""}"#
         } else {
             "Deep research mock title"
@@ -464,6 +460,102 @@ impl ModelProviderSDK for ClarifyingResearchProvider {
 
     fn name(&self) -> &str {
         "clarifying-research-provider"
+    }
+}
+
+struct RepeatedClarificationResearchProvider;
+
+#[async_trait]
+impl ModelProviderSDK for RepeatedClarificationResearchProvider {
+    async fn completion(&self, request: ModelRequest) -> Result<ModelResponse> {
+        let prompt = request_text(&request);
+        if request_has_stage(&request, "research brief") {
+            assert_request_exposes_tools(&request, &[]);
+            assert!(
+                prompt.contains("Product docs") && prompt.contains("APAC"),
+                "research brief should receive all clarification context: {prompt}"
+            );
+        }
+        Ok(model_response("DeepSeek official website summary"))
+    }
+
+    async fn completion_stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
+        let prompt = request_text(&request);
+        let events = if request_has_stage(&request, "clarification gate") {
+            assert_request_exposes_tools(&request, &["request_user_input"]);
+            if !request_has_tool_result(&request, "clarify-scope") {
+                streamed_tool_call_events(
+                    "clarify-scope",
+                    "request_user_input",
+                    serde_json::json!({
+                        "questions": [{
+                            "id": "scope",
+                            "header": "Scope",
+                            "question": "Which scope should the research use?",
+                            "options": [{
+                                "label": "Product docs (Recommended)",
+                                "description": "Focus on official product documentation."
+                            }]
+                        }]
+                    }),
+                )
+            } else if !request_has_tool_result(&request, "clarify-region") {
+                streamed_tool_call_events(
+                    "clarify-region",
+                    "request_user_input",
+                    serde_json::json!({
+                        "questions": [{
+                            "id": "region",
+                            "header": "Region",
+                            "question": "Which region should the research prioritize?",
+                            "options": [{
+                                "label": "APAC (Recommended)",
+                                "description": "Prioritize Asia-Pacific availability and context."
+                            }]
+                        }]
+                    }),
+                )
+            } else {
+                streamed_text_events("Clarification complete.")
+            }
+        } else if request_has_stage(&request, "research brief") {
+            assert_request_exposes_tools(&request, &[]);
+            assert!(
+                prompt.contains("Product docs") && prompt.contains("APAC"),
+                "research brief should receive all clarification context: {prompt}"
+            );
+            streamed_text_events(
+                "## Objective\nResearch DeepSeek official website.\n\n## Scope\nProduct docs and APAC context.\n\n## Constraints And Preferences\nKeep it short.\n\n## Source Preferences\nOpen-ended.\n\n## Open Dimensions\nNone.\n\n## Report Language\nEnglish",
+            )
+        } else if request_has_stage(&request, "supervisor worker orchestration") {
+            supervisor_stream_events(&request)
+        } else if request_has_stage(&request, "researcher evidence gathering")
+            || request_has_stage(&request, "delegated deep research worker")
+        {
+            streamed_text_events(
+                "Researcher notes before completion: official source https://www.deepseek.com/",
+            )
+        } else if request_has_stage(&request, "evidence pack compression") {
+            assert_compress_request_uses_structured_context(&request);
+            streamed_text_events(
+                "Evidence pack: Official source https://www.deepseek.com/ confirms the DeepSeek website.",
+            )
+        } else if request_has_stage(&request, "final report writing") {
+            assert_final_report_request_uses_file_tools(&request);
+            streamed_text_events(
+                "Final report: DeepSeek official website is https://www.deepseek.com/. Product docs and APAC context were prioritized.",
+            )
+        } else {
+            streamed_text_events("DeepSeek official website summary")
+        };
+        Ok(Box::pin(stream::iter(events)))
+    }
+
+    fn name(&self) -> &str {
+        "repeated-clarification-research-provider"
     }
 }
 
@@ -535,9 +627,9 @@ async fn deep_research_turn_streams_artifact_reasoning_and_final_report() -> Res
     assert_eq!(
         completed_turn["params"]["turn"]["usage"],
         serde_json::json!({
-            "input_tokens": 5,
-            "output_tokens": 5,
-            "total_tokens": 10,
+            "input_tokens": 7,
+            "output_tokens": 7,
+            "total_tokens": 14,
             "cache_creation_input_tokens": null,
             "cache_read_input_tokens": null
         })
@@ -585,6 +677,70 @@ async fn deep_research_accepts_write_tool_only_final_report() -> Result<()> {
         final_report.contains("DeepSeek official website"),
         "expected final response to summarize written report: {final_report}"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn deep_research_continues_when_web_search_disabled() -> Result<()> {
+    // Trace: L2-DES-RESEARCH-001
+    // Verifies: /research does not fail turn/start when web_search is disabled.
+    let workspace = TempDir::new()?;
+    write_disabled_web_search_research_config(workspace.path())?;
+    let runtime = build_scripted_research_runtime(workspace.path())?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, workspace.path()).await?;
+    start_research_turn(&runtime, connection_id, session_id).await?;
+
+    let events = wait_for_research_completion(
+        &runtime,
+        connection_id,
+        session_id,
+        &mut notifications_rx,
+        "Use the provided scope.",
+    )
+    .await?;
+
+    assert_final_report(&events);
+    assert!(
+        events.iter().any(|event| {
+            event.get("method") == Some(&serde_json::json!("turn/completed"))
+                && event["params"]["session_id"] == serde_json::json!(session_id.to_string())
+        }),
+        "expected research turn to complete with web_search disabled: {events:#?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn deep_research_clarification_can_ask_multiple_times_in_one_query() -> Result<()> {
+    // Trace: L2-DES-RESEARCH-001
+    // Verifies: the clarification query loop can ask, receive an answer, and ask again.
+    let workspace = TempDir::new()?;
+    write_live_research_config(workspace.path())?;
+    let provider: Arc<dyn ModelProviderSDK> = Arc::new(RepeatedClarificationResearchProvider);
+    let runtime = build_scripted_research_runtime_with_provider(workspace.path(), provider)?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, workspace.path()).await?;
+    start_research_turn(&runtime, connection_id, session_id).await?;
+
+    let events = wait_for_research_completion_with_clarification_answers(
+        &runtime,
+        connection_id,
+        session_id,
+        &mut notifications_rx,
+        &["Product docs", "APAC"],
+    )
+    .await?;
+
+    let clarification = research_artifact_content(&events, "clarification")
+        .context("expected clarification artifact")?;
+    assert_eq!(
+        clarification,
+        "Question 1: Which scope should the research use?\n\nAnswer 1: Product docs\n\nQuestion 2: Which region should the research prioritize?\n\nAnswer 2: APAC"
+    );
+    assert_final_report(&events);
 
     Ok(())
 }
@@ -650,7 +806,7 @@ async fn deep_research_read_only_write_permission_uses_active_connection() -> Re
 #[tokio::test]
 async fn deep_research_streams_researcher_delta_before_query_finishes() -> Result<()> {
     // Trace: L2-DES-RESEARCH-001
-    // Verifies: researcher QueryEvent deltas are broadcast while query() is still running.
+    // Verifies: delegated worker deltas are visible while supervisor waits for child output.
     let workspace = TempDir::new()?;
     write_live_research_config(workspace.path())?;
     let researcher_gate = Arc::new(Notify::new());
@@ -671,25 +827,21 @@ async fn deep_research_streams_researcher_delta_before_query_finishes() -> Resul
                 .get("method")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            if method == "item/researchArtifact/delta"
-                && event["params"]["payload"]["delta"]
-                    .as_str()
-                    .is_some_and(|delta| delta.contains("Researcher notes before completion"))
-            {
+            if is_agent_message_delta(&event) {
                 return Ok(());
             }
             if method == "turn/failed" {
                 anyhow::bail!(
-                    "research turn failed before streaming artifact delta: {}",
+                    "research turn failed before delegated worker delta: {}",
                     latest_agent_message(&[event])
                         .unwrap_or_else(|| "no failure message was emitted".to_string())
                 );
             }
         }
-        anyhow::bail!("notification channel closed before artifact delta")
+        anyhow::bail!("notification channel closed before delegated worker delta")
     })
     .await
-    .context("timed out waiting for live research artifact delta")??;
+    .context("timed out waiting for delegated worker delta")??;
 
     researcher_gate.notify_waiters();
     wait_for_research_completion(
@@ -707,7 +859,7 @@ async fn deep_research_streams_researcher_delta_before_query_finishes() -> Resul
 #[tokio::test]
 async fn deep_research_continues_after_delegated_worker_failure() -> Result<()> {
     // Trace: L2-DES-RESEARCH-001
-    // Verifies: a failed delegated worker turn is continued instead of failing the whole research turn.
+    // Verifies: supervisor-driven research can retry after a failed delegated worker turn.
     let workspace = TempDir::new()?;
     write_live_research_config(workspace.path())?;
     let provider: Arc<dyn ModelProviderSDK> =
@@ -756,7 +908,7 @@ async fn deep_research_continues_after_delegated_worker_failure() -> Result<()> 
 #[tokio::test]
 async fn deep_research_restarts_worker_when_continuation_fails() -> Result<()> {
     // Trace: L2-DES-RESEARCH-001
-    // Verifies: if the original delegated worker and its continuation both fail, research restarts a replacement worker.
+    // Verifies: supervisor-driven research can spawn replacement workers after repeated failures.
     let workspace = TempDir::new()?;
     write_live_research_config(workspace.path())?;
     let provider: Arc<dyn ModelProviderSDK> = Arc::new(
@@ -788,7 +940,7 @@ async fn deep_research_restarts_worker_when_continuation_fails() -> Result<()> {
         .count();
     assert_eq!(child_failures, 2);
     let child_sessions = unique_child_turn_sessions(&events, session_id);
-    assert_eq!(child_sessions.len(), 2);
+    assert_eq!(child_sessions.len(), 3);
     let final_report = latest_agent_message(&events).context("expected final report message")?;
     assert!(
         final_report.contains("DeepSeek official website"),
@@ -827,11 +979,7 @@ async fn interrupted_research_closes_delegated_child_agent() -> Result<()> {
             if let Some(session_id) = child_turn_session_id(&event, session_id) {
                 child_session_id = Some(session_id);
             }
-            if method == "item/researchArtifact/delta"
-                && event["params"]["payload"]["delta"]
-                    .as_str()
-                    .is_some_and(|delta| delta.contains("Researcher notes before completion"))
-            {
+            if is_agent_message_delta(&event) {
                 saw_researcher_delta = true;
             }
             if saw_researcher_delta && let Some(child_session_id) = child_session_id.clone() {
@@ -918,18 +1066,14 @@ async fn queued_regular_turn_starts_after_research_completes() -> Result<()> {
     timeout(Duration::from_secs(5), async {
         while let Some(event) = notifications_rx.recv().await {
             let event = legacy_event_from_acp_notification(event);
-            if event.get("method") == Some(&serde_json::json!("item/researchArtifact/delta"))
-                && event["params"]["payload"]["delta"]
-                    .as_str()
-                    .is_some_and(|delta| delta.contains("Researcher notes before completion"))
-            {
+            if is_agent_message_delta(&event) {
                 return Ok(());
             }
         }
-        anyhow::bail!("notification channel closed before researcher delta")
+        anyhow::bail!("notification channel closed before delegated worker delta")
     })
     .await
-    .context("timed out waiting for live research artifact delta")??;
+    .context("timed out waiting for delegated worker delta")??;
 
     queue_regular_turn_during_research(&runtime, connection_id, session_id).await?;
     researcher_gate.notify_waiters();
@@ -1123,8 +1267,22 @@ fn write_live_research_config(root: &std::path::Path) -> Result<()> {
 mode = "provider"
 
 [research]
-max_concurrent_tasks = 1
-max_tasks = 1
+max_researcher_iterations = 1
+fetch_summary_threshold_chars = 2000
+max_summary_chars = 1000
+"#,
+    )?;
+    Ok(())
+}
+
+fn write_disabled_web_search_research_config(root: &std::path::Path) -> Result<()> {
+    std::fs::write(
+        root.join("config.toml"),
+        r#"
+[tools.web_search]
+mode = "disabled"
+
+[research]
 max_researcher_iterations = 1
 fetch_summary_threshold_chars = 2000
 max_summary_chars = 1000
@@ -1247,11 +1405,48 @@ fn assert_research_environment_contains_cwd(request: &ModelRequest, expected_cwd
     );
 }
 
-fn assert_compress_request_uses_structured_context(request: &ModelRequest) {
+fn assert_request_exposes_tools(request: &ModelRequest, expected: &[&str]) {
     assert!(
         request.hosted_tools.is_empty(),
-        "compression must not expose new provider-hosted tools"
+        "request should not expose hosted tools: {:?}",
+        request.hosted_tools
     );
+    let tool_names = request_tool_names(request);
+    assert_eq!(tool_names, expected);
+}
+
+fn request_tool_names(request: &ModelRequest) -> Vec<&str> {
+    request
+        .tools
+        .as_ref()
+        .map(|tools| tools.iter().map(|tool| tool.name.as_str()).collect())
+        .unwrap_or_default()
+}
+
+fn assert_final_report_request_uses_file_tools(request: &ModelRequest) {
+    assert_request_exposes_tools(request, &["read", "write", "apply_patch"]);
+    let runtime_text = request
+        .messages
+        .iter()
+        .map(request_message_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for hidden in [
+        "Stage: supervisor worker orchestration",
+        "Stage: evidence pack compression",
+        "spawn_agent",
+        "wait_agent",
+        "Researcher notes before completion",
+    ] {
+        assert!(
+            !runtime_text.contains(hidden),
+            "final report leaked research-internal context {hidden:?}: {runtime_text}"
+        );
+    }
+}
+
+fn assert_compress_request_uses_structured_context(request: &ModelRequest) {
+    assert_request_exposes_tools(request, &[]);
     let runtime_text = request
         .messages
         .iter()
@@ -1354,6 +1549,167 @@ fn hosted_web_search_researcher_response() -> ModelResponse {
     }
 }
 
+fn supervisor_stream_events(request: &ModelRequest) -> Vec<Result<StreamEvent>> {
+    assert_supervisor_request_uses_agent_tools(request);
+    for attempt in 1..=3 {
+        let spawn_id = format!("spawn-supervisor-worker-{attempt}");
+        let wait_id = format!("wait-supervisor-worker-{attempt}");
+        if !request_has_tool_result(request, &spawn_id) {
+            return streamed_tool_call_events(
+                &spawn_id,
+                "spawn_agent",
+                serde_json::json!({
+                    "message": supervisor_worker_message(attempt),
+                    "fork_turns": "none"
+                }),
+            );
+        }
+        if !request_has_tool_result(request, &wait_id) {
+            let target = tool_result_json(request, &spawn_id)
+                .and_then(|value| {
+                    value
+                        .get("agent_path")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| {
+                            value
+                                .get("child_session_id")
+                                .and_then(serde_json::Value::as_str)
+                        })
+                        .map(str::to_string)
+                })
+                .unwrap_or_default();
+            let mut input = serde_json::json!({ "timeout_ms": 900000 });
+            if !target.is_empty() {
+                input["target"] = serde_json::Value::String(target);
+            }
+            return streamed_tool_call_events(&wait_id, "wait_agent", input);
+        }
+        let wait_content = request_tool_result_content(request, &wait_id).unwrap_or_default();
+        if !wait_content.contains("failed")
+            && !wait_content.contains("interrupted")
+            && !wait_content.contains("canceled")
+        {
+            return streamed_text_events(supervisor_notes());
+        }
+    }
+    streamed_text_events(
+        "Supervisor notes: delegated workers failed after retries. Evidence is unavailable; do not infer unsupported claims.",
+    )
+}
+
+fn supervisor_worker_message(attempt: usize) -> String {
+    format!(
+        "You are a delegated DeepResearch worker for attempt {attempt}.\n\n<research_environment>\nUse the parent-provided current date, timezone, and cwd.\n</research_environment>\n\n<original_research_question>\nResearch the current official DeepSeek website domain. Use web search, keep the final report short, and include source URLs.\n</original_research_question>\n\n<research_brief>\nResearch DeepSeek official website.\n</research_brief>\n\nReturn concise evidence notes with searches/tool calls, key findings, source table, uncertainty, and recommended citations. Do not write report files."
+    )
+}
+
+fn supervisor_notes() -> String {
+    "Supervisor notes: Researcher notes before completion; official source https://www.deepseek.com/.\n\nSource table: DeepSeek official website, https://www.deepseek.com/, supports the official domain.\n\nRecommended citations: cite https://www.deepseek.com/ for the official website claim.".to_string()
+}
+
+fn assert_supervisor_request_uses_agent_tools(request: &ModelRequest) {
+    assert!(
+        request.hosted_tools.is_empty(),
+        "supervisor orchestration should not expose hosted web tools"
+    );
+    let tool_names = request
+        .tools
+        .as_ref()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for expected in [
+        "spawn_agent",
+        "send_message",
+        "wait_agent",
+        "list_agents",
+        "close_agent",
+    ] {
+        assert!(
+            tool_names.contains(&expected),
+            "supervisor request missing {expected}: {tool_names:?}"
+        );
+    }
+    for disallowed in ["web_search", "webfetch", "read", "write", "apply_patch"] {
+        assert!(
+            !tool_names.contains(&disallowed),
+            "supervisor request unexpectedly exposed {disallowed}: {tool_names:?}"
+        );
+    }
+}
+
+fn request_has_tool_result(request: &ModelRequest, tool_use_id: &str) -> bool {
+    request_tool_result_content(request, tool_use_id).is_some()
+}
+
+fn request_tool_result_content(request: &ModelRequest, tool_use_id: &str) -> Option<String> {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .find_map(|content| match content {
+            RequestContent::ToolResult {
+                tool_use_id: id,
+                content,
+                ..
+            } if id == tool_use_id => Some(content.clone()),
+            RequestContent::Text { .. }
+            | RequestContent::Reasoning { .. }
+            | RequestContent::ProviderReasoning { .. }
+            | RequestContent::ToolUse { .. }
+            | RequestContent::HostedToolUse { .. }
+            | RequestContent::ToolResult { .. } => None,
+        })
+}
+
+fn tool_result_json(request: &ModelRequest, tool_use_id: &str) -> Option<serde_json::Value> {
+    request_tool_result_content(request, tool_use_id)
+        .and_then(|content| serde_json::from_str(&content).ok())
+}
+
+fn streamed_tool_call_events(
+    id: &str,
+    name: &str,
+    input: serde_json::Value,
+) -> Vec<Result<StreamEvent>> {
+    vec![
+        Ok(StreamEvent::ToolCallStart {
+            index: 0,
+            id: id.to_string(),
+            name: name.to_string(),
+            input: input.clone(),
+        }),
+        Ok(StreamEvent::MessageDone {
+            response: tool_use_response(id, name, input),
+        }),
+    ]
+}
+
+fn tool_use_response(id: &str, name: &str, input: serde_json::Value) -> ModelResponse {
+    ModelResponse {
+        id: format!("{id}-response"),
+        content: vec![ResponseContent::ToolUse {
+            id: id.to_string(),
+            name: name.to_string(),
+            input,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        usage: Usage {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
+        },
+        metadata: ResponseMetadata::default(),
+    }
+}
+
 fn request_message_text(message: &devo_protocol::RequestMessage) -> String {
     message
         .content
@@ -1368,6 +1724,13 @@ fn request_message_text(message: &devo_protocol::RequestMessage) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn request_has_stage(request: &ModelRequest, stage: &str) -> bool {
+    request
+        .system
+        .as_deref()
+        .is_some_and(|system| prompt_has_stage(system, stage))
 }
 
 fn prompt_has_stage(prompt: &str, stage: &str) -> bool {
@@ -1645,6 +2008,57 @@ async fn wait_for_research_completion(
     })
     .await
     .context("timed out waiting for research completion")?
+}
+
+async fn wait_for_research_completion_with_clarification_answers(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: devo_core::SessionId,
+    notifications_rx: &mut mpsc::Receiver<serde_json::Value>,
+    clarification_answers: &[&str],
+) -> Result<Vec<serde_json::Value>> {
+    let mut events = Vec::new();
+    let mut answer_index = 0usize;
+    let events = timeout(Duration::from_secs(240), async {
+        while let Some(event) = notifications_rx.recv().await {
+            let event = legacy_event_from_acp_notification(event);
+            let method = event
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if method == "item/tool/requestUserInput" {
+                let answer = clarification_answers.get(answer_index).with_context(|| {
+                    format!("unexpected extra clarification request {event:#?}")
+                })?;
+                answer_index += 1;
+                respond_to_clarification(runtime, connection_id, &event, answer).await?;
+            }
+            let is_parent_event =
+                event["params"]["session_id"] == serde_json::json!(session_id.to_string());
+            let done = method == "turn/completed" && is_parent_event;
+            if method == "turn/failed" && is_parent_event {
+                anyhow::bail!(
+                    "research turn failed: {}",
+                    latest_agent_message(&events)
+                        .unwrap_or_else(|| "no failure message was emitted".to_string())
+                );
+            }
+            events.push(event);
+            if done {
+                return Ok(events);
+            }
+        }
+        anyhow::bail!("notification channel closed before turn/completed")
+    })
+    .await
+    .context("timed out waiting for research completion")??;
+    assert_eq!(
+        answer_index,
+        clarification_answers.len(),
+        "expected all clarification answers to be consumed"
+    );
+    Ok(events)
 }
 
 async fn wait_for_research_completion_allowing_permission(
@@ -1960,6 +2374,21 @@ fn assert_research_artifacts(events: &[serde_json::Value]) {
         artifact_types.contains(&"compressed_finding"),
         "expected compressed finding artifact: {events:#?}"
     );
+}
+
+fn research_artifact_content(events: &[serde_json::Value], artifact_type: &str) -> Option<String> {
+    events.iter().find_map(|event| {
+        if event.get("method") != Some(&serde_json::json!("item/completed"))
+            || event["params"]["item"]["item_kind"] != serde_json::json!("research_artifact")
+            || event["params"]["item"]["payload"]["artifact_type"]
+                != serde_json::json!(artifact_type)
+        {
+            return None;
+        }
+        event["params"]["item"]["payload"]["content"]
+            .as_str()
+            .map(str::to_string)
+    })
 }
 
 fn assert_normal_web_search_items(events: &[serde_json::Value]) {

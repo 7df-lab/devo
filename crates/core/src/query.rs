@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::io::ErrorKind;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use devo_protocol::SamplingControls;
 use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::ToolDefinition;
+use devo_protocol::TruncationPolicy;
 use futures::StreamExt;
 use tokio::time::sleep;
 use tracing::debug;
@@ -30,6 +32,7 @@ use crate::tools::ToolRegistry;
 use crate::tools::ToolRuntime;
 use crate::tools::deferred_loading::is_subagent_agent_coordination_tool;
 use devo_provider::ModelProviderSDK;
+use devo_provider::error::ProviderError;
 
 use crate::AgentError;
 use crate::ContentBlock;
@@ -164,9 +167,10 @@ pub enum QueryEvent {
 pub type EventCallback = Arc<dyn Fn(QueryEvent) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
-// Error classification (capability 3.2)
+// Error classification
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, PartialEq, Eq)]
 enum ErrorClass {
     ContextTooLong,
     ParameterError,
@@ -178,6 +182,7 @@ enum ErrorClass {
     NoApiPermission,
     FileTooLarge,
     ServerError,
+    NetworkError,
     Unretryable,
 }
 
@@ -188,6 +193,74 @@ enum ProviderRetryDecision {
 }
 
 fn classify_error(e: &anyhow::Error) -> ErrorClass {
+    for cause in e.chain() {
+        let Some(provider_error) = cause.downcast_ref::<ProviderError>() else {
+            continue;
+        };
+        match provider_error {
+            ProviderError::AuthenticationError { .. } => return ErrorClass::AuthenticationFailure,
+            ProviderError::RateLimitError { .. } => return ErrorClass::RateLimit,
+            ProviderError::ProviderServerError {
+                status_code: Some(429),
+                ..
+            } => return ErrorClass::RateLimit,
+            ProviderError::ProviderServerError {
+                status_code: Some(408),
+                ..
+            }
+            | ProviderError::ProviderTimeoutError { .. }
+            | ProviderError::StreamError { .. } => return ErrorClass::NetworkError,
+            ProviderError::ProviderServerError { .. } => return ErrorClass::ServerError,
+            ProviderError::ContextLimitError { .. } => return ErrorClass::ContextTooLong,
+            ProviderError::ModelNotFoundError { .. } => return ErrorClass::TaskNotFound,
+            ProviderError::InvalidRequestError { .. } => return ErrorClass::ParameterError,
+            ProviderError::QuotaExceededError { .. }
+            | ProviderError::ContentFilteredError { .. } => {
+                return ErrorClass::Unretryable;
+            }
+            ProviderError::UnknownError {
+                status_code: Some(429),
+                ..
+            } => return ErrorClass::RateLimit,
+            ProviderError::UnknownError {
+                status_code: Some(408),
+                ..
+            } => return ErrorClass::NetworkError,
+            ProviderError::UnknownError {
+                status_code: Some(500..=599),
+                ..
+            } => return ErrorClass::ServerError,
+            ProviderError::UnknownError { .. } => {}
+        }
+    }
+
+    if e.chain().any(|cause| {
+        cause.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+            error.is_timeout()
+                || error.is_connect()
+                || error.status() == Some(reqwest::StatusCode::REQUEST_TIMEOUT)
+        })
+    }) {
+        return ErrorClass::NetworkError;
+    }
+
+    if e.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                ErrorKind::TimedOut
+                    | ErrorKind::ConnectionRefused
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::NotConnected
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::UnexpectedEof
+            )
+        })
+    }) {
+        return ErrorClass::NetworkError;
+    }
+
     let msg = e.to_string().to_lowercase();
     // TODO: Expand the error of ContextTooLong
     if msg.contains("context_too_long") {
@@ -226,6 +299,41 @@ fn classify_error(e: &anyhow::Error) -> ErrorClass {
             || msg.contains("jsonl"))
     {
         ErrorClass::FileContentAnomaly
+    } else if msg.contains("408")
+        || msg.contains("request timeout")
+        || msg.contains("request timed out")
+        || msg.contains("operation timed out")
+        || msg.contains("timed out")
+        || msg.contains("deadline has elapsed")
+        || msg.contains("deadline exceeded")
+        || msg.contains("provider timeout")
+        || msg.contains("network error")
+        || msg.contains("network is unreachable")
+        || msg.contains("network unreachable")
+        || msg.contains("host unreachable")
+        || msg.contains("destination unreachable")
+        || msg.contains("unreachable host")
+        || msg.contains("no route to host")
+        || msg.contains("connection refused")
+        || msg.contains("connection reset")
+        || msg.contains("connection closed")
+        || msg.contains("connection aborted")
+        || msg.contains("connection timed out")
+        || msg.contains("connection failure")
+        || msg.contains("connection failed")
+        || msg.contains("failed to connect")
+        || msg.contains("connect error")
+        || msg.contains("error trying to connect")
+        || msg.contains("error sending request")
+        || msg.contains("dns error")
+        || msg.contains("failed to lookup address information")
+        || msg.contains("temporary failure in name resolution")
+        || msg.contains("name or service not known")
+        || msg.contains("nodename nor servname")
+        || msg.contains("could not resolve host")
+        || msg.contains("unexpected eof")
+    {
+        ErrorClass::NetworkError
     } else if msg.contains("400")
         || msg.contains("parameter error")
         || msg.contains("invalid parameter")
@@ -260,7 +368,7 @@ fn provider_retry_decision(
                 ProviderRetryDecision::CompactAndRetry
             }
         }
-        ErrorClass::RateLimit | ErrorClass::ServerError => {
+        ErrorClass::RateLimit | ErrorClass::ServerError | ErrorClass::NetworkError => {
             if *retry_count >= MAX_RETRIES {
                 ProviderRetryDecision::Fail
             } else {
@@ -341,28 +449,44 @@ async fn summarize_and_compact(
 }
 
 // ---------------------------------------------------------------------------
-// Micro compact
+// Model-visible tool result truncation
 // ---------------------------------------------------------------------------
 
-/// TODO: Now, the micro compact acts like a truncation, however, we already
-/// have truncation policy, should follow model's truncation policy, so the
-/// micro compact should be removed in the future.
-const MICRO_COMPACT_THRESHOLD: usize = 10_000;
+const TOOL_RESULT_TRUNCATION_MARKER: &str = "\n...[truncated]";
 
-fn micro_compact(content: String) -> String {
-    if content.len() > MICRO_COMPACT_THRESHOLD {
-        let truncate_at = content
-            .char_indices()
-            .map(|(index, _)| index)
-            .take_while(|index| *index <= MICRO_COMPACT_THRESHOLD)
-            .last()
-            .unwrap_or(0);
-        let mut truncated = content[..truncate_at].to_string();
-        truncated.push_str("\n...[truncated]");
-        truncated
-    } else {
-        content
+fn truncate_tool_result_for_model(
+    content: String,
+    tool_name: Option<&str>,
+    truncation_policy: TruncationPolicy,
+) -> String {
+    if preserve_full_tool_result(tool_name) {
+        return content;
     }
+
+    let byte_budget = truncation_policy.byte_budget();
+    if content.len() <= byte_budget {
+        return content;
+    }
+
+    let marker = if byte_budget > TOOL_RESULT_TRUNCATION_MARKER.len() {
+        TOOL_RESULT_TRUNCATION_MARKER
+    } else {
+        TOOL_RESULT_TRUNCATION_MARKER.trim_start()
+    };
+
+    if byte_budget <= marker.len() {
+        return marker.to_string();
+    }
+
+    let content_budget = byte_budget - marker.len();
+    let mut truncate_at = content_budget;
+    while truncate_at > 0 && !content.is_char_boundary(truncate_at) {
+        truncate_at -= 1;
+    }
+
+    let mut truncated = content[..truncate_at].to_string();
+    truncated.push_str(marker);
+    truncated
 }
 
 fn preserve_full_tool_result(tool_name: Option<&str>) -> bool {
@@ -429,17 +553,6 @@ fn is_injected_context_message(message: &RequestMessage) -> bool {
             | RequestContent::ToolUse { .. }
             | RequestContent::ToolResult { .. } => false,
         })
-}
-
-fn compact_tool_content(content: ToolContent) -> ToolContent {
-    match content {
-        ToolContent::Text(text) => ToolContent::Text(micro_compact(text)),
-        ToolContent::Json(json) => ToolContent::Json(json),
-        ToolContent::Mixed { text, json } => ToolContent::Mixed {
-            text: text.map(micro_compact),
-            json,
-        },
-    }
 }
 
 fn tool_content_model_bytes(content: &ToolContent) -> usize {
@@ -540,7 +653,7 @@ fn emit_hosted_tool_result<F>(
         tool_name: name.to_string(),
         input: input.clone(),
         content,
-        display_content: Some(micro_compact(text)),
+        display_content: Some(text),
         is_error: hosted_tool_status_is_error(status.as_deref()),
         summary,
     });
@@ -1439,8 +1552,6 @@ pub async fn query(
                         });
                     },
                     move |result| {
-                        let content = compact_tool_content(result.content.clone());
-                        let display_content = result.display_content.clone().map(micro_compact);
                         let (tool_name, input, summary) = metadata
                             .get(result.tool_use_id.as_str())
                             .cloned()
@@ -1451,8 +1562,8 @@ pub async fn query(
                             tool_use_id: result.tool_use_id.clone(),
                             tool_name,
                             input,
-                            content,
-                            display_content,
+                            content: result.content.clone(),
+                            display_content: result.display_content.clone(),
                             is_error: result.is_error,
                             summary,
                         });
@@ -1477,7 +1588,7 @@ pub async fn query(
         );
 
         // Build tool result message (user role, per Anthropic API convention)
-        // Apply micro-compact to large tool results
+        let truncation_policy = TruncationPolicy::from(turn_config.model.truncation_policy);
         let result_content: Vec<ContentBlock> = results
             .into_iter()
             .map(|r| {
@@ -1485,14 +1596,11 @@ pub async fn query(
                     .get(r.tool_use_id.as_str())
                     .map(|(tool_name, _, _)| tool_name.as_str());
                 let content_str = r.content.into_string();
-                let compacted_content = if preserve_full_tool_result(tool_name) {
-                    content_str
-                } else {
-                    micro_compact(content_str)
-                };
+                let content =
+                    truncate_tool_result_for_model(content_str, tool_name, truncation_policy);
                 ContentBlock::ToolResult {
                     tool_use_id: r.tool_use_id,
-                    content: compacted_content,
+                    content,
                     is_error: r.is_error,
                 }
             })
@@ -1624,6 +1732,7 @@ mod tests {
     use super::insert_subagent_request_reminders;
     use super::query;
     use super::test_model_connection;
+    use super::truncate_tool_result_for_model;
     use crate::ContentBlock;
     use crate::Message;
     use crate::Model;
@@ -1658,6 +1767,62 @@ mod tests {
     }
     use crate::ReasoningCapability;
     use crate::ReasoningImplementation;
+
+    #[test]
+    fn network_errors_are_retryable() {
+        let cases = [
+            anyhow::anyhow!("request timed out while connecting"),
+            anyhow::anyhow!(
+                "error sending request for url (https://api.example.test): connection refused"
+            ),
+            anyhow::anyhow!("dns error: failed to lookup address information"),
+            anyhow::anyhow!("network is unreachable"),
+            anyhow::anyhow!("Invalid status code: 408 Request Timeout"),
+            anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "socket timed out",
+            )),
+            anyhow::Error::new(devo_provider::error::ProviderError::ProviderTimeoutError {
+                message: "provider request timed out".into(),
+                provider_name: Some("test-provider".into()),
+            }),
+        ];
+
+        for error in cases {
+            assert_eq!(
+                super::classify_error(&error),
+                super::ErrorClass::NetworkError
+            );
+
+            let mut retry_count = 0;
+            let mut context_compacted = false;
+            assert!(matches!(
+                super::provider_retry_decision(&error, &mut retry_count, &mut context_compacted),
+                super::ProviderRetryDecision::RetryAfter(_)
+            ));
+            assert_eq!(retry_count, 1);
+            assert!(!context_compacted);
+        }
+    }
+
+    #[test]
+    fn token_timeout_remains_authentication_failure() {
+        let error = anyhow::anyhow!("token timeout");
+
+        assert_eq!(
+            super::classify_error(&error),
+            super::ErrorClass::AuthenticationFailure
+        );
+
+        let mut retry_count = 0;
+        let mut context_compacted = false;
+        assert!(matches!(
+            super::provider_retry_decision(&error, &mut retry_count, &mut context_compacted),
+            super::ProviderRetryDecision::Fail
+        ));
+        assert_eq!(retry_count, 0);
+        assert!(!context_compacted);
+    }
     use crate::ReasoningVariant;
     use crate::ReasoningVariantConfig;
     use crate::SessionConfig;
@@ -1666,10 +1831,79 @@ mod tests {
     use crate::TruncationPolicyConfig;
     use crate::TurnConfig;
 
+    #[test]
+    fn model_tool_result_truncation_preserves_content_within_budget() {
+        assert_eq!(
+            truncate_tool_result_for_model(
+                "short".to_string(),
+                Some("read"),
+                TruncationPolicyConfig::bytes(100).into(),
+            ),
+            "short"
+        );
+    }
+
+    #[test]
+    fn model_tool_result_truncation_uses_byte_policy() {
+        assert_eq!(
+            truncate_tool_result_for_model(
+                "abcdefghijklmnopqrstuvwxyz".to_string(),
+                Some("read"),
+                TruncationPolicyConfig::bytes(20).into(),
+            ),
+            "abcde\n...[truncated]"
+        );
+    }
+
+    #[test]
+    fn model_tool_result_truncation_uses_token_policy_byte_budget() {
+        assert_eq!(
+            truncate_tool_result_for_model(
+                "abcdefghijklmnopqrstuvwxyz".to_string(),
+                Some("read"),
+                TruncationPolicyConfig::tokens(5).into(),
+            ),
+            "abcde\n...[truncated]"
+        );
+    }
+
+    #[test]
+    fn model_tool_result_truncation_preserves_utf8_boundaries() {
+        let truncated = truncate_tool_result_for_model(
+            "éééééabcdefghij".to_string(),
+            Some("read"),
+            TruncationPolicyConfig::bytes(18).into(),
+        );
+
+        assert_eq!(truncated, "é\n...[truncated]");
+        assert!(truncated.len() <= 18);
+    }
+
+    #[test]
+    fn model_tool_result_truncation_preserves_agent_coordination_results() {
+        let content = "abcdefghijklmnopqrstuvwxyz".to_string();
+
+        for tool_name in [Some("wait_agent"), Some("subagent_result")] {
+            assert_eq!(
+                truncate_tool_result_for_model(
+                    content.clone(),
+                    tool_name,
+                    TruncationPolicyConfig::bytes(20).into(),
+                ),
+                content
+            );
+        }
+    }
+
     const HOSTED_DSML_TEXT: &str = "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"web_search\">\n<｜｜DSML｜｜parameter name=\"query\" string=\"true\">current Rust docs</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>";
 
     struct SingleToolUseProvider {
         requests: AtomicUsize,
+    }
+
+    struct CapturingToolUseProvider {
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
+        calls: AtomicUsize,
     }
 
     struct InterleavedToolUseProvider {
@@ -1741,6 +1975,61 @@ mod tests {
 
         fn name(&self) -> &str {
             "test-provider"
+        }
+    }
+
+    #[async_trait]
+    impl devo_provider::ModelProviderSDK for CapturingToolUseProvider {
+        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            unreachable!("tests stream responses only")
+        }
+
+        async fn completion_stream(
+            &self,
+            request: ModelRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            self.requests.lock().expect("lock requests").push(request);
+            let request_number = self.calls.fetch_add(1, Ordering::SeqCst);
+
+            let events = if request_number == 0 {
+                vec![
+                    Ok(StreamEvent::ToolCallStart {
+                        index: 0,
+                        id: "tool-1".into(),
+                        name: "mutating_tool".into(),
+                        input: json!({}),
+                    }),
+                    Ok(StreamEvent::MessageDone {
+                        response: ModelResponse {
+                            id: "resp-1".into(),
+                            content: vec![ResponseContent::ToolUse {
+                                id: "tool-1".into(),
+                                name: "mutating_tool".into(),
+                                input: json!({}),
+                            }],
+                            stop_reason: Some(StopReason::ToolUse),
+                            usage: Usage::default(),
+                            metadata: Default::default(),
+                        },
+                    }),
+                ]
+            } else {
+                vec![Ok(StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: "resp-2".into(),
+                        content: vec![ResponseContent::Text("done".into())],
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage: Usage::default(),
+                        metadata: Default::default(),
+                    },
+                })]
+            };
+
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+
+        fn name(&self) -> &str {
+            "capturing-tool-use-provider"
         }
     }
 
@@ -2267,6 +2556,11 @@ mod tests {
 
     struct DisplayContentTool;
 
+    struct LargeToolResultTool {
+        content: String,
+        display_content: Option<String>,
+    }
+
     struct CountingWebSearchTool {
         executions: Arc<AtomicUsize>,
     }
@@ -2347,6 +2641,32 @@ mod tests {
                 "done",
             );
             result.display_content = Some("display".to_string());
+            Ok(result)
+        }
+    }
+
+    #[async_trait]
+    impl ToolHandler for LargeToolResultTool {
+        fn spec(&self) -> &crate::tools::tool_spec::ToolSpec {
+            Box::leak(Box::new(crate::tools::tool_spec::ToolSpec::new(
+                "read",
+                "read tool",
+                crate::tools::JsonSchema::object(Default::default(), None, None),
+            )))
+        }
+
+        async fn handle(
+            &self,
+            _ctx: crate::tools::contracts::ToolContext,
+            _input: serde_json::Value,
+            _progress: Option<crate::tools::contracts::ToolProgressSender>,
+        ) -> Result<crate::tools::contracts::ToolResult, crate::tools::contracts::ToolCallError>
+        {
+            let mut result = crate::tools::contracts::ToolResult::success(
+                crate::tools::contracts::ToolResultContent::Text(self.content.clone()),
+                "done",
+            );
+            result.display_content = self.display_content.clone();
             Ok(result)
         }
     }
@@ -4541,6 +4861,97 @@ mod tests {
                 (String::from("tool-2"), json!({ "value": 2 })),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn query_truncates_model_visible_tool_results_but_emits_raw_tool_result_events() {
+        let full_content = "abcdefghijklmnopqrstuvwxyz".to_string();
+        let display_content = "raw display abcdefghijklmnopqrstuvwxyz".to_string();
+        let mut builder = ToolRegistryBuilder::new();
+        builder.register_handler(
+            "mutating_tool",
+            Arc::new(LargeToolResultTool {
+                content: full_content.clone(),
+                display_content: Some(display_content.clone()),
+            }),
+        );
+        builder.push_spec(ToolSpec {
+            name: "mutating_tool".into(),
+            description: String::new(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Text,
+            execution_mode: ToolExecutionMode::ReadOnly,
+            capability_tags: vec![],
+            supports_parallel: false,
+            preparation_feedback: ToolPreparationFeedback::None,
+            display_name: None,
+            supports_cancellation: None,
+            supports_streaming: None,
+        });
+        let registry = Arc::new(builder.build());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("run the tool"));
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = Arc::clone(&seen);
+        let callback = Arc::new(move |event: QueryEvent| {
+            if let QueryEvent::ToolResult {
+                content,
+                display_content,
+                ..
+            } = event
+            {
+                seen_clone
+                    .lock()
+                    .expect("lock seen events")
+                    .push((content.into_string(), display_content));
+            }
+        });
+
+        query(
+            &mut session,
+            &TurnConfig::new(
+                Model {
+                    truncation_policy: TruncationPolicyConfig::bytes(20),
+                    ..Model::default()
+                },
+                None,
+            ),
+            Arc::new(CapturingToolUseProvider {
+                requests: Arc::clone(&requests),
+                calls: AtomicUsize::new(0),
+            }),
+            registry,
+            &runtime,
+            Some(callback),
+        )
+        .await
+        .expect("query should complete");
+
+        assert_eq!(
+            seen.lock().expect("lock seen events").as_slice(),
+            &[(full_content.clone(), Some(display_content))]
+        );
+
+        let captured = requests.lock().expect("lock requests");
+        assert_eq!(captured.len(), 2);
+        let model_visible_tool_result = captured[1]
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .find_map(|content| match content {
+                RequestContent::ToolResult { content, .. } => Some(content.as_str()),
+                RequestContent::Text { .. }
+                | RequestContent::Reasoning { .. }
+                | RequestContent::ProviderReasoning { .. }
+                | RequestContent::HostedToolUse { .. }
+                | RequestContent::ToolUse { .. } => None,
+            })
+            .expect("continuation request should include tool result");
+        assert_eq!(model_visible_tool_result, "abcde\n...[truncated]");
     }
 
     #[tokio::test]

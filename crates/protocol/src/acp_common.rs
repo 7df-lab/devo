@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::AcpAuthCapabilities;
 use crate::AcpAuthMethod;
@@ -158,7 +160,7 @@ pub enum AcpErrorCode {
     ServerError = -32000,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpImplementation {
     pub name: String,
@@ -185,7 +187,7 @@ impl AcpImplementation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpInitializeParams {
     pub protocol_version: AcpProtocolVersion,
@@ -197,7 +199,7 @@ pub struct AcpInitializeParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpInitializeResult {
     pub protocol_version: AcpProtocolVersion,
@@ -211,7 +213,7 @@ pub struct AcpInitializeResult {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAgentCapabilities {
     #[serde(default)]
@@ -228,7 +230,7 @@ pub struct AcpAgentCapabilities {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpPromptCapabilities {
     #[serde(default)]
@@ -241,7 +243,7 @@ pub struct AcpPromptCapabilities {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpMcpCapabilities {
     #[serde(default)]
@@ -252,7 +254,7 @@ pub struct AcpMcpCapabilities {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpHttpHeader {
     pub name: String,
@@ -261,7 +263,7 @@ pub struct AcpHttpHeader {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(untagged)]
 pub enum AcpMcpServer {
     Http(AcpMcpServerHttp),
@@ -270,19 +272,19 @@ pub enum AcpMcpServer {
     Unsupported(AcpUnsupportedMcpServer),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum AcpMcpServerHttpType {
     Http,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum AcpMcpServerSseType {
     Sse,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpMcpServerHttp {
     #[serde(rename = "type")]
@@ -294,7 +296,7 @@ pub struct AcpMcpServerHttp {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpMcpServerSse {
     #[serde(rename = "type")]
@@ -306,7 +308,7 @@ pub struct AcpMcpServerSse {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpMcpServerStdio {
     pub name: String,
@@ -317,7 +319,7 @@ pub struct AcpMcpServerStdio {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpEnvVariable {
     pub name: String,
@@ -326,14 +328,14 @@ pub struct AcpEnvVariable {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpUnsupportedMcpServer {
     #[serde(rename = "type")]
     pub transport_type: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -350,7 +352,7 @@ pub struct AcpSessionCapabilities {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpNewSessionParams {
     pub cwd: PathBuf,
@@ -362,7 +364,7 @@ pub struct AcpNewSessionParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpNewSessionResult {
     pub session_id: SessionId,
@@ -374,7 +376,7 @@ pub struct AcpNewSessionResult {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpPromptParams {
     pub session_id: SessionId,
@@ -383,7 +385,7 @@ pub struct AcpPromptParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpPromptResult {
     pub stop_reason: AcpStopReason,
@@ -391,7 +393,7 @@ pub struct AcpPromptResult {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpStopReason {
     EndTurn,
@@ -401,7 +403,7 @@ pub enum AcpStopReason {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpCancelParams {
     pub session_id: SessionId,

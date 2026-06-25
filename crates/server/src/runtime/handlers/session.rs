@@ -64,6 +64,7 @@ impl ServerRuntime {
             additional_directories: params.additional_directories.clone(),
             created_at: now,
             updated_at: now,
+            last_activity_at: now,
             title: params.title.clone(),
             title_state: params
                 .title
@@ -191,7 +192,12 @@ impl ServerRuntime {
         for session in sessions {
             summaries.push(session.lock().await.summary.clone());
         }
-        summaries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        summaries.sort_by(|left, right| {
+            right
+                .last_activity_at
+                .cmp(&left.last_activity_at)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+        });
         summaries
     }
 
@@ -801,6 +807,7 @@ impl ServerRuntime {
             additional_directories,
             created_at,
             updated_at,
+            last_activity_at: updated_at,
             title: title_override.or_else(|| source.summary.title.clone()),
             title_state: source.summary.title_state.clone(),
             parent_session_id: None,

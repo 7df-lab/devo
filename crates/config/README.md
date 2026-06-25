@@ -178,6 +178,11 @@ command = "hooks/pre-tool-use.sh"
 timeout = 30
 ```
 
+`server.listen` accepts `stdio://` and `ws://host:port` entries. An empty list
+uses the server defaults: stdio plus `ws://127.0.0.1:3210`. The short `ws://`
+entry also binds to `127.0.0.1:3210`. To run only WebSocket transport from the
+CLI, use `devo server --transport websocket`.
+
 `logging.file.directory` is optional. Relative logging directories resolve under
 `DEVO_HOME`.
 
@@ -426,9 +431,6 @@ configuration for all stages.
 
 Supported keys:
 
-- `max_concurrent_tasks` (default `3`): reserved concurrency budget for
-  researcher tasks.
-- `max_tasks` (default `4`): maximum supervisor-planned research tasks.
 - `max_researcher_iterations` (default `5`): search/fetch iteration guidance
   passed to researcher prompts.
 - `fetch_summary_threshold_chars` (default `24000`): local `webfetch` text

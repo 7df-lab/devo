@@ -4,13 +4,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use devo_core::SessionState;
 use devo_protocol::RequestUserInputQuestion;
-use devo_protocol::ResponseExtra;
 use devo_protocol::ServerRequestKind;
-use devo_protocol::StreamEvent;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use serde::Deserialize;
-use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -18,10 +13,75 @@ use super::*;
 use crate::session_context::SessionRuntimeContext;
 
 pub(crate) const RESEARCH_FILE_TOOL_NAMES: &[&str] = &["read", "write", "apply_patch"];
+const RESEARCH_NO_TOOL_NAMES: &[&str] = &[];
+const RESEARCH_CLARIFICATION_TOOL_NAMES: &[&str] = &["request_user_input"];
+const RESEARCH_SUPERVISOR_TOOL_NAMES: &[&str] = &[
+    "spawn_agent",
+    "send_message",
+    "wait_agent",
+    "list_agents",
+    "close_agent",
+];
 pub(crate) const RESEARCH_WORKER_TOOL_NAMES: &[&str] =
     &["read", "write", "apply_patch", "web_search", "webfetch"];
-const RESEARCH_SUBAGENT_CONTINUATION_ATTEMPTS: usize = 1;
-const RESEARCH_SUBAGENT_RESTART_ATTEMPTS: usize = 1;
+
+#[derive(Debug, Clone, Copy)]
+enum ResearchStageKind {
+    Clarify,
+    Brief,
+    Supervisor,
+    Compress,
+    FinalReport,
+}
+
+impl ResearchStageKind {
+    fn prompt(self) -> String {
+        match self {
+            ResearchStageKind::Clarify => devo_core::research::prompts::clarify(),
+            ResearchStageKind::Brief => devo_core::research::prompts::research_brief(),
+            ResearchStageKind::Supervisor => devo_core::research::prompts::supervisor(),
+            ResearchStageKind::Compress => devo_core::research::prompts::compress(),
+            ResearchStageKind::FinalReport => devo_core::research::prompts::final_report(),
+        }
+    }
+
+    fn tool_names(self) -> &'static [&'static str] {
+        match self {
+            ResearchStageKind::Clarify => RESEARCH_CLARIFICATION_TOOL_NAMES,
+            ResearchStageKind::Brief | ResearchStageKind::Compress => RESEARCH_NO_TOOL_NAMES,
+            ResearchStageKind::Supervisor => RESEARCH_SUPERVISOR_TOOL_NAMES,
+            ResearchStageKind::FinalReport => RESEARCH_FILE_TOOL_NAMES,
+        }
+    }
+
+    fn usage_prefix(self) -> &'static str {
+        match self {
+            ResearchStageKind::Clarify => "clarify_call",
+            ResearchStageKind::Brief => "brief_call",
+            ResearchStageKind::Supervisor => "supervisor_call",
+            ResearchStageKind::Compress => "supervisor_compress_call",
+            ResearchStageKind::FinalReport => "final_report_call",
+        }
+    }
+
+    fn artifact(self) -> Option<StreamedResearchArtifact> {
+        match self {
+            ResearchStageKind::Brief => Some(StreamedResearchArtifact {
+                artifact_type: ResearchArtifactType::Brief,
+                title: "Research Brief".to_string(),
+            }),
+            ResearchStageKind::Supervisor => Some(StreamedResearchArtifact {
+                artifact_type: ResearchArtifactType::Plan,
+                title: "Research Plan".to_string(),
+            }),
+            ResearchStageKind::Compress => Some(StreamedResearchArtifact {
+                artifact_type: ResearchArtifactType::CompressedFinding,
+                title: "Compressed Finding: Research Evidence".to_string(),
+            }),
+            ResearchStageKind::Clarify | ResearchStageKind::FinalReport => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct ClarifyDecision {
@@ -32,45 +92,29 @@ struct ClarifyDecision {
     verification: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct SupervisorPlan {
-    tasks: Vec<ResearchTask>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ResearchTask {
-    title: String,
-    research_topic: String,
-    #[serde(default)]
-    purpose: String,
-    #[serde(default)]
-    source_strategy: String,
-    #[serde(default)]
-    success_criteria: String,
-}
-
-#[derive(Debug, Clone)]
-struct ResearcherOutput {
-    title: String,
-    topic: String,
-    notes: String,
-    structured_evidence_messages: Vec<devo_protocol::RequestMessage>,
-    oversized_fetches: Vec<OversizedFetch>,
-}
-
 #[derive(Debug, Clone)]
 struct ResearchRequestContext {
     question: String,
     current_date: String,
     timezone: String,
     cwd: String,
-    clarification: Option<ResearchClarificationContext>,
+    clarifications: Vec<ResearchClarificationContext>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ResearchClarificationContext {
     question: String,
     answer: String,
+}
+
+struct ClarificationGateResult {
+    artifact_content: String,
+    clarifications: Vec<ResearchClarificationContext>,
+}
+
+struct SupervisorOutput {
+    notes: String,
+    worker_count: usize,
 }
 
 impl ResearchRequestContext {
@@ -80,22 +124,8 @@ impl ResearchRequestContext {
             current_date,
             timezone,
             cwd,
-            clarification: None,
+            clarifications: Vec::new(),
         }
-    }
-
-    fn set_clarification(&mut self, question: String, answer: String) {
-        self.clarification = Some(ResearchClarificationContext { question, answer });
-    }
-
-    fn request_messages(
-        &self,
-        additional_context: Vec<String>,
-    ) -> Vec<devo_protocol::RequestMessage> {
-        self.context_texts(additional_context)
-            .into_iter()
-            .map(request_text_message)
-            .collect()
     }
 
     fn session_messages(&self, additional_context: Vec<String>) -> Vec<devo_core::Message> {
@@ -114,7 +144,7 @@ impl ResearchRequestContext {
             ),
             self.question.clone(),
         ];
-        if let Some(clarification) = &self.clarification {
+        for clarification in &self.clarifications {
             messages.push(devo_core::research::prompts::clarification_context(
                 &clarification.question,
                 &clarification.answer,
@@ -140,6 +170,54 @@ struct ResearchQueryCapture {
     turn_completed: bool,
 }
 
+#[derive(Default)]
+struct ClarificationQueryCapture {
+    text: String,
+    pending_request_user_input_questions: HashMap<String, Vec<(String, String)>>,
+    request_user_input_exchanges: Vec<ResearchClarificationContext>,
+    clarifications: Vec<ResearchClarificationContext>,
+    reasoning: StreamedTextItem,
+    usage_invocation_index: usize,
+}
+
+#[derive(Default)]
+struct SupervisorQueryCapture {
+    text: String,
+    artifact: StreamedTextItem,
+    pending_tools: HashMap<String, PendingResearchToolCall>,
+    reasoning: StreamedTextItem,
+    usage_invocation_index: usize,
+    spawned_worker_count: usize,
+}
+
+#[derive(Default)]
+struct ResearchArtifactQueryCapture {
+    text: String,
+    artifact: StreamedTextItem,
+    reasoning: StreamedTextItem,
+    usage_invocation_index: usize,
+    turn_completed: bool,
+}
+
+enum ResearchStageCapture<'a> {
+    Clarification(&'a mut ClarificationQueryCapture),
+    Artifact(&'a mut ResearchArtifactQueryCapture),
+    Supervisor(&'a mut SupervisorQueryCapture),
+    FinalReport(&'a mut ResearchQueryCapture),
+}
+
+struct ResearchQueryEventContext<'a> {
+    session_id: SessionId,
+    turn_id: TurnId,
+    usage_ledger: &'a ResearchUsageLedgerRef,
+    context_window: Option<u64>,
+}
+
+struct ResearchArtifactEventContext<'a> {
+    query: ResearchQueryEventContext<'a>,
+    artifact: &'a StreamedResearchArtifact,
+}
+
 struct PendingResearchToolCall {
     item_id: ItemId,
     item_seq: u64,
@@ -153,13 +231,6 @@ struct FinalReportWrite {
     content: String,
 }
 
-#[derive(Debug, Clone)]
-struct OversizedFetch {
-    content: String,
-    source_url: String,
-    source_title: String,
-}
-
 #[derive(Debug, Default)]
 struct StreamedTextItem {
     item_id: Option<ItemId>,
@@ -171,19 +242,6 @@ struct StreamedTextItem {
 struct StreamedResearchArtifact {
     artifact_type: ResearchArtifactType,
     title: String,
-}
-
-#[derive(Debug, Clone)]
-enum ResearchModelTextDisplay {
-    Hidden,
-    ResearchArtifact(StreamedResearchArtifact),
-}
-
-#[derive(Debug, Clone)]
-struct ResearchSubagentTerminal {
-    status: String,
-    detail: Option<String>,
-    completed: bool,
 }
 
 struct ResearchPipelineInput<'a> {
@@ -211,26 +269,6 @@ struct ResearchModelRuntime<'a> {
     usage_ledger: &'a ResearchUsageLedgerRef,
     session_id: SessionId,
     turn_id: TurnId,
-}
-
-struct ResearcherAgentTaskInput<'a> {
-    research_brief: &'a str,
-    research_context: &'a ResearchRequestContext,
-    task_index: usize,
-    total_tasks: usize,
-}
-
-struct ResearchChildWaitTarget<'a> {
-    session_id: SessionId,
-    turn_id: TurnId,
-    artifact_item_id: ItemId,
-    child_session_id: SessionId,
-    agent_path: &'a str,
-}
-
-struct ResearchChildWaitBuffers<'a> {
-    after_sequence: &'a mut u64,
-    notes: &'a mut String,
 }
 
 type ResearchUsageLedgerRef = Arc<Mutex<ResearchUsageLedger>>;
@@ -383,16 +421,6 @@ impl ServerRuntime {
                 requested_model,
                 requested_reasoning_effort_selection.clone(),
             );
-            if matches!(
-                turn_config.web_search,
-                devo_core::ResolvedWebSearchConfig::Disabled
-            ) {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InvalidParams,
-                    "/research requires web_search to be enabled",
-                );
-            }
             let effective_cwd = params
                 .cwd
                 .clone()
@@ -442,6 +470,7 @@ impl ServerRuntime {
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
+            session.summary.last_activity_at = now;
             session.active_turn = Some(turn.clone());
             (turn, turn_config, effective_cwd.display().to_string())
         };
@@ -528,6 +557,7 @@ impl ServerRuntime {
                     session.active_turn = None;
                     session.summary.status = SessionRuntimeStatus::Idle;
                     session.summary.updated_at = Utc::now();
+                    session.summary.last_activity_at = session.summary.updated_at;
                 }
             }
             return self.error_response(
@@ -699,209 +729,67 @@ impl ServerRuntime {
         )
         .await;
 
-        let clarify_prompt = devo_core::research::prompts::clarify();
-        let clarify_text = self
-            .model_text(
-                &model_runtime,
-                clarify_prompt,
-                research_context.request_messages(Vec::new()),
-                "clarify".to_string(),
-            )
-            .await?;
-        if let Some(decision) = parse_json_object::<ClarifyDecision>(&clarify_text) {
-            if decision.need_clarification && !decision.question.trim().is_empty() {
-                let answer = self
-                    .request_research_clarification(session_id, turn.turn_id, &decision.question)
-                    .await?;
-                self.emit_research_artifact(
-                    session_id,
-                    turn.turn_id,
-                    ResearchArtifactType::Clarification,
-                    "Research Clarification",
-                    format!(
-                        "Question: {}\n\nAnswer: {}",
-                        decision.question,
-                        answer.trim()
-                    ),
-                )
-                .await;
-                if !answer.trim().is_empty() {
-                    research_context.set_clarification(decision.question, answer);
-                }
-            } else {
-                let content = if decision.verification.trim().is_empty() {
-                    "No clarification needed.".to_string()
-                } else {
-                    decision.verification
-                };
-                self.emit_research_artifact(
-                    session_id,
-                    turn.turn_id,
-                    ResearchArtifactType::Clarification,
-                    "Research Clarification",
-                    content,
-                )
-                .await;
-            }
-        } else {
-            self.emit_research_artifact(
-                session_id,
-                turn.turn_id,
-                ResearchArtifactType::Clarification,
-                "Research Clarification",
-                "No clarification needed.",
-            )
-            .await;
+        let mut coordinator_scratch = self.scratch_session(session_id).await?;
+        for message in research_context.session_messages(Vec::new()) {
+            coordinator_scratch.push_message(message);
         }
 
-        let brief_prompt = devo_core::research::prompts::research_brief();
-        let research_brief = self
-            .model_text_artifact(
-                &model_runtime,
-                brief_prompt,
-                research_context.request_messages(Vec::new()),
-                "brief".to_string(),
-                ResearchArtifactType::Brief,
-                "Research Brief",
-            )
+        let clarification_result = self
+            .run_clarification_gate(&model_runtime, &mut coordinator_scratch)
             .await?;
-
-        let plan_prompt = devo_core::research::prompts::supervisor(research_config.max_tasks);
-        let plan_text = self
-            .model_text(
-                &model_runtime,
-                plan_prompt,
-                research_context.request_messages(vec![
-                    devo_core::research::prompts::research_brief_context(&research_brief),
-                ]),
-                "plan".to_string(),
-            )
-            .await?;
-        let mut tasks = parse_json_object::<SupervisorPlan>(&plan_text)
-            .map(|plan| plan.tasks)
-            .unwrap_or_default();
-        if tasks.is_empty() {
-            tasks.push(ResearchTask {
-                title: "Research".to_string(),
-                research_topic: research_brief.clone(),
-                purpose: String::new(),
-                source_strategy: String::new(),
-                success_criteria: String::new(),
-            });
-        }
-        tasks.truncate(research_config.max_tasks.max(1));
-        let plan_content = tasks
-            .iter()
-            .enumerate()
-            .map(|(index, task)| {
-                let mut task_text = format!(
-                    "{}. {}\n{}",
-                    index + 1,
-                    task.title.trim(),
-                    task.research_topic.trim()
-                );
-                if !task.purpose.trim().is_empty() {
-                    task_text.push_str(&format!("\nPurpose: {}", task.purpose.trim()));
-                }
-                if !task.source_strategy.trim().is_empty() {
-                    task_text.push_str(&format!(
-                        "\nSource strategy: {}",
-                        task.source_strategy.trim()
-                    ));
-                }
-                if !task.success_criteria.trim().is_empty() {
-                    task_text.push_str(&format!(
-                        "\nSuccess criteria: {}",
-                        task.success_criteria.trim()
-                    ));
-                }
-                task_text
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
         self.emit_research_artifact(
             session_id,
             turn.turn_id,
-            ResearchArtifactType::Plan,
-            "Research Plan",
-            plan_content,
+            ResearchArtifactType::Clarification,
+            "Research Clarification",
+            clarification_result.artifact_content,
         )
         .await;
-
-        let total_tasks = tasks.len();
-        let task_concurrency = research_config.max_concurrent_tasks.max(1);
-        let semaphore = Arc::new(Semaphore::new(task_concurrency));
-        let mut research_futures = FuturesUnordered::new();
-        for (index, task) in tasks.into_iter().enumerate() {
-            let runtime = Arc::clone(self);
-            let research_brief = research_brief.clone();
-            let research_context = research_context.clone();
-            let semaphore = Arc::clone(&semaphore);
-            research_futures.push(async move {
-                let _permit = semaphore.acquire_owned().await?;
-                let output = Arc::clone(&runtime)
-                    .run_researcher_agent_task(
-                        session_id,
-                        turn.turn_id,
-                        ResearcherAgentTaskInput {
-                            research_brief: &research_brief,
-                            research_context: &research_context,
-                            task_index: index,
-                            total_tasks,
-                        },
-                        task,
-                    )
-                    .await?;
-                Ok::<(usize, ResearcherOutput), anyhow::Error>((index, output))
-            });
-        }
-        let mut outputs = Vec::new();
-        while let Some(output) = research_futures.next().await {
-            let output = output?;
-            outputs.push(output);
-        }
-        outputs.sort_by_key(|(index, _)| *index);
-
-        let mut compressed_findings = Vec::new();
-        for (output_index, output) in outputs {
-            let webpage_summaries = self
-                .summarize_oversized_fetches(
-                    &model_runtime,
-                    &output.topic,
-                    output.oversized_fetches,
-                    research_config.max_summary_chars,
-                    &research_context,
-                    format!("researcher_{output_index}"),
-                )
-                .await?;
-            let compress_prompt = devo_core::research::prompts::compress();
-            let webpage_summaries = webpage_summaries.join("\n\n");
-            let mut compress_messages = research_context.request_messages(vec![
-                devo_core::research::prompts::research_topic_context(&output.topic),
-                devo_core::research::prompts::research_notes_context(&output.notes),
-            ]);
-            compress_messages.extend(output.structured_evidence_messages.clone());
-            compress_messages.push(request_text_message(
-                devo_core::research::prompts::webpage_summaries_context(&webpage_summaries),
+        research_context
+            .clarifications
+            .extend(clarification_result.clarifications.clone());
+        for clarification in &clarification_result.clarifications {
+            coordinator_scratch.push_message(devo_core::Message::user(
+                devo_core::research::prompts::clarification_context(
+                    &clarification.question,
+                    &clarification.answer,
+                ),
             ));
-            let compressed = self
-                .model_text_artifact(
-                    &model_runtime,
-                    compress_prompt,
-                    compress_messages,
-                    format!("researcher_{output_index}_compress"),
-                    ResearchArtifactType::CompressedFinding,
-                    format!("Compressed Finding: {}", output.title),
-                )
-                .await?;
-            compressed_findings.push(compressed);
         }
 
-        let final_prompt = devo_core::research::prompts::final_report();
+        let research_brief = self
+            .run_research_artifact_stage(
+                &model_runtime,
+                &mut coordinator_scratch,
+                ResearchStageKind::Brief,
+            )
+            .await?;
+        coordinator_scratch.push_message(devo_core::Message::user(
+            devo_core::research::prompts::research_brief_context(&research_brief),
+        ));
+
+        let supervisor_output = self
+            .run_supervisor_stage(&model_runtime, &mut coordinator_scratch)
+            .await?;
+        coordinator_scratch.push_message(devo_core::Message::user(
+            devo_core::research::prompts::research_notes_context(&supervisor_output.notes),
+        ));
+        coordinator_scratch.push_message(devo_core::Message::user(
+            devo_core::research::prompts::webpage_summaries_context(""),
+        ));
+
+        let compressed = self
+            .run_research_artifact_stage(
+                &model_runtime,
+                &mut coordinator_scratch,
+                ResearchStageKind::Compress,
+            )
+            .await?;
+        let compressed_findings = vec![compressed];
+
         let final_report = self
             .stream_final_report(
                 &model_runtime,
-                final_prompt,
                 question,
                 research_context.session_messages(vec![
                     devo_core::research::prompts::research_brief_context(&research_brief),
@@ -915,7 +803,7 @@ impl ServerRuntime {
             question,
             &final_report,
             &compressed_findings,
-            total_tasks,
+            supervisor_output.worker_count,
             research_config.max_summary_chars,
         );
         self.emit_research_artifact(
@@ -993,345 +881,446 @@ impl ServerRuntime {
             .unwrap_or_default())
     }
 
-    async fn run_researcher_agent_task(
-        self: Arc<Self>,
-        session_id: SessionId,
-        turn_id: TurnId,
-        input: ResearcherAgentTaskInput<'_>,
-        task: ResearchTask,
-    ) -> anyhow::Result<ResearcherOutput> {
-        let ResearcherAgentTaskInput {
-            research_brief,
-            research_context,
-            task_index,
-            total_tasks,
-        } = input;
-        let artifact_title = format!("Research Finding: {}", task.title.trim());
-        let artifact = ResearchArtifactItem {
-            artifact_type: ResearchArtifactType::Finding,
-            title: artifact_title.clone(),
-            content: String::new(),
+    async fn run_research_artifact_stage(
+        self: &Arc<Self>,
+        runtime: &ResearchModelRuntime<'_>,
+        scratch: &mut SessionState,
+        stage: ResearchStageKind,
+    ) -> anyhow::Result<String> {
+        let mut capture = ResearchArtifactQueryCapture::default();
+        self.run_research_stage_query(
+            runtime,
+            scratch,
+            stage,
+            ResearchStageCapture::Artifact(&mut capture),
+        )
+        .await?;
+        self.complete_reasoning_item(runtime.session_id, runtime.turn_id, &mut capture.reasoning)
+            .await;
+        if !capture.turn_completed {
+            anyhow::bail!("research {stage:?} stream ended without message completion");
+        }
+        let text = if capture.text.trim().is_empty() {
+            assistant_text_from_session(scratch)
+        } else {
+            capture.text.clone()
         };
-        let (artifact_item_id, artifact_item_seq) = self
-            .start_item(
-                session_id,
-                turn_id,
-                ItemKind::ResearchArtifact,
-                serde_json::to_value(&artifact).expect("serialize streamed research artifact"),
-            )
+        let artifact = stage
+            .artifact()
+            .ok_or_else(|| anyhow::anyhow!("research {stage:?} has no artifact"))?;
+        self.complete_research_artifact_item(
+            runtime.session_id,
+            runtime.turn_id,
+            &mut capture.artifact,
+            &artifact,
+            &text,
+        )
+        .await;
+        Ok(text)
+    }
+
+    async fn run_supervisor_stage(
+        self: &Arc<Self>,
+        runtime: &ResearchModelRuntime<'_>,
+        scratch: &mut SessionState,
+    ) -> anyhow::Result<SupervisorOutput> {
+        let mut capture = SupervisorQueryCapture::default();
+        self.run_research_stage_query(
+            runtime,
+            scratch,
+            ResearchStageKind::Supervisor,
+            ResearchStageCapture::Supervisor(&mut capture),
+        )
+        .await?;
+        self.complete_reasoning_item(runtime.session_id, runtime.turn_id, &mut capture.reasoning)
             .await;
 
-        let spawn_result = Arc::clone(&self)
-            .spawn_agent(devo_protocol::SpawnAgentParams {
-                session_id,
-                message: delegated_research_task_message(
-                    research_brief,
-                    research_context,
-                    task_index,
-                    total_tasks,
-                    &task,
-                ),
-                fork_turns: Some("none".to_string()),
-                max_turns: None,
-                tool_policy: devo_protocol::AgentToolPolicy::DeepResearch,
-                context_mode: devo_protocol::AgentContextMode::DeepResearch,
-                ephemeral: false,
-            })
-            .await?;
-        self.remember_research_child_agent(session_id, spawn_result.child_session_id)
-            .await;
-        let mut child_session_ids = vec![spawn_result.child_session_id];
-        let mut terminal_agent_path = spawn_result.agent_path.clone();
-
-        let mut notes = String::new();
-        let mut structured_evidence_messages = Vec::new();
-        let mut after_sequence = 0_u64;
-        let mut terminal = self
-            .wait_research_child_until_terminal(
-                ResearchChildWaitTarget {
-                    session_id,
-                    turn_id,
-                    artifact_item_id,
-                    child_session_id: spawn_result.child_session_id,
-                    agent_path: spawn_result.agent_path.as_str(),
-                },
-                ResearchChildWaitBuffers {
-                    after_sequence: &mut after_sequence,
-                    notes: &mut notes,
-                },
-            )
-            .await?;
-        self.merge_child_research_output(
-            spawn_result.child_session_id,
-            &mut notes,
-            &mut structured_evidence_messages,
+        let supervisor_text = if capture.text.trim().is_empty() {
+            assistant_text_from_session(scratch)
+        } else {
+            capture.text.clone()
+        };
+        let notes = if supervisor_text.trim().is_empty() {
+            "Supervisor completed without visible notes. Treat evidence as unavailable unless structured worker tool output is present."
+                .to_string()
+        } else {
+            supervisor_text
+        };
+        let artifact = ResearchStageKind::Supervisor
+            .artifact()
+            .expect("supervisor stage should have an artifact");
+        self.complete_research_artifact_item(
+            runtime.session_id,
+            runtime.turn_id,
+            &mut capture.artifact,
+            &artifact,
+            &notes,
         )
         .await;
 
-        for _ in 0..RESEARCH_SUBAGENT_CONTINUATION_ATTEMPTS {
-            if terminal.completed {
-                break;
-            }
-            if terminal.status == "timed_out" {
-                let _ = Arc::clone(&self)
-                    .close_agent(devo_protocol::CloseAgentParams {
-                        session_id,
-                        target: spawn_result.child_session_id.to_string(),
-                    })
-                    .await;
-                break;
-            }
-            let continuation = delegated_research_continuation_message(
-                &task,
-                terminal.status.as_str(),
-                terminal.detail.as_deref(),
-                &notes,
-            );
-            match Arc::clone(&self)
-                .send_message(devo_protocol::AgentMessageParams {
-                    session_id,
-                    target: spawn_result.child_session_id.to_string(),
-                    message: continuation,
-                })
-                .await
-            {
-                Ok(_) => {
-                    terminal = self
-                        .wait_research_child_until_terminal(
-                            ResearchChildWaitTarget {
-                                session_id,
-                                turn_id,
-                                artifact_item_id,
-                                child_session_id: spawn_result.child_session_id,
-                                agent_path: spawn_result.agent_path.as_str(),
-                            },
-                            ResearchChildWaitBuffers {
-                                after_sequence: &mut after_sequence,
-                                notes: &mut notes,
-                            },
-                        )
-                        .await?;
-                    self.merge_child_research_output(
-                        spawn_result.child_session_id,
-                        &mut notes,
-                        &mut structured_evidence_messages,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    terminal.detail = Some(format!(
-                        "{}; failed to continue child agent: {error}",
-                        terminal
-                            .detail
-                            .as_deref()
-                            .unwrap_or("research subagent ended")
-                    ));
-                    break;
-                }
-            }
-        }
-
-        for _ in 0..RESEARCH_SUBAGENT_RESTART_ATTEMPTS {
-            if terminal.completed || !notes.trim().is_empty() {
-                break;
-            }
-            let restart_result = Arc::clone(&self)
-                .spawn_agent(devo_protocol::SpawnAgentParams {
-                    session_id,
-                    message: delegated_research_restart_message(
-                        research_brief,
-                        research_context,
-                        task_index,
-                        total_tasks,
-                        &task,
-                        terminal.status.as_str(),
-                        terminal.detail.as_deref(),
-                    ),
-                    fork_turns: Some("none".to_string()),
-                    max_turns: None,
-                    tool_policy: devo_protocol::AgentToolPolicy::DeepResearch,
-                    context_mode: devo_protocol::AgentContextMode::DeepResearch,
-                    ephemeral: false,
-                })
-                .await?;
-            self.remember_research_child_agent(session_id, restart_result.child_session_id)
-                .await;
-            child_session_ids.push(restart_result.child_session_id);
-            terminal_agent_path = restart_result.agent_path.clone();
-            let mut restart_after_sequence = 0_u64;
-            terminal = self
-                .wait_research_child_until_terminal(
-                    ResearchChildWaitTarget {
-                        session_id,
-                        turn_id,
-                        artifact_item_id,
-                        child_session_id: restart_result.child_session_id,
-                        agent_path: restart_result.agent_path.as_str(),
-                    },
-                    ResearchChildWaitBuffers {
-                        after_sequence: &mut restart_after_sequence,
-                        notes: &mut notes,
-                    },
-                )
-                .await?;
-            self.merge_child_research_output(
-                restart_result.child_session_id,
-                &mut notes,
-                &mut structured_evidence_messages,
-            )
-            .await;
-        }
-
-        if !terminal.completed {
-            append_degraded_research_note(
-                &mut notes,
-                terminal_agent_path.as_str(),
-                terminal.status.as_str(),
-                terminal.detail.as_deref(),
-            );
-        }
-
-        if notes.trim().is_empty() {
-            notes = format!(
-                "Research worker {} did not produce reliable notes for this task. Treat this finding as unavailable and avoid unsupported claims.",
-                terminal_agent_path
-            );
-        }
-
-        let completed_artifact = ResearchArtifactItem {
-            artifact_type: ResearchArtifactType::Finding,
-            title: artifact_title,
-            content: notes.clone(),
-        };
-        self.complete_item(
-            session_id,
-            turn_id,
-            artifact_item_id,
-            artifact_item_seq,
-            ItemKind::ResearchArtifact,
-            TurnItem::ResearchArtifact(completed_artifact.clone()),
-            serde_json::to_value(completed_artifact)
-                .expect("serialize completed research artifact"),
-        )
-        .await;
-        for child_session_id in child_session_ids {
-            self.forget_research_child_agent(session_id, child_session_id)
-                .await;
-        }
-
-        Ok(ResearcherOutput {
-            title: task.title,
-            topic: task.research_topic,
+        Ok(SupervisorOutput {
             notes,
-            structured_evidence_messages,
-            oversized_fetches: Vec::new(),
+            worker_count: capture.spawned_worker_count,
         })
     }
 
-    async fn wait_research_child_until_terminal(
+    async fn run_research_stage_query(
         self: &Arc<Self>,
-        target: ResearchChildWaitTarget<'_>,
-        buffers: ResearchChildWaitBuffers<'_>,
-    ) -> anyhow::Result<ResearchSubagentTerminal> {
-        let ResearchChildWaitTarget {
-            session_id,
-            turn_id,
-            artifact_item_id,
-            child_session_id,
-            agent_path,
-        } = target;
-        let ResearchChildWaitBuffers {
-            after_sequence,
-            notes,
-        } = buffers;
-        loop {
-            let wait_result = Arc::clone(self)
-                .wait_agent(devo_protocol::WaitAgentParams {
-                    session_id,
-                    target: Some(child_session_id.to_string()),
-                    after_sequence: Some(*after_sequence),
-                    timeout_ms: Some(900_000),
-                })
-                .await?;
-            if wait_result.timed_out && wait_result.events.is_empty() {
-                return Ok(ResearchSubagentTerminal {
-                    status: "timed_out".to_string(),
-                    detail: Some(format!(
-                        "research subagent {agent_path} timed out before completing"
-                    )),
-                    completed: false,
-                });
-            }
-            for event in wait_result.events {
-                *after_sequence = (*after_sequence).max(event.sequence);
-                match event.kind.as_str() {
-                    "assistant_delta" => {
-                        if let Some(text) = event.text {
-                            if text.is_empty() {
-                                continue;
-                            }
-                            notes.push_str(&text);
-                            self.broadcast_event(ServerEvent::ItemDelta {
-                                delta_kind: ItemDeltaKind::ResearchArtifactDelta,
-                                payload: ItemDeltaPayload {
-                                    context: EventContext {
-                                        session_id,
-                                        turn_id: Some(turn_id),
-                                        item_id: Some(artifact_item_id),
-                                        seq: 0,
-                                    },
-                                    delta: text,
-                                    stream_index: None,
-                                    channel: None,
-                                },
-                            })
-                            .await;
+        runtime: &ResearchModelRuntime<'_>,
+        scratch: &mut SessionState,
+        stage: ResearchStageKind,
+        mut capture: ResearchStageCapture<'_>,
+    ) -> anyhow::Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let callback = Arc::new(move |event: QueryEvent| {
+            let _ = tx.send(event);
+        });
+        let mut stage_turn_config = runtime.turn_config.clone();
+        stage_turn_config.web_search = devo_core::ResolvedWebSearchConfig::Disabled;
+        stage_turn_config.web_fetch = devo_core::ResolvedWebFetchConfig::Disabled;
+        scratch.config.token_budget = stage_turn_config.token_budget();
+        scratch.session_context = Some(research_session_context(
+            scratch,
+            &stage_turn_config,
+            research_stage_system(stage.prompt()),
+        ));
+        let registry = Arc::new(
+            runtime
+                .runtime_context
+                .registry
+                .restricted_to_specs(stage.tool_names()),
+        );
+        let tool_runtime = self
+            .tool_runtime_for_research(
+                runtime.session_id,
+                runtime.turn_id,
+                &stage_turn_config,
+                Arc::clone(&registry),
+            )
+            .await?;
+        let artifact = stage.artifact();
+        let query_result = {
+            let query_future = query(
+                scratch,
+                &stage_turn_config,
+                runtime
+                    .runtime_context
+                    .provider_for_route(stage_turn_config.provider_route.clone()),
+                Arc::clone(&registry),
+                &tool_runtime,
+                Some(callback),
+            );
+            tokio::pin!(query_future);
+            let mut event_channel_closed = false;
+            loop {
+                tokio::select! {
+                    maybe_event = rx.recv(), if !event_channel_closed => {
+                        if let Some(event) = maybe_event {
+                            let context = ResearchQueryEventContext {
+                                session_id: runtime.session_id,
+                                turn_id: runtime.turn_id,
+                                usage_ledger: runtime.usage_ledger,
+                                context_window: Some(stage_turn_config.model.context_window as u64),
+                            };
+                            self.handle_research_stage_query_event(
+                                context,
+                                stage,
+                                &mut capture,
+                                artifact.as_ref(),
+                                event,
+                            )
+                            .await?;
+                        } else {
+                            event_channel_closed = true;
                         }
                     }
-                    "status" => match event.status.as_deref() {
-                        Some("completed") => {
-                            return Ok(ResearchSubagentTerminal {
-                                status: "completed".to_string(),
-                                detail: event.text,
-                                completed: true,
-                            });
-                        }
-                        Some("failed" | "interrupted" | "canceled" | "closed") => {
-                            let status = event.status.unwrap_or_else(|| "unknown".to_string());
-                            return Ok(ResearchSubagentTerminal {
-                                status,
-                                detail: event.text,
-                                completed: false,
-                            });
-                        }
-                        Some(_) | None => {}
-                    },
-                    _ => {}
+                    result = &mut query_future => {
+                        break result;
+                    }
                 }
             }
+        };
+        query_result?;
+        while let Some(event) = rx.recv().await {
+            let context = ResearchQueryEventContext {
+                session_id: runtime.session_id,
+                turn_id: runtime.turn_id,
+                usage_ledger: runtime.usage_ledger,
+                context_window: Some(stage_turn_config.model.context_window as u64),
+            };
+            self.handle_research_stage_query_event(
+                context,
+                stage,
+                &mut capture,
+                artifact.as_ref(),
+                event,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_research_stage_query_event(
+        &self,
+        context: ResearchQueryEventContext<'_>,
+        stage: ResearchStageKind,
+        capture: &mut ResearchStageCapture<'_>,
+        artifact: Option<&StreamedResearchArtifact>,
+        event: QueryEvent,
+    ) -> anyhow::Result<()> {
+        match capture {
+            ResearchStageCapture::Clarification(capture) => {
+                self.handle_clarification_query_event(context, capture, event)
+                    .await;
+            }
+            ResearchStageCapture::Artifact(capture) => {
+                let artifact = artifact
+                    .ok_or_else(|| anyhow::anyhow!("research {stage:?} missing artifact"))?;
+                let artifact_context = ResearchArtifactEventContext {
+                    query: context,
+                    artifact,
+                };
+                self.handle_research_artifact_query_event(artifact_context, stage, capture, event)
+                    .await;
+            }
+            ResearchStageCapture::Supervisor(capture) => {
+                let artifact = artifact
+                    .ok_or_else(|| anyhow::anyhow!("research supervisor missing artifact"))?;
+                let artifact_context = ResearchArtifactEventContext {
+                    query: context,
+                    artifact,
+                };
+                self.handle_supervisor_query_event(artifact_context, capture, event)
+                    .await;
+            }
+            ResearchStageCapture::FinalReport(capture) => {
+                self.handle_final_report_query_event(context, capture, event)
+                    .await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_research_artifact_query_event(
+        &self,
+        context: ResearchArtifactEventContext<'_>,
+        stage: ResearchStageKind,
+        capture: &mut ResearchArtifactQueryCapture,
+        event: QueryEvent,
+    ) {
+        let session_id = context.query.session_id;
+        let turn_id = context.query.turn_id;
+        let usage_ledger = context.query.usage_ledger;
+        let context_window = context.query.context_window;
+        match event {
+            QueryEvent::TextDelta(text) => {
+                capture.text.push_str(&text);
+                self.push_research_artifact_delta(
+                    session_id,
+                    turn_id,
+                    &mut capture.artifact,
+                    context.artifact,
+                    text,
+                )
+                .await;
+            }
+            QueryEvent::Usage { usage } => {
+                let usage_key = format!(
+                    "{}_{}",
+                    stage.usage_prefix(),
+                    capture.usage_invocation_index
+                );
+                self.apply_research_usage(
+                    session_id,
+                    turn_id,
+                    usage_ledger,
+                    usage_key,
+                    ResearchUsageTotals::from_usage(&usage),
+                    context_window,
+                )
+                .await;
+                capture.usage_invocation_index += 1;
+            }
+            QueryEvent::UsageDelta { usage } => {
+                let usage_key = format!(
+                    "{}_{}",
+                    stage.usage_prefix(),
+                    capture.usage_invocation_index
+                );
+                self.apply_research_usage(
+                    session_id,
+                    turn_id,
+                    usage_ledger,
+                    usage_key,
+                    ResearchUsageTotals::from_usage(&usage),
+                    context_window,
+                )
+                .await;
+            }
+            QueryEvent::ReasoningDelta(text) => {
+                self.push_reasoning_delta(session_id, turn_id, &mut capture.reasoning, text)
+                    .await;
+            }
+            QueryEvent::ReasoningCompleted => {
+                self.complete_reasoning_item(session_id, turn_id, &mut capture.reasoning)
+                    .await;
+            }
+            QueryEvent::TurnComplete { .. } => {
+                capture.turn_completed = true;
+            }
+            QueryEvent::ToolUseStart { .. }
+            | QueryEvent::ToolExecutionStart { .. }
+            | QueryEvent::ToolProgress { .. }
+            | QueryEvent::ToolResult { .. } => {}
         }
     }
 
-    async fn merge_child_research_output(
+    async fn handle_supervisor_query_event(
         &self,
-        child_session_id: SessionId,
-        notes: &mut String,
-        structured_evidence_messages: &mut Vec<devo_protocol::RequestMessage>,
+        context: ResearchArtifactEventContext<'_>,
+        capture: &mut SupervisorQueryCapture,
+        event: QueryEvent,
     ) {
-        match self.child_research_output(child_session_id).await {
-            Ok((fallback_notes, evidence_messages)) => {
-                if notes.trim().is_empty() && !fallback_notes.trim().is_empty() {
-                    *notes = fallback_notes;
-                }
-                structured_evidence_messages.extend(evidence_messages);
+        let session_id = context.query.session_id;
+        let turn_id = context.query.turn_id;
+        let usage_ledger = context.query.usage_ledger;
+        let context_window = context.query.context_window;
+        match event {
+            QueryEvent::TextDelta(text) => {
+                capture.text.push_str(&text);
+                self.push_research_artifact_delta(
+                    session_id,
+                    turn_id,
+                    &mut capture.artifact,
+                    context.artifact,
+                    text,
+                )
+                .await;
             }
-            Err(error) => {
-                tracing::warn!(
-                    child_session_id = %child_session_id,
-                    error = %error,
-                    "failed to collect child research output"
+            QueryEvent::ToolUseStart { id, name, input } => {
+                let (item_id, item_seq) = self
+                    .start_item(
+                        session_id,
+                        turn_id,
+                        ItemKind::ToolCall,
+                        serde_json::to_value(ToolCallPayload {
+                            tool_call_id: id.clone(),
+                            tool_name: name.clone(),
+                            parameters: input.clone(),
+                            command_actions: Vec::new(),
+                        })
+                        .expect("serialize supervisor tool call payload"),
+                    )
+                    .await;
+                capture.pending_tools.insert(
+                    id,
+                    PendingResearchToolCall {
+                        item_id,
+                        item_seq,
+                        tool_name: name,
+                        input,
+                    },
                 );
             }
+            QueryEvent::ToolExecutionStart { .. } => {}
+            QueryEvent::ToolResult {
+                tool_use_id,
+                tool_name,
+                input,
+                content,
+                display_content,
+                is_error,
+                summary,
+            } => {
+                let output = tool_content_to_json(content);
+                if is_spawn_agent_tool_name(&tool_name)
+                    && !is_error
+                    && let Some(child_session_id) = spawn_agent_child_session_id(&output)
+                {
+                    self.remember_research_child_agent(session_id, child_session_id)
+                        .await;
+                    capture.spawned_worker_count += 1;
+                }
+                if let Some(pending) = capture.pending_tools.remove(&tool_use_id) {
+                    self.complete_item(
+                        session_id,
+                        turn_id,
+                        pending.item_id,
+                        pending.item_seq,
+                        ItemKind::ToolCall,
+                        TurnItem::ToolCall(ToolCallItem {
+                            tool_call_id: tool_use_id.clone(),
+                            tool_name: pending.tool_name.clone(),
+                            input: pending.input.clone(),
+                        }),
+                        serde_json::to_value(ToolCallPayload {
+                            tool_call_id: tool_use_id.clone(),
+                            tool_name: pending.tool_name,
+                            parameters: pending.input,
+                            command_actions: Vec::new(),
+                        })
+                        .expect("serialize completed supervisor tool call"),
+                    )
+                    .await;
+                }
+                self.emit_turn_item(
+                    session_id,
+                    turn_id,
+                    ItemKind::ToolResult,
+                    TurnItem::ToolResult(ToolResultItem {
+                        tool_call_id: tool_use_id.clone(),
+                        tool_name: Some(tool_name.clone()),
+                        output: output.clone(),
+                        display_content: display_content.clone(),
+                        is_error,
+                    }),
+                    serde_json::to_value(ToolResultPayload {
+                        tool_call_id: tool_use_id,
+                        tool_name: Some(tool_name),
+                        input: (!input.is_null()).then_some(input),
+                        content: output,
+                        display_content,
+                        is_error,
+                        summary,
+                    })
+                    .expect("serialize supervisor tool result payload"),
+                )
+                .await;
+            }
+            QueryEvent::Usage { usage } => {
+                let usage_key = format!("supervisor_call_{}", capture.usage_invocation_index);
+                self.apply_research_usage(
+                    session_id,
+                    turn_id,
+                    usage_ledger,
+                    usage_key,
+                    ResearchUsageTotals::from_usage(&usage),
+                    context_window,
+                )
+                .await;
+                capture.usage_invocation_index += 1;
+            }
+            QueryEvent::UsageDelta { usage } => {
+                let usage_key = format!("supervisor_call_{}", capture.usage_invocation_index);
+                self.apply_research_usage(
+                    session_id,
+                    turn_id,
+                    usage_ledger,
+                    usage_key,
+                    ResearchUsageTotals::from_usage(&usage),
+                    context_window,
+                )
+                .await;
+            }
+            QueryEvent::ReasoningDelta(text) => {
+                self.push_reasoning_delta(session_id, turn_id, &mut capture.reasoning, text)
+                    .await;
+            }
+            QueryEvent::ReasoningCompleted => {
+                self.complete_reasoning_item(session_id, turn_id, &mut capture.reasoning)
+                    .await;
+            }
+            QueryEvent::TurnComplete { .. } | QueryEvent::ToolProgress { .. } => {}
         }
     }
 
@@ -1346,20 +1335,6 @@ impl ServerRuntime {
             .entry(parent_session_id)
             .or_default()
             .insert(child_session_id);
-    }
-
-    async fn forget_research_child_agent(
-        &self,
-        parent_session_id: SessionId,
-        child_session_id: SessionId,
-    ) {
-        let mut research_child_agents = self.research_child_agents.lock().await;
-        if let Some(children) = research_child_agents.get_mut(&parent_session_id) {
-            children.remove(&child_session_id);
-            if children.is_empty() {
-                research_child_agents.remove(&parent_session_id);
-            }
-        }
     }
 
     async fn clear_research_child_agents(&self, parent_session_id: SessionId) {
@@ -1395,50 +1370,16 @@ impl ServerRuntime {
         }
     }
 
-    async fn child_research_output(
-        &self,
-        child_session_id: SessionId,
-    ) -> anyhow::Result<(String, Vec<devo_protocol::RequestMessage>)> {
-        let Some(session_arc) = self.sessions.lock().await.get(&child_session_id).cloned() else {
-            anyhow::bail!("research subagent session does not exist: {child_session_id}");
-        };
-        let messages = {
-            let session = session_arc.lock().await;
-            let core_session = session.core_session.lock().await;
-            core_session.messages.clone()
-        };
-        let notes = messages
-            .iter()
-            .rev()
-            .find(|message| message.role == devo_core::Role::Assistant)
-            .map(|message| {
-                message
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        devo_core::ContentBlock::Text { text } => Some(text.as_str()),
-                        devo_core::ContentBlock::Reasoning { .. }
-                        | devo_core::ContentBlock::ProviderReasoning { .. }
-                        | devo_core::ContentBlock::ToolUse { .. }
-                        | devo_core::ContentBlock::HostedToolUse { .. }
-                        | devo_core::ContentBlock::ToolResult { .. } => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default();
-        Ok((notes, structured_tool_evidence_messages(&messages)))
-    }
-
     async fn handle_final_report_query_event(
         &self,
-        session_id: SessionId,
-        turn_id: TurnId,
+        context: ResearchQueryEventContext<'_>,
         capture: &mut ResearchQueryCapture,
-        usage_ledger: &ResearchUsageLedgerRef,
-        context_window: Option<u64>,
         event: QueryEvent,
     ) {
+        let session_id = context.session_id;
+        let turn_id = context.turn_id;
+        let usage_ledger = context.usage_ledger;
+        let context_window = context.context_window;
         match event {
             QueryEvent::TextDelta(text) => {
                 capture.text.push_str(&text);
@@ -1580,38 +1521,96 @@ impl ServerRuntime {
         }
     }
 
-    async fn summarize_oversized_fetches(
+    async fn handle_clarification_query_event(
         &self,
-        runtime: &ResearchModelRuntime<'_>,
-        topic: &str,
-        fetches: Vec<OversizedFetch>,
-        max_summary_chars: usize,
-        research_context: &ResearchRequestContext,
-        usage_prefix: String,
-    ) -> anyhow::Result<Vec<String>> {
-        let mut summaries = Vec::new();
-        for (index, fetch) in fetches.into_iter().enumerate() {
-            let prompt = devo_core::research::prompts::summarize_webpage(max_summary_chars);
-            let summary = self
-                .model_text_artifact(
-                    runtime,
-                    prompt,
-                    research_context.request_messages(vec![
-                        devo_core::research::prompts::research_topic_context(topic),
-                        devo_core::research::prompts::source_context(
-                            &fetch.source_url,
-                            &fetch.source_title,
-                            &fetch.content,
-                        ),
-                    ]),
-                    format!("{usage_prefix}_webpage_summary_{index}"),
-                    ResearchArtifactType::WebpageSummary,
-                    format!("Webpage Summary {}", index + 1),
+        context: ResearchQueryEventContext<'_>,
+        capture: &mut ClarificationQueryCapture,
+        event: QueryEvent,
+    ) {
+        let session_id = context.session_id;
+        let turn_id = context.turn_id;
+        let usage_ledger = context.usage_ledger;
+        let context_window = context.context_window;
+        match event {
+            QueryEvent::TextDelta(text) => {
+                capture.text.push_str(&text);
+            }
+            QueryEvent::ToolUseStart {
+                id, name, input, ..
+            } => {
+                if is_request_user_input_tool_name(&name) {
+                    let questions = request_user_input_questions_from_input(&input);
+                    if !questions.is_empty() {
+                        capture
+                            .pending_request_user_input_questions
+                            .insert(id, questions);
+                    }
+                }
+            }
+            QueryEvent::ToolResult {
+                tool_use_id,
+                tool_name,
+                content,
+                ..
+            } => {
+                if is_request_user_input_tool_name(&tool_name) {
+                    let output = tool_content_to_json(content);
+                    if let Ok(response) =
+                        serde_json::from_value::<devo_protocol::RequestUserInputResponse>(output)
+                    {
+                        let questions = capture
+                            .pending_request_user_input_questions
+                            .remove(&tool_use_id)
+                            .unwrap_or_default();
+                        let exchanges =
+                            request_user_input_exchanges_from_response(&questions, &response);
+                        capture.clarifications.extend(
+                            exchanges
+                                .iter()
+                                .filter(|exchange| !exchange.answer.trim().is_empty())
+                                .cloned(),
+                        );
+                        capture.request_user_input_exchanges.extend(exchanges);
+                    }
+                }
+            }
+            QueryEvent::Usage { usage } => {
+                let usage_key = format!("clarify_call_{}", capture.usage_invocation_index);
+                self.apply_research_usage(
+                    session_id,
+                    turn_id,
+                    usage_ledger,
+                    usage_key,
+                    ResearchUsageTotals::from_usage(&usage),
+                    context_window,
                 )
-                .await?;
-            summaries.push(summary);
+                .await;
+                capture.usage_invocation_index += 1;
+            }
+            QueryEvent::UsageDelta { usage } => {
+                let usage_key = format!("clarify_call_{}", capture.usage_invocation_index);
+                self.apply_research_usage(
+                    session_id,
+                    turn_id,
+                    usage_ledger,
+                    usage_key,
+                    ResearchUsageTotals::from_usage(&usage),
+                    context_window,
+                )
+                .await;
+            }
+            QueryEvent::ReasoningDelta(text) => {
+                self.push_reasoning_delta(session_id, turn_id, &mut capture.reasoning, text)
+                    .await;
+            }
+            QueryEvent::ReasoningCompleted => {
+                self.complete_reasoning_item(session_id, turn_id, &mut capture.reasoning)
+                    .await;
+            }
+            QueryEvent::TurnComplete { .. }
+            | QueryEvent::ToolExecutionStart { .. }
+            | QueryEvent::ToolProgress { .. } => {}
         }
-        Ok(summaries)
     }
 
     async fn emit_research_artifact(
@@ -1819,30 +1818,97 @@ impl ServerRuntime {
         .await;
     }
 
+    async fn run_clarification_gate(
+        self: &Arc<Self>,
+        runtime: &ResearchModelRuntime<'_>,
+        scratch: &mut SessionState,
+    ) -> anyhow::Result<ClarificationGateResult> {
+        let mut capture = ClarificationQueryCapture::default();
+        self.run_research_stage_query(
+            runtime,
+            scratch,
+            ResearchStageKind::Clarify,
+            ResearchStageCapture::Clarification(&mut capture),
+        )
+        .await?;
+        self.complete_reasoning_item(runtime.session_id, runtime.turn_id, &mut capture.reasoning)
+            .await;
+
+        if !capture.request_user_input_exchanges.is_empty() {
+            return Ok(ClarificationGateResult {
+                artifact_content: clarification_artifact_content(
+                    &capture.request_user_input_exchanges,
+                ),
+                clarifications: capture.clarifications,
+            });
+        }
+
+        let clarify_text = if capture.text.trim().is_empty() {
+            assistant_text_from_session(scratch)
+        } else {
+            capture.text.clone()
+        };
+        if let Some(decision) = parse_json_object::<ClarifyDecision>(&clarify_text) {
+            if decision.need_clarification && !decision.question.trim().is_empty() {
+                let question = decision.question;
+                let answer = self
+                    .request_research_clarification(runtime.session_id, runtime.turn_id, &question)
+                    .await?;
+                let artifact_content =
+                    format!("Question: {}\n\nAnswer: {}", question, answer.trim());
+                let clarifications = if answer.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    vec![ResearchClarificationContext { question, answer }]
+                };
+                return Ok(ClarificationGateResult {
+                    artifact_content,
+                    clarifications,
+                });
+            }
+            let artifact_content = if decision.verification.trim().is_empty() {
+                "No clarification needed.".to_string()
+            } else {
+                decision.verification
+            };
+            return Ok(ClarificationGateResult {
+                artifact_content,
+                clarifications: Vec::new(),
+            });
+        }
+
+        let artifact_content = if clarify_text.trim().is_empty() {
+            "No clarification needed.".to_string()
+        } else {
+            clarify_text
+        };
+        Ok(ClarificationGateResult {
+            artifact_content,
+            clarifications: Vec::new(),
+        })
+    }
+
     async fn stream_final_report(
         self: &Arc<Self>,
         runtime: &ResearchModelRuntime<'_>,
-        prompt: String,
         question: &str,
         messages: Vec<devo_core::Message>,
     ) -> anyhow::Result<String> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let callback = Arc::new(move |event: QueryEvent| {
-            let _ = tx.send(event);
-        });
-        let mut final_turn_config = runtime.turn_config.clone();
-        final_turn_config.web_search = devo_core::ResolvedWebSearchConfig::Disabled;
-        final_turn_config.web_fetch = devo_core::ResolvedWebFetchConfig::Disabled;
         let mut scratch = self.scratch_session(runtime.session_id).await?;
-        scratch.config.token_budget = final_turn_config.token_budget();
-        scratch.session_context = Some(research_session_context(
-            &scratch,
-            &final_turn_config,
-            research_stage_system(prompt),
-        ));
         for message in messages {
             scratch.push_message(message);
         }
+        let mut capture = ResearchQueryCapture::default();
+        self.run_research_stage_query(
+            runtime,
+            &mut scratch,
+            ResearchStageKind::FinalReport,
+            ResearchStageCapture::FinalReport(&mut capture),
+        )
+        .await?;
+        let mut final_turn_config = runtime.turn_config.clone();
+        final_turn_config.web_search = devo_core::ResolvedWebSearchConfig::Disabled;
+        final_turn_config.web_fetch = devo_core::ResolvedWebFetchConfig::Disabled;
         let registry = Arc::new(
             runtime
                 .runtime_context
@@ -1857,55 +1923,6 @@ impl ServerRuntime {
                 Arc::clone(&registry),
             )
             .await?;
-        let mut capture = ResearchQueryCapture::default();
-        let query_result = {
-            let query_future = query(
-                &mut scratch,
-                &final_turn_config,
-                runtime
-                    .runtime_context
-                    .provider_for_route(final_turn_config.provider_route.clone()),
-                Arc::clone(&registry),
-                &tool_runtime,
-                Some(callback),
-            );
-            tokio::pin!(query_future);
-            let mut event_channel_closed = false;
-            loop {
-                tokio::select! {
-                    maybe_event = rx.recv(), if !event_channel_closed => {
-                        if let Some(event) = maybe_event {
-                            self.handle_final_report_query_event(
-                                runtime.session_id,
-                                runtime.turn_id,
-                                &mut capture,
-                                runtime.usage_ledger,
-                                Some(final_turn_config.model.context_window as u64),
-                                event,
-                            )
-                            .await;
-                        } else {
-                            event_channel_closed = true;
-                        }
-                    }
-                    result = &mut query_future => {
-                        break result;
-                    }
-                }
-            }
-        };
-        query_result?;
-        while let Some(event) = rx.recv().await {
-            self.handle_final_report_query_event(
-                runtime.session_id,
-                runtime.turn_id,
-                &mut capture,
-                runtime.usage_ledger,
-                Some(final_turn_config.model.context_window as u64),
-                event,
-            )
-            .await;
-        }
         self.complete_reasoning_item(runtime.session_id, runtime.turn_id, &mut capture.reasoning)
             .await;
         if !capture.turn_completed {
@@ -2076,159 +2093,6 @@ impl ServerRuntime {
             .ok_or_else(|| {
                 anyhow::anyhow!("fallback final report write did not report a file path")
             })
-    }
-
-    async fn model_text(
-        &self,
-        runtime: &ResearchModelRuntime<'_>,
-        prompt: String,
-        messages: Vec<devo_protocol::RequestMessage>,
-        usage_key: String,
-    ) -> anyhow::Result<String> {
-        self.model_text_with_display(
-            runtime,
-            prompt,
-            messages,
-            usage_key,
-            ResearchModelTextDisplay::Hidden,
-        )
-        .await
-    }
-
-    async fn model_text_artifact(
-        &self,
-        runtime: &ResearchModelRuntime<'_>,
-        prompt: String,
-        messages: Vec<devo_protocol::RequestMessage>,
-        usage_key: String,
-        artifact_type: ResearchArtifactType,
-        title: impl Into<String>,
-    ) -> anyhow::Result<String> {
-        self.model_text_with_display(
-            runtime,
-            prompt,
-            messages,
-            usage_key,
-            ResearchModelTextDisplay::ResearchArtifact(StreamedResearchArtifact {
-                artifact_type,
-                title: title.into(),
-            }),
-        )
-        .await
-    }
-
-    async fn model_text_with_display(
-        &self,
-        runtime: &ResearchModelRuntime<'_>,
-        prompt: String,
-        messages: Vec<devo_protocol::RequestMessage>,
-        usage_key: String,
-        display: ResearchModelTextDisplay,
-    ) -> anyhow::Result<String> {
-        let request = model_text_request(runtime.turn_config, prompt, messages);
-        let mut stream = runtime
-            .runtime_context
-            .provider_for_route(runtime.turn_config.provider_route.clone())
-            .completion_stream(request)
-            .await?;
-        let mut text = String::new();
-        let mut reasoning = StreamedTextItem::default();
-        let mut artifact = StreamedTextItem::default();
-        let mut saw_reasoning = false;
-        let mut final_response = None;
-        while let Some(event) = stream.next().await {
-            match event? {
-                StreamEvent::TextStart { .. } | StreamEvent::ReasoningStart { .. } => {}
-                StreamEvent::TextDelta { text: delta, .. } => {
-                    text.push_str(&delta);
-                    if let ResearchModelTextDisplay::ResearchArtifact(display) = &display {
-                        self.push_research_artifact_delta(
-                            runtime.session_id,
-                            runtime.turn_id,
-                            &mut artifact,
-                            display,
-                            delta,
-                        )
-                        .await;
-                    }
-                }
-                StreamEvent::ReasoningDelta { text: delta, .. } => {
-                    saw_reasoning = true;
-                    self.push_reasoning_delta(
-                        runtime.session_id,
-                        runtime.turn_id,
-                        &mut reasoning,
-                        delta,
-                    )
-                    .await;
-                }
-                StreamEvent::ReasoningDone { .. } => {
-                    self.complete_reasoning_item(
-                        runtime.session_id,
-                        runtime.turn_id,
-                        &mut reasoning,
-                    )
-                    .await;
-                }
-                StreamEvent::MessageDone { response } => {
-                    final_response = Some(response);
-                }
-                StreamEvent::UsageDelta(usage) => {
-                    self.apply_research_usage(
-                        runtime.session_id,
-                        runtime.turn_id,
-                        runtime.usage_ledger,
-                        usage_key.clone(),
-                        ResearchUsageTotals::from_usage(&usage),
-                        Some(runtime.turn_config.model.context_window as u64),
-                    )
-                    .await;
-                }
-                StreamEvent::ToolCallStart { .. }
-                | StreamEvent::HostedToolCallStart { .. }
-                | StreamEvent::HostedToolCallDone { .. }
-                | StreamEvent::ToolCallInputDelta { .. } => {}
-            }
-        }
-        if let Some(response) = &final_response {
-            if text.is_empty() {
-                text = response_text(&response.content);
-            }
-            if !saw_reasoning {
-                let reasoning_text = response_reasoning_text(response);
-                if !reasoning_text.is_empty() {
-                    self.push_reasoning_delta(
-                        runtime.session_id,
-                        runtime.turn_id,
-                        &mut reasoning,
-                        reasoning_text,
-                    )
-                    .await;
-                }
-            }
-            self.apply_research_usage(
-                runtime.session_id,
-                runtime.turn_id,
-                runtime.usage_ledger,
-                usage_key,
-                ResearchUsageTotals::from_usage(&response.usage),
-                Some(runtime.turn_config.model.context_window as u64),
-            )
-            .await;
-        }
-        self.complete_reasoning_item(runtime.session_id, runtime.turn_id, &mut reasoning)
-            .await;
-        if let ResearchModelTextDisplay::ResearchArtifact(display) = &display {
-            self.complete_research_artifact_item(
-                runtime.session_id,
-                runtime.turn_id,
-                &mut artifact,
-                display,
-                &text,
-            )
-            .await;
-        }
-        Ok(text)
     }
 
     async fn push_research_artifact_delta(
@@ -2447,6 +2311,7 @@ impl ServerRuntime {
                 session.active_turn = None;
                 session.summary.status = SessionRuntimeStatus::Idle;
                 session.summary.updated_at = Utc::now();
+                session.summary.last_activity_at = session.summary.updated_at;
             }
         }
         let (record, session_context, turn_context) = {
@@ -2582,42 +2447,114 @@ where
     })
 }
 
-fn response_text(content: &[devo_protocol::ResponseContent]) -> String {
-    content
+fn assistant_text_from_session(session: &SessionState) -> String {
+    session
+        .messages
         .iter()
-        .filter_map(|block| match block {
-            devo_protocol::ResponseContent::Text(text) => Some(text.as_str()),
-            devo_protocol::ResponseContent::ToolUse { .. }
-            | devo_protocol::ResponseContent::HostedToolUse { .. }
-            | devo_protocol::ResponseContent::ProviderReasoning { .. } => None,
+        .rev()
+        .find(|message| message.role == devo_core::Role::Assistant)
+        .map(|message| {
+            message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    devo_core::ContentBlock::Text { text } => Some(text.as_str()),
+                    devo_core::ContentBlock::Reasoning { .. }
+                    | devo_core::ContentBlock::ProviderReasoning { .. }
+                    | devo_core::ContentBlock::ToolUse { .. }
+                    | devo_core::ContentBlock::HostedToolUse { .. }
+                    | devo_core::ContentBlock::ToolResult { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("")
         })
-        .collect::<Vec<_>>()
-        .join("")
+        .unwrap_or_default()
 }
 
-fn response_reasoning_text(response: &devo_protocol::ModelResponse) -> String {
-    response
-        .content
+fn is_request_user_input_tool_name(tool_name: &str) -> bool {
+    matches!(tool_name, "request_user_input" | "question")
+}
+
+fn clarification_artifact_content(exchanges: &[ResearchClarificationContext]) -> String {
+    match exchanges {
+        [] => "No clarification needed.".to_string(),
+        [exchange] => format!(
+            "Question: {}\n\nAnswer: {}",
+            exchange.question,
+            exchange.answer.trim()
+        ),
+        _ => exchanges
+            .iter()
+            .enumerate()
+            .map(|(index, exchange)| {
+                let item = index + 1;
+                format!(
+                    "Question {item}: {}\n\nAnswer {item}: {}",
+                    exchange.question,
+                    exchange.answer.trim()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    }
+}
+
+fn request_user_input_questions_from_input(input: &serde_json::Value) -> Vec<(String, String)> {
+    if let Some(question) = input
+        .get("question")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|question| !question.is_empty())
+    {
+        return vec![("question".to_string(), question.to_string())];
+    }
+
+    let Some(questions) = input.get("questions").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+
+    questions
         .iter()
-        .filter_map(|block| match block {
-            devo_protocol::ResponseContent::ProviderReasoning { payload, .. } => {
-                payload.get("thinking").and_then(serde_json::Value::as_str)
-            }
-            devo_protocol::ResponseContent::Text(_)
-            | devo_protocol::ResponseContent::ToolUse { .. }
-            | devo_protocol::ResponseContent::HostedToolUse { .. } => None,
+        .filter_map(|question| {
+            let id = question
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())?;
+            let question_text = question
+                .get("question")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|question| !question.is_empty())?;
+            Some((id.to_string(), question_text.to_string()))
         })
-        .chain(
-            response
-                .metadata
-                .extras
-                .iter()
-                .filter_map(|extra| match extra {
-                    ResponseExtra::ReasoningText { text } => Some(text.as_str()),
-                    ResponseExtra::ProviderSpecific { .. } => None,
-                }),
-        )
-        .collect::<String>()
+        .collect()
+}
+
+fn request_user_input_exchanges_from_response(
+    questions: &[(String, String)],
+    response: &devo_protocol::RequestUserInputResponse,
+) -> Vec<ResearchClarificationContext> {
+    questions
+        .iter()
+        .filter_map(|(id, question)| {
+            let answer = response.answers.get(id)?;
+            Some(ResearchClarificationContext {
+                question: question.clone(),
+                answer: first_non_empty_request_user_input_answer(answer).unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn first_non_empty_request_user_input_answer(
+    answer: &devo_protocol::RequestUserInputAnswer,
+) -> Option<String> {
+    answer
+        .answers
+        .iter()
+        .find(|text| !text.trim().is_empty())
+        .cloned()
 }
 
 fn build_research_context_reference(
@@ -2631,7 +2568,7 @@ fn build_research_context_reference(
         return String::new();
     }
     let mut reference = format!(
-        "Original question:\n{}\n\nResearch tasks: {}",
+        "Original question:\n{}\n\nResearch workers: {}",
         question.trim(),
         task_count
     );
@@ -2699,149 +2636,20 @@ fn extract_urls(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn request_text_message(text: String) -> devo_protocol::RequestMessage {
-    devo_protocol::RequestMessage {
-        role: "user".to_string(),
-        content: vec![devo_protocol::RequestContent::Text { text }],
-    }
+fn is_spawn_agent_tool_name(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "spawn_agent" | "spawn_subagent" | "subagent" | "delegate"
+    )
 }
 
-fn delegated_research_task_message(
-    research_brief: &str,
-    research_context: &ResearchRequestContext,
-    task_index: usize,
-    total_tasks: usize,
-    task: &ResearchTask,
-) -> String {
-    let mut message = format!(
-        "You are a delegated DeepResearch worker for supervisor task {} of {}.\n\n",
-        task_index + 1,
-        total_tasks
-    );
-    message.push_str("<original_research_question>\n");
-    message.push_str(research_context.question.trim());
-    message.push_str("\n</original_research_question>\n\n");
-    if let Some(clarification) = &research_context.clarification {
-        message.push_str("<clarification_context>\nQuestion: ");
-        message.push_str(clarification.question.trim());
-        message.push_str("\nAnswer: ");
-        message.push_str(clarification.answer.trim());
-        message.push_str("\n</clarification_context>\n\n");
-    }
-    message.push_str("<research_brief>\n");
-    message.push_str(research_brief.trim());
-    message.push_str("\n</research_brief>\n\n");
-    message.push_str("<research_topic>\nTitle: ");
-    message.push_str(task.title.trim());
-    message.push_str("\nTopic: ");
-    message.push_str(task.research_topic.trim());
-    if !task.purpose.trim().is_empty() {
-        message.push_str("\nPurpose: ");
-        message.push_str(task.purpose.trim());
-    }
-    if !task.source_strategy.trim().is_empty() {
-        message.push_str("\nSource strategy: ");
-        message.push_str(task.source_strategy.trim());
-    }
-    if !task.success_criteria.trim().is_empty() {
-        message.push_str("\nSuccess criteria: ");
-        message.push_str(task.success_criteria.trim());
-    }
-    message.push_str("\n</research_topic>\n\n");
-    message.push_str(
-        "Return concise evidence notes for the parent researcher, not a final report. Do not write files, create local report artifacts, or modify the workspace unless this exact delegated task explicitly requires a local file change. Include searches/tool calls performed, key findings, a source table, conflicts or uncertainty, recommended citations, and any local file paths read for evidence. Do not fabricate citations, URLs, source titles, dates, quotes, or source access.",
-    );
-    message
+fn spawn_agent_child_session_id(output: &serde_json::Value) -> Option<SessionId> {
+    serde_json::from_value::<devo_protocol::SpawnAgentResult>(output.clone())
+        .ok()
+        .map(|result| result.child_session_id)
 }
 
-fn delegated_research_restart_message(
-    research_brief: &str,
-    research_context: &ResearchRequestContext,
-    task_index: usize,
-    total_tasks: usize,
-    task: &ResearchTask,
-    previous_status: &str,
-    previous_detail: Option<&str>,
-) -> String {
-    let mut message = delegated_research_task_message(
-        research_brief,
-        research_context,
-        task_index,
-        total_tasks,
-        task,
-    );
-    message.push_str("\n\n<previous_worker_failure>\nStatus: ");
-    message.push_str(previous_status.trim());
-    if let Some(detail) = previous_detail
-        .map(str::trim)
-        .filter(|detail| !detail.is_empty())
-    {
-        message.push_str("\nDetail: ");
-        message.push_str(detail);
-    }
-    message.push_str(
-        "\n</previous_worker_failure>\n\nA previous worker could not complete this task. Restart from the task brief, avoid repeating the same failure mode, and return evidence notes with explicit limitations if sources/tools are unavailable. Do not write files or create local report artifacts.",
-    );
-    message
-}
-
-fn delegated_research_continuation_message(
-    task: &ResearchTask,
-    status: &str,
-    detail: Option<&str>,
-    partial_notes: &str,
-) -> String {
-    let mut message = String::from(
-        "Your previous delegated research turn ended before completing. Continue the same task now. Preserve any useful evidence already gathered, repair the failure, and return concise evidence notes for the parent researcher. Do not start a final report.\n\n",
-    );
-    message.push_str("<previous_status>\n");
-    message.push_str(status.trim());
-    if let Some(detail) = detail.map(str::trim).filter(|detail| !detail.is_empty()) {
-        message.push_str(": ");
-        message.push_str(detail);
-    }
-    message.push_str("\n</previous_status>\n\n");
-    message.push_str("<research_topic>\nTitle: ");
-    message.push_str(task.title.trim());
-    message.push_str("\nTopic: ");
-    message.push_str(task.research_topic.trim());
-    message.push_str("\n</research_topic>\n\n");
-    if !partial_notes.trim().is_empty() {
-        message.push_str("<partial_notes_already_seen_by_parent>\n");
-        message.push_str(&truncate_chars(partial_notes.trim(), 4_000));
-        message.push_str("\n</partial_notes_already_seen_by_parent>\n\n");
-    }
-    message.push_str(
-        "Continue from the available context. If a source/tool failed, try an alternate source or report the limitation explicitly. Return only evidence notes, source details, conflicts or uncertainty, and recommended citations. Do not write files or create local report artifacts.",
-    );
-    message
-}
-
-fn append_degraded_research_note(
-    notes: &mut String,
-    agent_path: &str,
-    status: &str,
-    detail: Option<&str>,
-) {
-    if !notes.ends_with('\n') && !notes.is_empty() {
-        notes.push('\n');
-    }
-    if !notes.is_empty() {
-        notes.push('\n');
-    }
-    notes.push_str("Research worker status: ");
-    notes.push_str(agent_path);
-    notes.push_str(" ended with ");
-    notes.push_str(status.trim());
-    if let Some(detail) = detail.map(str::trim).filter(|detail| !detail.is_empty()) {
-        notes.push_str(". Detail: ");
-        notes.push_str(detail);
-    }
-    notes.push_str(
-        "\nProceeding with partial evidence for this task. Treat missing citations or unsupported claims as unavailable rather than inferred.",
-    );
-}
-
+#[cfg(test)]
 fn structured_tool_evidence_messages(
     messages: &[devo_core::Message],
 ) -> Vec<devo_protocol::RequestMessage> {
@@ -2865,6 +2673,7 @@ fn structured_tool_evidence_messages(
         .collect()
 }
 
+#[cfg(test)]
 fn structured_tool_evidence_content(
     block: &devo_core::ContentBlock,
 ) -> Option<devo_protocol::RequestContent> {
@@ -2943,38 +2752,6 @@ pub(crate) fn research_session_context(
     }
 }
 
-fn model_text_request(
-    turn_config: &TurnConfig,
-    stage_prompt: String,
-    messages: Vec<devo_protocol::RequestMessage>,
-) -> devo_protocol::ModelRequest {
-    let resolved = turn_config
-        .model
-        .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
-    devo_protocol::ModelRequest {
-        model: turn_config.provider_request_model(&resolved.request_model),
-        system: Some(research_stage_system(stage_prompt))
-            .filter(|system| !system.trim().is_empty()),
-        messages,
-        max_tokens: turn_config
-            .model
-            .max_tokens
-            .map_or(turn_config.token_budget().max_output_tokens, |value| {
-                value as usize
-            }),
-        tools: None,
-        hosted_tools: Vec::new(),
-        sampling: devo_protocol::SamplingControls {
-            temperature: turn_config.model.temperature,
-            top_p: turn_config.model.top_p,
-            top_k: turn_config.model.top_k.map(|value| value as u32),
-        },
-        request_thinking: resolved.request_thinking,
-        reasoning_effort: resolved.request_reasoning_effort,
-        extra_body: resolved.extra_body,
-    }
-}
-
 fn final_report_file_requested_by_default(question: &str) -> bool {
     let question = question.to_ascii_lowercase();
     ![
@@ -3043,37 +2820,6 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     truncated
 }
 
-#[cfg(test)]
-fn extract_source_url(input: &serde_json::Value, output: &serde_json::Value) -> Option<String> {
-    input
-        .get("url")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| output.get("url").and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-#[cfg(test)]
-fn extract_source_title(
-    output: &serde_json::Value,
-    display_content: Option<&str>,
-) -> Option<String> {
-    output
-        .get("title")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            output
-                .get("metadata")
-                .and_then(|metadata| metadata.get("title"))
-                .and_then(serde_json::Value::as_str)
-        })
-        .or(display_content)
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .map(|title| truncate_chars(title, 240))
-}
-
 fn research_display_input(display_input: &str) -> String {
     let trimmed = display_input.trim();
     if trimmed == "/research" || trimmed.starts_with("/research ") {
@@ -3101,19 +2847,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_fetch_metadata_prefers_visible_url_and_title() {
+    fn request_user_input_exchanges_follow_question_order_and_ignore_unknown_answers() {
         // Trace: L2-DES-RESEARCH-001
-        // Verifies: oversized local web fetch summaries receive source metadata when available.
-        let input = json!({"url": "https://example.com/page"});
-        let output = json!({"title": "Example Page"});
+        // Verifies: clarification tool answers map back to the original ordered questions.
+        let questions = request_user_input_questions_from_input(&json!({
+            "questions": [
+                {"id": "scope", "question": "Which scope?"},
+                {"id": "region", "question": "Which region?"},
+                {"id": "empty", "question": "Optional detail?"}
+            ]
+        }));
+        let response = serde_json::from_value::<devo_protocol::RequestUserInputResponse>(json!({
+            "answers": {
+                "region": {"answers": ["APAC"]},
+                "unknown": {"answers": ["ignore me"]},
+                "scope": {"answers": ["Product docs"]},
+                "empty": {"answers": ["   "]}
+            }
+        }))
+        .expect("request_user_input response should deserialize");
+
+        let exchanges = request_user_input_exchanges_from_response(&questions, &response);
 
         assert_eq!(
-            extract_source_url(&input, &output),
-            Some("https://example.com/page".to_string())
+            exchanges,
+            vec![
+                ResearchClarificationContext {
+                    question: "Which scope?".to_string(),
+                    answer: "Product docs".to_string(),
+                },
+                ResearchClarificationContext {
+                    question: "Which region?".to_string(),
+                    answer: "APAC".to_string(),
+                },
+                ResearchClarificationContext {
+                    question: "Optional detail?".to_string(),
+                    answer: String::new(),
+                },
+            ]
         );
         assert_eq!(
-            extract_source_title(&output, None),
-            Some("Example Page".to_string())
+            exchanges
+                .iter()
+                .filter(|exchange| !exchange.answer.trim().is_empty())
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                ResearchClarificationContext {
+                    question: "Which scope?".to_string(),
+                    answer: "Product docs".to_string(),
+                },
+                ResearchClarificationContext {
+                    question: "Which region?".to_string(),
+                    answer: "APAC".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn clarification_artifact_content_numbers_multiple_questions() {
+        // Trace: L2-DES-RESEARCH-001
+        // Verifies: multiple clarification exchanges render deterministically for transcript artifacts.
+        let content = clarification_artifact_content(&[
+            ResearchClarificationContext {
+                question: "Which scope?".to_string(),
+                answer: "Product docs".to_string(),
+            },
+            ResearchClarificationContext {
+                question: "Optional detail?".to_string(),
+                answer: String::new(),
+            },
+        ]);
+
+        assert_eq!(
+            content,
+            "Question 1: Which scope?\n\nAnswer 1: Product docs\n\nQuestion 2: Optional detail?\n\nAnswer 2: "
         );
     }
 
@@ -3194,7 +3003,7 @@ mod tests {
 
         assert_eq!(
             reference,
-            "Original question:\nWhat changed?\n\nResearch tasks: 2\n\nSource/reference hints:\nhttps://example.com/a\nhttps://example.com/b"
+            "Original question:\nWhat changed?\n\nResearch workers: 2\n\nSource/reference hints:\nhttps://example.com/a\nhttps://example.com/b"
         );
     }
 }

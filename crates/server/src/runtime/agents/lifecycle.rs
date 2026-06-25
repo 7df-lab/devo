@@ -41,6 +41,7 @@ impl ServerRuntime {
             let mut session = session_arc.lock().await;
             session.summary.status = SessionRuntimeStatus::Idle;
             session.summary.updated_at = Utc::now();
+            session.summary.last_activity_at = session.summary.updated_at;
         }
         self.broadcast_event(ServerEvent::SessionStatusChanged(
             SessionStatusChangedPayload {
@@ -79,6 +80,7 @@ impl ServerRuntime {
         let mut session = session_arc.lock().await;
         session.summary.status = SessionRuntimeStatus::Idle;
         session.summary.updated_at = Utc::now();
+        session.summary.last_activity_at = session.summary.updated_at;
         session.active_turn.take().map(|mut turn| {
             turn.status = TurnStatus::Interrupted;
             turn.completed_at = Some(Utc::now());

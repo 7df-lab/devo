@@ -77,6 +77,7 @@ impl Database {
                 ephemeral INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
+                last_activity_at INTEGER NOT NULL DEFAULT 0,
                 schema_version INTEGER NOT NULL DEFAULT 2
             );
 
@@ -130,6 +131,34 @@ impl Database {
                 [],
             )
             .context("failed to add additional_directories column")?;
+        }
+        let has_session_last_activity_at = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(sessions)")
+                .context("failed to inspect sessions schema")?;
+            let columns = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .context("failed to read sessions schema")?;
+            let mut found = false;
+            for column in columns {
+                if column? == "last_activity_at" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_session_last_activity_at {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .context("failed to add last_activity_at column")?;
+            conn.execute(
+                "UPDATE sessions SET last_activity_at = updated_at WHERE last_activity_at = 0",
+                [],
+            )
+            .context("failed to backfill last_activity_at column")?;
         }
         let has_pending_input_id = {
             let mut stmt = conn
@@ -198,8 +227,8 @@ impl Database {
             SessionTitleState::Final(_) => "final",
         };
         conn.execute(
-            "INSERT INTO sessions (id, title, title_state, model, thinking, cwd, additional_directories, ephemeral, created_at, updated_at, schema_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 2)
+            "INSERT INTO sessions (id, title, title_state, model, thinking, cwd, additional_directories, ephemeral, created_at, updated_at, last_activity_at, schema_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 2)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 title_state = excluded.title_state,
@@ -207,7 +236,8 @@ impl Database {
                 thinking = excluded.thinking,
                 cwd = excluded.cwd,
                 additional_directories = excluded.additional_directories,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at,
+                last_activity_at = excluded.last_activity_at",
             params![
                 meta.session_id.to_string(),
                 meta.title,
@@ -219,6 +249,7 @@ impl Database {
                 meta.ephemeral as i32,
                 meta.created_at.timestamp(),
                 meta.updated_at.timestamp(),
+                meta.last_activity_at.timestamp(),
             ],
         )
         .context("failed to upsert session")?;
@@ -230,7 +261,7 @@ impl Database {
         let conn = self.conn.lock().expect("database mutex poisoned");
         let mut stmt = conn
             .prepare(
-                "SELECT id, title, title_state, model, thinking, cwd, additional_directories, ephemeral, created_at, updated_at
+                "SELECT id, title, title_state, model, thinking, cwd, additional_directories, ephemeral, created_at, updated_at, last_activity_at
                  FROM sessions WHERE id = ?1",
             )
             .context("failed to prepare get_session statement")?;
@@ -245,6 +276,7 @@ impl Database {
             let ephemeral: i32 = row.get(7)?;
             let created_at: i64 = row.get(8)?;
             let updated_at: i64 = row.get(9)?;
+            let last_activity_at: i64 = row.get(10)?;
 
             let title_state = match title_state_str.as_str() {
                 "provisional" => SessionTitleState::Provisional,
@@ -267,6 +299,10 @@ impl Database {
                     .unwrap_or_else(Utc::now),
                 updated_at: Utc
                     .timestamp_opt(updated_at, 0)
+                    .single()
+                    .unwrap_or_else(Utc::now),
+                last_activity_at: Utc
+                    .timestamp_opt(last_activity_at, 0)
                     .single()
                     .unwrap_or_else(Utc::now),
                 title,
@@ -303,8 +339,8 @@ impl Database {
         let conn = self.conn.lock().expect("database mutex poisoned");
         let mut stmt = conn
             .prepare(
-                "SELECT id, title, title_state, model, thinking, cwd, additional_directories, ephemeral, created_at, updated_at
-                 FROM sessions ORDER BY updated_at DESC",
+                "SELECT id, title, title_state, model, thinking, cwd, additional_directories, ephemeral, created_at, updated_at, last_activity_at
+                 FROM sessions ORDER BY last_activity_at DESC, updated_at DESC",
             )
             .context("failed to prepare list_sessions statement")?;
         let rows = stmt
@@ -319,6 +355,7 @@ impl Database {
                 let ephemeral: i32 = row.get(7)?;
                 let created_at: i64 = row.get(8)?;
                 let updated_at: i64 = row.get(9)?;
+                let last_activity_at: i64 = row.get(10)?;
 
                 let title_state = match title_state_str.as_str() {
                     "provisional" => SessionTitleState::Provisional,
@@ -341,6 +378,10 @@ impl Database {
                         .unwrap_or_else(Utc::now),
                     updated_at: Utc
                         .timestamp_opt(updated_at, 0)
+                        .single()
+                        .unwrap_or_else(Utc::now),
+                    last_activity_at: Utc
+                        .timestamp_opt(last_activity_at, 0)
                         .single()
                         .unwrap_or_else(Utc::now),
                     title,
@@ -711,6 +752,7 @@ mod tests {
             additional_directories: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            last_activity_at: Utc::now(),
             title: Some("Test Session".into()),
             title_state: SessionTitleState::Provisional,
             parent_session_id: None,
@@ -754,15 +796,19 @@ mod tests {
     #[test]
     fn list_sessions_ordered() {
         let (db, _dir) = test_db();
-        let meta1 = sample_session("session-1");
+        let mut meta1 = sample_session("session-1");
         let mut meta2 = sample_session("session-2");
-        meta2.updated_at = Utc::now() + chrono::Duration::seconds(10);
+        let baseline = Utc::now();
+        meta1.updated_at = baseline;
+        meta1.last_activity_at = baseline;
+        meta2.updated_at = baseline + chrono::Duration::seconds(10);
+        meta2.last_activity_at = baseline - chrono::Duration::seconds(10);
         db.upsert_session(&meta1).expect("upsert");
         db.upsert_session(&meta2).expect("upsert");
 
         let sessions = db.list_sessions().expect("list");
         assert_eq!(sessions.len(), 2);
-        assert_eq!(sessions[0].session_id, meta2.session_id);
+        assert_eq!(sessions[0].session_id, meta1.session_id);
     }
 
     #[test]

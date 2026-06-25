@@ -1,0 +1,429 @@
+/**
+ * Unified backend service layer.
+ *
+ * Detects whether we're running inside Electron (preload bridge available)
+ * or in a plain browser (Bun + Hono server on port 3100). All hooks import
+ * from here instead of `devo-server.ts` directly.
+ *
+ * In Electron mode, calls go through IPC to the main process.
+ * In browser mode, calls go through HTTP to the Devo server.
+ */
+
+import type {
+	Automation,
+	AutomationRun,
+	CreateAutomationInput,
+	GitApplyResult,
+	GitBranchInfo,
+	GitCheckoutResult,
+	GitCommitResult,
+	GitDiffStat,
+	GitPushResult,
+	GitStashResult,
+	GitStatusInfo,
+	ModelState,
+	OpenInTargetsResult,
+	UpdateAutomationInput,
+} from "../../preload/api"
+import { createLogger } from "../lib/logger"
+
+const log = createLogger("backend")
+
+// ============================================================
+// Runtime detection
+// ============================================================
+
+/**
+ * Returns true when running inside Electron (preload bridge is available).
+ * The `devo` object is exposed via `contextBridge.exposeInMainWorld`.
+ */
+export const isElectron = typeof window !== "undefined" && "devo" in window
+
+// ============================================================
+// Backend API — same signatures regardless of runtime
+// ============================================================
+
+/**
+ * Ensures the single local Devo stdio runtime is running and returns its
+ * compatibility URL.
+ */
+export async function fetchDevoUrl(): Promise<{ url: string }> {
+	log.debug("fetchDevoUrl", { via: isElectron ? "ipc" : "http" })
+	try {
+		if (isElectron) {
+			const info = await window.devo.ensureDevo()
+			log.info("Devo server URL resolved", { url: info.url })
+			return { url: info.url }
+		}
+		const { fetchDevoUrl: httpFetch } = await import("./devo-server")
+		const result = await httpFetch()
+		log.info("Devo server URL resolved", { url: result.url })
+		return result
+	} catch (err) {
+		log.error("fetchDevoUrl failed", err)
+		throw err
+	}
+}
+
+/**
+ * Resolve the connection URL for the local server config.
+ */
+export async function resolveServerUrl(
+	server: import("../../preload/api").ServerConfig,
+): Promise<string> {
+	if (server.type !== "local") throw new Error("Remote Devo servers are disabled in this build")
+	const { url } = await fetchDevoUrl()
+	return url
+}
+
+/**
+ * The local stdio transport does not use HTTP auth.
+ */
+export async function resolveAuthHeader(
+	_server: import("../../preload/api").ServerConfig,
+): Promise<string | null> {
+	return null
+}
+
+/**
+ * Fetches the Devo model state (recent models, favorites, variants)
+ * from ~/.local/state/devo/model.json.
+ */
+export async function fetchModelState(): Promise<ModelState> {
+	if (isElectron) {
+		return window.devo.getModelState()
+	}
+	const { fetchModelState: httpFetch } = await import("./devo-server")
+	return httpFetch() as unknown as Promise<ModelState>
+}
+
+/**
+ * Adds a model to the front of the recent list in model.json.
+ * Matches the TUI's `model.set(model, { recent: true })` behavior.
+ * Returns the updated model state.
+ */
+export async function updateModelRecent(model: {
+	providerID: string
+	modelID: string
+}): Promise<ModelState> {
+	if (isElectron) {
+		return window.devo.updateModelRecent(model)
+	}
+	const { updateModelRecent: httpUpdate } = await import("./devo-server")
+	return httpUpdate(model) as unknown as Promise<ModelState>
+}
+
+/**
+ * Checks if the backend is available.
+ * In Electron, always returns true (main process is always there).
+ * In browser, pings the Devo HTTP server.
+ */
+export async function checkBackendHealth(): Promise<boolean> {
+	if (isElectron) {
+		return true
+	}
+	const { checkServerHealth } = await import("./devo-server")
+	return checkServerHealth()
+}
+
+// ============================================================
+// Directory picker — Electron-only (native dialog via IPC)
+// ============================================================
+
+/**
+ * Opens a native folder picker dialog.
+ * Returns the selected directory path, or null if cancelled.
+ */
+export async function pickDirectory(): Promise<string | null> {
+	if (isElectron) {
+		return window.devo.pickDirectory()
+	}
+	throw new Error("Directory picker is only available in Electron mode")
+}
+
+// ============================================================
+// Git operations — Electron-only (main process via IPC)
+// In browser mode, these are not available (Devo server
+// doesn't expose git checkout/stash APIs).
+// ============================================================
+
+/**
+ * Lists all local and remote branches for a project directory.
+ */
+export async function fetchGitBranches(directory: string): Promise<GitBranchInfo> {
+	if (isElectron) {
+		return window.devo.git.listBranches(directory)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+/**
+ * Gets the working tree status (clean/dirty, file counts).
+ */
+export async function fetchGitStatus(directory: string): Promise<GitStatusInfo> {
+	if (isElectron) {
+		return window.devo.git.getStatus(directory)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+/**
+ * Checks out a branch. Fails if there are uncommitted changes
+ * that would conflict.
+ */
+export async function gitCheckout(directory: string, branch: string): Promise<GitCheckoutResult> {
+	if (isElectron) {
+		return window.devo.git.checkout(directory, branch)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+/**
+ * Stashes uncommitted changes, then checks out the target branch.
+ */
+export async function gitStashAndCheckout(
+	directory: string,
+	branch: string,
+): Promise<GitStashResult> {
+	if (isElectron) {
+		return window.devo.git.stashAndCheckout(directory, branch)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+/**
+ * Pops the most recent stash entry.
+ */
+export async function gitStashPop(directory: string): Promise<GitStashResult> {
+	if (isElectron) {
+		return window.devo.git.stashPop(directory)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+// ============================================================
+// Worktree operations — Devo API only
+// ============================================================
+
+export type { WorktreeResult } from "./worktree-service"
+export {
+	createWorktree as createWorktreeViaApi,
+	listWorktrees as listWorktreesViaApi,
+	removeWorktree as removeWorktreeViaApi,
+	resetWorktree,
+} from "./worktree-service"
+
+/**
+ * Gets the git repository root for a directory.
+ */
+export async function getGitRoot(directory: string): Promise<string | null> {
+	if (isElectron) {
+		return window.devo.git.getRoot(directory)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+/**
+ * Gets a summary of uncommitted changes in a directory.
+ */
+export async function fetchDiffStat(directory: string): Promise<GitDiffStat> {
+	if (isElectron) {
+		return window.devo.git.diffStat(directory)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+/**
+ * Commits all changes (staged + unstaged) with the given message.
+ */
+export async function gitCommitAll(directory: string, message: string): Promise<GitCommitResult> {
+	if (isElectron) {
+		return window.devo.git.commitAll(directory, message)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+/**
+ * Pushes the current branch to the remote.
+ */
+export async function gitPush(directory: string, remote?: string): Promise<GitPushResult> {
+	if (isElectron) {
+		return window.devo.git.push(directory, remote)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+/**
+ * Creates a new branch on the given directory.
+ */
+export async function gitCreateBranch(
+	directory: string,
+	branchName: string,
+): Promise<GitCheckoutResult> {
+	if (isElectron) {
+		return window.devo.git.createBranch(directory, branchName)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+/**
+ * Gets the remote URL for a repository (defaults to "origin").
+ */
+export async function getGitRemoteUrl(directory: string, remote?: string): Promise<string | null> {
+	if (isElectron) {
+		return window.devo.git.getRemoteUrl(directory, remote)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+/**
+ * Applies uncommitted changes from a worktree to the local checkout as a patch.
+ */
+export async function gitApplyToLocal(
+	worktreeDir: string,
+	localDir: string,
+): Promise<GitApplyResult> {
+	if (isElectron) {
+		return window.devo.git.applyToLocal(worktreeDir, localDir)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+/**
+ * Applies a raw diff string to a local directory using `git apply`.
+ * Used for remote worktree apply-to-local, where the diff is fetched
+ * from the Devo session.diff API rather than from a local worktree.
+ */
+export async function gitApplyDiffText(
+	localDir: string,
+	diffText: string,
+): Promise<GitApplyResult> {
+	if (isElectron) {
+		return window.devo.git.applyDiffText(localDir, diffText)
+	}
+	throw new Error("Git operations are only available in Electron mode")
+}
+
+// ============================================================
+// Open in external app — Electron-only (main process via IPC)
+// ============================================================
+
+/**
+ * Gets the list of available "Open in" targets (editors, terminals, file managers)
+ * with their availability status and the user's preferred target.
+ */
+export async function fetchOpenInTargets(): Promise<OpenInTargetsResult> {
+	if (isElectron) {
+		return window.devo.openIn.getTargets()
+	}
+	throw new Error("Open-in targets are only available in Electron mode")
+}
+
+/**
+ * Opens a directory in the specified target application.
+ * Optionally persists the target as the user's preferred choice.
+ */
+export async function openInTarget(
+	directory: string,
+	targetId: string,
+	persistPreferred?: boolean,
+): Promise<void> {
+	if (isElectron) {
+		return window.devo.openIn.open(directory, targetId, persistPreferred)
+	}
+	throw new Error("Open-in targets are only available in Electron mode")
+}
+
+/**
+ * Sets the user's preferred "Open in" target without opening anything.
+ */
+export async function setOpenInPreferred(targetId: string): Promise<{ success: boolean }> {
+	if (isElectron) {
+		return window.devo.openIn.setPreferred(targetId)
+	}
+	throw new Error("Open-in targets are only available in Electron mode")
+}
+
+// ============================================================
+// Automations — Electron-only
+// ============================================================
+
+export async function fetchAutomations(): Promise<Automation[]> {
+	if (isElectron) {
+		return window.devo.automation.list()
+	}
+	throw new Error("Automations are only available in Electron mode")
+}
+
+export async function fetchAutomation(id: string): Promise<Automation | null> {
+	if (isElectron) {
+		return window.devo.automation.get(id)
+	}
+	throw new Error("Automations are only available in Electron mode")
+}
+
+export async function createAutomation(input: CreateAutomationInput): Promise<Automation> {
+	if (isElectron) {
+		return window.devo.automation.create(input)
+	}
+	throw new Error("Automations are only available in Electron mode")
+}
+
+export async function updateAutomation(input: UpdateAutomationInput): Promise<Automation | null> {
+	if (isElectron) {
+		return window.devo.automation.update(input)
+	}
+	throw new Error("Automations are only available in Electron mode")
+}
+
+export async function deleteAutomation(id: string): Promise<boolean> {
+	if (isElectron) {
+		return window.devo.automation.delete(id)
+	}
+	throw new Error("Automations are only available in Electron mode")
+}
+
+export async function runAutomationNow(id: string): Promise<boolean> {
+	if (isElectron) {
+		return window.devo.automation.runNow(id)
+	}
+	throw new Error("Automations are only available in Electron mode")
+}
+
+export async function fetchAutomationRuns(automationId?: string): Promise<AutomationRun[]> {
+	if (isElectron) {
+		return window.devo.automation.listRuns(automationId)
+	}
+	throw new Error("Automations are only available in Electron mode")
+}
+
+export async function archiveAutomationRun(runId: string): Promise<boolean> {
+	if (isElectron) {
+		return window.devo.automation.archiveRun(runId)
+	}
+	throw new Error("Automations are only available in Electron mode")
+}
+
+export async function acceptAutomationRun(runId: string): Promise<boolean> {
+	if (isElectron) {
+		return window.devo.automation.acceptRun(runId)
+	}
+	throw new Error("Automations are only available in Electron mode")
+}
+
+export async function markAutomationRunRead(runId: string): Promise<boolean> {
+	if (isElectron) {
+		return window.devo.automation.markRunRead(runId)
+	}
+	throw new Error("Automations are only available in Electron mode")
+}
+
+export async function previewAutomationSchedule(
+	rrule: string,
+	timezone: string,
+): Promise<string[]> {
+	if (isElectron) {
+		return window.devo.automation.previewSchedule(rrule, timezone)
+	}
+	throw new Error("Automations are only available in Electron mode")
+}

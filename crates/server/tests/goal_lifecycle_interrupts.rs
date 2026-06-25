@@ -129,10 +129,10 @@ async fn goal_cancel_interrupts_active_hidden_continuation_turn() -> Result<()> 
             connection_id,
             serde_json::json!({
                 "id": 126,
-                "method": "_devo/goal/cancel",
+                "method": "goal/cancel",
                 "params": {
-                    "session_id": session_id,
-                    "goal_id": goal_id
+                    "sessionId": session_id,
+                    "goalId": goal_id
                 }
             }),
         )

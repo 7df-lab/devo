@@ -82,6 +82,7 @@ impl ServerRuntime {
                 };
                 session.summary.status = SessionRuntimeStatus::ActiveTurn;
                 session.summary.updated_at = now;
+                session.summary.last_activity_at = now;
                 apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
                 session.active_turn = Some(turn.clone());
                 turn
@@ -513,6 +514,7 @@ impl ServerRuntime {
             session.latest_turn = Some(turn.clone());
             session.summary.status = SessionRuntimeStatus::Idle;
             session.summary.updated_at = Utc::now();
+            session.summary.last_activity_at = session.summary.updated_at;
             let totals = session.core_session.try_lock().ok().map(|core_session| {
                 (
                     core_session.total_input_tokens,

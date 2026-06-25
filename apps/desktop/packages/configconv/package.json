@@ -1,0 +1,41 @@
+{
+	"name": "@devo/configconv",
+	"version": "0.5.2",
+	"private": true,
+	"license": "MIT",
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts",
+		"./scanner": "./src/scanner/index.ts",
+		"./scanner/*": "./src/scanner/*.ts",
+		"./converter": "./src/converter/index.ts",
+		"./converter/*": "./src/converter/*.ts",
+		"./converter/universal": "./src/converter/universal.ts",
+		"./converter/to-canonical/*": "./src/converter/to-canonical/*.ts",
+		"./converter/from-canonical/*": "./src/converter/from-canonical/*.ts",
+		"./writer": "./src/writer/index.ts",
+		"./writer/*": "./src/writer/*.ts",
+		"./validator": "./src/validator/index.ts",
+		"./differ": "./src/differ/index.ts",
+		"./types": "./src/types/index.ts",
+		"./types/*": "./src/types/*.ts",
+		"./utils/*": "./src/utils/*.ts"
+	},
+	"scripts": {
+		"check-types": "tsc --noEmit",
+		"test": "bun test",
+		"lint": "biome check .",
+		"clean": "rm -rf node_modules .turbo"
+	},
+	"dependencies": {
+		"@devo-ai/plugin": "file:../devo-ai-plugin",
+		"@devo-ai/sdk": "file:../devo-ai-sdk",
+		"jsonc-parser": "^3.3.1",
+		"yaml": "^2.7.1",
+		"zod": "^3.24.4"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"typescript": "^5.8.3"
+	}
+}

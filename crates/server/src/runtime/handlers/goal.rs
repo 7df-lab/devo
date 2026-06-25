@@ -213,12 +213,6 @@ pub struct GoalCompleteParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GoalCancelParams {
-    pub session_id: SessionId,
-    pub goal_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalClearParams {
     pub session_id: SessionId,
 }

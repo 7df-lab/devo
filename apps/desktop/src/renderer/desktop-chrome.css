@@ -1,0 +1,100 @@
+:root[data-platform="win32"] {
+	--devo-titlebar-height: 40px;
+	--devo-windows-focus-chrome-bg: #ecf5f9;
+	--devo-windows-unfocused-chrome-bg: #f2f4f5;
+}
+
+:root[data-platform="win32"].electron-transparent {
+	--glass-body: 58%;
+	--glass-sidebar: 62%;
+	--glass-content: 90%;
+	--glass-surface: 84%;
+	--glass-elevated: 88%;
+	--glass-card: 88%;
+	--devo-content-radius: 12px;
+	--devo-composer-radius: 16px;
+}
+
+:root[data-platform="win32"][data-window-focused="true"] {
+	--devo-windows-chrome-bg: var(--devo-titlebar-tint, var(--devo-windows-focus-chrome-bg));
+	--sidebar: var(--devo-windows-chrome-bg);
+}
+
+:root[data-platform="win32"][data-window-focused="false"] {
+	--devo-windows-chrome-bg: var(--devo-windows-unfocused-chrome-bg);
+	--sidebar: var(--devo-windows-unfocused-chrome-bg);
+}
+
+:root[data-platform="win32"][data-window-focused="true"] [data-slot="sidebar-inset"],
+:root[data-platform="win32"][data-window-focused="false"] [data-slot="sidebar-inset"] {
+	background: var(--devo-windows-chrome-bg) !important;
+	background-color: var(--devo-windows-chrome-bg) !important;
+}
+
+:root[data-platform="win32"][data-window-focused="true"] body::before,
+:root[data-platform="win32"][data-window-focused="false"] body::before {
+	content: "";
+	position: fixed;
+	top: 0;
+	right: 0;
+	left: 0;
+	z-index: 20;
+	height: var(--devo-titlebar-height, 40px);
+	pointer-events: none;
+	background-color: var(--devo-windows-chrome-bg);
+	transition: background-color var(--duration-fast, 150ms) ease;
+}
+
+:root[data-platform="win32"][data-window-focused="true"] [data-slot="sidebar-wrapper"],
+:root[data-platform="win32"][data-window-focused="true"] [data-slot="sidebar"],
+:root[data-platform="win32"][data-window-focused="true"] [data-slot="sidebar-container"],
+:root[data-platform="win32"][data-window-focused="true"] [data-slot="sidebar-inner"],
+:root[data-platform="win32"][data-window-focused="true"] [data-slot="sidebar-header"],
+:root[data-platform="win32"][data-window-focused="true"] [data-slot="sidebar-content"],
+:root[data-platform="win32"][data-window-focused="true"] [data-slot="sidebar-footer"],
+:root[data-platform="win32"][data-window-focused="false"] [data-slot="sidebar-wrapper"],
+:root[data-platform="win32"][data-window-focused="false"] [data-slot="sidebar"],
+:root[data-platform="win32"][data-window-focused="false"] [data-slot="sidebar-container"],
+:root[data-platform="win32"][data-window-focused="false"] [data-slot="sidebar-inner"],
+:root[data-platform="win32"][data-window-focused="false"] [data-slot="sidebar-header"],
+:root[data-platform="win32"][data-window-focused="false"] [data-slot="sidebar-content"],
+:root[data-platform="win32"][data-window-focused="false"] [data-slot="sidebar-footer"] {
+	background: var(--devo-windows-chrome-bg) !important;
+	background-color: var(--devo-windows-chrome-bg) !important;
+}
+
+:root[data-platform="win32"].electron-transparent [data-slot="sidebar-inset"] {
+	margin-right: 0;
+	margin-bottom: 0;
+	border-top-left-radius: 0;
+	border-top-right-radius: 0;
+	border-bottom-right-radius: 0;
+	border-bottom-left-radius: 0;
+}
+
+:root[data-platform="win32"].electron-transparent [data-slot="content-area"] {
+	border-top-left-radius: var(--devo-content-radius);
+	border-top-right-radius: 0;
+	border-bottom-right-radius: 0;
+	border-bottom-left-radius: var(--devo-content-radius);
+}
+
+.devo-composer,
+.devo-composer-shell {
+	border-radius: var(--devo-composer-radius, 16px);
+}
+
+.devo-composer {
+	background: var(--background) !important;
+	background-color: var(--background) !important;
+}
+
+.devo-composer-shell {
+	overflow: hidden;
+}
+
+.devo-composer [data-slot="input-group"] {
+	background: var(--background) !important;
+	background-color: var(--background) !important;
+	border-radius: inherit;
+}

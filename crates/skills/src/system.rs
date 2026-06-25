@@ -10,8 +10,7 @@ use std::path::PathBuf;
 use include_dir::Dir;
 use thiserror::Error;
 
-const SYSTEM_SKILLS_DIR: Dir<'_> =
-    include_dir::include_dir!("$CARGO_MANIFEST_DIR/src/assets/samples");
+const SYSTEM_SKILLS_DIR: Dir<'_> = include_dir::include_dir!("$DEVO_SKILLS_SAMPLES_DIR");
 const SYSTEM_SKILLS_DIR_NAME: &str = ".system";
 const SKILLS_DIR_NAME: &str = "skills";
 const SYSTEM_SKILLS_MARKER_FILENAME: &str = ".devo-system-skills.marker";

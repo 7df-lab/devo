@@ -20,6 +20,9 @@ use devo_core::McpTransportConfig;
 use devo_core::McpTrustPolicy;
 use devo_core::tools::ToolPlanConfig;
 use devo_mcp::manager::RmcpMcpManager;
+use devo_protocol::AcpMeta;
+use devo_protocol::DEVO_HISTORY_INDEX_META;
+use devo_protocol::DEVO_PARENT_MESSAGE_ID_META;
 
 use crate::ACP_SESSION_UPDATE_METHOD;
 use crate::AcpAgentCapabilities;
@@ -91,6 +94,7 @@ use mcp::acp_mcp_config;
 pub(super) use response::legacy_error_to_acp;
 use session_support::decode_session_list_cursor;
 use session_support::encode_session_list_cursor;
+use session_support::history_limit_from_meta;
 use session_support::validate_acp_session_roots;
 
 impl ServerRuntime {

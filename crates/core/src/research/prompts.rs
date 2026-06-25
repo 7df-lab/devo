@@ -18,7 +18,6 @@ const COMPRESS_TEMPLATE: &str = include_str!("../../prompts/research/compress.md
 const FINAL_REPORT_TEMPLATE: &str = include_str!("../../prompts/research/final_report.md");
 const SUMMARIZE_WEBPAGE_TEMPLATE: &str =
     include_str!("../../prompts/research/summarize_webpage.md");
-const MAX_TASKS_PLACEHOLDER: &str = "{{ max_tasks }}";
 const MAX_ITERATIONS_PLACEHOLDER: &str = "{{ max_iterations }}";
 const MAX_SUMMARY_CHARS_PLACEHOLDER: &str = "{{ max_summary_chars }}";
 
@@ -88,9 +87,8 @@ pub fn research_brief() -> String {
     RESEARCH_BRIEF_TEMPLATE.trim_end().to_string()
 }
 
-pub fn supervisor(max_tasks: usize) -> String {
-    let max_tasks = max_tasks.to_string();
-    render(SUPERVISOR_TEMPLATE, &[(MAX_TASKS_PLACEHOLDER, &max_tasks)])
+pub fn supervisor() -> String {
+    SUPERVISOR_TEMPLATE.trim_end().to_string()
 }
 
 pub fn researcher(max_iterations: usize) -> String {
@@ -198,14 +196,58 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_prompt_renders_max_tasks() {
+    fn supervisor_prompt_uses_agent_tools_without_json_contract() {
         // Trace: L2-DES-RESEARCH-001
-        // Verifies: supervisor prompt renders the configured task cap.
-        let prompt = supervisor(4);
+        // Verifies: supervisor prompt drives workers through agent tools.
+        let prompt = supervisor();
 
-        assert!(prompt.contains("at most 4 tasks"));
+        assert!(prompt.contains("spawn_agent"));
+        assert!(prompt.contains("wait_agent"));
+        assert!(!prompt.contains("Return valid JSON"));
+        assert!(!prompt.contains("strict JSON"));
         assert!(!prompt.contains("{{ max_tasks }}"));
         assert!(!prompt.contains("Compare A and B"));
+    }
+
+    #[test]
+    fn research_brief_prompt_uses_continuous_coordinator_context() {
+        // Trace: L2-DES-RESEARCH-001
+        // Verifies: brief generation expects the shared coordinator query history.
+        let prompt = research_brief();
+
+        assert!(prompt.contains("coordinator query history"));
+        assert!(prompt.contains("optional normalized `<clarification_context>` blocks"));
+        assert!(prompt.contains("Worker Decomposition Hints"));
+        assert!(prompt.contains("Do not use tools at this stage"));
+        assert!(!prompt.contains("{{"));
+    }
+
+    #[test]
+    fn compress_prompt_targets_supervisor_worker_evidence_without_tools() {
+        // Trace: L2-DES-RESEARCH-001
+        // Verifies: compression consumes supervisor notes and worker evidence from query history.
+        let prompt = compress();
+
+        assert!(prompt.contains("supervisor notes"));
+        assert!(prompt.contains("worker tool call/result context"));
+        assert!(prompt.contains("Do not use tools at this stage"));
+        assert!(!prompt.contains("researcher task"));
+        assert!(!prompt.contains("{{"));
+    }
+
+    #[test]
+    fn final_report_prompt_preserves_clean_context_and_numbered_references() {
+        // Trace: L2-DES-RESEARCH-001
+        // Verifies: final report stage sees only clean handoff blocks and cites with numbered anchors.
+        let prompt = final_report();
+
+        assert!(prompt.contains("clean user-role messages"));
+        assert!(prompt.contains("a `<research_brief>`, and `<findings>`"));
+        assert!(prompt.contains(r"[\[1\]](#ref-1)"));
+        assert!(prompt.contains(r#"<a name="ref-1"></a>[1]"#));
+        assert!(prompt.contains("Do not expect supervisor notes, worker transcripts"));
+        assert!(prompt.contains("Do not expose the internal research workflow"));
+        assert!(!prompt.contains("{{"));
     }
 
     #[test]
@@ -226,6 +268,9 @@ mod tests {
 
         assert!(prompt.contains("after 5 search/fetch iterations"));
         assert!(!prompt.contains("{{ research_brief }}"));
+        assert!(prompt.contains("Agent coordination tools are not available"));
+        assert!(!prompt.contains("spawn_agent"));
+        assert!(!prompt.contains("wait_agent"));
     }
 
     #[test]
@@ -235,9 +280,12 @@ mod tests {
         let prompt = subagent();
 
         assert!(prompt.contains("Stage: delegated deep research worker."));
-        assert!(prompt.contains("not a final user-facing"));
+        assert!(prompt.contains("parent supervisor"));
+        assert!(prompt.contains("not a final"));
+        assert!(prompt.contains("user-facing report"));
         assert!(prompt.contains("Do not write files"));
         assert!(prompt.contains("assistant text only"));
+        assert!(prompt.contains("Agent coordination tools are not available"));
         assert!(!prompt.contains("{{"));
     }
 

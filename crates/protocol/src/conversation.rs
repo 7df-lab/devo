@@ -1,7 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{RequestContent, RequestMessage, Usage};
@@ -11,6 +13,35 @@ macro_rules! define_id {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         #[serde(transparent)]
         pub struct $name(Uuid);
+
+        impl JsonSchema for $name {
+            fn schema_name() -> String {
+                String::from(stringify!($name))
+            }
+
+            fn json_schema(
+                generator: &mut schemars::r#gen::SchemaGenerator,
+            ) -> schemars::schema::Schema {
+                String::json_schema(generator)
+            }
+        }
+
+        impl TS for $name {
+            type WithoutGenerics = Self;
+            type OptionInnerType = Self;
+
+            fn name(_: &ts_rs::Config) -> String {
+                String::from(stringify!($name))
+            }
+
+            fn inline(cfg: &ts_rs::Config) -> String {
+                Self::name(cfg)
+            }
+
+            fn decl(_: &ts_rs::Config) -> String {
+                String::from(concat!("type ", stringify!($name), " = string;"))
+            }
+        }
 
         impl $name {
             pub fn new() -> Self {
@@ -67,21 +98,21 @@ define_id!(TurnId);
 define_id!(ItemId);
 define_id!(PendingInputId);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub enum SessionTitleState {
     Unset,
     Provisional,
     Final(SessionTitleFinalSource),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub enum SessionTitleFinalSource {
     ModelGenerated,
     UserRename,
     ExplicitCreate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub enum TurnStatus {
     Pending,
     Running,
@@ -91,7 +122,7 @@ pub enum TurnStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct TurnUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -133,7 +164,7 @@ fn saturating_u32(value: usize) -> u32 {
     value.try_into().unwrap_or(u32::MAX)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
@@ -151,7 +182,7 @@ impl Role {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "text")]
@@ -188,7 +219,7 @@ pub enum ContentBlock {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,

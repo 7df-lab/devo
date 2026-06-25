@@ -1086,6 +1086,7 @@ impl ServerRuntime {
             session.active_turn = None;
             session.summary.status = SessionRuntimeStatus::Idle;
             session.summary.updated_at = Utc::now();
+            session.summary.last_activity_at = session.summary.updated_at;
             final_turn
         };
         let (record, session_context, turn_context) = {
@@ -2186,6 +2187,7 @@ impl ServerRuntime {
             session.active_turn = None;
             session.summary.status = SessionRuntimeStatus::Idle;
             session.summary.updated_at = Utc::now();
+            session.summary.last_activity_at = session.summary.updated_at;
             session.summary.total_input_tokens = session_total_input_tokens;
             session.summary.total_output_tokens = session_total_output_tokens;
             session.summary.total_tokens = session_total_tokens;
@@ -2441,6 +2443,7 @@ impl ServerRuntime {
             apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
+            session.summary.last_activity_at = now;
             session.active_turn = Some(turn.clone());
         }
         self.broadcast_event(ServerEvent::TurnStarted(TurnEventPayload {
@@ -2580,6 +2583,7 @@ impl ServerRuntime {
             apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
+            session.summary.last_activity_at = now;
             session.active_turn = Some(turn.clone());
         }
         self.broadcast_event(ServerEvent::TurnStarted(TurnEventPayload {

@@ -120,6 +120,7 @@ impl RolloutStore {
             rollout_path,
             created_at,
             updated_at: created_at,
+            last_activity_at: Some(created_at),
             source: "cli".into(),
             agent_nickname: None,
             agent_role: None,
@@ -479,13 +480,19 @@ struct ReplayState {
     turn_order: Vec<TurnId>,
     superseded_turn_ids: HashSet<TurnId>,
     summarized_turn_ids: HashSet<TurnId>,
+    last_activity_at: Option<chrono::DateTime<Utc>>,
 }
 
 impl ReplayState {
     fn apply_line(&mut self, line: RolloutLine) -> Result<()> {
         match line {
             RolloutLine::SessionMeta(line) => {
-                self.session = Some(line.session);
+                let mut session = line.session;
+                if session.last_activity_at.is_none() {
+                    session.last_activity_at = Some(session.created_at);
+                }
+                self.last_activity_at = session.last_activity_at;
+                self.session = Some(session);
             }
             RolloutLine::Turn(line) => {
                 // Insert turn summary for the previous turn before processing the new turn
@@ -525,6 +532,11 @@ impl ReplayState {
                 if self.superseded_turn_ids.contains(&turn.id) {
                     return Ok(());
                 }
+                self.apply_activity_timestamp(
+                    turn.session_id,
+                    turn.completed_at.unwrap_or(turn.started_at),
+                    "turn line",
+                )?;
                 if !self.turn_records_by_id.contains_key(&turn.id) {
                     self.turn_order.push(turn.id);
                 }
@@ -553,6 +565,11 @@ impl ReplayState {
             }
             RolloutLine::Item(line) => {
                 if !self.superseded_turn_ids.contains(&line.item.turn_id) {
+                    self.apply_activity_timestamp(
+                        line.item.session_id,
+                        line.item.timestamp,
+                        "item line",
+                    )?;
                     self.loaded_item_count += 1;
                     self.next_item_seq = self.next_item_seq.max(line.item.seq + 1);
                     self.collect_item_line(line.item);
@@ -576,9 +593,19 @@ impl ReplayState {
                     line.timestamp,
                     "message edit line",
                 )?;
+                self.apply_activity_timestamp(
+                    line.record.session_id,
+                    line.timestamp,
+                    "message edit line",
+                )?;
             }
             RolloutLine::TurnSuperseded(line) => {
                 self.apply_record_timestamp(
+                    line.record.session_id,
+                    line.timestamp,
+                    "turn superseded line",
+                )?;
+                self.apply_activity_timestamp(
                     line.record.session_id,
                     line.timestamp,
                     "turn superseded line",
@@ -591,9 +618,19 @@ impl ReplayState {
                     line.timestamp,
                     "workspace restore started line",
                 )?;
+                self.apply_activity_timestamp(
+                    line.record.session_id,
+                    line.timestamp,
+                    "workspace restore started line",
+                )?;
             }
             RolloutLine::TurnWorkspaceRestoreCompleted(line) => {
                 self.apply_record_timestamp(
+                    line.record.session_id,
+                    line.timestamp,
+                    "workspace restore completed line",
+                )?;
+                self.apply_activity_timestamp(
                     line.record.session_id,
                     line.timestamp,
                     "workspace restore completed line",
@@ -644,6 +681,11 @@ impl ReplayState {
         }
 
         let mut record = self.session.context("missing SessionMetaLine in rollout")?;
+        let last_activity_at = self
+            .last_activity_at
+            .or(record.last_activity_at)
+            .unwrap_or(record.updated_at);
+        record.last_activity_at = Some(last_activity_at);
         let runtime_context = deps.context_for_workspace(&record.cwd).await?;
         let mut core_session = runtime_context.new_session_state(
             record.id,
@@ -766,6 +808,7 @@ impl ReplayState {
             additional_directories: record.additional_directories.clone(),
             created_at: record.created_at,
             updated_at: record.updated_at,
+            last_activity_at,
             title: record.title.clone(),
             title_state: record.title_state.clone(),
             parent_session_id: record.parent_session_id,
@@ -836,6 +879,26 @@ impl ReplayState {
         Ok(())
     }
 
+    fn apply_activity_timestamp(
+        &mut self,
+        session_id: SessionId,
+        timestamp: chrono::DateTime<Utc>,
+        line_kind: &str,
+    ) -> Result<()> {
+        if let Some(session) = self.session.as_mut() {
+            if session.id != session_id {
+                anyhow::bail!("{line_kind} session id does not match session header");
+            }
+            let last_activity_at = self
+                .last_activity_at
+                .map(|current| current.max(timestamp))
+                .unwrap_or(timestamp);
+            self.last_activity_at = Some(last_activity_at);
+            session.last_activity_at = Some(last_activity_at);
+        }
+        Ok(())
+    }
+
     fn apply_turn_superseded(&mut self, record: TurnSupersededRecord) {
         self.superseded_turn_ids.insert(record.superseded_turn_id);
         let removed_item_ids = self
@@ -889,6 +952,7 @@ impl ReplayState {
             }
             session.updated_at = line.timestamp;
         }
+        self.apply_activity_timestamp(line.session_id, line.timestamp, "rollback line")?;
 
         let retained_turn_ids = line
             .retained_turn_ids
@@ -2065,6 +2129,7 @@ mod tests {
                     rollout_path: PathBuf::from("rollout.jsonl"),
                     created_at: now,
                     updated_at: now,
+                    last_activity_at: Some(now),
                     source: "cli".into(),
                     agent_nickname: None,
                     agent_role: None,

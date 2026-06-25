@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
+use chrono::Utc;
+
 use crate::CommandExecutionPayload;
+use crate::EventContext;
 use crate::FileChangePayload;
 use crate::ItemDeltaKind;
 use crate::ItemEventPayload;
@@ -12,8 +15,12 @@ use crate::ToolResultPayload;
 use crate::TurnPlanStepPayload;
 use crate::acp::ACP_SESSION_UPDATE_METHOD;
 use crate::acp::AcpMeta;
+use crate::acp::DEVO_ACTIVITY_AT_META;
+use crate::acp::DEVO_ITEM_ID_META;
 use crate::acp::DEVO_ORIGINAL_EVENT_META;
 use crate::acp::DEVO_ORIGINAL_METHOD_META;
+use crate::acp::DEVO_SESSION_META;
+use crate::acp::DEVO_TURN_ID_META;
 use crate::acp::devo_extension_method;
 use crate::acp_content::*;
 use crate::acp_session_update::*;
@@ -69,14 +76,59 @@ pub fn original_event_from_acp_notification(
     Some((method, event))
 }
 
+fn acp_meta_from_context(context: &EventContext) -> Option<AcpMeta> {
+    let mut meta = AcpMeta::new();
+    if let Some(turn_id) = &context.turn_id {
+        meta.insert(
+            DEVO_TURN_ID_META.to_string(),
+            serde_json::Value::String(turn_id.to_string()),
+        );
+    }
+    if let Some(item_id) = &context.item_id {
+        meta.insert(
+            DEVO_ITEM_ID_META.to_string(),
+            serde_json::Value::String(item_id.to_string()),
+        );
+    }
+    (!meta.is_empty()).then_some(meta)
+}
+
+fn add_activity_at(meta: &mut AcpMeta) {
+    meta.insert(
+        DEVO_ACTIVITY_AT_META.to_string(),
+        serde_json::Value::String(Utc::now().to_rfc3339()),
+    );
+}
+
+fn acp_activity_meta_from_context(context: &EventContext) -> AcpMeta {
+    let mut meta = acp_meta_from_context(context).unwrap_or_default();
+    add_activity_at(&mut meta);
+    meta
+}
+
+fn acp_activity_meta_from_turn_id(turn_id: &crate::TurnId) -> AcpMeta {
+    let mut meta = AcpMeta::new();
+    meta.insert(
+        DEVO_TURN_ID_META.to_string(),
+        serde_json::Value::String(turn_id.to_string()),
+    );
+    add_activity_at(&mut meta);
+    meta
+}
+
 pub(crate) fn acp_update_from_server_event(event: &ServerEvent) -> Option<AcpSessionUpdate> {
     match event {
         ServerEvent::SessionStarted(SessionEventPayload { session })
         | ServerEvent::SessionTitleUpdated(SessionEventPayload { session }) => {
+            let mut meta = AcpMeta::new();
+            meta.insert(
+                DEVO_SESSION_META.to_string(),
+                serde_json::to_value(session).expect("serialize session metadata"),
+            );
             Some(AcpSessionUpdate::SessionInfoUpdate {
                 title: session.title.clone(),
-                updated_at: Some(session.updated_at.to_rfc3339()),
-                meta: None,
+                updated_at: Some(session.last_activity_at.to_rfc3339()),
+                meta: Some(meta),
             })
         }
         ServerEvent::TurnPlanUpdated(payload) => Some(AcpSessionUpdate::Plan {
@@ -115,7 +167,7 @@ pub(crate) fn acp_update_from_server_event(event: &ServerEvent) -> Option<AcpSes
                 raw_output: None,
                 content,
                 locations: Vec::new(),
-                meta: None,
+                meta: Some(acp_activity_meta_from_turn_id(&payload.turn_id)),
             })
         }
         ServerEvent::ItemDelta {
@@ -134,17 +186,18 @@ fn acp_update_from_item_delta(
 ) -> Option<AcpSessionUpdate> {
     let content = AcpContentBlock::text(payload.delta.clone());
     let message_id = payload.context.item_id.map(|item_id| item_id.to_string());
+    let meta = Some(acp_activity_meta_from_context(&payload.context));
     match delta_kind {
         ItemDeltaKind::AgentMessageDelta => Some(AcpSessionUpdate::AgentMessageChunk {
             content,
             message_id,
-            meta: None,
+            meta,
         }),
         ItemDeltaKind::ReasoningSummaryTextDelta | ItemDeltaKind::ReasoningTextDelta => {
             Some(AcpSessionUpdate::AgentThoughtChunk {
                 content,
                 message_id,
-                meta: None,
+                meta,
             })
         }
         _ => None,
@@ -152,6 +205,7 @@ fn acp_update_from_item_delta(
 }
 
 fn acp_update_from_item_started(payload: &ItemEventPayload) -> Option<AcpSessionUpdate> {
+    let meta = Some(acp_activity_meta_from_context(&payload.context));
     match payload.item.item_kind {
         ItemKind::ToolCall => {
             let tool =
@@ -165,7 +219,7 @@ fn acp_update_from_item_started(payload: &ItemEventPayload) -> Option<AcpSession
                 raw_input: Some(tool.parameters),
                 raw_output: None,
                 content: Vec::new(),
-                meta: None,
+                meta,
             })
         }
         ItemKind::CommandExecution => {
@@ -185,7 +239,7 @@ fn acp_update_from_item_started(payload: &ItemEventPayload) -> Option<AcpSession
                 raw_input: command.input,
                 raw_output: None,
                 content: Vec::new(),
-                meta: None,
+                meta,
             })
         }
         _ => None,
@@ -193,7 +247,16 @@ fn acp_update_from_item_started(payload: &ItemEventPayload) -> Option<AcpSession
 }
 
 fn acp_update_from_item_completed(payload: &ItemEventPayload) -> Option<AcpSessionUpdate> {
+    let meta = Some(acp_activity_meta_from_context(&payload.context));
     match payload.item.item_kind {
+        ItemKind::UserMessage => {
+            let text = payload.item.payload.get("text")?.as_str()?.to_string();
+            Some(AcpSessionUpdate::UserMessageChunk {
+                content: AcpContentBlock::text(text),
+                message_id: payload.context.item_id.map(|item_id| item_id.to_string()),
+                meta,
+            })
+        }
         ItemKind::ToolResult => {
             let result =
                 serde_json::from_value::<ToolResultPayload>(payload.item.payload.clone()).ok()?;
@@ -219,7 +282,7 @@ fn acp_update_from_item_completed(payload: &ItemEventPayload) -> Option<AcpSessi
                     .map(tool_locations_from_value)
                     .unwrap_or_default(),
                 content: tool_result_content(result.display_content, result.content),
-                meta: None,
+                meta,
             })
         }
         ItemKind::CommandExecution => {
@@ -249,7 +312,7 @@ fn acp_update_from_item_completed(payload: &ItemEventPayload) -> Option<AcpSessi
                 raw_output: command.output,
                 content,
                 locations: Vec::new(),
-                meta: None,
+                meta,
             })
         }
         ItemKind::FileChange => {
@@ -268,7 +331,7 @@ fn acp_update_from_item_completed(payload: &ItemEventPayload) -> Option<AcpSessi
                 raw_output: Some(payload.item.payload.clone()),
                 content: file_change_tool_content(&change),
                 locations: file_change_locations(&change),
-                meta: None,
+                meta,
             })
         }
         _ => None,

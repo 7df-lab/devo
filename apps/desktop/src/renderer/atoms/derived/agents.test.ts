@@ -1,0 +1,110 @@
+import { describe, expect, test } from "bun:test"
+import type { SidebarProject } from "../../lib/types"
+import {
+	formatRelativeTime,
+	projectDisplayName,
+	projectNameFromDir,
+	sortSidebarProjectsForDefaultList,
+} from "./agents"
+
+function project(
+	name: string,
+	directory: string,
+	lastActiveAt: number,
+	hasActiveAgent = false,
+): SidebarProject {
+	return {
+		id: `${name}-id`,
+		slug: `${name}-slug`,
+		name,
+		directory,
+		agentCount: lastActiveAt > 0 ? 1 : 0,
+		lastActiveAt,
+		hasActiveAgent,
+	}
+}
+
+describe("project list ordering", () => {
+	test("default project order follows discovery order when activity fields change", () => {
+		const alpha = project("alpha", "/repo/alpha", 10)
+		const beta = project("beta", "/repo/beta", 90, true)
+		const gamma = project("gamma", "/repo/gamma", 0)
+		const activeAlpha = project("alpha", "/repo/alpha", 120, true)
+		const idleBeta = project("beta", "/repo/beta", 20)
+		const discoveryOrder = [beta.directory, alpha.directory, gamma.directory]
+
+		expect(sortSidebarProjectsForDefaultList([beta, gamma, alpha], discoveryOrder)).toEqual([
+			beta,
+			alpha,
+			gamma,
+		])
+		expect(sortSidebarProjectsForDefaultList([idleBeta, gamma, activeAlpha], discoveryOrder)).toEqual([
+			idleBeta,
+			activeAlpha,
+			gamma,
+		])
+	})
+
+	test("default project order falls back to name for projects outside discovery", () => {
+		const alpha = project("alpha", "/repo/alpha", 10)
+		const beta = project("beta", "/repo/beta", 90, true)
+		const gamma = project("gamma", "/repo/gamma", 0)
+
+		expect(sortSidebarProjectsForDefaultList([beta, gamma, alpha], [])).toEqual([
+			alpha,
+			beta,
+			gamma,
+		])
+	})
+})
+
+describe("project display names", () => {
+	test("derives folder names from platform-specific paths", () => {
+		expect({
+			windows: projectNameFromDir("C:\\Users\\lenovo\\Desktop\\devo"),
+			windowsTrailingSlash: projectNameFromDir("C:\\Users\\lenovo\\Desktop\\devo\\"),
+			unix: projectNameFromDir("/repo/seo_0623"),
+			unixTrailingSlash: projectNameFromDir("/repo/seo_0623/"),
+		}).toEqual({
+			windows: "devo",
+			windowsTrailingSlash: "devo",
+			unix: "seo_0623",
+			unixTrailingSlash: "seo_0623",
+		})
+	})
+
+	test("keeps short project names and normalizes path-like API names", () => {
+		expect({
+			shortName: projectDisplayName("seo_0623", "C:\\Users\\lenovo\\Desktop\\seo_0623"),
+			windowsPathName: projectDisplayName(
+				"C:\\Users\\lenovo\\Desktop\\devo",
+				"C:\\Users\\lenovo\\Desktop\\devo",
+			),
+			unixPathName: projectDisplayName("/repo/devo", "/repo/devo"),
+			blankName: projectDisplayName("  ", "/repo/devo"),
+		}).toEqual({
+			shortName: "seo_0623",
+			windowsPathName: "devo",
+			unixPathName: "devo",
+			blankName: "devo",
+		})
+	})
+})
+
+describe("relative session time formatting", () => {
+	test("formats relative time from an explicit clock", () => {
+		const now = Date.parse("2026-06-24T02:00:00.000Z")
+
+		expect({
+			now: formatRelativeTime(now - 30_000, now),
+			minutes: formatRelativeTime(now - 42 * 60_000, now),
+			hours: formatRelativeTime(now - 2 * 60 * 60_000, now),
+			days: formatRelativeTime(now - 3 * 24 * 60 * 60_000, now),
+		}).toEqual({
+			now: "now",
+			minutes: "42m",
+			hours: "2h",
+			days: "3d",
+		})
+	})
+})

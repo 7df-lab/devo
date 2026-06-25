@@ -161,6 +161,47 @@ async fn acp_session_list_filters_and_paginates_with_cursor() -> Result<()> {
 }
 
 #[tokio::test]
+async fn acp_session_list_orders_by_last_activity_not_metadata_update() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let runtime = build_runtime(data_root.path())?;
+    let (connection_id, _notifications_rx) = initialize_acp_connection(&runtime).await?;
+    let cwd = data_root.path().join("project");
+    std::fs::create_dir_all(&cwd)?;
+
+    let first_id = create_acp_session(&runtime, connection_id, &cwd, 10).await?;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let second_id = create_acp_session(&runtime, connection_id, &cwd, 11).await?;
+
+    runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 12,
+                "method": "_devo/session/title/update",
+                "params": {
+                    "session_id": first_id,
+                    "title": "Metadata-only rename"
+                }
+            }),
+        )
+        .await
+        .context("session/title/update response")?;
+
+    let listed = list_acp_sessions(&runtime, connection_id, 13, Some(&cwd), None).await?;
+
+    assert_eq!(
+        listed
+            .sessions
+            .iter()
+            .take(2)
+            .map(|session| session.session_id)
+            .collect::<Vec<_>>(),
+        vec![second_id, first_id]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn acp_session_load_replays_history_and_rejects_relative_roots() -> Result<()> {
     let data_root = TempDir::new()?;
     let runtime = build_runtime(data_root.path())?;

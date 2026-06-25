@@ -1,0 +1,293 @@
+/**
+ * Compact session metrics bar for the agent-detail app bar.
+ *
+ * Inline: work time, cost, and error/retry alerts.
+ * Popover: full token breakdown, exchanges, model distribution,
+ * tool calls, and cache efficiency.
+ *
+ * Context window usage is displayed separately in the StatusBar below
+ * the chat input (see prompt-toolbar.tsx).
+ */
+import { Popover, PopoverContent, PopoverTrigger } from "@devo/ui/components/popover"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
+import { useAtomValue } from "jotai"
+import { BarChart3Icon, CoinsIcon, TimerIcon } from "lucide-react"
+import { Fragment, memo, useEffect, useState } from "react"
+import { type SessionMetricsValue, sessionMetricsFamily } from "../atoms/derived/session-metrics"
+import { formatTokens, formatWorkDuration } from "../lib/session-metrics"
+
+// ============================================================
+// Tool category display labels
+// ============================================================
+
+const TOOL_CATEGORY_LABELS: Record<string, string> = {
+	explore: "Read/Search",
+	edit: "Edit/Write",
+	run: "Run",
+	delegate: "Agent",
+	plan: "Plan",
+	ask: "Ask",
+	fetch: "Fetch",
+	other: "Other",
+}
+
+// ============================================================
+// SessionMetricsBar
+// ============================================================
+
+interface SessionMetricsBarProps {
+	sessionId: string
+}
+
+/**
+ * Compact metrics bar that reads from `sessionMetricsFamily` directly.
+ * Only re-renders when the session's metrics change (structural equality).
+ *
+ * Shows time + cost inline, with a popover for the full stats breakdown.
+ */
+export const SessionMetricsBar = memo(function SessionMetricsBar({
+	sessionId,
+}: SessionMetricsBarProps) {
+	const metrics = useAtomValue(sessionMetricsFamily(sessionId))
+
+	if (metrics.exchangeCount === 0 && metrics.assistantMessageCount === 0) return null
+
+	return (
+		<div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+			{/* Work time */}
+			<Tooltip>
+				<TooltipTrigger
+					render={
+						<span className="inline-flex items-center gap-1 text-xs tabular-nums text-muted-foreground/60" />
+					}
+				>
+					<TimerIcon className="size-3" aria-hidden="true" />
+					{metrics.activeStartMs != null ? (
+						<LiveWorkTime
+							completedMs={metrics.completedWorkTimeMs}
+							activeStartMs={metrics.activeStartMs}
+						/>
+					) : (
+						metrics.workTime
+					)}
+				</TooltipTrigger>
+				<TooltipContent side="bottom" align="end">
+					<div className="space-y-1 text-xs">
+						<p className="font-medium">Work Time</p>
+						<p className="text-background/60">Avg per exchange: {metrics.avgExchangeTime}</p>
+					</div>
+				</TooltipContent>
+			</Tooltip>
+
+			{/* Cost */}
+			{metrics.costRaw > 0 && (
+				<>
+					<Separator />
+					<Tooltip>
+						<TooltipTrigger
+							render={
+								<span className="inline-flex items-center gap-1 text-xs tabular-nums text-muted-foreground/60" />
+							}
+						>
+							<CoinsIcon className="size-3" aria-hidden="true" />
+							{metrics.cost}
+						</TooltipTrigger>
+						<TooltipContent side="bottom" align="end">
+							<div className="space-y-1 text-xs">
+								<p className="font-medium">Cost</p>
+								<p className="text-background/60">Avg per exchange: {metrics.avgExchangeCost}</p>
+							</div>
+						</TooltipContent>
+					</Tooltip>
+				</>
+			)}
+
+		{/* Details popover -- full stats breakdown */}
+			{(metrics.tokensRaw > 0 || metrics.toolCallCount > 0) && (
+				<>
+					<Separator />
+					<MetricsPopover metrics={metrics} />
+				</>
+			)}
+		</div>
+	)
+})
+
+// ============================================================
+// Metrics detail popover
+// ============================================================
+
+function MetricsPopover({ metrics }: { metrics: SessionMetricsValue }) {
+	const { raw } = metrics
+
+	return (
+		<Popover>
+			<PopoverTrigger
+				render={
+					<button
+						type="button"
+						className="inline-flex items-center gap-1 text-xs text-muted-foreground/60 transition-colors hover:text-muted-foreground"
+					/>
+				}
+			>
+				<BarChart3Icon className="size-3" aria-hidden="true" />
+			</PopoverTrigger>
+			<PopoverContent side="bottom" align="end" sideOffset={8} className="w-64 gap-0 p-0">
+				<div className="space-y-3 p-3 text-xs">
+					{/* Summary row */}
+					<div className="grid grid-cols-3 gap-2">
+						<MetricCell label="Time" value={metrics.workTime} />
+						<MetricCell label="Cost" value={metrics.cost} />
+						<MetricCell label="Tokens" value={metrics.tokens} />
+					</div>
+
+					{/* Token breakdown */}
+					{metrics.tokensRaw > 0 && (
+						<div>
+							<p className="mb-1.5 font-medium text-foreground/80">Token Breakdown</p>
+							<div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-muted-foreground">
+								<span>Input</span>
+								<span className="text-right tabular-nums">{formatTokens(raw.tokens.input)}</span>
+								<span>Output</span>
+								<span className="text-right tabular-nums">{formatTokens(raw.tokens.output)}</span>
+								{raw.tokens.reasoning > 0 && (
+									<>
+										<span>Reasoning</span>
+										<span className="text-right tabular-nums">
+											{formatTokens(raw.tokens.reasoning)}
+										</span>
+									</>
+								)}
+								<span>Cache read</span>
+								<span className="text-right tabular-nums">
+									{formatTokens(raw.tokens.cacheRead)}
+								</span>
+								{raw.tokens.cacheWrite > 0 && (
+									<>
+										<span>Cache write</span>
+										<span className="text-right tabular-nums">
+											{formatTokens(raw.tokens.cacheWrite)}
+										</span>
+									</>
+								)}
+							</div>
+							{metrics.cacheEfficiency > 0 && (
+								<p className="mt-1 text-muted-foreground">
+									Cache hit rate: {metrics.cacheEfficiencyFormatted}
+								</p>
+							)}
+						</div>
+					)}
+
+					{/* Exchanges + model distribution */}
+					<div>
+						<p className="mb-1.5 font-medium text-foreground/80">Exchanges</p>
+						<div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-muted-foreground">
+							<span>User messages</span>
+							<span className="text-right tabular-nums">{metrics.userMessageCount}</span>
+							<span>Agent responses</span>
+							<span className="text-right tabular-nums">{metrics.assistantMessageCount}</span>
+						</div>
+						{metrics.modelDistributionDisplay.length > 0 && (
+							<div className="mt-1.5 border-t border-border/50 pt-1.5">
+								<p className="mb-0.5 font-medium text-foreground/80">Models</p>
+								<div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-muted-foreground">
+									{metrics.modelDistributionDisplay.map(({ name, count }) => (
+										<Fragment key={name}>
+											<span>{name}</span>
+											<span className="text-right tabular-nums">{count}</span>
+										</Fragment>
+									))}
+								</div>
+							</div>
+						)}
+					</div>
+
+					{/* Tool calls */}
+					{metrics.toolCallCount > 0 && (
+						<div>
+							<p className="mb-1.5 font-medium text-foreground/80">
+								Tool Calls ({metrics.toolCallCount})
+							</p>
+							<div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-muted-foreground">
+								{Object.entries(metrics.toolBreakdown)
+									.sort(([, a], [, b]) => (Number(b) || 0) - (Number(a) || 0))
+									.map(([cat, count]) => (
+										<Fragment key={cat}>
+											<span>{TOOL_CATEGORY_LABELS[cat] ?? cat}</span>
+											<span className="text-right tabular-nums">{count}</span>
+										</Fragment>
+									))}
+							</div>
+						</div>
+					)}
+
+					{/* Averages */}
+					<div className="border-t border-border/50 pt-2">
+						<div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-muted-foreground">
+							<span>Avg cost / exchange</span>
+							<span className="text-right tabular-nums">{metrics.avgExchangeCost}</span>
+							<span>Avg time / exchange</span>
+							<span className="text-right tabular-nums">{metrics.avgExchangeTime}</span>
+						</div>
+					</div>
+				</div>
+			</PopoverContent>
+		</Popover>
+	)
+}
+
+// ============================================================
+// Small metric cell for the summary row
+// ============================================================
+
+function MetricCell({ label, value }: { label: string; value: string }) {
+	return (
+		<div className="flex flex-col items-center gap-0.5">
+			<span className="text-[10px] text-muted-foreground">{label}</span>
+			<span className="tabular-nums text-foreground">{value}</span>
+		</div>
+	)
+}
+
+// ============================================================
+// Live work-time ticker -- updates every second while active
+// ============================================================
+
+/**
+ * Tiny leaf component that ticks every second to show live work time.
+ * Only mounts when the agent has an in-progress message, so the rest of
+ * the metrics bar is not affected by the interval.
+ */
+function LiveWorkTime({
+	completedMs,
+	activeStartMs,
+}: {
+	completedMs: number
+	activeStartMs: number
+}) {
+	const [display, setDisplay] = useState(() =>
+		formatWorkDuration(completedMs + (Date.now() - activeStartMs)),
+	)
+
+	useEffect(() => {
+		const tick = () => setDisplay(formatWorkDuration(completedMs + (Date.now() - activeStartMs)))
+		tick()
+		const id = setInterval(tick, 1_000)
+		return () => clearInterval(id)
+	}, [completedMs, activeStartMs])
+
+	return <>{display}</>
+}
+
+// ============================================================
+// Small separator dot
+// ============================================================
+
+function Separator() {
+	return (
+		<span className="text-muted-foreground/20" aria-hidden="true">
+			·
+		</span>
+	)
+}

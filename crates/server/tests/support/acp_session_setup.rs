@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;

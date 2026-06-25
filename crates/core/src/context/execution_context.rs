@@ -62,10 +62,16 @@ impl EnvironmentContext {
             timezone: iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string()),
         }
     }
+}
 
-    pub fn render(&self) -> String {
+impl ContextualUserFragment for EnvironmentContext {
+    const ROLE: &'static str = "user";
+    const START_MARKER: &'static str = "<environment_context>";
+    const END_MARKER: &'static str = "</environment_context>";
+
+    fn body(&self) -> String {
         format!(
-            "<environment_context>\n  <cwd>{}</cwd>\n  <shell>{}</shell>\n  <current_date>{}</current_date>\n  <timezone>{}</timezone>\n</environment_context>",
+            "\n  <cwd>{}</cwd>\n  <shell>{}</shell>\n  <current_date>{}</current_date>\n  <timezone>{}</timezone>\n",
             self.cwd.display(),
             self.shell,
             self.current_date,
@@ -82,17 +88,18 @@ pub struct LanguageContext {
 impl Default for LanguageContext {
     fn default() -> Self {
         Self {
-            language_preference: "Reply in the same natural language as the user's latest message. If the latest user message mixes languages, use the primary language of that message. Preserve technical terms, code identifiers, file paths, commands, API names, and quoted text in their original form unless the user explicitly asks to translate them. This language rule also applies to Proposed Plan: any content inside <proposed_plan></proposed_plan> must follow the same natural language as the user's latest message.".to_string(),
+            language_preference: "Reply in the same natural language as the user's latest message. If the latest user message mixes languages, use the primary language of that message. Preserve technical terms, code identifiers, file paths, commands, API names, and quoted text in their original form unless the user explicitly asks to translate them. This language rule also applies to Proposed Plan and Goal: any content inside <proposed_plan></proposed_plan> and <objective></objective> must follow the same natural language as the user's latest message.".to_string(),
         }
     }
 }
 
-impl LanguageContext {
-    pub fn render(&self) -> String {
-        format!(
-            "<language_preference>{}</language_preference>",
-            self.language_preference
-        )
+impl ContextualUserFragment for LanguageContext {
+    const ROLE: &'static str = "user";
+    const START_MARKER: &'static str = "<language_preference>";
+    const END_MARKER: &'static str = "</language_preference>";
+
+    fn body(&self) -> String {
+        self.language_preference.clone()
     }
 }
 
@@ -528,8 +535,24 @@ mod tests {
 
         assert_eq!(
             context.render(),
-            "<language_preference>Reply in the same natural language as the user's latest message. If the latest user message mixes languages, use the primary language of that message. Preserve technical terms, code identifiers, file paths, commands, API names, and quoted text in their original form unless the user explicitly asks to translate them. This language rule also applies to Proposed Plan: any content inside <proposed_plan></proposed_plan> must follow the same natural language as the user's latest message.</language_preference>"
+            "<language_preference>Reply in the same natural language as the user's latest message. If the latest user message mixes languages, use the primary language of that message. Preserve technical terms, code identifiers, file paths, commands, API names, and quoted text in their original form unless the user explicitly asks to translate them. This language rule also applies to Proposed Plan and Goal: any content inside <proposed_plan></proposed_plan> and <objective></objective> must follow the same natural language as the user's latest message.</language_preference>"
         );
+    }
+
+    #[test]
+    fn execution_context_fragments_match_their_markers() {
+        let environment = EnvironmentContext {
+            cwd: PathBuf::from("/tmp/project"),
+            shell: "bash".into(),
+            current_date: "2026-06-23".into(),
+            timezone: "Asia/Shanghai".into(),
+        };
+        let language = LanguageContext::default();
+
+        assert!(EnvironmentContext::matches_text(&environment.render()));
+        assert!(LanguageContext::matches_text(&language.render()));
+        assert!(!EnvironmentContext::matches_text(&language.render()));
+        assert!(!LanguageContext::matches_text(&environment.render()));
     }
 
     #[test]

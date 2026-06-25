@@ -171,6 +171,7 @@ impl ServerRuntime {
             additional_directories: parent_summary.additional_directories.clone(),
             created_at: now,
             updated_at: now,
+            last_activity_at: now,
             title: Some(nickname.clone()),
             title_state: SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate),
             parent_session_id: Some(parent_session_id),
@@ -514,6 +515,7 @@ impl ServerRuntime {
             };
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
+            session.summary.last_activity_at = now;
             apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
             session.active_turn = Some(turn.clone());
             turn

@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::AcpMessageId;
 use crate::AcpPermissionOptionId;
@@ -13,7 +15,7 @@ use crate::SessionId;
 use crate::acp::AcpMeta;
 use crate::acp_content::AcpContentBlock;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionNotification {
     pub session_id: SessionId,
@@ -22,7 +24,7 @@ pub struct AcpSessionNotification {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpRequestPermissionParams {
     pub session_id: SessionId,
@@ -32,7 +34,7 @@ pub struct AcpRequestPermissionParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpToolCallUpdate {
     #[serde(rename = "toolCallId")]
@@ -55,7 +57,7 @@ pub struct AcpToolCallUpdate {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct AcpToolCallLocation {
@@ -64,7 +66,7 @@ pub struct AcpToolCallLocation {
     pub line: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpPermissionOption {
     #[serde(rename = "optionId")]
@@ -75,7 +77,7 @@ pub struct AcpPermissionOption {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpPermissionOptionKind {
     AllowOnce,
@@ -84,7 +86,7 @@ pub enum AcpPermissionOptionKind {
     RejectAlways,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpRequestPermissionResponse {
     pub outcome: AcpPermissionOutcome,
@@ -92,7 +94,7 @@ pub struct AcpRequestPermissionResponse {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpCost {
     pub amount: f64,
@@ -101,7 +103,7 @@ pub struct AcpCost {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAvailableCommandInput {
     pub hint: String,
@@ -109,7 +111,7 @@ pub struct AcpAvailableCommandInput {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAvailableCommand {
     pub name: String,
@@ -120,7 +122,7 @@ pub struct AcpAvailableCommand {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum AcpPermissionOutcome {
     Selected {
@@ -130,7 +132,7 @@ pub enum AcpPermissionOutcome {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "sessionUpdate", rename_all = "snake_case")]
 pub enum AcpSessionUpdate {
     UserMessageChunk {
@@ -232,7 +234,7 @@ pub enum AcpSessionUpdate {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpToolKind {
     Read,
@@ -246,7 +248,7 @@ pub enum AcpToolKind {
     Other,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpToolCallStatus {
     Pending,
@@ -256,7 +258,7 @@ pub enum AcpToolCallStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AcpToolCallContent {
     Content {
@@ -275,7 +277,7 @@ pub enum AcpToolCallContent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpPlanEntry {
     pub content: String,
@@ -283,7 +285,7 @@ pub struct AcpPlanEntry {
     pub status: AcpPlanEntryStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpPlanEntryPriority {
     High,
@@ -291,7 +293,7 @@ pub enum AcpPlanEntryPriority {
     Low,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpPlanEntryStatus {
     Pending,

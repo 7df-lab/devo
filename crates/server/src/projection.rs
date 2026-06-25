@@ -461,6 +461,7 @@ impl SessionProjector for DefaultProjection {
             additional_directories: session.additional_directories.clone(),
             created_at: session.created_at,
             updated_at: session.updated_at,
+            last_activity_at: session.last_activity_at.unwrap_or(session.updated_at),
             title: session.title.clone(),
             title_state: session.title_state.clone(),
             parent_session_id: session.parent_session_id,

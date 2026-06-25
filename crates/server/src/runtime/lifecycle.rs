@@ -252,6 +252,7 @@ impl ServerRuntime {
                 session.latest_turn = Some(turn.clone());
                 session.summary.status = SessionRuntimeStatus::Idle;
                 session.summary.updated_at = Utc::now();
+                session.summary.last_activity_at = session.summary.updated_at;
                 let token_totals = session.core_session.try_lock().ok().map(|core| {
                     (
                         core.total_input_tokens,

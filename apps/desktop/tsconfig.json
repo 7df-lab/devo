@@ -1,0 +1,32 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"jsx": "react-jsx",
+		"strict": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"isolatedModules": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noEmit": true,
+		"paths": {
+			"@/*": ["./src/renderer/*"],
+			"@devo/configconv": ["./packages/configconv/src/index.ts"],
+			"@devo/configconv/*": ["./packages/configconv/src/*"],
+			"@devo/ui/*": ["./packages/ui/src/*"],
+			"@devo-ai/sdk/v2/client": ["./packages/devo-ai-sdk/src/v2/client.ts"]
+		}
+	},
+	"include": [
+		"src/main/**/*.ts",
+		"src/preload/**/*.ts",
+		"src/preload/**/*.d.ts",
+		"src/renderer/**/*.ts",
+		"src/renderer/**/*.tsx"
+	],
+	"exclude": ["node_modules", "dist", "out", "release"]
+}

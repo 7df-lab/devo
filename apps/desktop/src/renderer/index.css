@@ -1,0 +1,163 @@
+/* Fonts — Inter (sans) + IBM Plex Mono (mono), available as fallback */
+@import "@fontsource-variable/inter";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-mono/600.css";
+
+@import "@devo/ui/styles/globals.css";
+@import "./desktop-chrome.css";
+
+body {
+	margin: 0;
+	min-height: 100vh;
+}
+
+.devo-splash-brand {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	color: var(--foreground);
+	font-size: 32px;
+	font-weight: 650;
+	letter-spacing: 0;
+	line-height: 1.2;
+	white-space: nowrap;
+}
+
+.devo-splash-brand-mark-frame {
+	display: inline-flex;
+	width: 64px;
+	height: 64px;
+	flex-shrink: 0;
+	align-items: center;
+	justify-content: center;
+}
+
+.devo-splash-brand-mark {
+	width: 64px;
+	height: 64px;
+	flex-shrink: 0;
+}
+
+.devo-brand-mark-attention {
+	animation: devo-brand-mark-attention 1.45s cubic-bezier(0.18, 0.82, 0.22, 1) both;
+	transform-origin: center;
+}
+
+.devo-brand-word {
+	display: inline-grid;
+	height: 1.2em;
+	line-height: 1.2;
+	overflow: hidden;
+}
+
+.devo-brand-word-track {
+	display: flex;
+	flex-direction: column;
+	transform: translateY(-2.4em);
+}
+
+.devo-brand-word-track > span {
+	height: 1.2em;
+}
+
+.devo-brand-word-attention .devo-brand-word-track {
+	animation: devo-brand-word-carousel 1.05s cubic-bezier(0.18, 0.82, 0.22, 1) both;
+}
+
+.devo-loading-dots {
+	--devo-loading-dot-idle: color-mix(in srgb, #60a5fa 18%, var(--muted-foreground, #737373));
+	--devo-loading-dot-active: #60a5fa;
+
+	display: flex;
+	align-items: center;
+	gap: 7px;
+}
+
+.devo-loading-dots span {
+	width: 7px;
+	height: 7px;
+	border-radius: 9999px;
+	background: var(--devo-loading-dot-idle);
+	animation: devo-loading-dot 1.16s ease-in-out infinite;
+	opacity: 0.45;
+	transform: scale(0.86);
+}
+
+.devo-loading-dots span:nth-child(2) {
+	animation-delay: 160ms;
+}
+
+.devo-loading-dots span:nth-child(3) {
+	animation-delay: 320ms;
+}
+
+@keyframes devo-loading-dot {
+	0%,
+	100% {
+		background: var(--devo-loading-dot-idle);
+		box-shadow: 0 0 0 rgb(96 165 250 / 0);
+		opacity: 0.45;
+		transform: translateY(0) scale(0.86);
+	}
+
+	28% {
+		background: var(--devo-loading-dot-active);
+		box-shadow: 0 0 12px rgb(96 165 250 / 0.5);
+		opacity: 1;
+		transform: translateY(-1px) scale(1.18);
+	}
+
+	56% {
+		background: var(--devo-loading-dot-idle);
+		box-shadow: 0 0 0 rgb(96 165 250 / 0);
+		opacity: 0.55;
+		transform: translateY(0) scale(0.92);
+	}
+}
+
+@keyframes devo-brand-mark-attention {
+	0% {
+		transform: rotate(0deg) scale(1);
+	}
+
+	42% {
+		transform: rotate(285deg) scale(1.08);
+	}
+
+	72% {
+		transform: rotate(368deg) scale(0.98);
+	}
+
+	100% {
+		transform: rotate(360deg) scale(1);
+	}
+}
+
+@keyframes devo-brand-word-carousel {
+	0% {
+		filter: blur(1.5px);
+		opacity: 0.58;
+		transform: translateY(0);
+	}
+
+	34% {
+		filter: blur(0.8px);
+		opacity: 0.82;
+		transform: translateY(-1.2em);
+	}
+
+	74%,
+	100% {
+		filter: blur(0);
+		opacity: 1;
+		transform: translateY(-2.4em);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.devo-brand-mark-attention,
+	.devo-brand-word-attention .devo-brand-word-track {
+		animation: none;
+	}
+}

@@ -1,14 +1,16 @@
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::AcpEnvVariable;
 use crate::AcpTerminalId;
 use crate::SessionId;
 use crate::acp::AcpMeta;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct AcpFsReadTextFileParams {
@@ -22,7 +24,7 @@ pub struct AcpFsReadTextFileParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpFsReadTextFileResult {
     pub content: String,
@@ -30,7 +32,7 @@ pub struct AcpFsReadTextFileResult {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct AcpFsWriteTextFileParams {
@@ -41,7 +43,7 @@ pub struct AcpFsWriteTextFileParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct AcpTerminalCreateParams {
@@ -63,7 +65,7 @@ pub struct AcpTerminalCreateParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpTerminalCreateResult {
     #[serde(rename = "terminalId")]
@@ -72,7 +74,7 @@ pub struct AcpTerminalCreateResult {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct AcpTerminalParams {
@@ -83,7 +85,7 @@ pub struct AcpTerminalParams {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpTerminalOutputResult {
     pub output: String,
@@ -98,7 +100,7 @@ pub struct AcpTerminalOutputResult {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpTerminalWaitForExitResult {
     #[serde(default, rename = "exitCode", skip_serializing_if = "Option::is_none")]
@@ -109,7 +111,7 @@ pub struct AcpTerminalWaitForExitResult {
     pub meta: Option<AcpMeta>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpTerminalExitStatus {
     #[serde(default, rename = "exitCode", skip_serializing_if = "Option::is_none")]

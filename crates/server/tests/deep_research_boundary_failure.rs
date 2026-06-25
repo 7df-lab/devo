@@ -76,8 +76,8 @@ impl ModelProviderSDK for IncompleteFinalReportProvider {
         } else if prompt_has_stage(&prompt, "research brief") {
             "## Objective\nResearch DeepSeek official website.\n\n## Scope\nCurrent official website.\n\n## Report Language\nEnglish"
                 .to_string()
-        } else if prompt_has_stage(&prompt, "supervisor task plan") {
-            r#"{"tasks":[{"title":"Official website","research_topic":"Find the current official DeepSeek website.","purpose":"Answer the brief","source_strategy":"Use official sources","success_criteria":"Capture the official domain"}]}"#
+        } else if prompt_has_stage(&prompt, "supervisor worker orchestration") {
+            "Supervisor notes: Researcher notes: official source https://www.deepseek.com/."
                 .to_string()
         } else if prompt_has_stage(&prompt, "evidence pack compression") {
             "Evidence pack: DeepSeek official website is https://www.deepseek.com/".to_string()
@@ -103,9 +103,9 @@ impl ModelProviderSDK for IncompleteFinalReportProvider {
             streamed_text_events(
                 "## Objective\nResearch DeepSeek official website.\n\n## Scope\nCurrent official website.\n\n## Report Language\nEnglish",
             )
-        } else if prompt_has_stage(&prompt, "supervisor task plan") {
+        } else if prompt_has_stage(&prompt, "supervisor worker orchestration") {
             streamed_text_events(
-                r#"{"tasks":[{"title":"Official website","research_topic":"Find the current official DeepSeek website.","purpose":"Answer the brief","source_strategy":"Use official sources","success_criteria":"Capture the official domain"}]}"#,
+                "Supervisor notes: Researcher notes: official source https://www.deepseek.com/.",
             )
         } else if prompt_has_stage(&prompt, "evidence pack compression") {
             streamed_text_events(
@@ -214,8 +214,6 @@ fn write_research_config(root: &std::path::Path) -> Result<()> {
 mode = "provider"
 
 [research]
-max_concurrent_tasks = 1
-max_tasks = 1
 max_researcher_iterations = 1
 fetch_summary_threshold_chars = 2000
 max_summary_chars = 1000

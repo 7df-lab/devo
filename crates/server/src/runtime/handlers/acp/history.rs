@@ -3,7 +3,9 @@ use super::*;
 pub(super) fn acp_update_from_history_item(
     index: usize,
     item: &SessionHistoryItem,
+    parent_message_id: Option<&str>,
 ) -> Option<AcpSessionUpdate> {
+    let meta = history_meta(index, parent_message_id);
     if let Some(SessionHistoryMetadata::PlanUpdate { steps, .. }) = &item.metadata {
         return Some(AcpSessionUpdate::Plan {
             entries: steps
@@ -20,7 +22,7 @@ pub(super) fn acp_update_from_history_item(
                     },
                 })
                 .collect(),
-            meta: None,
+            meta: Some(meta),
         });
     }
     let content = AcpContentBlock::text(item.body.clone());
@@ -29,18 +31,18 @@ pub(super) fn acp_update_from_history_item(
         SessionHistoryItemKind::User => Some(AcpSessionUpdate::UserMessageChunk {
             content,
             message_id,
-            meta: None,
+            meta: Some(history_meta(index, None)),
         }),
         SessionHistoryItemKind::Assistant => Some(AcpSessionUpdate::AgentMessageChunk {
             content,
             message_id,
-            meta: None,
+            meta: Some(meta),
         }),
         SessionHistoryItemKind::Reasoning | SessionHistoryItemKind::TurnSummary => {
             Some(AcpSessionUpdate::AgentThoughtChunk {
                 content,
                 message_id,
-                meta: None,
+                meta: Some(meta),
             })
         }
         SessionHistoryItemKind::ToolCall => {
@@ -57,7 +59,7 @@ pub(super) fn acp_update_from_history_item(
                     .and_then(|tool_io| tool_io.output.clone()),
                 content: Vec::new(),
                 locations: Vec::new(),
-                meta: None,
+                meta: Some(meta),
             })
         }
         SessionHistoryItemKind::ToolResult
@@ -87,14 +89,73 @@ pub(super) fn acp_update_from_history_item(
                     content: AcpContentBlock::text(text),
                 }],
                 locations: Vec::new(),
-                meta: None,
+                meta: Some(meta),
             })
         }
     }
+}
+
+fn history_meta(index: usize, parent_message_id: Option<&str>) -> AcpMeta {
+    let mut meta = AcpMeta::new();
+    meta.insert(
+        DEVO_HISTORY_INDEX_META.to_string(),
+        serde_json::json!(index),
+    );
+    if let Some(parent_message_id) = parent_message_id {
+        meta.insert(
+            DEVO_PARENT_MESSAGE_ID_META.to_string(),
+            serde_json::Value::String(parent_message_id.to_string()),
+        );
+    }
+    meta
 }
 
 fn history_tool_call_id(index: usize, item: &SessionHistoryItem) -> String {
     item.tool_call_id
         .clone()
         .unwrap_or_else(|| format!("history-{index}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn history_item(kind: SessionHistoryItemKind, title: &str, body: &str) -> SessionHistoryItem {
+        SessionHistoryItem::new(None, kind, title.to_string(), body.to_string())
+    }
+
+    #[test]
+    fn history_user_updates_include_stable_order_metadata_without_parent() {
+        let item = history_item(SessionHistoryItemKind::User, "User", "hello");
+
+        let update = acp_update_from_history_item(3, &item, None).expect("history update");
+
+        let AcpSessionUpdate::UserMessageChunk {
+            message_id, meta, ..
+        } = update
+        else {
+            panic!("expected user message chunk");
+        };
+        assert_eq!(message_id, Some("history-3".to_string()));
+        assert_eq!(meta, Some(history_meta(3, None)));
+    }
+
+    #[test]
+    fn history_tool_updates_include_stable_order_and_parent_metadata() {
+        let mut item = history_item(SessionHistoryItemKind::ToolCall, "Read", "");
+        item.tool_call_id = Some("read-real-a".to_string());
+
+        let update =
+            acp_update_from_history_item(4, &item, Some("history-0")).expect("history update");
+
+        let AcpSessionUpdate::ToolCall {
+            tool_call_id, meta, ..
+        } = update
+        else {
+            panic!("expected tool call");
+        };
+        assert_eq!(tool_call_id, "read-real-a");
+        assert_eq!(meta, Some(history_meta(4, Some("history-0"))));
+    }
 }

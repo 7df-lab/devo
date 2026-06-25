@@ -16,6 +16,7 @@ mod acp_session;
 mod acp_session_config;
 mod acp_session_mode;
 mod acp_session_update;
+pub mod acp_ts;
 mod agent;
 mod approval;
 mod command_exec;

@@ -21,6 +21,9 @@ pub struct SessionRecord {
     pub created_at: DateTime<Utc>,
     /// The timestamp of the most recent update to session metadata.
     pub updated_at: DateTime<Utc>,
+    /// The timestamp of the most recent user-visible session activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
     /// The session source kind, such as CLI or API.
     pub source: String,
     /// Optional nickname assigned to a spawned sub-agent session.
@@ -513,6 +516,7 @@ mod tests {
             rollout_path: "rollout.jsonl".into(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            last_activity_at: Some(Utc::now()),
             source: "cli".into(),
             agent_nickname: None,
             agent_role: None,
@@ -1033,6 +1037,7 @@ mod tests {
             rollout_path: "test.jsonl".into(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            last_activity_at: Some(Utc::now()),
             source: "test".into(),
             agent_nickname: None,
             agent_role: None,

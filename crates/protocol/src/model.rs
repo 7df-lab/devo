@@ -16,11 +16,15 @@
 //! - raw preset/config concerns live in `devo-core`
 //! - this module describes runtime state and runtime-facing interfaces only
 //!
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use std::fmt;
+use std::path::PathBuf;
+use ts_rs::TS;
 
+use crate::AcpSessionConfigOption;
 use crate::HostedToolDefinition;
 use crate::ReasoningCapability;
 use crate::ReasoningEffort;
@@ -30,7 +34,7 @@ use crate::ResolvedReasoningRequest;
 use crate::nearest_effort;
 use crate::truncation::TruncationPolicyConfig;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum Verbosity {
@@ -132,7 +136,7 @@ pub enum RequestContent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 /// Supported input types that a model can accept.
 #[derive(Default)]
@@ -169,7 +173,7 @@ impl Default for AnthropicApi {
 }
 
 /// One supported provider wire protocol exposed by the runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
 pub enum ProviderWireApi {
     /// OpenAI-compatible `/v1/chat/completions`.
     #[serde(rename = "openai_chat_completions")]
@@ -547,15 +551,15 @@ pub enum ModelError {
 
 // ── model/catalog API ───────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema, TS)]
 pub struct ModelCatalogParams {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ModelCatalogResult {
     pub models: Vec<ModelCatalogEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ModelCatalogEntry {
     pub slug: String,
     pub display_name: String,
@@ -584,18 +588,32 @@ impl From<&Model> for ModelCatalogEntry {
     }
 }
 
+// ── model/config API ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema, TS)]
+pub struct ModelConfigParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConfigResult {
+    pub config_options: Vec<AcpSessionConfigOption>,
+}
+
 // ── model/saved API ─────────────────────────────────────────────────
 
 /// Lists models that have been configured with credentials in `config.toml`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema, TS)]
 pub struct ModelSavedParams {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ModelSavedResult {
     pub models: Vec<ModelSavedEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ModelSavedEntry {
     pub slug: String,
     pub display_name: String,

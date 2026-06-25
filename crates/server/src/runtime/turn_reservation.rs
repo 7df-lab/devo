@@ -77,6 +77,7 @@ impl ServerRuntime {
             session.active_turn = None;
             session.summary.status = SessionRuntimeStatus::Idle;
             session.summary.updated_at = Utc::now();
+            session.summary.last_activity_at = session.summary.updated_at;
         }
     }
 }

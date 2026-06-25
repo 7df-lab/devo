@@ -146,10 +146,12 @@ impl ServerRuntime {
         legacy.result.session = updated_summary;
         self.subscribe_connection_to_session(connection_id, params.session_id, None)
             .await;
+        let history_limit = history_limit_from_meta(&params.meta);
         self.send_acp_history_updates(
             connection_id,
             params.session_id,
             &legacy.result.history_items,
+            history_limit,
         )
         .await;
         let config_options = match self.acp_session_config_options(params.session_id).await {
