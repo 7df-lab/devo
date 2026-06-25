@@ -7,6 +7,8 @@ use chrono::DateTime;
 use crate::AcpErrorCode;
 use crate::AcpSetConfigOptionParams;
 use crate::execution::RuntimeSession;
+use crate::session_context::SessionRuntimeContext;
+use devo_core::TurnConfig;
 use devo_protocol::AcpSessionConfigOption;
 use devo_protocol::AcpSessionConfigOptionCategory;
 use devo_protocol::AcpSessionConfigOptionCategoryKnown;
@@ -30,6 +32,14 @@ impl ServerRuntime {
         };
         let session = session_arc.lock().await;
         Ok(acp_config_options_for_session(&session))
+    }
+
+    pub(crate) fn acp_model_config_options_for_context(
+        &self,
+        runtime_context: &SessionRuntimeContext,
+    ) -> Vec<AcpSessionConfigOption> {
+        let turn_config = runtime_context.resolve_turn_config(None, None);
+        acp_model_and_reasoning_options_for_context(runtime_context, &turn_config)
     }
 
     pub(super) async fn set_acp_session_config_option(
@@ -182,11 +192,34 @@ impl ServerRuntime {
 }
 
 fn acp_config_options_for_session(session: &RuntimeSession) -> Vec<AcpSessionConfigOption> {
-    let mut options = vec![acp_model_config_option_for_session(session)];
-    if let Some(reasoning_effort_option) = acp_reasoning_effort_config_option_for_session(session) {
+    let mut options = acp_model_and_reasoning_options_for_session(session);
+    options.push(acp_mode_config_option_for_session(session));
+    options
+}
+
+fn acp_model_and_reasoning_options_for_session(
+    session: &RuntimeSession,
+) -> Vec<AcpSessionConfigOption> {
+    let turn_config = session.runtime_context.resolve_turn_config(
+        session_model_selection(&session.summary),
+        session.summary.reasoning_effort_selection.clone(),
+    );
+    acp_model_and_reasoning_options_for_context(session.runtime_context.as_ref(), &turn_config)
+}
+
+fn acp_model_and_reasoning_options_for_context(
+    runtime_context: &SessionRuntimeContext,
+    turn_config: &TurnConfig,
+) -> Vec<AcpSessionConfigOption> {
+    let mut options = vec![acp_model_config_option_for_turn_config(
+        runtime_context,
+        turn_config,
+    )];
+    if let Some(reasoning_effort_option) =
+        acp_reasoning_effort_config_option_for_turn_config(turn_config)
+    {
         options.push(reasoning_effort_option);
     }
-    options.push(acp_mode_config_option_for_session(session));
     options
 }
 
@@ -243,12 +276,18 @@ fn acp_model_config_option_for_session(session: &RuntimeSession) -> AcpSessionCo
         session_model_selection(&session.summary),
         session.summary.reasoning_effort_selection.clone(),
     );
+    acp_model_config_option_for_turn_config(session.runtime_context.as_ref(), &turn_config)
+}
+
+fn acp_model_config_option_for_turn_config(
+    runtime_context: &SessionRuntimeContext,
+    turn_config: &TurnConfig,
+) -> AcpSessionConfigOption {
     let current_value = turn_config
         .model_binding_id
         .clone()
         .unwrap_or_else(|| turn_config.model.slug.clone());
-    let config = session
-        .runtime_context
+    let config = runtime_context
         .config_store
         .lock()
         .expect("app config store mutex should not be poisoned")
@@ -261,8 +300,7 @@ fn acp_model_config_option_for_session(session: &RuntimeSession) -> AcpSessionCo
         if !binding.enabled || !seen_values.insert(binding_id.clone()) {
             continue;
         }
-        let model_display_name = session
-            .runtime_context
+        let model_display_name = runtime_context
             .model_catalog
             .get(&binding.model_slug)
             .map(|model| model.display_name.as_str())
@@ -323,9 +361,15 @@ fn acp_reasoning_effort_config_option_for_session(
         session_model_selection(&session.summary),
         session.summary.reasoning_effort_selection.clone(),
     );
+    acp_reasoning_effort_config_option_for_turn_config(&turn_config)
+}
+
+fn acp_reasoning_effort_config_option_for_turn_config(
+    turn_config: &TurnConfig,
+) -> Option<AcpSessionConfigOption> {
     let current_value = current_reasoning_effort_value(
         &turn_config.model,
-        session.summary.reasoning_effort_selection.as_deref(),
+        turn_config.reasoning_effort_selection.as_deref(),
     )?;
     let mut seen_values = BTreeSet::new();
     let mut options = Vec::new();

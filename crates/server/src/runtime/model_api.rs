@@ -1,6 +1,8 @@
 use devo_core::ModelCatalogEntry;
 use devo_core::ModelCatalogParams;
 use devo_core::ModelCatalogResult;
+use devo_core::ModelConfigParams;
+use devo_core::ModelConfigResult;
 use devo_core::ModelSavedEntry;
 use devo_core::ModelSavedParams;
 use devo_core::ModelSavedResult;
@@ -11,6 +13,55 @@ use crate::{ProtocolErrorCode, SuccessResponse};
 use super::ServerRuntime;
 
 impl ServerRuntime {
+    pub(super) async fn handle_model_config(
+        &self,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let params = match serde_json::from_value::<ModelConfigParams>(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    format!("invalid model/config params: {error}"),
+                );
+            }
+        };
+
+        let runtime_context = match params.cwd.as_deref() {
+            Some(cwd) if !cwd.is_absolute() => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    "model/config cwd must be an absolute path".to_string(),
+                );
+            }
+            Some(cwd) => match self.deps.context_for_workspace(cwd).await {
+                Ok(context) => context,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!(
+                            "failed to load model config for cwd {}: {error}",
+                            cwd.display()
+                        ),
+                    );
+                }
+            },
+            None => self.deps.process_context.clone(),
+        };
+
+        let config_options = self.acp_model_config_options_for_context(&runtime_context);
+
+        serde_json::to_value(SuccessResponse {
+            id: request_id,
+            result: ModelConfigResult { config_options },
+        })
+        .expect("serialize model/config response")
+    }
+
     pub(super) async fn handle_model_catalog(
         &self,
         request_id: serde_json::Value,
