@@ -725,12 +725,12 @@ function CompletedTurnProcessDisclosure({
 	hasProcessDetails: boolean
 	onToggle: () => void
 }) {
-	if (!duration) return null
+	if (!duration && !hasProcessDetails) return null
 
 	const content = (
 		<>
 			<span>
-				{"Worked for "}
+				{duration ? "Worked for " : "Worked"}
 				{duration}
 			</span>
 			{hasProcessDetails && (
@@ -1028,7 +1028,7 @@ export const ChatTurnComponent = memo(
 				)}
 
 				{working && <WorkingTurnStatusStrip turn={turn} />}
-				{!working && duration && (
+				{!working && (duration || hasCompletedProcessDetails) && (
 					<CompletedTurnProcessDisclosure
 						duration={duration}
 						expanded={completedProcessExpanded}

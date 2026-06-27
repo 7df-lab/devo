@@ -37,3 +37,11 @@ export function RightPanelIcon({ open, ...props }: PanelIconProps) {
 		</svg>
 	)
 }
+
+export function LeftPanelIcon({ open, ...props }: PanelIconProps) {
+	return (
+		<svg width={20} height={20} viewBox="0 0 20 20" fill="none" {...props}>
+			<path d={open ? SIDE_PANEL_OPEN_PATH : SIDE_PANEL_CLOSED_PATH} fill="currentColor" />
+		</svg>
+	)
+}

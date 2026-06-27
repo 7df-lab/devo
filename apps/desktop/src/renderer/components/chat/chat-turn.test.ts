@@ -165,6 +165,22 @@ describe("ChatTurnComponent transcript controls", () => {
 		})
 	})
 
+	test("keeps completed process disclosure reachable when duration is unavailable", () => {
+		expect({
+			disclosureAllowsMissingDuration: source.includes(
+				"if (!duration && !hasProcessDetails) return null",
+			),
+			disclosureUsesWorkedFallback: source.includes('{duration ? "Worked for " : "Worked"}'),
+			renderConditionIncludesProcessDetails: source.includes(
+				"{!working && (duration || hasCompletedProcessDetails) && (",
+			),
+		}).toEqual({
+			disclosureAllowsMissingDuration: true,
+			disclosureUsesWorkedFallback: true,
+			renderConditionIncludesProcessDetails: true,
+		})
+	})
+
 	test("uses a subtle transcript-local reasoning indicator instead of the default Thought row", () => {
 		const chatTurnComponentSource =
 			source.match(/export const ChatTurnComponent = memo\([\s\S]*?\n\)/)?.[0] ?? ""
