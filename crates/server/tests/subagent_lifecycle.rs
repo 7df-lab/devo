@@ -899,6 +899,7 @@ async fn fork_all_inherits_stable_parent_context() -> Result<()> {
     )
     .await?;
     wait_for_child_turn_started(&mut notifications_rx, active_child.child_session_id).await?;
+    wait_for_stream_calls(&provider, 4).await?;
 
     let requests = provider.requests();
     assert_eq!(requests.len(), 4);
@@ -996,6 +997,7 @@ async fn fork_none_omits_parent_context_and_places_reminder_before_task() -> Res
     )
     .await?;
     wait_for_child_turn_started(&mut notifications_rx, child.child_session_id).await?;
+    wait_for_stream_calls(&provider, 2).await?;
 
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
