@@ -30,6 +30,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react"
 import type {
 	GitBranchInfo,
+	GitBranchState,
 	GitCheckoutResult,
 	GitStashResult,
 	GitStatusInfo,
@@ -51,6 +52,8 @@ interface BranchPickerProps {
 	directory: string
 	/** Current branch from VCS (display-only fallback) */
 	currentBranch?: string
+	/** Current git state from VCS (display-only fallback) */
+	currentState?: GitBranchState
 	/** Called after a successful branch switch */
 	onBranchChanged?: (branch: string) => void
 	/** Number of active sessions on this directory (for warnings) */
@@ -64,6 +67,7 @@ interface BranchPickerProps {
 export function BranchPicker({
 	directory,
 	currentBranch,
+	currentState,
 	onBranchChanged,
 	activeSessionCount = 0,
 }: BranchPickerProps) {
@@ -108,6 +112,8 @@ export function BranchPicker({
 	}, [open, loadBranches])
 
 	const effectiveCurrent = branches?.current || currentBranch || ""
+	const effectiveState = branches?.state ?? currentState ?? (effectiveCurrent ? "branch" : undefined)
+	const displayLabel = branchTriggerLabel(effectiveState, effectiveCurrent)
 
 	// Perform the actual checkout
 	const performCheckout = useCallback(
@@ -229,7 +235,7 @@ export function BranchPicker({
 						<GitBranchIcon className="size-3" />
 					)}
 					<span className="max-w-[140px] truncate">
-						{switching ? "Switching..." : effectiveCurrent || "no branch"}
+						{switching ? "Switching..." : displayLabel}
 					</span>
 					<ChevronsUpDownIcon className="size-3 opacity-50" />
 				</SearchableListPopoverTrigger>
@@ -294,6 +300,22 @@ export function BranchPicker({
 	)
 }
 
+function branchTriggerLabel(state: GitBranchState | undefined, current: string): string {
+	if (!state) return current || "branch unavailable"
+	switch (state) {
+		case "branch":
+			return current || "branch unavailable"
+		case "detached":
+			return current ? `detached: ${current}` : "detached HEAD"
+		case "missing":
+			return "missing project"
+		case "not_directory":
+			return "not a directory"
+		case "not_git":
+			return "not a git repo"
+	}
+}
+
 // ============================================================
 // Branch list — reads search from context
 // ============================================================
@@ -308,6 +330,7 @@ function BranchList({
 	onSelectBranch: (branch: string) => void
 }) {
 	const search = useSearchableListPopoverSearch()
+	const unavailableMessage = branches ? unavailableBranchMessage(branches.state) : null
 
 	const filteredLocal = useMemo(() => {
 		if (!branches) return []
@@ -329,7 +352,11 @@ function BranchList({
 
 	return (
 		<SearchableListPopoverList maxHeight="max-h-[300px]">
-			{filteredLocal.length > 0 && (
+			{unavailableMessage && (
+				<SearchableListPopoverEmpty>{unavailableMessage}</SearchableListPopoverEmpty>
+			)}
+
+			{!unavailableMessage && filteredLocal.length > 0 && (
 				<SearchableListPopoverGroup label="Local">
 					{filteredLocal.map((branch: string) => (
 						<BranchItem
@@ -342,7 +369,7 @@ function BranchList({
 				</SearchableListPopoverGroup>
 			)}
 
-			{filteredRemote.length > 0 && (
+			{!unavailableMessage && filteredRemote.length > 0 && (
 				<SearchableListPopoverGroup label="Remote">
 					{filteredRemote.map((branch: string) => (
 						<BranchItem
@@ -356,13 +383,27 @@ function BranchList({
 				</SearchableListPopoverGroup>
 			)}
 
-			{filteredLocal.length === 0 && filteredRemote.length === 0 && (
+			{!unavailableMessage && filteredLocal.length === 0 && filteredRemote.length === 0 && (
 				<SearchableListPopoverEmpty>
 					{search ? "No matching branches" : "No branches found"}
 				</SearchableListPopoverEmpty>
 			)}
 		</SearchableListPopoverList>
 	)
+}
+
+function unavailableBranchMessage(state: GitBranchState): string | null {
+	switch (state) {
+		case "branch":
+		case "detached":
+			return null
+		case "missing":
+			return "Project directory is missing"
+		case "not_directory":
+			return "Project path is not a directory"
+		case "not_git":
+			return "Project is not a git repository"
+	}
 }
 
 // ============================================================

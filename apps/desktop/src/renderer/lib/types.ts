@@ -3,6 +3,7 @@ import type {
 	PermissionRequest as SdkPermissionRequest,
 	QuestionRequest as SdkQuestionRequest,
 } from "@devo-ai/sdk/v2/client"
+import type { DesktopFolderStatus } from "../../preload/api"
 
 // Re-export all SDK types from v2
 export type {
@@ -107,6 +108,8 @@ export interface SidebarProject {
 	lastActiveAt: number
 	/** Whether at least one agent in this project is running or waiting for input */
 	hasActiveAgent: boolean
+	/** Filesystem status for user-managed Desktop folders. */
+	folderStatus?: DesktopFolderStatus
 }
 
 /** Activity entry for the detail panel — derived from message parts */
@@ -162,4 +165,6 @@ export interface Agent {
 	createdAt: number
 	/** Timestamp (ms) of last activity — for sorting and relative time display */
 	lastActiveAt: number
+	/** Renderer-local marker for a completed background turn waiting to be read. */
+	hasUnreadCompletion?: boolean
 }

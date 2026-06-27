@@ -11,7 +11,10 @@ export function resolveSelectedProjectDirectory(
 	projects: SidebarProject[],
 	projectSlug: string | undefined,
 	currentDirectory: string,
-	options: { preserveCurrentDirectory?: boolean } = {},
+	options: {
+		preserveCurrentDirectory?: boolean
+		unavailableDirectories?: ReadonlySet<string>
+	} = {},
 ): string {
 	if (projects.length === 0) return ""
 
@@ -23,11 +26,11 @@ export function resolveSelectedProjectDirectory(
 	if (
 		options.preserveCurrentDirectory &&
 		currentDirectory &&
+		!options.unavailableDirectories?.has(currentDirectory) &&
 		projects.some((project) => project.directory === currentDirectory)
 	) {
 		return currentDirectory
 	}
 
-	const nonRootProject = projects.find((project) => project.directory !== "/")
-	return (nonRootProject ?? projects[0]).directory
+	return ""
 }

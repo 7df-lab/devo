@@ -15,17 +15,10 @@ import {
 	createFileMention,
 	insertMentionIntoText,
 } from "./chat/prompt-mentions"
-import {
-	optionMenuContentClass,
-	optionMenuItemClass,
-} from "@devo/ui/components/option-menu-styles"
-import { Popover, PopoverContent, PopoverTrigger } from "@devo/ui/components/popover"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
-import { cn } from "@devo/ui/lib/utils"
 import { useNavigate, useParams } from "@tanstack/react-router"
 import { useAtomValue } from "jotai"
 import {
-	ChevronDownIcon,
 	GitForkIcon,
 	MonitorIcon,
 	PlusIcon,
@@ -40,6 +33,7 @@ import {
 	upsertSessionAtom,
 } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
+import { useDesktopProjectActions } from "./desktop-project-actions-context"
 import { useAgents, useProjectList } from "../hooks/use-agents"
 import { newChatDraftKey, useDraftActions, useDraftSnapshot } from "../hooks/use-draft"
 import type { ModelRef } from "../hooks/use-devo-data"
@@ -54,12 +48,14 @@ import {
 	useVcs,
 } from "../hooks/use-devo-data"
 import { useAgentActions } from "../hooks/use-server"
+import { persistRuntimeModelConfigOption, persistRuntimeModelSelection } from "../lib/model-config-options"
 import { resolveSelectedProjectDirectory } from "../lib/project-selection"
 import type { FileAttachment } from "../lib/types"
 import { createWorktree, randomWorktreeName } from "../services/worktree-service"
 import { BranchPicker } from "./branch-picker"
 import { PromptAttachmentPreview } from "./chat/prompt-attachments"
 import { PromptToolbar, StatusBar } from "./chat/prompt-toolbar"
+import { NewChatProjectPicker } from "./new-chat-project-picker"
 
 // ============================================================
 // Worktree mode toggle
@@ -211,6 +207,7 @@ export function NewChat() {
 	const projects = useProjectList()
 	const { createSession, sendPrompt } = useAgentActions()
 	const navigate = useNavigate()
+	const { startFromScratch, useExistingFolder } = useDesktopProjectActions()
 
 	const [selectedDirectory, setSelectedDirectory] = useState<string>("")
 	const [launching, setLaunching] = useState(false)
@@ -224,7 +221,7 @@ export function NewChat() {
 	const draftKey = newChatDraftKey(selectedDirectory)
 	const draft = useDraftSnapshot(draftKey)
 	const { setDraft, clearDraft } = useDraftActions(draftKey)
-	const [projectPickerOpen, setProjectPickerOpen] = useState(false)
+	const [unavailableProjectDirectories, setUnavailableProjectDirectories] = useState<ReadonlySet<string>>(() => new Set())
 
 	// Toolbar state
 	const [selectedModel, setSelectedModel] = useState<ModelRef | null>(null)
@@ -239,11 +236,7 @@ export function NewChat() {
 	)
 	const mentionPopoverRef = useRef<MentionPopoverHandle>(null)
 
-	// Seed selectedModel, selectedVariant, and selectedAgent from the persisted
-	// per-project preferences on first mount / project switch.
-	// This puts the model at step 1 (user override) in resolveEffectiveModel, so it
-	// wins over config.model and global recent list — matching the user's expectation
-	// that the model they last used in this project sticks.
+	// Project model preferences are a UI fallback for older local state.
 	const projectModels = useAtomValue(projectModelsAtom)
 	const prevDirectoryRef = useRef<string>("")
 	useEffect(() => {
@@ -266,22 +259,62 @@ export function NewChat() {
 		[projects, selectedDirectory],
 	)
 
+	const handleSelectProject = useCallback(
+		(project: (typeof projects)[number]) => {
+			manuallySelectedDirectoryRef.current = project.directory
+			setSelectedDirectory(project.directory)
+			navigate({
+				to: "/project/$projectSlug",
+				params: { projectSlug: project.slug },
+			})
+		},
+		[navigate],
+	)
+
+	const handleClearProject = useCallback(() => {
+		manuallySelectedDirectoryRef.current = null
+		setSelectedDirectory("")
+		if (projectSlug) navigate({ to: "/" })
+	}, [navigate, projectSlug])
+
+	const handleUseExistingFolder = useCallback(async () => {
+		const folder = await useExistingFolder?.()
+		if (!folder) return
+		manuallySelectedDirectoryRef.current = folder.directory
+		setSelectedDirectory(folder.directory)
+	}, [useExistingFolder])
+
 	const { data: providers } = useProviders(selectedDirectory || null)
 	const { data: config } = useConfig(selectedDirectory || null)
 	const { data: vcs, reload: reloadVcs } = useVcs(selectedDirectory || null)
 	const { agents: devoAgents } = useDevoAgents(selectedDirectory || null)
 	const { recentModels, addRecent: addRecentModel } = useModelState()
 
-	// Handle model selection — set local state + persist to model.json.
-	// Reset variant when the model changes: the new model may have different
-	// (or no) variants, so carrying over a stale variant would be incorrect.
 	const handleModelSelect = useCallback(
 		(model: ModelRef | null) => {
 			setSelectedModel(model)
 			setSelectedVariant(undefined)
-			if (model) addRecentModel(model)
+			if (!model) return
+			addRecentModel(model)
+			if (!selectedDirectory) return
+			void persistRuntimeModelSelection(selectedDirectory, model).catch((err) => {
+				console.error("Failed to persist model selection:", err)
+				setError("Failed to save model setting")
+			})
 		},
-		[addRecentModel],
+		[addRecentModel, selectedDirectory],
+	)
+
+	const handleVariantSelect = useCallback(
+		(variant: string | undefined) => {
+			setSelectedVariant(variant)
+			if (!variant || !selectedDirectory) return
+			void persistRuntimeModelConfigOption(selectedDirectory, "thought_level", variant).catch((err) => {
+				console.error("Failed to persist reasoning effort selection:", err)
+				setError("Failed to save reasoning effort setting")
+			})
+		},
+		[selectedDirectory],
 	)
 
 	// Count active sessions on the selected directory (for branch switch warnings)
@@ -380,14 +413,24 @@ export function NewChat() {
 	)
 
 	useEffect(() => {
+		if (selectedDirectory && (vcs?.state === "missing" || vcs?.state === "not_directory")) {
+			setUnavailableProjectDirectories((previous) => {
+				if (previous.has(selectedDirectory)) return previous
+				return new Set([...previous, selectedDirectory])
+			})
+		}
+	}, [selectedDirectory, vcs?.state])
+
+	useEffect(() => {
 		setSelectedDirectory((currentDirectory) =>
 			resolveSelectedProjectDirectory(projects, projectSlug, currentDirectory, {
 				preserveCurrentDirectory:
 					!!manuallySelectedDirectoryRef.current &&
 					manuallySelectedDirectoryRef.current === currentDirectory,
+				unavailableDirectories: projectSlug ? undefined : unavailableProjectDirectories,
 			}),
 		)
-	}, [projectSlug, projects])
+	}, [projectSlug, projects, unavailableProjectDirectories])
 
 	// ---
 	// Launch helpers
@@ -593,7 +636,7 @@ export function NewChat() {
 			<div className="w-full max-w-3xl">
 				<div className="mb-6 text-center">
 					<h1 className="select-none text-[34px] font-normal leading-tight tracking-normal text-foreground">
-						What can I do for you today?
+						What should we work on?
 					</h1>
 				</div>
 
@@ -638,7 +681,7 @@ export function NewChat() {
 									data-prompt-input
 									placeholder="Do anything"
 									autoFocus
-									disabled={launching || !selectedDirectory || projects.length === 0}
+									disabled={launching || !selectedDirectory}
 									className="min-h-[52px] px-4 pt-3 text-base"
 									onKeyDown={handleTextareaKeyDown}
 								/>
@@ -657,89 +700,41 @@ export function NewChat() {
 												hasModelOverride={!!selectedModel}
 												onSelectModel={handleModelSelect}
 												selectedVariant={selectedVariant}
-												onSelectVariant={setSelectedVariant}
+												onSelectVariant={handleVariantSelect}
 												disabled={launching || !selectedDirectory}
 											/>
 										)}
 									</PromptInputTools>
-									<PromptInputSubmit
-										disabled={launching || !selectedDirectory || projects.length === 0}
-									/>
+									<PromptInputSubmit disabled={launching || !selectedDirectory} />
 								</PromptInputFooter>
 							</PromptInput>
 						</div>
 					</PromptInputProvider>
 
-					{providers && (
-						<div className="px-4 pb-2">
-							<div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
-								{projects.length > 1 ? (
-									<Popover open={projectPickerOpen} onOpenChange={setProjectPickerOpen}>
-										<PopoverTrigger
-											render={
-												<button
-													type="button"
-													className="flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md px-1.5 transition-colors hover:bg-black/[0.04] hover:text-foreground"
-												/>
-											}
-										>
-											<span className="truncate">{selectedProject?.name ?? "select project"}</span>
-											<ChevronDownIcon className="size-4 shrink-0" />
-										</PopoverTrigger>
-										<PopoverContent
-											className={cn(
-												optionMenuContentClass,
-												"w-[232px] max-w-[calc(100vw-24px)] gap-0",
-											)}
-											align="start"
-										>
-											{projects.map((p) => (
-												<button
-													key={p.directory}
-													type="button"
-													onClick={() => {
-														manuallySelectedDirectoryRef.current = p.directory
-														setSelectedDirectory(p.directory)
-														setProjectPickerOpen(false)
-														navigate({
-															to: "/project/$projectSlug",
-															params: { projectSlug: p.slug },
-														})
-													}}
-													className={cn(
-														"flex w-full items-center text-left transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none",
-														optionMenuItemClass,
-														p.directory === selectedDirectory
-															? "bg-accent text-accent-foreground"
-															: "text-muted-foreground",
-													)}
-												>
-													<span className="min-w-0 flex-1 truncate font-normal">{p.name}</span>
-													<span className="w-5 shrink-0 text-right text-xs text-muted-foreground/60">
-														{p.agentCount}
-													</span>
-												</button>
-											))}
-										</PopoverContent>
-									</Popover>
-								) : (
-									<span className="flex h-7 shrink-0 items-center truncate px-1.5">
-										{selectedProject?.name ?? ""}
-									</span>
-								)}
+					<div className="px-4 py-1">
+						<div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
+							<NewChatProjectPicker
+								projects={projects}
+								selectedProject={selectedProject}
+								selectedDirectory={selectedDirectory}
+								onSelectProject={handleSelectProject}
+								onClearProject={handleClearProject}
+								onStartFromScratch={startFromScratch}
+								onUseExistingFolder={useExistingFolder ? handleUseExistingFolder : undefined}
+							/>
+							{providers && selectedDirectory && (
 								<div className="min-w-0 flex-1 [&>div]:px-0 [&>div]:pt-0">
 									<StatusBar
 										vcs={vcs ?? null}
 										isConnected={true}
 										branchSlot={
-											selectedDirectory ? (
-												<BranchPicker
-													directory={selectedDirectory}
-													currentBranch={vcs?.branch}
-													onBranchChanged={handleBranchChanged}
-													activeSessionCount={activeSessionCount}
-												/>
-											) : undefined
+											<BranchPicker
+												directory={selectedDirectory}
+												currentBranch={vcs?.branch}
+												currentState={vcs?.state}
+												onBranchChanged={handleBranchChanged}
+												activeSessionCount={activeSessionCount}
+											/>
 										}
 										extraSlot={
 											vcs ? (
@@ -748,22 +743,15 @@ export function NewChat() {
 										}
 									/>
 								</div>
-							</div>
+							)}
 						</div>
-					)}
+					</div>
 
 					{/* Error */}
 					{error && (
 						<div className="mt-2 rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-500">
 							{error}
 						</div>
-					)}
-
-					{/* No projects warning */}
-					{projects.length === 0 && (
-						<p className="mt-2 text-center text-xs text-muted-foreground">
-							No projects found. Check that projects exist in ~/.local/share/devo/storage/.
-						</p>
 					)}
 				</div>
 			</div>

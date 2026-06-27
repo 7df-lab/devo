@@ -45,6 +45,8 @@ class FakeEventStream {
 
 const streams = new Map<string, FakeEventStream>()
 let activeManager: typeof import("./connection-manager") | null = null
+let listSessionsImpl: (client: DevoClient, options?: unknown) => Promise<Session[]> = async () => []
+let getSessionStatusesImpl: () => Promise<Record<string, { type: string }>> = async () => ({})
 
 function streamFor(directory: string): FakeEventStream {
 	let stream = streams.get(directory)
@@ -60,9 +62,9 @@ mock.module("./devo", () => ({
 		({ directory: options?.directory ?? "__base__" }) as unknown as DevoClient,
 	disposeAllInstances: () => {},
 	getSession: async () => null,
-	getSessionStatuses: async () => ({}),
+	getSessionStatuses: async () => getSessionStatusesImpl(),
 	listProjects: async () => [],
-	listSessions: async () => [],
+	listSessions: async (client: DevoClient, options?: unknown) => listSessionsImpl(client, options),
 	subscribeToGlobalEvents: async (client: DevoClient) =>
 		streamFor(((client as unknown as { directory?: string }).directory) ?? "__base__"),
 }))
@@ -70,6 +72,8 @@ mock.module("./devo", () => ({
 describe("connection manager project status bridge", () => {
 	beforeEach(() => {
 		streams.clear()
+		listSessionsImpl = async () => []
+		getSessionStatusesImpl = async () => ({})
 		;(globalThis as unknown as { window: Record<string, unknown> }).window = {}
 		;(globalThis as unknown as { requestAnimationFrame: (callback: FrameRequestCallback) => number }).requestAnimationFrame =
 			(callback) => setTimeout(() => callback(performance.now()), 0) as unknown as number
@@ -111,6 +115,31 @@ describe("connection manager project status bridge", () => {
 			},
 		})
 		await new Promise((resolve) => setTimeout(resolve, 5))
+
+		expect(appStore.get(sessionFamily(session.id))?.status).toEqual({ type: "busy" })
+	})
+
+	test("loads project statuses after session list hydration", async () => {
+		const directory = "/repo/list-status-hydration"
+		const session: Session = {
+			id: "status-after-list-session",
+			directory,
+			title: "Status after list",
+			time: { created: 1, updated: 1 },
+		}
+		let listHydrated = false
+		listSessionsImpl = async () => {
+			await new Promise((resolve) => setTimeout(resolve, 0))
+			listHydrated = true
+			return [session]
+		}
+		getSessionStatusesImpl = async () =>
+			listHydrated ? { [session.id]: { type: "busy" } } : {}
+
+		const manager = await import(`./connection-manager?case=${Date.now()}`)
+		activeManager = manager
+		await manager.connectToDevo("devo://stdio")
+		await manager.loadProjectSessions(directory)
 
 		expect(appStore.get(sessionFamily(session.id))?.status).toEqual({ type: "busy" })
 	})

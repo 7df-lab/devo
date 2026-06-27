@@ -7,6 +7,8 @@ import type {
 	SessionStatus,
 	SidebarProject,
 } from "../../lib/types"
+import type { DesktopFolder } from "../../../preload/api"
+import { desktopFolderStatusByDirectoryAtom, desktopFoldersAtom } from "../desktop-folders"
 import { discoveryAtom } from "../discovery"
 import { sessionFamily, sessionIdsAtom } from "../sessions"
 import { effectivePermissionFamily, effectiveQuestionFamily } from "./session-requests"
@@ -42,6 +44,7 @@ function agentEqual(prev: Agent | null, next: Agent | null): boolean {
 		prev.worktreeBranch === next.worktreeBranch &&
 		prev.createdAt === next.createdAt &&
 		prev.lastActiveAt === next.lastActiveAt &&
+		prev.hasUnreadCompletion === next.hasUnreadCompletion &&
 		prev.permissions.length === next.permissions.length &&
 		prev.questions.length === next.questions.length &&
 		prev.permissions[0] === next.permissions[0] &&
@@ -64,6 +67,10 @@ function deriveAgentStatus(
 			return "running"
 		case "retry":
 			return "running"
+		case "error":
+			return "failed"
+		case "failed":
+			return "failed"
 		case "idle":
 			return "idle"
 		default:
@@ -215,6 +222,7 @@ function buildParentToSandboxesMap(projects: DevoProject[]): Map<string, Set<str
 
 function collectAllProjects(
 	liveSessionDirs: Map<string, string>,
+	desktopFolders: readonly DesktopFolder[],
 	discovery: {
 		loaded: boolean
 		projects: DevoProject[]
@@ -222,6 +230,16 @@ function collectAllProjects(
 ): ProjectEntry[] {
 	const entries: ProjectEntry[] = []
 	const seenDirs = new Set<string>()
+
+	for (const folder of desktopFolders) {
+		if (!folder.directory || seenDirs.has(folder.directory)) continue
+		seenDirs.add(folder.directory)
+		entries.push({
+			id: folder.id,
+			name: projectDisplayName(folder.name, folder.directory),
+			directory: folder.directory,
+		})
+	}
 
 	// Build sandbox set to filter out worktree projects
 	const sandboxDirs = discovery.loaded ? buildSandboxDirSet(discovery.projects) : new Set<string>()
@@ -297,6 +315,7 @@ export const sandboxMappingsAtom = atom((get) => {
 const projectSlugMapAtom = atom((get) => {
 	const sessionIds = get(sessionIdsAtom)
 	const discovery = get(discoveryAtom)
+	const desktopFolders = get(desktopFoldersAtom)
 
 	const liveSessionDirs = new Map<string, string>()
 	for (const id of sessionIds) {
@@ -305,7 +324,7 @@ const projectSlugMapAtom = atom((get) => {
 		liveSessionDirs.set(id, entry.directory)
 	}
 
-	const allProjects = collectAllProjects(liveSessionDirs, discovery)
+	const allProjects = collectAllProjects(liveSessionDirs, desktopFolders, discovery)
 	return buildProjectSlugMap(allProjects)
 })
 
@@ -370,7 +389,7 @@ export const agentFamily = atomFamily((sessionId: string) => {
 				? `Asking: ${effectiveQ.request.questions[0]?.header ?? "Question"}`
 				: effectivePerm
 					? `Waiting for approval: ${effectivePerm.request.permission}`
-					: status.type === "busy"
+					: status.type === "busy" || status.type === "retry"
 						? "Working..."
 						: undefined,
 			activities: [],
@@ -381,6 +400,7 @@ export const agentFamily = atomFamily((sessionId: string) => {
 			worktreeBranch: entry.worktreeBranch,
 			createdAt: created,
 			lastActiveAt,
+			hasUnreadCompletion: entry.hasUnreadCompletion ?? false,
 		}
 
 		// Return the previous reference if structurally equal to avoid
@@ -501,7 +521,8 @@ export const projectListAtom = (() => {
 				pa.directory !== pb.directory ||
 				pa.agentCount !== pb.agentCount ||
 				pa.lastActiveAt !== pb.lastActiveAt ||
-				pa.hasActiveAgent !== pb.hasActiveAgent
+				pa.hasActiveAgent !== pb.hasActiveAgent ||
+				pa.folderStatus !== pb.folderStatus
 			) {
 				return false
 			}
@@ -511,11 +532,28 @@ export const projectListAtom = (() => {
 
 	return atom((get) => {
 		const sessionIds = get(sessionIdsAtom)
-		const discovery = get(discoveryAtom)
+		const desktopFolders = get(desktopFoldersAtom)
+		const folderStatuses = get(desktopFolderStatusByDirectoryAtom)
 		const slugMap = get(projectSlugMapAtom)
 		const { sandboxToParent } = get(sandboxMappingsAtom)
 
 		const projects = new Map<string, SidebarProject>()
+
+		for (const folder of desktopFolders) {
+			if (!folder.directory) continue
+			const projectInfo = slugMap.get(folder.directory)
+			const name = projectDisplayName(folder.name ?? projectInfo?.name, folder.directory)
+			projects.set(folder.directory, {
+				id: projectInfo?.id ?? folder.id,
+				slug: projectInfo?.slug ?? `${name}-${folder.id.slice(0, 12)}`,
+				name,
+				directory: folder.directory,
+				agentCount: 0,
+				lastActiveAt: 0,
+				hasActiveAgent: false,
+				folderStatus: folderStatuses[folder.directory] ?? "available",
+			})
+		}
 
 		// Live sessions grouped by directory.
 		// Sessions in sandbox directories are counted under their parent project.
@@ -534,8 +572,8 @@ export const projectListAtom = (() => {
 			// Remap sandbox directories to their parent project
 			const parentDir = sandboxToParent.get(entry.directory)
 			const dir = parentDir ?? entry.directory
-			const projectInfo = slugMap.get(dir)
-			const name = projectInfo?.name ?? projectNameFromDir(dir)
+			const existing = projects.get(dir)
+			if (!existing) continue
 			const sessionTime =
 				entry.session.time.lastActivity ??
 				entry.session.time.updated ??
@@ -548,61 +586,14 @@ export const projectListAtom = (() => {
 				entry.permissions.length > 0 ||
 				entry.questions.length > 0
 
-			const existing = projects.get(dir)
-			if (existing) {
-				existing.agentCount += 1
-				if (sessionTime > existing.lastActiveAt) existing.lastActiveAt = sessionTime
-				if (isActive) existing.hasActiveAgent = true
-			} else {
-				projects.set(dir, {
-					id: projectInfo?.id ?? dir,
-					slug: projectInfo?.slug ?? name,
-					name,
-					directory: dir,
-					agentCount: 1,
-					lastActiveAt: sessionTime,
-					hasActiveAgent: isActive,
-				})
-			}
+			existing.agentCount += 1
+			if (sessionTime > existing.lastActiveAt) existing.lastActiveAt = sessionTime
+			if (isActive) existing.hasActiveAgent = true
 		}
 
-		// Build sandbox set to filter out worktree projects from discovery
-		const sandboxDirs = discovery.loaded
-			? buildSandboxDirSet(discovery.projects)
-			: new Set<string>()
-
-		// Discovered projects from API that have no live sessions yet
-		// (show them in sidebar so users can start new agents).
-		// Skip sandbox projects -- they belong under their parent.
-		// These get lastActiveAt = 0 so they sort alphabetically at the bottom
-		// (tier 3), avoiding instability from volatile project.time.updated.
-		if (discovery.loaded) {
-			for (const project of discovery.projects) {
-				if (!project.worktree) continue
-				if (projects.has(project.worktree)) continue
-				if (sandboxDirs.has(project.worktree)) continue
-
-				const projectInfo = slugMap.get(project.worktree)
-				const name = projectDisplayName(project.name, project.worktree)
-
-				projects.set(project.worktree, {
-					id: projectInfo?.id ?? project.id,
-					slug: projectInfo?.slug ?? name,
-					name,
-					directory: project.worktree,
-					agentCount: 0,
-					lastActiveAt: 0,
-					hasActiveAgent: false,
-				})
-			}
-		}
-
-		const discoveryOrder = discovery.loaded
-			? discovery.projects
-					.map((project) => project.worktree)
-					.filter((worktree): worktree is string => !!worktree && !sandboxDirs.has(worktree))
-			: []
-		const next = sortSidebarProjectsForDefaultList(Array.from(projects.values()), discoveryOrder)
+		const next = desktopFolders
+			.map((folder) => projects.get(folder.directory))
+			.filter((project): project is SidebarProject => !!project)
 
 		if (projectListEqual(prevProjects, next)) return prevProjects
 		prevProjects = next

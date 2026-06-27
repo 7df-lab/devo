@@ -3,6 +3,7 @@ import { atomFamily } from "jotai-family"
 import type { PermissionRequest, QuestionRequest, Session, SessionStatus } from "../lib/types"
 import { messagesFamily } from "./messages"
 import { partsFamily, partStorageKey } from "./parts"
+import { viewedSessionIdAtom } from "./ui"
 
 // ============================================================
 // Constants
@@ -55,6 +56,8 @@ export interface SessionEntry {
 	error?: SessionError
 	/** Worktree setup phase (shown in chat empty state while worktree is being created) */
 	setupPhase?: SessionSetupPhase
+	/** Renderer-local marker for a completed background turn waiting to be read. */
+	hasUnreadCompletion?: boolean
 }
 
 // ============================================================
@@ -97,6 +100,7 @@ export const upsertSessionAtom = atom(
 			worktreeBranch: existing?.worktreeBranch,
 			error: existing?.error,
 			setupPhase: existing?.setupPhase,
+			hasUnreadCompletion: existing?.hasUnreadCompletion,
 		})
 
 		// Add to index
@@ -144,9 +148,23 @@ export const setSessionStatusAtom = atom(
 	) => {
 		const entry = get(sessionFamily(args.sessionId))
 		if (!entry) return
-		set(sessionFamily(args.sessionId), { ...entry, status: args.status })
+		const wasWorking = entry.status.type === "busy" || entry.status.type === "retry"
+		const isWorking = args.status.type === "busy" || args.status.type === "retry"
+		const completedTurn = wasWorking && args.status.type === "idle"
+		const hasUnreadCompletion = isWorking
+			? false
+			: completedTurn
+				? get(viewedSessionIdAtom) !== args.sessionId
+				: entry.hasUnreadCompletion
+		set(sessionFamily(args.sessionId), { ...entry, status: args.status, hasUnreadCompletion })
 	},
 )
+
+export const markSessionReadAtom = atom(null, (get, set, sessionId: string) => {
+	const entry = get(sessionFamily(sessionId))
+	if (!entry || !entry.hasUnreadCompletion) return
+	set(sessionFamily(sessionId), { ...entry, hasUnreadCompletion: false })
+})
 
 export const setSessionErrorAtom = atom(
 	null,
@@ -340,6 +358,7 @@ export const setSessionsAtom = atom(
 				worktreeBranch: existing?.worktreeBranch,
 				error: existing?.error,
 				setupPhase: existing?.setupPhase,
+				hasUnreadCompletion: existing?.hasUnreadCompletion,
 			})
 			nextIds.add(session.id)
 		}

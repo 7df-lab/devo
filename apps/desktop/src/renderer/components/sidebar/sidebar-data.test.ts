@@ -48,7 +48,7 @@ describe("sidebar data helpers", () => {
 	const betaOnly = agent("beta-only", beta, 30, 60)
 
 	test("by-project groups preserve project sections and loaded sessions", () => {
-		const preferences: SidebarPreferences = { organization: "by-project", sort: "updated" }
+		const preferences: SidebarPreferences = { sort: "updated" }
 
 		expect(
 			buildSidebarItems({
@@ -67,7 +67,7 @@ describe("sidebar data helpers", () => {
 	})
 
 	test("by-project order can remain stable when project activity changes", () => {
-		const preferences: SidebarPreferences = { organization: "by-project", sort: "updated" }
+		const preferences: SidebarPreferences = { sort: "updated" }
 		const stableOrder = new Map([
 			[alpha.directory, 0],
 			[beta.directory, 1],
@@ -90,12 +90,12 @@ describe("sidebar data helpers", () => {
 		])
 	})
 
-	test("recent-projects mode returns project-only rows ordered by project activity", () => {
-		const preferences: SidebarPreferences = { organization: "recent-projects", sort: "updated" }
+	test("empty stored folders produce an empty sidebar even when sessions exist", () => {
+		const preferences: SidebarPreferences = { sort: "updated" }
 
 		expect(
 			buildSidebarItems({
-				projects: [alpha, beta],
+				projects: [],
 				agents: [alphaOlder, alphaNewer, betaOnly],
 				projectSessionsByDirectory: new Map([
 					[alpha.directory, [alphaOlder, alphaNewer]],
@@ -103,74 +103,49 @@ describe("sidebar data helpers", () => {
 				]),
 				preferences,
 			}),
-		).toEqual([
-			{ type: "project", project: beta, sessions: [] },
-			{ type: "project", project: alpha, sessions: [] },
-		])
-	})
-
-	test("chronological mode sorts sessions by last activity across projects", () => {
-		const preferences: SidebarPreferences = { organization: "chronological", sort: "updated" }
-
-		expect(
-			buildSidebarItems({
-				projects: [alpha, beta],
-				agents: [alphaOlder, alphaNewer, betaOnly],
-				projectSessionsByDirectory: new Map(),
-				preferences,
-			}),
-		).toEqual([
-			{ type: "session", agent: alphaNewer, project: alpha },
-			{ type: "session", agent: betaOnly, project: beta },
-			{ type: "session", agent: alphaOlder, project: alpha },
-		])
+		).toEqual([])
 	})
 
 	test("created sort orders sessions by creation time instead of update time", () => {
-		const preferences: SidebarPreferences = { organization: "chronological", sort: "created" }
+		const preferences: SidebarPreferences = { sort: "created" }
 
 		expect(
 			buildSidebarItems({
-				projects: [alpha, beta],
+				projects: [alpha],
 				agents: [alphaOlder, alphaNewer, betaOnly],
-				projectSessionsByDirectory: new Map(),
+				projectSessionsByDirectory: new Map([[alpha.directory, [alphaOlder, alphaNewer]]]),
 				preferences,
 			}),
-		).toEqual([
-			{ type: "session", agent: betaOnly, project: beta },
-			{ type: "session", agent: alphaNewer, project: alpha },
-			{ type: "session", agent: alphaOlder, project: alpha },
-		])
+		).toEqual([{ type: "project", project: alpha, sessions: [alphaNewer, alphaOlder] }])
 	})
 
-	test("hidden project directories remove project sections and their sessions", () => {
-		const preferences: SidebarPreferences = { organization: "by-project", sort: "updated" }
+	test("unstored session directories are hidden from folder tree", () => {
+		const preferences: SidebarPreferences = { sort: "updated" }
 
 		expect(
 			buildSidebarItems({
-				projects: [alpha, beta],
+				projects: [alpha],
 				agents: [alphaOlder, alphaNewer, betaOnly],
 				projectSessionsByDirectory: new Map([
 					[alpha.directory, [alphaOlder, alphaNewer]],
 					[beta.directory, [betaOnly]],
 				]),
 				preferences,
-				hiddenProjectDirectories: new Set([alpha.directory]),
 			}),
-		).toEqual([{ type: "project", project: beta, sessions: [betaOnly] }])
+		).toEqual([{ type: "project", project: alpha, sessions: [alphaNewer, alphaOlder] }])
 	})
 
-	test("hidden project directories remove sessions from chronological mode", () => {
-		const preferences: SidebarPreferences = { organization: "chronological", sort: "updated" }
+	test("missing folder rows remain present with their matching sessions", () => {
+		const preferences: SidebarPreferences = { sort: "updated" }
+		const missingAlpha = { ...alpha, folderStatus: "missing" as const }
 
 		expect(
 			buildSidebarItems({
-				projects: [alpha, beta],
-				agents: [alphaOlder, alphaNewer, betaOnly],
-				projectSessionsByDirectory: new Map(),
+				projects: [missingAlpha],
+				agents: [alphaOlder, alphaNewer],
+				projectSessionsByDirectory: new Map([[alpha.directory, [alphaOlder, alphaNewer]]]),
 				preferences,
-				hiddenProjectDirectories: new Set([alpha.directory]),
 			}),
-		).toEqual([{ type: "session", agent: betaOnly, project: beta }])
+		).toEqual([{ type: "project", project: missingAlpha, sessions: [alphaNewer, alphaOlder] }])
 	})
 })

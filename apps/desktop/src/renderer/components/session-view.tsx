@@ -13,7 +13,7 @@ import { useNavigate, useParams } from "@tanstack/react-router"
 import { useAtomValue, useSetAtom } from "jotai"
 import { useCallback, useEffect, useState } from "react"
 import { agentFamily, sessionNameFamily } from "../atoms/derived/agents"
-import { upsertSessionAtom } from "../atoms/sessions"
+import { markSessionReadAtom, upsertSessionAtom } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
 import { viewedSessionIdAtom } from "../atoms/ui"
 import { useSessionRevert } from "../hooks/use-commands"
@@ -50,10 +50,12 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	// Track which session is currently viewed so background sessions can
 	// skip expensive metric recomputation.
 	const setViewedSessionId = useSetAtom(viewedSessionIdAtom)
+	const markSessionRead = useSetAtom(markSessionReadAtom)
 	useEffect(() => {
 		setViewedSessionId(sessionId)
+		markSessionRead(sessionId)
 		return () => setViewedSessionId(null)
-	}, [sessionId, setViewedSessionId])
+	}, [markSessionRead, sessionId, setViewedSessionId])
 
 	const selectedAgent = useAtomValue(agentFamily(sessionId))
 

@@ -17,11 +17,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/too
 import { cn } from "@devo/ui/lib/utils"
 import {
 	ArchiveIcon,
-	ArrowDownIcon,
 	CheckIcon,
 	Clock3Icon,
 	CommandIcon,
-	FolderIcon,
 	FolderPlusIcon,
 	GripVerticalIcon,
 	Maximize2Icon,
@@ -30,11 +28,7 @@ import {
 } from "lucide-react"
 import { forwardRef, type ComponentPropsWithoutRef, type ReactNode } from "react"
 import { projectMenuContentClass, rowMenuItemClass } from "./sidebar-menu-styles"
-import type {
-	SidebarOrganization,
-	SidebarPreferences,
-	SidebarSort,
-} from "./sidebar-data"
+import type { SidebarPreferences, SidebarSort } from "./sidebar-data"
 
 const menuContentClass = projectMenuContentClass
 const menuItemClass = rowMenuItemClass
@@ -111,10 +105,6 @@ export function SidebarMainMenu({
 	onPreferencesChange: (preferences: SidebarPreferences) => void
 	onOpenCommandPalette: () => void
 }) {
-	const setOrganization = (organization: SidebarOrganization) => {
-		onPreferencesChange({ ...preferences, organization })
-	}
-
 	const setSort = (sort: SidebarSort) => {
 		onPreferencesChange({ ...preferences, sort })
 	}
@@ -134,40 +124,6 @@ export function SidebarMainMenu({
 						Archive all chats
 					</DisabledMenuItem>
 					<DropdownMenuSeparator className={optionMenuSeparatorClass} />
-					<DropdownMenuSub>
-						<DropdownMenuSubTrigger className={menuItemClass}>
-							<FolderIcon className={menuIconClass} />
-							<span className="min-w-0 flex-1 truncate">Organize sidebar</span>
-						</DropdownMenuSubTrigger>
-						<DropdownMenuSubContent sideOffset={8} className={menuContentClass}>
-							<DropdownMenuGroup>
-								<CheckedMenuItem
-									checked={preferences.organization === "by-project"}
-									icon={<FolderIcon className={menuIconClass} />}
-									onClick={() => setOrganization("by-project")}
-								>
-									By project
-								</CheckedMenuItem>
-								<CheckedMenuItem
-									checked={preferences.organization === "recent-projects"}
-									icon={<FolderIcon className={menuIconClass} />}
-									onClick={() => setOrganization("recent-projects")}
-								>
-									Recent projects
-								</CheckedMenuItem>
-								<CheckedMenuItem
-									checked={preferences.organization === "chronological"}
-									icon={<Clock3Icon className={menuIconClass} />}
-									onClick={() => setOrganization("chronological")}
-								>
-									Chronological list
-								</CheckedMenuItem>
-								<DisabledMenuItem icon={<ArrowDownIcon className={menuIconClass} />}>
-									Move down
-								</DisabledMenuItem>
-							</DropdownMenuGroup>
-						</DropdownMenuSubContent>
-					</DropdownMenuSub>
 					<DropdownMenuSub>
 						<DropdownMenuSubTrigger className={menuItemClass}>
 							<Clock3Icon className={menuIconClass} />
@@ -207,8 +163,10 @@ export function SidebarMainMenu({
 }
 
 export function AddProjectMenu({
+	onCreateFolder,
 	onAddExistingFolder,
 }: {
+	onCreateFolder?: () => void
 	onAddExistingFolder?: () => void
 }) {
 	return (
@@ -222,9 +180,14 @@ export function AddProjectMenu({
 			/>
 			<DropdownMenuContent align="end" sideOffset={8} className={menuContentClass}>
 				<DropdownMenuGroup>
-					<DisabledMenuItem icon={<FolderPlusIcon className={menuIconClass} />}>
+					<DropdownMenuItem
+						disabled={!onCreateFolder}
+						className={menuItemClass}
+						onClick={onCreateFolder}
+					>
+						<FolderPlusIcon className={menuIconClass} />
 						Start from scratch
-					</DisabledMenuItem>
+					</DropdownMenuItem>
 					<DropdownMenuItem
 						disabled={!onAddExistingFolder}
 						className={menuItemClass}

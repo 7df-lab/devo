@@ -1,36 +1,28 @@
 import type { Agent, SidebarProject } from "../../lib/types"
 
-export type SidebarOrganization = "by-project" | "recent-projects" | "chronological"
 export type SidebarSort = "updated" | "created"
 
 export interface SidebarPreferences {
-	organization: SidebarOrganization
 	sort: SidebarSort
 }
 
 export const DEFAULT_SIDEBAR_PREFERENCES: SidebarPreferences = {
-	organization: "by-project",
 	sort: "updated",
 }
 
-export type SidebarDisplayItem =
-	| {
-			type: "project"
-			project: SidebarProject
-			sessions: Agent[]
-	  }
-	| {
-			type: "session"
-			agent: Agent
-			project: SidebarProject | null
-	  }
+export interface SidebarProjectDisplayItem {
+	type: "project"
+	project: SidebarProject
+	sessions: Agent[]
+}
+
+export type SidebarDisplayItem = SidebarProjectDisplayItem
 
 export interface BuildSidebarItemsArgs {
 	projects: SidebarProject[]
 	agents: Agent[]
 	projectSessionsByDirectory: Map<string, Agent[]>
 	preferences: SidebarPreferences
-	hiddenProjectDirectories?: ReadonlySet<string>
 	projectOrder?: ReadonlyMap<string, number>
 }
 
@@ -40,16 +32,6 @@ function sortSessions(sessions: Agent[], sort: SidebarSort): Agent[] {
 		const aTime = sort === "created" ? a.createdAt : a.lastActiveAt
 		const bTime = sort === "created" ? b.createdAt : b.lastActiveAt
 		const timeDiff = bTime - aTime
-		if (timeDiff !== 0) return timeDiff
-		return a.name.localeCompare(b.name)
-	})
-	return sorted
-}
-
-function sortRecentProjects(projects: SidebarProject[]): SidebarProject[] {
-	const sorted = [...projects]
-	sorted.sort((a, b) => {
-		const timeDiff = b.lastActiveAt - a.lastActiveAt
 		if (timeDiff !== 0) return timeDiff
 		return a.name.localeCompare(b.name)
 	})
@@ -76,53 +58,17 @@ function sortProjectsByStableOrder(
 	return sorted
 }
 
-function buildProjectLookup(projects: SidebarProject[]): Map<string, SidebarProject> {
-	const lookup = new Map<string, SidebarProject>()
-	for (const project of projects) {
-		lookup.set(project.directory, project)
-	}
-	return lookup
-}
-
 export function buildSidebarItems({
 	projects,
-	agents,
 	projectSessionsByDirectory,
 	preferences,
-	hiddenProjectDirectories,
 	projectOrder,
 }: BuildSidebarItemsArgs): SidebarDisplayItem[] {
-	const isProjectHidden = (directory: string) => hiddenProjectDirectories?.has(directory) ?? false
-	const isAgentHidden = (agent: Agent) =>
-		isProjectHidden(agent.projectDirectory) || isProjectHidden(agent.directory)
-	const visibleProjects = projects.filter((project) => !isProjectHidden(project.directory))
-	const visibleAgents = agents.filter((agent) => !isAgentHidden(agent))
-
-	if (preferences.organization === "chronological") {
-		const projectLookup = buildProjectLookup(visibleProjects)
-		return sortSessions(visibleAgents, preferences.sort).map((agent) => ({
-			type: "session",
-			agent,
-			project: projectLookup.get(agent.projectDirectory) ?? projectLookup.get(agent.directory) ?? null,
-		}))
-	}
-
-	const projectRows =
-		preferences.organization === "recent-projects"
-			? sortRecentProjects(visibleProjects)
-			: sortProjectsByStableOrder(visibleProjects, projectOrder)
+	const projectRows = sortProjectsByStableOrder(projects, projectOrder)
 
 	return projectRows.map((project) => ({
 		type: "project",
 		project,
-		sessions:
-			preferences.organization === "recent-projects"
-				? []
-				: sortSessions(
-						(projectSessionsByDirectory.get(project.directory) ?? []).filter(
-							(agent) => !isAgentHidden(agent),
-						),
-						preferences.sort,
-					),
+		sessions: sortSessions(projectSessionsByDirectory.get(project.directory) ?? [], preferences.sort),
 	}))
 }

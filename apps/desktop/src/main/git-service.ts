@@ -15,8 +15,9 @@ function getGit(directory: string) {
 	return simpleGit({ baseDir: directory, trimmed: true })
 }
 
-function emptyBranchInfo(): GitBranchInfo {
+function emptyBranchInfo(state: GitBranchState): GitBranchInfo {
 	return {
+		state,
 		current: "",
 		detached: false,
 		local: [],
@@ -28,7 +29,11 @@ function emptyBranchInfo(): GitBranchInfo {
 // Types exposed to the renderer via IPC
 // ============================================================
 
+export type GitBranchState = "branch" | "detached" | "missing" | "not_directory" | "not_git"
+
 export interface GitBranchInfo {
+	/** Directory/repository state represented by this branch summary */
+	state: GitBranchState
 	/** Current branch name (empty string if detached HEAD) */
 	current: string
 	/** Whether HEAD is detached */
@@ -76,19 +81,22 @@ export async function listBranches(directory: string): Promise<GitBranchInfo> {
 	let summary: BranchSummary
 	try {
 		const directoryStats = await stat(directory).catch((error: NodeJS.ErrnoException) => {
-			if (error.code === "ENOENT" || error.code === "ENOTDIR") return null
+			if (error.code === "ENOENT") return "missing" as const
+			if (error.code === "ENOTDIR") return "not_directory" as const
 			throw error
 		})
-		if (!directoryStats?.isDirectory()) return emptyBranchInfo()
+		if (directoryStats === "missing") return emptyBranchInfo("missing")
+		if (directoryStats === "not_directory") return emptyBranchInfo("not_directory")
+		if (!directoryStats.isDirectory()) return emptyBranchInfo("not_directory")
 		const git = getGit(directory)
 		summary = await git.branch(["-a"])
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error)
-		if (
-			message.includes("not a git repository") ||
-			message.includes("Cannot use simple-git on a directory that does not exist")
-		) {
-			return emptyBranchInfo()
+		if (message.includes("Cannot use simple-git on a directory that does not exist")) {
+			return emptyBranchInfo("missing")
+		}
+		if (message.includes("not a git repository")) {
+			return emptyBranchInfo("not_git")
 		}
 		throw error
 	}
@@ -110,6 +118,7 @@ export async function listBranches(directory: string): Promise<GitBranchInfo> {
 	}
 
 	return {
+		state: summary.detached ? "detached" : "branch",
 		current: summary.current,
 		detached: summary.detached,
 		local,

@@ -42,7 +42,7 @@ describe("new chat project selection", () => {
 			).toBe("/Users/tsiao/Desktop/devo_feat_desktop")
 	})
 
-	test("replaces an auto-selected parent directory when projects refresh", () => {
+	test("clears an implicit root-page selection when projects refresh", () => {
 		const projects = [
 			project("devo_feat_desktop", "/Users/tsiao/Desktop/devo_feat_desktop", 400),
 			project("Desktop", "/Users/tsiao/Desktop", 300),
@@ -52,17 +52,41 @@ describe("new chat project selection", () => {
 			resolveSelectedProjectDirectory(projects, undefined, "/Users/tsiao/Desktop", {
 				preserveCurrentDirectory: false,
 			}),
-		).toBe("/Users/tsiao/Desktop/devo_feat_desktop")
+		).toBe("")
 	})
 
-	test("does not default to filesystem root when a real project is available", () => {
+	test("does not choose a default project on the root route", () => {
 		const projects = [
 			project("/", "/", 300),
 			project("devo_simplify_0623", "/Users/tsiao/Desktop/devo_simplify_0623", 0),
 		]
 
-		expect(resolveSelectedProjectDirectory(projects, undefined, "")).toBe(
-			"/Users/tsiao/Desktop/devo_simplify_0623",
-		)
+		expect(resolveSelectedProjectDirectory(projects, undefined, "")).toBe("")
+	})
+
+	test("does not choose an unavailable-aware default project on the root route", () => {
+		const projects = [
+			project("old-worktree", "/Users/tsiao/Desktop/devo_missing", 400),
+			project("devo", "/Users/tsiao/Desktop/devo", 300),
+		]
+
+		expect(
+			resolveSelectedProjectDirectory(projects, undefined, "", {
+				unavailableDirectories: new Set(["/Users/tsiao/Desktop/devo_missing"]),
+			}),
+		).toBe("")
+	})
+
+	test("keeps an explicitly routed unavailable project", () => {
+		const projects = [
+			project("old-worktree", "/Users/tsiao/Desktop/devo_missing", 400),
+			project("devo", "/Users/tsiao/Desktop/devo", 300),
+		]
+
+		expect(
+			resolveSelectedProjectDirectory(projects, "old-worktree-slug", "", {
+				unavailableDirectories: new Set(["/Users/tsiao/Desktop/devo_missing"]),
+			}),
+		).toBe("/Users/tsiao/Desktop/devo_missing")
 	})
 })

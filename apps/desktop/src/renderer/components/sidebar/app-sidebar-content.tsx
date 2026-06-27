@@ -4,12 +4,13 @@ import { useNavigate, useParams } from "@tanstack/react-router"
 import { useAtom, useAtomValue } from "jotai"
 import {
 	Clock3Icon,
+	FolderPlusIcon,
 	Loader2Icon,
 	PenLineIcon,
 	SearchIcon,
 	SettingsIcon,
 } from "lucide-react"
-import { memo, useCallback, useMemo, useRef, useState, type ReactNode } from "react"
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react"
 import { activeServerConfigAtom } from "../../atoms/connection"
 import { sandboxMappingsAtom } from "../../atoms/derived/agents"
 import { automationsEnabledAtom } from "../../atoms/feature-flags"
@@ -20,24 +21,25 @@ import { loadMoreProjectSessions, loadProjectSessions } from "../../services/con
 import {
 	buildSidebarItems,
 	type SidebarDisplayItem,
-	type SidebarPreferences,
 } from "./sidebar-data"
-import { AddProjectMenu, SidebarMainMenu } from "./sidebar-menus"
 import {
-	hiddenSidebarProjectDirectoriesAtom,
-	sidebarPreferencesAtom,
-} from "./sidebar-preferences"
+	FolderRemoveDialog,
+	MissingFolderDialog,
+} from "./sidebar-folder-dialogs"
+import { AddProjectMenu, SidebarMainMenu } from "./sidebar-menus"
+import { sidebarPreferencesAtom } from "./sidebar-preferences"
 import { ProjectRow, SessionRow } from "./sidebar-rows"
 
 interface AppSidebarContentProps {
 	agents: Agent[]
 	projects: SidebarProject[]
 	onOpenCommandPalette: () => void
+	onCreateFolder?: () => void
 	onAddProject?: () => void
+	onRemoveProject?: (project: SidebarProject) => Promise<void>
 	onRenameSession?: (agent: Agent, title: string) => Promise<void>
 	onDeleteSession?: (agent: Agent) => Promise<void>
 	onForkSession?: (agent: Agent) => Promise<void>
-	serverConnected: boolean
 }
 
 function groupAgentsByProject(agents: Agent[]): Map<string, Agent[]> {
@@ -84,11 +86,11 @@ function ProjectSection({
 	item,
 	selectedProjectSlug,
 	selectedSessionId,
-	preferences,
 	isCollapsed,
 	onToggleCollapsed,
 	onRevealInFinder,
 	onRemoveProject,
+	onMissingFolder,
 	sandboxDirs,
 	onRenameSession,
 	onDeleteSession,
@@ -97,11 +99,11 @@ function ProjectSection({
 	item: Extract<SidebarDisplayItem, { type: "project" }>
 	selectedProjectSlug: string | undefined
 	selectedSessionId: string | null
-	preferences: SidebarPreferences
 	isCollapsed: boolean
 	onToggleCollapsed: (directory: string) => void
 	onRevealInFinder?: (directory: string) => void
 	onRemoveProject: (project: SidebarProject) => void
+	onMissingFolder: (project: SidebarProject) => void
 	sandboxDirs: Set<string> | undefined
 	onRenameSession?: (agent: Agent, title: string) => Promise<void>
 	onDeleteSession?: (agent: Agent) => Promise<void>
@@ -109,10 +111,14 @@ function ProjectSection({
 }) {
 	const navigate = useNavigate()
 	const pagination = useAtomValue(projectPaginationFamily(item.project.directory))
-	const isRecentProjects = preferences.organization === "recent-projects"
-	const canShowSessions = !isRecentProjects
+	const canShowSessions = true
+	const isUnavailable = item.project.folderStatus ? item.project.folderStatus !== "available" : false
 
 	const handleProjectSelect = useCallback(() => {
+		if (isUnavailable) {
+			onMissingFolder(item.project)
+			return
+		}
 		if (canShowSessions && !isCollapsed && !pagination.loaded && !pagination.loading) {
 			loadProjectSessions(item.project.directory, sandboxDirs, { limit: 5, roots: true })
 		}
@@ -124,21 +130,31 @@ function ProjectSection({
 		item.project.directory,
 		item.project.slug,
 		navigate,
+		onMissingFolder,
 		pagination.loaded,
 		pagination.loading,
 		sandboxDirs,
 		canShowSessions,
 		isCollapsed,
+		isUnavailable,
 	])
 
 	const handleNewChat = useCallback(() => {
+		if (isUnavailable) {
+			onMissingFolder(item.project)
+			return
+		}
 		navigate({
 			to: "/project/$projectSlug",
 			params: { projectSlug: item.project.slug },
 		})
-	}, [item.project.slug, navigate])
+	}, [isUnavailable, item.project, navigate, onMissingFolder])
 
 	const handleToggleCollapsed = useCallback(() => {
+		if (isUnavailable) {
+			onMissingFolder(item.project)
+			return
+		}
 		if (canShowSessions && isCollapsed && !pagination.loaded && !pagination.loading) {
 			loadProjectSessions(item.project.directory, sandboxDirs, { limit: 5, roots: true })
 		}
@@ -146,7 +162,10 @@ function ProjectSection({
 	}, [
 		canShowSessions,
 		isCollapsed,
+		isUnavailable,
+		item.project,
 		item.project.directory,
+		onMissingFolder,
 		onToggleCollapsed,
 		pagination.loaded,
 		pagination.loading,
@@ -166,14 +185,15 @@ function ProjectSection({
 			<ProjectRow
 				project={item.project}
 				isSelected={selectedProjectSlug === item.project.slug && !selectedSessionId}
-				showCount={isRecentProjects}
+				showCount={false}
 				isCollapsed={isCollapsed}
 				canToggleSessions={canShowSessions}
 				onSelect={handleProjectSelect}
 				onToggleCollapsed={handleToggleCollapsed}
 				onNewChat={handleNewChat}
-				onRevealInFinder={handleRevealInFinder}
+				onRevealInFinder={isUnavailable ? undefined : handleRevealInFinder}
 				onRemoveProject={() => onRemoveProject(item.project)}
+				isUnavailable={isUnavailable}
 			/>
 			{canShowSessions && (
 				<div
@@ -200,6 +220,8 @@ function ProjectSection({
 									onRename={onRenameSession}
 									onDelete={onDeleteSession}
 									onFork={onForkSession}
+									projectUnavailable={isUnavailable}
+									onUnavailableProject={() => onMissingFolder(item.project)}
 								/>
 							))}
 							{pagination.loaded && pagination.hasMore && item.sessions.length > 0 && (
@@ -220,54 +242,26 @@ function ProjectSection({
 	)
 }
 
-const ChronologicalSessionList = memo(function ChronologicalSessionList({
-	items,
-	selectedSessionId,
-	onRenameSession,
-	onDeleteSession,
-	onForkSession,
-}: {
-	items: Extract<SidebarDisplayItem, { type: "session" }>[]
-	selectedSessionId: string | null
-	onRenameSession?: (agent: Agent, title: string) => Promise<void>
-	onDeleteSession?: (agent: Agent) => Promise<void>
-	onForkSession?: (agent: Agent) => Promise<void>
-}) {
-	return (
-		<div className="flex flex-col gap-y-1">
-			{items.map((item) => (
-				<SessionRow
-					key={item.agent.id}
-					agent={item.agent}
-					isSelected={item.agent.id === selectedSessionId}
-					onRename={onRenameSession}
-					onDelete={onDeleteSession}
-					onFork={onForkSession}
-					showProject
-				/>
-			))}
-		</div>
-	)
-})
-
 export function AppSidebarContent({
 	agents,
 	projects,
 	onOpenCommandPalette,
+	onCreateFolder,
 	onAddProject,
+	onRemoveProject,
 	onRenameSession,
 	onDeleteSession,
 	onForkSession,
-	serverConnected,
 }: AppSidebarContentProps) {
 	const navigate = useNavigate()
 	const routeParams = useParams({ strict: false }) as { projectSlug?: string; sessionId?: string }
 	const selectedSessionId = routeParams.sessionId ?? null
 	const [preferences, setPreferences] = useAtom(sidebarPreferencesAtom)
-	const [hiddenProjectDirectories, setHiddenProjectDirectories] = useAtom(
-		hiddenSidebarProjectDirectoriesAtom,
-	)
 	const [collapsedProjectDirs, setCollapsedProjectDirs] = useState<Set<string>>(() => new Set())
+	const [removeTarget, setRemoveTarget] = useState<SidebarProject | null>(null)
+	const [missingTarget, setMissingTarget] = useState<SidebarProject | null>(null)
+	const [folderActionPending, setFolderActionPending] = useState(false)
+	const [folderActionError, setFolderActionError] = useState<string | null>(null)
 	const { parentToSandboxes } = useAtomValue(sandboxMappingsAtom)
 	const automationsEnabled = useAtomValue(automationsEnabledAtom)
 	const activeServer = useAtomValue(activeServerConfigAtom)
@@ -276,10 +270,6 @@ export function AppSidebarContent({
 	const stableProjectOrderRef = useRef<Map<string, number>>(new Map())
 
 	const visibleAgents = useMemo(() => agents.filter((agent) => !agent.parentId), [agents])
-	const hiddenProjectDirectorySet = useMemo(
-		() => new Set(hiddenProjectDirectories),
-		[hiddenProjectDirectories],
-	)
 	const stableProjectOrder = useMemo(() => {
 		const order = stableProjectOrderRef.current
 		for (const project of projects) {
@@ -300,7 +290,6 @@ export function AppSidebarContent({
 				agents: visibleAgents,
 				projectSessionsByDirectory,
 				preferences,
-				hiddenProjectDirectories: hiddenProjectDirectorySet,
 				projectOrder: stableProjectOrder,
 			}),
 		[
@@ -308,7 +297,6 @@ export function AppSidebarContent({
 			visibleAgents,
 			projectSessionsByDirectory,
 			preferences,
-			hiddenProjectDirectorySet,
 			stableProjectOrder,
 		],
 	)
@@ -344,22 +332,46 @@ export function AppSidebarContent({
 		})
 	}, [])
 
-	const handleRemoveProject = useCallback(
-		(project: SidebarProject) => {
-			setHiddenProjectDirectories((previous) =>
-				previous.includes(project.directory) ? previous : [...previous, project.directory],
-			)
-			setCollapsedProjectDirs((previous) => {
-				if (!previous.has(project.directory)) return previous
-				const next = new Set(previous)
-				next.delete(project.directory)
-				return next
-			})
-			if (routeParams.projectSlug === project.slug) {
-				navigate({ to: "/" })
+	const requestRemoveProject = useCallback((project: SidebarProject) => {
+		setFolderActionError(null)
+		setRemoveTarget(project)
+	}, [])
+
+	const requestMissingFolderRemove = useCallback((project: SidebarProject) => {
+		setFolderActionError(null)
+		setMissingTarget(project)
+	}, [])
+
+	const handleFolderDialogOpenChange = useCallback((open: boolean) => {
+		if (open) return
+		setRemoveTarget(null)
+		setMissingTarget(null)
+		setFolderActionError(null)
+	}, [])
+
+	const confirmRemoveProject = useCallback(
+		async (project: SidebarProject | null) => {
+			if (!project || folderActionPending || !onRemoveProject) return
+			setFolderActionPending(true)
+			setFolderActionError(null)
+			try {
+				await onRemoveProject(project)
+				setCollapsedProjectDirs((previous) => {
+					if (!previous.has(project.directory)) return previous
+					const next = new Set(previous)
+					next.delete(project.directory)
+					return next
+				})
+				setRemoveTarget(null)
+				setMissingTarget(null)
+			} catch (err) {
+				const message = err instanceof Error ? err.message : "Failed to remove folder"
+				setFolderActionError(message)
+			} finally {
+				setFolderActionPending(false)
 			}
 		},
-		[navigate, routeParams.projectSlug, setHiddenProjectDirectories],
+		[folderActionPending, onRemoveProject],
 	)
 
 	return (
@@ -398,62 +410,54 @@ export function AppSidebarContent({
 							onPreferencesChange={setPreferences}
 							onOpenCommandPalette={onOpenCommandPalette}
 						/>
-						<AddProjectMenu onAddExistingFolder={onAddProject} />
+						<AddProjectMenu onCreateFolder={onCreateFolder} onAddExistingFolder={onAddProject} />
 					</div>
 				</div>
 
 				{!hasContent && (
 					<div className="flex flex-1 items-center justify-center p-6">
-						<div className="flex flex-col gap-1 text-center">
-							<p className="text-sm text-muted-foreground">
-								{serverConnected ? "No projects yet" : "Server offline"}
-							</p>
-							<p className="text-xs text-muted-foreground/70">
-								{serverConnected
-									? "Add a project to get started"
-									: "Check your connection in Settings"}
-							</p>
+						<div className="flex max-w-[240px] flex-col items-center gap-3 text-center">
+							<div className="flex flex-col gap-1">
+								<p className="text-sm text-muted-foreground">No projects yet</p>
+								<p className="text-xs text-muted-foreground/70">
+									Add an existing project or create a new one to start.
+								</p>
+							</div>
+							{onAddProject && (
+								<button
+									type="button"
+									onClick={onAddProject}
+									className="flex h-8 items-center gap-2 rounded-lg px-2 text-sm font-normal text-muted-foreground transition-colors hover:bg-black/[0.04] hover:text-sidebar-foreground focus-visible:bg-black/[0.04] focus-visible:text-sidebar-foreground focus-visible:outline-none dark:hover:bg-white/[0.06] dark:focus-visible:bg-white/[0.06]"
+								>
+									<FolderPlusIcon className={sidebarPrimaryIconClass} />
+									<span>Use existing folder</span>
+								</button>
+							)}
 						</div>
 					</div>
 				)}
 
 				{hasContent && (
 					<div className="scrollbar-comfort flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-3 pb-2">
-						{preferences.organization === "chronological" ? (
-							<ChronologicalSessionList
-								items={sidebarItems.filter(
-									(item): item is Extract<SidebarDisplayItem, { type: "session" }> =>
-										item.type === "session",
-								)}
-								selectedSessionId={selectedSessionId}
-								onRenameSession={onRenameSession}
-								onDeleteSession={onDeleteSession}
-								onForkSession={onForkSession}
-							/>
-						) : (
-							<div className="flex flex-col gap-1">
-								{sidebarItems.map((item) => {
-									if (item.type !== "project") return null
-									return (
-										<ProjectSection
-											key={item.project.id}
-											item={item}
-											selectedProjectSlug={routeParams.projectSlug}
-											selectedSessionId={selectedSessionId}
-											preferences={preferences}
-											isCollapsed={collapsedProjectDirs.has(item.project.directory)}
-											onToggleCollapsed={handleToggleProjectCollapsed}
-											onRemoveProject={handleRemoveProject}
-											onRevealInFinder={canRevealInFinder ? handleRevealInFinder : undefined}
-											sandboxDirs={parentToSandboxes.get(item.project.directory)}
-											onRenameSession={onRenameSession}
-											onDeleteSession={onDeleteSession}
-											onForkSession={onForkSession}
-										/>
-									)
-								})}
-							</div>
-						)}
+						<div className="flex flex-col gap-1">
+							{sidebarItems.map((item) => (
+								<ProjectSection
+									key={item.project.id}
+									item={item}
+									selectedProjectSlug={routeParams.projectSlug}
+									selectedSessionId={selectedSessionId}
+									isCollapsed={collapsedProjectDirs.has(item.project.directory)}
+									onToggleCollapsed={handleToggleProjectCollapsed}
+									onRemoveProject={requestRemoveProject}
+									onMissingFolder={requestMissingFolderRemove}
+									onRevealInFinder={canRevealInFinder ? handleRevealInFinder : undefined}
+									sandboxDirs={parentToSandboxes.get(item.project.directory)}
+									onRenameSession={onRenameSession}
+									onDeleteSession={onDeleteSession}
+									onForkSession={onForkSession}
+								/>
+							))}
+						</div>
 					</div>
 				)}
 			</SidebarContent>
@@ -470,6 +474,22 @@ export function AppSidebarContent({
 					<span className="truncate">Settings</span>
 				</button>
 			</SidebarFooter>
+			<FolderRemoveDialog
+				project={removeTarget}
+				open={!!removeTarget}
+				pending={folderActionPending}
+				error={folderActionError}
+				onOpenChange={handleFolderDialogOpenChange}
+				onConfirm={() => confirmRemoveProject(removeTarget)}
+			/>
+			<MissingFolderDialog
+				project={missingTarget}
+				open={!!missingTarget}
+				pending={folderActionPending}
+				error={folderActionError}
+				onOpenChange={handleFolderDialogOpenChange}
+				onConfirmRemove={() => confirmRemoveProject(missingTarget)}
+			/>
 		</>
 	)
 }

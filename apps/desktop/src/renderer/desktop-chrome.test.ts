@@ -39,6 +39,48 @@ function declarationsForSelector(
 }
 
 describe("desktop chrome CSS", () => {
+	test("content area owns a transcript background surface", async () => {
+		const css = await readFile(cssPath, "utf8");
+		const lightDeclarations = declarationsForSelector(css, ":root");
+		const darkDeclarations = declarationsForSelector(css, ":root.dark");
+		const contentAreaDeclarations = declarationsForSelector(
+			css,
+			'[data-slot="content-area"]',
+		);
+
+		expect(lightDeclarations["--devo-transcript-background"]).toBe(
+			"color-mix( in srgb, var(--background) 96%, var(--foreground) 4% )",
+		);
+		expect(darkDeclarations["--devo-transcript-background"]).toBe(
+			"color-mix( in srgb, var(--background) 92%, var(--foreground) 8% )",
+		);
+		expect(contentAreaDeclarations).toEqual({
+			background: "var(--devo-transcript-background)",
+		});
+		expect(contentAreaDeclarations.border).toBeUndefined();
+	});
+
+	test("glass content area keeps the same transcript surface token", async () => {
+		const css = await readFile(cssPath, "utf8");
+		const selectors = [
+			':root.electron-transparent [data-slot="content-area"]',
+			':root.electron-vibrancy [data-slot="content-area"]',
+		];
+
+		expect(
+			selectors.map((selector) => declarationsForSelector(css, selector)),
+		).toEqual([
+			{
+				background:
+					"color-mix( in srgb, var(--devo-transcript-background) var(--glass-content), transparent )",
+			},
+			{
+				background:
+					"color-mix( in srgb, var(--devo-transcript-background) var(--glass-content), transparent )",
+			},
+		]);
+	});
+
 	test("Windows dark mode uses dark chrome background tokens", async () => {
 		const css = await readFile(cssPath, "utf8");
 		const lightDeclarations = declarationsForSelector(
@@ -143,5 +185,30 @@ describe("desktop chrome CSS", () => {
 				"-webkit-app-region": "no-drag",
 			},
 		]);
+	});
+
+	test("macOS collapsed transcript header clears the window controls", async () => {
+		const css = await readFile(cssPath, "utf8");
+		const declarations = declarationsForSelector(
+			css,
+			':root[data-platform="darwin"] [data-slot="sidebar-wrapper"][data-state="collapsed"] [data-slot="content-area"][data-transcript-titlebar-fill="true"] [data-slot="session-panel-header"]',
+		);
+
+		expect(declarations).toEqual({
+			"padding-inline-start": "var(--window-controls-inset) !important",
+		});
+	});
+
+	test("offcanvas sidebar collapses its layout width", async () => {
+		const css = await readFile(cssPath, "utf8");
+		const declarations = declarationsForSelector(
+			css,
+			'[data-slot="sidebar"][data-collapsible="offcanvas"][data-state="collapsed"]',
+		);
+
+		expect(declarations).toEqual({
+			"flex-basis": "0",
+			width: "0",
+		});
 	});
 });

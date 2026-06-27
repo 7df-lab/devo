@@ -197,10 +197,8 @@ export async function loadProjectSessions(
 	}
 
 	try {
-		const [sessions, statuses] = await Promise.all([
-			listSessions(client, options),
-			getSessionStatuses(client),
-		])
+		const sessions = await listSessions(client, options)
+		const statuses = await getSessionStatuses(client)
 		log.info("Loaded sessions for project", {
 			directory,
 			count: sessions.length,
@@ -252,10 +250,8 @@ export async function loadMoreProjectSessions(
 	}
 
 	try {
-		const [sessions, statuses] = await Promise.all([
-			listSessions(client, { limit: nextLimit, roots: true }),
-			getSessionStatuses(client),
-		])
+		const sessions = await listSessions(client, { limit: nextLimit, roots: true })
+		const statuses = await getSessionStatuses(client)
 		log.info("Loaded more sessions for project", {
 			directory,
 			count: sessions.length,
@@ -362,6 +358,23 @@ export function getBaseClient(): DevoClient | null {
 		}
 	}
 	return connection.baseClient
+}
+
+/**
+ * Clear cached ACP model/config options on every active SDK client.
+ * Provider updates mutate server config, so model/config must be reloaded.
+ */
+export function invalidateConfigOptionCaches(): void {
+	const clients = new Set<DevoClient>()
+	if (connection?.baseClient) {
+		clients.add(connection.baseClient)
+	}
+	for (const client of projectClients.values()) {
+		clients.add(client)
+	}
+	for (const client of clients) {
+		client.invalidateConfigOptionCaches?.()
+	}
 }
 
 /**

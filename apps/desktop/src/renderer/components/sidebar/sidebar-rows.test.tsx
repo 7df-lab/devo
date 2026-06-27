@@ -1,12 +1,12 @@
 import { describe, expect, mock, test } from "bun:test"
 import { renderToStaticMarkup } from "react-dom/server"
-import type { Agent } from "../../lib/types"
+import type { Agent, SidebarProject } from "../../lib/types"
 
 mock.module("@tanstack/react-router", () => ({
 	useNavigate: () => () => undefined,
 }))
 
-const { SessionRow } = await import("./sidebar-rows")
+const { ProjectRow, SessionRow } = await import("./sidebar-rows")
 
 function agent(): Agent {
 	return {
@@ -26,6 +26,19 @@ function agent(): Agent {
 		questions: [],
 		createdAt: 1,
 		lastActiveAt: 2,
+	}
+}
+
+function project(): SidebarProject {
+	return {
+		id: "project-1",
+		slug: "devo-123",
+		name: "devo",
+		directory: "/Users/tsiao/Desktop/devo",
+		agentCount: 1,
+		lastActiveAt: 2,
+		hasActiveAgent: false,
+		folderStatus: "missing",
 	}
 }
 
@@ -110,5 +123,166 @@ describe("SessionRow", () => {
 		} finally {
 			Date.now = originalNow
 		}
+	})
+
+	test("renders a spinner while the session is running instead of an unread dot", () => {
+		const markup = renderToStaticMarkup(
+			<SessionRow
+				agent={{ ...agent(), status: "running" }}
+				isSelected={false}
+				onRename={async () => {}}
+				onDelete={async () => {}}
+				onFork={async () => {}}
+			/>,
+		)
+
+		expect({
+			hasSpinner: markup.includes("animate-spin"),
+			hasLoaderIcon: markup.includes("lucide-loader-circle"),
+			hasCustomRing: markup.includes("border-[1.5px]"),
+			hasBlueDot: markup.includes("size-2 rounded-full bg-[#3396f4]"),
+		}).toEqual({
+			hasSpinner: true,
+			hasLoaderIcon: true,
+			hasCustomRing: false,
+			hasBlueDot: false,
+		})
+	})
+
+	test("keeps compact status indicators while the session is waiting", () => {
+		const markup = renderToStaticMarkup(
+			<SessionRow
+				agent={{ ...agent(), status: "waiting" }}
+				isSelected={false}
+				onRename={async () => {}}
+				onDelete={async () => {}}
+				onFork={async () => {}}
+			/>,
+		)
+
+		expect({
+			hasBlueDot: markup.includes("size-2 rounded-full bg-[#3396f4]"),
+			hasSpinner: markup.includes("animate-spin"),
+		}).toEqual({
+			hasBlueDot: true,
+			hasSpinner: false,
+		})
+	})
+
+	test("keeps last active text for idle rows", () => {
+		const originalNow = Date.now
+		Date.now = () => Date.parse("2026-06-24T02:00:00.000Z")
+		try {
+			const markup = renderToStaticMarkup(
+				<SessionRow
+					agent={{
+						...agent(),
+						status: "idle",
+						lastActiveAt: Date.parse("2026-06-24T00:00:00.000Z"),
+					}}
+					isSelected={false}
+					onRename={async () => {}}
+					onDelete={async () => {}}
+					onFork={async () => {}}
+				/>,
+			)
+
+			expect({
+				hasBlueDot: markup.includes("size-2 rounded-full bg-[#3396f4]"),
+				showsRelativeTime: markup.includes("2h"),
+			}).toEqual({
+				hasBlueDot: false,
+				showsRelativeTime: true,
+			})
+		} finally {
+			Date.now = originalNow
+		}
+	})
+
+	test("renders a spinning icon for running rows and last active text for idle rows", () => {
+		const originalNow = Date.now
+		Date.now = () => Date.parse("2026-06-24T02:00:00.000Z")
+		try {
+			const idleAgent = {
+				...agent(),
+				status: "idle" as const,
+				lastActiveAt: Date.parse("2026-06-24T00:00:00.000Z"),
+			}
+			const runningAgent = {
+				...idleAgent,
+				status: "running" as const,
+			}
+
+			const idleMarkup = renderToStaticMarkup(
+				<SessionRow
+					agent={idleAgent}
+					isSelected={false}
+					onRename={async () => {}}
+					onDelete={async () => {}}
+					onFork={async () => {}}
+				/>,
+			)
+			const runningMarkup = renderToStaticMarkup(
+				<SessionRow
+					agent={runningAgent}
+					isSelected={false}
+					onRename={async () => {}}
+					onDelete={async () => {}}
+					onFork={async () => {}}
+				/>,
+			)
+
+			expect({
+				idleShowsLastActive: idleMarkup.includes("2h"),
+				idleSpins: idleMarkup.includes("animate-spin"),
+				runningUsesLoader: runningMarkup.includes("lucide-loader-circle"),
+				runningSpins: runningMarkup.includes("animate-spin"),
+				runningShowsLastActive: runningMarkup.includes("2h"),
+			}).toEqual({
+				idleShowsLastActive: true,
+				idleSpins: false,
+				runningUsesLoader: true,
+				runningSpins: true,
+				runningShowsLastActive: false,
+			})
+		} finally {
+			Date.now = originalNow
+		}
+	})
+
+	test("marks missing project rows and sessions as unavailable", () => {
+		const projectMarkup = renderToStaticMarkup(
+			<ProjectRow
+				project={project()}
+				isSelected={false}
+				showCount={false}
+				isCollapsed={false}
+				canToggleSessions
+				onSelect={() => {}}
+				isUnavailable
+			/>,
+		)
+		const sessionMarkup = renderToStaticMarkup(
+			<SessionRow
+				agent={agent()}
+				isSelected={false}
+				onRename={async () => {}}
+				onDelete={async () => {}}
+				onFork={async () => {}}
+				projectUnavailable
+			/>,
+		)
+
+		expect({
+			projectAriaDisabled: projectMarkup.includes('aria-disabled="true"'),
+			projectUnavailableData: projectMarkup.includes('data-folder-unavailable="true"'),
+			sessionAriaDisabled: sessionMarkup.includes('aria-disabled="true"'),
+			sessionUnavailableData: sessionMarkup.includes('data-folder-unavailable="true"'),
+		}).toEqual({
+			projectAriaDisabled: true,
+			projectUnavailableData: true,
+			sessionAriaDisabled: true,
+			sessionUnavailableData: true,
+		})
 	})
 })

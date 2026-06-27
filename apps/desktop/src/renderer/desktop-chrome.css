@@ -1,7 +1,41 @@
+:root {
+	--devo-transcript-background: color-mix(
+		in srgb,
+		var(--background) 96%,
+		var(--foreground) 4%
+	);
+}
+
+:root.dark {
+	--devo-transcript-background: color-mix(
+		in srgb,
+		var(--background) 92%,
+		var(--foreground) 8%
+	);
+}
+
 :root[data-platform="win32"] {
 	--devo-titlebar-height: 40px;
 	--devo-windows-focus-chrome-bg: #ecf5f9;
 	--devo-windows-unfocused-chrome-bg: #f2f4f5;
+}
+
+[data-slot="sidebar"][data-collapsible="offcanvas"][data-state="collapsed"] {
+	flex-basis: 0;
+	width: 0;
+}
+
+[data-slot="content-area"] {
+	background: var(--devo-transcript-background);
+}
+
+:root.electron-transparent [data-slot="content-area"],
+:root.electron-vibrancy [data-slot="content-area"] {
+	background: color-mix(
+		in srgb,
+		var(--devo-transcript-background) var(--glass-content),
+		transparent
+	);
 }
 
 :root[data-platform="win32"].dark {
@@ -132,6 +166,13 @@
 	[data-slot="content-area"][data-transcript-titlebar-fill="true"]
 	[data-slot="session-panel-header"] {
 	-webkit-app-region: drag;
+}
+
+:root[data-platform="darwin"]
+	[data-slot="sidebar-wrapper"][data-state="collapsed"]
+	[data-slot="content-area"][data-transcript-titlebar-fill="true"]
+	[data-slot="session-panel-header"] {
+	padding-inline-start: var(--window-controls-inset) !important;
 }
 
 :root[data-platform="darwin"]

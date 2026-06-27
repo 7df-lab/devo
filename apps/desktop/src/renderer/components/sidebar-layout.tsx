@@ -14,19 +14,36 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/too
 import { Outlet, useNavigate, useParams, useRouterState } from "@tanstack/react-router"
 import { useAtom, useAtomValue, useSetAtom } from "jotai"
 import { PanelLeftIcon } from "lucide-react"
-import { type MouseEvent, useCallback, useEffect, useRef } from "react"
-import { serverConnectedAtom } from "../atoms/connection"
+import { type MouseEvent, useCallback, useEffect, useRef, useState } from "react"
+import { toast } from "sonner"
+import type { DesktopFolder, DesktopFolderStatus } from "../../preload/api"
+import {
+	desktopFolderStatusByDirectoryAtom,
+	desktopFoldersAtom,
+} from "../atoms/desktop-folders"
 import { terminalPanelOpenAtom } from "../atoms/terminal"
 import { useAgents, useProjectList, useSetCommandPaletteOpen } from "../hooks/use-agents"
 import { useAgentActions } from "../hooks/use-server"
+import {
+	buildDesktopFolder,
+	desktopFolderProjectSlug,
+	normalizeDesktopFolderDirectory,
+	removeDesktopFolder,
+	upsertDesktopFolder,
+} from "../lib/desktop-folders"
 import { formatShortcut } from "../lib/shortcut-display"
-import type { Agent } from "../lib/types"
-import { pickDirectory } from "../services/backend"
+import type { Agent, SidebarProject } from "../lib/types"
+import { createDesktopFolder, pickDirectory, statDesktopFolders } from "../services/backend"
 import { loadProjectSessions } from "../services/connection-manager"
 import { APP_BAR_HEIGHT, AppBar } from "./app-bar"
+import { DesktopProjectActionsProvider } from "./desktop-project-actions-context"
 import { DesktopTerminalPanel } from "./desktop-terminal-panel"
 import { AppSidebarContent } from "./sidebar"
-import { hiddenSidebarProjectDirectoriesAtom } from "./sidebar/sidebar-preferences"
+import {
+	SessionDeleteDialog,
+	deleteSessionNavigationTarget,
+} from "./sidebar/sidebar-session-delete"
+import { CreateFolderDialog } from "./sidebar/sidebar-folder-dialogs"
 import { useSidebarSlot } from "./sidebar-slot-context"
 import { UpdateBanner } from "./update-banner"
 
@@ -152,6 +169,7 @@ function WindowControls() {
 						<Button
 							variant="ghost"
 							size="icon"
+							aria-label="Toggle sidebar"
 							className="size-7 shrink-0"
 							onClick={toggleSidebar}
 						/>
@@ -172,7 +190,10 @@ function WindowControls() {
 
 export function SidebarLayout() {
 	const navigate = useNavigate()
-	const { sessionId } = useParams({ strict: false }) as { sessionId?: string }
+	const { projectSlug, sessionId } = useParams({ strict: false }) as {
+		projectSlug?: string
+		sessionId?: string
+	}
 	const pathname = useRouterState({ select: (state) => state.location.pathname })
 	const { content: slotContent, footer: slotFooter } = useSidebarSlot()
 	const [terminalPanelOpen, setTerminalPanelOpen] = useAtom(terminalPanelOpenAtom)
@@ -181,9 +202,20 @@ export function SidebarLayout() {
 	const agents = useAgents()
 	const projects = useProjectList()
 	const setCommandPaletteOpen = useSetCommandPaletteOpen()
-	const setHiddenProjectDirectories = useSetAtom(hiddenSidebarProjectDirectoriesAtom)
+	const desktopFolders = useAtomValue(desktopFoldersAtom)
+	const folderStatuses = useAtomValue(desktopFolderStatusByDirectoryAtom)
+	const setDesktopFolders = useSetAtom(desktopFoldersAtom)
+	const setFolderStatuses = useSetAtom(desktopFolderStatusByDirectoryAtom)
 	const { renameSession, deleteSession, forkSession } = useAgentActions()
-	const serverConnected = useAtomValue(serverConnectedAtom)
+	const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null)
+	const [deletePending, setDeletePending] = useState(false)
+	const [deleteError, setDeleteError] = useState<string | null>(null)
+	const [createFolderOpen, setCreateFolderOpen] = useState(false)
+	const [createFolderParent, setCreateFolderParent] = useState("")
+	const [createFolderName, setCreateFolderName] = useState("")
+	const [createFolderPending, setCreateFolderPending] = useState(false)
+	const [createFolderError, setCreateFolderError] = useState<string | null>(null)
+	const loadedProjectDirectoriesRef = useRef<Set<string>>(new Set())
 
 	// Sub-agents are filtered at the API level (roots: true)
 	const visibleAgents = agents
@@ -203,10 +235,46 @@ export function SidebarLayout() {
 
 	const handleDeleteSession = useCallback(
 		async (agent: Agent) => {
-			await deleteSession(agent.directory, agent.sessionId)
+			setDeleteError(null)
+			setDeleteTarget(agent)
 		},
-		[deleteSession],
+		[],
 	)
+
+	const handleDeleteDialogOpenChange = useCallback((open: boolean) => {
+		if (open) return
+		setDeleteTarget(null)
+		setDeleteError(null)
+	}, [])
+
+	const handleConfirmDeleteSession = useCallback(async () => {
+		if (!deleteTarget || deletePending) return
+		setDeletePending(true)
+		setDeleteError(null)
+		try {
+			await deleteSession(deleteTarget.directory, deleteTarget.sessionId)
+			const navigationTarget = deleteSessionNavigationTarget({
+				deletedSessionId: deleteTarget.sessionId,
+				currentSessionId: sessionId,
+				projectSlug,
+			})
+			setDeleteTarget(null)
+			if (navigationTarget?.to === "/project/$projectSlug") {
+				navigate({
+					to: "/project/$projectSlug",
+					params: navigationTarget.params,
+				})
+			} else if (navigationTarget?.to === "/") {
+				navigate({ to: "/" })
+			}
+		} catch (err) {
+			const message = err instanceof Error ? err.message : "Failed to delete session"
+			setDeleteError(message)
+			toast.error("Failed to delete session", { description: message })
+		} finally {
+			setDeletePending(false)
+		}
+	}, [deletePending, deleteSession, deleteTarget, navigate, projectSlug, sessionId])
 
 	const handleForkSession = useCallback(
 		async (agent: Agent) => {
@@ -225,15 +293,173 @@ export function SidebarLayout() {
 		setCommandPaletteOpen(true)
 	}, [setCommandPaletteOpen])
 
-	const handleAddProject = useCallback(async () => {
-		const directory = await pickDirectory()
-		if (!directory) return
-		setHiddenProjectDirectories((previous) =>
-			previous.includes(directory) ? previous.filter((item) => item !== directory) : previous,
+	const persistDesktopFolders = useCallback(
+		async (folders: DesktopFolder[]) => {
+			if (!isElectronEnv) {
+				setDesktopFolders(folders)
+				return folders
+			}
+			const settings = await window.devo.updateSettings({ desktopFolders: { folders } })
+			setDesktopFolders(settings.desktopFolders.folders)
+			return settings.desktopFolders.folders
+		},
+		[setDesktopFolders],
+	)
+
+	useEffect(() => {
+		const directories = desktopFolders.map((folder) =>
+			normalizeDesktopFolderDirectory(folder.directory),
 		)
-		await loadProjectSessions(directory)
-		navigate({ to: "/" })
-	}, [navigate, setHiddenProjectDirectories])
+		if (directories.length === 0) {
+			setFolderStatuses({})
+			return
+		}
+
+		let cancelled = false
+		statDesktopFolders(directories)
+			.then((results) => {
+				if (cancelled) return
+				const nextStatuses: Record<string, DesktopFolderStatus> = {}
+				for (const result of results) {
+					nextStatuses[normalizeDesktopFolderDirectory(result.directory)] = result.status
+				}
+				setFolderStatuses(nextStatuses)
+			})
+			.catch((err) => {
+				console.error("Failed to stat desktop folders", err)
+			})
+
+		return () => {
+			cancelled = true
+		}
+	}, [desktopFolders, setFolderStatuses])
+
+	useEffect(() => {
+		for (const folder of desktopFolders) {
+			const directory = normalizeDesktopFolderDirectory(folder.directory)
+			if (folderStatuses[directory] !== "available") continue
+			if (loadedProjectDirectoriesRef.current.has(directory)) continue
+			loadedProjectDirectoriesRef.current.add(directory)
+			void loadProjectSessions(directory)
+		}
+	}, [desktopFolders, folderStatuses])
+
+	const handleAddProject = useCallback(async () => {
+		try {
+			const selectedDirectory = await pickDirectory()
+			if (!selectedDirectory) return null
+			const normalizedDirectory = normalizeDesktopFolderDirectory(selectedDirectory)
+			const [stat] = await statDesktopFolders([normalizedDirectory])
+			if (stat?.status !== "available") {
+				toast.error("Folder is not available", {
+					description:
+						stat?.status === "not_directory"
+							? "The selected path is not a directory."
+							: "The selected folder no longer exists.",
+				})
+				return null
+			}
+			const folder = buildDesktopFolder(stat.directory)
+			const nextFolders = upsertDesktopFolder(desktopFolders, folder)
+			await persistDesktopFolders(nextFolders)
+			setFolderStatuses((previous) => ({
+				...previous,
+				[folder.directory]: "available",
+			}))
+			loadedProjectDirectoriesRef.current.add(folder.directory)
+			await loadProjectSessions(folder.directory)
+			navigate({
+				to: "/project/$projectSlug",
+				params: { projectSlug: desktopFolderProjectSlug(folder) },
+			})
+			return folder
+		} catch (err) {
+			const message = err instanceof Error ? err.message : "Failed to add folder"
+			toast.error("Failed to add folder", { description: message })
+			return null
+		}
+	}, [desktopFolders, navigate, persistDesktopFolders, setFolderStatuses])
+
+	const handleOpenCreateFolder = useCallback(() => {
+		setCreateFolderError(null)
+		setCreateFolderOpen(true)
+	}, [])
+
+	const handlePickCreateFolderParent = useCallback(async () => {
+		const directory = await pickDirectory()
+		if (directory) setCreateFolderParent(directory)
+	}, [])
+
+	const handleCreateFolderDialogOpenChange = useCallback((open: boolean) => {
+		if (open) {
+			setCreateFolderOpen(true)
+			return
+		}
+		if (createFolderPending) return
+		setCreateFolderOpen(false)
+		setCreateFolderError(null)
+	}, [createFolderPending])
+
+	const handleConfirmCreateFolder = useCallback(async () => {
+		if (createFolderPending) return
+		const parentDirectory = createFolderParent.trim()
+		const name = createFolderName.trim()
+		if (!parentDirectory || !name) {
+			setCreateFolderError("Choose a parent directory and enter a folder name.")
+			return
+		}
+		setCreateFolderPending(true)
+		setCreateFolderError(null)
+		try {
+			const created = await createDesktopFolder({ parentDirectory, name })
+			const folder = buildDesktopFolder(created.directory, created.name)
+			const nextFolders = upsertDesktopFolder(desktopFolders, folder)
+			await persistDesktopFolders(nextFolders)
+			setFolderStatuses((previous) => ({
+				...previous,
+				[folder.directory]: "available",
+			}))
+			loadedProjectDirectoriesRef.current.add(folder.directory)
+			await loadProjectSessions(folder.directory)
+			setCreateFolderOpen(false)
+			setCreateFolderParent("")
+			setCreateFolderName("")
+			navigate({
+				to: "/project/$projectSlug",
+				params: { projectSlug: desktopFolderProjectSlug(folder) },
+			})
+		} catch (err) {
+			const message = err instanceof Error ? err.message : "Failed to create folder"
+			setCreateFolderError(message)
+		} finally {
+			setCreateFolderPending(false)
+		}
+	}, [
+		createFolderName,
+		createFolderParent,
+		createFolderPending,
+		desktopFolders,
+		navigate,
+		persistDesktopFolders,
+		setFolderStatuses,
+	])
+
+	const handleRemoveFolder = useCallback(
+		async (project: SidebarProject) => {
+			const nextFolders = removeDesktopFolder(desktopFolders, project.directory)
+			await persistDesktopFolders(nextFolders)
+			setFolderStatuses((previous) => {
+				const next = { ...previous }
+				delete next[normalizeDesktopFolderDirectory(project.directory)]
+				return next
+			})
+			loadedProjectDirectoriesRef.current.delete(normalizeDesktopFolderDirectory(project.directory))
+			if (projectSlug === project.slug) {
+				navigate({ to: "/" })
+			}
+		},
+		[desktopFolders, navigate, persistDesktopFolders, projectSlug, setFolderStatuses],
+	)
 
 	return (
 		<div
@@ -245,61 +471,89 @@ export function SidebarLayout() {
 				} as React.CSSProperties
 			}
 		>
-			<SidebarProvider embedded defaultOpen={true}>
-				<NarrowWindowCollapser />
-				<Sidebar collapsible="offcanvas" variant="sidebar">
-					{/* Sidebar header -- reserves space to match the app bar height so
-					 * sidebar content aligns with the main content area. Also clears
-					 * the traffic lights + the absolutely-positioned toggle button. */}
-					<SidebarHeader
-						className="flex-row items-center gap-1 shrink-0 transition-colors duration-150"
-						style={{
-							height: APP_BAR_HEIGHT,
-							// Make header draggable on Electron (acts as title bar above sidebar)
-							// @ts-expect-error -- vendor-prefixed CSS property
-							WebkitAppRegion: "drag",
-						}}
-					/>
-					{slotContent ?? (
-					<AppSidebarContent
-						agents={visibleAgents}
-						projects={projects}
-						onOpenCommandPalette={handleOpenCommandPalette}
-						onAddProject={handleAddProject}
-						onRenameSession={handleRenameSession}
-						onDeleteSession={handleDeleteSession}
-						onForkSession={handleForkSession}
-						serverConnected={serverConnected}
-					/>
-					)}
-					{/* Footer: false = hide, ReactNode = render it, null = let default handle it.
-					 * When default sidebar is active, AppSidebarContent renders its own footer. */}
-					{slotFooter !== false && slotFooter}
-				</Sidebar>
-				<SidebarInset data-transcript-titlebar-fill={transcriptTitlebarFillAttr}>
-					<UpdateBanner />
-					{!transcriptFillsTitlebar && <AppBar />}
-					{/* Flex-1 + min-h-0 wrapper: pages use h-full which would
-					    resolve to 100% of SidebarInset. This container takes
-					    remaining space after the optional AppBar and constrains
-					    page content correctly. */}
-					<div
-						data-slot="content-area"
-						data-transcript-titlebar-fill={transcriptTitlebarFillAttr}
-						className="relative min-h-0 min-w-0 flex-1 overflow-hidden"
-					>
-						<Outlet />
-					</div>
-					<DesktopTerminalPanel
-						open={terminalPanelOpen}
-						directory={terminalDirectory}
-						onOpenChange={setTerminalPanelOpen}
-					/>
-				</SidebarInset>
-				{/* Rendered last so it paints on top of the sidebar and app bar,
-				    whose transition properties create stacking contexts. */}
-				<WindowControls />
-			</SidebarProvider>
+			<DesktopProjectActionsProvider
+				startFromScratch={handleOpenCreateFolder}
+				useExistingFolder={handleAddProject}
+			>
+				<SidebarProvider embedded defaultOpen={true}>
+					<NarrowWindowCollapser />
+					<Sidebar collapsible="offcanvas" variant="sidebar">
+						{/* Sidebar header -- reserves space to match the app bar height so
+						 * sidebar content aligns with the main content area. Also clears
+						 * the traffic lights + the absolutely-positioned toggle button. */}
+						<SidebarHeader
+							className="flex-row items-center gap-1 shrink-0 transition-colors duration-150"
+							style={{
+								height: APP_BAR_HEIGHT,
+								// Make header draggable on Electron (acts as title bar above sidebar)
+								// @ts-expect-error -- vendor-prefixed CSS property
+								WebkitAppRegion: "drag",
+							}}
+						/>
+						{slotContent ?? (
+							<>
+								<AppSidebarContent
+									agents={visibleAgents}
+									projects={projects}
+									onOpenCommandPalette={handleOpenCommandPalette}
+									onCreateFolder={handleOpenCreateFolder}
+									onAddProject={handleAddProject}
+									onRemoveProject={handleRemoveFolder}
+									onRenameSession={handleRenameSession}
+									onDeleteSession={handleDeleteSession}
+									onForkSession={handleForkSession}
+								/>
+								<CreateFolderDialog
+									open={createFolderOpen}
+									parentDirectory={createFolderParent}
+									name={createFolderName}
+									pending={createFolderPending}
+									error={createFolderError}
+									onOpenChange={handleCreateFolderDialogOpenChange}
+									onPickParent={handlePickCreateFolderParent}
+									onParentDirectoryChange={setCreateFolderParent}
+									onNameChange={setCreateFolderName}
+									onSubmit={handleConfirmCreateFolder}
+								/>
+								<SessionDeleteDialog
+									agent={deleteTarget}
+									open={!!deleteTarget}
+									pending={deletePending}
+									error={deleteError}
+									onOpenChange={handleDeleteDialogOpenChange}
+									onConfirm={handleConfirmDeleteSession}
+								/>
+							</>
+						)}
+						{/* Footer: false = hide, ReactNode = render it, null = let default handle it.
+						 * When default sidebar is active, AppSidebarContent renders its own footer. */}
+						{slotFooter !== false && slotFooter}
+					</Sidebar>
+					<SidebarInset data-transcript-titlebar-fill={transcriptTitlebarFillAttr}>
+						<UpdateBanner />
+						{!transcriptFillsTitlebar && <AppBar />}
+						{/* Flex-1 + min-h-0 wrapper: pages use h-full which would
+						    resolve to 100% of SidebarInset. This container takes
+						    remaining space after the optional AppBar and constrains
+						    page content correctly. */}
+						<div
+							data-slot="content-area"
+							data-transcript-titlebar-fill={transcriptTitlebarFillAttr}
+							className="relative min-h-0 min-w-0 flex-1 overflow-hidden"
+						>
+							<Outlet />
+						</div>
+						<DesktopTerminalPanel
+							open={terminalPanelOpen}
+							directory={terminalDirectory}
+							onOpenChange={setTerminalPanelOpen}
+						/>
+					</SidebarInset>
+					{/* Rendered last so it paints on top of the sidebar and app bar,
+					    whose transition properties create stacking contexts. */}
+					<WindowControls />
+				</SidebarProvider>
+			</DesktopProjectActionsProvider>
 		</div>
 	)
 }

@@ -67,6 +67,7 @@ import type { ChatTurn } from "../../hooks/use-session-chat"
 import { createLogger } from "../../lib/logger"
 import { computeTurnWorkTimeSplit, formatWorkDuration } from "../../lib/session-metrics"
 import type { Agent, FileAttachment, FilePart, QuestionAnswer, TextPart } from "../../lib/types"
+import { persistRuntimeModelConfigOption, persistRuntimeModelSelection } from "../../lib/model-config-options"
 import { getProjectClient } from "../../services/connection-manager"
 
 const log = createLogger("chat-view")
@@ -1154,9 +1155,25 @@ function ChatInputSection({
 		(model: ModelRef | null) => {
 			setSelectedModel(model)
 			setSelectedVariant(undefined)
-			if (model) addRecentModel(model)
+			if (!model) return
+			addRecentModel(model)
+			if (!agent.directory) return
+			void persistRuntimeModelSelection(agent.directory, model).catch((err) => {
+				console.error("Failed to persist model selection:", err)
+			})
 		},
-		[addRecentModel],
+		[addRecentModel, agent.directory],
+	)
+
+	const handleVariantSelect = useCallback(
+		(variant: string | undefined) => {
+			setSelectedVariant(variant)
+			if (!variant || !agent.directory) return
+			void persistRuntimeModelConfigOption(agent.directory, "thought_level", variant).catch((err) => {
+				console.error("Failed to persist reasoning effort selection:", err)
+			})
+		},
+		[agent.directory],
 	)
 
 	const slashCommandRef = useRef<{
@@ -1626,7 +1643,7 @@ function ChatInputSection({
 												hasModelOverride={!!selectedModel}
 												onSelectModel={handleModelSelect}
 												selectedVariant={selectedVariant}
-												onSelectVariant={setSelectedVariant}
+												onSelectVariant={handleVariantSelect}
 												disabled={!isConnected}
 											/>
 										</PromptInputTools>

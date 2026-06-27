@@ -21,12 +21,10 @@ import {
 import { cn } from "@devo/ui/lib/utils"
 import { useNavigate } from "@tanstack/react-router"
 import {
-	AlertCircleIcon,
 	ArchiveIcon,
 	ArrowUpRightIcon,
 	ChevronDownIcon,
 	ChevronRightIcon,
-	CheckCircle2Icon,
 	FolderClosedIcon,
 	FolderOpenIcon,
 	GitForkIcon,
@@ -35,7 +33,6 @@ import {
 	PencilIcon,
 	PenLineIcon,
 	PinIcon,
-	TimerIcon,
 	TrashIcon,
 } from "lucide-react"
 import {
@@ -64,15 +61,6 @@ import {
 	sessionMenuContentClass,
 } from "./sidebar-menu-styles"
 
-const STATUS_ICON: Record<AgentStatus, typeof Loader2Icon> = {
-	running: Loader2Icon,
-	waiting: TimerIcon,
-	paused: CheckCircle2Icon,
-	completed: CheckCircle2Icon,
-	failed: AlertCircleIcon,
-	idle: CheckCircle2Icon,
-}
-
 function useLiveLastActive(lastActiveAt: number): string {
 	const [display, setDisplay] = useState(() => formatRelativeTime(lastActiveAt))
 
@@ -89,6 +77,47 @@ function statusIndicatorClass(status: AgentStatus): string {
 	if (status === "failed") return "bg-destructive"
 	if (status === "running" || status === "waiting") return "bg-[#3396f4]"
 	return "bg-transparent"
+}
+
+function SessionRowStatusIndicator({
+	agent,
+	lastActive,
+	isWorktree,
+}: {
+	agent: Agent
+	lastActive: string
+	isWorktree: boolean
+}) {
+	if (agent.status === "waiting") {
+		return (
+			<>
+				<span className={cn("size-2 rounded-full", statusIndicatorClass(agent.status))} />
+				{isWorktree && <GitForkIcon className="size-3.5 text-muted-foreground" />}
+			</>
+		)
+	}
+	if (agent.status === "running") {
+		return (
+			<>
+				<Loader2Icon className="size-3.5 animate-spin text-[#3396f4]" aria-hidden="true" />
+				{isWorktree && <GitForkIcon className="size-3.5 text-muted-foreground" />}
+			</>
+		)
+	}
+	if (agent.status === "failed") {
+		return (
+			<>
+				<span className={cn("size-2 rounded-full", statusIndicatorClass(agent.status))} />
+				{isWorktree && <GitForkIcon className="size-3.5 text-muted-foreground" />}
+			</>
+		)
+	}
+	return (
+		<>
+			{lastActive}
+			{isWorktree && <GitForkIcon className="size-3.5 text-muted-foreground" />}
+		</>
+	)
 }
 
 const rowMenuIconClass = optionMenuIconClass
@@ -242,6 +271,7 @@ export const ProjectRow = memo(function ProjectRow({
 	onNewChat,
 	onRevealInFinder,
 	onRemoveProject,
+	isUnavailable,
 }: {
 	project: SidebarProject
 	isSelected: boolean
@@ -253,6 +283,7 @@ export const ProjectRow = memo(function ProjectRow({
 	onNewChat?: () => void
 	onRevealInFinder?: () => void
 	onRemoveProject?: () => void
+	isUnavailable?: boolean
 }) {
 	const actions = buildProjectRowActions({ canRevealInFinder: !!onRevealInFinder })
 	const handleAction = useCallback(
@@ -289,10 +320,13 @@ export const ProjectRow = memo(function ProjectRow({
 
 	return (
 		<div
+			aria-disabled={isUnavailable || undefined}
+			data-folder-unavailable={isUnavailable || undefined}
 			onClick={onSelect}
 			className={cn(
 				"group/sidebar-row relative flex h-8 w-full items-center rounded-lg text-sidebar-foreground transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]",
 				isSelected && "bg-black/[0.07] dark:bg-white/[0.08]",
+				isUnavailable && "text-muted-foreground opacity-55",
 			)}
 		>
 			<div className="flex h-full min-w-0 flex-1 items-center pr-[52px]">
@@ -305,7 +339,11 @@ export const ProjectRow = memo(function ProjectRow({
 					className="flex h-full min-w-0 items-center gap-2.5 rounded-lg py-0 pr-1 pl-1.5 text-left text-sm leading-none"
 				>
 					<ProjectFolderIcon
-						className={cn(sidebarPrimaryIconClass, "shrink-0 text-sidebar-foreground/90")}
+						className={cn(
+							sidebarPrimaryIconClass,
+							"shrink-0 text-sidebar-foreground/90",
+							isUnavailable && "text-muted-foreground",
+						)}
 					/>
 					<span className="min-w-0 truncate font-normal tracking-normal">{project.name}</span>
 					{showCount && project.agentCount > 0 && (
@@ -360,6 +398,8 @@ export const SessionRow = memo(function SessionRow({
 	onDelete,
 	onFork,
 	showProject,
+	projectUnavailable,
+	onUnavailableProject,
 }: {
 	agent: Agent
 	isSelected: boolean
@@ -367,24 +407,30 @@ export const SessionRow = memo(function SessionRow({
 	onDelete?: (agent: Agent) => Promise<void>
 	onFork?: (agent: Agent) => Promise<void>
 	showProject?: boolean
+	projectUnavailable?: boolean
+	onUnavailableProject?: () => void
 }) {
 	const navigate = useNavigate()
 	const [, startTransition] = useTransition()
-	const StatusIcon = STATUS_ICON[agent.status]
 	const lastActive = useLiveLastActive(agent.lastActiveAt)
 	const isWorktree = !!agent.worktreePath
+	const hasWideStatusIndicator = false
 	const [isEditing, setIsEditing] = useState(false)
 	const [editValue, setEditValue] = useState(agent.name)
 	const inputRef = useRef<HTMLInputElement>(null)
 
 	const onSelect = useCallback(() => {
+		if (projectUnavailable) {
+			onUnavailableProject?.()
+			return
+		}
 		startTransition(() => {
 			navigate({
 				to: "/project/$projectSlug/session/$sessionId",
 				params: { projectSlug: agent.projectSlug, sessionId: agent.id },
 			})
 		})
-	}, [navigate, agent.projectSlug, agent.id])
+	}, [agent.id, agent.projectSlug, navigate, onUnavailableProject, projectUnavailable])
 
 	const startEditing = useCallback(() => {
 		setEditValue(agent.name)
@@ -433,16 +479,22 @@ export const SessionRow = memo(function SessionRow({
 
 	const row = (
 		<div
+			aria-disabled={projectUnavailable || undefined}
+			data-folder-unavailable={projectUnavailable || undefined}
 			className={cn(
 				"group/sidebar-row relative flex min-h-8 w-full items-center rounded-lg text-sidebar-foreground transition-colors",
 				!isSelected && "hover:bg-black/[0.04] dark:hover:bg-white/[0.06]",
 				isSelected && "bg-black/[0.07] dark:bg-white/[0.08]",
+				projectUnavailable && "text-muted-foreground opacity-55",
 			)}
 		>
 			<button
 				type="button"
 				onClick={isEditing ? undefined : onSelect}
-				className="flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-lg py-1 pr-12 pl-[34px] text-left text-sm leading-tight"
+				className={cn(
+					"flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-lg py-1 pl-[34px] text-left text-sm leading-tight",
+					hasWideStatusIndicator ? "pr-28" : "pr-12",
+				)}
 			>
 				{isEditing ? (
 					<Input
@@ -472,14 +524,13 @@ export const SessionRow = memo(function SessionRow({
 				)}
 			</button>
 			{!isEditing && (
-				<span className="pointer-events-none absolute right-2 top-1/2 flex h-7 min-w-7 -translate-y-1/2 items-center justify-center gap-1.5 rounded-lg px-1 text-[13px] tabular-nums text-muted-foreground transition-opacity duration-150 group-hover/sidebar-row:opacity-0 group-focus-within/sidebar-row:opacity-0">
-					{agent.status === "running" || agent.status === "waiting" || agent.status === "failed" ? (
-						<span className={cn("size-2 rounded-full", statusIndicatorClass(agent.status))} />
-					) : (
-						lastActive
+				<span
+					className={cn(
+						"pointer-events-none absolute right-2 top-1/2 flex h-7 -translate-y-1/2 items-center justify-center gap-1.5 rounded-lg px-1 text-[13px] tabular-nums text-muted-foreground transition-opacity duration-150 group-hover/sidebar-row:opacity-0 group-focus-within/sidebar-row:opacity-0",
+						hasWideStatusIndicator ? "min-w-[86px]" : "min-w-7",
 					)}
-					{isWorktree && <GitForkIcon className="size-3.5 text-muted-foreground" />}
-					<StatusIcon className="sr-only" />
+				>
+					<SessionRowStatusIndicator agent={agent} lastActive={lastActive} isWorktree={isWorktree} />
 				</span>
 			)}
 			{!isEditing && (

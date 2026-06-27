@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import type { SidebarProject } from "../../lib/types"
+import type { Session, SidebarProject } from "../../lib/types"
+import { setSessionStatusAtom, upsertSessionAtom } from "../sessions"
+import { appStore } from "../store"
 import {
+	agentFamily,
 	formatRelativeTime,
 	projectDisplayName,
 	projectNameFromDir,
@@ -106,5 +109,31 @@ describe("relative session time formatting", () => {
 			hours: "2h",
 			days: "3d",
 		})
+	})
+})
+
+describe("agent status derivation", () => {
+	test("keeps idle selected sessions idle and maps active/error statuses for display", () => {
+		const session: Session = {
+			id: "agent-status-session",
+			title: "Status session",
+			directory: "/repo/status",
+			time: { created: 1, updated: 1 },
+		}
+		appStore.set(upsertSessionAtom, { session, directory: "/repo/status" })
+
+		const statuses = [
+			[{ type: "idle" }, "idle"],
+			[{ type: "busy" }, "running"],
+			[{ type: "retry" }, "running"],
+			[{ type: "error" }, "failed"],
+		] as const
+
+		const derived = statuses.map(([status]) => {
+			appStore.set(setSessionStatusAtom, { sessionId: session.id, status })
+			return appStore.get(agentFamily(session.id))?.status
+		})
+
+		expect(derived).toEqual(statuses.map(([, expected]) => expected))
 	})
 })

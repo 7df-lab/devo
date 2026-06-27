@@ -29,7 +29,6 @@ function currentSettings() {
 		appearance: {
 			colorScheme: "dark",
 			themeId: "default",
-			displayMode: "default",
 			rendererPreferencesMigrated: false,
 		},
 		openIn: {
