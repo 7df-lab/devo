@@ -65,7 +65,7 @@ pub fn build_registry_from_plan(config: &ToolPlanConfig) -> crate::registry::Too
     for spec in specs {
         builder.push_spec(spec);
     }
-    build_registry_from_builder(handlers, builder, Vec::new())
+    build_registry_from_builder(handlers, builder, Vec::new(), config)
 }
 
 pub async fn build_registry_from_plan_with_mcp(
@@ -111,13 +111,14 @@ pub async fn build_registry_from_plan_with_mcp(
         ));
     }
 
-    build_registry_from_builder(handlers, builder, mcp_handlers)
+    build_registry_from_builder(handlers, builder, mcp_handlers, config)
 }
 
 fn build_registry_from_builder(
     handlers: Vec<(ToolHandlerKind, String)>,
     mut builder: ToolRegistryBuilder,
     mcp_handlers: Vec<(String, Arc<dyn ToolHandler>)>,
+    config: &ToolPlanConfig,
 ) -> crate::registry::ToolRegistry {
     register_agent_tools(&mut builder);
     builder.push_spec(goal_update_spec());
@@ -133,7 +134,12 @@ fn build_registry_from_builder(
         let handler: Arc<dyn ToolHandler> = match kind {
             ToolHandlerKind::Bash => Arc::new(BashHandler::new()),
             #[cfg(feature = "code-search")]
-            ToolHandlerKind::CodeSearch => Arc::new(CodeSearchHandler::new()),
+            ToolHandlerKind::CodeSearch => Arc::new(CodeSearchHandler::new_with_network_proxy(
+                devo_network_proxy::NetworkProxyConfig {
+                    proxy_url: config.network_proxy.clone(),
+                    no_proxy: config.network_no_proxy.clone(),
+                },
+            )),
             // When the `code-search` feature is disabled the planner never emits
             // this handler kind (see registry_plan), so the arm is unreachable.
             #[cfg(not(feature = "code-search"))]

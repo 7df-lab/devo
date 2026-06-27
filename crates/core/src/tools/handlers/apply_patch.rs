@@ -138,6 +138,7 @@ mod tests {
                     client_filesystem: None,
                     client_terminal: None,
                     network_proxy: None,
+                    network_no_proxy: None,
                 },
                 serde_json::json!({
                     "patchText": "*** Begin Patch\n*** Add File: file.txt\n+hello\n*** End Patch"

@@ -956,24 +956,24 @@ impl ServerRuntime {
             self.clear_active_turn_runtime_handles(session_id).await;
             return;
         };
-        let (permission_mode, permission_profile, registry, network_proxy) = {
+        let (permission_mode, permission_profile, registry, network_proxy, network_no_proxy) = {
             let session = session_arc.lock().await;
             let registry = self.tool_registry_for_session(&session);
             let core_session = session.core_session.lock().await;
-            let network_proxy = session
+            let provider_http = session
                 .runtime_context
                 .config_store
                 .lock()
                 .expect("app config store mutex should not be poisoned")
                 .effective_config()
                 .provider_http
-                .proxy_url
                 .clone();
             (
                 core_session.config.permission_mode,
                 core_session.config.permission_profile.clone(),
                 registry,
-                network_proxy,
+                provider_http.proxy_url,
+                provider_http.no_proxy,
             )
         };
         let turn_cancel_token = self
@@ -1007,6 +1007,7 @@ impl ServerRuntime {
                 local_web_search: None,
                 hooks: self.hook_context_for_session(session_id).await,
                 network_proxy,
+                network_no_proxy,
             },
             ToolExecutionOptions {
                 cancel_token: turn_cancel_token,
@@ -2063,13 +2064,12 @@ impl ServerRuntime {
                 .get(&session_id)
                 .cloned()
                 .unwrap_or_else(CancellationToken::new);
-            let network_proxy = runtime_context
+            let provider_http = runtime_context
                 .config_store
                 .lock()
                 .expect("app config store mutex should not be poisoned")
                 .effective_config()
                 .provider_http
-                .proxy_url
                 .clone();
             let runtime = ToolRuntime::new_with_context_and_options(
                 Arc::clone(&registry),
@@ -2095,7 +2095,8 @@ impl ServerRuntime {
                         | devo_core::ResolvedWebSearchConfig::Provider => None,
                     },
                     hooks: hook_context,
-                    network_proxy,
+                    network_proxy: provider_http.proxy_url,
+                    network_no_proxy: provider_http.no_proxy,
                 },
                 ToolExecutionOptions {
                     cancel_token: turn_cancel_token,

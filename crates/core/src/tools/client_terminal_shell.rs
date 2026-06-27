@@ -432,6 +432,7 @@ mod tests {
             client_filesystem: None,
             client_terminal: Some(client_terminal),
             network_proxy: None,
+            network_no_proxy: None,
         }
     }
 

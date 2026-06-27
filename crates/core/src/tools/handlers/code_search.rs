@@ -25,6 +25,12 @@ impl CodeSearchHandler {
         Self::with_service(Arc::new(CodeSearchService::production()))
     }
 
+    pub fn new_with_network_proxy(network_proxy: devo_network_proxy::NetworkProxyConfig) -> Self {
+        Self::with_service(Arc::new(CodeSearchService::production_with_network_proxy(
+            network_proxy,
+        )))
+    }
+
     pub fn with_service(service: Arc<CodeSearchService>) -> Self {
         let spec = code_search_tool_spec();
         Self { spec, service }
@@ -268,6 +274,7 @@ mod tests {
             client_filesystem: None,
             client_terminal: None,
             network_proxy: None,
+            network_no_proxy: None,
         }
     }
 

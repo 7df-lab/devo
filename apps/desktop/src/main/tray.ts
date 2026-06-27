@@ -22,7 +22,7 @@ import {
 	onStateChanged,
 	type SessionState,
 } from "./notification-watcher"
-import { getAcpTransport, getServerUrl } from "./devo-manager"
+import { getAcpTransport, getServerUrl, onServerReady } from "./devo-manager"
 import { buildCodexStyleTrayMenuTemplate, type DiscoveryCache } from "./tray-menu"
 
 const log = createLogger("tray")
@@ -50,8 +50,10 @@ const LINUX_TRAY_ICON_SIZE = 22
 let tray: Tray | null = null
 let getWindow: (() => BrowserWindow | undefined) | null = null
 let unsubscribeWatcher: (() => void) | null = null
+let unsubscribeServerReady: (() => void) | null = null
 let discoveryCache: DiscoveryCache | null = null
 let discoveryTimer: ReturnType<typeof setInterval> | null = null
+let discoveryRefreshInFlight: Promise<void> | null = null
 
 interface TrayInteractionTarget {
 	on(event: string, listener: (...args: unknown[]) => void): unknown
@@ -87,6 +89,9 @@ export function createTray(windowGetter: () => BrowserWindow | undefined): void 
 	// Subscribe to notification-watcher state changes for live updates
 	unsubscribeWatcher = onStateChanged(() => {
 		rebuildMenu()
+	})
+	unsubscribeServerReady = onServerReady(() => {
+		void refreshDiscovery()
 	})
 
 	// Load discovery data for offline sessions, then refresh periodically
@@ -150,6 +155,10 @@ export function destroyTray(): void {
 	if (unsubscribeWatcher) {
 		unsubscribeWatcher()
 		unsubscribeWatcher = null
+	}
+	if (unsubscribeServerReady) {
+		unsubscribeServerReady()
+		unsubscribeServerReady = null
 	}
 	if (discoveryTimer) {
 		clearInterval(discoveryTimer)
@@ -242,7 +251,15 @@ function updateTrayTitle(
 async function refreshDiscovery(): Promise<void> {
 	const serverUrl = getServerUrl()
 	if (!serverUrl) return
+	if (discoveryRefreshInFlight) return discoveryRefreshInFlight
 
+	discoveryRefreshInFlight = refreshDiscoveryForServer().finally(() => {
+		discoveryRefreshInFlight = null
+	})
+	return discoveryRefreshInFlight
+}
+
+async function refreshDiscoveryForServer(): Promise<void> {
 	try {
 		const client = createDevoClient({ transport: getAcpTransport() })
 		const [projectsResult, sessionsResult] = await Promise.all([

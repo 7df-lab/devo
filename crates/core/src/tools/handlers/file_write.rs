@@ -264,6 +264,7 @@ mod tests {
                     client_filesystem: Some(client_filesystem),
                     client_terminal: None,
                     network_proxy: None,
+                    network_no_proxy: None,
                 },
                 serde_json::json!({
                     "filePath": path.clone(),

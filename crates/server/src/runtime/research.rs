@@ -2233,13 +2233,12 @@ impl ServerRuntime {
                 Arc::clone(&session.runtime_context),
             )
         };
-        let network_proxy = runtime_context
+        let provider_http = runtime_context
             .config_store
             .lock()
             .expect("app config store mutex should not be poisoned")
             .effective_config()
             .provider_http
-            .proxy_url
             .clone();
         let turn_cancel_token = self
             .active_turn_cancellations
@@ -2268,7 +2267,8 @@ impl ServerRuntime {
                     | devo_core::ResolvedWebSearchConfig::Provider => None,
                 },
                 hooks: self.hook_context_for_session(session_id).await,
-                network_proxy,
+                network_proxy: provider_http.proxy_url,
+                network_no_proxy: provider_http.no_proxy,
             },
             ToolExecutionOptions {
                 cancel_token: turn_cancel_token,

@@ -102,9 +102,13 @@ impl ToolHandler for WebFetchHandler {
             _ => "*/*",
         };
 
-        let client = devo_network_proxy::apply_proxy(
+        let proxy_config = devo_network_proxy::NetworkProxyConfig {
+            proxy_url: ctx.network_proxy.clone(),
+            no_proxy: ctx.network_no_proxy.clone(),
+        };
+        let client = devo_network_proxy::apply_proxy_config(
             reqwest::Client::builder(),
-            ctx.network_proxy.as_deref(),
+            &proxy_config,
         )
         .map_err(|e| {
             ToolCallError::ExecutionFailed(format!("Failed to configure HTTP proxy: {e}"))

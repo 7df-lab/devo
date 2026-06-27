@@ -111,6 +111,7 @@ pub(crate) async fn run_prompt(
                 },
             }),
             network_proxy: None,
+            network_no_proxy: None,
         },
     );
     let provider = Arc::new(RoutedPromptProvider::new(

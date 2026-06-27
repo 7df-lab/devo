@@ -96,10 +96,24 @@ impl ToolHandler for WebSearchHandler {
 
         let response = match config.kind {
             LocalWebSearchProviderKind::Exa => {
-                search_exa(&config, query, max_results, ctx.network_proxy.as_deref()).await?
+                search_exa(
+                    &config,
+                    query,
+                    max_results,
+                    ctx.network_proxy.clone(),
+                    ctx.network_no_proxy.clone(),
+                )
+                .await?
             }
             LocalWebSearchProviderKind::Tavily => {
-                search_tavily(&config, query, max_results, ctx.network_proxy.as_deref()).await?
+                search_tavily(
+                    &config,
+                    query,
+                    max_results,
+                    ctx.network_proxy.clone(),
+                    ctx.network_no_proxy.clone(),
+                )
+                .await?
             }
         };
 
@@ -114,10 +128,15 @@ async fn search_exa(
     config: &ResolvedLocalWebSearchConfig,
     query: &str,
     max_results: u32,
-    network_proxy: Option<&str>,
+    network_proxy: Option<String>,
+    network_no_proxy: Option<String>,
 ) -> Result<String, ToolCallError> {
     let url = config.base_url.as_deref().unwrap_or(DEFAULT_EXA_BASE_URL);
-    let client = devo_network_proxy::build_client(network_proxy).map_err(|error| {
+    let proxy_config = devo_network_proxy::NetworkProxyConfig {
+        proxy_url: network_proxy,
+        no_proxy: network_no_proxy,
+    };
+    let client = devo_network_proxy::build_client_config(&proxy_config).map_err(|error| {
         ToolCallError::ExecutionFailed(format!("Failed to create HTTP client: {error}"))
     })?;
     let response = client
@@ -141,13 +160,18 @@ async fn search_tavily(
     config: &ResolvedLocalWebSearchConfig,
     query: &str,
     max_results: u32,
-    network_proxy: Option<&str>,
+    network_proxy: Option<String>,
+    network_no_proxy: Option<String>,
 ) -> Result<String, ToolCallError> {
     let url = config
         .base_url
         .as_deref()
         .unwrap_or(DEFAULT_TAVILY_BASE_URL);
-    let client = devo_network_proxy::build_client(network_proxy).map_err(|error| {
+    let proxy_config = devo_network_proxy::NetworkProxyConfig {
+        proxy_url: network_proxy,
+        no_proxy: network_no_proxy,
+    };
+    let client = devo_network_proxy::build_client_config(&proxy_config).map_err(|error| {
         ToolCallError::ExecutionFailed(format!("Failed to create HTTP client: {error}"))
     })?;
     let response = client
@@ -395,9 +419,15 @@ mod tests {
             max_results: Some(1),
         };
 
-        let text = search_tavily(&config, "who is Leo Messi?", 1, /*network_proxy*/ None)
-            .await
-            .expect("Tavily search should succeed");
+        let text = search_tavily(
+            &config,
+            "who is Leo Messi?",
+            1,
+            /*network_proxy*/ None,
+            /*network_no_proxy*/ None,
+        )
+        .await
+        .expect("Tavily search should succeed");
         let request = capture.await.expect("capture request");
         let body: Value = serde_json::from_str(&request.body).expect("request body JSON");
 
@@ -459,6 +489,7 @@ mod tests {
             "Rust programming language official website",
             2,
             /*network_proxy*/ None,
+            /*network_no_proxy*/ None,
         )
         .await
         .expect("Exa live search should succeed");
@@ -481,9 +512,15 @@ mod tests {
             max_results: Some(1),
         };
 
-        let text = search_tavily(&config, "who is Leo Messi?", 1, /*network_proxy*/ None)
-            .await
-            .expect("Tavily live search should succeed");
+        let text = search_tavily(
+            &config,
+            "who is Leo Messi?",
+            1,
+            /*network_proxy*/ None,
+            /*network_no_proxy*/ None,
+        )
+        .await
+        .expect("Tavily live search should succeed");
 
         assert!(text.contains("Search results for: who is Leo Messi?"));
         assert!(text.contains("]("));

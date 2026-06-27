@@ -50,6 +50,8 @@ pub struct ToolPlanConfig {
     pub code_search: bool,
     pub web_search: bool,
     pub web_fetch: bool,
+    pub network_proxy: Option<String>,
+    pub network_no_proxy: Option<String>,
 }
 
 impl ToolPlanConfig {
@@ -58,6 +60,8 @@ impl ToolPlanConfig {
             web_search: app_config_uses_local_web_search(config),
             web_fetch: app_config_uses_local_web_fetch(config),
             code_search: config.experimental.code_search,
+            network_proxy: config.provider_http.proxy_url.clone(),
+            network_no_proxy: config.provider_http.no_proxy.clone(),
             ..Self::default()
         }
     }
@@ -79,6 +83,8 @@ impl Default for ToolPlanConfig {
             code_search: true,
             web_search: false,
             web_fetch: true,
+            network_proxy: None,
+            network_no_proxy: None,
         }
     }
 }

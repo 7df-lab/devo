@@ -14,6 +14,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use devo_network_proxy::NetworkProxyConfig;
+
 use crate::cache::{cache_file_path, default_cache_dir, load_payload, save_payload};
 use crate::dense::{EmbeddingProvider, Model2VecEmbeddingProvider};
 use crate::files::{FileEntry, discover_files};
@@ -46,8 +48,13 @@ pub struct CodeSearchService {
 impl CodeSearchService {
     /// Creates the production service with the default local model cache.
     pub fn production() -> Self {
+        Self::production_with_network_proxy(NetworkProxyConfig::default())
+    }
+
+    /// Creates the production service with an explicit network proxy policy.
+    pub fn production_with_network_proxy(network_proxy: NetworkProxyConfig) -> Self {
         Self::new(
-            Arc::new(Model2VecEmbeddingProvider::default()),
+            Arc::new(Model2VecEmbeddingProvider::default_cached_with_network_proxy(network_proxy)),
             default_cache_dir(),
         )
     }

@@ -10,7 +10,9 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use devo_network_proxy::NetworkProxyConfig;
 use devo_util_paths::find_devo_home;
+use hf_hub::HFClient;
 use hf_hub::HFClientSync;
 use model2vec::model::Model2Vec;
 use sha2::{Digest, Sha256};
@@ -49,16 +51,23 @@ pub trait EmbeddingProvider: Send + Sync {
 pub struct Model2VecEmbeddingProvider {
     model_id: String,
     model_dir: PathBuf,
+    network_proxy: NetworkProxyConfig,
     model: Mutex<Option<Model2Vec>>,
 }
 
 impl Model2VecEmbeddingProvider {
     /// Creates a provider that uses Devo's default local model cache.
     pub fn default_cached() -> Self {
+        Self::default_cached_with_network_proxy(NetworkProxyConfig::default())
+    }
+
+    /// Creates a provider that uses Devo's default local model cache and HTTP policy.
+    pub fn default_cached_with_network_proxy(network_proxy: NetworkProxyConfig) -> Self {
         let model_dir = default_model_cache_dir();
         Self {
             model_id: DEFAULT_MODEL_ID.to_string(),
             model_dir,
+            network_proxy,
             model: Mutex::new(None),
         }
     }
@@ -68,7 +77,7 @@ impl Model2VecEmbeddingProvider {
     /// `normalize_from_config` is left to the model config so the provider stays
     /// aligned with upstream model metadata.
     fn load_model(&self) -> Result<Model2Vec, CodeSearchError> {
-        ensure_model_files(&self.model_dir)?;
+        ensure_model_files(&self.model_dir, &self.network_proxy)?;
         let normalize_from_config = None;
         let subdir = None;
         Model2Vec::from_pretrained(&self.model_dir, normalize_from_config, subdir)
@@ -213,7 +222,10 @@ fn finish_cosine_similarity(dot: f32, left_norm: f32, right_norm: f32) -> f32 {
 /// The check is all-or-download so a partially populated cache is repaired on
 /// demand. If the final files are still missing, callers receive a typed model
 /// error that can be shown as a recoverable tool failure.
-fn ensure_model_files(model_dir: &PathBuf) -> Result<(), CodeSearchError> {
+fn ensure_model_files(
+    model_dir: &PathBuf,
+    network_proxy: &NetworkProxyConfig,
+) -> Result<(), CodeSearchError> {
     if MODEL_FILES
         .iter()
         .all(|file| model_dir.join(file).is_file())
@@ -221,8 +233,7 @@ fn ensure_model_files(model_dir: &PathBuf) -> Result<(), CodeSearchError> {
         return Ok(());
     }
     std::fs::create_dir_all(model_dir)?;
-    let client = HFClientSync::new()
-        .map_err(|error| CodeSearchError::ModelUnavailable(error.to_string()))?;
+    let client = build_hf_client(network_proxy)?;
     let repo = client.model(DEFAULT_MODEL_OWNER, DEFAULT_MODEL_NAME);
     for file in MODEL_FILES {
         repo.download_file()
@@ -242,6 +253,36 @@ fn ensure_model_files(model_dir: &PathBuf) -> Result<(), CodeSearchError> {
             model_dir.display()
         )))
     }
+}
+
+fn build_hf_client(network_proxy: &NetworkProxyConfig) -> Result<HFClientSync, CodeSearchError> {
+    let Some(proxy_url) = non_empty(network_proxy.proxy_url.as_deref()) else {
+        return HFClientSync::new()
+            .map_err(|error| CodeSearchError::ModelUnavailable(error.to_string()));
+    };
+
+    let no_proxy =
+        non_empty(network_proxy.no_proxy.as_deref()).and_then(reqwest_hf::NoProxy::from_string);
+    let proxy = reqwest_hf::Proxy::all(proxy_url)
+        .map_err(|error| {
+            CodeSearchError::ModelUnavailable(format!(
+                "invalid Hugging Face proxy URL `{proxy_url}`: {error}"
+            ))
+        })?
+        .no_proxy(no_proxy);
+    let http_client = reqwest_hf::Client::builder()
+        .proxy(proxy)
+        .build()
+        .map_err(|error| CodeSearchError::ModelUnavailable(error.to_string()))?;
+
+    HFClient::builder()
+        .client(http_client)
+        .build_sync()
+        .map_err(|error| CodeSearchError::ModelUnavailable(error.to_string()))
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 /// Computes the on-disk directory for the default model.
@@ -384,5 +425,27 @@ mod tests {
                 .join(LOCAL_MODELS_DIR)
                 .join("minishlab--potion-code-16M")
         );
+    }
+
+    #[test]
+    fn hf_client_builder_accepts_configured_proxy_and_no_proxy() {
+        let config = devo_network_proxy::NetworkProxyConfig {
+            proxy_url: Some("socks5h://127.0.0.1:7890".to_string()),
+            no_proxy: Some("localhost,127.0.0.1,::1".to_string()),
+        };
+
+        build_hf_client(&config).expect("build proxied hf client");
+    }
+
+    #[test]
+    fn hf_client_builder_rejects_invalid_proxy_url() {
+        let config = devo_network_proxy::NetworkProxyConfig {
+            proxy_url: Some("not a proxy url".to_string()),
+            no_proxy: None,
+        };
+
+        let error = build_hf_client(&config).expect_err("invalid proxy should fail");
+
+        assert!(error.to_string().contains("invalid Hugging Face proxy URL"));
     }
 }

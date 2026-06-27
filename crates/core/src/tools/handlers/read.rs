@@ -232,6 +232,7 @@ mod tests {
                     client_filesystem: None,
                     client_terminal: None,
                     network_proxy: None,
+                    network_no_proxy: None,
                 },
                 serde_json::json!({
                     "filePath": "sample.txt",

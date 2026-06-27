@@ -5,6 +5,33 @@ const createdImagePaths: string[] = []
 const resizedImages: Array<{ height: number; width: number }> = []
 const templateImageFlags: boolean[] = []
 const trayInstances: FakeElectronTray[] = []
+const serverReadyListeners: Array<() => void> = []
+const sessionListParams: unknown[] = []
+
+let serverUrl: string | null = null
+let discoveredSessions: unknown[] = []
+let sessionListGate: Promise<void> | null = null
+
+const fakeAcpTransport = {
+	request: async (method: string, params?: unknown) => {
+		if (method === "initialize") {
+			return {
+				protocolVersion: 1,
+				agentCapabilities: {},
+				authMethods: [],
+			}
+		}
+		if (method === "session/list") {
+			sessionListParams.push(params)
+			if (sessionListGate) await sessionListGate
+			return { sessions: discoveredSessions }
+		}
+		throw new Error(`unexpected request ${method}`)
+	},
+	respond: async () => {},
+	subscribe: () => () => {},
+	connected: () => true,
+}
 
 class FakeNativeImage {
 	constructor(readonly imagePath: string) {}
@@ -67,8 +94,15 @@ mock.module("electron", () => ({
 }))
 
 mock.module("./devo-manager", () => ({
-	getAcpTransport: () => undefined,
-	getServerUrl: () => null,
+	getAcpTransport: () => fakeAcpTransport,
+	getServerUrl: () => serverUrl,
+	onServerReady: (listener: () => void) => {
+		serverReadyListeners.push(listener)
+		return () => {
+			const index = serverReadyListeners.indexOf(listener)
+			if (index >= 0) serverReadyListeners.splice(index, 1)
+		}
+	},
 }))
 
 mock.module("./notification-watcher", () => ({
@@ -101,6 +135,11 @@ beforeEach(() => {
 	resizedImages.length = 0
 	templateImageFlags.length = 0
 	trayInstances.length = 0
+	serverReadyListeners.length = 0
+	sessionListParams.length = 0
+	serverUrl = null
+	discoveredSessions = []
+	sessionListGate = null
 })
 
 afterEach(async () => {
@@ -172,5 +211,69 @@ describe("createTray", () => {
 		expect(resizedImages).toEqual([{ height: 18, width: 18 }])
 		expect(templateImageFlags).toEqual([])
 		expect(trayInstances).toHaveLength(1)
+	})
+
+	test("does not populate Recent when the tray is created before server readiness", async () => {
+		const { createTray } = await import("./tray")
+
+		createTray(() => undefined)
+		await new Promise((resolve) => setTimeout(resolve, 0))
+
+		expect(sessionListParams).toEqual([])
+		expect(
+			(trayInstances[0].contextMenu as Array<{ label?: string }>).map((item) => item.label),
+		).not.toContain("Recent")
+	})
+
+	test("refreshes Recent immediately when the managed server becomes ready", async () => {
+		const { createTray } = await import("./tray")
+		discoveredSessions = [
+			{
+				sessionId: "ready-session",
+				title: "Ready from server",
+				cwd: "/repo",
+				updatedAt: "1970-01-01T00:00:02.000Z",
+			},
+		]
+
+		createTray(() => undefined)
+		serverUrl = "stdio://local"
+		serverReadyListeners[0]()
+		await new Promise((resolve) => setTimeout(resolve, 0))
+
+		expect(sessionListParams).toHaveLength(2)
+		expect(
+			(trayInstances[0].contextMenu as Array<{ label?: string }>).map((item) => item.label),
+		).toContain("Ready from server")
+	})
+
+	test("does not overlap server-ready tray discovery refreshes", async () => {
+		const { createTray } = await import("./tray")
+		let releaseSessionList: () => void = () => {}
+		sessionListGate = new Promise((resolve) => {
+			releaseSessionList = resolve
+		})
+
+		createTray(() => undefined)
+		serverUrl = "stdio://local"
+		serverReadyListeners[0]()
+		serverReadyListeners[0]()
+		await new Promise((resolve) => setTimeout(resolve, 0))
+
+		expect(sessionListParams).toHaveLength(2)
+
+		releaseSessionList()
+		await new Promise((resolve) => setTimeout(resolve, 0))
+	})
+
+	test("unsubscribes the server-ready listener when the tray is destroyed", async () => {
+		const { createTray, destroyTray } = await import("./tray")
+
+		createTray(() => undefined)
+		expect(serverReadyListeners).toHaveLength(1)
+
+		destroyTray()
+
+		expect(serverReadyListeners).toHaveLength(0)
 	})
 })

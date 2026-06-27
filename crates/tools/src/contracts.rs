@@ -54,6 +54,7 @@ pub struct ToolContext {
     pub client_filesystem: Option<Arc<dyn ClientFilesystem>>,
     pub client_terminal: Option<Arc<dyn ClientTerminal>>,
     pub network_proxy: Option<String>,
+    pub network_no_proxy: Option<String>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -83,6 +84,10 @@ impl std::fmt::Debug for ToolContext {
             .field(
                 "network_proxy",
                 &self.network_proxy.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "network_no_proxy",
+                &self.network_no_proxy.as_ref().map(|_| "<configured>"),
             )
             .finish_non_exhaustive()
     }

@@ -303,6 +303,7 @@ impl ToolRuntime {
             client_filesystem: self.context.client_filesystem.clone(),
             client_terminal: self.context.client_terminal.clone(),
             network_proxy: self.context.network_proxy.clone(),
+            network_no_proxy: self.context.network_no_proxy.clone(),
         };
 
         let (progress_sender, progress_task) = match on_progress {
@@ -497,6 +498,7 @@ pub struct ToolRuntimeContext {
     pub local_web_search: Option<ResolvedLocalWebSearchConfig>,
     pub hooks: Option<crate::hooks::HookRuntimeContext>,
     pub network_proxy: Option<String>,
+    pub network_no_proxy: Option<String>,
 }
 
 impl std::fmt::Debug for ToolRuntimeContext {
@@ -531,6 +533,10 @@ impl std::fmt::Debug for ToolRuntimeContext {
             .field(
                 "network_proxy",
                 &self.network_proxy.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "network_no_proxy",
+                &self.network_no_proxy.as_ref().map(|_| "<configured>"),
             )
             .finish()
     }
@@ -1244,6 +1250,7 @@ mod tests {
                 local_web_search: None,
                 hooks: None,
                 network_proxy: None,
+                network_no_proxy: None,
             },
         );
         let call = ToolCall {
