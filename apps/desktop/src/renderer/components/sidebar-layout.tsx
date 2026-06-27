@@ -13,7 +13,6 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
 import { Outlet, useNavigate, useParams, useRouterState } from "@tanstack/react-router"
 import { useAtom, useAtomValue, useSetAtom } from "jotai"
-import { PanelLeftIcon } from "lucide-react"
 import { type MouseEvent, useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import type { DesktopFolder, DesktopFolderStatus } from "../../preload/api"
@@ -38,6 +37,7 @@ import { loadProjectSessions } from "../services/connection-manager"
 import { APP_BAR_HEIGHT, AppBar } from "./app-bar"
 import { DesktopProjectActionsProvider } from "./desktop-project-actions-context"
 import { DesktopTerminalPanel } from "./desktop-terminal-panel"
+import { LeftPanelIcon } from "./panel-icons"
 import { AppSidebarContent } from "./sidebar"
 import {
 	SessionDeleteDialog,
@@ -58,6 +58,7 @@ const isWindowsElectron = isElectronEnv && window.devo.platform === "win32"
 
 /** Pixel offset from the left edge where window controls start */
 const WINDOW_CONTROLS_LEFT = isMac && isElectronEnv ? 93 : 8
+const WINDOW_CONTROLS_TOP = isMac && isElectronEnv ? 7 : 6
 /** Total width reserved for traffic lights or custom titlebar controls */
 const WINDOW_CONTROLS_INSET = isMac && isElectronEnv ? 160 : isWindowsElectron ? 200 : 72
 const WINDOW_CONTROLS_RIGHT_INSET = isWindowsElectron ? 138 : 12
@@ -150,14 +151,15 @@ function AppMenuBar() {
  * Must be rendered inside a SidebarProvider.
  */
 function WindowControls() {
-	const { toggleSidebar } = useSidebar()
+	const { isMobile, open, openMobile, toggleSidebar } = useSidebar()
 	const toggleSidebarShortcut = formatShortcut(["mod", "B"])
+	const sidebarOpen = isMobile ? openMobile : open
 
 	return (
 		<div
 			className="absolute z-50 flex items-center gap-0.5"
 			style={{
-				top: 6,
+				top: WINDOW_CONTROLS_TOP,
 				left: WINDOW_CONTROLS_LEFT,
 				// @ts-expect-error -- vendor-prefixed CSS property
 				WebkitAppRegion: "no-drag",
@@ -175,7 +177,7 @@ function WindowControls() {
 						/>
 					}
 				>
-					<PanelLeftIcon className="size-3.5" />
+					<LeftPanelIcon open={sidebarOpen} className="size-3.5" aria-hidden="true" />
 				</TooltipTrigger>
 				<TooltipContent>Toggle sidebar ({toggleSidebarShortcut})</TooltipContent>
 			</Tooltip>

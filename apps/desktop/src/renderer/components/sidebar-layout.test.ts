@@ -11,4 +11,34 @@ describe("sidebar layout window controls", () => {
 
 		expect(source).toContain('aria-label="Toggle sidebar"')
 	})
+
+	test("sidebar toggle uses the shared panel icon resource", async () => {
+		const source = await readFile(sourcePath, "utf8")
+
+		expect({
+			importsSharedIcon: source.includes('import { LeftPanelIcon } from "./panel-icons"'),
+			rendersSharedIcon: source.includes("<LeftPanelIcon"),
+			replacesLucideIcon: !source.includes("PanelLeftIcon"),
+		}).toEqual({
+			importsSharedIcon: true,
+			rendersSharedIcon: true,
+			replacesLucideIcon: true,
+		})
+	})
+
+	test("sidebar toggle matches macOS traffic light alignment and compact icon scale", async () => {
+		const source = await readFile(sourcePath, "utf8")
+
+		expect({
+			definesMacAlignedTop: source.includes(
+				"const WINDOW_CONTROLS_TOP = isMac && isElectronEnv ? 7 : 6",
+			),
+			usesTopConstant: source.includes("top: WINDOW_CONTROLS_TOP"),
+			usesCompactPanelIcon: source.includes('className="size-3.5"'),
+		}).toEqual({
+			definesMacAlignedTop: true,
+			usesTopConstant: true,
+			usesCompactPanelIcon: true,
+		})
+	})
 })

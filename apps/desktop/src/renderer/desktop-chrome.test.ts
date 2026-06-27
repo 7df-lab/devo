@@ -266,7 +266,30 @@ describe("desktop chrome CSS", () => {
 		});
 	});
 
-	test("collapsed sidebar inset does not keep a left gutter", async () => {
+	test("collapsed sidebar inset overrides every chrome tier left gutter", async () => {
+		const css = await readFile(cssPath, "utf8");
+		const selectors = [
+			':root:not(.electron-transparent):not(.electron-vibrancy) [data-slot="sidebar-wrapper"][data-state="collapsed"] [data-slot="sidebar-inset"]',
+			':root.electron-transparent [data-slot="sidebar-wrapper"][data-state="collapsed"] [data-slot="sidebar-inset"]',
+			':root.electron-vibrancy [data-slot="sidebar-wrapper"][data-state="collapsed"] [data-slot="sidebar-inset"]',
+		];
+
+		expect(
+			selectors.map((selector) => declarationsForSelector(css, selector)),
+		).toEqual([
+			{
+				"margin-left": "0",
+			},
+			{
+				"margin-left": "0",
+			},
+			{
+				"margin-left": "0",
+			},
+		]);
+	});
+
+	test("collapsed sidebar inset still has a broad fallback for unclassified tiers", async () => {
 		const css = await readFile(cssPath, "utf8");
 		const declarations = declarationsForSelector(
 			css,

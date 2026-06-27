@@ -114,7 +114,7 @@ describe("SessionRow", () => {
 			)
 
 			expect({
-				usesTimestamp: markup.includes("2h"),
+				usesTimestamp: markup.includes(">2h<"),
 				usesCachedDuration: markup.includes(">now<"),
 			}).toEqual({
 				usesTimestamp: true,
@@ -189,7 +189,7 @@ describe("SessionRow", () => {
 
 			expect({
 				hasBlueDot: markup.includes("size-2 rounded-full bg-[#3396f4]"),
-				showsRelativeTime: markup.includes("2h"),
+				showsRelativeTime: markup.includes(">2h<"),
 			}).toEqual({
 				hasBlueDot: false,
 				showsRelativeTime: true,
@@ -233,11 +233,11 @@ describe("SessionRow", () => {
 			)
 
 			expect({
-				idleShowsLastActive: idleMarkup.includes("2h"),
+				idleShowsLastActive: idleMarkup.includes(">2h<"),
 				idleSpins: idleMarkup.includes("animate-spin"),
 				runningUsesLoader: runningMarkup.includes("lucide-loader-circle"),
 				runningSpins: runningMarkup.includes("animate-spin"),
-				runningShowsLastActive: runningMarkup.includes("2h"),
+				runningShowsLastActive: runningMarkup.includes(">2h<"),
 			}).toEqual({
 				idleShowsLastActive: true,
 				idleSpins: false,

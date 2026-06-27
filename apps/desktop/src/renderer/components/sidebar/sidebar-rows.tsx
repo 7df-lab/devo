@@ -170,7 +170,7 @@ function ActionMenuItems<TId extends string>({
 				disabled={action.disabled}
 				variant={action.variant}
 				className={rowMenuItemClass}
-				onSelect={(event) => {
+				onClick={(event) => {
 					event.stopPropagation()
 					if (action.disabled) return
 					onAction(action.id)
@@ -251,7 +251,10 @@ function SessionContextMenuItems({
 			<ContextMenuItem
 				variant={action.variant}
 				className={rowMenuItemClass}
-				onSelect={() => onAction(action.id)}
+				onClick={(event) => {
+					event.stopPropagation()
+					onAction(action.id)
+				}}
 			>
 				{sessionActionIcon(action.id)}
 				<span className="min-w-0 flex-1 truncate">{action.label}</span>

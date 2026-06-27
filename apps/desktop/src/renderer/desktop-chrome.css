@@ -46,6 +46,15 @@
 	background: var(--devo-transcript-background);
 }
 
+:root:not(.electron-transparent):not(.electron-vibrancy)
+	[data-slot="sidebar-wrapper"][data-state="collapsed"]
+	[data-slot="sidebar-inset"],
+:root.electron-transparent
+	[data-slot="sidebar-wrapper"][data-state="collapsed"]
+	[data-slot="sidebar-inset"],
+:root.electron-vibrancy
+	[data-slot="sidebar-wrapper"][data-state="collapsed"]
+	[data-slot="sidebar-inset"],
 [data-slot="sidebar-wrapper"][data-state="collapsed"] [data-slot="sidebar-inset"] {
 	margin-left: 0;
 }
