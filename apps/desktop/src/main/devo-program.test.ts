@@ -40,14 +40,40 @@ describe("resolveDevoProgram", () => {
 		expect(program).toBe("/custom/devo")
 	})
 
-	test("falls back to PATH in packaged apps", () => {
+	test("uses bundled runtime in packaged apps", () => {
 		const program = resolveDevoProgram({
 			appPath: "/repo/apps/desktop",
 			env: {},
-			existsSync: () => true,
+			existsSync: (candidate) => candidate === "/Applications/Devo.app/Contents/Resources/runtime/bin/devo",
 			isPackaged: true,
+			resourcesPath: "/Applications/Devo.app/Contents/Resources",
 		})
 
-		expect(program).toBe("devo")
+		expect(program).toBe("/Applications/Devo.app/Contents/Resources/runtime/bin/devo")
+	})
+
+	test("uses bundled Windows runtime executable in packaged apps", () => {
+		const program = resolveDevoProgram({
+			appPath: "/app/resources/app.asar",
+			env: {},
+			existsSync: (candidate) => candidate === "/app/resources/runtime/bin/devo.exe",
+			isPackaged: true,
+			platform: "win32",
+			resourcesPath: "/app/resources",
+		})
+
+		expect(program).toBe("/app/resources/runtime/bin/devo.exe")
+	})
+
+	test("fails clearly when packaged runtime is missing", () => {
+		expect(() =>
+			resolveDevoProgram({
+				appPath: "/repo/apps/desktop",
+				env: {},
+				existsSync: () => false,
+				isPackaged: true,
+				resourcesPath: "/Applications/Devo.app/Contents/Resources",
+			}),
+		).toThrow("Bundled Devo runtime not found")
 	})
 })

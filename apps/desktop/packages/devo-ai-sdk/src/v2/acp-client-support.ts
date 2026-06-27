@@ -188,12 +188,24 @@ export function toolPartFromUpdate(
 }
 
 export function statusFromDevo(status?: string): any {
-	switch (status) {
+	const normalized = status
+		?.replace(/([a-z])([A-Z])/g, "$1_$2")
+		.replace(/-/g, "_")
+		.toLowerCase()
+	switch (normalized) {
+		case "active_turn":
 		case "running":
 		case "busy":
+		case "waiting_client":
 			return { type: "busy" }
 		case "failed":
+		case "error":
 			return { type: "error" }
+		case "idle":
+		case "archived":
+		case "unloaded":
+		case undefined:
+			return { type: "idle" }
 		default:
 			return { type: "idle" }
 	}

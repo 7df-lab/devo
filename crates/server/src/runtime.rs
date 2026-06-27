@@ -57,7 +57,7 @@ use devo_core::tools::ToolRegistry;
 use devo_core::tools::ToolRuntime;
 use devo_core::tools::ToolRuntimeContext;
 use devo_protocol::{
-    WorkspaceChangeAttribution, WorkspaceChangeScope, WorkspaceChangeView,
+    SessionDeletedPayload, WorkspaceChangeAttribution, WorkspaceChangeScope, WorkspaceChangeView,
     WorkspaceChangesReadParams, WorkspaceChangesReadResult, WorkspaceChangesUpdatedPayload,
     WorkspaceDiffDetail,
 };

@@ -384,53 +384,154 @@ impl ServerRuntime {
                 );
             }
         };
-        if self.sessions.lock().await.contains_key(&params.session_id) {
-            self.handle_acp_session_cancel(
-                serde_json::to_value(AcpCancelParams {
-                    session_id: params.session_id,
-                    meta: None,
-                })
-                .expect("serialize ACP cancel params"),
-            )
+        let deleted_session_ids = match self.delete_session_tree(params.session_id).await {
+            Ok(deleted_session_ids) => deleted_session_ids,
+            Err(error) => {
+                return acp_error_response(
+                    request_id,
+                    AcpErrorCode::InternalError,
+                    format!("failed to delete session: {error}"),
+                );
+            }
+        };
+        if !deleted_session_ids.is_empty() {
+            self.broadcast_event(ServerEvent::SessionDeleted(SessionDeletedPayload {
+                session_id: params.session_id,
+                deleted_session_ids,
+            }))
             .await;
         }
-        let removed = self.sessions.lock().await.remove(&params.session_id);
-        let persisted = match self.deps.db.get_session(&params.session_id) {
-            Ok(session) => session,
-            Err(error) => {
-                return acp_error_response(
-                    request_id,
-                    AcpErrorCode::InternalError,
-                    format!("failed to inspect session before delete: {error}"),
-                );
-            }
-        };
-        let deleted_rollout = match self
-            .rollout_store
-            .delete_session_rollouts(&params.session_id)
-        {
-            Ok(deleted) => deleted,
-            Err(error) => {
-                return acp_error_response(
-                    request_id,
-                    AcpErrorCode::InternalError,
-                    format!("failed to delete session rollout: {error}"),
-                );
-            }
-        };
-        if removed.is_none() && persisted.is_none() && !deleted_rollout {
-            return acp_success_response(request_id, AcpDeleteSessionResult::default());
-        }
-        if persisted.is_some()
-            && let Err(error) = self.deps.db.delete_session(&params.session_id)
-        {
-            return acp_error_response(
-                request_id,
-                AcpErrorCode::InternalError,
-                format!("failed to delete session: {error}"),
-            );
-        }
         acp_success_response(request_id, AcpDeleteSessionResult::default())
+    }
+
+    async fn delete_session_tree(
+        self: &Arc<Self>,
+        root_session_id: SessionId,
+    ) -> Result<Vec<SessionId>, String> {
+        let session_ids = self.collect_session_delete_tree(root_session_id).await;
+        for session_id in &session_ids {
+            if self.sessions.lock().await.contains_key(session_id) {
+                self.handle_acp_session_cancel(
+                    serde_json::to_value(AcpCancelParams {
+                        session_id: *session_id,
+                        meta: None,
+                    })
+                    .expect("serialize ACP cancel params"),
+                )
+                .await;
+            }
+        }
+
+        let mut deleted_session_ids = Vec::new();
+        for session_id in session_ids {
+            let removed = self.sessions.lock().await.remove(&session_id);
+            self.clear_deleted_session_runtime_state(session_id).await;
+            let persisted = self
+                .deps
+                .db
+                .get_session(&session_id)
+                .map_err(|error| format!("failed to inspect session before delete: {error}"))?;
+            let deleted_rollout = self
+                .rollout_store
+                .delete_session_rollouts(&session_id)
+                .map_err(|error| format!("failed to delete session rollout: {error}"))?;
+            if persisted.is_some() {
+                self.deps
+                    .db
+                    .clear_pending(&session_id, crate::db::QueueType::Turn)
+                    .map_err(|error| format!("failed to clear pending turn queue: {error}"))?;
+                self.deps
+                    .db
+                    .clear_pending(&session_id, crate::db::QueueType::Btw)
+                    .map_err(|error| format!("failed to clear pending btw queue: {error}"))?;
+                self.deps
+                    .db
+                    .delete_session(&session_id)
+                    .map_err(|error| format!("failed to delete session metadata: {error}"))?;
+            }
+            if removed.is_some() || persisted.is_some() || deleted_rollout {
+                deleted_session_ids.push(session_id);
+            }
+        }
+        Ok(deleted_session_ids)
+    }
+
+    async fn collect_session_delete_tree(&self, root_session_id: SessionId) -> Vec<SessionId> {
+        let session_entries = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .iter()
+                .map(|(session_id, session_arc)| (*session_id, Arc::clone(session_arc)))
+                .collect::<Vec<_>>()
+        };
+        let mut parent_by_session = Vec::new();
+        for (session_id, session_arc) in session_entries {
+            let session = session_arc.lock().await;
+            parent_by_session.push((session_id, session.summary.parent_session_id));
+        }
+        parent_by_session.sort_by_key(|(session_id, _)| session_id.to_string());
+
+        let mut seen = std::collections::HashSet::new();
+        let mut session_ids = Vec::new();
+        seen.insert(root_session_id);
+        session_ids.push(root_session_id);
+        let mut index = 0;
+        while index < session_ids.len() {
+            let parent_session_id = session_ids[index];
+            for (session_id, parent_id) in &parent_by_session {
+                if *parent_id == Some(parent_session_id) && seen.insert(*session_id) {
+                    session_ids.push(*session_id);
+                }
+            }
+            index += 1;
+        }
+        session_ids
+    }
+
+    async fn clear_deleted_session_runtime_state(&self, session_id: SessionId) {
+        if let Some(task) = self.active_tasks.lock().await.remove(&session_id) {
+            task.abort();
+        }
+        if let Some(cancellation) = self
+            .active_turn_cancellations
+            .lock()
+            .await
+            .remove(&session_id)
+        {
+            cancellation.cancel();
+        }
+        self.active_turn_connections
+            .lock()
+            .await
+            .remove(&session_id);
+        if let Some(turn_id) = self
+            .active_goal_continuation_turns
+            .lock()
+            .await
+            .remove(&session_id)
+        {
+            self.goal_continuation_turn_goals
+                .lock()
+                .await
+                .remove(&turn_id);
+        }
+        self.goal_stores.lock().await.remove(&session_id);
+        self.agent_mailboxes.lock().await.remove(&session_id);
+        self.agent_output_buffers.lock().await.remove(&session_id);
+        {
+            let mut registries = self.agent_registries.lock().await;
+            registries.remove(&session_id);
+            for registry in registries.values_mut() {
+                registry.unregister(session_id);
+            }
+        }
+        {
+            let mut research_child_agents = self.research_child_agents.lock().await;
+            research_child_agents.remove(&session_id);
+            for child_agents in research_child_agents.values_mut() {
+                child_agents.remove(&session_id);
+            }
+        }
     }
 
     pub(crate) async fn handle_acp_session_set_mode(

@@ -364,6 +364,9 @@ impl ServerRuntime {
             // get the model catalog, aka the configured models list
             Some(ClientMethod::ModelCatalog) => Some(self.handle_model_catalog(id?, params).await),
             Some(ClientMethod::ModelConfig) => Some(self.handle_model_config(id?, params).await),
+            Some(ClientMethod::ModelConfigSet) => {
+                Some(self.handle_model_config_set(id?, params).await)
+            }
             // TODO: not sure, config model from client should be deprecated
             Some(ClientMethod::ModelSaved) => Some(self.handle_model_saved(id?, params).await),
             Some(ClientMethod::CommandExec) => {

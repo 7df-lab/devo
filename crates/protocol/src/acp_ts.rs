@@ -279,6 +279,7 @@ pub fn generate_protocol_typescript() -> String {
     push_decl::<ModelCatalogResult>(&cfg, &mut output);
     push_decl::<ModelCatalogEntry>(&cfg, &mut output);
     push_decl::<ModelConfigParams>(&cfg, &mut output);
+    push_decl::<ModelConfigSetParams>(&cfg, &mut output);
     push_decl::<ModelConfigResult>(&cfg, &mut output);
     push_decl::<ModelSavedParams>(&cfg, &mut output);
     push_decl::<ModelSavedResult>(&cfg, &mut output);
@@ -669,6 +670,7 @@ fn register_devo_protocol_schemas(
     schema::<ModelCatalogParams>(schemas);
     schema::<ModelCatalogResult>(schemas);
     schema::<ModelConfigParams>(schemas);
+    schema::<ModelConfigSetParams>(schemas);
     schema::<ModelConfigResult>(schemas);
     schema::<ModelSavedParams>(schemas);
     schema::<ModelSavedResult>(schemas);
@@ -771,6 +773,7 @@ fn register_devo_protocol_schemas(
     );
     devo_method::<ModelCatalogParams, ModelCatalogResult>(methods, ClientMethod::ModelCatalog);
     devo_method::<ModelConfigParams, ModelConfigResult>(methods, ClientMethod::ModelConfig);
+    devo_method::<ModelConfigSetParams, ModelConfigResult>(methods, ClientMethod::ModelConfigSet);
     devo_method::<ModelSavedParams, ModelSavedResult>(methods, ClientMethod::ModelSaved);
     devo_method::<CommandExecParams, CommandExecResult>(methods, ClientMethod::CommandExec);
     devo_method::<CommandExecWriteParams, CommandExecWriteResult>(

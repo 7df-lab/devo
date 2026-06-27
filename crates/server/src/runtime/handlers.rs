@@ -1,6 +1,6 @@
 mod acp;
 mod acp_auth;
-mod acp_config_options;
+pub(crate) mod acp_config_options;
 mod acp_slash_commands;
 mod compaction;
 pub mod goal;

@@ -1,5 +1,7 @@
 use super::*;
 
+const DEVO_TURN_DURATION_MS_META: &str = "devo/turnDurationMs";
+
 pub(super) fn acp_update_from_history_item(
     index: usize,
     item: &SessionHistoryItem,
@@ -38,7 +40,19 @@ pub(super) fn acp_update_from_history_item(
             message_id,
             meta: Some(meta),
         }),
-        SessionHistoryItemKind::Reasoning | SessionHistoryItemKind::TurnSummary => {
+        SessionHistoryItemKind::Reasoning => Some(AcpSessionUpdate::AgentThoughtChunk {
+            content,
+            message_id,
+            meta: Some(meta),
+        }),
+        SessionHistoryItemKind::TurnSummary => {
+            let mut meta = meta;
+            if let Some(duration_secs) = item.duration_ms {
+                meta.insert(
+                    DEVO_TURN_DURATION_MS_META.to_string(),
+                    serde_json::json!(duration_secs.saturating_mul(1_000)),
+                );
+            }
             Some(AcpSessionUpdate::AgentThoughtChunk {
                 content,
                 message_id,
@@ -157,5 +171,28 @@ mod tests {
         };
         assert_eq!(tool_call_id, "read-real-a");
         assert_eq!(meta, Some(history_meta(4, Some("history-0"))));
+    }
+
+    #[test]
+    fn history_turn_summary_includes_duration_metadata() {
+        let mut item = history_item(SessionHistoryItemKind::TurnSummary, "gpt-5", "");
+        item.duration_ms = Some(42);
+
+        let update =
+            acp_update_from_history_item(5, &item, Some("history-0")).expect("history update");
+
+        let AcpSessionUpdate::AgentThoughtChunk {
+            message_id, meta, ..
+        } = update
+        else {
+            panic!("expected agent thought chunk");
+        };
+        let mut expected = history_meta(5, Some("history-0"));
+        expected.insert(
+            DEVO_TURN_DURATION_MS_META.to_string(),
+            serde_json::json!(42_000_u64),
+        );
+        assert_eq!(message_id, Some("history-5".to_string()));
+        assert_eq!(meta, Some(expected));
     }
 }

@@ -211,6 +211,76 @@ describe("ACP desktop SDK session cwd discovery", () => {
 		expect(result.data.map((message) => message.parts[0]?.text)).toEqual(["user", "assistant"])
 	})
 
+	test("applies replayed turn summary duration to the prior assistant message", async () => {
+		const transport = new FakeTransport((method, _params, _directory, tx) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") return { sessions: [storedSession] }
+			if (method === "session/load") {
+				tx?.emitSessionUpdate({
+					sessionId: "stored-session",
+					update: {
+						sessionUpdate: "user_message_chunk",
+						messageId: "history-0",
+						content: { type: "text", text: "user" },
+						_meta: { "devo/historyIndex": 0 },
+					},
+				} satisfies AcpSessionNotification)
+				tx?.emitSessionUpdate({
+					sessionId: "stored-session",
+					update: {
+						sessionUpdate: "agent_message_chunk",
+						messageId: "history-1",
+						content: { type: "text", text: "assistant" },
+						_meta: { "devo/historyIndex": 1, "devo/parentMessageId": "history-0" },
+					},
+				} satisfies AcpSessionNotification)
+				tx?.emitSessionUpdate({
+					sessionId: "stored-session",
+					update: {
+						sessionUpdate: "agent_thought_chunk",
+						messageId: "history-2",
+						content: { type: "text", text: "" },
+						_meta: {
+							"devo/historyIndex": 2,
+							"devo/parentMessageId": "history-0",
+							"devo/turnDurationMs": 42_000,
+						},
+					},
+				} satisfies AcpSessionNotification)
+				return {}
+			}
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ transport })
+
+		const result = await client.session.messages({ sessionID: "stored-session" })
+
+		expect(
+			result.data.map((entry) => ({
+				id: entry.info.id,
+				role: entry.info.role,
+				time: entry.info.time,
+				parts: entry.parts.map((part) => ({
+					type: part.type,
+					text: part.text,
+				})),
+			})),
+		).toEqual([
+			{
+				id: "history-0",
+				role: "user",
+				time: { created: 1 },
+				parts: [{ type: "text", text: "user" }],
+			},
+			{
+				id: "history-1",
+				role: "assistant",
+				time: { created: 2, completed: 42_001 },
+				parts: [{ type: "text", text: "assistant" }],
+			},
+		])
+	})
+
 	test("keeps locally limited cached history windows on turn boundaries", async () => {
 		const transport = new FakeTransport((method, _params, _directory, tx) => {
 			if (method === "initialize") return initializeResult

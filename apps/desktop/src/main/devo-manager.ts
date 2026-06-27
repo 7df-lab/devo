@@ -1,14 +1,24 @@
 import type { AcpTransport, AcpTransportEvent, AcpTransportListener, JsonRpcId } from "./acp-stdio-client"
 import { app } from "electron"
+import {
+	TRAFFIC_LOG_PATH_ENV,
+	createAcpTrafficLoggerFromEnv,
+	type AcpTrafficLogger,
+	type AcpTrafficLogState,
+} from "./acp-traffic-log"
 import { StdioAcpClient, SUPPRESS_SERVER_TRAY_ENV } from "./acp-stdio-client"
 import { resolveDevoProgram } from "./devo-program"
 import { createLogger } from "./logger"
 import { startNotificationWatcher, stopNotificationWatcher } from "./notification-watcher"
+import { getSettings } from "./settings-store"
 import { waitForEnv } from "./shell-env"
 
 const log = createLogger("devo-manager")
 
 const STDIO_URL = "stdio://local"
+const acpTrafficLogStartupEnv = {
+	[TRAFFIC_LOG_PATH_ENV]: process.env[TRAFFIC_LOG_PATH_ENV],
+}
 
 export interface DevoServer {
 	url: string
@@ -20,6 +30,8 @@ export interface DevoServer {
 let stdioClient: StdioAcpClient | null = null
 let server: DevoServer | null = null
 let initializing: Promise<DevoServer> | null = null
+let acpTrafficLogger: AcpTrafficLogger | null = null
+const serverReadyListeners = new Set<() => void>()
 
 export async function ensureServer(): Promise<DevoServer> {
 	if (server && stdioClient?.connected()) return server
@@ -33,6 +45,20 @@ export async function ensureServer(): Promise<DevoServer> {
 
 export function getServerUrl(): string | null {
 	return server?.url ?? null
+}
+
+export function onServerReady(listener: () => void): () => void {
+	serverReadyListeners.add(listener)
+	if (server && stdioClient?.connected()) {
+		queueMicrotask(() => {
+			if (serverReadyListeners.has(listener) && server && stdioClient?.connected()) {
+				listener()
+			}
+		})
+	}
+	return () => {
+		serverReadyListeners.delete(listener)
+	}
 }
 
 export function stopServer(): boolean {
@@ -79,6 +105,10 @@ export function getAcpTransport(): AcpTransport {
 	}
 }
 
+export function getAcpTrafficLogState(): AcpTrafficLogState {
+	return getAcpTrafficLogger().getState()
+}
+
 async function startServer(): Promise<DevoServer> {
 	await waitForEnv()
 	const client = getOrCreateClient()
@@ -93,6 +123,7 @@ async function startServer(): Promise<DevoServer> {
 		managed: true,
 	}
 	startNotificationWatcher(getAcpTransport())
+	notifyServerReady()
 	log.info("Devo ACP stdio server ready", { pid: server.pid })
 	return server
 }
@@ -108,20 +139,42 @@ function getOrCreateClient(): StdioAcpClient {
 			appPath: app.getAppPath(),
 			env: process.env,
 			isPackaged: app.isPackaged,
+			resourcesPath: process.resourcesPath,
 		})
-		stdioClient = new StdioAcpClient({
-			program,
-			env: { [SUPPRESS_SERVER_TRAY_ENV]: "1" },
-		})
+			stdioClient = new StdioAcpClient({
+				program,
+				env: { [SUPPRESS_SERVER_TRAY_ENV]: "1" },
+				networkProxy: getSettings().servers.networkProxy,
+				trafficLogger: getAcpTrafficLogger(),
+			})
 		stdioClient.subscribe(handleTransportEvent)
 	}
 	return stdioClient
+}
+
+function getAcpTrafficLogger(): AcpTrafficLogger {
+	if (!acpTrafficLogger) {
+		acpTrafficLogger = createAcpTrafficLoggerFromEnv({
+			env: acpTrafficLogStartupEnv,
+		})
+	}
+	return acpTrafficLogger
 }
 
 function handleTransportEvent(event: AcpTransportEvent): void {
 	if (event.type === "closed") {
 		log.warn("Devo ACP stdio transport closed", { error: event.error })
 		server = null
+	}
+}
+
+function notifyServerReady(): void {
+	for (const listener of serverReadyListeners) {
+		try {
+			listener()
+		} catch (error) {
+			log.warn("Server-ready listener failed", error)
+		}
 	}
 }
 

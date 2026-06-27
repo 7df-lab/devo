@@ -33,6 +33,11 @@ import type {
 import type {
 	ModelConfigParams,
 	ModelConfigResult,
+	ProviderValidateParams,
+	ProviderValidateResult,
+	ProviderVendorListResult,
+	ProviderVendorUpsertParams,
+	ProviderVendorUpsertResult,
 	RequestUserInputRespondParams,
 	WorkspaceChangeCoverage,
 	WorkspaceChangeScope,
@@ -132,6 +137,14 @@ export type ToolStateCompleted = any
 export type UserMessage = any
 export type Worktree = any
 export type {
+	ProviderModelBinding,
+	ProviderValidateParams,
+	ProviderValidateResult,
+	ProviderVendor,
+	ProviderVendorListResult,
+	ProviderVendorUpsertParams,
+	ProviderVendorUpsertResult,
+	ProviderWireApi,
 	WorkspaceChangeAttribution,
 	WorkspaceChangeBase,
 	WorkspaceChangeCoverage,
@@ -204,6 +217,14 @@ function sessionMeta(value: unknown): Record<string, unknown> | undefined {
 	return objectRecord(meta?.["devo/session"])
 }
 
+function sessionStatusFromMetadata(value: unknown): string | undefined {
+	const meta = objectRecord(value)
+	const nestedStatus = objectRecord(meta?.["devo/session"])?.status
+	if (typeof nestedStatus === "string") return nestedStatus
+	const directStatus = meta?.["devo/session.status"]
+	return typeof directStatus === "string" ? directStatus : undefined
+}
+
 function numberFromProtocol(value: unknown): number {
 	if (typeof value === "number" && Number.isFinite(value)) return value
 	if (typeof value === "bigint") return Number(value)
@@ -249,6 +270,40 @@ function workspaceChangesUpdatedFromOriginalEvent(
 	}
 }
 
+function deletedSessionIdsFromOriginalEvent(original: unknown): string[] {
+	const event = objectRecord(original)
+	if (!event) return []
+	const payload =
+		event.kind === "session_deleted"
+			? event
+			: objectRecord(event.SessionDeleted) ?? objectRecord(event.session_deleted)
+	if (!payload) return []
+	const rawIds = payload.deleted_session_ids ?? payload.deletedSessionIds
+	if (Array.isArray(rawIds)) return rawIds.map(String).filter(Boolean)
+	const sessionId = payload.session_id ?? payload.sessionId
+	return sessionId ? [String(sessionId)] : []
+}
+
+function sessionStatusChangedFromOriginalEvent(
+	original: unknown,
+	originalMethod?: string,
+): { sessionId: string; status: string } | null {
+	const event = objectRecord(original)
+	if (!event) return null
+	const payload =
+		originalMethod === "session/status/changed"
+			? objectRecord(event.SessionStatusChanged) ?? event
+			: event.kind === "session_status_changed" || event.kind === "session/status/changed"
+				? event
+				: objectRecord(event.SessionStatusChanged) ??
+					objectRecord(event.session_status_changed) ??
+					objectRecord(event.sessionStatusChanged)
+	if (!payload) return null
+	const sessionId = payload.session_id ?? payload.sessionId
+	const status = payload.status
+	return typeof sessionId === "string" && typeof status === "string" ? { sessionId, status } : null
+}
+
 function workspaceChangesUpdatedEventProperties(
 	payload: WorkspaceChangesUpdatedPayload,
 ): WorkspaceChangesUpdatedEventProperties {
@@ -281,6 +336,7 @@ const DEVO_TURN_ID_META = "devo/turnId"
 const DEVO_ACTIVITY_AT_META = "devo/activityAt"
 const DEVO_HISTORY_INDEX_META = "devo/historyIndex"
 const DEVO_PARENT_MESSAGE_ID_META = "devo/parentMessageId"
+const DEVO_TURN_DURATION_MS_META = "devo/turnDurationMs"
 
 function normalizedHistoryLimit(limit: unknown): number | undefined {
 	if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) return undefined
@@ -466,21 +522,8 @@ class AcpClient {
 		delete: async (params: { sessionID: string }) => {
 			const deleteParams: AcpDeleteSessionParams = { sessionId: params.sessionID }
 			await this.request("session/delete", deleteParams)
-			const directory = this.sessionDirectories.get(params.sessionID) ?? this.options.directory ?? defaultCwd()
-			this.sessions.delete(params.sessionID)
-			this.sessionStatuses.delete(params.sessionID)
-			this.sessionDirectories.delete(params.sessionID)
-			this.loadedSessionLimits.delete(params.sessionID)
-			this.messages.delete(params.sessionID)
-			for (const [messageId, parts] of this.parts) {
-				if (parts.some((part) => part.sessionID === params.sessionID)) {
-					this.parts.delete(messageId)
-				}
-			}
-			this.emit(directory, {
-				type: "session.deleted",
-				properties: { info: { id: params.sessionID, directory } },
-			})
+			const { directory } = this.forgetSession(params.sessionID)
+			this.emitSessionDeleted(params.sessionID, directory)
 		},
 		get: async (params: { sessionID: string }) => ({
 			data: await this.getSessionById(params.sessionID),
@@ -600,6 +643,11 @@ class AcpClient {
 			data: providerDataFromConfigOptions(await this.ensureCurrentConfigOptions()),
 		}),
 		get: async () => ({ data: configDataFromConfigOptions(await this.ensureCurrentConfigOptions()) }),
+		setOption: async (params: { configID: string; value: string }) => ({
+			data: configDataFromConfigOptions(
+				await this.setDefaultConfigOption(params.configID, params.value),
+			),
+		}),
 	}
 
 	vcs = {
@@ -612,7 +660,20 @@ class AcpClient {
 	}
 
 	provider = {
-		list: async () => ({ data: [] }),
+		list: async () => ({
+			data: (await this.request("provider/list", {})) as ProviderVendorListResult,
+		}),
+		validate: async (params: ProviderValidateParams) => ({
+			data: (await this.request("provider/validate", params)) as ProviderValidateResult,
+		}),
+		upsert: async (params: ProviderVendorUpsertParams) => {
+			const data = (await this.request(
+				"provider/upsert",
+				params,
+			)) as ProviderVendorUpsertResult
+			this.invalidateConfigOptionCaches()
+			return { data }
+		},
 		auth: async () => ({ data: [] }),
 		oauth: {
 			authorize: async (_params: unknown) => ({ data: null }),
@@ -760,6 +821,7 @@ class AcpClient {
 	private rememberSession(info: AcpSessionInfo): Session {
 		const existing = this.sessions.get(info.sessionId)
 		const meta = sessionMeta(info._meta)
+		const metadataStatus = sessionStatusFromMetadata(info._meta)
 		const parsedCreated = parseTimestampMs(meta?.created_at ?? info.updatedAt)
 		const created = parsedCreated ?? existing?.time.created ?? Date.now()
 		const parsedUpdated = parseTimestampMs(meta?.updated_at ?? info.updatedAt)
@@ -787,9 +849,9 @@ class AcpClient {
 		this.sessionDirectories.set(session.id, info.cwd)
 		this.sessionStatuses.set(
 			session.id,
-			meta?.status === undefined
-				? this.sessionStatuses.get(session.id) ?? statusFromDevo(meta?.status)
-				: statusFromDevo(meta.status),
+			metadataStatus === undefined
+				? this.sessionStatuses.get(session.id) ?? statusFromDevo()
+				: statusFromDevo(metadataStatus),
 		)
 		return session
 	}
@@ -997,6 +1059,19 @@ class AcpClient {
 
 	private handleSessionUpdate(notification: AcpSessionNotification): void {
 		const sessionId = notification.sessionId
+		const deletedSessionIds = deletedSessionIdsFromOriginalEvent(
+			notification._meta?.["devo/originalEvent"],
+		)
+		if (deletedSessionIds.length > 0) {
+			this.handleDeletedSessionIds(
+				deletedSessionIds,
+				this.sessionDirectories.get(sessionId) ??
+					this.sessions.get(sessionId)?.directory ??
+					this.options.directory ??
+					defaultCwd(),
+			)
+			return
+		}
 		const update = notification.update as Record<string, unknown>
 		const kind = typeof update.sessionUpdate === "string" ? update.sessionUpdate : undefined
 		let session = this.sessions.get(sessionId)
@@ -1045,6 +1120,11 @@ class AcpClient {
 
 			const activity = parseTimestampMs(meta?.last_activity_at)
 			if (activity !== undefined) session.time.lastActivity = activity
+
+			const metadataStatus = sessionStatusFromMetadata(update._meta)
+			if (metadataStatus !== undefined) {
+				this.rememberSessionStatus(sessionId, directory, metadataStatus)
+			}
 		}
 		const activityAt = parseTimestampMs(updateMeta(update)?.[DEVO_ACTIVITY_AT_META])
 		if (activityAt !== undefined) session.time.lastActivity = activityAt
@@ -1062,6 +1142,7 @@ class AcpClient {
 				break
 			case "agent_thought_chunk":
 			case "agentThoughtChunk":
+				this.applyHistoryTurnDuration(sessionId, directory, update)
 				this.appendText(sessionId, directory, "assistant", "reasoning", update)
 				break
 			case "plan":
@@ -1123,6 +1204,20 @@ class AcpClient {
 	): void {
 		const original = notification._meta?.["devo/originalEvent"]
 		if (!original || typeof original !== "object") return
+		const originalMethod =
+			typeof notification._meta?.["devo/originalMethod"] === "string"
+				? notification._meta["devo/originalMethod"]
+				: undefined
+		const deletedSessionIds = deletedSessionIdsFromOriginalEvent(original)
+		if (deletedSessionIds.length > 0) {
+			this.handleDeletedSessionIds(deletedSessionIds, directory)
+			return
+		}
+		const changedStatus = sessionStatusChangedFromOriginalEvent(original, originalMethod)
+		if (changedStatus) {
+			this.rememberSessionStatus(changedStatus.sessionId, directory, changedStatus.status)
+			return
+		}
 		if ("RequestUserInput" in original) {
 			const payload = (original as { RequestUserInput: Record<string, unknown> }).RequestUserInput
 			this.handleRequestUserInput(sessionId, directory, payload)
@@ -1143,6 +1238,54 @@ class AcpClient {
 				properties: { sessionID: pending.sessionId, requestID: requestId },
 			})
 		}
+	}
+
+	private rememberSessionStatus(sessionId: string, directory: string, protocolStatus: string): void {
+		const status = statusFromDevo(protocolStatus)
+		this.sessionStatuses.set(sessionId, status)
+		this.emit(directory, {
+			type: "session.status",
+			properties: { sessionID: sessionId, status },
+		})
+	}
+
+	private handleDeletedSessionIds(sessionIds: string[], fallbackDirectory: string): void {
+		for (const sessionId of sessionIds) {
+			const { directory, known } = this.forgetSession(sessionId, fallbackDirectory)
+			if (known) this.emitSessionDeleted(sessionId, directory)
+		}
+	}
+
+	private forgetSession(
+		sessionId: string,
+		fallbackDirectory = this.options.directory ?? defaultCwd(),
+	): { directory: string; known: boolean } {
+		const session = this.sessions.get(sessionId)
+		const directory = this.sessionDirectories.get(sessionId) ?? session?.directory ?? fallbackDirectory
+		const known =
+			this.sessions.has(sessionId) ||
+			this.sessionStatuses.has(sessionId) ||
+			this.sessionDirectories.has(sessionId) ||
+			this.loadedSessionLimits.has(sessionId) ||
+			this.messages.has(sessionId)
+		this.sessions.delete(sessionId)
+		this.sessionStatuses.delete(sessionId)
+		this.sessionDirectories.delete(sessionId)
+		this.loadedSessionLimits.delete(sessionId)
+		this.messages.delete(sessionId)
+		for (const [messageId, parts] of this.parts) {
+			if (parts.some((part) => part.sessionID === sessionId)) {
+				this.parts.delete(messageId)
+			}
+		}
+		return { directory, known }
+	}
+
+	private emitSessionDeleted(sessionId: string, directory: string): void {
+		this.emit(directory, {
+			type: "session.deleted",
+			properties: { info: { id: sessionId, directory } },
+		})
 	}
 
 	private handleWorkspaceChangesUpdated(
@@ -1269,6 +1412,42 @@ class AcpClient {
 			this.emit(directory, { type: "message.updated", properties: { info: updated, message: updated } })
 		}
 	}
+
+	private applyHistoryTurnDuration(
+		sessionId: string,
+		directory: string,
+		update: Record<string, unknown>,
+	): void {
+		const durationMs = Math.floor(
+			numberFromProtocol(updateMeta(update)?.[DEVO_TURN_DURATION_MS_META]),
+		)
+		if (durationMs <= 0) return
+		const parentID =
+			updateMetaString(update, DEVO_PARENT_MESSAGE_ID_META) ??
+			this.lastUserMessageBySession.get(sessionId)
+		if (!parentID) return
+		const messages = this.messages.get(sessionId)
+		if (!messages) return
+		const userMessage = messages.find(
+			(message) => message.id === parentID && message.role === "user",
+		)
+		const userCreated = userMessage?.time?.created
+		if (typeof userCreated !== "number" || !Number.isFinite(userCreated)) return
+
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index]
+			if (message.role !== "assistant" || message.parentID !== parentID) continue
+			if (typeof message.time?.completed === "number") return
+			const updated = {
+				...message,
+				time: { ...(message.time ?? {}), completed: userCreated + durationMs },
+			} as Message
+			messages[index] = updated
+			this.emit(directory, { type: "message.updated", properties: { info: updated, message: updated } })
+			return
+		}
+	}
+
 	private appendText(
 		sessionId: string,
 		directory: string,
@@ -1463,6 +1642,20 @@ class AcpClient {
 		this.rememberConfigOptions(sessionId, directory, result.configOptions)
 	}
 
+	private async setDefaultConfigOption(
+		configId: string,
+		value: string,
+	): Promise<AcpConfigOption[]> {
+		await this.ensureInitialized()
+		const directory = this.options.directory ?? defaultCwd()
+		const params = this.options.directory
+			? { cwd: this.options.directory, configId, value }
+			: { configId, value }
+		const result = (await this.request("model/config/set", params)) as ModelConfigResult
+		this.rememberDirectoryConfigOptions(directory, result.configOptions)
+		return this.currentConfigOptions()
+	}
+
 	private cachedConfigOptions(): AcpConfigOption[] | undefined {
 		if (this.options.directory) {
 			const byDirectory = this.configOptionsByDirectory.get(this.options.directory)
@@ -1473,6 +1666,11 @@ class AcpClient {
 
 	private currentConfigOptions(): AcpConfigOption[] {
 		return this.cachedConfigOptions() ?? []
+	}
+
+	invalidateConfigOptionCaches(): void {
+		this.configOptionsBySession.clear()
+		this.configOptionsByDirectory.clear()
 	}
 
 	private async ensureCurrentConfigOptions(): Promise<AcpConfigOption[]> {

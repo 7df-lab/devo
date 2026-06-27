@@ -134,6 +134,20 @@ async function nextPayload(stream: AsyncIterator<any>, label: string): Promise<a
 	return result.value.payload
 }
 
+async function nextPayloadOfType(
+	stream: AsyncIterator<any>,
+	type: string,
+	label: string,
+): Promise<any> {
+	const deadline = Date.now() + 100
+	while (Date.now() < deadline) {
+		const payload = await nextPayload(stream, label)
+		if (payload?.type === type) return payload
+		if (typeof payload?.type === "string" && payload.type.startsWith("timeout:")) return payload
+	}
+	return { type: `timeout:${label}` }
+}
+
 describe("ACP desktop SDK session mapping", () => {
 	test("loads ACP history and returns grouped messages with accumulated text parts", async () => {
 		Date.now = () => 1_772_000_000_000
@@ -1553,6 +1567,60 @@ describe("ACP desktop SDK session mapping", () => {
 		})
 	})
 
+	test("emits local deletion events when a server broadcast reports deleted session ids", async () => {
+		const childSessionInfo = {
+			...sessionInfo,
+			sessionId: "s2",
+			title: "Forked session",
+		} satisfies AcpSessionInfo
+		let deleted = false
+		const transport = new FakeTransport((method) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") {
+				return { sessions: deleted ? [] : [sessionInfo, childSessionInfo] }
+			}
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
+
+		await client.session.list()
+		transport.emitSessionUpdate({
+			sessionId: "s1",
+			update: { sessionUpdate: "session_info_update" },
+			_meta: {
+				"devo/originalMethod": "session/deleted",
+				"devo/originalEvent": {
+					kind: "session_deleted",
+					session_id: "s1",
+					deleted_session_ids: ["s1", "s2"],
+				},
+			},
+		} as AcpSessionNotification)
+		deleted = true
+
+		expect(await nextPayloadOfType(stream, "session.deleted", "root deleted")).toEqual({
+			type: "session.deleted",
+			properties: {
+				info: {
+					id: "s1",
+					directory: "/repo",
+				},
+			},
+		})
+		expect(await nextPayloadOfType(stream, "session.deleted", "child deleted")).toEqual({
+			type: "session.deleted",
+			properties: {
+				info: {
+					id: "s2",
+					directory: "/repo",
+				},
+			},
+		})
+		expect((await client.session.get({ sessionID: "s1" })).data).toBeUndefined()
+		expect((await client.session.get({ sessionID: "s2" })).data).toBeUndefined()
+	})
+
 	test("follows ACP session list pagination until caller limit is satisfied", async () => {
 		const pages = new Map<string | undefined, AcpSessionInfo[]>([
 			[undefined, [sessionInfo]],
@@ -1589,4 +1657,121 @@ describe("ACP desktop SDK session mapping", () => {
 			{ method: "session/list", directory: "/repo", params: { cwd: "/repo", cursor: "page-2" } },
 		])
 	})
+	test("maps active_turn session list metadata to busy session status", async () => {
+		const transport = new FakeTransport((method) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") {
+				return {
+					sessions: [
+						{
+							...sessionInfo,
+							_meta: { "devo/session": { status: "active_turn" } },
+						},
+					],
+				}
+			}
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+
+		await client.session.list()
+
+		expect(await client.session.status()).toEqual({ data: { s1: { type: "busy" } } })
+	})
+
+	test("emits session status updates from wrapped original SessionStatusChanged events", async () => {
+		const transport = new FakeTransport((method) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") return { sessions: [sessionInfo] }
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
+
+		await client.session.list()
+		transport.emitSessionUpdate({
+			sessionId: "s1",
+			update: { sessionUpdate: "session_info_update" },
+			_meta: {
+				"devo/originalMethod": "session/status/changed",
+				"devo/originalEvent": {
+					SessionStatusChanged: {
+						session_id: "s1",
+						status: "active_turn",
+					},
+				},
+			},
+		} satisfies AcpSessionNotification)
+		transport.emitSessionUpdate({
+			sessionId: "s1",
+			update: { sessionUpdate: "session_info_update" },
+			_meta: {
+				"devo/originalMethod": "session/status/changed",
+				"devo/originalEvent": {
+					session_id: "s1",
+					status: "idle",
+				},
+			},
+		} satisfies AcpSessionNotification)
+
+		expect(await nextPayloadOfType(stream, "session.status", "wrapped busy")).toEqual({
+			type: "session.status",
+			properties: {
+				sessionID: "s1",
+				status: { type: "busy" },
+			},
+		})
+		expect(await nextPayloadOfType(stream, "session.status", "wrapped idle")).toEqual({
+			type: "session.status",
+			properties: {
+				sessionID: "s1",
+				status: { type: "idle" },
+			},
+		})
+		expect(await client.session.status()).toEqual({ data: { s1: { type: "idle" } } })
+	})
+
+	test("refreshes session status from session info update metadata", async () => {
+		const transport = new FakeTransport((method) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") return { sessions: [sessionInfo] }
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
+
+		await client.session.list()
+		transport.emitSessionUpdate({
+			sessionId: "s1",
+			update: {
+				sessionUpdate: "session_info_update",
+				_meta: { "devo/session.status": "active_turn" },
+			},
+		} satisfies AcpSessionNotification)
+
+		expect(await nextPayloadOfType(stream, "session.status", "metadata busy")).toEqual({
+			type: "session.status",
+			properties: {
+				sessionID: "s1",
+				status: { type: "busy" },
+			},
+		})
+		expect(await client.session.status()).toEqual({ data: { s1: { type: "busy" } } })
+	})
+
+	test("loading session history keeps status idle without runtime metadata or events", async () => {
+		const transport = new FakeTransport((method) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") return { sessions: [sessionInfo] }
+			if (method === "session/load") return { configOptions }
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+
+		await client.session.list()
+		await client.session.messages({ sessionID: "s1" })
+
+		expect(await client.session.status()).toEqual({ data: { s1: { type: "idle" } } })
+	})
+
 })

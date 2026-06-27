@@ -147,6 +147,12 @@ pub struct SessionEventPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDeletedPayload {
+    pub session_id: SessionId,
+    pub deleted_session_ids: Vec<SessionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStatusChangedPayload {
     pub session_id: SessionId,
     pub status: SessionRuntimeStatus,
@@ -326,6 +332,7 @@ pub enum ServerEvent {
     SessionArchived(SessionEventPayload),
     SessionUnarchived(SessionEventPayload),
     SessionClosed(SessionEventPayload),
+    SessionDeleted(SessionDeletedPayload),
     TurnStarted(TurnEventPayload),
     TurnCompleted(TurnEventPayload),
     TurnInterrupted(TurnEventPayload),
@@ -366,6 +373,7 @@ impl ServerEvent {
             | Self::SessionArchived(payload)
             | Self::SessionUnarchived(payload)
             | Self::SessionClosed(payload) => Some(payload.session.session_id),
+            Self::SessionDeleted(payload) => Some(payload.session_id),
             Self::SessionCompactionFailed(payload) => Some(payload.session_id),
             Self::SessionStatusChanged(payload) => Some(payload.session_id),
             Self::TurnStarted(payload)
@@ -408,6 +416,7 @@ impl ServerEvent {
             Self::SessionArchived(_) => "session/archived",
             Self::SessionUnarchived(_) => "session/unarchived",
             Self::SessionClosed(_) => "session/closed",
+            Self::SessionDeleted(_) => "session/deleted",
             Self::TurnStarted(_) => "turn/started",
             Self::TurnCompleted(_) => "turn/completed",
             Self::TurnInterrupted(_) => "turn/interrupted",

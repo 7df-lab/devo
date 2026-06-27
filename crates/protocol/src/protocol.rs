@@ -20,6 +20,15 @@ pub struct ClientNotification<T> {
     pub params: T,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConfigSetParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    pub config_id: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SuccessResponse<T> {
     pub id: serde_json::Value,
@@ -59,6 +68,7 @@ pub enum ClientMethod {
     SkillsSetEnabled,
     ModelCatalog,
     ModelConfig,
+    ModelConfigSet,
     ModelSaved,
     CommandExec,
     CommandExecWrite,
@@ -109,6 +119,7 @@ impl ClientMethod {
             Self::SkillsSetEnabled => "skills/set_enabled",
             Self::ModelCatalog => "model/catalog",
             Self::ModelConfig => "model/config",
+            Self::ModelConfigSet => "model/config/set",
             Self::ModelSaved => "model/saved",
             Self::CommandExec => "command/exec",
             Self::CommandExecWrite => "command/exec/write",
@@ -159,6 +170,7 @@ impl ClientMethod {
             "skills/set_enabled" => Self::SkillsSetEnabled,
             "model/catalog" => Self::ModelCatalog,
             "model/config" => Self::ModelConfig,
+            "model/config/set" => Self::ModelConfigSet,
             "model/saved" => Self::ModelSaved,
             "command/exec" => Self::CommandExec,
             "command/exec/write" => Self::CommandExecWrite,
@@ -601,6 +613,15 @@ mod tests {
             ClientMethod::WorkspaceChangesRead.as_str(),
             "workspace/changes/read"
         );
+    }
+
+    #[test]
+    fn client_method_recognizes_model_config_set() {
+        assert_eq!(
+            ClientMethod::parse("model/config/set"),
+            Some(ClientMethod::ModelConfigSet)
+        );
+        assert_eq!(ClientMethod::ModelConfigSet.as_str(), "model/config/set");
     }
 
     #[test]

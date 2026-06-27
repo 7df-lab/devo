@@ -3,10 +3,27 @@ import { EventEmitter } from "node:events"
 import { createInterface } from "node:readline"
 import { homedir } from "node:os"
 import path from "node:path"
+import type { NetworkProxySettings } from "../preload/api"
+import { normalizeNoProxy, normalizeProxyUrl } from "../shared/network-proxy"
+import type { AcpTrafficLogRecord, AcpTrafficLogger } from "./acp-traffic-log"
 import { createLogger } from "./logger"
 
 const log = createLogger("acp-stdio-client")
 export const SUPPRESS_SERVER_TRAY_ENV = "DEVO_SUPPRESS_SERVER_TRAY"
+export const DESKTOP_NETWORK_PROXY_MODE_ENV = "DEVO_DESKTOP_NETWORK_PROXY_MODE"
+export const DESKTOP_NETWORK_PROXY_URL_ENV = "DEVO_DESKTOP_NETWORK_PROXY_URL"
+export const DESKTOP_NETWORK_NO_PROXY_ENV = "DEVO_DESKTOP_NETWORK_NO_PROXY"
+
+const PROXY_ENV_KEYS = [
+	"HTTP_PROXY",
+	"HTTPS_PROXY",
+	"ALL_PROXY",
+	"NO_PROXY",
+	"http_proxy",
+	"https_proxy",
+	"all_proxy",
+	"no_proxy",
+]
 
 export type JsonRpcId = number | string
 
@@ -17,8 +34,8 @@ type PendingRequest = {
 
 export type AcpIncomingMessage =
 	| { type: "response"; id: JsonRpcId; message: Record<string, unknown> }
-	| { type: "notification"; method: string; params: unknown }
-	| { type: "request"; id: JsonRpcId; method: string; params: unknown }
+	| { type: "notification"; method: string; params: unknown; message: Record<string, unknown> }
+	| { type: "request"; id: JsonRpcId; method: string; params: unknown; message: Record<string, unknown> }
 	| { type: "invalid"; error: string; line: string }
 
 export type AcpTransportEvent =
@@ -42,6 +59,8 @@ export interface StdioAcpClientOptions {
 	args?: string[]
 	cwd?: string
 	env?: NodeJS.ProcessEnv
+	networkProxy?: NetworkProxySettings
+	trafficLogger?: AcpTrafficLogger
 }
 
 export interface BuildServerProcessEnvOptions {
@@ -49,6 +68,8 @@ export interface BuildServerProcessEnvOptions {
 	homeDir?: string
 	optionsEnv?: NodeJS.ProcessEnv
 	pathSeparator?: string
+	runtimeBinDir?: string
+	networkProxy?: NetworkProxySettings
 }
 
 function toError(error: unknown): Error {
@@ -60,12 +81,51 @@ export function buildServerProcessEnv({
 	homeDir = homedir(),
 	optionsEnv = {},
 	pathSeparator = process.platform === "win32" ? ";" : ":",
+	runtimeBinDir,
+	networkProxy,
 }: BuildServerProcessEnvOptions = {}): NodeJS.ProcessEnv {
-	const devoBinDir = path.join(homeDir, ".devo", "bin")
-	return {
+	const binDir = runtimeBinDir ?? path.join(homeDir, ".devo", "bin")
+	const env: NodeJS.ProcessEnv = {
 		...baseEnv,
 		...optionsEnv,
-		PATH: `${devoBinDir}${pathSeparator}${optionsEnv.PATH ?? baseEnv.PATH ?? ""}`,
+	}
+	applyDesktopNetworkProxyEnv(env, networkProxy)
+	env.PATH = `${binDir}${pathSeparator}${optionsEnv.PATH ?? baseEnv.PATH ?? ""}`
+	return env
+}
+
+function applyDesktopNetworkProxyEnv(
+	env: NodeJS.ProcessEnv,
+	networkProxy: NetworkProxySettings | undefined,
+): void {
+	if (!networkProxy) return
+	env[DESKTOP_NETWORK_PROXY_MODE_ENV] = networkProxy.mode
+	delete env[DESKTOP_NETWORK_PROXY_URL_ENV]
+	delete env[DESKTOP_NETWORK_NO_PROXY_ENV]
+
+	if (networkProxy.mode === "system") return
+
+	for (const key of PROXY_ENV_KEYS) {
+		delete env[key]
+	}
+
+	if (networkProxy.mode === "off") return
+
+	const proxyUrl = normalizeProxyUrl(networkProxy.proxyUrl)
+	if (!proxyUrl) return
+
+	const noProxy = normalizeNoProxy(networkProxy.noProxy)
+	env[DESKTOP_NETWORK_PROXY_URL_ENV] = proxyUrl
+	env.HTTP_PROXY = proxyUrl
+	env.HTTPS_PROXY = proxyUrl
+	env.ALL_PROXY = proxyUrl
+	env.http_proxy = proxyUrl
+	env.https_proxy = proxyUrl
+	env.all_proxy = proxyUrl
+	if (noProxy) {
+		env[DESKTOP_NETWORK_NO_PROXY_ENV] = noProxy
+		env.NO_PROXY = noProxy
+		env.no_proxy = noProxy
 	}
 }
 
@@ -86,6 +146,7 @@ export function routeAcpLine(line: string): AcpIncomingMessage {
 			id,
 			method,
 			params: "params" in message ? message.params : {},
+			message,
 		}
 	}
 
@@ -98,6 +159,7 @@ export function routeAcpLine(line: string): AcpIncomingMessage {
 			type: "notification",
 			method,
 			params: "params" in message ? message.params : {},
+			message,
 		}
 	}
 
@@ -108,6 +170,7 @@ export class StdioAcpClient implements AcpTransport {
 	private child: ChildProcessWithoutNullStreams | null = null
 	private nextId = 1
 	private pending = new Map<JsonRpcId, PendingRequest>()
+	private pendingMethods = new Map<JsonRpcId, string>()
 	private events = new EventEmitter()
 	private stopped = false
 
@@ -117,12 +180,22 @@ export class StdioAcpClient implements AcpTransport {
 		if (this.child) return
 
 		const devoBinDir = path.join(homedir(), ".devo", "bin")
-		const env = buildServerProcessEnv({ optionsEnv: this.options.env })
 		const program = this.options.program ?? "devo"
+		const runtimeBinDir = path.isAbsolute(program) ? path.dirname(program) : undefined
+		const env = buildServerProcessEnv({
+			optionsEnv: this.options.env,
+			runtimeBinDir,
+			networkProxy: this.options.networkProxy,
+		})
 		const args = this.options.args ?? ["server", "--transport", "stdio"]
 		const cwd = this.options.cwd ?? homedir()
 
-		log.info("Spawning Devo ACP stdio server", { program, args, cwd, binDir: devoBinDir })
+		log.info("Spawning Devo ACP stdio server", {
+			program,
+			args,
+			cwd,
+			binDir: runtimeBinDir ?? devoBinDir,
+		})
 		const child = spawn(program, args, {
 			cwd,
 			env,
@@ -162,14 +235,24 @@ export class StdioAcpClient implements AcpTransport {
 		this.start()
 		const id = this.nextId++
 		const child = this.requireChild()
+		const payload = { jsonrpc: "2.0", id, method, params }
 		const response = new Promise<unknown>((resolve, reject) => {
 			this.pending.set(id, { resolve, reject })
 		})
+		this.pendingMethods.set(id, method)
 		try {
-			await this.writeJson(child, { jsonrpc: "2.0", id, method, params })
+			await this.writeJson(child, payload)
+			this.recordTraffic({
+				direction: "desktop-to-server",
+				kind: "request",
+				id,
+				method,
+				payload,
+			})
 		} catch (error) {
 			const reason = toError(error)
 			this.pending.delete(id)
+			this.pendingMethods.delete(id)
 			this.close(reason)
 			throw reason
 		}
@@ -178,8 +261,15 @@ export class StdioAcpClient implements AcpTransport {
 
 	async respond(id: JsonRpcId, result: unknown): Promise<void> {
 		this.start()
+		const payload = { jsonrpc: "2.0", id, result }
 		try {
-			await this.writeJson(this.requireChild(), { jsonrpc: "2.0", id, result })
+			await this.writeJson(this.requireChild(), payload)
+			this.recordTraffic({
+				direction: "desktop-to-server",
+				kind: "response",
+				id,
+				payload,
+			})
 		} catch (error) {
 			const reason = toError(error)
 			this.close(reason)
@@ -212,6 +302,15 @@ export class StdioAcpClient implements AcpTransport {
 		const routed = routeAcpLine(line)
 		switch (routed.type) {
 			case "response": {
+				const method = this.pendingMethods.get(routed.id)
+				this.pendingMethods.delete(routed.id)
+				this.recordTraffic({
+					direction: "server-to-desktop",
+					kind: "response",
+					id: routed.id,
+					method,
+					payload: routed.message,
+				})
 				const pending = this.pending.get(routed.id)
 				if (!pending) return
 				this.pending.delete(routed.id)
@@ -224,6 +323,12 @@ export class StdioAcpClient implements AcpTransport {
 				break
 			}
 			case "notification":
+				this.recordTraffic({
+					direction: "server-to-desktop",
+					kind: "notification",
+					method: routed.method,
+					payload: routed.message,
+				})
 				this.events.emit("event", {
 					type: "notification",
 					method: routed.method,
@@ -231,6 +336,13 @@ export class StdioAcpClient implements AcpTransport {
 				} satisfies AcpTransportEvent)
 				break
 			case "request":
+				this.recordTraffic({
+					direction: "server-to-desktop",
+					kind: "request",
+					id: routed.id,
+					method: routed.method,
+					payload: routed.message,
+				})
 				this.events.emit("event", {
 					type: "request",
 					id: routed.id,
@@ -239,6 +351,11 @@ export class StdioAcpClient implements AcpTransport {
 				} satisfies AcpTransportEvent)
 				break
 			case "invalid":
+				this.recordTraffic({
+					direction: "system",
+					kind: "invalid",
+					payload: { error: routed.error, line: routed.line },
+				})
 				log.warn("Ignoring invalid ACP stdio line", { error: routed.error, line: routed.line })
 				break
 		}
@@ -274,10 +391,24 @@ export class StdioAcpClient implements AcpTransport {
 
 	private close(error: Error): void {
 		this.child = null
+		this.recordTraffic({
+			direction: "system",
+			kind: "closed",
+			payload: { error: error.message },
+		})
 		for (const pending of this.pending.values()) {
 			pending.reject(error)
 		}
 		this.pending.clear()
+		this.pendingMethods.clear()
 		this.events.emit("event", { type: "closed", error: error.message } satisfies AcpTransportEvent)
+	}
+
+	private recordTraffic(entry: AcpTrafficLogRecord): void {
+		try {
+			this.options.trafficLogger?.record(entry)
+		} catch (error) {
+			log.warn("Failed to record ACP traffic", error)
+		}
 	}
 }

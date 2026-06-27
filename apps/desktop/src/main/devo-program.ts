@@ -6,6 +6,8 @@ export interface ResolveDevoProgramOptions {
 	env: NodeJS.ProcessEnv
 	existsSync?: (path: string) => boolean
 	isPackaged: boolean
+	platform?: NodeJS.Platform
+	resourcesPath?: string
 }
 
 const PATH_DEVO = "devo"
@@ -16,11 +18,18 @@ export function resolveDevoProgram({
 	env,
 	existsSync = fs.existsSync,
 	isPackaged,
+	platform = process.platform,
+	resourcesPath,
 }: ResolveDevoProgramOptions): string {
 	const override = env[OVERRIDE_ENV]?.trim()
 	if (override) return override
 
-	if (isPackaged) return PATH_DEVO
+	if (isPackaged) {
+		const runtimeRoot = resourcesPath ?? path.join(appPath, "..")
+		const bundled = path.join(runtimeRoot, "runtime", "bin", devoExecutableName(platform))
+		if (existsSync(bundled)) return bundled
+		throw new Error(`Bundled Devo runtime not found at ${bundled}`)
+	}
 
 	const checkoutRoot = path.resolve(appPath, "../..")
 	const candidates = [
@@ -31,4 +40,8 @@ export function resolveDevoProgram({
 	]
 
 	return candidates.find(existsSync) ?? PATH_DEVO
+}
+
+function devoExecutableName(platform: NodeJS.Platform): string {
+	return platform === "win32" ? "devo.exe" : "devo"
 }

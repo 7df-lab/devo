@@ -3,39 +3,40 @@ import { StdioAcpClient, buildServerProcessEnv, routeAcpLine } from "./acp-stdio
 
 describe("routeAcpLine", () => {
 	test("routes JSON-RPC responses, notifications, and server requests", () => {
-		const response = routeAcpLine(JSON.stringify({ jsonrpc: "2.0", id: 7, result: { ok: true } }))
+		const responseMessage = { jsonrpc: "2.0", id: 7, result: { ok: true } }
+		const response = routeAcpLine(JSON.stringify(responseMessage))
 		expect(response).toEqual({
 			type: "response",
 			id: 7,
-			message: { jsonrpc: "2.0", id: 7, result: { ok: true } },
+			message: responseMessage,
 		})
 
-		const notification = routeAcpLine(
-			JSON.stringify({
-				jsonrpc: "2.0",
-				method: "session/update",
-				params: { sessionId: "s1", update: { sessionUpdate: "agent_message_chunk" } },
-			}),
-		)
+		const notificationMessage = {
+			jsonrpc: "2.0",
+			method: "session/update",
+			params: { sessionId: "s1", update: { sessionUpdate: "agent_message_chunk" } },
+		}
+		const notification = routeAcpLine(JSON.stringify(notificationMessage))
 		expect(notification).toEqual({
 			type: "notification",
 			method: "session/update",
 			params: { sessionId: "s1", update: { sessionUpdate: "agent_message_chunk" } },
+			message: notificationMessage,
 		})
 
-		const request = routeAcpLine(
-			JSON.stringify({
-				jsonrpc: "2.0",
-				id: 9,
-				method: "session/request_permission",
-				params: { sessionId: "s1", options: [{ optionId: "reject", kind: "reject_once" }] },
-			}),
-		)
+		const requestMessage = {
+			jsonrpc: "2.0",
+			id: 9,
+			method: "session/request_permission",
+			params: { sessionId: "s1", options: [{ optionId: "reject", kind: "reject_once" }] },
+		}
+		const request = routeAcpLine(JSON.stringify(requestMessage))
 		expect(request).toEqual({
 			type: "request",
 			id: 9,
 			method: "session/request_permission",
 			params: { sessionId: "s1", options: [{ optionId: "reject", kind: "reject_once" }] },
+			message: requestMessage,
 		})
 	})
 })
@@ -53,6 +54,101 @@ describe("StdioAcpClient", () => {
 			DEVO_SUPPRESS_SERVER_TRAY: "1",
 			KEEP: "base",
 			PATH: "/Users/tester/.devo/bin:/custom/bin",
+		})
+	})
+
+	test("uses bundled runtime bin dir first when provided", () => {
+		const env = buildServerProcessEnv({
+			baseEnv: { PATH: "/usr/bin", KEEP: "base" },
+			homeDir: "/Users/tester",
+			optionsEnv: { DEVO_SUPPRESS_SERVER_TRAY: "1" },
+			pathSeparator: ":",
+			runtimeBinDir: "/Applications/Devo.app/Contents/Resources/runtime/bin",
+		})
+
+		expect(env).toMatchObject({
+			DEVO_SUPPRESS_SERVER_TRAY: "1",
+			KEEP: "base",
+			PATH: "/Applications/Devo.app/Contents/Resources/runtime/bin:/usr/bin",
+		})
+	})
+
+	test("adds desktop custom proxy environment for the managed runtime", () => {
+		const env = buildServerProcessEnv({
+			baseEnv: { PATH: "/usr/bin" },
+			homeDir: "/Users/tester",
+			pathSeparator: ":",
+			networkProxy: {
+				mode: "custom",
+				proxyUrl: "socks5h://127.0.0.1:7890",
+				noProxy: "localhost,127.0.0.1,::1",
+			},
+		})
+
+		expect(env).toMatchObject({
+			DEVO_DESKTOP_NETWORK_PROXY_MODE: "custom",
+			DEVO_DESKTOP_NETWORK_PROXY_URL: "socks5h://127.0.0.1:7890",
+			DEVO_DESKTOP_NETWORK_NO_PROXY: "localhost,127.0.0.1,::1",
+			HTTP_PROXY: "socks5h://127.0.0.1:7890",
+			HTTPS_PROXY: "socks5h://127.0.0.1:7890",
+			ALL_PROXY: "socks5h://127.0.0.1:7890",
+			NO_PROXY: "localhost,127.0.0.1,::1",
+		})
+	})
+
+	test("clears inherited proxy environment when desktop proxy mode is off", () => {
+		const env = buildServerProcessEnv({
+			baseEnv: {
+				PATH: "/usr/bin",
+				HTTP_PROXY: "http://proxy.example:8080",
+				HTTPS_PROXY: "http://proxy.example:8080",
+				ALL_PROXY: "http://proxy.example:8080",
+				NO_PROXY: "localhost",
+				http_proxy: "http://proxy.example:8080",
+				https_proxy: "http://proxy.example:8080",
+				all_proxy: "http://proxy.example:8080",
+				no_proxy: "localhost",
+			},
+			homeDir: "/Users/tester",
+			pathSeparator: ":",
+			networkProxy: {
+				mode: "off",
+				proxyUrl: "",
+				noProxy: "localhost,127.0.0.1,::1",
+			},
+		})
+
+		expect(env).toMatchObject({
+			DEVO_DESKTOP_NETWORK_PROXY_MODE: "off",
+		})
+		expect(env).not.toHaveProperty("HTTP_PROXY")
+		expect(env).not.toHaveProperty("HTTPS_PROXY")
+		expect(env).not.toHaveProperty("ALL_PROXY")
+		expect(env).not.toHaveProperty("NO_PROXY")
+		expect(env).not.toHaveProperty("http_proxy")
+		expect(env).not.toHaveProperty("https_proxy")
+		expect(env).not.toHaveProperty("all_proxy")
+		expect(env).not.toHaveProperty("no_proxy")
+	})
+
+	test("preserves inherited proxy environment when desktop proxy mode is system", () => {
+		const env = buildServerProcessEnv({
+			baseEnv: {
+				PATH: "/usr/bin",
+				HTTP_PROXY: "http://proxy.example:8080",
+			},
+			homeDir: "/Users/tester",
+			pathSeparator: ":",
+			networkProxy: {
+				mode: "system",
+				proxyUrl: "",
+				noProxy: "localhost,127.0.0.1,::1",
+			},
+		})
+
+		expect(env).toMatchObject({
+			HTTP_PROXY: "http://proxy.example:8080",
+			DEVO_DESKTOP_NETWORK_PROXY_MODE: "system",
 		})
 	})
 
@@ -75,5 +171,126 @@ describe("StdioAcpClient", () => {
 		await expect(client.request("initialize")).rejects.toThrow("write EPIPE")
 		expect((client as unknown as { pending: Map<unknown, unknown> }).pending.size).toBe(0)
 		expect(client.connected()).toBe(false)
+	})
+
+	test("records outgoing requests and incoming responses with raw payloads", async () => {
+		const records: unknown[] = []
+		const client = new StdioAcpClient({
+			trafficLogger: {
+				getState: () => ({ enabled: true, path: null }),
+				record: (entry) => records.push(entry),
+			},
+		})
+		;(client as unknown as { child: unknown }).child = {
+			killed: false,
+			pid: 123,
+			stdin: {
+				destroyed: false,
+				writable: true,
+				writableEnded: false,
+				write: (_line: string, callback: (error?: Error) => void) => {
+					callback()
+					return true
+				},
+			},
+		}
+
+		const response = client.request("initialize", { protocolVersion: 1 })
+		await Promise.resolve()
+		;(client as unknown as { handleLine: (line: string) => void }).handleLine(
+			JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }),
+		)
+
+		await expect(response).resolves.toEqual({ ok: true })
+		expect(records).toEqual([
+			{
+				direction: "desktop-to-server",
+				kind: "request",
+				id: 1,
+				method: "initialize",
+				payload: {
+					jsonrpc: "2.0",
+					id: 1,
+					method: "initialize",
+					params: { protocolVersion: 1 },
+				},
+			},
+			{
+				direction: "server-to-desktop",
+				kind: "response",
+				id: 1,
+				method: "initialize",
+				payload: { jsonrpc: "2.0", id: 1, result: { ok: true } },
+			},
+		])
+	})
+
+	test("records server requests, notifications, invalid lines, and closed events", () => {
+		const records: unknown[] = []
+		const client = new StdioAcpClient({
+			trafficLogger: {
+				getState: () => ({ enabled: true, path: null }),
+				record: (entry) => records.push(entry),
+			},
+		})
+		const handleLine = (client as unknown as { handleLine: (line: string) => void }).handleLine.bind(
+			client,
+		)
+
+		handleLine(
+			JSON.stringify({
+				jsonrpc: "2.0",
+				id: "server-1",
+				method: "session/request_permission",
+				params: { sessionId: "s1" },
+			}),
+		)
+		handleLine(
+			JSON.stringify({
+				jsonrpc: "2.0",
+				method: "session/update",
+				params: { sessionId: "s1" },
+			}),
+		)
+		handleLine("{not json")
+		client.stop()
+
+		expect(records).toEqual([
+			{
+				direction: "server-to-desktop",
+				kind: "request",
+				id: "server-1",
+				method: "session/request_permission",
+				payload: {
+					jsonrpc: "2.0",
+					id: "server-1",
+					method: "session/request_permission",
+					params: { sessionId: "s1" },
+				},
+			},
+			{
+				direction: "server-to-desktop",
+				kind: "notification",
+				method: "session/update",
+				payload: {
+					jsonrpc: "2.0",
+					method: "session/update",
+					params: { sessionId: "s1" },
+				},
+			},
+			{
+				direction: "system",
+				kind: "invalid",
+				payload: {
+					error: "JSON Parse error: Expected '}'",
+					line: "{not json",
+				},
+			},
+			{
+				direction: "system",
+				kind: "closed",
+				payload: { error: "Devo ACP stdio client stopped" },
+			},
+		])
 	})
 })
