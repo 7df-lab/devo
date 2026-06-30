@@ -22,9 +22,7 @@ import {
 	CopyIcon,
 	FileIcon,
 	GitForkIcon,
-	ListOrderedIcon,
 	Loader2Icon,
-	SendIcon,
 	Undo2Icon,
 	XIcon,
 } from "lucide-react"
@@ -726,8 +724,6 @@ interface ChatTurnProps {
 	) => Promise<void>
 	/** Revert to this turn's user message (for per-turn undo) */
 	onRevertToMessage?: (messageId: string) => Promise<void>
-	/** Interrupt the current work and send this queued message immediately */
-	onSendNow?: (turn: ChatTurnType) => Promise<void>
 	/** Fork the conversation from this turn boundary */
 	onForkFromTurn?: () => Promise<void>
 	/** Delete a specific part from a message (for error recovery) */
@@ -848,7 +844,6 @@ export const ChatTurnComponent = memo(
 		onApprovePermission,
 		onDenyPermission,
 		onRevertToMessage,
-		onSendNow,
 		onForkFromTurn,
 		onDeletePart,
 		stepsExpanded: controlledStepsExpanded,
@@ -921,8 +916,8 @@ export const ChatTurnComponent = memo(
 		}, [turn.assistantMessages])
 
 		const working = isLast && isWorking
-		const isQueued = isWorking && turn.assistantMessages.length === 0 && !isLast
-		const isQueuedLast = isWorking && turn.assistantMessages.length === 0 && isLast
+		// User requirement: queue state belongs in the composer status stack;
+		// this transcript must not infer queued state from an empty assistant response.
 		const processOrderedParts = working ? orderedParts : completedProcessParts
 		const processToolParts = useMemo(
 			() => processOrderedParts.flatMap((part) => (part.kind === "tool" ? [part.part] : [])),
@@ -1010,17 +1005,6 @@ export const ChatTurnComponent = memo(
 			}
 		}, [onForkFromTurn, forking])
 
-		const [sendingNow, setSendingNow] = useState(false)
-		const handleSendNow = useCallback(async () => {
-			if (!onSendNow || sendingNow) return
-			setSendingNow(true)
-			try {
-				await onSendNow(turn)
-			} finally {
-				setSendingNow(false)
-			}
-		}, [onSendNow, sendingNow, turn])
-
 		const handleDeleteFile = useCallback(
 			async (file: FilePart) => {
 				if (!onDeletePart) return
@@ -1075,23 +1059,6 @@ export const ChatTurnComponent = memo(
 								/>
 							)}
 							<p className="whitespace-pre-wrap">{userText}</p>
-							{(isQueued || isQueuedLast) && (
-								<span className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground/60">
-									<ListOrderedIcon className="size-3" />
-									Queued
-									{onSendNow && (
-										<button
-											type="button"
-											onClick={handleSendNow}
-											disabled={sendingNow}
-											className="ml-1 inline-flex items-center gap-0.5 rounded-full bg-muted/80 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary disabled:opacity-50"
-										>
-											<SendIcon className="size-2.5" />
-											{sendingNow ? "Sending..." : "Send now"}
-										</button>
-									)}
-								</span>
-							)}
 						</MessageContent>
 					</Message>
 				)}

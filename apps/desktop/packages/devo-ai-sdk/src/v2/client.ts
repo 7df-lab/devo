@@ -38,6 +38,11 @@ import type {
 	ProviderVendorListResult,
 	ProviderVendorUpsertParams,
 	ProviderVendorUpsertResult,
+	GoalClearResult,
+	GoalSetResult,
+	GoalSetStatusResult,
+	GoalStatusResult,
+	ThreadGoalStatus,
 	RequestUserInputRespondParams,
 	WorkspaceChangeCoverage,
 	WorkspaceChangeScope,
@@ -708,6 +713,51 @@ class AcpClient {
 
 	command = {
 		list: async () => ({ data: [{ name: "compact", description: "Compact the session" }] }),
+	}
+
+	// User requirement: Desktop's composer status area needs direct goal state
+	// controls, while the existing /goal trigger remains available for entry.
+	goal = {
+		status: async (params: { sessionID: string }) => {
+			const result = (await this.request("goal/status", {
+				sessionId: params.sessionID,
+			})) as GoalStatusResult
+			return { data: result.goal }
+		},
+		set: async (params: {
+			sessionID: string
+			objective?: string
+			status?: ThreadGoalStatus
+			tokenBudget?: number | null
+		}) => {
+			const result = (await this.request("goal/set", {
+				sessionId: params.sessionID,
+				...(params.objective !== undefined ? { objective: params.objective } : {}),
+				...(params.status !== undefined ? { status: params.status } : {}),
+				...(params.tokenBudget !== undefined ? { tokenBudget: params.tokenBudget } : {}),
+			})) as GoalSetResult
+			return { data: result.goal }
+		},
+		pause: async (params: { sessionID: string }) => {
+			const result = (await this.request("goal/pause", {
+				sessionId: params.sessionID,
+				status: "paused",
+			})) as GoalSetStatusResult
+			return { data: result.goal }
+		},
+		resume: async (params: { sessionID: string }) => {
+			const result = (await this.request("goal/resume", {
+				sessionId: params.sessionID,
+				status: "active",
+			})) as GoalSetStatusResult
+			return { data: result.goal }
+		},
+		clear: async (params: { sessionID: string }) => {
+			const result = (await this.request("goal/clear", {
+				sessionId: params.sessionID,
+			})) as GoalClearResult
+			return { data: result }
+		},
 	}
 
 	find = {

@@ -44,7 +44,7 @@ import {
 	useState,
 } from "react"
 import { compactionStatusFamily } from "../../atoms/compaction"
-import { messagesFamily, removeMessageAtom } from "../../atoms/messages"
+import { messagesFamily } from "../../atoms/messages"
 import { projectModelsAtom, setProjectModelAtom } from "../../atoms/preferences"
 import type { SessionSetupPhase } from "../../atoms/sessions"
 import { removePermissionAtom, sessionFamily } from "../../atoms/sessions"
@@ -70,7 +70,7 @@ import {
 import type { ChatTurn } from "../../hooks/use-session-chat"
 import { createLogger } from "../../lib/logger"
 import { computeTurnWorkTimeSplit, formatWorkDuration } from "../../lib/session-metrics"
-import type { Agent, FileAttachment, FilePart, QuestionAnswer, TextPart } from "../../lib/types"
+import type { Agent, FileAttachment, QuestionAnswer } from "../../lib/types"
 import { persistRuntimeModelConfigOption, persistRuntimeModelSelection } from "../../lib/model-config-options"
 import { getProjectClient } from "../../services/connection-manager"
 
@@ -78,8 +78,6 @@ const log = createLogger("chat-view")
 
 const VIRTUALIZE_TURN_THRESHOLD = 30
 const VIRTUAL_TURN_GAP = 40
-
-type ComposerTrigger = "goal" | "plan"
 
 import {
 	type DiffComment,
@@ -89,6 +87,11 @@ import {
 import { PermissionItem } from "./chat-permission"
 import { ChatQuestionFlow } from "./chat-question"
 import { ChatTurnComponent } from "./chat-turn"
+import {
+	ComposerStatusStack,
+	type ComposerGoal,
+	type ComposerGoalStatus,
+} from "./composer-status-stack"
 import { ContextItems } from "./context-items"
 import type { MentionOption } from "./mention-popover"
 import { MentionPopover, type MentionPopoverHandle } from "./mention-popover"
@@ -104,6 +107,33 @@ import {
 import { PromptToolbar } from "./prompt-toolbar"
 import { SessionTaskList } from "./session-task-list"
 import { SlashCommandPopover, type SlashCommandPopoverHandle } from "./slash-command-popover"
+
+type ComposerTrigger = "goal" | "plan"
+type ComposerGoalAction = "edit" | "pause" | "resume" | "clear"
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+	return value && typeof value === "object" ? (value as Record<string, unknown>) : null
+}
+
+function normalizeGoalStatus(value: unknown): ComposerGoalStatus | null {
+	if (value === "active" || value === "paused" || value === "complete") return value
+	if (value === "budgetLimited" || value === "budget_limited") return "budgetLimited"
+	return null
+}
+
+function normalizeComposerGoal(value: unknown): ComposerGoal | null {
+	const record = objectRecord(value)
+	if (!record) return null
+	const objective = typeof record.objective === "string" ? record.objective.trim() : ""
+	const status = normalizeGoalStatus(record.status)
+	if (!objective || !status || status === "complete") return null
+	return {
+		objective,
+		status,
+		timeUsedSeconds: (record.timeUsedSeconds ?? record.time_used_seconds) as ComposerGoal["timeUsedSeconds"],
+		observedAtMs: Date.now(),
+	}
+}
 
 /**
  * Small "+" button that opens the file picker for attachments.
@@ -703,52 +733,6 @@ export function ChatView({
 		[onDeny, removePermission],
 	)
 
-	const handleSendNow = useCallback(
-		async (turn: ChatTurn) => {
-			if (!isWorking) return
-
-			// Extract text and files from the queued turn BEFORE aborting, because
-			// the abort may clean up state that we need.
-			const text = turn.userMessage.parts
-				.filter((p): p is TextPart => p.type === "text" && !p.synthetic)
-				.map((p) => p.text)
-				.join("\n")
-			const files: FileAttachment[] = turn.userMessage.parts
-				.filter((p): p is FilePart => p.type === "file")
-				.map((p) => ({
-					type: "file" as const,
-					url: p.url,
-					mediaType: p.mime,
-					filename: p.filename,
-				}))
-
-			if (!text.trim()) return
-
-			// 1. Abort the currently running turn
-			if (onStop) {
-				await onStop(agent)
-			}
-
-			// 2. Remove the orphaned message from the local store to prevent
-			// duplicates. After an abort the server discards queued prompt
-			// callbacks, so the user message is persisted on the server but no
-			// response will be generated. When we re-send below, a new user
-			// message + optimistic entry will be created. The server's loop
-			// reads full history and will respond to the newest user message,
-			// effectively ignoring the orphaned one in the context.
-			appStore.set(removeMessageAtom, {
-				sessionId: agent.sessionId,
-				messageId: turn.userMessage.info.id,
-			})
-
-			// 3. Re-send the queued message so the server actually processes it.
-			if (onSendMessage) {
-				await onSendMessage(agent, text, { files: files.length > 0 ? files : undefined })
-			}
-		},
-		[onStop, onSendMessage, isWorking, agent],
-	)
-
 	// Keyboard shortcuts for undo/redo
 	useEffect(() => {
 		const handleKeyDown = (e: KeyboardEvent) => {
@@ -814,7 +798,6 @@ export function ChatView({
 				onApprovePermission={handleApprovePermission}
 				onDenyPermission={handleDenyPermission}
 				onRevertToMessage={onRevertToMessage}
-				onSendNow={isWorking ? handleSendNow : undefined}
 				onForkFromTurn={
 					onForkFromTurn
 						? () => {
@@ -833,7 +816,6 @@ export function ChatView({
 			expandedStepTurnIds,
 			handleApprovePermission,
 			handleDenyPermission,
-			handleSendNow,
 			handleStepsExpandedChange,
 			isConnected,
 			isWorking,
@@ -1014,10 +996,57 @@ function ChatInputSection({
 }: ChatInputSectionProps) {
 	const [sending, setSending] = useState(false)
 	const [activeTrigger, setActiveTrigger] = useState<ComposerTrigger | null>(null)
+	const [activeGoal, setActiveGoal] = useState<ComposerGoal | null>(null)
+	const [goalAction, setGoalAction] = useState<ComposerGoalAction | null>(null)
 
+	// User requirement: the /goal footer chip is only an input trigger;
+	// the composer-adjacent status row reflects the real session goal state.
 	useEffect(() => {
 		setActiveTrigger(null)
+		setActiveGoal(null)
+		setGoalAction(null)
 	}, [agent.sessionId])
+
+	const loadGoalStatus = useCallback(async (): Promise<ComposerGoal | null> => {
+		if (!agent.directory) return null
+		const client = getProjectClient(agent.directory)
+		if (!client?.goal?.status) return null
+		const result = await client.goal.status({ sessionID: agent.sessionId })
+		return normalizeComposerGoal(result.data)
+	}, [agent.directory, agent.sessionId])
+
+	const refreshGoalStatus = useCallback(async () => {
+		try {
+			setActiveGoal(await loadGoalStatus())
+		} catch (err) {
+			log.error("goal.status failed", { sessionId: agent.sessionId }, err)
+		}
+	}, [agent.sessionId, loadGoalStatus])
+
+	useEffect(() => {
+		let disposed = false
+		const load = async () => {
+			try {
+				const nextGoal = await loadGoalStatus()
+				if (!disposed) setActiveGoal(nextGoal)
+			} catch (err) {
+				if (!disposed) {
+					setActiveGoal(null)
+					log.error("goal.status failed", { sessionId: agent.sessionId }, err)
+				}
+			}
+		}
+		void load()
+		const interval = setInterval(load, 15_000)
+		return () => {
+			disposed = true
+			clearInterval(interval)
+		}
+	}, [agent.sessionId, loadGoalStatus])
+
+	useEffect(() => {
+		if (!isWorking) void refreshGoalStatus()
+	}, [isWorking, refreshGoalStatus])
 
 	// Tree-scoped interactive requests — bubbles up from sub-agent sessions.
 	// These replace the direct `agent.permissions` / `agent.questions` arrays
@@ -1233,6 +1262,65 @@ function ChatInputSection({
 		getText: () => string
 	} | null>(null)
 
+	const focusComposer = useCallback(() => {
+		requestAnimationFrame(() => {
+			const textarea = document.querySelector<HTMLTextAreaElement>("textarea[data-prompt-input]")
+			textarea?.focus()
+		})
+	}, [])
+
+	const handleEditGoal = useCallback(() => {
+		if (!activeGoal) return
+		setActiveTrigger("goal")
+		slashCommandRef.current?.setText(activeGoal.objective)
+		focusComposer()
+	}, [activeGoal, focusComposer])
+
+	const handlePauseGoal = useCallback(async () => {
+		if (!agent.directory || goalAction !== null) return
+		const client = getProjectClient(agent.directory)
+		if (!client?.goal?.pause) return
+		setGoalAction("pause")
+		try {
+			const result = await client.goal.pause({ sessionID: agent.sessionId })
+			setActiveGoal(normalizeComposerGoal(result.data))
+		} catch (err) {
+			log.error("goal.pause failed", { sessionId: agent.sessionId }, err)
+		} finally {
+			setGoalAction(null)
+		}
+	}, [agent.directory, agent.sessionId, goalAction])
+
+	const handleResumeGoal = useCallback(async () => {
+		if (!agent.directory || goalAction !== null) return
+		const client = getProjectClient(agent.directory)
+		if (!client?.goal?.resume) return
+		setGoalAction("resume")
+		try {
+			const result = await client.goal.resume({ sessionID: agent.sessionId })
+			setActiveGoal(normalizeComposerGoal(result.data))
+		} catch (err) {
+			log.error("goal.resume failed", { sessionId: agent.sessionId }, err)
+		} finally {
+			setGoalAction(null)
+		}
+	}, [agent.directory, agent.sessionId, goalAction])
+
+	const handleClearGoal = useCallback(async () => {
+		if (!agent.directory || goalAction !== null) return
+		const client = getProjectClient(agent.directory)
+		if (!client?.goal?.clear) return
+		setGoalAction("clear")
+		try {
+			await client.goal.clear({ sessionID: agent.sessionId })
+			setActiveGoal(null)
+		} catch (err) {
+			log.error("goal.clear failed", { sessionId: agent.sessionId }, err)
+		} finally {
+			setGoalAction(null)
+		}
+	}, [agent.directory, agent.sessionId, goalAction])
+
 	const handleSlashCommand = useCallback(
 		async (text: string): Promise<boolean> => {
 			const trimmed = text.trim()
@@ -1364,11 +1452,16 @@ function ChatInputSection({
 				const finalText = commentPrefix ? `${commentPrefix}${text.trim()}` : text.trim()
 
 				if (activeTrigger) {
-					await submitTriggeredPrompt(activeTrigger, finalText, files)
+					const trigger = activeTrigger
+					await submitTriggeredPrompt(trigger, finalText, files)
 					log.debug("handleSend triggered prompt completed", {
 						sessionId: agent.sessionId,
-						trigger: activeTrigger,
+						trigger,
 					})
+					if (trigger === "goal") {
+						setTimeout(() => void refreshGoalStatus(), 400)
+						setTimeout(() => void refreshGoalStatus(), 1_200)
+					}
 				} else {
 					await onSendMessage?.(agent, finalText, {
 						model: effectiveModel ?? undefined,
@@ -1404,6 +1497,7 @@ function ChatInputSection({
 			clearDraft,
 			activeTrigger,
 			submitTriggeredPrompt,
+			refreshGoalStatus,
 			handleSlashCommand,
 			scrollRef,
 			diffComments,
@@ -1655,8 +1749,19 @@ function ChatInputSection({
 									onSelect={handleMentionSelect}
 									onClose={handleMentionClose}
 								/>
+								<ComposerStatusStack
+									goal={activeGoal}
+									goalAction={goalAction}
+									onEditGoal={handleEditGoal}
+									onPauseGoal={handlePauseGoal}
+									onResumeGoal={handleResumeGoal}
+									onClearGoal={handleClearGoal}
+								/>
 								<PromptInput
-									className="devo-composer bg-background/95 shadow-[0_18px_52px_rgba(0,0,0,0.10)] dark:shadow-[0_18px_58px_rgba(0,0,0,0.34)]"
+									className={cn(
+										"devo-composer bg-background/95 shadow-[0_18px_52px_rgba(0,0,0,0.10)] dark:shadow-[0_18px_58px_rgba(0,0,0,0.34)]",
+										activeGoal && "rounded-t-none border-t-border/70",
+									)}
 									accept="image/png,image/jpeg,image/gif,image/webp,application/pdf"
 									multiple
 									maxFileSize={10 * 1024 * 1024}
