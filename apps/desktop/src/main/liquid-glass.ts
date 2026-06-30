@@ -37,6 +37,8 @@ const TITLE_BAR_OVERLAY_HEIGHT = 40
 const TITLE_BAR_OVERLAY_COLOR = "#00000000"
 const TITLE_BAR_OVERLAY_DARK_SYMBOL_COLOR = "#111111"
 const TITLE_BAR_OVERLAY_LIGHT_SYMBOL_COLOR = "#f4f4f5"
+const STARTUP_WINDOW_DARK_BACKGROUND = "#181818"
+const STARTUP_WINDOW_LIGHT_BACKGROUND = "#ffffff"
 
 export function resolveTitleBarOverlay(isDarkMode: boolean): TitleBarOverlay {
 	return {
@@ -46,6 +48,10 @@ export function resolveTitleBarOverlay(isDarkMode: boolean): TitleBarOverlay {
 			: TITLE_BAR_OVERLAY_DARK_SYMBOL_COLOR,
 		height: TITLE_BAR_OVERLAY_HEIGHT,
 	}
+}
+
+export function resolveStartupWindowBackground(isDarkMode: boolean): string {
+	return isDarkMode ? STARTUP_WINDOW_DARK_BACKGROUND : STARTUP_WINDOW_LIGHT_BACKGROUND
 }
 
 // ============================================================

@@ -227,6 +227,24 @@ export function SidebarLayout() {
 		pathname.includes("/session/") || /^\/automations\/[^/]+\/runs\/[^/]+$/.test(pathname)
 	const transcriptFillsTitlebar = isMac && isTranscriptRoute
 	const transcriptTitlebarFillAttr = transcriptFillsTitlebar ? "true" : undefined
+	const isOpeningRoute = pathname === "/" || /^\/project\/[^/]+\/?$/.test(pathname)
+
+	useEffect(() => {
+		if (typeof document === "undefined") return
+		const root = document.documentElement
+
+		// Product requirement: on Windows, the startup New Chat surface should
+		// blend into the topbar instead of showing a separate chrome strip.
+		if (isOpeningRoute) {
+			root.dataset.openingRoute = "true"
+		} else {
+			delete root.dataset.openingRoute
+		}
+
+		return () => {
+			delete root.dataset.openingRoute
+		}
+	}, [isOpeningRoute])
 
 	const handleRenameSession = useCallback(
 		async (agent: Agent, title: string) => {

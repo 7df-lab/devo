@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
 	getResolvedChromeTier,
+	resolveStartupWindowBackground,
 	resolveTitleBarOverlay,
 	resolveWindowChrome,
 } from "./liquid-glass"
@@ -102,6 +103,16 @@ describe("resolveWindowChrome", () => {
 			color: "#00000000",
 			symbolColor: "#111111",
 			height: 40,
+		})
+	})
+
+	test("matches the native startup background to the splash theme", () => {
+		expect({
+			dark: resolveStartupWindowBackground(true),
+			light: resolveStartupWindowBackground(false),
+		}).toEqual({
+			dark: "#181818",
+			light: "#ffffff",
 		})
 	})
 })

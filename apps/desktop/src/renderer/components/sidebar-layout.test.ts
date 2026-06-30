@@ -41,4 +41,20 @@ describe("sidebar layout window controls", () => {
 			usesCompactPanelIcon: true,
 		})
 	})
+
+	test("opening routes mark the root for Windows titlebar blending", async () => {
+		const source = await readFile(sourcePath, "utf8")
+
+		expect({
+			detectsRootRoute: source.includes('pathname === "/"'),
+			detectsProjectOpeningRoute: source.includes("^\\/project\\/[^/]+\\/?$"),
+			setsOpeningRouteMarker: source.includes('root.dataset.openingRoute = "true"'),
+			clearsOpeningRouteMarker: source.includes("delete root.dataset.openingRoute"),
+		}).toEqual({
+			detectsRootRoute: true,
+			detectsProjectOpeningRoute: true,
+			setsOpeningRouteMarker: true,
+			clearsOpeningRouteMarker: true,
+		})
+	})
 })

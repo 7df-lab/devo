@@ -6,7 +6,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, se
 import { initAutomations, shutdownAutomations } from "./automation"
 import { initCredentialStore } from "./credential-store"
 import { getOpaqueWindowsPref, registerIpcHandlers } from "./ipc-handlers"
-import { installLiquidGlass, resolveWindowChrome } from "./liquid-glass"
+import { installLiquidGlass, resolveStartupWindowBackground, resolveWindowChrome } from "./liquid-glass"
 import { createLogger } from "./logger"
 import { stopServer } from "./devo-manager"
 import { getSessionStates } from "./notification-watcher"
@@ -227,10 +227,12 @@ async function createWindow(): Promise<BrowserWindow> {
 	// Resolve window chrome tier: liquid glass > vibrancy > Windows transparency > opaque
 	const isOpaque = getOpaqueWindowsPref()
 	const colorScheme = getSettings().appearance.colorScheme
+	const isDarkMode = colorScheme === "dark" || (colorScheme === "system" && nativeTheme.shouldUseDarkColors)
 	const chrome = await resolveWindowChrome({
 		isOpaque,
-		isDarkMode: colorScheme === "dark" || (colorScheme === "system" && nativeTheme.shouldUseDarkColors),
+		isDarkMode,
 	})
+	const startupWindowBackground = resolveStartupWindowBackground(isDarkMode)
 
 	// Resolve the window icon for Linux/Windows. macOS uses the .app bundle icon.
 	// Linux: use 256x256 icon — GTK's GdkPixbuf can choke on the full 1024x1024
@@ -253,7 +255,9 @@ async function createWindow(): Promise<BrowserWindow> {
 		autoHideMenuBar: process.platform === "win32",
 		// Transparent background for macOS glass/vibrancy tiers. Windows acrylic
 		// keeps a non-transparent BrowserWindow so native resize/maximize work.
-		backgroundColor: chrome.usesTransparentBackground ? "#00000000" : "#000000",
+		// Product requirement: the Windows startup titlebar should match the
+		// splash/opening page background instead of flashing as a separate black strip.
+		backgroundColor: chrome.usesTransparentBackground ? "#00000000" : startupWindowBackground,
 		// Don't show the window until the renderer has painted its first frame.
 		// Prevents a flash of transparent/empty content, especially on Wayland.
 		show: false,

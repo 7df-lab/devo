@@ -114,6 +114,16 @@
 	transition: background-color var(--duration-fast, 150ms) ease;
 }
 
+:root[data-platform="win32"][data-opening-route="true"] body::before {
+	background-color: var(--devo-transcript-background);
+}
+
+:root[data-platform="win32"][data-opening-route="true"] [data-slot="app-bar"] {
+	background: var(--devo-transcript-background);
+	background-color: var(--devo-transcript-background);
+	border-bottom-color: transparent;
+}
+
 :root[data-platform="win32"][data-window-focused="true"]
 	[data-slot="sidebar-wrapper"],
 :root[data-platform="win32"][data-window-focused="true"] [data-slot="sidebar"],
