@@ -162,6 +162,14 @@ Local provider fields:
 | --- | --- | --- |
 | `mode` | `disabled`, `provider`, `local` | Effective web fetch mode. Default is `local`. |
 
+## `[research]`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `max_researcher_iterations` | integer | Search/fetch iteration guidance passed to researcher prompts. Defaults to `5`. |
+| `fetch_summary_threshold_chars` | integer | Local `webfetch` text length above which research summarizes the fetched page. Defaults to `24000`. |
+| `max_summary_chars` | integer | Target cap for oversized webpage summaries. Defaults to `8000`. |
+
 ## `auth.json`
 
 `auth.json` stores user-scoped credentials:

@@ -160,6 +160,14 @@ Local provider fields：
 | --- | --- | --- |
 | `mode` | `disabled`, `provider`, `local` | Effective web fetch mode。默认 `local`。 |
 
+## `[research]`
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `max_researcher_iterations` | integer | 传给 researcher prompt 的 search/fetch iteration guidance。默认 `5`。 |
+| `fetch_summary_threshold_chars` | integer | 本地 `webfetch` 文本超过该长度时，research 会先汇总 fetched page。默认 `24000`。 |
+| `max_summary_chars` | integer | 超大 webpage summaries 的目标上限。默认 `8000`。 |
+
 ## `auth.json`
 
 `auth.json` 存储 user-scoped credentials：

@@ -1,12 +1,12 @@
 ---
 artifact_id: L2-DES-RESEARCH-001
-revision: 3
+revision: 5
 status: Draft
 active_baseline: no
 supersedes:
 superseded_by:
 owner: Assistant
-last_updated: 2026-06-18
+last_updated: 2026-06-30
 ---
 
 # L2-DES-RESEARCH-001 — Deep Research Workflow
@@ -64,11 +64,15 @@ turns remain durable history only.
 
 The `[research]` config section defines v1 runtime caps:
 
-- `max_concurrent_tasks`
-- `max_tasks`
 - `max_researcher_iterations`
 - `fetch_summary_threshold_chars`
 - `max_summary_chars`
+
+The workflow intentionally does not define hard worker-count caps in v1. The
+supervisor prompt may prefer one worker and can launch parallel workers when the
+brief has clear independent subtopics. The workflow also intentionally does not
+define model-stage or total-turn timeouts in v1, because model response latency
+varies by provider and model.
 
 All stages reuse the active session model, provider, reasoning effort, web search, and web fetch configuration.
 
@@ -88,6 +92,8 @@ All stages reuse the active session model, provider, reasoning effort, web searc
 
 | Revision | Date | Author | Change Type | Notes |
 |---:|---|---|---|---|
+| 5 | 2026-06-30 | Assistant | Update | Removes research timeout caps after trial feedback showed model-specific latency makes fixed timeouts confusing. |
+| 4 | 2026-06-30 | Assistant | Update | Removes unused hard worker-count caps from the v1 design and adds stage/turn timeout caps as the enforced execution boundary. |
 | 3 | 2026-06-18 | Assistant | Update | Adds cwd to the prompt-visible research runtime environment for local report output. |
 | 2 | 2026-06-17 | Assistant | Update | Defines the explicit `/research` context-boundary projection contract across live, replay, resume, and compaction paths. |
 | 1 | 2026-06-14 | Assistant | Initial | Initial v1 deep research workflow design. |
