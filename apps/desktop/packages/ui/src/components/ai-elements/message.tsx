@@ -274,6 +274,35 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>
 
 const streamdownPlugins = { cjk, code, math, mermaid }
 
+type TranscriptMarkdownHeadingProps = ComponentProps<"h1"> & { node?: unknown }
+
+function TranscriptMarkdownHeading({
+	className,
+	node: _node,
+	...props
+}: TranscriptMarkdownHeadingProps) {
+	return (
+		<p
+			className={cn(
+				"my-2 border-0 pb-0 text-sm font-semibold leading-6 text-foreground",
+				className,
+			)}
+			{...props}
+		/>
+	)
+}
+
+// Product requirement: transcript Markdown headings should look like bold body text,
+// not oversized section titles or headings with divider rules.
+const transcriptMarkdownComponents: NonNullable<MessageResponseProps["components"]> = {
+	h1: TranscriptMarkdownHeading,
+	h2: TranscriptMarkdownHeading,
+	h3: TranscriptMarkdownHeading,
+	h4: TranscriptMarkdownHeading,
+	h5: TranscriptMarkdownHeading,
+	h6: TranscriptMarkdownHeading,
+}
+
 export const MessageResponse = memo(
 	({ className, ...props }: MessageResponseProps) => (
 		<Streamdown
@@ -281,6 +310,7 @@ export const MessageResponse = memo(
 				"devo-message-response size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
 				className,
 			)}
+			components={transcriptMarkdownComponents}
 			plugins={streamdownPlugins}
 			{...props}
 		/>

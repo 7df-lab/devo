@@ -21,4 +21,20 @@ describe("MessageResponse markdown surfaces", () => {
 			tableHeaderSurface: true,
 		})
 	})
+
+	test("keeps transcript markdown headings visually compact", () => {
+		expect({
+			requirementComment: messageSource.includes(
+				"transcript Markdown headings should look like bold body text",
+			),
+			headingComponents: messageSource.includes("const transcriptMarkdownComponents"),
+			headingStyle: messageSource.includes(
+				"my-2 border-0 pb-0 text-sm font-semibold leading-6 text-foreground",
+			),
+		}).toEqual({
+			requirementComment: true,
+			headingComponents: true,
+			headingStyle: true,
+		})
+	})
 })
