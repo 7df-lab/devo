@@ -91,6 +91,7 @@ import {
 	ComposerStatusStack,
 	type ComposerGoal,
 	type ComposerGoalStatus,
+	type ComposerQueueItem,
 } from "./composer-status-stack"
 import { ContextItems } from "./context-items"
 import type { MentionOption } from "./mention-popover"
@@ -110,6 +111,9 @@ import { SlashCommandPopover, type SlashCommandPopoverHandle } from "./slash-com
 
 type ComposerTrigger = "goal" | "plan"
 type ComposerGoalAction = "edit" | "pause" | "resume" | "clear"
+type ComposerPromptPart =
+	| { type: "text"; text: string }
+	| { type: "file"; mime: string; filename?: string; url: string }
 
 function objectRecord(value: unknown): Record<string, unknown> | null {
 	return value && typeof value === "object" ? (value as Record<string, unknown>) : null
@@ -133,6 +137,32 @@ function normalizeComposerGoal(value: unknown): ComposerGoal | null {
 		timeUsedSeconds: (record.timeUsedSeconds ?? record.time_used_seconds) as ComposerGoal["timeUsedSeconds"],
 		observedAtMs: Date.now(),
 	}
+}
+
+function promptPartsFromTextAndFiles(text: string, files?: FileAttachment[]): ComposerPromptPart[] {
+	const parts: ComposerPromptPart[] = [{ type: "text", text }]
+	for (const file of files ?? []) {
+		parts.push({
+			type: "file",
+			mime: file.mediaType ?? "application/octet-stream",
+			filename: file.filename,
+			url: file.url,
+		})
+	}
+	return parts
+}
+
+function chatTurnUserText(turn: ChatTurn): string {
+	return turn.userMessage.parts
+		.filter((part) => part.type === "text")
+		.map((part) => part.text)
+		.join("\n")
+		.trim()
+}
+
+function chatTurnUserCreatedAt(turn: ChatTurn): number {
+	const created = turn.userMessage.info.time?.created
+	return typeof created === "number" && Number.isFinite(created) ? created : 0
 }
 
 /**
@@ -998,6 +1028,7 @@ function ChatInputSection({
 	const [activeTrigger, setActiveTrigger] = useState<ComposerTrigger | null>(null)
 	const [activeGoal, setActiveGoal] = useState<ComposerGoal | null>(null)
 	const [goalAction, setGoalAction] = useState<ComposerGoalAction | null>(null)
+	const [queueItems, setQueueItems] = useState<ComposerQueueItem[]>([])
 
 	// User requirement: the /goal footer chip is only an input trigger;
 	// the composer-adjacent status row reflects the real session goal state.
@@ -1005,7 +1036,21 @@ function ChatInputSection({
 		setActiveTrigger(null)
 		setActiveGoal(null)
 		setGoalAction(null)
+		setQueueItems([])
 	}, [agent.sessionId])
+
+	useEffect(() => {
+		setQueueItems((current) =>
+			current.filter((item) => {
+				if (item.status !== "queued") return true
+				const createdAt = item.createdAtMs ?? 0
+				return !turns.some(
+					(turn) =>
+						chatTurnUserText(turn) === item.text && chatTurnUserCreatedAt(turn) >= createdAt - 1_000,
+				)
+			}),
+		)
+	}, [turns])
 
 	const loadGoalStatus = useCallback(async (): Promise<ComposerGoal | null> => {
 		if (!agent.directory) return null
@@ -1320,6 +1365,108 @@ function ChatInputSection({
 			setGoalAction(null)
 		}
 	}, [agent.directory, agent.sessionId, goalAction])
+
+	const handleSteerQueueItem = useCallback(
+		async (item: ComposerQueueItem) => {
+			if (!agent.directory || !item.queuedInputId || !item.activeTurnId) return
+			const client = getProjectClient(agent.directory)
+			if (!client?.turn?.steerQueued) return
+			setQueueItems((current) =>
+				current.map((entry) => (entry.id === item.id ? { ...entry, status: "steering" } : entry)),
+			)
+			try {
+				await client.turn.steerQueued({
+					sessionID: agent.sessionId,
+					expectedTurnID: item.activeTurnId,
+					queuedInputID: item.queuedInputId,
+				})
+				setQueueItems((current) => current.filter((entry) => entry.id !== item.id))
+			} catch (err) {
+				log.error("turn.queue.steer failed", { sessionId: agent.sessionId }, err)
+				setQueueItems((current) =>
+					current.map((entry) =>
+						entry.id === item.id
+							? { ...entry, status: "error", error: err instanceof Error ? err.message : "Steer failed" }
+							: entry,
+					),
+				)
+			}
+		},
+		[agent.directory, agent.sessionId],
+	)
+
+	const handleRemoveQueueItem = useCallback(
+		async (item: ComposerQueueItem) => {
+			if (!agent.directory || !item.queuedInputId) {
+				setQueueItems((current) => current.filter((entry) => entry.id !== item.id))
+				return
+			}
+			const client = getProjectClient(agent.directory)
+			if (!client?.turn?.removeQueued) return
+			setQueueItems((current) =>
+				current.map((entry) => (entry.id === item.id ? { ...entry, status: "removing" } : entry)),
+			)
+			try {
+				await client.turn.removeQueued({
+					sessionID: agent.sessionId,
+					queuedInputID: item.queuedInputId,
+				})
+				setQueueItems((current) => current.filter((entry) => entry.id !== item.id))
+			} catch (err) {
+				log.error("turn.queue.remove failed", { sessionId: agent.sessionId }, err)
+				setQueueItems((current) =>
+					current.map((entry) =>
+						entry.id === item.id
+							? { ...entry, status: "error", error: err instanceof Error ? err.message : "Remove failed" }
+							: entry,
+					),
+				)
+			}
+		},
+		[agent.directory, agent.sessionId],
+	)
+
+	const handleEditQueueItem = useCallback(
+		async (item: ComposerQueueItem) => {
+			if ((item.fileCount ?? 0) > 0) return
+			if (item.queuedInputId) {
+				if (!agent.directory) return
+				const client = getProjectClient(agent.directory)
+				if (!client?.turn?.removeQueued) return
+				setQueueItems((current) =>
+					current.map((entry) =>
+						entry.id === item.id ? { ...entry, status: "removing" } : entry,
+					),
+				)
+				try {
+					await client.turn.removeQueued({
+						sessionID: agent.sessionId,
+						queuedInputID: item.queuedInputId,
+					})
+				} catch (err) {
+					log.error("turn.queue.edit remove failed", { sessionId: agent.sessionId }, err)
+					setQueueItems((current) =>
+						current.map((entry) =>
+							entry.id === item.id
+								? {
+										...entry,
+										status: "error",
+										error: err instanceof Error ? err.message : "Edit failed",
+									}
+								: entry,
+						),
+					)
+					return
+				}
+				setQueueItems((current) => current.filter((entry) => entry.id !== item.id))
+			} else {
+				setQueueItems((current) => current.filter((entry) => entry.id !== item.id))
+			}
+			slashCommandRef.current?.setText(item.text)
+			focusComposer()
+		},
+		[agent.directory, agent.sessionId, focusComposer],
+	)
 
 	const handleSlashCommand = useCallback(
 		async (text: string): Promise<boolean> => {
