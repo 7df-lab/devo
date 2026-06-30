@@ -43,4 +43,36 @@ describe("MessageResponse markdown surfaces", () => {
 			markdownRulesStillRender: true,
 		})
 	})
+
+	test("keeps streamdown code block actions in the language header row", () => {
+		expect({
+			headerPadding: rendererCssSource.includes('[data-streamdown="code-block-header"]'),
+			actionsSiblingSelector: rendererCssSource.includes(
+				'> div:has(> [data-streamdown="code-block-actions"])',
+			),
+			actionsAbsolute: rendererCssSource.includes("position: absolute;"),
+			actionsStillClickable: rendererCssSource.includes("pointer-events: auto;"),
+		}).toEqual({
+			headerPadding: true,
+			actionsSiblingSelector: true,
+			actionsAbsolute: true,
+			actionsStillClickable: true,
+		})
+	})
+
+	test("removes fullscreen from regular markdown table controls only", () => {
+		expect({
+			controlsConfig: messageSource.includes("const transcriptMarkdownControls"),
+			tableFullscreenDisabled: messageSource.includes("fullscreen: false"),
+			controlsPassedToStreamdown: messageSource.includes("controls={transcriptMarkdownControls}"),
+			tableCopyNotDisabled: !messageSource.includes("copy: false"),
+			tableDownloadNotDisabled: !messageSource.includes("download: false"),
+		}).toEqual({
+			controlsConfig: true,
+			tableFullscreenDisabled: true,
+			controlsPassedToStreamdown: true,
+			tableCopyNotDisabled: true,
+			tableDownloadNotDisabled: true,
+		})
+	})
 })

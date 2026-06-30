@@ -34,6 +34,38 @@ body {
 	border-color: var(--border);
 }
 
+.devo-message-response [data-streamdown="code-block"] {
+	position: relative;
+}
+
+.devo-message-response [data-streamdown="code-block-header"] {
+	padding-right: 5rem;
+}
+
+/* Streamdown renders code actions as a sibling of the language header; keep
+   them visually in the same toolbar row instead of a second row. */
+.devo-message-response
+	[data-streamdown="code-block"]
+	> div:has(> [data-streamdown="code-block-actions"]) {
+	position: absolute;
+	top: 0.5rem;
+	right: 0.5rem;
+	z-index: 10;
+	display: flex;
+	height: 2rem;
+	align-items: center;
+	justify-content: flex-end;
+	margin-top: 0;
+	pointer-events: none;
+}
+
+.devo-message-response
+	[data-streamdown="code-block"]
+	> div:has(> [data-streamdown="code-block-actions"])
+	> [data-streamdown="code-block-actions"] {
+	pointer-events: auto;
+}
+
 :root.dark .devo-message-response [data-streamdown="code-block-actions"],
 :root.dark .devo-message-response [data-streamdown="mermaid-block-actions"] {
 	background: var(--devo-markdown-surface-subtle);

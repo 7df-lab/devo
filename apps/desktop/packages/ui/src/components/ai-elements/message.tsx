@@ -274,6 +274,14 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>
 
 const streamdownPlugins = { cjk, code, math, mermaid }
 
+// Product requirement: regular transcript Markdown tables should keep copy and
+// download controls, but not show a fullscreen control.
+const transcriptMarkdownControls: NonNullable<MessageResponseProps["controls"]> = {
+	table: {
+		fullscreen: false,
+	},
+}
+
 type TranscriptMarkdownHeadingProps = ComponentProps<"h1"> & { node?: unknown }
 
 function TranscriptMarkdownHeading({
@@ -311,6 +319,7 @@ export const MessageResponse = memo(
 				className,
 			)}
 			components={transcriptMarkdownComponents}
+			controls={transcriptMarkdownControls}
 			plugins={streamdownPlugins}
 			{...props}
 		/>
