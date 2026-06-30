@@ -174,6 +174,7 @@ mod research_child_agents;
 mod research_context;
 mod research_formatting;
 mod research_parsing;
+mod research_session;
 mod research_stages;
 mod research_streaming;
 mod research_tool_runtime;
