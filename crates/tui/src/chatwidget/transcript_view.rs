@@ -196,40 +196,62 @@ impl ChatWidget {
         if let Some(cell) = &self.active_cell {
             Self::extend_lines_with_separator(&mut lines, cell.transcript_lines(width));
         }
-        for item in &self.active_text_items {
-            if let Some(cell) = &item.cell {
-                Self::extend_lines_with_separator(&mut lines, cell.transcript_lines(width));
+
+        // Build a merged list of (seq, LiveItem) sorted by seq
+        #[allow(clippy::large_enum_variant)]
+        enum LiveItem {
+            Text(usize),
+            Tool(String),
+        }
+        let mut items: Vec<(u64, LiveItem)> = Vec::new();
+        for (idx, item) in self.active_text_items.iter().enumerate() {
+            if item.cell.is_some() {
+                items.push((item.seq, LiveItem::Text(idx)));
             }
         }
-        let mut tool_calls = self.active_tool_calls.values().collect::<Vec<_>>();
-        tool_calls.sort_by(|left, right| left.tool_use_id.cmp(&right.tool_use_id));
-        for tool_call in tool_calls {
+        for tool_call in self.active_tool_calls.values() {
             if tool_call.exec_like {
                 continue;
             }
-            let transcript_lines = match (&tool_call.tool_name, &tool_call.input) {
-                (Some(tool_name), Some(input)) => ToolIoCell::from_text_output(
-                    ToolIoCellOptions {
-                        title_line: Some(Self::running_tool_line(&tool_call.title)),
-                        dot_prefix: Self::pending_dot_prefix(),
-                        subsequent_prefix: "  ".into(),
-                        output_style: Self::tool_text_style(),
-                        show_empty_ellipsis: false,
-                    },
-                    tool_name.clone(),
-                    input.clone(),
-                    tool_call.output.clone(),
-                )
-                .transcript_lines(width),
-                _ => history_cell::AgentMessageCell::new_with_prefix(
-                    tool_call.lines.clone(),
-                    Self::pending_dot_prefix(),
-                    "  ",
-                    false,
-                )
-                .transcript_lines(width),
-            };
-            Self::extend_lines_with_separator(&mut lines, transcript_lines);
+            items.push((tool_call.seq, LiveItem::Tool(tool_call.tool_use_id.clone())));
+        }
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (_, item) in items {
+            match item {
+                LiveItem::Text(idx) => {
+                    if let Some(cell) = &self.active_text_items[idx].cell {
+                        Self::extend_lines_with_separator(&mut lines, cell.transcript_lines(width));
+                    }
+                }
+                LiveItem::Tool(tool_use_id) => {
+                    if let Some(tool_call) = self.active_tool_calls.get(&tool_use_id) {
+                        let transcript_lines = match (&tool_call.tool_name, &tool_call.input) {
+                            (Some(tool_name), Some(input)) => ToolIoCell::from_text_output(
+                                ToolIoCellOptions {
+                                    title_line: Some(Self::running_tool_line(&tool_call.title)),
+                                    dot_prefix: Self::pending_dot_prefix(),
+                                    subsequent_prefix: "  ".into(),
+                                    output_style: Self::tool_text_style(),
+                                    show_empty_ellipsis: false,
+                                },
+                                tool_name.clone(),
+                                input.clone(),
+                                tool_call.output.clone(),
+                            )
+                            .transcript_lines(width),
+                            _ => history_cell::AgentMessageCell::new_with_prefix(
+                                tool_call.lines.clone(),
+                                Self::pending_dot_prefix(),
+                                "  ",
+                                false,
+                            )
+                            .transcript_lines(width),
+                        };
+                        Self::extend_lines_with_separator(&mut lines, transcript_lines);
+                    }
+                }
+            }
         }
         for pending in &self.pending_tool_calls {
             let pending_lines = if let Some(start_time) = pending.start_time {

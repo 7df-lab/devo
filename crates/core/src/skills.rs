@@ -1,5 +1,6 @@
 //! Core-facing skill catalog wrapper backed by `devo-skills`.
 
+use devo_util_paths;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -104,8 +105,10 @@ pub struct FileSystemSkillCatalog {
 
 impl FileSystemSkillCatalog {
     pub fn new(config: SkillsConfig) -> Self {
+        let devo_home = devo_util_paths::find_devo_home()
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self::with_devo_home(config, cwd.clone(), cwd, vec![".git".to_string()])
+        Self::with_devo_home(config, devo_home, cwd, vec![".git".to_string()])
     }
 
     pub fn with_devo_home(

@@ -86,6 +86,9 @@ pub struct ReasoningVariant {
     pub label: String,
     /// User-facing description shown alongside the label.
     pub description: String,
+    /// Optional provider-specific JSON merged into the request body.
+    #[serde(default)]
+    pub extra_body: Option<Value>,
 }
 
 /// Fully resolved request settings derived from a logical model plus reasoning-effort selection.

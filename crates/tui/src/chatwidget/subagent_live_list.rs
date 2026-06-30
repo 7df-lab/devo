@@ -14,6 +14,11 @@ use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
+use super::session_header::COMPLETED_COLOR;
+use super::session_header::MUTED_COLOR;
+use super::session_header::PREVIEW_COLOR;
+use super::session_header::REASONING_ACCENT_COLOR;
+use super::session_header::RUNNING_COLOR;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::ui_consts::LIVE_PREFIX_COLS;
 
@@ -138,7 +143,7 @@ fn preview_line(row: &SubagentLiveListRow, max_width: usize) -> Line<'static> {
         Span::raw(prefix).dim(),
         Span::styled(
             truncate_preview_tail(&row.preview, preview_width),
-            Style::default().fg(Color::Rgb(176, 184, 196)),
+            Style::default().fg(PREVIEW_COLOR),
         ),
     ])
 }
@@ -172,17 +177,17 @@ fn take_suffix_by_width(text: &str, max_width: usize) -> String {
 
 fn status_marker_style(status: &str) -> Style {
     match status.to_ascii_lowercase().as_str() {
-        "idle" => Style::default().fg(Color::Rgb(120, 220, 160)).bold(),
-        "waiting_client" => Style::default().fg(Color::Rgb(210, 150, 60)).bold(),
-        _ => Style::default().fg(Color::Rgb(106, 200, 255)).bold(),
+        "idle" => Style::default().fg(COMPLETED_COLOR).bold(),
+        "waiting_client" => Style::default().fg(REASONING_ACCENT_COLOR).bold(),
+        _ => Style::default().fg(RUNNING_COLOR).bold(),
     }
 }
 
 fn status_text_style(status: &str) -> Style {
     match status.to_ascii_lowercase().as_str() {
-        "running" | "active_turn" => Style::default().fg(Color::Rgb(106, 200, 255)).bold(),
-        "idle" => Style::default().fg(Color::Rgb(120, 220, 160)).bold(),
-        "waiting_client" => Style::default().fg(Color::Rgb(210, 150, 60)).bold(),
-        _ => Style::default().fg(Color::Rgb(160, 163, 168)),
+        "running" | "active_turn" => Style::default().fg(RUNNING_COLOR).bold(),
+        "idle" => Style::default().fg(COMPLETED_COLOR).bold(),
+        "waiting_client" => Style::default().fg(REASONING_ACCENT_COLOR).bold(),
+        _ => Style::default().fg(MUTED_COLOR),
     }
 }

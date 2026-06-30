@@ -23,6 +23,7 @@ devo-safety = { workspace = true }
 devo-skills = { workspace = true }
 devo-tools = { workspace = true }
 devo-util-process = { workspace = true }
+devo-util-paths = { workspace = true }
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }

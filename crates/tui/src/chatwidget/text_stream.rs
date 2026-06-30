@@ -26,6 +26,7 @@ use super::ResearchTaskPreview;
 pub(super) struct ActiveTextItem {
     pub(super) item_id: ActiveTextItemId,
     pub(super) kind: TextItemKind,
+    pub(super) seq: u64,
     pub(super) status: DotStatus,
     pub(super) stream_controller: Option<StreamController>,
     last_renderable_delta_at: Option<Instant>,
@@ -112,6 +113,7 @@ impl ChatWidget {
             return;
         }
 
+        let seq = self.reserve_seq();
         let stream_controller = match kind {
             TextItemKind::Assistant => Some(StreamController::new(None, &self.session.cwd)),
             TextItemKind::Reasoning | TextItemKind::ResearchArtifact => None,
@@ -129,6 +131,7 @@ impl ChatWidget {
             ActiveTextItem {
                 item_id,
                 kind,
+                seq,
                 status: DotStatus::Pending,
                 stream_controller,
                 last_renderable_delta_at: None,

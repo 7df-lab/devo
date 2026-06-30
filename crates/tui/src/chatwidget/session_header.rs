@@ -22,6 +22,21 @@ use crate::startup_header::STARTUP_HEADER_ANIMATION_INTERVAL;
 use super::ChatWidget;
 use super::DotStatus;
 
+/// Warm amber used for the "Thought" heading and the failed-tool indicator.
+pub(super) const REASONING_ACCENT_COLOR: Color = Color::Rgb(210, 150, 60);
+/// Green used for completed, idle, and done indicators.
+pub(super) const COMPLETED_COLOR: Color = Color::Rgb(120, 220, 160);
+/// Blue used for the pending-state dot prefix.
+pub(super) const PENDING_DOT_COLOR: Color = Color::Rgb(110, 200, 255);
+/// Blue used for running/active state text.
+pub(super) const RUNNING_COLOR: Color = Color::Rgb(106, 200, 255);
+/// Red used for failed/interrupted state.
+pub(super) const FAILED_COLOR: Color = Color::Rgb(255, 100, 100);
+/// Muted grey for secondary/unknown status text.
+pub(super) const MUTED_COLOR: Color = Color::Rgb(160, 163, 168);
+/// Subtle grey for preview text (only in subagent live list).
+pub(super) const PREVIEW_COLOR: Color = Color::Rgb(176, 184, 196);
+
 pub(super) struct SessionHeaderParams<'a> {
     pub cwd: &'a Path,
     pub model: Option<&'a Model>,
@@ -88,23 +103,23 @@ impl ChatWidget {
 
     pub(super) fn completed_dot_prefix() -> Line<'static> {
         Line::from(vec![
-            Span::styled("▌", Style::default().fg(Color::Rgb(120, 220, 160))),
+            Span::styled("▌", Style::default().fg(COMPLETED_COLOR)),
             " ".into(),
         ])
     }
 
     pub(super) fn pending_dot_prefix() -> Line<'static> {
         Line::from(vec![
-            Span::styled("▌", Style::default().fg(Color::Rgb(110, 200, 255))),
+            Span::styled("▌", Style::default().fg(PENDING_DOT_COLOR)),
             " ".into(),
         ])
     }
 
     pub(super) fn reasoning_dot_prefix(status: DotStatus) -> Line<'static> {
         let color = match status {
-            DotStatus::Pending => Color::Rgb(210, 150, 60),
-            DotStatus::Completed => Color::Rgb(120, 220, 160),
-            DotStatus::Failed => Color::Rgb(255, 100, 100),
+            DotStatus::Pending => REASONING_ACCENT_COLOR,
+            DotStatus::Completed => COMPLETED_COLOR,
+            DotStatus::Failed => FAILED_COLOR,
         };
         Line::from(vec![
             Span::styled("▌", Style::default().fg(color)),
@@ -148,15 +163,15 @@ impl ChatWidget {
     }
 
     pub(super) fn tool_text_style() -> Style {
-        Style::default().fg(Color::Rgb(160, 163, 168))
+        Style::default().fg(MUTED_COLOR)
     }
 
     pub(super) fn tool_status_running_style() -> Style {
-        Style::default().fg(Color::Rgb(106, 200, 255)).bold()
+        Style::default().fg(RUNNING_COLOR).bold()
     }
 
     pub(super) fn tool_status_done_style() -> Style {
-        Style::default().fg(Color::Rgb(120, 220, 160)).bold()
+        Style::default().fg(COMPLETED_COLOR).bold()
     }
 
     pub(super) fn running_tool_line(title: &str) -> Line<'static> {
@@ -195,15 +210,14 @@ impl ChatWidget {
 
     pub(super) fn tool_dot_prefix() -> Line<'static> {
         Line::from(vec![
-            Span::styled("▌", Style::default().fg(Color::Rgb(120, 220, 160))),
+            Span::styled("▌", Style::default().fg(COMPLETED_COLOR)),
             " ".into(),
         ])
     }
 
-    pub(super) fn failed_dot_prefix(&self) -> Line<'static> {
-        let error_color = self.active_error_color();
+    pub(super) fn failed_dot_prefix() -> Line<'static> {
         Line::from(vec![
-            Span::styled("▌", Style::default().fg(error_color)),
+            Span::styled("▌", Style::default().fg(REASONING_ACCENT_COLOR)),
             " ".into(),
         ])
     }
@@ -212,7 +226,7 @@ impl ChatWidget {
         match status {
             DotStatus::Pending => Self::pending_dot_prefix(),
             DotStatus::Completed => Self::completed_dot_prefix(),
-            DotStatus::Failed => self.failed_dot_prefix(),
+            DotStatus::Failed => Self::failed_dot_prefix(),
         }
     }
 
@@ -496,7 +510,7 @@ impl ChatWidget {
     }
 
     pub(super) fn reasoning_heading_style() -> Style {
-        Style::default().italic().fg(Color::Rgb(210, 150, 60))
+        Style::default().italic().fg(REASONING_ACCENT_COLOR)
     }
 
     pub(super) fn patch_lines_style(lines: &mut [Line<'static>], style: Style) {

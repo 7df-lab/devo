@@ -43,10 +43,6 @@ use crate::upsert_user_auth_api_key;
 use crate::write_atomic;
 use crate::write_provider_config;
 
-pub const DESKTOP_NETWORK_PROXY_MODE_ENV: &str = "DEVO_DESKTOP_NETWORK_PROXY_MODE";
-pub const DESKTOP_NETWORK_PROXY_URL_ENV: &str = "DEVO_DESKTOP_NETWORK_PROXY_URL";
-pub const DESKTOP_NETWORK_NO_PROXY_ENV: &str = "DEVO_DESKTOP_NETWORK_NO_PROXY";
-
 /// Stores the fully normalized runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -590,56 +586,6 @@ pub struct FileSystemAppConfigLoader {
     config_folder_home: PathBuf,
     /// Command-line overrides applied on top of file-backed config.
     cli_overrides: toml::Value,
-    /// Desktop-managed runtime proxy override read from private process env.
-    desktop_network_proxy_env: DesktopNetworkProxyEnv,
-}
-
-/// Desktop-managed runtime network proxy override values.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DesktopNetworkProxyEnv {
-    mode: Option<String>,
-    proxy_url: Option<String>,
-    no_proxy: Option<String>,
-}
-
-impl DesktopNetworkProxyEnv {
-    pub fn from_process_env() -> Self {
-        Self::from_env_fn(|key| std::env::var(key))
-    }
-
-    pub fn from_env_fn<F>(env: F) -> Self
-    where
-        F: Fn(&str) -> Result<String, std::env::VarError>,
-    {
-        Self {
-            mode: env(DESKTOP_NETWORK_PROXY_MODE_ENV)
-                .ok()
-                .and_then(|value| non_empty_string(&value)),
-            proxy_url: env(DESKTOP_NETWORK_PROXY_URL_ENV)
-                .ok()
-                .and_then(|value| non_empty_string(&value)),
-            no_proxy: env(DESKTOP_NETWORK_NO_PROXY_ENV)
-                .ok()
-                .and_then(|value| non_empty_string(&value)),
-        }
-    }
-
-    pub fn custom(proxy_url: impl Into<String>, no_proxy: Option<&str>) -> Self {
-        let proxy_url = proxy_url.into();
-        Self {
-            mode: Some("custom".to_string()),
-            proxy_url: non_empty_string(&proxy_url),
-            no_proxy: no_proxy.and_then(non_empty_string),
-        }
-    }
-
-    pub fn off() -> Self {
-        Self {
-            mode: Some("off".to_string()),
-            proxy_url: None,
-            no_proxy: None,
-        }
-    }
 }
 
 impl FileSystemAppConfigLoader {
@@ -648,18 +594,12 @@ impl FileSystemAppConfigLoader {
         Self {
             config_folder_home,
             cli_overrides: toml::Value::Table(Default::default()),
-            desktop_network_proxy_env: DesktopNetworkProxyEnv::from_process_env(),
         }
     }
 
     /// Returns a loader that applies CLI overrides with the highest priority.
     pub fn with_cli_overrides(mut self, cli_overrides: toml::Value) -> Self {
         self.cli_overrides = cli_overrides;
-        self
-    }
-
-    pub fn with_desktop_network_proxy_env(mut self, env: DesktopNetworkProxyEnv) -> Self {
-        self.desktop_network_proxy_env = env;
         self
     }
 
@@ -718,26 +658,8 @@ impl AppConfigLoader for FileSystemAppConfigLoader {
                     message: source.to_string(),
                 })?;
         config.provider = provider_config;
-        apply_desktop_network_proxy_env_override(&mut config, &self.desktop_network_proxy_env);
         validate_app_config(&config)?;
         Ok(config)
-    }
-}
-
-fn apply_desktop_network_proxy_env_override(config: &mut AppConfig, env: &DesktopNetworkProxyEnv) {
-    match env.mode.as_deref() {
-        Some("custom") => {
-            if let Some(proxy_url) = env.proxy_url.clone() {
-                config.provider_http.proxy_url = Some(proxy_url);
-                config.provider_http.no_proxy = env.no_proxy.clone();
-            }
-        }
-        Some("off") => {
-            config.provider_http.proxy_url = None;
-            config.provider_http.no_proxy = None;
-        }
-        Some("system") | None => {}
-        Some(_) => {}
     }
 }
 

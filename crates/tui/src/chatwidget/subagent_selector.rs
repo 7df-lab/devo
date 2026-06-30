@@ -13,6 +13,11 @@ use ratatui::widgets::BorderType;
 use ratatui::widgets::Borders;
 use ratatui::widgets::Clear;
 use ratatui::widgets::Widget;
+use super::session_header::COMPLETED_COLOR;
+use super::session_header::FAILED_COLOR;
+use super::session_header::MUTED_COLOR;
+use super::session_header::REASONING_ACCENT_COLOR;
+use super::session_header::RUNNING_COLOR;
 
 pub(super) struct SubagentSelectorAgent<'a> {
     pub(super) session_id: SessionId,
@@ -228,12 +233,12 @@ fn status_badge(status: &str) -> Span<'static> {
 
 fn status_style(status: &str) -> Style {
     match status.to_ascii_lowercase().as_str() {
-        "running" | "active_turn" => Style::default().fg(Color::Rgb(106, 200, 255)).bold(),
-        "idle" => Style::default().fg(Color::Rgb(120, 220, 160)).bold(),
-        "waiting_client" => Style::default().fg(Color::Rgb(210, 150, 60)).bold(),
-        "completed" => Style::default().fg(Color::Rgb(120, 220, 160)),
-        "failed" | "interrupted" => Style::default().fg(Color::Rgb(255, 100, 100)).bold(),
+        "running" | "active_turn" => Style::default().fg(RUNNING_COLOR).bold(),
+        "idle" => Style::default().fg(COMPLETED_COLOR).bold(),
+        "waiting_client" => Style::default().fg(REASONING_ACCENT_COLOR).bold(),
+        "completed" => Style::default().fg(COMPLETED_COLOR),
+        "failed" | "interrupted" => Style::default().fg(FAILED_COLOR).bold(),
         "closed" => Style::default().dim(),
-        _ => Style::default().fg(Color::Rgb(160, 163, 168)),
+        _ => Style::default().fg(MUTED_COLOR),
     }
 }

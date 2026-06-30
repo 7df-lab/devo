@@ -1617,6 +1617,7 @@ dependencies = [
  "devo-safety",
  "devo-skills",
  "devo-tools",
+ "devo-util-paths",
  "devo-util-process",
  "diffy",
  "futures",

@@ -3604,6 +3604,7 @@ mod tests {
                             reasoning_effort: None,
                             label: "Off".into(),
                             description: "Use the standard model".into(),
+                            extra_body: None,
                         },
                         ReasoningVariant {
                             selection_value: "enabled".into(),
@@ -3611,6 +3612,7 @@ mod tests {
                             reasoning_effort: Some(ReasoningEffort::Medium),
                             label: "On".into(),
                             description: "Use the reasoning model".into(),
+                            extra_body: None,
                         },
                     ],
                 },

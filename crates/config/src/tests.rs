@@ -10,7 +10,6 @@ use super::AppConfig;
 use super::AppConfigLoader;
 use super::AppConfigStore;
 use super::CommandHookConfig;
-use super::DesktopNetworkProxyEnv;
 use super::ExperimentalConfig;
 use super::FileSystemAppConfigLoader;
 use super::HookCommandConfig;
@@ -474,71 +473,6 @@ invocation_method = "openai_responses"
     );
 
     let _ = std::fs::remove_dir_all(root);
-}
-
-/// Verifies: Desktop-managed runtime proxy env overrides file-backed provider proxy without mutating config files.
-#[test]
-fn loader_applies_desktop_network_proxy_custom_override() {
-    let root = unique_temp_dir("config-desktop-proxy-custom");
-    let home = root.join("home").join(".devo");
-    let workspace = root.join("workspace");
-    std::fs::create_dir_all(&home).expect("home config dir");
-    std::fs::create_dir_all(workspace.join(".devo")).expect("workspace config dir");
-    let project_config = workspace.join(".devo").join("config.toml");
-    std::fs::write(
-        &project_config,
-        r#"
-[provider_http]
-proxy_url = "http://workspace-proxy.example:8080"
-"#,
-    )
-    .expect("write project config");
-
-    let loader = FileSystemAppConfigLoader::new(home).with_desktop_network_proxy_env(
-        DesktopNetworkProxyEnv::custom("socks5h://127.0.0.1:7890", Some("localhost,127.0.0.1,::1")),
-    );
-    let config = loader.load(Some(&workspace)).expect("load config");
-
-    assert_eq!(
-        config.provider_http,
-        ProviderHttpConfig {
-            proxy_url: Some("socks5h://127.0.0.1:7890".to_string()),
-            no_proxy: Some("localhost,127.0.0.1,::1".to_string()),
-        }
-    );
-    let persisted = std::fs::read_to_string(project_config).expect("read project config");
-    assert!(persisted.contains("workspace-proxy.example"));
-}
-
-/// Verifies: Desktop-managed runtime proxy off mode clears the effective provider proxy only for the process.
-#[test]
-fn loader_applies_desktop_network_proxy_off_override() {
-    let root = unique_temp_dir("config-desktop-proxy-off");
-    let home = root.join("home").join(".devo");
-    let workspace = root.join("workspace");
-    std::fs::create_dir_all(&home).expect("home config dir");
-    std::fs::create_dir_all(workspace.join(".devo")).expect("workspace config dir");
-    std::fs::write(
-        workspace.join(".devo").join("config.toml"),
-        r#"
-[provider_http]
-proxy_url = "http://workspace-proxy.example:8080"
-no_proxy = "localhost"
-"#,
-    )
-    .expect("write project config");
-
-    let loader = FileSystemAppConfigLoader::new(home)
-        .with_desktop_network_proxy_env(DesktopNetworkProxyEnv::off());
-    let config = loader.load(Some(&workspace)).expect("load config");
-
-    assert_eq!(
-        config.provider_http,
-        ProviderHttpConfig {
-            proxy_url: None,
-            no_proxy: None,
-        }
-    );
 }
 
 /// Trace: L2-DES-APP-005

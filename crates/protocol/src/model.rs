@@ -472,7 +472,7 @@ impl Model {
                         request_thinking: None,
                         request_reasoning_effort: variant.reasoning_effort,
                         effective_reasoning_effort: variant.reasoning_effort,
-                        extra_body: None,
+                        extra_body: variant.extra_body.clone(),
                     }
                 } else {
                     ResolvedReasoningRequest {
@@ -839,6 +839,7 @@ mod tests {
                         reasoning_effort: None,
                         label: String::from("Off"),
                         description: String::from("Use the standard model"),
+                        extra_body: None,
                     },
                     ReasoningVariant {
                         selection_value: String::from("enabled"),
@@ -846,6 +847,7 @@ mod tests {
                         reasoning_effort: Some(ReasoningEffort::Medium),
                         label: String::from("On"),
                         description: String::from("Use the reasoning model"),
+                        extra_body: None,
                     },
                 ],
             },
@@ -873,6 +875,7 @@ mod tests {
                     reasoning_effort: None,
                     label: String::from("Off"),
                     description: String::from("Use the standard model"),
+                    extra_body: None,
                 }],
             },
         ));

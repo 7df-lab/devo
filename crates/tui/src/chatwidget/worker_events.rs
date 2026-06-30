@@ -65,10 +65,12 @@ impl ChatWidget {
                 grouped.set_tool_io_input(&tool_use_id, "exec_command".to_string(), input);
             }
             *cell = grouped;
+            let seq = self.reserve_seq();
             self.active_tool_calls.insert(
                 tool_use_id.clone(),
                 ActiveToolCall {
                     tool_use_id,
+                    seq,
                     tool_name: Some("exec_command".to_string()),
                     input: input.clone(),
                     title,
@@ -91,10 +93,12 @@ impl ChatWidget {
             cell.set_tool_io_input(&tool_use_id, "exec_command".to_string(), input);
         }
         self.active_cell = Some(Box::new(cell));
+        let seq = self.reserve_seq();
         self.active_tool_calls.insert(
             tool_use_id.clone(),
             ActiveToolCall {
                 tool_use_id,
+                seq,
                 tool_name: Some("exec_command".to_string()),
                 input,
                 title,
@@ -291,8 +295,10 @@ impl ChatWidget {
                 } else {
                     summary
                 };
+                let seq = self.reserve_seq();
                 let tool_call = ActiveToolCall {
                     tool_use_id: tool_use_id.clone(),
+                    seq,
                     tool_name: None,
                     input: None,
                     title: title.clone(),
@@ -316,8 +322,10 @@ impl ChatWidget {
                         } else {
                             format!("Running {title}")
                         };
+                    let seq = self.reserve_seq();
                     self.pending_tool_calls.push(ActiveToolCall {
                         tool_use_id,
+                        seq,
                         tool_name: None,
                         input: None,
                         title: pending_title,
@@ -471,11 +479,13 @@ impl ChatWidget {
                 } else {
                     DotStatus::Completed
                 };
+                let seq = self.reserve_seq();
                 let resolved_tool_call =
                     self.active_tool_calls
                         .remove(&tool_use_id)
                         .unwrap_or(ActiveToolCall {
                             tool_use_id: tool_use_id.clone(),
+                            seq,
                             tool_name: Some(tool_name.clone()),
                             input: Some(input.clone()),
                             title,
@@ -605,11 +615,13 @@ impl ChatWidget {
                 } else {
                     DotStatus::Completed
                 };
+                let seq = self.reserve_seq();
                 let resolved_title =
                     self.active_tool_calls
                         .remove(&tool_use_id)
                         .unwrap_or(ActiveToolCall {
                             tool_use_id: tool_use_id.clone(),
+                            seq,
                             tool_name: None,
                             input: None,
                             title,

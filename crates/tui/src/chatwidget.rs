@@ -202,6 +202,7 @@ enum OnboardingStep {
 struct ActiveToolCall {
     tool_use_id: String,
     tool_name: Option<String>,
+    seq: u64,
     input: Option<serde_json::Value>,
     title: String,
     lines: Vec<Line<'static>>,
@@ -311,6 +312,15 @@ pub(crate) struct ChatWidget {
     user_cell_history_indices: Vec<usize>,
     startup_header_mascot_frame_index: usize,
     startup_header_next_animation_at: Instant,
+    next_seq: u64,
+}
+
+impl ChatWidget {
+    fn reserve_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        seq
+    }
 }
 
 impl ChatWidget {
@@ -464,6 +474,7 @@ impl ChatWidget {
             user_cell_history_indices: Vec::new(),
             startup_header_mascot_frame_index: 0,
             startup_header_next_animation_at: Instant::now() + STARTUP_HEADER_ANIMATION_INTERVAL,
+            next_seq: 0,
         };
 
         // Model onboarding can inject additional startup UI before the first frame is drawn.

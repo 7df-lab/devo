@@ -2653,7 +2653,7 @@ async fn run_worker_inner(
                                             tool_use_id: process_id,
                                             title: "Shell".to_string(),
                                             preview: String::new(),
-                                            is_error: exit_code != Some(0),
+                                            is_error: false,
                                             truncated: false,
                                         });
                                         let _ = event_tx.send(WorkerEvent::ShellCommandFinished {

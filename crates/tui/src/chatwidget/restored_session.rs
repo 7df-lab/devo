@@ -252,7 +252,7 @@ impl ChatWidget {
                     self.add_history_entry_without_redraw(Box::new(ToolResultCell::new(
                         (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title)),
                         item.body.clone(),
-                        self.failed_dot_prefix(),
+                        Self::failed_dot_prefix(),
                         Line::from("  "),
                         Self::tool_text_style(),
                         false,
@@ -327,7 +327,7 @@ impl ChatWidget {
                 title_line: (!call_item.title.is_empty())
                     .then(|| Self::ran_tool_line(&call_item.title)),
                 dot_prefix: if result_item.kind == devo_protocol::SessionHistoryItemKind::Error {
-                    self.failed_dot_prefix()
+                    Self::failed_dot_prefix()
                 } else {
                     Self::tool_dot_prefix()
                 },

@@ -525,7 +525,7 @@ impl ChatWidget {
             }
             MonitorTranscriptKind::Plan | MonitorTranscriptKind::Status => {
                 let dot_prefix = if item.is_error {
-                    self.failed_dot_prefix()
+                    Self::failed_dot_prefix()
                 } else {
                     Self::completed_dot_prefix()
                 };

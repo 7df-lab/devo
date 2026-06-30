@@ -92,7 +92,9 @@ impl AnthropicProvider {
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
         let builder = if let Some(api_key) = &self.api_key {
-            builder.header("x-api-key", api_key)
+            builder
+                .header("x-api-key", api_key)
+                .header("Authorization", format!("Bearer {}", api_key))
         } else {
             builder
         };
