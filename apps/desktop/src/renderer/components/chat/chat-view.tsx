@@ -15,6 +15,7 @@ import {
 	usePromptInputAttachments,
 	usePromptInputController,
 } from "@devo/ui/components/ai-elements/prompt-input"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
 import { cn } from "@devo/ui/lib/utils"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { useAtomValue, useSetAtom } from "jotai"
@@ -22,6 +23,8 @@ import {
 	ArrowUpToLineIcon,
 	ChevronUpIcon,
 	GitForkIcon,
+	GoalIcon,
+	ListTodoIcon,
 	Loader2Icon,
 	PlusIcon,
 	Redo2Icon,
@@ -75,6 +78,8 @@ const log = createLogger("chat-view")
 const VIRTUALIZE_TURN_THRESHOLD = 30
 const VIRTUAL_TURN_GAP = 40
 
+type ComposerTrigger = "goal" | "plan"
+
 import {
 	type DiffComment,
 	diffCommentsFamily,
@@ -97,7 +102,6 @@ import {
 } from "./prompt-mentions"
 import { PromptToolbar } from "./prompt-toolbar"
 import { SessionTaskList } from "./session-task-list"
-import { SkillPickerDialog } from "./skill-picker-dialog"
 import { SlashCommandPopover, type SlashCommandPopoverHandle } from "./slash-command-popover"
 
 /**
@@ -114,6 +118,44 @@ function AttachButton({ disabled }: { disabled?: boolean }) {
 		>
 			<PlusIcon className="size-4" />
 		</PromptInputButton>
+	)
+}
+
+function ComposerTriggerChip({
+	trigger,
+	onRemove,
+}: {
+	trigger: ComposerTrigger
+	onRemove: () => void
+}) {
+	const isPlan = trigger === "plan"
+	const Icon = isPlan ? ListTodoIcon : GoalIcon
+	const label = isPlan ? "Plan" : "Goal"
+	const description = isPlan ? "Create a plan" : "Set a goal"
+
+	return (
+		<Tooltip>
+			<TooltipTrigger
+				render={
+					<div className="group inline-flex h-7 items-center gap-1 rounded-full px-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" />
+				}
+			>
+				<button
+					type="button"
+					aria-label={`Remove ${label} trigger`}
+					onClick={onRemove}
+					className="inline-flex size-3.5 shrink-0 items-center justify-center rounded-full bg-muted-foreground/45 text-background transition-colors hover:bg-foreground"
+				>
+					<XIcon className="size-2.5" />
+				</button>
+				<Icon className="size-3.5 shrink-0" />
+				<span>{label}</span>
+			</TooltipTrigger>
+			<TooltipContent side="top" align="start">
+				<div>{description}</div>
+				{isPlan && <div className="text-[11px] opacity-70">Shift + Tab to toggle</div>}
+			</TooltipContent>
+		</Tooltip>
 	)
 }
 
@@ -897,12 +939,10 @@ export function ChatView({
 						onReplyQuestion={onReplyQuestion}
 						onRejectQuestion={onRejectQuestion}
 						canRedo={canRedo}
-						onUndo={onUndo}
 						onRedo={onRedo}
 						isReverted={isReverted}
 						scrollRef={scrollRef}
 						reviewPanelOpen={reviewPanelOpen}
-						onForkFromTurn={onForkFromTurn}
 					/>
 				</div>
 			)}
@@ -934,13 +974,10 @@ interface ChatInputSectionProps {
 	onReplyQuestion?: ChatViewProps["onReplyQuestion"]
 	onRejectQuestion?: ChatViewProps["onRejectQuestion"]
 	canRedo?: boolean
-	onUndo?: () => Promise<string | undefined>
 	onRedo?: () => Promise<void>
 	isReverted?: boolean
 	scrollRef: React.RefObject<ScrollHandle | null>
 	reviewPanelOpen?: boolean
-	/** Fork the current session (full fork, no cutoff) */
-	onForkFromTurn?: (messageId?: string) => Promise<void>
 }
 
 function ChatInputSection({
@@ -958,14 +995,17 @@ function ChatInputSection({
 	onReplyQuestion,
 	onRejectQuestion,
 	canRedo,
-	onUndo,
 	onRedo,
 	isReverted,
 	scrollRef,
 	reviewPanelOpen,
-	onForkFromTurn,
 }: ChatInputSectionProps) {
 	const [sending, setSending] = useState(false)
+	const [activeTrigger, setActiveTrigger] = useState<ComposerTrigger | null>(null)
+
+	useEffect(() => {
+		setActiveTrigger(null)
+	}, [agent.sessionId])
 
 	// Tree-scoped interactive requests — bubbles up from sub-agent sessions.
 	// These replace the direct `agent.permissions` / `agent.questions` arrays
@@ -1188,18 +1228,12 @@ function ChatInputSection({
 
 			const spaceIndex = trimmed.indexOf(" ")
 			const cmdName = spaceIndex === -1 ? trimmed.slice(1) : trimmed.slice(1, spaceIndex)
-			const cmdArgs = spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim()
 
-			// Client-only commands that don't go through the server
+			// Product requirement: Desktop slash commands are limited to first-party
+			// entries. Compact executes immediately; Goal/Plan become footer trigger
+			// chips; Research stays as slash text so ACP can run it after a question.
 			switch (cmdName.toLowerCase()) {
-				case "undo":
-					if (onUndo) await onUndo()
-					return true
-				case "redo":
-					if (onRedo) await onRedo()
-					return true
 				case "compact":
-				case "summarize":
 					if (agent.directory && effectiveModel) {
 						const client = getProjectClient(agent.directory)
 						if (client) {
@@ -1215,29 +1249,53 @@ function ChatInputSection({
 						}
 					}
 					return true
+				case "goal":
+					setActiveTrigger("goal")
+					return true
+				case "plan":
+					setActiveTrigger("plan")
+					return true
+				case "research":
+					return false
 				default:
-					break
+					return false
 			}
-
-			if (agent.directory) {
-				const client = getProjectClient(agent.directory)
-				if (client) {
-					try {
-						await client.session.command({
-							sessionID: agent.sessionId,
-							command: cmdName,
-							arguments: cmdArgs,
-						})
-						return true
-					} catch {
-						// Not a recognized server command
-					}
-				}
-			}
-
-			return false
 		},
-		[agent, onUndo, onRedo, effectiveModel],
+		[agent.directory, agent.sessionId, effectiveModel],
+	)
+
+	const submitTriggeredPrompt = useCallback(
+		async (trigger: ComposerTrigger, text: string, files?: FileAttachment[]) => {
+			if (!agent.directory) throw new Error("No project directory for slash trigger")
+			const client = getProjectClient(agent.directory)
+			if (!client) throw new Error("Not connected to Devo server")
+			const parts: Array<
+				{ type: "text"; text: string } | {
+					type: "file"
+					mime: string
+					filename?: string
+					url: string
+				}
+			> = [{ type: "text", text: `/${trigger} ${text.trim()}` }]
+			for (const file of files ?? []) {
+				parts.push({
+					type: "file",
+					mime: file.mediaType ?? "application/octet-stream",
+					filename: file.filename,
+					url: file.url,
+				})
+			}
+			await client.session.promptAsync({
+				sessionID: agent.sessionId,
+				parts,
+				model: effectiveModel
+					? { providerID: effectiveModel.providerID, modelID: effectiveModel.modelID }
+					: undefined,
+				agent: selectedAgent || undefined,
+				variant: selectedVariant,
+			})
+		},
+		[agent.directory, agent.sessionId, effectiveModel, selectedAgent, selectedVariant],
 	)
 
 	const handleSend = useCallback(
@@ -1248,7 +1306,7 @@ function ChatInputSection({
 				sending,
 				sessionId: agent.sessionId,
 			})
-			if (!text.trim() || !onSendMessage || sending) {
+			if (!text.trim() || (!onSendMessage && !activeTrigger) || sending) {
 				log.warn("handleSend bailed", {
 					emptyText: !text.trim(),
 					noOnSendMessage: !onSendMessage,
@@ -1257,7 +1315,7 @@ function ChatInputSection({
 				return
 			}
 
-			if (text.trim().startsWith("/")) {
+			if (!activeTrigger && text.trim().startsWith("/")) {
 				const handled = await handleSlashCommand(text)
 				if (handled) {
 					slashCommandRef.current?.setText("")
@@ -1293,15 +1351,24 @@ function ChatInputSection({
 				const commentPrefix = serializeCommentsForChat(diffComments)
 				const finalText = commentPrefix ? `${commentPrefix}${text.trim()}` : text.trim()
 
-				await onSendMessage(agent, finalText, {
-					model: effectiveModel ?? undefined,
-					agentName: selectedAgent || undefined,
-					variant: selectedVariant,
-					files,
-				})
-				log.debug("handleSend onSendMessage completed", { sessionId: agent.sessionId })
+				if (activeTrigger) {
+					await submitTriggeredPrompt(activeTrigger, finalText, files)
+					log.debug("handleSend triggered prompt completed", {
+						sessionId: agent.sessionId,
+						trigger: activeTrigger,
+					})
+				} else {
+					await onSendMessage?.(agent, finalText, {
+						model: effectiveModel ?? undefined,
+						agentName: selectedAgent || undefined,
+						variant: selectedVariant,
+						files,
+					})
+					log.debug("handleSend onSendMessage completed", { sessionId: agent.sessionId })
+				}
 				clearDraft()
 				setMentions([])
+				setActiveTrigger(null)
 				// Clear diff comments after successful send
 				if (diffComments.length > 0) {
 					setDiffComments([])
@@ -1323,6 +1390,8 @@ function ChatInputSection({
 			selectedAgent,
 			selectedVariant,
 			clearDraft,
+			activeTrigger,
+			submitTriggeredPrompt,
 			handleSlashCommand,
 			scrollRef,
 			diffComments,
@@ -1360,35 +1429,7 @@ function ChatInputSection({
 	const [mentionOpen, setMentionOpen] = useState(false)
 	const [mentionQuery, setMentionQuery] = useState("")
 
-	// --- Skills picker dialog ---
-	const [skillsDialogOpen, setSkillsDialogOpen] = useState(false)
 
-	const handleForkViaSlash = useCallback(async () => {
-		const ctrl = slashCommandRef.current
-		if (ctrl) ctrl.setText("")
-		await onForkFromTurn?.()
-	}, [onForkFromTurn])
-
-	const handleSkillsOpen = useCallback(() => {
-		const ctrl = slashCommandRef.current
-		if (ctrl) ctrl.setText("")
-		setSkillsDialogOpen(true)
-	}, [])
-
-	const handleSkillSelect = useCallback((skillName: string) => {
-		const ctrl = slashCommandRef.current
-		if (ctrl) {
-			ctrl.setText(`/${skillName} `)
-		}
-		requestAnimationFrame(() => {
-			const ta = document.querySelector<HTMLTextAreaElement>("textarea[data-prompt-input]")
-			if (ta) {
-				ta.focus()
-				const len = `/${skillName} `.length
-				ta.setSelectionRange(len, len)
-			}
-		})
-	}, [])
 
 	const slashPopoverRef = useRef<SlashCommandPopoverHandle>(null)
 	const mentionPopoverRef = useRef<MentionPopoverHandle>(null)
@@ -1491,6 +1532,14 @@ function ChatInputSection({
 
 	const handleTextareaKeyDown = useCallback(
 		(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+			if (e.key === "Tab" && e.shiftKey) {
+				e.preventDefault()
+				handleSlashClose()
+				handleMentionClose()
+				setActiveTrigger((current) => (current === "plan" ? null : "plan"))
+				return
+			}
+
 			// Always delegate to popovers first — they guard on their own `open` prop
 			// internally, so we don't need to check slashOpen/mentionOpen here.
 			// This avoids stale-closure issues where the parent's boolean lags behind
@@ -1502,7 +1551,7 @@ function ChatInputSection({
 				handleEscapeAbort()
 			}
 		},
-		[handleEscapeAbort],
+		[handleEscapeAbort, handleSlashClose, handleMentionClose],
 	)
 
 	// Width constraint class: remove max-w when review panel is open
@@ -1582,10 +1631,7 @@ function ChatInputSection({
 								query={slashQuery}
 								open={slashOpen}
 								enabled={isConnected}
-								directory={agent.directory}
 								onSelect={handleSlashSelect}
-								onSkillsOpen={handleSkillsOpen}
-								onFork={handleForkViaSlash}
 								onClose={handleSlashClose}
 							/>
 								<MentionPopover
@@ -1646,6 +1692,12 @@ function ChatInputSection({
 												onSelectVariant={handleVariantSelect}
 												disabled={!isConnected}
 											/>
+											{activeTrigger && (
+												<ComposerTriggerChip
+													trigger={activeTrigger}
+													onRemove={() => setActiveTrigger(null)}
+												/>
+											)}
 										</PromptInputTools>
 										<PromptInputSubmit
 											disabled={!canSend}
@@ -1669,13 +1721,6 @@ function ChatInputSection({
 				</div>
 			</div>
 
-			{/* Skills picker dialog — triggered by /skills command */}
-			<SkillPickerDialog
-				open={skillsDialogOpen}
-				onOpenChange={setSkillsDialogOpen}
-				directory={agent.directory}
-				onSelect={handleSkillSelect}
-			/>
 		</>
 	)
 }

@@ -68,6 +68,19 @@ impl ServerRuntime {
         let Some((command_name, argument)) = acp_slash_command_text(prompt) else {
             return AcpSlashCommandPromptResult::NotCommand;
         };
+        // Desktop requirement: /plan is a composer trigger chip, not a user-defined
+        // command. Keep it on the ACP prompt path so the client waits for the plan turn.
+        if command_name == "plan" {
+            return self
+                .handle_acp_plan_slash_command(
+                    connection_id,
+                    request_id,
+                    session_id,
+                    argument,
+                    prompt,
+                )
+                .await;
+        }
         let Ok(command) = command_name.parse::<SlashCommand>() else {
             return AcpSlashCommandPromptResult::NotCommand;
         };
@@ -416,6 +429,85 @@ impl ServerRuntime {
         AcpSlashCommandPromptResult::Pending
     }
 
+    async fn handle_acp_plan_slash_command(
+        self: &Arc<Self>,
+        connection_id: u64,
+        request_id: serde_json::Value,
+        session_id: SessionId,
+        argument: &str,
+        prompt: &[AcpContentBlock],
+    ) -> AcpSlashCommandPromptResult {
+        let input = match input_items_from_argument_slash_prompt(
+            argument,
+            prompt,
+            "Usage: /plan <task to plan>",
+        ) {
+            Ok(input) => input,
+            Err(error) => {
+                return AcpSlashCommandPromptResult::Response(acp_error_response(
+                    request_id,
+                    AcpErrorCode::InvalidParams,
+                    error,
+                ));
+            }
+        };
+        let legacy_response = self
+            .handle_turn_start_with_queue_policy(
+                Some(connection_id),
+                request_id.clone(),
+                TurnStartParams {
+                    session_id,
+                    input,
+                    model: None,
+                    model_binding_id: None,
+                    reasoning_effort_selection: None,
+                    sandbox: None,
+                    approval_policy: None,
+                    cwd: None,
+                    collaboration_mode: CollaborationMode::Plan,
+                    execution_mode: TurnExecutionMode::Regular,
+                },
+                TurnStartQueuePolicy::RejectActive,
+            )
+            .await;
+        let legacy: SuccessResponse<TurnStartResult> =
+            match serde_json::from_value(legacy_response.clone()) {
+                Ok(legacy) => legacy,
+                Err(_) => {
+                    return AcpSlashCommandPromptResult::Response(legacy_error_to_acp(
+                        request_id,
+                        legacy_response,
+                    ));
+                }
+            };
+        let Some(turn_id) = legacy.result.turn_id() else {
+            return AcpSlashCommandPromptResult::Response(acp_error_response(
+                request_id,
+                AcpErrorCode::ServerError,
+                "session/prompt cannot queue behind an active turn",
+            ));
+        };
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            let stop_reason = runtime
+                .wait_for_acp_prompt_stop_reason(session_id, turn_id)
+                .await;
+            runtime
+                .send_raw_to_connection(
+                    connection_id,
+                    acp_success_response(
+                        request_id,
+                        AcpPromptResult {
+                            stop_reason,
+                            meta: None,
+                        },
+                    ),
+                )
+                .await;
+        });
+        AcpSlashCommandPromptResult::Pending
+    }
+
     async fn send_acp_agent_message(
         &self,
         connection_id: u64,
@@ -478,6 +570,14 @@ fn input_items_from_research_prompt(
     argument: &str,
     prompt: &[AcpContentBlock],
 ) -> Result<Vec<InputItem>, String> {
+    input_items_from_argument_slash_prompt(argument, prompt, "Usage: /research <research question>")
+}
+
+fn input_items_from_argument_slash_prompt(
+    argument: &str,
+    prompt: &[AcpContentBlock],
+    usage: &str,
+) -> Result<Vec<InputItem>, String> {
     let mut input = Vec::new();
     let trimmed = argument.trim();
     if !trimmed.is_empty() {
@@ -489,7 +589,7 @@ fn input_items_from_research_prompt(
         input.extend(block.into_input_items()?);
     }
     if input.is_empty() {
-        return Err("Usage: /research <research question>".to_string());
+        return Err(usage.to_string());
     }
     Ok(input)
 }
@@ -564,6 +664,31 @@ mod tests {
                 },
                 InputItem::Text {
                     text: "include slash command docs".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_prompt_uses_command_argument_and_preserves_extra_content() {
+        let input = input_items_from_argument_slash_prompt(
+            "desktop slash triggers",
+            &[
+                AcpContentBlock::text("/plan desktop slash triggers"),
+                AcpContentBlock::text("include footer chip behavior"),
+            ],
+            "Usage: /plan <task to plan>",
+        )
+        .expect("plan input");
+
+        assert_eq!(
+            input,
+            vec![
+                InputItem::Text {
+                    text: "desktop slash triggers".to_string()
+                },
+                InputItem::Text {
+                    text: "include footer chip behavior".to_string()
                 },
             ]
         );

@@ -1,10 +1,10 @@
 /**
  * Slash command popover — appears when the user types `/` in the input.
  *
- * Matches the Devo TUI pattern:
- * - Flat command list with fuzzy search
- * - Skills are excluded (accessible via /skills → opens a dedicated picker)
- * - MCP commands show a `:mcp` badge
+ * Desktop intentionally exposes only first-party composer commands here:
+ * - /compact executes immediately
+ * - /goal and /plan become footer trigger chips
+ * - /research stays in the composer so the user can add a research question
  * - Keyboard navigation (Arrow keys, Enter/Tab, Escape)
  */
 
@@ -12,18 +12,12 @@ import { ScrollArea } from "@devo/ui/components/scroll-area"
 import { cn } from "@devo/ui/lib/utils"
 import fuzzysort from "fuzzysort"
 import {
-	BookOpenIcon,
-	CodeIcon,
-	GitForkIcon,
+	GoalIcon,
+	ListTodoIcon,
 	type LucideIcon,
-	MessageSquareIcon,
-	Redo2Icon,
+	MicroscopeIcon,
 	SearchIcon,
-	SettingsIcon,
 	SparklesIcon,
-	TerminalIcon,
-	Undo2Icon,
-	WrenchIcon,
 } from "lucide-react"
 import {
 	forwardRef,
@@ -35,8 +29,6 @@ import {
 	useRef,
 	useState,
 } from "react"
-import { useServerCommands } from "../../hooks/use-devo-data"
-import { formatShortcut } from "../../lib/shortcut-display"
 
 // ============================================================
 // Types
@@ -46,13 +38,7 @@ interface SlashCommand {
 	name: string
 	description: string
 	icon: LucideIcon
-	source: "client" | "server"
-	/** For server commands: the original source type */
-	serverSource?: "command" | "mcp" | "skill"
-	/** Keyboard shortcut */
-	shortcut?: string
-	/** Special action instead of regular command execution */
-	action?: "skills" | "fork"
+	insertText?: string
 }
 
 export interface SlashCommandPopoverHandle {
@@ -67,14 +53,8 @@ interface SlashCommandPopoverProps {
 	open: boolean
 	/** Whether the popover should be active (connected, has session, etc.) */
 	enabled: boolean
-	/** Directory for fetching server commands */
-	directory: string | null
 	/** Callback when a command is selected */
 	onSelect: (command: string) => void
-	/** Called when the /skills entry is selected — opens the skills picker */
-	onSkillsOpen?: () => void
-	/** Called when the /fork entry is selected — forks the session */
-	onFork?: () => Promise<void>
 	/** Called when Escape is pressed */
 	onClose: () => void
 }
@@ -85,55 +65,27 @@ interface SlashCommandPopoverProps {
 
 const CLIENT_COMMANDS: SlashCommand[] = [
 	{
-		name: "undo",
-		description: "Undo the last turn",
-		icon: Undo2Icon,
-		source: "client",
-		shortcut: formatShortcut(["mod", "Z"]),
-	},
-	{
-		name: "redo",
-		description: "Redo previously undone turn",
-		icon: Redo2Icon,
-		source: "client",
-		shortcut: formatShortcut(["shift", "mod", "Z"]),
-	},
-	{
 		name: "compact",
 		description: "Summarize conversation to save context",
 		icon: SparklesIcon,
-		source: "client",
 	},
 	{
-		name: "fork",
-		description: "Fork conversation from this point",
-		icon: GitForkIcon,
-		source: "client",
-		action: "fork",
+		name: "goal",
+		description: "Set a goal from the next message",
+		icon: GoalIcon,
 	},
 	{
-		name: "skills",
-		description: "Browse and use skills",
-		icon: BookOpenIcon,
-		source: "client",
-		action: "skills",
+		name: "plan",
+		description: "Create a plan from the next message",
+		icon: ListTodoIcon,
+	},
+	{
+		name: "research",
+		description: "Run deep research on a question",
+		icon: MicroscopeIcon,
+		insertText: "/research ",
 	},
 ]
-
-function getCommandIcon(name: string): LucideIcon {
-	switch (name) {
-		case "init":
-			return SettingsIcon
-		case "review":
-			return CodeIcon
-		case "feedback":
-			return MessageSquareIcon
-		case "mcp":
-			return WrenchIcon
-		default:
-			return TerminalIcon
-	}
-}
 
 // ============================================================
 // SlashCommandPopover
@@ -141,40 +93,21 @@ function getCommandIcon(name: string): LucideIcon {
 
 export const SlashCommandPopover = memo(
 	forwardRef<SlashCommandPopoverHandle, SlashCommandPopoverProps>(function SlashCommandPopover(
-		{ query, open, directory, onSelect, onSkillsOpen, onFork, onClose },
+		{ query, open, enabled, onSelect, onClose },
 		ref,
 	) {
 		const [activeIndex, setActiveIndex] = useState(0)
 		const listRef = useRef<HTMLDivElement>(null)
 
-		// --- Server commands (skills excluded, matching TUI pattern) ---
-		const rawServerCommands = useServerCommands(directory)
-		const serverCommands = useMemo<SlashCommand[]>(
-			() =>
-				rawServerCommands
-					.filter((c) => c.source !== "skill")
-					.map((c) => ({
-						name: c.name,
-						description: c.description ?? `Run /${c.name}`,
-						icon: getCommandIcon(c.name),
-						source: "server" as const,
-						serverSource: c.source,
-					})),
-			[rawServerCommands],
-		)
-
-		// --- Merge: server commands first, then built-in (matching TUI ordering) ---
-		const allCommands = useMemo(() => [...serverCommands, ...CLIENT_COMMANDS], [serverCommands])
-
 		// --- Fuzzy filter ---
 		const flatList = useMemo<SlashCommand[]>(() => {
-			if (!query) return allCommands
-			const results = fuzzysort.go(query, allCommands, {
+			if (!query) return CLIENT_COMMANDS
+			const results = fuzzysort.go(query, CLIENT_COMMANDS, {
 				keys: ["name", "description"],
 				threshold: 0.3,
 			})
 			return results.map((r) => r.obj)
-		}, [allCommands, query])
+		}, [query])
 
 		// Reset active index when options or query change
 		// biome-ignore lint/correctness/useExhaustiveDependencies: intentional — reset on options/query change
@@ -193,26 +126,18 @@ export const SlashCommandPopover = memo(
 			}
 		}, [activeIndex])
 
-		// --- Handle selection (regular commands or special actions) ---
+		// --- Handle selection ---
 		const handleSelect = useCallback(
 			(cmd: SlashCommand) => {
-				if (cmd.action === "skills") {
-					onClose()
-					onSkillsOpen?.()
-				} else if (cmd.action === "fork") {
-					onClose()
-					onFork?.()
-				} else {
-					onSelect(`/${cmd.name}`)
-				}
+				onSelect(cmd.insertText ?? `/${cmd.name}`)
 			},
-			[onSelect, onClose, onSkillsOpen, onFork],
+			[onSelect],
 		)
 
 		// --- Keyboard handler ---
 		const handleKeyDown = useCallback(
 			(e: React.KeyboardEvent): boolean => {
-				if (!open || flatList.length === 0) return false
+				if (!open || !enabled || flatList.length === 0) return false
 
 				switch (e.key) {
 					case "ArrowDown": {
@@ -241,12 +166,12 @@ export const SlashCommandPopover = memo(
 						return false
 				}
 			},
-			[open, flatList, activeIndex, handleSelect, onClose],
+			[open, enabled, flatList, activeIndex, handleSelect, onClose],
 		)
 
 		useImperativeHandle(ref, () => ({ handleKeyDown }), [handleKeyDown])
 
-		if (!open) return null
+		if (!open || !enabled) return null
 
 		return (
 			<div
@@ -257,7 +182,7 @@ export const SlashCommandPopover = memo(
 				{/* Search header */}
 				<div className="flex items-center gap-2 border-b px-3 py-2">
 					<SearchIcon className="size-3.5 shrink-0 text-muted-foreground" />
-					<span className="text-sm text-muted-foreground">Search</span>
+					<span className="text-sm text-muted-foreground">Commands</span>
 				</div>
 
 				{/* Results */}
@@ -318,16 +243,6 @@ const CommandItem = memo(function CommandItem({
 				<span className="font-medium">/{command.name}</span>
 				{command.description && (
 					<span className="truncate text-muted-foreground">{command.description}</span>
-				)}
-			</div>
-			<div className="flex shrink-0 items-center gap-2">
-				{command.serverSource === "mcp" && (
-					<span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-						mcp
-					</span>
-				)}
-				{command.shortcut && (
-					<span className="text-xs text-muted-foreground">{command.shortcut}</span>
 				)}
 			</div>
 		</button>

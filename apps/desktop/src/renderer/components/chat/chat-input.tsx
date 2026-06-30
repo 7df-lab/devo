@@ -48,7 +48,6 @@ interface ChatInputProps {
 	providers?: ProvidersData | null
 	config?: ConfigData | null
 	devoAgents?: SdkAgent[]
-	onSkillsOpen: () => void
 	onScrollToBottom: (behavior?: "instant" | "smooth") => void
 	handleSlashCommand: (text: string) => Promise<boolean>
 }
@@ -162,7 +161,6 @@ export function ChatInput({
 	providers,
 	config,
 	devoAgents,
-	onSkillsOpen,
 	onScrollToBottom,
 	handleSlashCommand,
 }: ChatInputProps) {
@@ -317,7 +315,6 @@ export function ChatInput({
 					query={slashQuery}
 					open={slashOpen}
 					enabled={isConnected}
-					directory={agent.directory}
 					onSelect={(cmd) => {
 						setSlashOpen(false)
 						// Use the command string directly instead of setText + setTimeout
@@ -337,7 +334,6 @@ export function ChatInput({
 							slashCommandRef.current?.setText(cmd)
 						}
 					}}
-					onSkillsOpen={onSkillsOpen}
 					onClose={() => setSlashOpen(false)}
 				/>
 				<MentionPopover
