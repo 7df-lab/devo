@@ -811,6 +811,31 @@ fn user_shell_command_payload(
     }
 }
 
+const AGENT_COORDINATION_TOOL_NAMES: &[&str] = &[
+    "spawn_agent",
+    "send_message",
+    "wait_agent",
+    "list_agents",
+    "close_agent",
+];
+
+fn without_agent_coordination_tools(
+    registry: &devo_core::tools::ToolRegistry,
+) -> devo_core::tools::ToolRegistry {
+    let names = registry
+        .tool_definitions()
+        .into_iter()
+        .map(|tool| tool.name)
+        .filter(|name| {
+            !AGENT_COORDINATION_TOOL_NAMES
+                .iter()
+                .any(|hidden_name| *hidden_name == name)
+        })
+        .collect::<Vec<_>>();
+    let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+    registry.restricted_to_specs(&names)
+}
+
 impl ServerRuntime {
     fn tool_registry_for_session(
         &self,
@@ -1094,11 +1119,16 @@ impl ServerRuntime {
         let turn_for_events = turn.clone();
         let turn_for_plan_updates = turn.clone();
         let event_session_arc = Arc::clone(&session_arc);
-        let event_tool_registry = {
+        let (event_tool_registry, usage_parent_session_id) = {
             let session = session_arc.lock().await;
-            self.tool_registry_for_session(&session)
+            (
+                self.tool_registry_for_session(&session),
+                session.summary.parent_session_id,
+            )
         };
         let usage_context_window = Some(turn_config.model.context_window as u64);
+        self.begin_parent_usage_turn(session_id, turn.turn_id, usage_context_window)
+            .await;
         let event_task = tokio::spawn(async move {
             // This task owns the streamed model output. It turns raw query
             // callbacks into persisted turn items and keeps enough state to
@@ -1770,29 +1800,48 @@ impl ServerRuntime {
                         let total_output_tokens = base.1 + usage.output_tokens;
                         let total_tokens = base.2 + display_total_tokens;
                         let total_cache_read_tokens = base.3 + cache_read_input_tokens;
-                        {
-                            let mut session = event_session_arc.lock().await;
-                            session.summary.total_input_tokens = total_input_tokens;
-                            session.summary.total_output_tokens = total_output_tokens;
-                            session.summary.total_tokens = total_tokens;
-                            session.summary.total_cache_read_tokens = total_cache_read_tokens;
-                            session.summary.last_query_total_tokens = display_total_tokens;
-                        }
-                        let _ = runtime
-                            .broadcast_event(ServerEvent::TurnUsageUpdated(
-                                TurnUsageUpdatedPayload {
+                        if usage_parent_session_id.is_some() {
+                            {
+                                let mut session = event_session_arc.lock().await;
+                                session.summary.total_input_tokens = total_input_tokens;
+                                session.summary.total_output_tokens = total_output_tokens;
+                                session.summary.total_tokens = total_tokens;
+                                session.summary.total_cache_read_tokens = total_cache_read_tokens;
+                                session.summary.last_query_total_tokens = display_total_tokens;
+                            }
+                            let _ = runtime
+                                .broadcast_event(ServerEvent::TurnUsageUpdated(
+                                    TurnUsageUpdatedPayload {
+                                        session_id,
+                                        turn_id: turn_for_events.turn_id,
+                                        usage: turn_usage.clone(),
+                                        total_input_tokens,
+                                        total_output_tokens,
+                                        total_tokens,
+                                        total_cache_read_tokens,
+                                        last_query_input_tokens: usage.input_tokens,
+                                        context_window: usage_context_window,
+                                    },
+                                ))
+                                .await;
+                            let _ = runtime
+                                .publish_subagent_turn_usage(
                                     session_id,
-                                    turn_id: turn_for_events.turn_id,
-                                    usage: turn_usage,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    total_tokens,
-                                    total_cache_read_tokens,
-                                    last_query_input_tokens: usage.input_tokens,
-                                    context_window: usage_context_window,
-                                },
-                            ))
-                            .await;
+                                    turn_for_events.turn_id,
+                                    turn_usage,
+                                )
+                                .await;
+                        } else if let Some(snapshot) = runtime
+                            .publish_parent_turn_usage(
+                                session_id,
+                                turn_for_events.turn_id,
+                                turn_usage,
+                                usage_context_window,
+                            )
+                            .await
+                        {
+                            latest_usage = Some(snapshot.turn_usage.to_turn_usage());
+                        }
                     }
                     QueryEvent::TurnComplete {
                         stop_reason: terminal_stop_reason,
@@ -1865,11 +1914,11 @@ impl ServerRuntime {
 
         let (
             result,
-            session_total_input_tokens,
-            session_total_output_tokens,
-            session_total_tokens,
-            session_total_cache_creation_tokens,
-            session_total_cache_read_tokens,
+            mut session_total_input_tokens,
+            mut session_total_output_tokens,
+            mut session_total_tokens,
+            mut session_total_cache_creation_tokens,
+            mut session_total_cache_read_tokens,
             session_last_input_tokens,
             session_prompt_token_estimate,
         ) = {
@@ -1947,6 +1996,9 @@ impl ServerRuntime {
                 })
                 .unwrap_or_default();
             let registry = match agent_tool_policy {
+                devo_protocol::AgentToolPolicy::Inherit if usage_parent_session_id.is_some() => {
+                    Arc::new(without_agent_coordination_tools(&session_tool_registry))
+                }
                 devo_protocol::AgentToolPolicy::Inherit => session_tool_registry,
                 devo_protocol::AgentToolPolicy::DenyAll => {
                     Arc::new(devo_core::tools::ToolRegistry::new())
@@ -2040,10 +2092,21 @@ impl ServerRuntime {
         // Wait for the event task to finish draining buffered stream events
         // before we persist the terminal turn state.
         let event_summary = event_task.await.ok();
-        let latest_usage = event_summary
+        let mut latest_usage = event_summary
             .as_ref()
             .and_then(|summary| summary.latest_usage.clone());
         let terminal_stop_reason = event_summary.and_then(|summary| summary.stop_reason);
+        if usage_parent_session_id.is_none()
+            && let Some(snapshot) = self.parent_usage_snapshot(session_id, turn.turn_id).await
+        {
+            latest_usage = Some(snapshot.turn_usage.to_turn_usage());
+            session_total_input_tokens = snapshot.session_totals.input_tokens;
+            session_total_output_tokens = snapshot.session_totals.output_tokens;
+            session_total_tokens = snapshot.session_totals.total_tokens;
+            session_total_cache_creation_tokens =
+                snapshot.session_totals.cache_creation_input_tokens;
+            session_total_cache_read_tokens = snapshot.session_totals.cache_read_input_tokens;
+        }
         self.active_tasks.lock().await.remove(&session_id);
         self.active_turn_cancellations
             .lock()
@@ -2112,6 +2175,13 @@ impl ServerRuntime {
             session.summary.prompt_token_estimate = session_prompt_token_estimate;
             if let Some(usage) = &final_turn.usage {
                 session.summary.last_query_total_tokens = usage.display_total_tokens();
+            }
+            if let Ok(mut core_session) = session.core_session.try_lock() {
+                core_session.total_input_tokens = session_total_input_tokens;
+                core_session.total_output_tokens = session_total_output_tokens;
+                core_session.total_tokens = session_total_tokens;
+                core_session.total_cache_creation_tokens = session_total_cache_creation_tokens;
+                core_session.total_cache_read_tokens = session_total_cache_read_tokens;
             }
 
             // Persist token stats to SQLite (skip for ephemeral sessions)
@@ -2267,6 +2337,7 @@ impl ServerRuntime {
                     Vec::new(),
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
                     model_selection_from_pending_metadata(metadata.as_ref()),
+                    subagent_usage_owner_from_pending_metadata(metadata.as_ref()),
                 )),
                 Some(devo_core::PendingInputItem {
                     kind:
@@ -2284,6 +2355,7 @@ impl ServerRuntime {
                     prompt_messages,
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
                     model_selection_from_pending_metadata(metadata.as_ref()),
+                    subagent_usage_owner_from_pending_metadata(metadata.as_ref()),
                 )),
                 _ => None,
             }
@@ -2294,6 +2366,7 @@ impl ServerRuntime {
             input_messages,
             queued_collaboration_mode,
             queued_model_selection,
+            queued_subagent_usage_owner,
         )) = queued_input
         else {
             self.maybe_start_goal_continuation_turn(session_id).await;
@@ -2352,6 +2425,10 @@ impl ServerRuntime {
             stop_reason: None,
             failure_reason: None,
         };
+        if let Some((parent_session_id, parent_turn_id)) = queued_subagent_usage_owner {
+            self.register_subagent_usage_owner(parent_session_id, session_id, parent_turn_id)
+                .await;
+        }
         {
             let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
                 Some(s) => s,
@@ -2397,6 +2474,7 @@ impl ServerRuntime {
             input_messages,
             queued_collaboration_mode,
             queued_model_selection,
+            queued_subagent_usage_owner,
         ) = {
             let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
                 Some(s) => s,
@@ -2420,6 +2498,7 @@ impl ServerRuntime {
                     Vec::new(),
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
                     model_selection_from_pending_metadata(metadata.as_ref()),
+                    subagent_usage_owner_from_pending_metadata(metadata.as_ref()),
                 ),
                 Some(devo_core::PendingInputItem {
                     kind:
@@ -2437,6 +2516,7 @@ impl ServerRuntime {
                     prompt_messages,
                     collaboration_mode_from_pending_metadata(metadata.as_ref()),
                     model_selection_from_pending_metadata(metadata.as_ref()),
+                    subagent_usage_owner_from_pending_metadata(metadata.as_ref()),
                 ),
                 _ => return,
             }
@@ -2494,6 +2574,10 @@ impl ServerRuntime {
             stop_reason: None,
             failure_reason: None,
         };
+        if let Some((parent_session_id, parent_turn_id)) = queued_subagent_usage_owner {
+            self.register_subagent_usage_owner(parent_session_id, session_id, parent_turn_id)
+                .await;
+        }
         {
             let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
                 Some(s) => s,

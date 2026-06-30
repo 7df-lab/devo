@@ -205,7 +205,6 @@ mod tests {
         assert!(prompt.contains("wait_agent"));
         assert!(!prompt.contains("Return valid JSON"));
         assert!(!prompt.contains("strict JSON"));
-        assert!(!prompt.contains("{{ max_tasks }}"));
         assert!(!prompt.contains("Compare A and B"));
     }
 

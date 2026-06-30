@@ -21,7 +21,6 @@ use super::research_formatting::{
     final_report_file_requested_by_default, final_report_written_response, research_display_input,
 };
 use super::research_parsing::parse_json_object;
-
 pub(crate) use super::research_session::{research_session_context, research_stage_system};
 use super::research_stages::RESEARCH_FILE_TOOL_NAMES;
 use super::research_stages::RESEARCH_PIPELINE_STAGES;
@@ -50,7 +49,6 @@ struct SupervisorOutput {
     notes: String,
     worker_count: usize,
 }
-
 
 struct ResearchPipelineInput<'a> {
     runtime_context: Arc<SessionRuntimeContext>,
@@ -129,14 +127,12 @@ impl ResearchUsageTotals {
 
 #[derive(Debug)]
 pub(super) struct ResearchUsageLedger {
-    base: ResearchUsageTotals,
     by_invocation: HashMap<String, ResearchUsageTotals>,
 }
 
 impl ResearchUsageLedger {
-    fn new(base: ResearchUsageTotals) -> Self {
+    fn new() -> Self {
         Self {
-            base,
             by_invocation: HashMap::new(),
         }
     }
@@ -442,6 +438,12 @@ impl ServerRuntime {
         self.capture_turn_workspace_baseline(session_id, turn.turn_id, PathBuf::from(cwd.clone()))
             .await;
         let usage_ledger = self.research_usage_ledger(session_id).await;
+        self.begin_parent_usage_turn(
+            session_id,
+            turn.turn_id,
+            Some(turn_config.model.context_window as u64),
+        )
+        .await;
         let result = self
             .run_research_pipeline(
                 session_id,
@@ -1101,7 +1103,17 @@ impl ServerRuntime {
     ) {
         turn.status = status.clone();
         turn.completed_at = Some(Utc::now());
-        let usage = final_usage.to_turn_usage();
+        let own_usage = final_usage.to_turn_usage();
+        let usage = self
+            .publish_parent_turn_usage(
+                session_id,
+                turn.turn_id,
+                own_usage.clone(),
+                /*context_window*/ None,
+            )
+            .await
+            .map(|snapshot| snapshot.turn_usage.to_turn_usage())
+            .unwrap_or(own_usage);
         {
             let session_arc = self.sessions.lock().await.get(&session_id).cloned();
             if let Some(session_arc) = session_arc {
@@ -1181,59 +1193,21 @@ impl ServerRuntime {
         usage: ResearchUsageTotals,
         context_window: Option<u64>,
     ) {
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
-            return;
-        };
-        let (base, aggregate) = {
+        let aggregate = {
             let mut ledger = usage_ledger.lock().await;
             ledger.by_invocation.insert(usage_key, usage);
-            (ledger.base, ledger.aggregate())
+            ledger.aggregate()
         };
-        let (total_input_tokens, total_output_tokens, total_tokens, total_cache_read_tokens) = {
-            let mut session = session_arc.lock().await;
-            session.summary.total_input_tokens = base.input_tokens + aggregate.input_tokens;
-            session.summary.total_output_tokens = base.output_tokens + aggregate.output_tokens;
-            session.summary.total_tokens = base.total_tokens + aggregate.total_tokens;
-            session.summary.total_cache_creation_tokens =
-                base.cache_creation_input_tokens + aggregate.cache_creation_input_tokens;
-            session.summary.total_cache_read_tokens =
-                base.cache_read_input_tokens + aggregate.cache_read_input_tokens;
-            session.summary.last_query_total_tokens = aggregate.total_tokens;
-            (
-                session.summary.total_input_tokens,
-                session.summary.total_output_tokens,
-                session.summary.total_tokens,
-                session.summary.total_cache_read_tokens,
-            )
-        };
-        self.broadcast_event(ServerEvent::TurnUsageUpdated(TurnUsageUpdatedPayload {
+        self.publish_parent_turn_usage(
             session_id,
             turn_id,
-            usage: aggregate.to_turn_usage(),
-            total_input_tokens,
-            total_output_tokens,
-            total_tokens,
-            total_cache_read_tokens,
-            last_query_input_tokens: aggregate.input_tokens,
+            aggregate.to_turn_usage(),
             context_window,
-        }))
+        )
         .await;
     }
 
-    async fn research_usage_ledger(&self, session_id: SessionId) -> ResearchUsageLedgerRef {
-        let base = if let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() {
-            let session = session_arc.lock().await;
-            ResearchUsageTotals {
-                input_tokens: session.summary.total_input_tokens,
-                output_tokens: session.summary.total_output_tokens,
-                total_tokens: session.summary.total_tokens,
-                cache_creation_input_tokens: session.summary.total_cache_creation_tokens,
-                cache_read_input_tokens: session.summary.total_cache_read_tokens,
-                reasoning_output_tokens: 0,
-            }
-        } else {
-            ResearchUsageTotals::default()
-        };
-        Arc::new(Mutex::new(ResearchUsageLedger::new(base)))
+    async fn research_usage_ledger(&self, _session_id: SessionId) -> ResearchUsageLedgerRef {
+        Arc::new(Mutex::new(ResearchUsageLedger::new()))
     }
 }

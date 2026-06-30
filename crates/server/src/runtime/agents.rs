@@ -81,6 +81,7 @@ impl ServerRuntime {
                 parent.config.clone(),
                 stable_items,
                 parent.latest_turn.clone(),
+                parent.active_turn.as_ref().map(|turn| turn.turn_id),
                 parent.tool_registry.clone(),
                 Arc::clone(&parent.runtime_context),
             )
@@ -90,6 +91,7 @@ impl ServerRuntime {
             parent_config,
             stable_items,
             parent_latest_turn,
+            parent_active_turn_id,
             parent_tool_registry,
             runtime_context,
         ) = parent_snapshot;
@@ -273,6 +275,12 @@ impl ServerRuntime {
             },
         )
         .await;
+        self.register_subagent_usage_owner(
+            parent_session_id,
+            child_session_id,
+            parent_active_turn_id,
+        )
+        .await;
         if !summary.ephemeral
             && let Err(error) = self.deps.db.upsert_session(&summary)
         {
@@ -301,7 +309,12 @@ impl ServerRuntime {
                 return;
             }
             match start_runtime
-                .start_runtime_turn(child_session_id, start_message.clone(), start_message)
+                .start_runtime_turn(
+                    child_session_id,
+                    start_message.clone(),
+                    start_message,
+                    /*queued_metadata*/ None,
+                )
                 .await
             {
                 Ok(_) => {
@@ -420,6 +433,7 @@ impl ServerRuntime {
         session_id: SessionId,
         display_input: String,
         input_text: String,
+        queued_metadata: Option<serde_json::Value>,
     ) -> Result<TurnMetadata, ToolCallError> {
         let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
             return Err(ToolCallError::InvalidInput(format!(
@@ -454,7 +468,7 @@ impl ServerRuntime {
         if let Some((active_turn, pending_turn_queue, is_ephemeral)) = queued_active_turn {
             let item = devo_core::PendingInputItem::new(
                 devo_core::PendingInputKind::UserText { text: input_text },
-                None,
+                queued_metadata,
                 Utc::now(),
             );
             pending_turn_queue
@@ -631,8 +645,31 @@ impl ServerRuntime {
     ) -> Result<(), ToolCallError> {
         let messages = self.mailbox(child_session_id).await.drain().await;
         for message in messages {
-            self.start_runtime_turn(child_session_id, message.content.clone(), message.content)
-                .await?;
+            let parent_turn_id = self
+                .active_turn_id_for_session(message.from_session_id)
+                .await;
+            if self
+                .active_turn_id_for_session(child_session_id)
+                .await
+                .is_none()
+            {
+                self.register_subagent_usage_owner(
+                    message.from_session_id,
+                    child_session_id,
+                    parent_turn_id,
+                )
+                .await;
+            }
+            self.start_runtime_turn(
+                child_session_id,
+                message.content.clone(),
+                message.content,
+                Some(subagent_usage_owner_pending_metadata(
+                    message.from_session_id,
+                    parent_turn_id,
+                )),
+            )
+            .await?;
             if let Some((parent_session_id, _)) = self.child_parent_and_path(child_session_id).await
             {
                 self.set_agent_status(parent_session_id, child_session_id, SubagentStatus::Running)

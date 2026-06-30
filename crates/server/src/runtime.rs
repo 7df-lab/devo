@@ -182,6 +182,7 @@ mod research_streaming;
 mod research_tool_runtime;
 mod research_tools;
 mod skills;
+mod subagent_usage;
 mod turn_exec;
 mod turn_reservation;
 mod user_input;
@@ -223,6 +224,8 @@ pub struct ServerRuntime {
     agent_output_buffers: Mutex<HashMap<SessionId, SubagentOutputBuffer>>,
     /// Child agents owned by an active `/research` pipeline.
     research_child_agents: Mutex<HashMap<SessionId, HashSet<SessionId>>>,
+    /// Latest subagent turn usage grouped under the parent turn that requested the work.
+    subagent_usage: Mutex<subagent_usage::SubagentUsageState>,
     /// Live client-owned reference search sessions.
     reference_searches:
         Mutex<HashMap<devo_protocol::ReferenceSearchId, reference_search::ReferenceSearchState>>,
@@ -309,6 +312,31 @@ fn model_selection_from_pending_metadata(metadata: Option<&serde_json::Value>) -
         .or_else(|| string_field_from_pending_metadata(metadata, "model"))
 }
 
+const SUBAGENT_USAGE_PARENT_SESSION_ID_METADATA: &str = "devo_subagent_usage_parent_session_id";
+const SUBAGENT_USAGE_PARENT_TURN_ID_METADATA: &str = "devo_subagent_usage_parent_turn_id";
+
+fn subagent_usage_owner_pending_metadata(
+    parent_session_id: SessionId,
+    parent_turn_id: Option<TurnId>,
+) -> serde_json::Value {
+    serde_json::json!({
+        SUBAGENT_USAGE_PARENT_SESSION_ID_METADATA: parent_session_id.to_string(),
+        SUBAGENT_USAGE_PARENT_TURN_ID_METADATA: parent_turn_id.map(|turn_id| turn_id.to_string()),
+    })
+}
+
+fn subagent_usage_owner_from_pending_metadata(
+    metadata: Option<&serde_json::Value>,
+) -> Option<(SessionId, Option<TurnId>)> {
+    let parent_session_id =
+        string_field_from_pending_metadata(metadata, SUBAGENT_USAGE_PARENT_SESSION_ID_METADATA)
+            .and_then(|value| SessionId::try_from(value).ok())?;
+    let parent_turn_id =
+        string_field_from_pending_metadata(metadata, SUBAGENT_USAGE_PARENT_TURN_ID_METADATA)
+            .and_then(|value| TurnId::try_from(value).ok());
+    Some((parent_session_id, parent_turn_id))
+}
+
 impl ServerRuntime {
     pub fn new(server_home: PathBuf, deps: ServerRuntimeDependencies) -> Arc<Self> {
         let rollout_store = RolloutStore::new(server_home.clone());
@@ -339,6 +367,7 @@ impl ServerRuntime {
             agent_mailboxes: Mutex::new(HashMap::new()),
             agent_output_buffers: Mutex::new(HashMap::new()),
             research_child_agents: Mutex::new(HashMap::new()),
+            subagent_usage: Mutex::new(subagent_usage::SubagentUsageState::default()),
             reference_searches: Mutex::new(HashMap::new()),
             command_exec_manager: command_exec::CommandExecManager::new(),
             active_workspace_baselines: Mutex::new(HashMap::new()),

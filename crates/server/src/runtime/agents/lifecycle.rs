@@ -328,6 +328,7 @@ mod tests {
                 session_id,
                 "inspect this".to_string(),
                 "inspect this".to_string(),
+                /*queued_metadata*/ None,
             )
             .await
             .expect_err("append failure");
