@@ -2,12 +2,11 @@ use super::super::*;
 
 use std::collections::BTreeSet;
 
-use chrono::DateTime;
-
 use crate::AcpErrorCode;
 use crate::AcpSetConfigOptionParams;
-use crate::execution::RuntimeSession;
+use crate::runtime::session_actor::snapshots::HookContextSnapshot;
 use crate::session_context::SessionRuntimeContext;
+use devo_core::SessionConfig;
 use devo_core::TurnConfig;
 use devo_protocol::AcpSessionConfigOption;
 use devo_protocol::AcpSessionConfigOptionCategory;
@@ -30,8 +29,15 @@ impl ServerRuntime {
         let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
             return Err("session does not exist".to_string());
         };
-        let session = session_arc.lock().await;
-        Ok(acp_config_options_for_session(&session))
+        let snapshot: HookContextSnapshot = session_arc
+            .hook_context_snapshot()
+            .await
+            .ok_or_else(|| "session actor unavailable".to_string())?;
+        Ok(acp_config_options_for_session(
+            &snapshot.runtime_context,
+            &snapshot.summary,
+            &snapshot.config,
+        ))
     }
 
     pub(crate) fn acp_model_config_options_for_context(
@@ -53,126 +59,192 @@ impl ServerRuntime {
             ));
         };
 
-        let (updated_session, config_options) = {
-            let mut session = session_arc.lock().await;
-            match params.config_id.as_str() {
-                ACP_MODEL_CONFIG_ID => {
-                    let model_option = acp_model_config_option_for_session(&session);
-                    let value_is_allowed = match &model_option {
-                        AcpSessionConfigOption::Select { options, .. } => {
-                            select_options_contain_value(options, &params.value)
-                        }
-                    };
-                    if !value_is_allowed {
-                        return Err((
-                            AcpErrorCode::InvalidParams,
-                            format!(
-                                "invalid value '{}' for session config option '{}'",
-                                params.value, params.config_id
-                            ),
-                        ));
-                    }
+        let snapshot: HookContextSnapshot =
+            session_arc.hook_context_snapshot().await.ok_or_else(|| {
+                (
+                    AcpErrorCode::ServerError,
+                    "session actor unavailable".to_string(),
+                )
+            })?;
 
-                    let mut turn_config = session.runtime_context.resolve_turn_config(
-                        Some(params.value.as_str()),
-                        session.summary.reasoning_effort_selection.clone(),
-                    );
-                    turn_config.reasoning_effort_selection = current_reasoning_effort_value(
-                        &turn_config.model,
-                        session.summary.reasoning_effort_selection.as_deref(),
-                    );
-                    apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
-                    let updated_at = Utc::now();
-                    session.summary.updated_at = updated_at;
-                    if let Err(error) = persist_session_config_summary(
-                        &self.rollout_store,
-                        &mut session,
-                        updated_at,
-                    ) {
-                        return Err((AcpErrorCode::ServerError, error));
+        let (updated_session, config_options) = match params.config_id.as_str() {
+            ACP_MODEL_CONFIG_ID => {
+                let model_option = acp_model_config_option_for_session(
+                    &snapshot.runtime_context,
+                    &snapshot.summary,
+                    &snapshot.config,
+                );
+                let value_is_allowed = match &model_option {
+                    AcpSessionConfigOption::Select { options, .. } => {
+                        select_options_contain_value(options, &params.value)
                     }
-                    (
-                        Some(session.summary.clone()),
-                        acp_config_options_for_session(&session),
-                    )
+                };
+                if !value_is_allowed {
+                    return Err((
+                        AcpErrorCode::InvalidParams,
+                        format!(
+                            "invalid value '{}' for session config option '{}'",
+                            params.value, params.config_id
+                        ),
+                    ));
                 }
-                ACP_REASONING_EFFORT_CONFIG_ID => {
-                    let Some(reasoning_effort_option) =
-                        acp_reasoning_effort_config_option_for_session(&session)
-                    else {
-                        return Err((
-                            AcpErrorCode::InvalidParams,
-                            format!("unknown session config option '{}'", params.config_id),
-                        ));
-                    };
-                    let value_is_allowed = match &reasoning_effort_option {
-                        AcpSessionConfigOption::Select { options, .. } => {
-                            select_options_contain_value(options, &params.value)
-                        }
-                    };
-                    if !value_is_allowed {
-                        return Err((
-                            AcpErrorCode::InvalidParams,
-                            format!(
-                                "invalid value '{}' for session config option '{}'",
-                                params.value, params.config_id
-                            ),
-                        ));
-                    }
 
-                    let mut turn_config = session.runtime_context.resolve_turn_config(
-                        session_model_selection(&session.summary),
-                        Some(params.value.clone()),
-                    );
-                    turn_config.reasoning_effort_selection = Some(params.value.clone());
-                    apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
-                    let updated_at = Utc::now();
-                    session.summary.updated_at = updated_at;
-                    if let Err(error) = persist_session_config_summary(
-                        &self.rollout_store,
-                        &mut session,
-                        updated_at,
-                    ) {
-                        return Err((AcpErrorCode::ServerError, error));
-                    }
-                    (
-                        Some(session.summary.clone()),
-                        acp_config_options_for_session(&session),
+                let mut turn_config = snapshot.runtime_context.resolve_turn_config(
+                    Some(params.value.as_str()),
+                    snapshot.summary.reasoning_effort_selection.clone(),
+                );
+                turn_config.reasoning_effort_selection = current_reasoning_effort_value(
+                    &turn_config.model,
+                    snapshot.summary.reasoning_effort_selection.as_deref(),
+                );
+
+                let updated = session_arc
+                    .update_session_metadata(
+                        Some(turn_config.model.slug.clone()),
+                        turn_config.model_binding_id.clone(),
+                        turn_config.reasoning_effort_selection.clone(),
                     )
+                    .await
+                    .ok_or_else(|| {
+                        (
+                            AcpErrorCode::ServerError,
+                            "failed to update session".to_string(),
+                        )
+                    })?;
+
+                let updated_snapshot =
+                    session_arc.hook_context_snapshot().await.ok_or_else(|| {
+                        (
+                            AcpErrorCode::ServerError,
+                            "session actor unavailable".to_string(),
+                        )
+                    })?;
+                if let Some(record) = updated_snapshot.record.as_ref()
+                    && let Err(error) = self.rollout_store.append_session_meta(record)
+                {
+                    return Err((AcpErrorCode::ServerError, error.to_string()));
                 }
-                ACP_MODE_CONFIG_ID => {
-                    let Some(preset) = permission_preset_from_value(&params.value) else {
-                        return Err((
-                            AcpErrorCode::InvalidParams,
-                            format!(
-                                "invalid value '{}' for session config option '{}'",
-                                params.value, params.config_id
-                            ),
-                        ));
-                    };
-                    let profile = safety_profile_from_protocol(
-                        preset,
-                        session.summary.cwd.clone(),
-                        session.summary.additional_directories.clone(),
-                    );
-                    {
-                        let mut core_session = session.core_session.lock().await;
-                        core_session.config.permission_mode = profile.permission_mode();
-                        core_session.config.permission_profile = profile.clone();
-                    }
-                    session.config.permission_mode = profile.permission_mode();
-                    session.config.permission_profile = profile;
-                    session.session_approval_cache =
-                        crate::execution::ApprovalGrantCache::default();
-                    session.turn_approval_cache = crate::execution::ApprovalGrantCache::default();
-                    (None, acp_config_options_for_session(&session))
-                }
-                _ => {
+
+                (
+                    Some(updated),
+                    acp_config_options_for_session(
+                        &updated_snapshot.runtime_context,
+                        &updated_snapshot.summary,
+                        &updated_snapshot.config,
+                    ),
+                )
+            }
+            ACP_REASONING_EFFORT_CONFIG_ID => {
+                let Some(reasoning_effort_option) = acp_reasoning_effort_config_option_for_session(
+                    &snapshot.runtime_context,
+                    &snapshot.summary,
+                ) else {
                     return Err((
                         AcpErrorCode::InvalidParams,
                         format!("unknown session config option '{}'", params.config_id),
                     ));
+                };
+                let value_is_allowed = match &reasoning_effort_option {
+                    AcpSessionConfigOption::Select { options, .. } => {
+                        select_options_contain_value(options, &params.value)
+                    }
+                };
+                if !value_is_allowed {
+                    return Err((
+                        AcpErrorCode::InvalidParams,
+                        format!(
+                            "invalid value '{}' for session config option '{}'",
+                            params.value, params.config_id
+                        ),
+                    ));
                 }
+
+                let mut turn_config = snapshot.runtime_context.resolve_turn_config(
+                    session_model_selection(&snapshot.summary),
+                    Some(params.value.clone()),
+                );
+                turn_config.reasoning_effort_selection = Some(params.value.clone());
+
+                let updated = session_arc
+                    .update_session_metadata(
+                        Some(turn_config.model.slug.clone()),
+                        turn_config.model_binding_id.clone(),
+                        turn_config.reasoning_effort_selection.clone(),
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        (
+                            AcpErrorCode::ServerError,
+                            "failed to update session".to_string(),
+                        )
+                    })?;
+
+                let updated_snapshot =
+                    session_arc.hook_context_snapshot().await.ok_or_else(|| {
+                        (
+                            AcpErrorCode::ServerError,
+                            "session actor unavailable".to_string(),
+                        )
+                    })?;
+                if let Some(record) = updated_snapshot.record.as_ref()
+                    && let Err(error) = self.rollout_store.append_session_meta(record)
+                {
+                    return Err((AcpErrorCode::ServerError, error.to_string()));
+                }
+
+                (
+                    Some(updated),
+                    acp_config_options_for_session(
+                        &updated_snapshot.runtime_context,
+                        &updated_snapshot.summary,
+                        &updated_snapshot.config,
+                    ),
+                )
+            }
+            ACP_MODE_CONFIG_ID => {
+                let Some(preset) = permission_preset_from_value(&params.value) else {
+                    return Err((
+                        AcpErrorCode::InvalidParams,
+                        format!(
+                            "invalid value '{}' for session config option '{}'",
+                            params.value, params.config_id
+                        ),
+                    ));
+                };
+                let profile = safety_profile_from_protocol(
+                    preset,
+                    snapshot.summary.cwd.clone(),
+                    snapshot.summary.additional_directories.clone(),
+                );
+
+                if !session_arc.apply_permission_profile(profile.clone()).await {
+                    return Err((
+                        AcpErrorCode::ServerError,
+                        "failed to apply permission profile".to_string(),
+                    ));
+                }
+
+                let updated_snapshot =
+                    session_arc.hook_context_snapshot().await.ok_or_else(|| {
+                        (
+                            AcpErrorCode::ServerError,
+                            "session actor unavailable".to_string(),
+                        )
+                    })?;
+                (
+                    None,
+                    acp_config_options_for_session(
+                        &updated_snapshot.runtime_context,
+                        &updated_snapshot.summary,
+                        &updated_snapshot.config,
+                    ),
+                )
+            }
+            _ => {
+                return Err((
+                    AcpErrorCode::InvalidParams,
+                    format!("unknown session config option '{}'", params.config_id),
+                ));
             }
         };
 
@@ -191,20 +263,25 @@ impl ServerRuntime {
     }
 }
 
-fn acp_config_options_for_session(session: &RuntimeSession) -> Vec<AcpSessionConfigOption> {
-    let mut options = acp_model_and_reasoning_options_for_session(session);
-    options.push(acp_mode_config_option_for_session(session));
+fn acp_config_options_for_session(
+    runtime_context: &SessionRuntimeContext,
+    summary: &SessionMetadata,
+    config: &SessionConfig,
+) -> Vec<AcpSessionConfigOption> {
+    let mut options = acp_model_and_reasoning_options_for_session(runtime_context, summary);
+    options.push(acp_mode_config_option_for_session(config));
     options
 }
 
 fn acp_model_and_reasoning_options_for_session(
-    session: &RuntimeSession,
+    runtime_context: &SessionRuntimeContext,
+    summary: &SessionMetadata,
 ) -> Vec<AcpSessionConfigOption> {
-    let turn_config = session.runtime_context.resolve_turn_config(
-        session_model_selection(&session.summary),
-        session.summary.reasoning_effort_selection.clone(),
+    let turn_config = runtime_context.resolve_turn_config(
+        session_model_selection(summary),
+        summary.reasoning_effort_selection.clone(),
     );
-    acp_model_and_reasoning_options_for_context(session.runtime_context.as_ref(), &turn_config)
+    acp_model_and_reasoning_options_for_context(runtime_context, &turn_config)
 }
 
 fn acp_model_and_reasoning_options_for_context(
@@ -223,9 +300,9 @@ fn acp_model_and_reasoning_options_for_context(
     options
 }
 
-fn acp_mode_config_option_for_session(session: &RuntimeSession) -> AcpSessionConfigOption {
+fn acp_mode_config_option_for_session(config: &SessionConfig) -> AcpSessionConfigOption {
     let current_value = permission_preset_value(permission_preset_from_safety(
-        session.config.permission_profile.preset,
+        config.permission_profile.preset,
     ))
     .to_string();
     AcpSessionConfigOption::Select {
@@ -271,12 +348,16 @@ fn acp_mode_config_option_for_session(session: &RuntimeSession) -> AcpSessionCon
     }
 }
 
-fn acp_model_config_option_for_session(session: &RuntimeSession) -> AcpSessionConfigOption {
-    let turn_config = session.runtime_context.resolve_turn_config(
-        session_model_selection(&session.summary),
-        session.summary.reasoning_effort_selection.clone(),
+fn acp_model_config_option_for_session(
+    runtime_context: &SessionRuntimeContext,
+    summary: &SessionMetadata,
+    _config: &SessionConfig,
+) -> AcpSessionConfigOption {
+    let turn_config = runtime_context.resolve_turn_config(
+        session_model_selection(summary),
+        summary.reasoning_effort_selection.clone(),
     );
-    acp_model_config_option_for_turn_config(session.runtime_context.as_ref(), &turn_config)
+    acp_model_config_option_for_turn_config(runtime_context, &turn_config)
 }
 
 fn acp_model_config_option_for_turn_config(
@@ -355,11 +436,12 @@ fn acp_model_config_option_for_turn_config(
 }
 
 fn acp_reasoning_effort_config_option_for_session(
-    session: &RuntimeSession,
+    runtime_context: &SessionRuntimeContext,
+    summary: &SessionMetadata,
 ) -> Option<AcpSessionConfigOption> {
-    let turn_config = session.runtime_context.resolve_turn_config(
-        session_model_selection(&session.summary),
-        session.summary.reasoning_effort_selection.clone(),
+    let turn_config = runtime_context.resolve_turn_config(
+        session_model_selection(summary),
+        summary.reasoning_effort_selection.clone(),
     );
     acp_reasoning_effort_config_option_for_turn_config(&turn_config)
 }
@@ -432,28 +514,6 @@ fn current_reasoning_effort_value(model: &Model, selection: Option<&str>) -> Opt
                 .filter(|value| option_values.contains(value))
         })
         .or_else(|| option_values.first().cloned())
-}
-
-fn persist_session_config_summary(
-    rollout_store: &crate::persistence::RolloutStore,
-    session: &mut RuntimeSession,
-    updated_at: DateTime<Utc>,
-) -> Result<(), String> {
-    let model = session.summary.model.clone();
-    let model_binding_id = session.summary.model_binding_id.clone();
-    let reasoning_effort_selection = session.summary.reasoning_effort_selection.clone();
-    if let Some(record) = session.record.as_mut() {
-        record.model = model;
-        record.model_binding_id = model_binding_id;
-        record.reasoning_effort_selection = reasoning_effort_selection;
-        record.updated_at = updated_at;
-        if let Err(error) = rollout_store.append_session_meta(record) {
-            return Err(format!(
-                "failed to persist ACP session config option: {error}"
-            ));
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn select_options_contain_value(

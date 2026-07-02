@@ -288,6 +288,10 @@ impl StreamController {
         self.core.set_width(width);
     }
 
+    pub(crate) fn live_source(&self) -> String {
+        self.core.live_source()
+    }
+
     pub(crate) fn live_lines(&self) -> Vec<Line<'static>> {
         let source = self.core.live_source();
         if source.is_empty() {

@@ -6,7 +6,7 @@ import {
 	type AcpTrafficLogger,
 	type AcpTrafficLogState,
 } from "./acp-traffic-log"
-import { StdioAcpClient, SUPPRESS_SERVER_TRAY_ENV } from "./acp-stdio-client"
+import { StdioAcpClient } from "./acp-stdio-client"
 import { resolveDevoProgram } from "./devo-program"
 import { createLogger } from "./logger"
 import { startNotificationWatcher, stopNotificationWatcher } from "./notification-watcher"
@@ -143,7 +143,6 @@ function getOrCreateClient(): StdioAcpClient {
 		})
 			stdioClient = new StdioAcpClient({
 				program,
-				env: { [SUPPRESS_SERVER_TRAY_ENV]: "1" },
 				networkProxy: getSettings().servers.networkProxy,
 				trafficLogger: getAcpTrafficLogger(),
 			})

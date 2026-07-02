@@ -20,13 +20,7 @@ impl ServerRuntime {
                     .lock()
                     .await
                     .insert(turn_id, captured.baseline);
-                let record = {
-                    let session_arc = self.sessions.lock().await.get(&session_id).cloned();
-                    match session_arc {
-                        Some(session_arc) => session_arc.lock().await.record.clone(),
-                        None => None,
-                    }
-                };
+                let record = self.session_record_snapshot(session_id).await;
                 if let Some(record) = record
                     && let Err(error) = self
                         .rollout_store
@@ -71,13 +65,7 @@ impl ServerRuntime {
         .await
         {
             Ok(finalized) => {
-                let record = {
-                    let session_arc = self.sessions.lock().await.get(&session_id).cloned();
-                    match session_arc {
-                        Some(session_arc) => session_arc.lock().await.record.clone(),
-                        None => None,
-                    }
-                };
+                let record = self.session_record_snapshot(session_id).await;
                 if let Some(record) = record
                     && let Err(error) = self
                         .rollout_store

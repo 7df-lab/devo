@@ -15,24 +15,25 @@ impl ServerRuntime {
         self.maybe_assign_provisional_title(session_id, user_input)
             .await;
 
-        let needs_title = {
-            let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
-                return;
-            };
-            let mut session = session_arc.lock().await;
-            if session.first_user_input.is_none() {
-                session.first_user_input = Some(user_input.to_string());
-            }
-            let first_input = session.first_user_input.clone();
-            let needs = matches!(
-                session.summary.title_state,
-                SessionTitleState::Unset | SessionTitleState::Provisional
-            );
-            (needs, first_input)
+        let Some(session_handle) = self.session(session_id).await else {
+            return;
         };
-        if needs_title.0
-            && let Some(first_input) = needs_title.1
-        {
+        let _ = session_handle
+            .set_first_user_input_if_unset(user_input.to_string())
+            .await;
+        let Some(title_context) = session_handle.title_generation_context().await else {
+            return;
+        };
+        let needs_title = matches!(
+            title_context.title_state,
+            SessionTitleState::Unset | SessionTitleState::Provisional
+        );
+        if needs_title {
+            let first_input = session_handle
+                .export_runtime_session()
+                .await
+                .and_then(|session| session.first_user_input)
+                .unwrap_or_else(|| user_input.to_string());
             let runtime = Arc::clone(self);
             tokio::spawn(async move {
                 runtime
@@ -50,39 +51,40 @@ impl ServerRuntime {
         let Some(candidate) = derive_provisional_title(first_user_input) else {
             return;
         };
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+        let Some(session_handle) = self.session(session_id).await else {
             return;
         };
-
-        let updated_summary = {
-            let mut session = session_arc.lock().await;
-            if session.summary.title.is_some()
-                || !matches!(session.summary.title_state, SessionTitleState::Unset)
-            {
-                return;
-            }
-
-            let previous_title = session.summary.title.clone();
-            let updated_at = Utc::now();
-            session.summary.title = Some(candidate.clone());
-            session.summary.title_state = SessionTitleState::Provisional;
-            session.summary.updated_at = updated_at;
-
-            if let Some(record) = session.record.as_mut() {
-                record.title = Some(candidate.clone());
-                record.title_state = SessionTitleState::Provisional;
-                record.updated_at = updated_at;
-                if let Err(error) = self.rollout_store.append_title_update(
-                    record,
-                    candidate.clone(),
-                    SessionTitleState::Provisional,
-                    previous_title,
-                ) {
-                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist provisional title");
-                }
-            }
-            session.summary.clone()
+        let Some(title_context) = session_handle.title_generation_context().await else {
+            return;
         };
+        if title_context.title_state != SessionTitleState::Unset {
+            return;
+        }
+        let Some(summary) = session_handle.summary().await else {
+            return;
+        };
+        if summary.title.is_some() {
+            return;
+        }
+
+        let previous_title = summary.title.clone();
+        let updated_at = Utc::now();
+        let mut updated_summary = summary;
+        updated_summary.title = Some(candidate.clone());
+        updated_summary.title_state = SessionTitleState::Provisional;
+        updated_summary.updated_at = updated_at;
+        session_handle.update_summary(updated_summary.clone()).await;
+
+        if let Some(record) = session_handle.record().await.flatten()
+            && let Err(error) = self.rollout_store.append_title_update(
+                &record,
+                candidate.clone(),
+                SessionTitleState::Provisional,
+                previous_title,
+            )
+        {
+            tracing::warn!(session_id = %session_id, error = %error, "failed to persist provisional title");
+        }
 
         self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
             session: updated_summary,
@@ -103,24 +105,21 @@ impl ServerRuntime {
         first_user_input: String,
     ) {
         for attempt in 1..=Self::MAX_TITLE_RETRIES {
-            let (model_selection, reasoning_effort_selection, should_skip, runtime_context) = {
-                let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
-                    return;
-                };
-                let session = session_arc.lock().await;
-                (
-                    session_model_selection(&session.summary)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| session.runtime_context.default_model.clone()),
-                    session.summary.reasoning_effort_selection.clone(),
-                    matches!(session.summary.title_state, SessionTitleState::Final(_)),
-                    Arc::clone(&session.runtime_context),
-                )
+            let Some(session_handle) = self.session(session_id).await else {
+                return;
             };
-
-            if should_skip {
+            let Some(title_context) = session_handle.title_generation_context().await else {
+                return;
+            };
+            if matches!(title_context.title_state, SessionTitleState::Final(_)) {
                 return;
             }
+            let model_selection = title_context
+                .model_selection
+                .clone()
+                .unwrap_or_else(|| title_context.runtime_context.default_model.clone());
+            let reasoning_effort_selection = title_context.reasoning_effort_selection.clone();
+            let runtime_context = title_context.runtime_context;
 
             let turn_config = runtime_context
                 .resolve_turn_config(Some(model_selection.as_str()), reasoning_effort_selection);
@@ -176,38 +175,29 @@ impl ServerRuntime {
                 }
             };
 
-            let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+            let Some(session_handle) = self.session(session_id).await else {
                 return;
             };
-            let updated_summary = {
-                let mut session = session_arc.lock().await;
-                if matches!(session.summary.title_state, SessionTitleState::Final(_)) {
-                    return;
-                }
-
-                let previous_title = session.summary.title.clone();
-                let updated_at = Utc::now();
-                session.summary.title = Some(generated_title.clone());
-                session.summary.title_state =
-                    SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
-                session.summary.updated_at = updated_at;
-
-                if let Some(record) = session.record.as_mut() {
-                    record.title = Some(generated_title.clone());
-                    record.title_state =
-                        SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
-                    record.updated_at = updated_at;
-                    if let Err(error) = self.rollout_store.append_title_update(
-                        record,
-                        generated_title.clone(),
-                        record.title_state.clone(),
-                        previous_title,
-                    ) {
-                        tracing::warn!(session_id = %session_id, error = %error, "failed to persist title");
-                    }
-                }
-                session.summary.clone()
+            let Some(updated_summary) = session_handle
+                .update_title(
+                    generated_title.clone(),
+                    SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated),
+                )
+                .await
+                .flatten()
+            else {
+                return;
             };
+            if let Some(record) = session_handle.record().await.flatten()
+                && let Err(error) = self.rollout_store.append_title_update(
+                    &record,
+                    generated_title.clone(),
+                    SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated),
+                    updated_summary.title.clone(),
+                )
+            {
+                tracing::warn!(session_id = %session_id, error = %error, "failed to persist title");
+            }
 
             self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
                 session: updated_summary,
@@ -355,60 +345,84 @@ impl ServerRuntime {
         turn_status: Option<TurnStatus>,
         worklog: Option<Worklog>,
     ) {
-        let session_arc = self.sessions.lock().await.get(&session_id).cloned();
-        if let Some(session_arc) = session_arc {
-            let record = {
-                let mut session = session_arc.lock().await;
-                if let Some(history_item) = history_item_from_turn_item(&turn_item) {
-                    session.history_items.push(history_item);
+        if let Some(stream) = self.active_stream_state(session_id).await {
+            let mut stream = stream.lock().await;
+            if let Some(inline) = stream.turn_inline.as_mut() {
+                if inline.turn_id == turn_id
+                    && let Some(history_item) = history_item_from_turn_item(&turn_item)
+                {
+                    inline.history_items.push(history_item);
                 }
-                let turn_kind = session
-                    .active_turn
-                    .as_ref()
-                    .filter(|turn| turn.turn_id == turn_id)
-                    .map(|turn| turn.kind.clone())
-                    .or_else(|| {
-                        session
-                            .latest_turn
-                            .as_ref()
-                            .filter(|turn| turn.turn_id == turn_id)
-                            .map(|turn| turn.kind.clone())
-                    })
-                    .unwrap_or_default();
-                session
-                    .persisted_turn_items
-                    .push(crate::execution::PersistedTurnItem {
+                if inline.turn_id == turn_id {
+                    inline
+                        .persisted_turn_items
+                        .push(crate::execution::PersistedTurnItem {
+                            turn_id,
+                            turn_kind: inline.turn_kind.clone(),
+                            item_id,
+                            turn_item: turn_item.clone(),
+                        });
+                }
+                if let Some(record) = inline.record.clone() {
+                    let item = build_item_record(
+                        session_id,
                         turn_id,
-                        turn_kind,
                         item_id,
-                        turn_item: turn_item.clone(),
-                    });
-                session.record.clone()
-            };
-            if let Some(record) = record {
-                let item = build_item_record(
-                    session_id,
-                    turn_id,
-                    item_id,
-                    item_seq,
-                    turn_item,
-                    turn_status,
-                    worklog,
-                );
-                if let Err(error) = self.rollout_store.append_item(&record, item) {
-                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist item line");
+                        item_seq,
+                        turn_item,
+                        turn_status,
+                        worklog,
+                    );
+                    if let Err(error) = self.rollout_store.append_item(&record, item) {
+                        tracing::warn!(session_id = %session_id, error = %error, "failed to persist item line");
+                    }
                 }
+                return;
+            }
+        }
+        let Some(session_handle) = self.session(session_id).await else {
+            return;
+        };
+        if let Some(history_item) = history_item_from_turn_item(&turn_item) {
+            session_handle.append_history_item(history_item).await;
+        }
+        let Some(prep) = session_handle.prepare_persist_item(turn_id).await else {
+            return;
+        };
+        session_handle
+            .append_persisted_item(crate::execution::PersistedTurnItem {
+                turn_id,
+                turn_kind: prep.turn_kind,
+                item_id,
+                turn_item: turn_item.clone(),
+            })
+            .await;
+        if let Some(record) = prep.record {
+            let item = build_item_record(
+                session_id,
+                turn_id,
+                item_id,
+                item_seq,
+                turn_item,
+                turn_status,
+                worklog,
+            );
+            if let Err(error) = self.rollout_store.append_item(&record, item) {
+                tracing::warn!(session_id = %session_id, error = %error, "failed to persist item line");
             }
         }
     }
 
     pub(super) async fn allocate_item_sequence(&self, session_id: SessionId) -> u64 {
-        let session_arc = self.sessions.lock().await.get(&session_id).cloned();
-        if let Some(session_arc) = session_arc {
-            let mut session = session_arc.lock().await;
-            let item_seq = session.next_item_seq;
-            session.loaded_item_count += 1;
-            session.next_item_seq += 1;
+        if let Some(stream) = self.active_stream_state(session_id).await {
+            let mut stream = stream.lock().await;
+            if let Some(inline) = stream.turn_inline.as_mut() {
+                return inline.allocate_item_seq();
+            }
+        }
+        if let Some(handle) = self.session(session_id).await
+            && let Some(item_seq) = handle.allocate_item_seq().await
+        {
             return item_seq;
         }
         1

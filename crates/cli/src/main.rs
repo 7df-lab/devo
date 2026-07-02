@@ -21,10 +21,9 @@ use devo_core::UpdateCheckOutcome;
 use devo_core::UpdateChecker;
 use devo_core::format_update_notification;
 use devo_server::ServerProcessArgs;
+use devo_server::ServerProcessRunOptions;
 use devo_server::ServerTransportMode;
 use devo_server::run_server_process;
-#[cfg(target_os = "macos")]
-use devo_server::run_server_process_with_macos_tray;
 use devo_util_paths::find_devo_home;
 use tracing_subscriber::filter::LevelFilter;
 
@@ -226,7 +225,7 @@ async fn run_cli() -> Result<()> {
         }) => {
             let args = server_process_args_from_cli(&cli).expect("server command args");
             let _logging = install_server_logging(&cli)?;
-            run_server_process(args).await
+            run_server_process(args, ServerProcessRunOptions::default()).await
         }
         None => {
             maybe_print_startup_update(&cli).await;
@@ -253,35 +252,8 @@ async fn run_cli() -> Result<()> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn direct_server_early_dispatch() -> devo_arg0::EarlyDispatch {
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(_) => return devo_arg0::EarlyDispatch::Continue,
-    };
-    if !should_direct_dispatch_macos_server(&cli, devo_arg0::suppress_server_tray_from_env()) {
-        return devo_arg0::EarlyDispatch::Continue;
-    }
-    let Some(args) = server_process_args_from_cli(&cli) else {
-        return devo_arg0::EarlyDispatch::Continue;
-    };
-    devo_arg0::EarlyDispatch::Handled(run_macos_server_process_from_cli(&cli, args))
-}
-
-#[cfg(not(target_os = "macos"))]
 fn direct_server_early_dispatch() -> devo_arg0::EarlyDispatch {
     devo_arg0::EarlyDispatch::Continue
-}
-
-#[cfg(target_os = "macos")]
-fn run_macos_server_process_from_cli(cli: &Cli, args: ServerProcessArgs) -> Result<()> {
-    let _logging = install_server_logging(cli)?;
-    run_server_process_with_macos_tray(args)
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn should_direct_dispatch_macos_server(cli: &Cli, suppress_server_tray: bool) -> bool {
-    !suppress_server_tray && server_process_args_from_cli(cli).is_some()
 }
 
 fn server_process_args_from_cli(cli: &Cli) -> Option<ServerProcessArgs> {
@@ -651,17 +623,6 @@ mod tests {
                 status: true,
                 shutdown: false,
             })
-        );
-    }
-
-    #[test]
-    fn direct_server_dispatch_suppresses_macos_tray_when_requested() {
-        let cli =
-            Cli::try_parse_from(["devo", "server", "--transport", "stdio"]).expect("parse server");
-
-        assert_eq!(
-            super::should_direct_dispatch_macos_server(&cli, /*suppress_server_tray*/ true),
-            false
         );
     }
 

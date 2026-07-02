@@ -291,6 +291,33 @@ impl SessionState {
         }
     }
 
+    /// Clones session state for read-only export without active turn bookkeeping.
+    pub fn snapshot_for_export(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            config: self.config.clone(),
+            messages: self.messages.clone(),
+            prompt_messages: self.prompt_messages.clone(),
+            session_context: self.session_context.clone(),
+            latest_turn_context: self.latest_turn_context.clone(),
+            active_goal: self.active_goal.clone(),
+            collaboration_mode: self.collaboration_mode,
+            cwd: self.cwd.clone(),
+            turn_count: self.turn_count,
+            total_input_tokens: self.total_input_tokens,
+            total_output_tokens: self.total_output_tokens,
+            total_tokens: self.total_tokens,
+            total_cache_creation_tokens: self.total_cache_creation_tokens,
+            total_cache_read_tokens: self.total_cache_read_tokens,
+            prompt_token_estimate: self.prompt_token_estimate,
+            last_input_tokens: self.last_input_tokens,
+            last_turn_tokens: self.last_turn_tokens,
+            pending_turn_queue: Arc::clone(&self.pending_turn_queue),
+            btw_input_queue: Arc::clone(&self.btw_input_queue),
+            turn_state: None,
+        }
+    }
+
     pub fn push_message(&mut self, msg: Message) {
         if let Some(prompt_messages) = self.prompt_messages.as_mut() {
             self.messages.push(msg.clone());

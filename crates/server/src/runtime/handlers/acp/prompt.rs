@@ -113,35 +113,40 @@ impl ServerRuntime {
                 return;
             }
         };
-        let Some(turn_id) = self.active_turn_id(params.session_id).await else {
+        let Some(turn_id) = self.runtime_active_turn_id(params.session_id).await else {
             tracing::debug!(session_id = %params.session_id, "session/cancel had no active turn");
             return;
         };
-        let _ = self
-            .handle_turn_interrupt(
-                serde_json::Value::Null,
-                serde_json::to_value(TurnInterruptParams {
-                    session_id: params.session_id,
-                    turn_id,
-                    reason: Some("cancelled by ACP client".to_string()),
-                })
-                .expect("serialize turn interrupt params"),
-            )
-            .await;
+        if let Some(cancel_token) = self
+            .active_turn_cancellations
+            .lock()
+            .await
+            .get(&params.session_id)
+            .cloned()
+        {
+            cancel_token.cancel();
+        }
+        if let Some(task) = self.active_tasks.lock().await.remove(&params.session_id) {
+            task.abort();
+        }
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            let _ = runtime
+                .handle_turn_interrupt(
+                    serde_json::Value::Null,
+                    serde_json::to_value(TurnInterruptParams {
+                        session_id: params.session_id,
+                        turn_id,
+                        reason: Some("cancelled by ACP client".to_string()),
+                    })
+                    .expect("serialize turn interrupt params"),
+                )
+                .await;
+        });
     }
 
     async fn session_has_active_turn(&self, session_id: SessionId) -> bool {
-        self.active_turn_id(session_id).await.is_some()
-    }
-
-    async fn active_turn_id(&self, session_id: SessionId) -> Option<TurnId> {
-        let session = self.sessions.lock().await.get(&session_id).cloned()?;
-        session
-            .lock()
-            .await
-            .active_turn
-            .as_ref()
-            .map(|turn| turn.turn_id)
+        self.runtime_active_turn_id(session_id).await.is_some()
     }
 
     pub(crate) async fn wait_for_acp_prompt_stop_reason(

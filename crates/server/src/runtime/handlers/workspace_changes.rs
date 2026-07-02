@@ -24,24 +24,26 @@ impl ServerRuntime {
             );
         }
 
-        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+        let Some(session_handle) = self.session(params.session_id).await else {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::SessionNotFound,
                 "session does not exist",
             );
         };
-        let (cwd, active_turn_id, latest_turn_id) = {
-            let session = session_arc.lock().await;
-            (
-                params
-                    .cwd
-                    .clone()
-                    .unwrap_or_else(|| session.summary.cwd.clone()),
-                session.active_turn.as_ref().map(|turn| turn.turn_id),
-                session.latest_turn.as_ref().map(|turn| turn.turn_id),
-            )
+        let Some(reservation) = session_handle.turn_reservation_snapshot().await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
         };
+        let cwd = params
+            .cwd
+            .clone()
+            .unwrap_or_else(|| reservation.summary.cwd.clone());
+        let active_turn_id = reservation.active_turn.as_ref().map(|turn| turn.turn_id);
+        let latest_turn_id = reservation.latest_turn.as_ref().map(|turn| turn.turn_id);
 
         let mut views = Vec::with_capacity(params.scopes.len());
         for scope in params.scopes {

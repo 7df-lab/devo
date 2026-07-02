@@ -283,7 +283,7 @@ where
         if result.is_ok() {
             self.last_flush_stats = stats;
         }
-        tracing::debug!(
+        tracing::trace!(
             stream_elapsed_ms = terminal_trace_elapsed_ms(),
             frame_seq = stats.frame_seq,
             diff_commands = stats.diff_commands,

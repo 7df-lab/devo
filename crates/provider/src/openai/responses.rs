@@ -6,7 +6,7 @@ use devo_protocol::{
     ModelRequest, ModelResponse, RequestContent, ResponseContent, ResponseExtra, ResponseMetadata,
     StopReason, StreamEvent, Usage,
 };
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use reqwest_eventsource::{Event, EventSource};
@@ -16,6 +16,7 @@ use tracing::debug;
 use crate::hosted_tools::append_openai_responses_hosted_tools;
 use crate::http::invalid_status_error;
 use crate::text_normalization::{TaggedTextFragment, TaggedTextParser, split_tagged_text};
+use crate::timeout;
 use crate::{ModelProviderSDK, ProviderHttpOptions, merge_extra_body};
 
 use super::capabilities::{OpenAITransport, resolve_request_profile};
@@ -30,6 +31,7 @@ use super::{
 /// chat-completions adapter so the transport can evolve independently.
 pub struct OpenAIResponsesProvider {
     client: Client,
+    streaming_client: Client,
     base_url: String,
     api_key: Option<String>,
     http_options: ProviderHttpOptions,
@@ -40,7 +42,10 @@ impl OpenAIResponsesProvider {
         let http_options = ProviderHttpOptions::default();
         Self {
             client: http_options
-                .build_client(None)
+                .build_request_client()
+                .unwrap_or_else(|_| Client::new()),
+            streaming_client: http_options
+                .build_streaming_client()
                 .unwrap_or_else(|_| Client::new()),
             base_url: base_url.into(),
             api_key: None,
@@ -54,7 +59,8 @@ impl OpenAIResponsesProvider {
     }
 
     pub fn with_http_options(mut self, http_options: ProviderHttpOptions) -> Result<Self> {
-        self.client = http_options.build_client(None)?;
+        self.client = http_options.build_request_client()?;
+        self.streaming_client = http_options.build_streaming_client()?;
         self.http_options = http_options;
         Ok(self)
     }
@@ -63,9 +69,8 @@ impl OpenAIResponsesProvider {
         format!("{}/responses", self.base_url.trim_end_matches('/'))
     }
 
-    fn request_builder(&self, body: &Value) -> reqwest::RequestBuilder {
-        let builder = self
-            .client
+    fn post_builder(&self, client: &Client, body: &Value) -> reqwest::RequestBuilder {
+        let builder = client
             .post(self.endpoint())
             .header(CONTENT_TYPE, "application/json");
         let builder = if let Some(api_key) = &self.api_key {
@@ -74,6 +79,14 @@ impl OpenAIResponsesProvider {
             builder
         };
         self.http_options.apply_custom_headers(builder).json(body)
+    }
+
+    fn request_builder(&self, body: &Value) -> reqwest::RequestBuilder {
+        self.post_builder(&self.client, body)
+    }
+
+    fn streaming_request_builder(&self, body: &Value) -> reqwest::RequestBuilder {
+        self.post_builder(&self.streaming_client, body)
     }
 }
 
@@ -515,7 +528,7 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
             "sending openai responses streaming request"
         );
 
-        let event_source = EventSource::new(self.request_builder(&body))
+        let event_source = EventSource::new(self.streaming_request_builder(&body))
             .context("failed to create openai responses event source")?;
         let stream = async_stream::try_stream! {
             let mut text_buf = String::new();
@@ -530,7 +543,17 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
             let mut text_started = false;
 
             futures::pin_mut!(event_source);
-            while let Some(event) = event_source.next().await {
+            loop {
+                let event = match timeout::next_eventsource_event(&mut event_source).await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    Err(idle) => {
+                        Err(anyhow::anyhow!(
+                            "openai responses stream idle timeout for model {}: {idle}",
+                            request.model
+                        ))?
+                    }
+                };
                 let event = match event {
                     Ok(event) => event,
                     Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)) => {

@@ -110,8 +110,8 @@ async fn spawn_agent_tool_call_does_not_deadlock_parent_turn() -> Result<()> {
     let data_root = TempDir::new()?;
     let provider = Arc::new(ScriptedProvider::new([
         ScriptedProvider::spawn_agent_tool_call("verify parent spawn tool call returns", "none"),
-        ScriptedProvider::completed("spawn tool result observed"),
         ScriptedProvider::completed("child finished"),
+        ScriptedProvider::completed("spawn tool result observed"),
     ]));
     let runtime = build_runtime(data_root.path(), Arc::clone(&provider) as _)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
@@ -136,6 +136,52 @@ async fn spawn_agent_tool_call_does_not_deadlock_parent_turn() -> Result<()> {
         agents.agents[0].last_task_message.as_deref(),
         Some("verify parent spawn tool call returns")
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn dual_spawn_agent_tool_calls_in_one_response_do_not_deadlock() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(ScriptedProvider::new([
+        ScriptedProvider::dual_spawn_agent_tool_calls(
+            "first delegated worker task",
+            "second delegated worker task",
+            "none",
+        ),
+        ScriptedProvider::completed("first child finished"),
+        ScriptedProvider::completed("second child finished"),
+        ScriptedProvider::completed("both children spawned successfully"),
+    ]));
+    let runtime = build_runtime(data_root.path(), Arc::clone(&provider) as _)?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
+
+    let drain_notifications =
+        tokio::spawn(async move { while notifications_rx.recv().await.is_some() {} });
+
+    start_turn_with_approval_policy(
+        &runtime,
+        connection_id,
+        parent_session_id,
+        "spawn two children in one tool batch",
+        Some("never"),
+    )
+    .await?;
+
+    timeout(Duration::from_secs(15), async {
+        loop {
+            let agents = request_agent_list(&runtime, connection_id, parent_session_id).await?;
+            if agents.agents.len() >= 2 {
+                return Ok::<_, anyhow::Error>(agents);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("timed out waiting for both child agents to register")??;
+
+    drain_notifications.abort();
 
     Ok(())
 }
@@ -640,6 +686,10 @@ async fn child_to_parent_message_is_rejected() -> Result<()> {
 
 #[tokio::test]
 async fn close_agent_records_closed_output_event_once() -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     let data_root = TempDir::new()?;
     let provider = Arc::new(ScriptedProvider::pending());
     let runtime = build_runtime(data_root.path(), provider as _)?;

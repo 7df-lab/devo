@@ -530,19 +530,9 @@ impl ServerRuntime {
         session_id: SessionId,
         goal: Option<devo_protocol::ThreadGoal>,
     ) {
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+        let Some(session_handle) = self.session(session_id).await else {
             return;
         };
-        let core_session = {
-            let session = session_arc.lock().await;
-            Arc::clone(&session.core_session)
-        };
-        if let Ok(mut core_session) = core_session.try_lock() {
-            if let Some(goal) = goal {
-                core_session.set_active_goal(goal);
-            } else {
-                core_session.clear_active_goal();
-            }
-        }
+        session_handle.set_active_goal(goal).await;
     }
 }

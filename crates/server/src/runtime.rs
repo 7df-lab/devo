@@ -49,8 +49,6 @@ use devo_core::tools::PermissionChecker;
 use devo_core::tools::ToolAgentScope;
 use devo_core::tools::ToolCall;
 use devo_core::tools::ToolCallError;
-use devo_core::tools::ToolCallResult;
-use devo_core::tools::ToolContent;
 use devo_core::tools::ToolExecutionOptions;
 use devo_core::tools::ToolPermissionRequest;
 use devo_core::tools::ToolRegistry;
@@ -62,13 +60,11 @@ use devo_protocol::{
     WorkspaceDiffDetail,
 };
 use devo_safety::PermissionMode;
-use devo_util_shell_command::parse_command::parse_command;
 
 use crate::ApprovalDecisionValue;
 use crate::ApprovalScopeValue;
 use crate::ClientMethod;
 use crate::ClientTransportKind;
-use crate::CommandExecutionPayload;
 use crate::ConnectionState;
 use crate::ErrorResponse;
 use crate::EventContext;
@@ -128,7 +124,6 @@ use crate::approval_reviewer::ReviewerDecision;
 use crate::approval_reviewer::build_approval_review_request;
 use crate::approval_reviewer::parse_reviewer_decision;
 use crate::db::QueueType;
-use crate::db::SessionStats;
 use crate::execution::PendingApproval;
 use crate::execution::PendingUserInput;
 use crate::execution::RuntimeSession;
@@ -181,6 +176,8 @@ mod research_stages;
 mod research_streaming;
 mod research_tool_runtime;
 mod research_tools;
+mod session_actor;
+mod session_interactive;
 mod skills;
 mod subagent_usage;
 mod turn_exec;
@@ -196,18 +193,33 @@ pub(crate) use connection::SubscriptionFilter;
 pub(crate) use items::render_input_items;
 pub(crate) use research_tools::extract_written_file_path;
 pub(crate) use research_tools::is_write_tool_name;
+use session_actor::SessionHandle;
+use session_interactive::SessionInteractiveLanes;
 use turn_exec::ExecuteTurnRequest;
+
+pub(crate) use session_actor::SessionActorState;
 
 pub struct ServerRuntime {
     metadata: InitializeResult,
     deps: ServerRuntimeDependencies,
     rollout_store: RolloutStore,
     goal_durable_store: GoalDurableStore,
-    /// Thread safe hashmap as sessions container, there are allowed multiple sessions.
-    sessions: Mutex<HashMap<SessionId, Arc<Mutex<RuntimeSession>>>>,
+    /// Per-session actor handles; map lock must not be held across await.
+    sessions: Mutex<HashMap<SessionId, SessionHandle>>,
+    /// Interactive approval and user-input waits outside session actors.
+    session_interactive: SessionInteractiveLanes,
+    /// Spawn snapshots for in-flight parent turns keyed by session and turn id.
+    active_spawn_snapshots:
+        Mutex<HashMap<SessionId, HashMap<TurnId, Arc<session_actor::SpawnSnapshot>>>>,
+    /// Stream state shared with the turn event task while a session actor turn runs.
+    active_stream_states: Mutex<
+        HashMap<SessionId, Arc<tokio::sync::Mutex<session_actor::state::SessionStreamState>>>,
+    >,
     connections: Arc<Mutex<HashMap<u64, ConnectionRuntime>>>,
     active_tasks: Mutex<HashMap<SessionId, tokio::task::AbortHandle>>,
     active_turn_cancellations: Mutex<HashMap<SessionId, CancellationToken>>,
+    /// Active turn ids tracked at runtime level so cancel/interrupt can avoid session-actor mailbox round-trips while a turn is blocked in permission wait.
+    active_turn_ids: Mutex<HashMap<SessionId, TurnId>>,
     active_turn_connections: Mutex<HashMap<SessionId, u64>>,
     terminal_turn_statuses: Mutex<VecDeque<(TurnId, TerminalTurnSnapshot)>>,
     acp_prompt_waiters: Mutex<HashMap<TurnId, Vec<oneshot::Sender<TerminalTurnSnapshot>>>>,
@@ -235,10 +247,12 @@ pub struct ServerRuntime {
     command_exec_manager: command_exec::CommandExecManager,
     /// Turn-scoped workspace baselines captured at actual execution start.
     active_workspace_baselines: Mutex<HashMap<TurnId, ActiveWorkspaceBaseline>>,
+    /// Weak back-reference used when session actors need the owning runtime `Arc`.
+    self_weak: std::sync::Weak<ServerRuntime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum TurnInputMode {
+pub(crate) enum TurnInputMode {
     VisibleUserMessage,
     HiddenGoalContinuation { goal: devo_protocol::ThreadGoal },
 }
@@ -291,33 +305,10 @@ fn requested_model_selection<'a>(
         .or_else(|| session_model_selection(session))
 }
 
-fn apply_turn_config_to_session_summary(summary: &mut SessionMetadata, turn_config: &TurnConfig) {
-    summary.model = Some(turn_config.model.slug.clone());
-    summary.model_binding_id = turn_config.model_binding_id.clone();
-    summary.reasoning_effort_selection = turn_config.reasoning_effort_selection.clone();
-}
-
-fn string_field_from_pending_metadata(
-    metadata: Option<&serde_json::Value>,
-    key: &str,
-) -> Option<String> {
-    metadata?
-        .get(key)?
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn model_selection_from_pending_metadata(metadata: Option<&serde_json::Value>) -> Option<String> {
-    string_field_from_pending_metadata(metadata, "model_binding_id")
-        .or_else(|| string_field_from_pending_metadata(metadata, "model"))
-}
-
 const SUBAGENT_USAGE_PARENT_SESSION_ID_METADATA: &str = "devo_subagent_usage_parent_session_id";
 const SUBAGENT_USAGE_PARENT_TURN_ID_METADATA: &str = "devo_subagent_usage_parent_turn_id";
 
-fn subagent_usage_owner_pending_metadata(
+pub(super) fn subagent_usage_owner_pending_metadata(
     parent_session_id: SessionId,
     parent_turn_id: Option<TurnId>,
 ) -> serde_json::Value {
@@ -327,23 +318,11 @@ fn subagent_usage_owner_pending_metadata(
     })
 }
 
-fn subagent_usage_owner_from_pending_metadata(
-    metadata: Option<&serde_json::Value>,
-) -> Option<(SessionId, Option<TurnId>)> {
-    let parent_session_id =
-        string_field_from_pending_metadata(metadata, SUBAGENT_USAGE_PARENT_SESSION_ID_METADATA)
-            .and_then(|value| SessionId::try_from(value).ok())?;
-    let parent_turn_id =
-        string_field_from_pending_metadata(metadata, SUBAGENT_USAGE_PARENT_TURN_ID_METADATA)
-            .and_then(|value| TurnId::try_from(value).ok());
-    Some((parent_session_id, parent_turn_id))
-}
-
 impl ServerRuntime {
     pub fn new(server_home: PathBuf, deps: ServerRuntimeDependencies) -> Arc<Self> {
         let rollout_store = RolloutStore::new(server_home.clone());
         let goal_durable_store = GoalDurableStore::new(server_home.clone());
-        Arc::new(Self {
+        Arc::new_cyclic(|self_weak| Self {
             metadata: InitializeResult {
                 server_name: "devo-server".into(),
                 server_version: env!("CARGO_PKG_VERSION").into(),
@@ -355,9 +334,13 @@ impl ServerRuntime {
             rollout_store,
             goal_durable_store,
             sessions: Mutex::new(HashMap::new()),
+            session_interactive: SessionInteractiveLanes::default(),
+            active_spawn_snapshots: Mutex::new(HashMap::new()),
+            active_stream_states: Mutex::new(HashMap::new()),
             connections: Arc::new(Mutex::new(HashMap::new())),
             active_tasks: Mutex::new(HashMap::new()),
             active_turn_cancellations: Mutex::new(HashMap::new()),
+            active_turn_ids: Mutex::new(HashMap::new()),
             active_turn_connections: Mutex::new(HashMap::new()),
             terminal_turn_statuses: Mutex::new(VecDeque::new()),
             acp_prompt_waiters: Mutex::new(HashMap::new()),
@@ -374,6 +357,7 @@ impl ServerRuntime {
             reference_searches: Mutex::new(HashMap::new()),
             command_exec_manager: command_exec::CommandExecManager::new(),
             active_workspace_baselines: Mutex::new(HashMap::new()),
+            self_weak: self_weak.clone(),
         })
     }
 }

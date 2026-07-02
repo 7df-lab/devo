@@ -244,6 +244,15 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         server_log_level: config.server_log_level.clone(),
         reasoning_effort_selection: initial_session.reasoning_effort_selection.clone(),
         permission_preset: initial_session.permission_preset,
+        client_capabilities: devo_protocol::AcpClientCapabilities {
+            fs: devo_protocol::AcpFileSystemCapabilities {
+                read_text_file: false,
+                write_text_file: false,
+                meta: None,
+            },
+            terminal: false,
+            meta: None,
+        },
     });
 
     // App events come from widgets and request host-level actions such as commands or exit.
@@ -543,7 +552,7 @@ fn handle_tui_event(
             let width = tui.terminal.size()?.width.max(1);
             // Completed transcript lines are written directly above the live inline viewport.
             let scrollback_lines = chat_widget.drain_scrollback_lines(width);
-            let scrollback_line_count = scrollback_lines.len();
+
             if !scrollback_lines.is_empty() {
                 tui.insert_history_lines(scrollback_lines);
             }
@@ -553,13 +562,7 @@ fn handle_tui_event(
                 .desired_height(width)
                 .min(tui.terminal.size()?.height.saturating_sub(1))
                 .max(3);
-            tracing::debug!(
-                stream_elapsed_ms = stream_trace_elapsed_ms(),
-                width,
-                height,
-                scrollback_lines = scrollback_line_count,
-                "tui draw frame requested"
-            );
+
             tui.draw(height, |frame| {
                 let area = frame.area();
                 chat_widget.render(area, frame.buffer_mut());
@@ -573,12 +576,6 @@ fn handle_tui_event(
             chat_widget.note_active_assistant_terminal_flush(
                 assistant_render_snapshot.as_ref(),
                 tui.terminal.last_flush_stats(),
-            );
-            tracing::debug!(
-                stream_elapsed_ms = stream_trace_elapsed_ms(),
-                width,
-                height,
-                "tui draw frame completed"
             );
         }
         TuiEvent::Key(key) => {

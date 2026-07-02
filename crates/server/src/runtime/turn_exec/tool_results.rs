@@ -1,0 +1,430 @@
+use std::sync::Arc;
+
+use devo_core::tools::ToolContent;
+use devo_core::{
+    CommandExecutionItem, SessionId, TextItem, ToolCallItem, ToolResultItem, TurnId, TurnItem,
+};
+use devo_util_git::extract_paths_from_patch;
+
+use super::super::*;
+use super::tool_display::{command_actions_from_tool_result, is_file_change_tool, is_plan_tool};
+use super::types::PendingToolCall;
+use crate::{
+    CommandExecutionPayload, FileChangePayload, ItemKind, ToolCallPayload, ToolResultPayload,
+    TurnPlanStepPayload, TurnPlanUpdatedPayload,
+};
+
+pub(super) fn tool_content_to_json(content: ToolContent) -> serde_json::Value {
+    match content {
+        ToolContent::Text(text) => serde_json::Value::String(text),
+        ToolContent::Json(json) => json,
+        ToolContent::Mixed { text, json } => {
+            json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+        }
+    }
+}
+
+/// Completes a pending tool-call item when the tool has a specialized item kind.
+///
+/// Returns `true` when the tool result item should not be emitted separately.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn complete_pending_tool_call(
+    runtime: &Arc<ServerRuntime>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    turn_for_plan_updates: &crate::TurnMetadata,
+    tool_use_id: &str,
+    tool_name: Option<String>,
+    pending: &PendingToolCall,
+    content: &ToolContent,
+    display_content: Option<String>,
+    is_error: bool,
+    summary: &str,
+) -> bool {
+    let pending_item_id = pending.item_id.expect("pending item id");
+    let pending_item_seq = pending.item_seq.expect("pending item seq");
+    if let Some(ref tool_name) = tool_name {
+        if is_plan_tool(tool_name) {
+            complete_plan_tool_call(
+                runtime,
+                session_id,
+                turn_id,
+                turn_for_plan_updates,
+                pending_item_id,
+                pending_item_seq,
+                content,
+            )
+            .await;
+            return true;
+        }
+        if is_file_change_tool(tool_name) {
+            complete_file_change_tool_call(
+                runtime,
+                session_id,
+                turn_id,
+                tool_use_id,
+                tool_name,
+                pending,
+                content,
+                display_content,
+                is_error,
+                pending_item_id,
+                pending_item_seq,
+            )
+            .await;
+            return true;
+        }
+        if pending.display_kind.is_command_execution() {
+            complete_command_execution_tool_call(
+                runtime,
+                session_id,
+                turn_id,
+                tool_use_id,
+                tool_name,
+                pending,
+                content,
+                is_error,
+                summary,
+                pending_item_id,
+                pending_item_seq,
+            )
+            .await;
+            return true;
+        }
+    }
+    complete_generic_tool_call(
+        runtime,
+        session_id,
+        turn_id,
+        tool_use_id,
+        tool_name.unwrap_or_default(),
+        pending,
+        summary,
+        pending_item_id,
+        pending_item_seq,
+    )
+    .await;
+    false
+}
+
+async fn complete_plan_tool_call(
+    runtime: &Arc<ServerRuntime>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    turn_for_plan_updates: &crate::TurnMetadata,
+    pending_item_id: devo_core::ItemId,
+    pending_item_seq: u64,
+    content: &ToolContent,
+) {
+    let output_json = tool_content_to_json(content.clone());
+    let explanation = output_json
+        .get("explanation")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+    let plan = output_json
+        .get("plan")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    runtime
+        .complete_item(
+            session_id,
+            turn_id,
+            pending_item_id,
+            pending_item_seq,
+            ItemKind::Plan,
+            TurnItem::Plan(TextItem {
+                text: output_json.to_string(),
+            }),
+            serde_json::json!({
+                "title": "Plan",
+                "text": output_json.to_string(),
+            }),
+        )
+        .await;
+    runtime
+        .broadcast_event(crate::ServerEvent::TurnPlanUpdated(
+            TurnPlanUpdatedPayload {
+                session_id,
+                turn: turn_for_plan_updates.clone(),
+                explanation,
+                plan: plan
+                    .into_iter()
+                    .filter_map(|item| {
+                        Some(TurnPlanStepPayload {
+                            step: item.get("step")?.as_str()?.to_string(),
+                            status: item.get("status")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect(),
+            },
+        ))
+        .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_file_change_tool_call(
+    runtime: &Arc<ServerRuntime>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    tool_use_id: &str,
+    tool_name: &str,
+    pending: &PendingToolCall,
+    content: &ToolContent,
+    display_content: Option<String>,
+    is_error: bool,
+    pending_item_id: devo_core::ItemId,
+    pending_item_seq: u64,
+) {
+    let output_json = tool_content_to_json(content.clone());
+    let changes = file_changes_from_output(&output_json);
+    runtime
+        .complete_item(
+            session_id,
+            turn_id,
+            pending_item_id,
+            pending_item_seq,
+            ItemKind::FileChange,
+            TurnItem::ToolResult(ToolResultItem {
+                tool_call_id: tool_use_id.to_string(),
+                tool_name: Some(tool_name.to_string()),
+                output: output_json.clone(),
+                display_content: display_content.clone(),
+                is_error,
+            }),
+            serde_json::to_value(FileChangePayload {
+                tool_call_id: tool_use_id.to_string(),
+                tool_name: Some(tool_name.to_string()),
+                input: Some(pending.input.clone()),
+                changes,
+                is_error,
+            })
+            .expect("serialize file change payload"),
+        )
+        .await;
+}
+
+fn file_changes_from_output(
+    output_json: &serde_json::Value,
+) -> Vec<(std::path::PathBuf, devo_protocol::protocol::FileChange)> {
+    let changes = output_json
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|file| {
+            let path = std::path::PathBuf::from(file.get("path")?.as_str()?);
+            let kind = file.get("kind")?.as_str()?;
+            let additions = file
+                .get("additions")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let deletions = file
+                .get("deletions")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let change = match kind {
+                "add" => devo_protocol::protocol::FileChange::Add {
+                    content: file
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| "\n".repeat(additions as usize)),
+                },
+                "delete" => devo_protocol::protocol::FileChange::Delete {
+                    content: file
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| "\n".repeat(deletions as usize)),
+                },
+                "update" | "move" => devo_protocol::protocol::FileChange::Update {
+                    unified_diff: file
+                        .get("diff")
+                        .or_else(|| file.get("patch"))
+                        .or_else(|| output_json.get("diff"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    old_text: file
+                        .get("oldContent")
+                        .or_else(|| file.get("preContent"))
+                        .or_else(|| file.get("pre_content"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                    new_text: file
+                        .get("postContent")
+                        .or_else(|| file.get("post_content"))
+                        .or_else(|| file.get("content"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned),
+                    move_path: file
+                        .get("movePath")
+                        .or_else(|| file.get("move_path"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(std::path::PathBuf::from),
+                },
+                _ => return None,
+            };
+            Some((path, change))
+        })
+        .collect::<Vec<_>>();
+    if changes.is_empty() {
+        output_json
+            .get("diff")
+            .and_then(serde_json::Value::as_str)
+            .map(extract_paths_from_patch)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| {
+                (
+                    std::path::PathBuf::from(path),
+                    devo_protocol::protocol::FileChange::Update {
+                        unified_diff: output_json
+                            .get("diff")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        old_text: None,
+                        new_text: None,
+                        move_path: None,
+                    },
+                )
+            })
+            .collect()
+    } else {
+        changes
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_command_execution_tool_call(
+    runtime: &Arc<ServerRuntime>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    tool_use_id: &str,
+    tool_name: &str,
+    pending: &PendingToolCall,
+    content: &ToolContent,
+    is_error: bool,
+    summary: &str,
+    pending_item_id: devo_core::ItemId,
+    pending_item_seq: u64,
+) {
+    let output = tool_content_to_json(content.clone());
+    let completed_payload = serde_json::to_value(CommandExecutionPayload {
+        tool_call_id: tool_use_id.to_string(),
+        tool_name: tool_name.to_string(),
+        command: pending.command.clone(),
+        input: Some(pending.input.clone()),
+        source: devo_protocol::protocol::ExecCommandSource::Agent,
+        command_actions: command_actions_from_tool_result(
+            tool_name,
+            &pending.command,
+            &pending.input,
+            summary,
+        ),
+        output: Some(output.clone()),
+        is_error,
+    })
+    .expect("serialize command execution payload");
+    runtime
+        .complete_item(
+            session_id,
+            turn_id,
+            pending_item_id,
+            pending_item_seq,
+            ItemKind::CommandExecution,
+            TurnItem::CommandExecution(CommandExecutionItem {
+                tool_call_id: tool_use_id.to_string(),
+                tool_name: tool_name.to_string(),
+                command: pending.command.clone(),
+                input: pending.input.clone(),
+                output,
+                is_error,
+            }),
+            completed_payload,
+        )
+        .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_generic_tool_call(
+    runtime: &Arc<ServerRuntime>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    tool_use_id: &str,
+    tool_name: String,
+    pending: &PendingToolCall,
+    summary: &str,
+    pending_item_id: devo_core::ItemId,
+    pending_item_seq: u64,
+) {
+    let completed_payload = serde_json::to_value(ToolCallPayload {
+        tool_call_id: tool_use_id.to_string(),
+        tool_name: tool_name.clone(),
+        parameters: pending.input.clone(),
+        command_actions: command_actions_from_tool_result(
+            tool_name.as_str(),
+            &pending.command,
+            &pending.input,
+            summary,
+        ),
+    })
+    .expect("serialize tool call payload");
+    runtime
+        .complete_item(
+            session_id,
+            turn_id,
+            pending_item_id,
+            pending_item_seq,
+            ItemKind::ToolCall,
+            TurnItem::ToolCall(ToolCallItem {
+                tool_call_id: tool_use_id.to_string(),
+                tool_name,
+                input: pending.input.clone(),
+            }),
+            completed_payload,
+        )
+        .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn emit_tool_result_item(
+    runtime: &Arc<ServerRuntime>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    tool_use_id: String,
+    tool_name: Option<String>,
+    result_input: Option<serde_json::Value>,
+    content: ToolContent,
+    display_content: Option<String>,
+    is_error: bool,
+    summary: String,
+) {
+    runtime
+        .emit_turn_item(
+            session_id,
+            turn_id,
+            ItemKind::ToolResult,
+            TurnItem::ToolResult(ToolResultItem {
+                tool_call_id: tool_use_id.clone(),
+                tool_name: tool_name.clone(),
+                output: tool_content_to_json(content.clone()),
+                display_content: display_content.clone(),
+                is_error,
+            }),
+            serde_json::to_value(ToolResultPayload {
+                tool_call_id: tool_use_id,
+                tool_name,
+                input: result_input,
+                content: tool_content_to_json(content),
+                display_content,
+                is_error,
+                summary,
+            })
+            .expect("serialize tool result payload"),
+        )
+        .await;
+}

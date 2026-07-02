@@ -15,7 +15,16 @@ impl ServerRuntime {
                 "session does not exist".to_string(),
             ));
         };
-        let stored_cwd = session_arc.lock().await.summary.cwd.clone();
+        let stored_cwd = session_arc
+            .summary()
+            .await
+            .ok_or_else(|| {
+                (
+                    AcpErrorCode::ServerError,
+                    "session actor unavailable".to_string(),
+                )
+            })?
+            .cwd;
         if stored_cwd != cwd {
             return Err((
                 AcpErrorCode::InvalidParams,
@@ -67,40 +76,42 @@ impl ServerRuntime {
         let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
             return Err("session does not exist".to_string());
         };
-        let (summary, core_session, profile) = {
-            let mut session = session_arc.lock().await;
-            if session.summary.additional_directories == additional_directories {
-                return Ok(session.summary.clone());
-            }
-            let updated_at = Utc::now();
-            session.summary.additional_directories = additional_directories.clone();
-            session.summary.updated_at = updated_at;
-            if let Some(record) = session.record.as_mut() {
-                record.additional_directories = additional_directories.clone();
-                record.updated_at = updated_at;
-                if let Err(error) = self.rollout_store.append_session_meta(record) {
-                    return Err(format!(
-                        "failed to persist ACP session additional directories: {error}"
-                    ));
-                }
-            }
+        let snapshot = session_arc
+            .hook_context_snapshot()
+            .await
+            .ok_or_else(|| "session actor unavailable".to_string())?;
+        if snapshot.summary.additional_directories == additional_directories {
+            return Ok(snapshot.summary);
+        }
 
-            let profile = devo_safety::RuntimePermissionProfile::from_preset(
-                session.config.permission_profile.preset,
-                session.summary.cwd.clone(),
-            )
-            .with_additional_roots(additional_directories.clone());
-            session.config.permission_profile = profile.clone();
-            (
-                session.summary.clone(),
-                Arc::clone(&session.core_session),
-                profile,
-            )
-        };
-        core_session.lock().await.config.permission_profile = profile;
+        let updated_at = Utc::now();
+        let mut updated_summary = snapshot.summary.clone();
+        updated_summary.additional_directories = additional_directories.clone();
+        updated_summary.updated_at = updated_at;
 
-        if !summary.ephemeral
-            && let Err(error) = self.deps.db.upsert_session(&summary)
+        // Apply new permission roots so tool authorization uses the updated workspace.
+        let profile = devo_safety::RuntimePermissionProfile::from_preset(
+            snapshot.config.permission_profile.preset,
+            updated_summary.cwd.clone(),
+        )
+        .with_additional_roots(additional_directories.clone());
+        if !session_arc.apply_permission_profile(profile).await {
+            return Err("failed to apply updated permission profile".to_string());
+        }
+        session_arc.update_summary(updated_summary.clone()).await;
+
+        if let Some(mut record) = snapshot.record {
+            record.additional_directories = additional_directories;
+            record.updated_at = updated_at;
+            if let Err(error) = self.rollout_store.append_session_meta(&record) {
+                return Err(format!(
+                    "failed to persist ACP session additional directories: {error}"
+                ));
+            }
+        }
+
+        if !updated_summary.ephemeral
+            && let Err(error) = self.deps.db.upsert_session(&updated_summary)
         {
             tracing::warn!(
                 session_id = %session_id,
@@ -108,7 +119,7 @@ impl ServerRuntime {
                 "failed to persist ACP session additional directories"
             );
         }
-        Ok(summary)
+        Ok(updated_summary)
     }
 
     pub(super) async fn send_acp_history_updates(

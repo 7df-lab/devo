@@ -38,6 +38,56 @@ struct PendingConnectionNotification {
     value: serde_json::Value,
 }
 
+struct QueuedConnectionNotification {
+    notification: PendingConnectionNotification,
+    delivered: Option<oneshot::Sender<bool>>,
+}
+
+fn spawn_connection_notification_writer(
+    mut queue_rx: mpsc::UnboundedReceiver<QueuedConnectionNotification>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(queued) = queue_rx.recv().await {
+            let sent = send_connection_notification(queued.notification).await;
+            if let Some(delivered) = queued.delivered {
+                let _ = delivered.send(sent);
+            }
+        }
+    })
+}
+
+fn enqueue_connection_notification(
+    queue_tx: &mpsc::UnboundedSender<QueuedConnectionNotification>,
+    notification: PendingConnectionNotification,
+) -> bool {
+    queue_tx
+        .send(QueuedConnectionNotification {
+            notification,
+            delivered: None,
+        })
+        .is_ok()
+}
+
+async fn enqueue_connection_notification_and_wait_for_delivery(
+    queue_tx: &mpsc::UnboundedSender<QueuedConnectionNotification>,
+    notification: PendingConnectionNotification,
+) -> bool {
+    let (delivered_tx, delivered_rx) = oneshot::channel();
+    if queue_tx
+        .send(QueuedConnectionNotification {
+            notification,
+            delivered: Some(delivered_tx),
+        })
+        .is_err()
+    {
+        return false;
+    }
+    match delivered_rx.await {
+        Ok(sent) => sent,
+        Err(_) => false,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum PendingConnectionMessageKind {
     Notification,
@@ -148,6 +198,9 @@ impl ServerRuntime {
         sender: mpsc::Sender<serde_json::Value>,
     ) -> u64 {
         let connection_id = self.next_connection_id.fetch_add(1, Ordering::SeqCst);
+        let (notification_queue_tx, notification_queue_rx) = mpsc::unbounded_channel();
+        let _notification_writer =
+            spawn_connection_notification_writer(notification_queue_rx);
         let mut connections = self.connections.lock().await;
         connections.insert(
             connection_id,
@@ -157,6 +210,7 @@ impl ServerRuntime {
                 acp_authenticated: false,
                 acp_client_capabilities: crate::AcpClientCapabilities::default(),
                 sender,
+                notification_queue_tx,
                 opt_out_notification_methods: HashSet::new(),
                 subscriptions: Vec::new(),
                 next_event_seq: 1,
@@ -625,17 +679,20 @@ impl ServerRuntime {
             let event_seq = connection.next_seq();
             let event = event.with_seq(event_seq);
             let (method, value) = acp_notification_from_server_event(method, &event);
-            Some(PendingConnectionNotification {
-                connection_id,
-                kind: PendingConnectionMessageKind::Notification,
-                method,
-                event_seq,
-                sender: connection.sender.clone(),
-                value,
-            })
+            Some((
+                connection.notification_queue_tx.clone(),
+                PendingConnectionNotification {
+                    connection_id,
+                    kind: PendingConnectionMessageKind::Notification,
+                    method,
+                    event_seq,
+                    sender: connection.sender.clone(),
+                    value,
+                },
+            ))
         };
-        if let Some(notification) = notification {
-            send_connection_notification(notification).await;
+        if let Some((queue_tx, notification)) = notification {
+            enqueue_connection_notification(&queue_tx, notification);
         }
     }
 
@@ -668,19 +725,22 @@ impl ServerRuntime {
                     let event_seq = connection.next_seq();
                     let event = event.clone().with_seq(event_seq);
                     let (method, value) = acp_notification_from_server_event(method, &event);
-                    Some(PendingConnectionNotification {
-                        connection_id: *connection_id,
-                        kind: PendingConnectionMessageKind::Notification,
-                        method,
-                        event_seq,
-                        sender: connection.sender.clone(),
-                        value,
-                    })
+                    Some((
+                        connection.notification_queue_tx.clone(),
+                        PendingConnectionNotification {
+                            connection_id: *connection_id,
+                            kind: PendingConnectionMessageKind::Notification,
+                            method,
+                            event_seq,
+                            sender: connection.sender.clone(),
+                            value,
+                        },
+                    ))
                 })
                 .collect::<Vec<_>>()
         };
-        for notification in notifications {
-            send_connection_notification(notification).await;
+        for (queue_tx, notification) in notifications {
+            enqueue_connection_notification(&queue_tx, notification);
         }
     }
 
@@ -688,11 +748,16 @@ impl ServerRuntime {
         let Some(session_id) = session_activity_event_id(event) else {
             return;
         };
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
-            return;
-        };
-        let mut session = session_arc.lock().await;
-        session.summary.last_activity_at = session.summary.last_activity_at.max(chrono::Utc::now());
+        if let Some(stream) = self.active_stream_state(session_id).await {
+            let mut stream = stream.lock().await;
+            if let Some(inline) = stream.turn_inline.as_mut() {
+                inline.summary.last_activity_at = inline.summary.last_activity_at.max(Utc::now());
+                return;
+            }
+        }
+        if let Some(session_handle) = self.session(session_id).await {
+            session_handle.touch_last_activity().await;
+        }
     }
 
     pub(super) async fn send_raw_to_connection(
@@ -700,35 +765,39 @@ impl ServerRuntime {
         connection_id: u64,
         value: serde_json::Value,
     ) {
-        let notification = {
+        let (queue_tx, notification) = {
             let connections = self.connections.lock().await;
             let Some(connection) = connections.get(&connection_id) else {
                 return;
             };
-            PendingConnectionNotification {
-                connection_id,
-                kind: PendingConnectionMessageKind::JsonRpcResponse,
-                method: "<response>".to_string(),
-                event_seq: 0,
-                sender: connection.sender.clone(),
-                value,
-            }
+            (
+                connection.notification_queue_tx.clone(),
+                PendingConnectionNotification {
+                    connection_id,
+                    kind: PendingConnectionMessageKind::JsonRpcResponse,
+                    method: "<response>".to_string(),
+                    event_seq: 0,
+                    sender: connection.sender.clone(),
+                    value,
+                },
+            )
         };
-        send_connection_notification(notification).await;
+        let _ = enqueue_connection_notification_and_wait_for_delivery(&queue_tx, notification).await;
     }
 
-    pub(super) async fn send_request_to_connection(
+    pub(super) async fn send_request_to_connection_cancellable(
         &self,
         connection_id: u64,
         method: &str,
         params: serde_json::Value,
+        cancel_token: CancellationToken,
     ) -> Result<serde_json::Value, String> {
         self.send_request_to_connection_inner(
             connection_id,
             method,
             params,
             /*timeout_duration*/ None,
-            CancellationToken::new(),
+            cancel_token,
         )
         .await
     }
@@ -759,7 +828,7 @@ impl ServerRuntime {
         timeout_duration: Option<Duration>,
         cancel_token: CancellationToken,
     ) -> Result<serde_json::Value, String> {
-        let (request_id, receiver, notification) = {
+        let (request_id, receiver, queue_tx, notification) = {
             let mut connections = self.connections.lock().await;
             let Some(connection) = connections.get_mut(&connection_id) else {
                 return Err("client connection does not exist".to_string());
@@ -777,6 +846,7 @@ impl ServerRuntime {
             (
                 request_id,
                 rx,
+                connection.notification_queue_tx.clone(),
                 PendingConnectionNotification {
                     connection_id,
                     kind: PendingConnectionMessageKind::ClientRequest,
@@ -792,7 +862,7 @@ impl ServerRuntime {
             connection_id,
             request_id,
         );
-        if !send_connection_notification(notification).await {
+        if !enqueue_connection_notification(&queue_tx, notification) {
             pending_request.remove().await;
             return Err("client connection closed before request was sent".to_string());
         }
@@ -825,11 +895,16 @@ impl ServerRuntime {
                 }
             }
             None => {
-                let message = receiver
-                    .await
-                    .map_err(|_| "client connection closed before responding".to_string())??;
-                pending_request.disarm();
-                message
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        pending_request.remove().await;
+                        return Err("client request cancelled".to_string());
+                    }
+                    result = receiver => {
+                        pending_request.disarm();
+                        result.map_err(|_| "client connection closed before responding".to_string())??
+                    }
+                }
             }
         };
         if let Some(error) = message.get("error") {
@@ -1042,6 +1117,7 @@ pub(crate) struct ConnectionRuntime {
     pub(crate) acp_authenticated: bool,
     pub(crate) acp_client_capabilities: crate::AcpClientCapabilities,
     pub(crate) sender: mpsc::Sender<serde_json::Value>,
+    notification_queue_tx: mpsc::UnboundedSender<QueuedConnectionNotification>,
     pub(crate) opt_out_notification_methods: HashSet<String>,
     pub(crate) subscriptions: Vec<SubscriptionFilter>,
     next_event_seq: u64,

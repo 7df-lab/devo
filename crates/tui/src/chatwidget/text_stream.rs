@@ -114,9 +114,10 @@ impl ChatWidget {
         }
 
         let seq = self.reserve_seq();
-        let stream_controller = match kind {
-            TextItemKind::Assistant => Some(StreamController::new(None, &self.session.cwd)),
-            TextItemKind::Reasoning | TextItemKind::ResearchArtifact => None,
+        let stream_controller = if uses_markdown_stream_controller(kind, research.as_ref()) {
+            Some(StreamController::new(None, &self.session.cwd))
+        } else {
+            None
         };
         let insert_index = self.active_text_item_insert_index(kind);
         tracing::debug!(
@@ -213,8 +214,20 @@ impl ChatWidget {
                 self.active_text_items[index].raw_text.push_str(delta);
             }
             TextItemKind::ResearchArtifact => {
-                self.active_text_items[index].raw_text.push_str(delta);
-                self.sync_research_task_preview(index);
+                let item = &mut self.active_text_items[index];
+                if item.is_delegated_research_finding() {
+                    item.raw_text.push_str(delta);
+                    self.sync_research_task_preview(index);
+                } else if let Some(controller) = item.stream_controller.as_mut() {
+                    let produced_renderable_lines = controller.push(delta);
+                    item.raw_text = controller.live_source();
+                    if produced_renderable_lines {
+                        item.last_renderable_delta_at = Some(Instant::now());
+                        item.stream_stall_warned = false;
+                    }
+                } else {
+                    item.raw_text.push_str(delta);
+                }
             }
         }
         self.sync_text_item_cell(index);
@@ -290,10 +303,18 @@ impl ChatWidget {
             .iter()
             .position(|item| item.item_id == item_id)
         {
-            if let Some(research) = research
-                && self.active_text_items[index].research.is_none()
-            {
-                self.active_text_items[index].research = Some(research);
+            if let Some(research) = research {
+                let item = &mut self.active_text_items[index];
+                if item.research.is_none() {
+                    item.research = Some(research.clone());
+                }
+                if research.is_delegated_finding() {
+                    item.stream_controller = None;
+                } else if uses_markdown_stream_controller(kind, Some(&research))
+                    && item.stream_controller.is_none()
+                {
+                    item.stream_controller = Some(StreamController::new(None, &self.session.cwd));
+                }
             }
             return index;
         }
@@ -365,6 +386,9 @@ impl ChatWidget {
                     self.remove_research_task_preview(item.item_id);
                     return;
                 }
+                if let Some(controller) = item.stream_controller.as_mut() {
+                    let _ = controller.finalize();
+                }
                 if !item.raw_text.trim().is_empty() {
                     self.add_history_entry_without_redraw(Box::new(ResearchArtifactCell::new(
                         "Research",
@@ -391,8 +415,14 @@ impl ChatWidget {
     }
 
     fn active_text_item_insert_index(&self, kind: TextItemKind) -> usize {
-        let _ = kind;
-        self.active_text_items.len()
+        match kind {
+            TextItemKind::Reasoning | TextItemKind::ResearchArtifact => self
+                .active_text_items
+                .iter()
+                .position(|item| item.kind == TextItemKind::Assistant)
+                .unwrap_or(self.active_text_items.len()),
+            TextItemKind::Assistant => self.active_text_items.len(),
+        }
     }
 
     fn commit_completed_text_items(&mut self) {
@@ -466,12 +496,15 @@ impl ChatWidget {
                 all_idle = output.all_idle,
                 "stream commit tick processed active text item"
             );
-            if item.kind == TextItemKind::Assistant {
+            if matches!(
+                item.kind,
+                TextItemKind::Assistant | TextItemKind::ResearchArtifact
+            ) {
                 if !output.cells.is_empty() {
                     changed_indexes.push(index);
                     item.last_stream_commit_at = Some(now);
                     item.stream_stall_warned = false;
-                } else {
+                } else if item.kind == TextItemKind::Assistant {
                     maybe_warn_stream_commit_stall(item, queued_lines_after, now);
                 }
                 if !output.all_idle {
@@ -582,13 +615,18 @@ impl ChatWidget {
         if item.is_delegated_research_finding() {
             return None;
         }
-        if item.raw_text.trim().is_empty() {
+        let markdown_source = if let Some(controller) = &item.stream_controller {
+            controller.live_source()
+        } else {
+            item.raw_text.clone()
+        };
+        if markdown_source.trim().is_empty() {
             return None;
         }
 
         Some(Box::new(ResearchArtifactCell::new(
             "Research",
-            item.raw_text.clone(),
+            markdown_source,
             &self.session.cwd,
         )))
     }
@@ -623,6 +661,7 @@ impl ChatWidget {
                 preview,
             });
         }
+        self.invalidate_subagent_live_list_cache();
     }
 
     fn remove_research_task_preview(&mut self, item_id: ActiveTextItemId) {
@@ -631,6 +670,7 @@ impl ChatWidget {
         };
         self.research_task_previews
             .retain(|preview| preview.item_id != item_id);
+        self.invalidate_subagent_live_list_cache();
     }
 }
 
@@ -641,6 +681,19 @@ impl ActiveTextItem {
                 .research
                 .as_ref()
                 .is_some_and(ResearchArtifactMetadata::is_delegated_finding)
+    }
+}
+
+fn uses_markdown_stream_controller(
+    kind: TextItemKind,
+    research: Option<&ResearchArtifactMetadata>,
+) -> bool {
+    match kind {
+        TextItemKind::Assistant => true,
+        TextItemKind::ResearchArtifact => {
+            !research.is_some_and(ResearchArtifactMetadata::is_delegated_finding)
+        }
+        TextItemKind::Reasoning => false,
     }
 }
 

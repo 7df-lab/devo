@@ -100,7 +100,8 @@ where
             .no_proxy(no_proxy.clone());
         builder = builder.proxy(proxy);
     }
-    if let Some(proxy_url) = proxies.https.as_deref() {
+    let https_proxy_url = proxies.https.as_deref().or(proxies.http.as_deref());
+    if let Some(proxy_url) = https_proxy_url {
         let proxy = reqwest::Proxy::https(proxy_url)
             .with_context(|| format!("invalid https_proxy URL `{proxy_url}`"))?
             .no_proxy(no_proxy.clone());
@@ -263,6 +264,37 @@ mod tests {
             ProxyEnv::from_env(env).no_proxy,
             Some("127.0.0.1,localhost".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn http_proxy_env_applies_to_https_requests() {
+        let target_url = spawn_response_server("proxied").await;
+        let proxy_url = spawn_response_server("proxy").await;
+        let env = move |key: &str| -> std::result::Result<String, std::env::VarError> {
+            match key {
+                "http_proxy" => Ok(proxy_url.clone()),
+                _ => Err(std::env::VarError::NotPresent),
+            }
+        };
+
+        let client = apply_proxy_with_env(
+            reqwest::Client::builder().timeout(Duration::from_secs(5)),
+            None,
+            env,
+        )
+        .expect("proxy config")
+        .build()
+        .expect("client");
+        let body = client
+            .get(target_url)
+            .send()
+            .await
+            .expect("proxied response")
+            .text()
+            .await
+            .expect("response body");
+
+        assert_eq!(body, "proxy");
     }
 
     #[tokio::test]

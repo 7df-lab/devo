@@ -3,6 +3,9 @@ use serde_json::Value;
 
 use super::*;
 
+use crate::runtime::session_actor::SessionActorState;
+use crate::runtime::session_actor::snapshots::HookContextSnapshot;
+
 impl ServerRuntime {
     pub(crate) fn hook_runner(&self) -> Option<devo_core::HookRunner> {
         let config = {
@@ -16,35 +19,82 @@ impl ServerRuntime {
         (!config.is_empty()).then(|| devo_core::HookRunner::new(config))
     }
 
-    pub(crate) async fn hook_context_for_session(
-        &self,
+    pub(crate) fn hook_context_from_actor_state(
+        state: &SessionActorState,
         session_id: SessionId,
     ) -> Option<devo_core::HookRuntimeContext> {
-        let session_arc = self.sessions.lock().await.get(&session_id).cloned()?;
-        let session = session_arc.lock().await;
-        let runner = session.runtime_context.hook_runner()?;
-        let transcript_path = session
+        let runner = state.runtime_context.hook_runner()?;
+        let transcript_path = state
             .record
             .as_ref()
             .map(|record| record.rollout_path.display().to_string())
             .unwrap_or_default();
-        let permission_mode = Some(permission_mode_label(session.config.permission_mode));
-        let agent_id = session
+        let permission_mode = Some(permission_mode_label(state.config.permission_mode));
+        let agent_id = state
             .summary
             .parent_session_id
             .is_some()
             .then(|| session_id.to_string());
-        let agent_type = session
+        let agent_type = state
             .summary
             .agent_role
             .clone()
-            .or_else(|| session.summary.agent_nickname.clone());
+            .or_else(|| state.summary.agent_nickname.clone());
         Some(devo_core::HookRuntimeContext {
             runner,
             base: devo_core::HookBaseInput {
                 session_id: session_id.to_string(),
                 transcript_path,
-                cwd: session.summary.cwd.clone(),
+                cwd: state.summary.cwd.clone(),
+                permission_mode,
+                agent_id,
+                agent_type,
+            },
+        })
+    }
+
+    pub(crate) async fn hook_context_for_session(
+        &self,
+        session_id: SessionId,
+    ) -> Option<devo_core::HookRuntimeContext> {
+        if let Some(stream) = self.active_stream_state(session_id).await {
+            let stream = stream.lock().await;
+            if let Some(inline) = stream.turn_inline.as_ref() {
+                return Self::hook_runtime_context_from_snapshot(session_id, &inline.hook_context);
+            }
+        }
+        let session_handle = self.sessions.lock().await.get(&session_id).cloned()?;
+        let snapshot = session_handle.hook_context_snapshot().await?;
+        Some(Self::hook_runtime_context_from_snapshot(session_id, &snapshot)?)
+    }
+
+    fn hook_runtime_context_from_snapshot(
+        session_id: SessionId,
+        snapshot: &HookContextSnapshot,
+    ) -> Option<devo_core::HookRuntimeContext> {
+        let runner = snapshot.runtime_context.hook_runner()?;
+        let transcript_path = snapshot
+            .record
+            .as_ref()
+            .map(|record| record.rollout_path.display().to_string())
+            .unwrap_or_default();
+        let permission_mode = Some(permission_mode_label(snapshot.config.permission_mode));
+        let agent_id = snapshot
+            .summary
+            .parent_session_id
+            .is_some()
+            .then(|| session_id.to_string());
+        let agent_type = snapshot
+            .summary
+            .agent_role
+            .clone()
+            .or_else(|| snapshot.summary.agent_nickname.clone());
+        Some(devo_core::HookRuntimeContext {
+            runner,
+            base: devo_core::HookBaseInput {
+                session_id: session_id.to_string(),
+                transcript_path,
+                cwd: snapshot.summary.cwd.clone(),
                 permission_mode,
                 agent_id,
                 agent_type,
@@ -59,6 +109,20 @@ impl ServerRuntime {
         extra: Map<String, Value>,
     ) -> devo_core::HookRunReport {
         let Some(context) = self.hook_context_for_session(session_id).await else {
+            return devo_core::HookRunReport::default();
+        };
+        let input = devo_core::HookInput::new(&context.base, event, extra);
+        context.runner.run(input).await
+    }
+
+    pub(crate) async fn run_session_hook_for_actor_state(
+        &self,
+        state: &SessionActorState,
+        session_id: SessionId,
+        event: devo_core::HookEvent,
+        extra: Map<String, Value>,
+    ) -> devo_core::HookRunReport {
+        let Some(context) = Self::hook_context_from_actor_state(state, session_id) else {
             return devo_core::HookRunReport::default();
         };
         let input = devo_core::HookInput::new(&context.base, event, extra);

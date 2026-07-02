@@ -106,36 +106,32 @@ impl ServerRuntime {
         let config = core_session.config.clone();
         let pending_turn_queue = Arc::clone(&core_session.pending_turn_queue);
         let btw_input_queue = Arc::clone(&core_session.btw_input_queue);
-        self.sessions.lock().await.insert(
-            session_id,
-            RuntimeSession {
-                runtime_context,
-                record,
-                summary: summary.clone(),
-                config,
-                core_session: Arc::new(Mutex::new(core_session)),
-                active_turn: None,
-                latest_turn: None,
-                loaded_item_count: 0,
-                history_items: Vec::new(),
-                persisted_turn_items: Vec::new(),
-                latest_compaction_snapshot: None,
-                pending_turn_queue,
-                btw_input_queue,
-                agent_tool_policy: Default::default(),
-                max_turns: None,
-                deferred_assistant: None,
-                deferred_reasoning: None,
-                next_item_seq: 1,
-                first_user_input: None,
-                pending_approvals: std::collections::HashMap::new(),
-                pending_user_inputs: std::collections::HashMap::new(),
-                tool_registry,
-                session_approval_cache: crate::execution::ApprovalGrantCache::default(),
-                turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
-            }
-            .shared(),
-        );
+        let actor_state = SessionActorState {
+            runtime_context,
+            record,
+            summary: summary.clone(),
+            config,
+            core: core_session,
+            stream: Arc::new(tokio::sync::Mutex::new(
+                crate::runtime::session_actor::state::SessionStreamState::default(),
+            )),
+            active_turn: None,
+            latest_turn: None,
+            loaded_item_count: 0,
+            history_items: Vec::new(),
+            persisted_turn_items: Vec::new(),
+            latest_compaction_snapshot: None,
+            pending_turn_queue,
+            btw_input_queue,
+            agent_tool_policy: Default::default(),
+            max_turns: None,
+            next_item_seq: 1,
+            first_user_input: None,
+            tool_registry,
+            session_approval_cache: crate::execution::ApprovalGrantCache::default(),
+            turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
+        };
+        self.insert_session_actor(actor_state).await;
         self.subscribe_connection_to_session(connection_id, session_id, None)
             .await;
 
@@ -181,24 +177,7 @@ impl ServerRuntime {
     }
 
     pub(crate) async fn list_session_summaries(&self) -> Vec<SessionMetadata> {
-        let sessions = self
-            .sessions
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut summaries = Vec::with_capacity(sessions.len());
-        for session in sessions {
-            summaries.push(session.lock().await.summary.clone());
-        }
-        summaries.sort_by(|left, right| {
-            right
-                .last_activity_at
-                .cmp(&left.last_activity_at)
-                .then_with(|| right.updated_at.cmp(&left.updated_at))
-        });
-        summaries
+        self.list_session_summaries_from_actors().await
     }
 
     pub(crate) async fn handle_session_metadata_update(
@@ -216,35 +195,37 @@ impl ServerRuntime {
                 );
             }
         };
-        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+        let Some(session_handle) = self.session(params.session_id).await else {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::SessionNotFound,
                 "session does not exist",
             );
         };
-        let updated_session = {
-            let mut session = session_arc.lock().await;
-            session.summary.model = params.model.clone();
-            session.summary.model_binding_id = params.model_binding_id.clone();
-            session.summary.reasoning_effort_selection = params.reasoning_effort_selection.clone();
-            let updated_at = Utc::now();
-            session.summary.updated_at = updated_at;
-            if let Some(record) = session.record.as_mut() {
-                record.model = params.model;
-                record.model_binding_id = params.model_binding_id;
-                record.reasoning_effort_selection = params.reasoning_effort_selection;
-                record.updated_at = updated_at;
-                if let Err(error) = self.rollout_store.append_session_meta(record) {
-                    return self.error_response(
-                        request_id,
-                        ProtocolErrorCode::InternalError,
-                        format!("failed to persist session metadata update: {error}"),
-                    );
-                }
-            }
-            session.summary.clone()
+        let Some(mut updated_session) = session_handle
+            .update_session_metadata(
+                params.model.clone(),
+                params.model_binding_id.clone(),
+                params.reasoning_effort_selection.clone(),
+            )
+            .await
+        else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
         };
+        if let Some(record) = session_handle.record().await.flatten() {
+            if let Err(error) = self.rollout_store.append_session_meta(&record) {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist session metadata update: {error}"),
+                );
+            }
+            updated_session = session_handle.summary().await.unwrap_or(updated_session);
+        }
 
         // Persist updated session metadata to SQLite
         if !updated_session.ephemeral
@@ -281,32 +262,35 @@ impl ServerRuntime {
                 );
             }
         };
-        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+        let Some(session_handle) = self.session(params.session_id).await else {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::SessionNotFound,
                 "session does not exist",
             );
         };
-
-        let profile = {
-            let mut session = session_arc.lock().await;
-            let profile = safety_profile_from_protocol(
-                params.preset,
-                session.summary.cwd.clone(),
-                session.summary.additional_directories.clone(),
+        let Some(summary) = session_handle.summary().await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
             );
-            {
-                let mut core_session = session.core_session.lock().await;
-                core_session.config.permission_mode = profile.permission_mode();
-                core_session.config.permission_profile = profile.clone();
-            }
-            session.config.permission_mode = profile.permission_mode();
-            session.config.permission_profile = profile.clone();
-            session.session_approval_cache = crate::execution::ApprovalGrantCache::default();
-            session.turn_approval_cache = crate::execution::ApprovalGrantCache::default();
-            profile
         };
+        let profile = safety_profile_from_protocol(
+            params.preset,
+            summary.cwd.clone(),
+            summary.additional_directories.clone(),
+        );
+        if !session_handle
+            .apply_permission_profile(profile.clone())
+            .await
+        {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        }
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -342,7 +326,7 @@ impl ServerRuntime {
                 "session title cannot be empty",
             );
         }
-        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+        let Some(session_handle) = self.session(params.session_id).await else {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::SessionNotFound,
@@ -350,33 +334,35 @@ impl ServerRuntime {
             );
         };
 
-        let summary = {
-            let mut session = session_arc.lock().await;
-            let previous_title = session.summary.title.clone();
-            let updated_at = Utc::now();
-            session.summary.title = Some(new_title.to_string());
-            session.summary.title_state =
-                SessionTitleState::Final(SessionTitleFinalSource::UserRename);
-            session.summary.updated_at = updated_at;
-            if let Some(record) = session.record.as_mut() {
-                record.title = Some(new_title.to_string());
-                record.title_state = SessionTitleState::Final(SessionTitleFinalSource::UserRename);
-                record.updated_at = updated_at;
-                if let Err(error) = self.rollout_store.append_title_update(
-                    record,
-                    new_title.to_string(),
-                    record.title_state.clone(),
-                    previous_title,
-                ) {
-                    return self.error_response(
-                        request_id,
-                        ProtocolErrorCode::InternalError,
-                        format!("failed to persist session title update: {error}"),
-                    );
-                }
-            }
-            session.summary.clone()
+        let previous_title = session_handle
+            .summary()
+            .await
+            .and_then(|summary| summary.title);
+        let Some(mut summary) = session_handle
+            .set_session_title_user_rename(new_title.to_string())
+            .await
+        else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
         };
+        if let Some(record) = session_handle.record().await.flatten() {
+            if let Err(error) = self.rollout_store.append_title_update(
+                &record,
+                new_title.to_string(),
+                record.title_state.clone(),
+                previous_title,
+            ) {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist session title update: {error}"),
+                );
+            }
+            summary = session_handle.summary().await.unwrap_or(summary);
+        }
 
         // Persist updated session metadata to SQLite
         if !summary.ephemeral
@@ -433,45 +419,45 @@ impl ServerRuntime {
         params: SessionResumeParams,
         tool_registry_update: RuntimeSessionToolRegistryUpdate,
     ) -> serde_json::Value {
-        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+        let Some(session_handle) = self.session(params.session_id).await else {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::SessionNotFound,
                 "session does not exist",
             );
         };
-        let mut session = session_arc.lock().await;
         match tool_registry_update {
             RuntimeSessionToolRegistryUpdate::KeepCurrent => {}
             RuntimeSessionToolRegistryUpdate::ReplaceIfCwdMatches { cwd, tool_registry } => {
-                if session.summary.cwd != cwd {
+                let summary = session_handle.summary().await;
+                if summary.as_ref().is_none_or(|summary| summary.cwd != cwd) {
                     return self.error_response(
                         request_id,
                         ProtocolErrorCode::InvalidParams,
                         "session cwd does not match the stored session cwd",
                     );
                 }
-                session.tool_registry = tool_registry;
+                if !session_handle.set_tool_registry(tool_registry).await {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::SessionNotFound,
+                        "session does not exist",
+                    );
+                }
             }
         }
-        let session_summary = session.summary.clone();
-        let latest_turn = session.latest_turn.clone();
-        let loaded_item_count = session.loaded_item_count;
-        let history_items = session.history_items.clone();
-        let pending_texts: Vec<String> = session
-            .pending_turn_queue
-            .lock()
-            .expect("pending turn queue mutex poisoned")
-            .iter()
-            .filter_map(|item| match &item.kind {
-                devo_core::PendingInputKind::UserText { text } => Some(text.clone()),
-                devo_core::PendingInputKind::UserInput { display_text, .. } => {
-                    Some(display_text.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        drop(session);
+        let Some(resume_snapshot) = session_handle.resume_snapshot().await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+        let session_summary = resume_snapshot.summary;
+        let latest_turn = resume_snapshot.latest_turn;
+        let loaded_item_count = resume_snapshot.loaded_item_count;
+        let history_items = resume_snapshot.history_items;
+        let pending_texts = resume_snapshot.pending_texts;
         self.subscribe_connection_to_session(connection_id, params.session_id, None)
             .await;
         self.run_session_hook(
@@ -517,19 +503,26 @@ impl ServerRuntime {
                 );
             }
         };
-        let Some(source_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+        let Some(source_handle) = self.session(params.session_id).await else {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::SessionNotFound,
                 "session does not exist",
             );
         };
-        let source = source_arc.lock().await;
+        let Some(source) = source_handle.export_runtime_session().await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+        let source = &source;
         let now = Utc::now();
         let forked_id = SessionId::new();
         let mut forked_runtime = match self
             .build_runtime_session_from_user_turn_cut(
-                &source,
+                source,
                 RuntimeSessionTurnCutOptions {
                     session_id: forked_id,
                     user_turn_index: params.user_turn_index,
@@ -547,7 +540,6 @@ impl ServerRuntime {
             }
         };
         forked_runtime.summary.parent_session_id = Some(params.session_id);
-        drop(source);
         if !forked_runtime.summary.ephemeral {
             let record = self.rollout_store.create_session_record(
                 forked_id,
@@ -571,10 +563,8 @@ impl ServerRuntime {
             forked_runtime.record = Some(record);
         }
         let summary = forked_runtime.summary.clone();
-        self.sessions
-            .lock()
-            .await
-            .insert(forked_id, forked_runtime.shared());
+        self.insert_session_actor(SessionActorState::from_runtime_session(forked_runtime))
+            .await;
         self.subscribe_connection_to_session(connection_id, forked_id, None)
             .await;
         tracing::info!(
@@ -616,17 +606,24 @@ impl ServerRuntime {
                 );
             }
         };
-        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+        let Some(session_handle) = self.session(params.session_id).await else {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::SessionNotFound,
                 "session does not exist",
             );
         };
-        let source = session_arc.lock().await;
+        let Some(source) = session_handle.export_runtime_session().await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+        let source = &source;
         let mut rebuilt = match self
             .build_runtime_session_from_user_turn_cut(
-                &source,
+                source,
                 RuntimeSessionTurnCutOptions {
                     session_id: params.session_id,
                     user_turn_index: Some(params.user_turn_index),
@@ -647,7 +644,6 @@ impl ServerRuntime {
         let (retained_turn_ids, retained_item_ids) =
             retained_ids_for_persisted_items(&rebuilt.persisted_turn_items);
         let latest_turn_id = rebuilt.latest_turn.as_ref().map(|turn| turn.turn_id);
-        drop(source);
         if let Some(record) = record.clone()
             && let Err(error) = self.rollout_store.append_session_rollback(
                 &record,
@@ -667,7 +663,9 @@ impl ServerRuntime {
         let latest_turn = rebuilt.latest_turn.clone();
         let loaded_item_count = rebuilt.loaded_item_count;
         let history_items = rebuilt.history_items.clone();
-        *session_arc.lock().await = rebuilt;
+        session_handle
+            .replace_state(SessionActorState::from_runtime_session(rebuilt))
+            .await;
         self.subscribe_connection_to_session(connection_id, params.session_id, None)
             .await;
         serde_json::to_value(SuccessResponse {
@@ -858,8 +856,6 @@ impl ServerRuntime {
             next_item_seq: u64::try_from(source.persisted_turn_items.len().saturating_add(1))
                 .unwrap_or(u64::MAX),
             first_user_input: source.first_user_input.clone(),
-            pending_approvals: std::collections::HashMap::new(),
-            pending_user_inputs: std::collections::HashMap::new(),
             tool_registry: source.tool_registry.clone(),
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),

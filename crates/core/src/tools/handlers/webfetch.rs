@@ -1,17 +1,23 @@
 use async_trait::async_trait;
 use base64::Engine;
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
+use tokio::time::timeout;
 
-use crate::contracts::{
-    ToolCallError, ToolContext, ToolProgressSender, ToolResult, ToolResultContent,
-};
+use crate::contracts::ToolCallError;
+use crate::contracts::ToolContext;
+use crate::contracts::ToolProgressSender;
+use crate::contracts::ToolResult;
+use crate::contracts::ToolResultContent;
 use crate::json_schema::JsonSchema;
 use crate::tool_handler::ToolHandler;
-use crate::tool_spec::{ToolCapabilityTag, ToolExecutionMode, ToolOutputMode, ToolSpec};
+use crate::tool_spec::ToolCapabilityTag;
+use crate::tool_spec::ToolExecutionMode;
+use crate::tool_spec::ToolOutputMode;
+use crate::tool_spec::ToolSpec;
 
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const MAX_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+const MAX_TIMEOUT_SECS: u64 = 120;
 const WEBFETCH_DESCRIPTION: &str = include_str!("../webfetch.txt");
 
 pub struct WebFetchHandler {
@@ -56,7 +62,7 @@ impl WebFetchHandler {
                 supports_parallel: true,
                 preparation_feedback: crate::tool_spec::ToolPreparationFeedback::None,
                 display_name: None,
-                supports_cancellation: None,
+                supports_cancellation: Some(true),
                 supports_streaming: None,
             },
         }
@@ -85,11 +91,9 @@ impl ToolHandler for WebFetchHandler {
         }
 
         let format = input["format"].as_str().unwrap_or("markdown");
-        let timeout_ms = input["timeout"]
-            .as_u64()
-            .unwrap_or(DEFAULT_TIMEOUT_MS / 1000)
-            .saturating_mul(1000)
-            .min(MAX_TIMEOUT_MS);
+        let timeout_secs = parse_timeout_secs(&input);
+        let timeout_ms = timeout_secs.saturating_mul(1_000);
+        let timeout_duration = Duration::from_millis(timeout_ms);
 
         let accept = match format {
             "markdown" => {
@@ -107,7 +111,9 @@ impl ToolHandler for WebFetchHandler {
             no_proxy: ctx.network_no_proxy.clone(),
         };
         let client = devo_network_proxy::apply_proxy_config(
-            reqwest::Client::builder(),
+            reqwest::Client::builder()
+                .connect_timeout(devo_provider::timeout::connect_timeout())
+                .timeout(timeout_duration),
             &proxy_config,
         )
         .map_err(|e| {
@@ -117,16 +123,17 @@ impl ToolHandler for WebFetchHandler {
             .build()
             .map_err(|e| ToolCallError::ExecutionFailed(format!("Failed to create HTTP client: {e}")))?;
 
-        let request = client
-            .get(url)
-            .header(reqwest::header::ACCEPT, accept)
-            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9");
-
-        let fetch_result = timeout(Duration::from_millis(timeout_ms), async {
-            let response = request
+        let cancel_token = ctx.cancel_token.clone();
+        let url = url.to_string();
+        let format = format.to_string();
+        let operation = async move {
+            let response = client
+                .get(&url)
+                .header(reqwest::header::ACCEPT, accept)
+                .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
                 .send()
                 .await
-                .map_err(|e| ToolCallError::ExecutionFailed(format!("Request failed: {e}")))?;
+                .map_err(|error| map_webfetch_request_error(error, timeout_secs))?;
             if !response.status().is_success() {
                 let msg = format!("Request failed with status code: {}", response.status());
                 return Err(ToolCallError::ExecutionFailed(msg));
@@ -143,89 +150,148 @@ impl ToolHandler for WebFetchHandler {
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or("")
                 .to_string();
-            let bytes = response.bytes().await.map_err(|e| {
-                ToolCallError::ExecutionFailed(format!("Failed to read response: {e}"))
-            })?;
-            Ok((bytes, content_type))
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|error| map_webfetch_request_error(error, timeout_secs))?;
+            if bytes.len() > MAX_RESPONSE_SIZE {
+                return Err(ToolCallError::ExecutionFailed("response too large".into()));
+            }
+
+            let url = url.clone();
+            let format = format.clone();
+            let bytes = bytes.to_vec();
+            tokio::task::spawn_blocking(move || {
+                build_webfetch_result(&url, bytes, &content_type, &format)
+            })
+            .await
+            .map_err(|error| {
+                ToolCallError::ExecutionFailed(format!("response processing failed: {error}"))
+            })?
+        };
+
+        let fetch_result = timeout(timeout_duration, async {
+            tokio::select! {
+                result = operation => result,
+                () = cancel_token.cancelled() => Err(ToolCallError::Cancelled),
+            }
         })
         .await;
 
-        let (bytes, content_type) = match fetch_result {
-            Ok(Ok(payload)) => payload,
+        match fetch_result {
+            Ok(Ok(result)) => Ok(result),
             Ok(Err(error)) => {
+                if matches!(error, ToolCallError::Cancelled) {
+                    return Ok(ToolResult::error(
+                        ToolResultContent::Text("Request cancelled".into()),
+                        "Cancelled",
+                        error,
+                    ));
+                }
+                if matches!(error, ToolCallError::TimedOut(_)) {
+                    return Ok(ToolResult::error(
+                        ToolResultContent::Text("Request timed out".into()),
+                        "Timeout",
+                        error,
+                    ));
+                }
                 let message = error.to_string();
-                return Ok(ToolResult::error(
+                Ok(ToolResult::error(
                     ToolResultContent::Text(message.clone()),
                     "HTTP error",
                     error,
-                ));
+                ))
             }
-            Err(_) => {
-                return Ok(ToolResult::error(
-                    ToolResultContent::Text("Request timed out".into()),
-                    "Timeout",
-                    ToolCallError::TimedOut(timeout_ms / 1000),
-                ));
-            }
-        };
-
-        if bytes.len() > MAX_RESPONSE_SIZE {
-            return Ok(ToolResult::error(
-                ToolResultContent::Text("Response too large (exceeds 5MB limit)".into()),
-                "Response too large",
-                ToolCallError::ExecutionFailed("response too large".into()),
-            ));
+            Err(_) => Ok(ToolResult::error(
+                ToolResultContent::Text("Request timed out".into()),
+                "Timeout",
+                ToolCallError::TimedOut(timeout_secs),
+            )),
         }
+    }
+}
 
-        let mime = content_type
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        let title = format!("{url} ({content_type})");
+fn build_webfetch_result(
+    url: &str,
+    bytes: Vec<u8>,
+    content_type: &str,
+    format: &str,
+) -> Result<ToolResult, ToolCallError> {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let title = format!("{url} ({content_type})");
 
-        if is_image_mime(&mime) {
-            return Ok(ToolResult::success(
-                ToolResultContent::Mixed {
-                    text: Some("Image fetched successfully".to_string()),
-                    json: Some(serde_json::json!({
-                        "title": title,
-                        "mime": mime,
-                        "image_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
-                    })),
-                },
-                "Image fetched",
-            ));
-        }
-
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-        let output = match format {
-            "text" => {
-                if content_type.contains("text/html") {
-                    extract_text_from_html(&content)
-                } else {
-                    content
-                }
-            }
-            "html" => content,
-            "markdown" => {
-                if content_type.contains("text/html") {
-                    convert_html_to_markdown(&content)
-                } else {
-                    content
-                }
-            }
-            _ => content,
-        };
-
-        Ok(ToolResult::success(
+    if is_image_mime(&mime) {
+        return Ok(ToolResult::success(
             ToolResultContent::Mixed {
-                text: Some(output),
-                json: Some(serde_json::json!({ "title": title, "mime": mime })),
+                text: Some("Image fetched successfully".to_string()),
+                json: Some(serde_json::json!({
+                    "title": title,
+                    "mime": mime,
+                    "image_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+                })),
             },
-            "Content fetched",
-        ))
+            "Image fetched",
+        ));
+    }
+
+    let content = String::from_utf8_lossy(&bytes).into_owned();
+    let output = match format {
+        "text" => {
+            if content_type.contains("text/html") {
+                extract_text_from_html(&content)
+            } else {
+                content
+            }
+        }
+        "html" => content,
+        "markdown" => {
+            if content_type.contains("text/html") {
+                convert_html_to_markdown(&content)
+            } else {
+                content
+            }
+        }
+        _ => content,
+    };
+
+    Ok(ToolResult::success(
+        ToolResultContent::Mixed {
+            text: Some(output),
+            json: Some(serde_json::json!({ "title": title, "mime": mime })),
+        },
+        "Content fetched",
+    ))
+}
+
+fn parse_timeout_secs(input: &serde_json::Value) -> u64 {
+    let raw = &input["timeout"];
+    let secs = raw
+        .as_u64()
+        .or_else(|| raw.as_i64().and_then(|value| u64::try_from(value).ok()))
+        .or_else(|| {
+            raw.as_f64().and_then(|value| {
+                if value.is_finite() && value > 0.0 {
+                    Some(value.round() as u64)
+                } else {
+                    None
+                }
+            })
+        })
+        .or_else(|| raw.as_str().and_then(|value| value.parse().ok()))
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    secs.clamp(1, MAX_TIMEOUT_SECS)
+}
+
+fn map_webfetch_request_error(error: reqwest::Error, timeout_secs: u64) -> ToolCallError {
+    if error.is_timeout() {
+        ToolCallError::TimedOut(timeout_secs)
+    } else {
+        ToolCallError::ExecutionFailed(format!("Request failed: {error}"))
     }
 }
 
@@ -300,6 +366,25 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::extract_text_from_html;
+    use super::parse_timeout_secs;
+
+    #[test]
+    fn parse_timeout_secs_accepts_integers_floats_and_strings() {
+        assert_eq!(parse_timeout_secs(&serde_json::json!({ "timeout": 5 })), 5);
+        assert_eq!(
+            parse_timeout_secs(&serde_json::json!({ "timeout": 5.0 })),
+            5
+        );
+        assert_eq!(
+            parse_timeout_secs(&serde_json::json!({ "timeout": "10" })),
+            10
+        );
+        assert_eq!(parse_timeout_secs(&serde_json::json!({})), 30);
+        assert_eq!(
+            parse_timeout_secs(&serde_json::json!({ "timeout": 999 })),
+            120
+        );
+    }
 
     #[test]
     fn extract_text_from_html_skips_case_insensitive_script_blocks() {

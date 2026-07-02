@@ -4,6 +4,8 @@
 //! selector for live direct children, and Enter asks the host overlay to render
 //! the selected child through the normal transcript pager.
 
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
@@ -41,7 +43,7 @@ use super::subagent_live_list::SubagentLiveListRowKey;
 const SUBAGENT_INACTIVE_GRACE: Duration = Duration::from_secs(12);
 const SUBAGENT_CTRL_X_REVEAL: Duration = Duration::from_secs(15);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct SubagentMonitorState {
     live_list_focused: bool,
     list_reveal_until: Option<Instant>,
@@ -49,6 +51,23 @@ pub(super) struct SubagentMonitorState {
     selected: Option<SessionId>,
     user_selected: bool,
     sessions: HashMap<SessionId, SubagentSessionView>,
+    live_list_rows_dirty: Cell<bool>,
+    live_list_rows_cache: RefCell<Vec<SubagentLiveListRow>>,
+}
+
+impl Default for SubagentMonitorState {
+    fn default() -> Self {
+        Self {
+            live_list_focused: false,
+            list_reveal_until: None,
+            agents: Vec::new(),
+            selected: None,
+            user_selected: false,
+            sessions: HashMap::new(),
+            live_list_rows_dirty: Cell::new(true),
+            live_list_rows_cache: RefCell::new(Vec::new()),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -201,6 +220,10 @@ impl ChatWidget {
         }
     }
 
+    pub(super) fn invalidate_subagent_live_list_cache(&mut self) {
+        self.subagent_monitor.live_list_rows_dirty.set(true);
+    }
+
     pub(super) fn subagent_live_list_desired_height(&self) -> u16 {
         subagent_live_list::desired_height(self.subagent_live_list_rows().len())
     }
@@ -228,6 +251,7 @@ impl ChatWidget {
         );
         self.upsert_subagent(agent);
         self.sync_subagent_hint(Instant::now());
+        self.invalidate_subagent_live_list_cache();
         self.frame_requester.schedule_frame();
     }
 
@@ -289,7 +313,11 @@ impl ChatWidget {
             focused = self.subagent_monitor.live_list_focused,
             "subagent monitor event applied"
         );
-        self.frame_requester.schedule_frame();
+        self.invalidate_subagent_live_list_cache();
+        let now = Instant::now();
+        if self.subagent_monitor.live_list_focused || self.has_visible_subagent_list(now) {
+            self.frame_requester.schedule_frame();
+        }
     }
 
     pub(crate) fn reset_subagent_monitor(&mut self) {
@@ -401,7 +429,11 @@ impl ChatWidget {
             .sessions
             .entry(session_id)
             .or_default();
+        let previous_status = view.status.clone();
         view.status = agent.status.clone();
+        if is_terminal_status(&previous_status) && !is_terminal_status(&view.status) {
+            view.status = previous_status;
+        }
         view.agent = Some(agent.clone());
         if is_active_subagent_status(&normalize_subagent_display_status(&agent.status)) {
             view.touch_activity();
@@ -412,6 +444,7 @@ impl ChatWidget {
         if let Some(message) = agent.last_task_message.as_deref() {
             view.seed_initial_task_message(message);
         }
+        self.invalidate_subagent_live_list_cache();
     }
 
     fn sync_subagent_hint(&mut self, now: Instant) {
@@ -425,6 +458,7 @@ impl ChatWidget {
             self.ensure_visible_subagent_selected(now);
         }
         self.bottom_pane.set_subagent_hint_visible(has_active);
+        self.prune_terminal_subagents(now);
         tracing::debug!(
             target: "devo_tui::subagent",
             has_active,
@@ -436,6 +470,42 @@ impl ChatWidget {
             user_selected = self.subagent_monitor.user_selected,
             "subagent live hint synced"
         );
+    }
+
+    fn prune_terminal_subagents(&mut self, now: Instant) {
+        let mut removed = Vec::new();
+        self.subagent_monitor.agents.retain(|agent| {
+            let Some(view) = self.subagent_monitor.sessions.get(&agent.session_id) else {
+                return false;
+            };
+            if view.active_turn.is_some() || view.has_live_tail() {
+                return true;
+            }
+            if is_active_subagent_status(&normalize_subagent_display_status(&view.status)) {
+                return true;
+            }
+            if !is_terminal_status(&view.status) {
+                return true;
+            }
+            let retain = view
+                .last_activity_at
+                .is_some_and(|at| now.duration_since(at) < SUBAGENT_INACTIVE_GRACE);
+            if !retain {
+                removed.push(agent.session_id);
+            }
+            retain
+        });
+        let had_removals = !removed.is_empty();
+        for session_id in removed {
+            self.subagent_monitor.sessions.remove(&session_id);
+            if self.subagent_monitor.selected == Some(session_id) {
+                self.subagent_monitor.selected = None;
+                self.subagent_monitor.user_selected = false;
+            }
+        }
+        if had_removals {
+            self.invalidate_subagent_live_list_cache();
+        }
     }
 
     fn has_active_subagents(&self) -> bool {
@@ -531,6 +601,7 @@ impl ChatWidget {
         };
         self.subagent_monitor.selected = Some(visible_ids[next]);
         self.subagent_monitor.user_selected = true;
+        self.invalidate_subagent_live_list_cache();
         self.frame_requester.schedule_frame();
     }
 
@@ -587,7 +658,16 @@ impl ChatWidget {
         self.active_subagent_ids()
     }
 
-    fn subagent_live_list_rows(&self) -> Vec<SubagentLiveListRow> {
+    fn subagent_live_list_rows(&self) -> std::cell::Ref<'_, Vec<SubagentLiveListRow>> {
+        if self.subagent_monitor.live_list_rows_dirty.get() {
+            let rows = self.compute_subagent_live_list_rows();
+            *self.subagent_monitor.live_list_rows_cache.borrow_mut() = rows;
+            self.subagent_monitor.live_list_rows_dirty.set(false);
+        }
+        self.subagent_monitor.live_list_rows_cache.borrow()
+    }
+
+    fn compute_subagent_live_list_rows(&self) -> Vec<SubagentLiveListRow> {
         let now = Instant::now();
         let mut rows = self
             .visible_subagent_ids(now)
@@ -646,13 +726,17 @@ impl ChatWidget {
 
     fn subagent_display_status(&self, agent: &SubagentMonitorAgent) -> String {
         let stored = self.subagent_status_for_agent(agent);
+        let normalized = normalize_subagent_display_status(&stored);
+        if is_terminal_status(&normalized) {
+            return normalized;
+        }
         let Some(view) = self.subagent_monitor.sessions.get(&agent.session_id) else {
-            return normalize_subagent_display_status(&stored);
+            return normalized;
         };
         if view.has_live_tail() || view.active_turn.is_some() {
             return "working".to_string();
         }
-        normalize_subagent_display_status(&stored)
+        normalized
     }
 
     fn subagent_transcript_item_cell(
@@ -946,15 +1030,15 @@ impl SubagentSessionView {
                 status,
             } => {
                 self.touch_activity();
-                self.status = status.clone();
+                self.status = normalize_terminal_subagent_status(&status);
                 self.active_turn = None;
                 self.flush_active_items();
-                self.set_latest_preview(format!("Turn {status}"));
+                self.set_latest_preview(format!("Turn {}", self.status));
                 self.transcript.push(MonitorTranscriptItem {
                     kind: MonitorTranscriptKind::Status,
-                    title: format!("Turn {status}"),
+                    title: format!("Turn {}", self.status),
                     body: String::new(),
-                    is_error: status.to_lowercase().contains("failed"),
+                    is_error: self.status.to_ascii_lowercase().contains("failed"),
                 });
             }
             SubagentMonitorEvent::TurnFailed {
@@ -984,8 +1068,18 @@ impl SubagentSessionView {
                 session_id: _,
                 status,
             } => {
-                if !is_terminal_status(&self.status) {
-                    self.status = normalize_runtime_status_for_subagent(status);
+                if is_terminal_status(&self.status) {
+                    return;
+                }
+                let normalized = normalize_runtime_status_for_subagent(status);
+                if normalized == "idle" && self.active_turn.is_none() && !self.has_live_tail() {
+                    self.touch_activity();
+                    self.status = "done".to_string();
+                    self.set_latest_preview("Turn done".to_string());
+                    return;
+                }
+                if !is_terminal_status(&normalized) {
+                    self.status = normalized;
                     self.set_latest_preview(format!("Status {}", self.status));
                 }
             }
@@ -1132,8 +1226,13 @@ fn is_active_subagent_status(status: &str) -> bool {
 fn normalize_subagent_display_status(status: &str) -> String {
     match status.to_ascii_lowercase().as_str() {
         "running" | "spawning" | "activeturn" => "working".to_string(),
+        "completed" | "idle" | "success" => "done".to_string(),
         other => other.to_string(),
     }
+}
+
+fn normalize_terminal_subagent_status(status: &str) -> String {
+    normalize_subagent_display_status(status)
 }
 
 fn normalize_runtime_status_for_subagent(status: devo_protocol::SessionRuntimeStatus) -> String {

@@ -24,6 +24,7 @@ use crate::ui_consts::LIVE_PREFIX_COLS;
 
 pub(super) const MAX_VISIBLE_SUBAGENTS: usize = 3;
 
+#[derive(Debug)]
 pub(super) struct SubagentLiveListRow {
     pub(super) key: SubagentLiveListRowKey,
     pub(super) name: String,
@@ -177,7 +178,7 @@ fn take_suffix_by_width(text: &str, max_width: usize) -> String {
 
 fn status_marker_style(status: &str) -> Style {
     match status.to_ascii_lowercase().as_str() {
-        "idle" => Style::default().fg(COMPLETED_COLOR).bold(),
+        "idle" | "done" => Style::default().fg(COMPLETED_COLOR).bold(),
         "working" | "running" | "active_turn" => Style::default().fg(RUNNING_COLOR).bold(),
         "waiting_client" => Style::default().fg(REASONING_ACCENT_COLOR).bold(),
         _ => Style::default().fg(RUNNING_COLOR).bold(),
@@ -187,7 +188,7 @@ fn status_marker_style(status: &str) -> Style {
 fn status_text_style(status: &str) -> Style {
     match status.to_ascii_lowercase().as_str() {
         "running" | "active_turn" | "working" => Style::default().fg(RUNNING_COLOR).bold(),
-        "idle" => Style::default().fg(COMPLETED_COLOR).bold(),
+        "idle" | "done" => Style::default().fg(COMPLETED_COLOR).bold(),
         "waiting_client" => Style::default().fg(REASONING_ACCENT_COLOR).bold(),
         _ => Style::default().fg(MUTED_COLOR),
     }

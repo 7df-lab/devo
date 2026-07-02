@@ -82,7 +82,7 @@ impl UsageTotals {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ParentUsageSnapshot {
+pub(crate) struct ParentUsageSnapshot {
     pub(super) session_id: SessionId,
     pub(super) turn_id: TurnId,
     pub(super) turn_usage: UsageTotals,
@@ -279,13 +279,11 @@ impl ServerRuntime {
         turn_id: TurnId,
         context_window: Option<u64>,
     ) {
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
-            return;
-        };
-        let base_session_totals = {
-            let session = session_arc.lock().await;
-            UsageTotals::from_session_summary(&session.summary)
-        };
+        let base_session_totals = self
+            .session_summary_snapshot(session_id)
+            .await
+            .map(|summary| UsageTotals::from_session_summary(&summary))
+            .unwrap_or_default();
         self.subagent_usage.lock().await.begin_parent_turn(
             session_id,
             turn_id,
@@ -308,13 +306,8 @@ impl ServerRuntime {
     }
 
     pub(super) async fn active_turn_id_for_session(&self, session_id: SessionId) -> Option<TurnId> {
-        let session_arc = self.sessions.lock().await.get(&session_id).cloned()?;
-        session_arc
-            .lock()
-            .await
-            .active_turn
-            .as_ref()
-            .map(|turn| turn.turn_id)
+        let session_handle = self.session(session_id).await?;
+        session_handle.active_turn_id().await.flatten()
     }
 
     pub(super) async fn publish_parent_turn_usage(
@@ -369,18 +362,8 @@ impl ServerRuntime {
     }
 
     async fn apply_parent_usage_snapshot(&self, snapshot: ParentUsageSnapshot) {
-        // Bind the session Arc before locking it so the global `sessions` guard is
-        // released first. Holding `sessions` across the per-session `.await` would
-        // pin the process-wide lock and can deadlock every other request.
-        let session_arc = self
-            .sessions
-            .lock()
-            .await
-            .get(&snapshot.session_id)
-            .cloned();
-        if let Some(session_arc) = session_arc {
-            let mut session = session_arc.lock().await;
-            snapshot.apply_to_session(&mut session);
+        if let Some(session_handle) = self.session(snapshot.session_id).await {
+            session_handle.apply_parent_usage_snapshot(snapshot).await;
         }
         self.broadcast_event(ServerEvent::TurnUsageUpdated(
             snapshot.to_turn_usage_updated_payload(),
@@ -404,27 +387,26 @@ impl ParentUsageSnapshot {
         }
     }
 
-    fn apply_to_session(self, session: &mut RuntimeSession) {
-        session.summary.total_input_tokens = self.session_totals.input_tokens;
-        session.summary.total_output_tokens = self.session_totals.output_tokens;
-        session.summary.total_tokens = self.session_totals.total_tokens;
-        session.summary.total_cache_creation_tokens =
-            self.session_totals.cache_creation_input_tokens;
-        session.summary.total_cache_read_tokens = self.session_totals.cache_read_input_tokens;
-        session.summary.last_query_total_tokens = self.turn_usage.total_tokens;
-        if let Some(active_turn) = session.active_turn.as_mut()
+    pub(super) fn apply_to_actor_state(
+        self,
+        state: &mut crate::runtime::session_actor::state::SessionActorState,
+    ) {
+        state.summary.total_input_tokens = self.session_totals.input_tokens;
+        state.summary.total_output_tokens = self.session_totals.output_tokens;
+        state.summary.total_tokens = self.session_totals.total_tokens;
+        state.summary.total_cache_creation_tokens = self.session_totals.cache_creation_input_tokens;
+        state.summary.total_cache_read_tokens = self.session_totals.cache_read_input_tokens;
+        state.summary.last_query_total_tokens = self.turn_usage.total_tokens;
+        if let Some(active_turn) = state.active_turn.as_mut()
             && active_turn.turn_id == self.turn_id
         {
             active_turn.usage = Some(self.turn_usage.to_turn_usage());
         }
-        if let Ok(mut core_session) = session.core_session.try_lock() {
-            core_session.total_input_tokens = self.session_totals.input_tokens;
-            core_session.total_output_tokens = self.session_totals.output_tokens;
-            core_session.total_tokens = self.session_totals.total_tokens;
-            core_session.total_cache_creation_tokens =
-                self.session_totals.cache_creation_input_tokens;
-            core_session.total_cache_read_tokens = self.session_totals.cache_read_input_tokens;
-        }
+        state.core.total_input_tokens = self.session_totals.input_tokens;
+        state.core.total_output_tokens = self.session_totals.output_tokens;
+        state.core.total_tokens = self.session_totals.total_tokens;
+        state.core.total_cache_creation_tokens = self.session_totals.cache_creation_input_tokens;
+        state.core.total_cache_read_tokens = self.session_totals.cache_read_input_tokens;
     }
 }
 

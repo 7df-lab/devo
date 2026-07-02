@@ -29,8 +29,6 @@ use anyhow::Result;
 /// Alias name for the server sub‑binary.
 const SERVER_ALIAS: &str = "devo-server";
 const ALIAS_SENTINEL_PREFIX: &str = "--devo-alias=";
-/// Internal env var used by Devo Desktop when it owns the visible tray icon.
-pub const SUPPRESS_SERVER_TRAY_ENV: &str = "DEVO_SUPPRESS_SERVER_TRAY";
 
 /// Directory (under DEVO_HOME/tmp/arg0) where alias entries are created.
 const ALIAS_TEMP_ROOT: &str = "arg0";
@@ -190,39 +188,6 @@ where
     filtered
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServerAliasDispatchMode {
-    AsyncRuntime,
-    MacosMainThreadTray,
-}
-
-/// Returns true when a child server process should avoid creating its own tray.
-pub fn suppress_server_tray_from_env() -> bool {
-    let value = std::env::var(SUPPRESS_SERVER_TRAY_ENV).ok();
-    suppress_server_tray_value(value.as_deref())
-}
-
-/// Interprets [`SUPPRESS_SERVER_TRAY_ENV`] without reading process env.
-pub fn suppress_server_tray_value(value: Option<&str>) -> bool {
-    value == Some("1")
-}
-
-fn server_alias_dispatch_mode() -> ServerAliasDispatchMode {
-    server_alias_dispatch_mode_for(suppress_server_tray_from_env())
-}
-
-fn server_alias_dispatch_mode_for(suppress_server_tray: bool) -> ServerAliasDispatchMode {
-    if suppress_server_tray {
-        return ServerAliasDispatchMode::AsyncRuntime;
-    }
-
-    if cfg!(target_os = "macos") {
-        ServerAliasDispatchMode::MacosMainThreadTray
-    } else {
-        ServerAliasDispatchMode::AsyncRuntime
-    }
-}
-
 /// Build a multi‑thread Tokio runtime.
 fn build_runtime() -> Result<tokio::runtime::Runtime> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -232,32 +197,9 @@ fn build_runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 fn run_server_alias_dispatch() -> Result<()> {
-    match server_alias_dispatch_mode() {
-        ServerAliasDispatchMode::AsyncRuntime => {
-            let runtime = build_runtime()?;
-            runtime.block_on(run_server_dispatch());
-            Ok(())
-        }
-        ServerAliasDispatchMode::MacosMainThreadTray => {
-            run_macos_server_dispatch();
-            Ok(())
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn run_macos_server_dispatch() {
-    let args = parse_server_dispatch_args();
-    let _logging = install_server_logging_for_dispatch();
-    if let Err(err) = devo_server::run_server_process_with_macos_tray(args) {
-        eprintln!("server error: {err}");
-        std::process::exit(1);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn run_macos_server_dispatch() {
-    unreachable!("macOS server dispatch is only selected on macOS");
+    let runtime = build_runtime()?;
+    runtime.block_on(run_server_dispatch());
+    Ok(())
 }
 
 fn parse_server_dispatch_args() -> devo_server::ServerProcessArgs {
@@ -301,7 +243,7 @@ fn install_server_logging_for_dispatch() -> Option<devo_core::LoggingRuntime> {
 async fn run_server_dispatch() {
     let args = parse_server_dispatch_args();
     let _logging = install_server_logging_for_dispatch();
-    if let Err(err) = devo_server::run_server_process(args).await {
+    if let Err(err) = devo_server::run_server_process(args, devo_server::ServerProcessRunOptions::default()).await {
         eprintln!("server error: {err}");
         std::process::exit(1);
     }
@@ -594,38 +536,6 @@ mod tests {
                 OsString::from("--transport"),
                 OsString::from("stdio")
             ]
-        );
-    }
-
-    #[test]
-    fn server_alias_dispatch_mode_matches_platform_threading_contract() {
-        let expected = if cfg!(target_os = "macos") {
-            super::ServerAliasDispatchMode::MacosMainThreadTray
-        } else {
-            super::ServerAliasDispatchMode::AsyncRuntime
-        };
-
-        assert_eq!(super::server_alias_dispatch_mode(), expected);
-    }
-
-    #[test]
-    fn server_alias_dispatch_mode_suppresses_macos_tray_when_requested() {
-        assert_eq!(
-            super::server_alias_dispatch_mode_for(/*suppress_server_tray*/ true),
-            super::ServerAliasDispatchMode::AsyncRuntime
-        );
-    }
-
-    #[test]
-    fn suppress_server_tray_value_only_accepts_one() {
-        assert_eq!(
-            [
-                super::suppress_server_tray_value(None),
-                super::suppress_server_tray_value(Some("")),
-                super::suppress_server_tray_value(Some("true")),
-                super::suppress_server_tray_value(Some("1")),
-            ],
-            [false, false, false, true]
         );
     }
 

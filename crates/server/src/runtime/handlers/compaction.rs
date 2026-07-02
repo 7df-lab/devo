@@ -17,7 +17,7 @@ impl ServerRuntime {
             }
         };
 
-        let session_arc = match self.sessions.lock().await.get(&params.session_id).cloned() {
+        let session_handle = match self.session(params.session_id).await {
             Some(session) => session,
             None => {
                 return self.error_response(
@@ -28,15 +28,18 @@ impl ServerRuntime {
             }
         };
 
-        let summary = {
-            let runtime_session = session_arc.lock().await;
-            runtime_session.summary.clone()
+        let Some(summary) = session_handle.summary().await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
         };
 
         let runtime = Arc::clone(self);
         tokio::spawn(async move {
             if let Err(panic) =
-                AssertUnwindSafe(runtime.run_session_compaction(params.session_id, session_arc))
+                AssertUnwindSafe(runtime.run_session_compaction(params.session_id, session_handle))
                     .catch_unwind()
                     .await
             {
@@ -59,12 +62,11 @@ impl ServerRuntime {
     pub(crate) async fn run_session_compaction(
         self: Arc<Self>,
         session_id: SessionId,
-        session_arc: Arc<tokio::sync::Mutex<crate::execution::RuntimeSession>>,
+        session_handle: crate::runtime::session_actor::SessionHandle,
     ) {
         tracing::info!(session_id = %session_id, "session compaction task started");
-        let started_summary = {
-            let runtime_session = session_arc.lock().await;
-            runtime_session.summary.clone()
+        let Some(started_summary) = session_handle.summary().await else {
+            return;
         };
         self.broadcast_event(ServerEvent::SessionCompactionStarted(SessionEventPayload {
             session: started_summary,
@@ -81,7 +83,17 @@ impl ServerRuntime {
         .await;
 
         let result = {
-            let runtime_session = session_arc.lock().await;
+            let Some(runtime_session) = session_handle.export_runtime_session().await else {
+                tracing::warn!(session_id = %session_id, "session compaction failed: session unavailable");
+                self.broadcast_event(ServerEvent::SessionCompactionFailed(
+                    SessionCompactionFailedPayload {
+                        session_id,
+                        message: "compaction failed: session unavailable".to_string(),
+                    },
+                ))
+                .await;
+                return;
+            };
             let core_session = runtime_session.core_session.lock().await;
 
             let items: Vec<ResponseItem> = core_session
@@ -143,7 +155,10 @@ impl ServerRuntime {
 
         match result {
             Ok(CompactAction::Replaced(compacted_items)) => {
-                let mut runtime_session = session_arc.lock().await;
+                let Some(mut runtime_session) = session_handle.export_runtime_session().await
+                else {
+                    return;
+                };
                 let preserved_item_ids = Self::preserved_item_ids_from_compacted(
                     &runtime_session.persisted_turn_items,
                     &compacted_items,
@@ -292,7 +307,13 @@ impl ServerRuntime {
                         }
                     }
                     let summary = runtime_session.summary.clone();
-                    drop(runtime_session);
+                    session_handle
+                        .replace_state(
+                            crate::runtime::session_actor::SessionActorState::from_runtime_session(
+                                runtime_session,
+                            ),
+                        )
+                        .await;
                     self.run_session_hook(
                         session_id,
                         devo_core::HookEvent::PostCompact,
@@ -314,6 +335,13 @@ impl ServerRuntime {
                 }
 
                 let summary = runtime_session.summary.clone();
+                session_handle
+                    .replace_state(
+                        crate::runtime::session_actor::SessionActorState::from_runtime_session(
+                            runtime_session,
+                        ),
+                    )
+                    .await;
                 tracing::info!(session_id = %session_id, "session compaction completed with replacement");
                 self.broadcast_event(ServerEvent::SessionCompactionCompleted(
                     SessionEventPayload { session: summary },
@@ -321,8 +349,9 @@ impl ServerRuntime {
                 .await;
             }
             Ok(CompactAction::Skipped) => {
-                let runtime_session = session_arc.lock().await;
-                let summary = runtime_session.summary.clone();
+                let Some(summary) = session_handle.summary().await else {
+                    return;
+                };
                 tracing::info!(session_id = %session_id, "session compaction completed without replacement");
                 self.broadcast_event(ServerEvent::SessionCompactionCompleted(
                     SessionEventPayload { session: summary },

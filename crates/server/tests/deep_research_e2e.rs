@@ -1,7 +1,9 @@
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -194,7 +196,11 @@ impl ModelProviderSDK for ScriptedResearchProvider {
                     .contains("Research the current official DeepSeek website domain"),
                 "research question should not be injected into system prompt"
             );
-            streamed_text_events(
+            streamed_text_event_chunks(
+                &[
+                    r#"{"need_clarification":false,"question":"","verification":"Research "#,
+                    r#"DeepSeek official website."}"#,
+                ],
                 r#"{"need_clarification":false,"question":"","verification":"Research DeepSeek official website."}"#,
             )
         } else if request_has_stage(&request, "research brief") {
@@ -593,6 +599,10 @@ async fn deep_research_turn_streams_artifact_reasoning_and_final_report() -> Res
         "expected streamed research artifact delta: {events:#?}"
     );
     assert!(
+        events.iter().any(is_clarification_artifact_delta),
+        "expected streamed clarification artifact delta: {events:#?}"
+    );
+    assert!(
         events.iter().any(is_reasoning_delta),
         "expected reasoning delta: {events:#?}"
     );
@@ -627,9 +637,9 @@ async fn deep_research_turn_streams_artifact_reasoning_and_final_report() -> Res
     assert_eq!(
         completed_turn["params"]["turn"]["usage"],
         serde_json::json!({
-            "input_tokens": 7,
-            "output_tokens": 7,
-            "total_tokens": 14,
+            "input_tokens": 8,
+            "output_tokens": 8,
+            "total_tokens": 16,
             "cache_creation_input_tokens": null,
             "cache_read_input_tokens": null
         })
@@ -668,7 +678,8 @@ async fn deep_research_accepts_write_tool_only_final_report() -> Result<()> {
         report_contents.contains("DeepSeek official website"),
         "expected written report to contain final report content: {report_contents}"
     );
-    let final_report = latest_agent_message(&events).context("expected final report message")?;
+    let final_report =
+        latest_parent_agent_message(&events, session_id).context("expected final report message")?;
     assert!(
         final_report.contains("Wrote the full research report"),
         "expected final response to point at written report: {final_report}"
@@ -896,7 +907,8 @@ async fn deep_research_continues_after_delegated_worker_failure() -> Result<()> 
         completed_turn["params"]["turn"]["status"],
         serde_json::json!("Completed")
     );
-    let final_report = latest_agent_message(&events).context("expected final report message")?;
+    let final_report =
+        latest_parent_agent_message(&events, session_id).context("expected final report message")?;
     assert!(
         final_report.contains("DeepSeek official website"),
         "expected final report after delegated worker recovery: {final_report}"
@@ -941,7 +953,8 @@ async fn deep_research_restarts_worker_when_continuation_fails() -> Result<()> {
     assert_eq!(child_failures, 2);
     let child_sessions = unique_child_turn_sessions(&events, session_id);
     assert_eq!(child_sessions.len(), 3);
-    let final_report = latest_agent_message(&events).context("expected final report message")?;
+    let final_report =
+        latest_parent_agent_message(&events, session_id).context("expected final report message")?;
     assert!(
         final_report.contains("DeepSeek official website"),
         "expected final report after replacement worker recovery: {final_report}"
@@ -1553,7 +1566,6 @@ fn supervisor_stream_events(request: &ModelRequest) -> Vec<Result<StreamEvent>> 
     assert_supervisor_request_uses_agent_tools(request);
     for attempt in 1..=3 {
         let spawn_id = format!("spawn-supervisor-worker-{attempt}");
-        let wait_id = format!("wait-supervisor-worker-{attempt}");
         if !request_has_tool_result(request, &spawn_id) {
             return streamed_tool_call_events(
                 &spawn_id,
@@ -1564,38 +1576,170 @@ fn supervisor_stream_events(request: &ModelRequest) -> Vec<Result<StreamEvent>> 
                 }),
             );
         }
-        if !request_has_tool_result(request, &wait_id) {
-            let target = tool_result_json(request, &spawn_id)
-                .and_then(|value| {
-                    value
-                        .get("agent_path")
-                        .and_then(serde_json::Value::as_str)
-                        .or_else(|| {
-                            value
-                                .get("child_session_id")
-                                .and_then(serde_json::Value::as_str)
-                        })
-                        .map(str::to_string)
-                })
-                .unwrap_or_default();
-            let mut input = serde_json::json!({ "timeout_secs": 120 });
-            if !target.is_empty() {
-                input["target"] = serde_json::Value::String(target);
+        let target = tool_result_json(request, &spawn_id)
+            .and_then(|value| {
+                value
+                    .get("agent_path")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| {
+                        value
+                            .get("child_session_id")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        let mut latest_completed_poll = None;
+        for poll_index in 0..=32 {
+            if request_has_tool_result(request, &supervisor_wait_tool_id(attempt, poll_index)) {
+                latest_completed_poll = Some(poll_index);
+            } else {
+                break;
             }
-            return streamed_tool_call_events(&wait_id, "wait_agent", input);
         }
-        let wait_content = request_tool_result_content(request, &wait_id).unwrap_or_default();
-        if !wait_content.contains("failed")
-            && !wait_content.contains("interrupted")
-            && !wait_content.contains("canceled")
-        {
-            return streamed_text_events(supervisor_notes());
+        match latest_completed_poll {
+            None => {
+                let wait_id = supervisor_wait_tool_id(attempt, 0);
+                let mut input = serde_json::json!({ "timeout_secs": 120 });
+                if !target.is_empty() {
+                    input["target"] = serde_json::Value::String(target.clone());
+                }
+                return streamed_tool_call_events(&wait_id, "wait_agent", input);
+            }
+            Some(poll_index) => {
+                let wait_id = supervisor_wait_tool_id(attempt, poll_index);
+                let wait_content = request_tool_result_content(request, &wait_id).unwrap_or_default();
+                // #region agent log
+                agent_debug_log(
+                    "deep_research_e2e.rs:supervisor_stream_events",
+                    "supervisor wait_agent poll result",
+                    serde_json::json!({
+                        "attempt": attempt,
+                        "pollIndex": poll_index,
+                        "waitId": wait_id,
+                        "terminal": wait_agent_result_is_terminal(&wait_content),
+                        "failed": wait_agent_result_indicates_failure(&wait_content),
+                        "succeeded": wait_agent_result_indicates_success(&wait_content),
+                    }),
+                    "A",
+                );
+                // #endregion
+                if wait_agent_result_indicates_failure(&wait_content) {
+                    break;
+                }
+                if wait_agent_result_indicates_success(&wait_content) {
+                    return streamed_text_events(supervisor_notes());
+                }
+                if poll_index >= 32 {
+                    break;
+                }
+                let next_poll = poll_index + 1;
+                let next_wait_id = supervisor_wait_tool_id(attempt, next_poll);
+                let mut input = serde_json::json!({ "timeout_secs": 2 });
+                if !target.is_empty() {
+                    input["target"] = serde_json::Value::String(target.clone());
+                }
+                if let Some(next_sequence) = wait_agent_next_sequence(&wait_content) {
+                    input["after_sequence"] = serde_json::json!(next_sequence);
+                }
+                return streamed_tool_call_events(&next_wait_id, "wait_agent", input);
+            }
         }
     }
     streamed_text_events(
         "Supervisor notes: delegated workers failed after retries. Evidence is unavailable; do not infer unsupported claims.",
     )
 }
+
+fn supervisor_wait_tool_id(attempt: usize, poll_index: u32) -> String {
+    if poll_index == 0 {
+        format!("wait-supervisor-worker-{attempt}")
+    } else {
+        format!("wait-supervisor-worker-{attempt}-poll-{poll_index}")
+    }
+}
+
+fn wait_agent_next_sequence(content: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|value| value.get("next_sequence").and_then(serde_json::Value::as_u64))
+}
+
+fn wait_agent_result_indicates_failure(content: &str) -> bool {
+    if content.contains("failed")
+        || content.contains("interrupted")
+        || content.contains("canceled")
+    {
+        return true;
+    }
+    wait_agent_statuses(content).any(|status| {
+        matches!(status.as_str(), "failed" | "interrupted" | "closed")
+    })
+}
+
+fn wait_agent_result_indicates_success(content: &str) -> bool {
+    wait_agent_events(content).iter().any(|event| {
+        event.get("kind").and_then(serde_json::Value::as_str) == Some("assistant_message")
+    }) || wait_agent_statuses(content).any(|status| status == "completed")
+}
+
+fn wait_agent_result_is_terminal(content: &str) -> bool {
+    wait_agent_result_indicates_failure(content) || wait_agent_result_indicates_success(content)
+}
+
+fn wait_agent_events(content: &str) -> Vec<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("events")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+        })
+        .unwrap_or_default()
+}
+
+fn wait_agent_statuses(content: &str) -> impl Iterator<Item = String> {
+    wait_agent_events(content).into_iter().filter_map(|event| {
+        if event.get("kind").and_then(serde_json::Value::as_str) != Some("status") {
+            return None;
+        }
+        event
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+// #region agent log
+fn agent_debug_log(
+    location: &str,
+    message: &str,
+    data: serde_json::Value,
+    hypothesis_id: &str,
+) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "sessionId": "ec5e4e",
+        "location": location,
+        "message": message,
+        "data": data,
+        "hypothesisId": hypothesis_id,
+        "runId": "post-fix",
+        "timestamp": timestamp,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../debug-ec5e4e.log"))
+    {
+        let _ = writeln!(file, "{payload}");
+    }
+}
+// #endregion
 
 fn supervisor_worker_message(attempt: usize) -> String {
     format!(
@@ -1767,6 +1911,26 @@ fn streamed_text_events(text: impl Into<String>) -> Vec<Result<StreamEvent>> {
             response: model_response(text),
         }),
     ]
+}
+
+fn streamed_text_event_chunks(
+    chunks: &[&str],
+    final_text: impl Into<String>,
+) -> Vec<Result<StreamEvent>> {
+    let final_text = final_text.into();
+    let mut events = chunks
+        .iter()
+        .map(|chunk| {
+            Ok(StreamEvent::TextDelta {
+                index: 0,
+                text: (*chunk).to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    events.push(Ok(StreamEvent::MessageDone {
+        response: model_response(final_text),
+    }));
+    events
 }
 
 async fn initialize_connection(
@@ -2200,6 +2364,15 @@ fn is_reasoning_delta(event: &serde_json::Value) -> bool {
                 == serde_json::json!("agent_thought_chunk"))
 }
 
+fn is_clarification_artifact_delta(event: &serde_json::Value) -> bool {
+    if event.get("method") != Some(&serde_json::json!("item/researchArtifact/delta")) {
+        return false;
+    }
+    event["params"]["payload"]["delta"]
+        .as_str()
+        .is_some_and(|delta| delta.contains("Research "))
+}
+
 fn is_agent_message_delta(event: &serde_json::Value) -> bool {
     event.get("method") == Some(&serde_json::json!("item/agentMessage/delta"))
         || (event.get("method") == Some(&serde_json::json!("session/update"))
@@ -2263,21 +2436,42 @@ fn legacy_event_from_acp_notification(value: serde_json::Value) -> serde_json::V
 }
 
 fn latest_agent_message(events: &[serde_json::Value]) -> Option<String> {
+    events.iter().rev().find_map(|event| agent_message_from_completed_event(event))
+}
+
+fn latest_parent_agent_message(
+    events: &[serde_json::Value],
+    session_id: devo_core::SessionId,
+) -> Option<String> {
+    let expected_session_id = session_id.to_string();
     events.iter().rev().find_map(|event| {
-        if event.get("method") != Some(&serde_json::json!("item/completed")) {
+        if event_session_id(event) != Some(expected_session_id.as_str()) {
             return None;
         }
-        let item = &event["params"]["item"];
-        if item["item_kind"] == serde_json::json!("agent_message") {
-            return item["payload"]["text"].as_str().map(str::to_string);
-        }
-        if item["item_kind"] == serde_json::json!("research_artifact")
-            && item["payload"]["artifact_type"] == serde_json::json!("failure")
-        {
-            return item["payload"]["content"].as_str().map(str::to_string);
-        }
-        None
+        agent_message_from_completed_event(event)
     })
+}
+
+fn event_session_id(event: &serde_json::Value) -> Option<&str> {
+    event["params"]["context"]["session_id"]
+        .as_str()
+        .or_else(|| event["params"]["session_id"].as_str())
+}
+
+fn agent_message_from_completed_event(event: &serde_json::Value) -> Option<String> {
+    if event.get("method") != Some(&serde_json::json!("item/completed")) {
+        return None;
+    }
+    let item = &event["params"]["item"];
+    if item["item_kind"] == serde_json::json!("agent_message") {
+        return item["payload"]["text"].as_str().map(str::to_string);
+    }
+    if item["item_kind"] == serde_json::json!("research_artifact")
+        && item["payload"]["artifact_type"] == serde_json::json!("failure")
+    {
+        return item["payload"]["content"].as_str().map(str::to_string);
+    }
+    None
 }
 
 async fn respond_to_clarification(
@@ -2362,6 +2556,10 @@ fn assert_research_artifacts(events: &[serde_json::Value]) {
         .filter_map(|event| event["params"]["item"]["payload"]["artifact_type"].as_str())
         .collect::<Vec<_>>();
 
+    assert!(
+        artifact_types.contains(&"clarification"),
+        "expected clarification artifact: {events:#?}"
+    );
     assert!(
         artifact_types.contains(&"brief"),
         "expected brief artifact: {events:#?}"

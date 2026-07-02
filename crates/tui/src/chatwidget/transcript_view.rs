@@ -6,6 +6,7 @@
 use ratatui::text::Line;
 use ratatui::text::Span;
 
+use crate::events::TextItemKind;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::ScrollbackLine;
@@ -35,6 +36,12 @@ pub(crate) struct TranscriptOverlayCell {
 enum LiveViewportLineMode {
     Display,
     Transcript,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum LiveItem {
+    Text(usize),
+    Tool(String),
 }
 
 impl ChatWidget {
@@ -172,11 +179,6 @@ impl ChatWidget {
             Self::extend_lines_with_separator(&mut lines, cell_lines(cell.as_ref()));
         }
 
-        #[allow(clippy::large_enum_variant)]
-        enum LiveItem {
-            Text(usize),
-            Tool(String),
-        }
         let mut items: Vec<(u64, LiveItem)> = Vec::new();
         for (idx, item) in self.active_text_items.iter().enumerate() {
             if item.cell.is_some() {
@@ -189,7 +191,15 @@ impl ChatWidget {
             }
             items.push((tool_call.seq, LiveItem::Tool(tool_call.tool_use_id.clone())));
         }
-        items.sort_by(|a, b| a.0.cmp(&b.0));
+        items.sort_by(|(seq_a, item_a), (seq_b, item_b)| {
+            Self::compare_live_viewport_items(
+                &self.active_text_items,
+                *seq_a,
+                item_a,
+                *seq_b,
+                item_b,
+            )
+        });
 
         for (_, item) in items {
             match item {
@@ -311,6 +321,37 @@ impl ChatWidget {
 
     fn live_transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
         self.live_viewport_lines(width, LiveViewportLineMode::Transcript)
+    }
+
+    fn text_item_precedes_assistant(kind: TextItemKind) -> bool {
+        matches!(
+            kind,
+            TextItemKind::Reasoning | TextItemKind::ResearchArtifact
+        )
+    }
+
+    fn compare_live_viewport_items(
+        active_text_items: &[super::text_stream::ActiveTextItem],
+        seq_a: u64,
+        item_a: &LiveItem,
+        seq_b: u64,
+        item_b: &LiveItem,
+    ) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        let text_kind = |item: &LiveItem| match item {
+            LiveItem::Text(idx) => active_text_items.get(*idx).map(|item| item.kind),
+            LiveItem::Tool(_) => None,
+        };
+        if let (Some(kind_a), Some(kind_b)) = (text_kind(item_a), text_kind(item_b)) {
+            if Self::text_item_precedes_assistant(kind_a) && kind_b == TextItemKind::Assistant {
+                return Ordering::Less;
+            }
+            if kind_a == TextItemKind::Assistant && Self::text_item_precedes_assistant(kind_b) {
+                return Ordering::Greater;
+            }
+        }
+        seq_a.cmp(&seq_b)
     }
 
     fn extend_lines_with_separator(target: &mut Vec<Line<'static>>, mut next: Vec<Line<'static>>) {

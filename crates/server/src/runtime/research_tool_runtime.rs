@@ -10,11 +10,13 @@ impl ServerRuntime {
         &self,
         session_id: SessionId,
     ) -> anyhow::Result<SessionState> {
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+        let Some(session_handle) = self.session(session_id).await else {
             anyhow::bail!("session does not exist");
         };
-        let session = session_arc.lock().await;
-        let core_session = session.core_session.lock().await;
+        let Some(runtime_session) = session_handle.export_runtime_session().await else {
+            anyhow::bail!("session does not exist");
+        };
+        let core_session = runtime_session.core_session.lock().await;
         let mut scratch = SessionState::new(core_session.config.clone(), core_session.cwd.clone());
         scratch.id = session_id.to_string();
         Ok(scratch)
@@ -27,19 +29,16 @@ impl ServerRuntime {
         turn_config: &TurnConfig,
         registry: Arc<ToolRegistry>,
     ) -> anyhow::Result<ToolRuntime> {
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+        let Some(session_handle) = self.session(session_id).await else {
             anyhow::bail!("session does not exist");
         };
-        let (cwd, permission_mode, permission_profile, runtime_context) = {
-            let session = session_arc.lock().await;
-            let core_session = session.core_session.lock().await;
-            (
-                core_session.cwd.clone(),
-                core_session.config.permission_mode,
-                core_session.config.permission_profile.clone(),
-                Arc::clone(&session.runtime_context),
-            )
+        let Some(snapshot) = session_handle.hook_context_snapshot().await else {
+            anyhow::bail!("session does not exist");
         };
+        let cwd = snapshot.summary.cwd.clone();
+        let permission_mode = snapshot.config.permission_mode;
+        let permission_profile = snapshot.config.permission_profile.clone();
+        let runtime_context = snapshot.runtime_context;
         let provider_http = runtime_context
             .config_store
             .lock()

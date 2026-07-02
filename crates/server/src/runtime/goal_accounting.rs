@@ -73,14 +73,7 @@ impl ServerRuntime {
     }
 
     async fn session_is_plan_mode(&self, session_id: SessionId) -> bool {
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
-            return false;
-        };
-        let core_session = {
-            let session = session_arc.lock().await;
-            Arc::clone(&session.core_session)
-        };
-        core_session.lock().await.collaboration_mode == devo_protocol::CollaborationMode::Plan
+        self.session_collaboration_mode(session_id).await == Some(devo_protocol::CollaborationMode::Plan)
     }
 }
 

@@ -51,12 +51,21 @@ impl ServerRuntime {
         }
     }
 
+    pub(super) async fn runtime_active_turn_id(&self, session_id: SessionId) -> Option<TurnId> {
+        self.active_turn_ids
+            .lock()
+            .await
+            .get(&session_id)
+            .copied()
+    }
+
     pub(super) async fn clear_active_turn_runtime_handles(&self, session_id: SessionId) {
         self.active_tasks.lock().await.remove(&session_id);
         self.active_turn_cancellations
             .lock()
             .await
             .remove(&session_id);
+        self.active_turn_ids.lock().await.remove(&session_id);
         self.active_turn_connections
             .lock()
             .await
@@ -65,20 +74,10 @@ impl ServerRuntime {
 
     pub(super) async fn clear_active_turn_reservation(
         &self,
-        session_arc: &Arc<Mutex<RuntimeSession>>,
+        session_handle: &SessionHandle,
         turn_id: TurnId,
     ) {
-        let mut session = session_arc.lock().await;
-        if session
-            .active_turn
-            .as_ref()
-            .is_some_and(|active| active.turn_id == turn_id)
-        {
-            session.active_turn = None;
-            session.summary.status = SessionRuntimeStatus::Idle;
-            session.summary.updated_at = Utc::now();
-            session.summary.last_activity_at = session.summary.updated_at;
-        }
+        let _ = session_handle.clear_active_turn_if_matches(turn_id).await;
     }
 }
 
@@ -183,21 +182,10 @@ mod tests {
         let session_id = start_session(&runtime, data_root.path().to_path_buf()).await;
         let bad_rollout_path = data_root.path().join("rollout-dir");
         std::fs::create_dir(&bad_rollout_path)?;
-        let session_arc = runtime
-            .sessions
-            .lock()
-            .await
-            .get(&session_id)
-            .cloned()
-            .expect("session");
-        {
-            let mut session = session_arc.lock().await;
-            session
-                .record
-                .as_mut()
-                .expect("durable record")
-                .rollout_path = bad_rollout_path;
-        }
+        let session_handle = runtime.session(session_id).await.expect("session");
+        session_handle
+            .update_record_rollout_path(bad_rollout_path)
+            .await;
 
         let value = runtime
             .handle_turn_shell_command_for_connection(
@@ -212,12 +200,16 @@ mod tests {
             )
             .await;
         let response: ErrorResponse = serde_json::from_value(value).expect("error response");
-        let session = session_arc.lock().await;
+        let reservation = session_handle
+            .turn_reservation_snapshot()
+            .await
+            .expect("turn reservation snapshot");
+        let summary = session_handle.summary().await.expect("summary");
 
         assert_eq!(response.error.code, ProtocolErrorCode::InternalError);
-        assert_eq!(session.active_turn, None);
-        assert_eq!(session.summary.status, SessionRuntimeStatus::Idle);
-        assert_eq!(session.latest_turn, None);
+        assert_eq!(reservation.active_turn, None);
+        assert_eq!(summary.status, SessionRuntimeStatus::Idle);
+        assert_eq!(reservation.latest_turn, None);
 
         Ok(())
     }
@@ -227,13 +219,12 @@ mod tests {
         let data_root = TempDir::new()?;
         let runtime = build_runtime(data_root.path());
         let session_id = start_session(&runtime, data_root.path().to_path_buf()).await;
-        let session_arc = runtime
-            .sessions
-            .lock()
+        let session_handle = runtime.session(session_id).await.expect("session");
+        let reservation = session_handle
+            .turn_reservation_snapshot()
             .await
-            .get(&session_id)
-            .cloned()
-            .expect("session");
+            .expect("turn reservation snapshot");
+        let turn_config = reservation.runtime_context.resolve_turn_config(None, None);
         let active_turn = TurnMetadata {
             turn_id: TurnId::new(),
             session_id,
@@ -252,10 +243,9 @@ mod tests {
             stop_reason: None,
             failure_reason: None,
         };
-        {
-            let mut session = session_arc.lock().await;
-            session.active_turn = Some(active_turn);
-        }
+        session_handle
+            .begin_active_turn(active_turn, turn_config)
+            .await;
 
         let value = runtime
             .handle_turn_start_with_queue_policy(
@@ -279,9 +269,7 @@ mod tests {
             )
             .await;
         let response: ErrorResponse = serde_json::from_value(value).expect("error response");
-        let queued_len = session_arc
-            .lock()
-            .await
+        let queued_len = reservation
             .pending_turn_queue
             .lock()
             .expect("pending turn queue mutex should not be poisoned")

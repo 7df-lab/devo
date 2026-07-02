@@ -13,9 +13,13 @@ use devo_protocol::AcpToolKind;
 use devo_protocol::DEVO_SESSION_META;
 use devo_protocol::DEVO_TURN_USAGE_META;
 use devo_protocol::ItemId;
+use devo_protocol::ServerEvent;
 use devo_protocol::SessionMetadata;
 use devo_protocol::SpawnAgentResult;
+use devo_protocol::TurnMetadata;
+use devo_protocol::TurnStatus;
 use devo_protocol::TurnUsageUpdatedPayload;
+use devo_protocol::original_event_from_acp_notification;
 
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
@@ -365,6 +369,9 @@ pub(super) fn subagent_monitor_events_from_acp_session_notification_with_termina
     pending_terminal_output: &mut HashMap<String, String>,
     terminal_session_ids: &mut HashMap<String, SessionId>,
 ) -> Vec<WorkerEvent> {
+    if let Some(events) = subagent_monitor_events_from_wrapped_server_event(&notification) {
+        return events;
+    }
     let session_id = notification.session_id;
     match notification.update {
         AcpSessionUpdate::AgentMessageChunk {
@@ -477,6 +484,90 @@ pub(super) fn subagent_monitor_events_from_acp_session_notification_with_termina
         | AcpSessionUpdate::ConfigOptionUpdate { .. }
         | AcpSessionUpdate::UsageUpdate { .. } => Vec::new(),
     }
+}
+
+fn subagent_monitor_events_from_wrapped_server_event(
+    notification: &AcpSessionNotification,
+) -> Option<Vec<WorkerEvent>> {
+    let (method, event) = original_event_from_acp_notification(notification)?;
+    Some(subagent_monitor_events_from_server_event(
+        notification.session_id,
+        method.as_str(),
+        event,
+    ))
+}
+
+fn subagent_monitor_events_from_server_event(
+    session_id: SessionId,
+    method: &str,
+    event: ServerEvent,
+) -> Vec<WorkerEvent> {
+    match (method, event) {
+        ("turn/started", ServerEvent::TurnStarted(payload)) => {
+            vec![WorkerEvent::SubagentMonitor {
+                event: SubagentMonitorEvent::TurnStarted {
+                    session_id,
+                    turn_id: payload.turn.turn_id,
+                },
+            }]
+        }
+        ("turn/completed", ServerEvent::TurnCompleted(payload))
+        | ("turn/interrupted", ServerEvent::TurnInterrupted(payload)) => {
+            vec![WorkerEvent::SubagentMonitor {
+                event: SubagentMonitorEvent::TurnFinished {
+                    session_id,
+                    status: subagent_turn_finished_status(payload.turn.status),
+                },
+            }]
+        }
+        ("turn/failed", ServerEvent::TurnFailed(payload)) => {
+            vec![WorkerEvent::SubagentMonitor {
+                event: SubagentMonitorEvent::TurnFailed {
+                    session_id,
+                    message: subagent_turn_failure_message(&payload.turn),
+                },
+            }]
+        }
+        ("session/status/changed", ServerEvent::SessionStatusChanged(payload)) => {
+            vec![WorkerEvent::SubagentMonitor {
+                event: SubagentMonitorEvent::SessionStatusChanged {
+                    session_id,
+                    status: payload.status,
+                },
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn subagent_turn_finished_status(status: TurnStatus) -> String {
+    match status {
+        TurnStatus::Completed => "done".to_string(),
+        TurnStatus::Interrupted => "interrupted".to_string(),
+        TurnStatus::Failed => "failed".to_string(),
+        TurnStatus::Running | TurnStatus::Pending | TurnStatus::WaitingApproval => {
+            "working".to_string()
+        }
+    }
+}
+
+fn subagent_turn_failure_message(turn: &TurnMetadata) -> String {
+    turn.failure_reason
+        .as_ref()
+        .map(|reason| format!("{reason:?}"))
+        .unwrap_or_else(|| "Turn failed".to_string())
+}
+
+/// Routes unwrapped server notifications (as produced by the stdio client) to
+/// sub-agent monitor events for a known child session.
+pub(super) fn subagent_monitor_events_from_unwrapped_server_notification(
+    method: &str,
+    event: ServerEvent,
+) -> Vec<WorkerEvent> {
+    let Some(session_id) = event.session_id() else {
+        return Vec::new();
+    };
+    subagent_monitor_events_from_server_event(session_id, method, event)
 }
 
 fn message_item_id(message_id: Option<&str>) -> Option<ItemId> {

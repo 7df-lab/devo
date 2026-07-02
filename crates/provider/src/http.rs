@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::Context;
 use anyhow::Result;
 use devo_network_proxy::NetworkProxyConfig;
@@ -46,14 +44,23 @@ impl ProviderHttpOptions {
         self.network_proxy.proxy_url.as_deref()
     }
 
-    pub(crate) fn build_client(&self, timeout: Option<Duration>) -> Result<Client> {
-        let mut builder = Client::builder();
-        if let Some(timeout) = timeout {
-            builder = builder.timeout(timeout);
-        }
+    /// HTTP client for non-streaming requests with total request timeout.
+    pub(crate) fn build_request_client(&self) -> Result<Client> {
+        let builder = Client::builder()
+            .connect_timeout(crate::timeout::connect_timeout())
+            .timeout(crate::timeout::request_timeout());
         devo_network_proxy::apply_proxy_config(builder, &self.network_proxy)?
             .build()
             .context("failed to build provider HTTP client")
+    }
+
+    /// HTTP client for SSE streaming. Duration is bounded by per-chunk idle
+    /// timeout in the stream layer, not a single wall-clock request timeout.
+    pub(crate) fn build_streaming_client(&self) -> Result<Client> {
+        let builder = Client::builder().connect_timeout(crate::timeout::connect_timeout());
+        devo_network_proxy::apply_proxy_config(builder, &self.network_proxy)?
+            .build()
+            .context("failed to build provider streaming HTTP client")
     }
 
     pub(crate) fn apply_custom_headers(&self, builder: RequestBuilder) -> RequestBuilder {

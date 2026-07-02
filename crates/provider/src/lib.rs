@@ -14,6 +14,7 @@ mod provider;
 mod request;
 pub mod router;
 mod text_normalization;
+pub mod timeout;
 
 pub use http::ProviderHttpOptions;
 pub use provider::*;

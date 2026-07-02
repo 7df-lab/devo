@@ -331,14 +331,19 @@ impl ServerClientCore {
         Ok(success.result)
     }
 
-    pub(crate) async fn turn_start(&mut self, params: TurnStartParams) -> Result<()> {
+    pub(crate) async fn turn_start(&mut self, params: TurnStartParams) -> Result<TurnStartResult> {
         match self
             .request_devo::<_, TurnStartResult>("turn/start", params.clone())
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(result) => Ok(result),
             Err(error) if is_method_not_found_error(&error) => {
-                self.turn_start_acp_prompt_detached(params).await
+                self.turn_start_acp_prompt_detached(params).await?;
+                Ok(TurnStartResult::Started {
+                    turn_id: TurnId::new(),
+                    status: TurnStatus::Running,
+                    accepted_at: Utc::now(),
+                })
             }
             Err(error) => Err(error),
         }

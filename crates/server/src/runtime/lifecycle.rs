@@ -4,16 +4,13 @@ impl ServerRuntime {
     /// Loads durable sessions from rollout files and installs them into the runtime map.
     /// Also restores token stats and pending queues from SQLite.
     pub async fn load_persisted_sessions(self: &Arc<Self>) -> anyhow::Result<()> {
-        let sessions = self.rollout_store.load_sessions(&self.deps).await?;
+        let mut sessions = self.rollout_store.load_sessions(&self.deps).await?;
         tracing::info!(session_count = sessions.len(), "loaded persisted sessions");
         let mut restored_goal_stores = std::collections::HashMap::new();
 
-        // Restore token stats and pending queues from SQLite
-        for (session_id, session_arc) in &sessions {
-            let mut session = session_arc.lock().await;
-
-            if !session.summary.ephemeral
-                && let Err(err) = self.deps.db.upsert_session(&session.summary)
+        for (session_id, runtime_session) in sessions.iter_mut() {
+            if !runtime_session.summary.ephemeral
+                && let Err(err) = self.deps.db.upsert_session(&runtime_session.summary)
             {
                 tracing::warn!(
                     session_id = %session_id,
@@ -25,13 +22,14 @@ impl ServerRuntime {
 
             match self.deps.db.get_stats(session_id) {
                 Ok(Some(stats)) => {
-                    session.summary.total_input_tokens = stats.total_input_tokens;
-                    session.summary.total_output_tokens = stats.total_output_tokens;
-                    session.summary.total_tokens = stats.total_tokens;
-                    session.summary.total_cache_creation_tokens = stats.total_cache_creation_tokens;
-                    session.summary.total_cache_read_tokens = stats.total_cache_read_tokens;
-                    session.summary.prompt_token_estimate = stats.prompt_token_estimate;
-                    if let Ok(mut core) = session.core_session.try_lock() {
+                    runtime_session.summary.total_input_tokens = stats.total_input_tokens;
+                    runtime_session.summary.total_output_tokens = stats.total_output_tokens;
+                    runtime_session.summary.total_tokens = stats.total_tokens;
+                    runtime_session.summary.total_cache_creation_tokens =
+                        stats.total_cache_creation_tokens;
+                    runtime_session.summary.total_cache_read_tokens = stats.total_cache_read_tokens;
+                    runtime_session.summary.prompt_token_estimate = stats.prompt_token_estimate;
+                    if let Ok(mut core) = runtime_session.core_session.try_lock() {
                         core.total_input_tokens = stats.total_input_tokens;
                         core.total_output_tokens = stats.total_output_tokens;
                         core.total_tokens = stats.total_tokens;
@@ -47,16 +45,17 @@ impl ServerRuntime {
                     );
                 }
                 Ok(None) => {
-                    // No stats in database, persist current stats
                     let stats = crate::db::SessionStats {
-                        total_input_tokens: session.summary.total_input_tokens,
-                        total_output_tokens: session.summary.total_output_tokens,
-                        total_tokens: session.summary.total_tokens,
-                        total_cache_creation_tokens: session.summary.total_cache_creation_tokens,
-                        total_cache_read_tokens: session.summary.total_cache_read_tokens,
+                        total_input_tokens: runtime_session.summary.total_input_tokens,
+                        total_output_tokens: runtime_session.summary.total_output_tokens,
+                        total_tokens: runtime_session.summary.total_tokens,
+                        total_cache_creation_tokens: runtime_session
+                            .summary
+                            .total_cache_creation_tokens,
+                        total_cache_read_tokens: runtime_session.summary.total_cache_read_tokens,
                         last_input_tokens: 0,
                         turn_count: 0,
-                        prompt_token_estimate: session.summary.prompt_token_estimate,
+                        prompt_token_estimate: runtime_session.summary.prompt_token_estimate,
                     };
                     if let Err(err) = self.deps.db.update_stats(session_id, &stats) {
                         tracing::warn!(
@@ -75,7 +74,6 @@ impl ServerRuntime {
                 }
             }
 
-            // Restore pending turn queue from SQLite
             match self
                 .deps
                 .db
@@ -83,7 +81,7 @@ impl ServerRuntime {
             {
                 Ok(items) => {
                     if !items.is_empty() {
-                        let core_session = session.core_session.lock().await;
+                        let core_session = runtime_session.core_session.lock().await;
                         let mut queue = core_session
                             .pending_turn_queue
                             .lock()
@@ -105,7 +103,6 @@ impl ServerRuntime {
                 }
             }
 
-            // Clear any stale btw inputs from previous session
             if let Err(err) = self
                 .deps
                 .db
@@ -118,7 +115,6 @@ impl ServerRuntime {
                 );
             }
 
-            drop(session);
             match self.goal_durable_store.replay_goal_store(*session_id).await {
                 Ok(Some(mut goal_store)) => {
                     if let Some(goal) = goal_store.get()
@@ -168,9 +164,10 @@ impl ServerRuntime {
             }
         }
 
-        let mut runtime_sessions = self.sessions.lock().await;
-        runtime_sessions.extend(sessions);
-        drop(runtime_sessions);
+        for (_, runtime_session) in sessions {
+            self.insert_session_actor(SessionActorState::from_runtime_session(runtime_session))
+                .await;
+        }
         self.goal_stores.lock().await.extend(restored_goal_stores);
         Ok(())
     }
@@ -179,15 +176,10 @@ impl ServerRuntime {
     /// persists interrupted turn records. Called on graceful shutdown.
     pub async fn shutdown(self: &Arc<Self>) {
         self.command_exec_manager.terminate_all().await;
-        let session_ids: Vec<SessionId> = {
-            let sessions = self.sessions.lock().await;
-            sessions.keys().cloned().collect()
-        };
+        let session_handles = self.list_session_handles().await;
 
-        for session_id in session_ids {
-            let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
-                continue;
-            };
+        for session_handle in session_handles {
+            let session_id = session_handle.id();
 
             self.run_session_hook(
                 session_id,
@@ -196,23 +188,14 @@ impl ServerRuntime {
             )
             .await;
 
-            let (deferred_assistant, deferred_reasoning, turn_id, record) = {
-                let mut session = session_arc.lock().await;
-                let turn_id = session.active_turn.as_ref().map(|t| t.turn_id);
-                (
-                    session.deferred_assistant.take(),
-                    session.deferred_reasoning.take(),
-                    turn_id,
-                    session.record.clone(),
-                )
+            let Some(snapshot) = session_handle.take_shutdown_deferred_snapshot().await else {
+                continue;
             };
-
-            let Some(turn_id) = turn_id else {
+            let Some(turn_id) = snapshot.active_turn_id else {
                 continue;
             };
 
-            // Complete deferred items before shutting down
-            if let Some((item_id, item_seq, text)) = deferred_assistant {
+            if let Some((item_id, item_seq, text)) = snapshot.deferred_assistant {
                 self.complete_item(
                     session_id,
                     turn_id,
@@ -224,7 +207,7 @@ impl ServerRuntime {
                 )
                 .await;
             }
-            if let Some((item_id, item_seq, text)) = deferred_reasoning {
+            if let Some((item_id, item_seq, text)) = snapshot.deferred_reasoning {
                 self.complete_item(
                     session_id,
                     turn_id,
@@ -237,57 +220,30 @@ impl ServerRuntime {
                 .await;
             }
 
-            // Mark turn as interrupted
-            let interrupted_turn = {
-                let mut session = session_arc.lock().await;
-                let Some(mut turn) = session.active_turn.take() else {
-                    continue;
-                };
-                if turn.turn_id != turn_id {
-                    session.active_turn = Some(turn);
-                    continue;
-                }
-                turn.status = TurnStatus::Interrupted;
-                turn.completed_at = Some(Utc::now());
-                session.latest_turn = Some(turn.clone());
-                session.summary.status = SessionRuntimeStatus::Idle;
-                session.summary.updated_at = Utc::now();
-                session.summary.last_activity_at = session.summary.updated_at;
-                let token_totals = session.core_session.try_lock().ok().map(|core| {
-                    (
-                        core.total_input_tokens,
-                        core.total_output_tokens,
-                        core.total_tokens,
-                    )
-                });
-                if let Some((input, output, total)) = token_totals {
-                    session.summary.total_input_tokens = input;
-                    session.summary.total_output_tokens = output;
-                    session.summary.total_tokens = total;
-                }
-                turn
+            let Some(interrupted_turn) = session_handle.interrupt_active_turn().await.flatten()
+            else {
+                continue;
             };
+            if interrupted_turn.turn_id != turn_id {
+                continue;
+            }
 
-            // Persist interrupted turn record
-            if let Some(record) = record {
-                let (session_context, turn_context) = {
-                    let session = session_arc.lock().await;
-                    let core = session.core_session.lock().await;
-                    (
-                        core.session_context.clone(),
-                        core.latest_turn_context.clone(),
-                    )
-                };
-                if let Err(error) = self.rollout_store.append_turn(
+            if let Some(record) = snapshot.record
+                && let Some(persistence) = session_handle.turn_persistence_snapshot().await
+                && let Err(error) = self.rollout_store.append_turn(
                     &record,
-                    build_turn_record(&interrupted_turn, session_context, turn_context),
-                ) {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %error,
-                        "failed to persist interrupted turn on shutdown"
-                    );
-                }
+                    build_turn_record(
+                        &interrupted_turn,
+                        persistence.session_context,
+                        persistence.latest_turn_context,
+                    ),
+                )
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "failed to persist interrupted turn on shutdown"
+                );
             }
 
             tracing::info!(
@@ -295,6 +251,19 @@ impl ServerRuntime {
                 turn_id = %interrupted_turn.turn_id,
                 "completed deferred items and interrupted turn on shutdown"
             );
+        }
+
+        let session_ids: Vec<SessionId> = self
+            .list_session_handles()
+            .await
+            .into_iter()
+            .map(|handle| handle.id())
+            .collect();
+        for session_id in session_ids {
+            if let Some(handle) = self.sessions.lock().await.get(&session_id).cloned() {
+                handle.shutdown().await;
+            }
+            self.remove_session_actor(session_id).await;
         }
     }
 }

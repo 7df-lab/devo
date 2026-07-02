@@ -78,6 +78,7 @@ use devo_server::TurnEventPayload;
 use devo_server::TurnExecutionMode;
 use devo_server::TurnInterruptParams;
 use devo_server::TurnStartParams;
+use devo_server::TurnStartResult;
 use devo_server::TurnSteerParams;
 
 use crate::app_command::GoalObjectiveMode;
@@ -106,6 +107,7 @@ use acp_events::session_metadata_from_acp_update;
 use acp_events::spawn_agent_result_from_acp_update;
 use acp_events::spawn_task_message_from_acp_update;
 use acp_events::subagent_monitor_events_from_acp_session_notification_with_terminal_state;
+use acp_events::subagent_monitor_events_from_unwrapped_server_notification;
 #[cfg(test)]
 use acp_events::worker_events_from_acp_notification;
 #[cfg(test)]
@@ -214,6 +216,8 @@ pub(crate) struct QueryWorkerConfig {
     pub(crate) reasoning_effort_selection: Option<String>,
     /// Permission preset to apply to the server session when it exists.
     pub(crate) permission_preset: PermissionPreset,
+    /// Agent client capabilities to advertise to the server session.
+    pub(crate) client_capabilities: devo_protocol::AcpClientCapabilities,
 }
 
 /// TODO: Should we extract the OperationCommand to the `protocol` crate? Since it can be shareable.
@@ -820,7 +824,7 @@ async fn run_worker_inner(
     // The worker owns the server client and translates UI commands into server
     // calls, then turns server notifications back into lightweight UI events.
     let mut client = spawn_client(&config.cwd, config.server_log_level.clone()).await?;
-    let _ = client.initialize().await?;
+    let _ = client.initialize(&config.client_capabilities).await?;
     let mut session_id: Option<SessionId> = None;
     let mut session_cwd = config.cwd.clone();
     let mut model = config.model;
@@ -926,37 +930,17 @@ async fn run_worker_inner(
                         approval_policy,
                         collaboration_mode,
                     }) => {
-                        let session_start = ensure_session_started(
+                        let active_session_id = prepare_session_for_command(
                             &mut client,
                             &config.cwd,
-                            &model,
-                            &model_binding_id,
+                            &mut model,
+                            &mut model_binding_id,
+                            &mut reasoning_effort_selection,
                             &mut session_id,
+                            permission_preset,
+                            event_tx,
                         )
                         .await?;
-                        if let Some(start_model) = session_start.model.clone() {
-                            model = start_model;
-                        }
-                        model_binding_id = session_start
-                            .model_binding_id
-                            .clone()
-                            .or(model_binding_id);
-                        reasoning_effort_selection = session_start
-                            .reasoning_effort_selection
-                            .clone()
-                            .or(reasoning_effort_selection);
-                        let active_session_id = session_start.session_id;
-                        if session_start.created {
-                            let _ = event_tx.send(WorkerEvent::SessionActivated {
-                                session_id: active_session_id,
-                            });
-                            apply_session_permissions(
-                                &mut client,
-                                active_session_id,
-                                permission_preset,
-                            )
-                            .await?;
-                        }
                         let start_result = client.turn_start(TurnStartParams {
                             session_id: active_session_id,
                             input,
@@ -970,7 +954,9 @@ async fn run_worker_inner(
                             execution_mode: TurnExecutionMode::Regular,
                         }).await;
                         match start_result {
-                            Ok(()) => {}
+                            Ok(result) => {
+                                handle_turn_start_result(result, &mut active_turn_id);
+                            }
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
                                     message: error.to_string(),
@@ -1176,7 +1162,7 @@ async fn run_worker_inner(
                             config.server_log_level.clone(),
                         )
                         .await?;
-                        client.initialize().await?;
+                        client.initialize(&config.client_capabilities).await?;
                         session_id = None;
                         child_agent_sessions.clear();
                         btw_agent_sessions.clear();
@@ -1388,34 +1374,17 @@ async fn run_worker_inner(
                         }
                     }
                     Some(OperationCommand::SetGoalObjective { objective, mode }) => {
-                        let session_start = ensure_session_started(
+                        let active_session_id = prepare_session_for_command(
                             &mut client,
                             &config.cwd,
-                            &model,
-                            &model_binding_id,
+                            &mut model,
+                            &mut model_binding_id,
+                            &mut reasoning_effort_selection,
                             &mut session_id,
+                            permission_preset,
+                            event_tx,
                         )
                         .await?;
-                        if let Some(start_model) = session_start.model.clone() {
-                            model = start_model;
-                        }
-                        model_binding_id = session_start
-                            .model_binding_id
-                            .clone()
-                            .or(model_binding_id);
-                        reasoning_effort_selection = session_start.reasoning_effort_selection.clone().or(reasoning_effort_selection);
-                        let active_session_id = session_start.session_id;
-                        if session_start.created {
-                            let _ = event_tx.send(WorkerEvent::SessionActivated {
-                                session_id: active_session_id,
-                            });
-                            apply_session_permissions(
-                                &mut client,
-                                active_session_id,
-                                permission_preset,
-                            )
-                            .await?;
-                        }
 
                         if matches!(mode, GoalObjectiveMode::ConfirmIfExists) {
                             match client
@@ -2029,34 +1998,17 @@ async fn run_worker_inner(
                         }
                     }
                     Some(OperationCommand::RunResearch { question }) => {
-                        let session_start = ensure_session_started(
+                        let active_session_id = prepare_session_for_command(
                             &mut client,
                             &config.cwd,
-                            &model,
-                            &model_binding_id,
+                            &mut model,
+                            &mut model_binding_id,
+                            &mut reasoning_effort_selection,
                             &mut session_id,
+                            permission_preset,
+                            event_tx,
                         )
                         .await?;
-                        if let Some(start_model) = session_start.model.clone() {
-                            model = start_model;
-                        }
-                        model_binding_id = session_start
-                            .model_binding_id
-                            .clone()
-                            .or(model_binding_id);
-                        reasoning_effort_selection = session_start.reasoning_effort_selection.clone().or(reasoning_effort_selection);
-                        let active_session_id = session_start.session_id;
-                        if session_start.created {
-                            let _ = event_tx.send(WorkerEvent::SessionActivated {
-                                session_id: active_session_id,
-                            });
-                            apply_session_permissions(
-                                &mut client,
-                                active_session_id,
-                                permission_preset,
-                            )
-                            .await?;
-                        }
                         match client
                             .turn_start(TurnStartParams {
                                 session_id: active_session_id,
@@ -2072,7 +2024,9 @@ async fn run_worker_inner(
                             })
                             .await
                         {
-                            Ok(()) => {}
+                            Ok(result) => {
+                                handle_turn_start_result(result, &mut active_turn_id);
+                            }
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
                                     message: error.to_string(),
@@ -2439,6 +2393,16 @@ async fn run_worker_inner(
                         if let Some(event_session_id) = event.session_id()
                             && Some(event_session_id) != session_id
                         {
+                            if child_agent_sessions.contains(&event_session_id) {
+                                for subagent_event in
+                                    subagent_monitor_events_from_unwrapped_server_notification(
+                                        method.as_str(),
+                                        event.clone(),
+                                    )
+                                {
+                                    let _ = event_tx.send(subagent_event);
+                                }
+                            }
                             continue;
                         }
                         match method.as_str() {
@@ -3007,6 +2971,56 @@ async fn ensure_session_started(
     })
 }
 
+/// Prepares the worker session state before turn or goal commands run.
+///
+/// Commands such as [`OperationCommand::SubmitInput`], [`OperationCommand::SetGoalObjective`],
+/// and [`OperationCommand::RunResearch`] share this path instead of duplicating session-start
+/// follow-up. When no session is active yet, [`ensure_session_started`] creates one on the
+/// server; the returned metadata is merged into the worker's current model, model binding, and
+/// reasoning-effort selection. For a newly created session, this also notifies the UI via
+/// [`WorkerEvent::SessionActivated`] and applies the configured permission preset.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_session_for_command(
+    client: &mut StdioServerClient,
+    cwd: &Path,
+    model: &mut String,
+    model_binding_id: &mut Option<String>,
+    reasoning_effort_selection: &mut Option<String>,
+    session_id: &mut Option<SessionId>,
+    permission_preset: PermissionPreset,
+    event_tx: &mpsc::UnboundedSender<WorkerEvent>,
+) -> Result<SessionId> {
+    let session_start =
+        ensure_session_started(client, cwd, model, model_binding_id, session_id).await?;
+    if let Some(model_override) = &session_start.model {
+        *model = model_override.clone();
+    }
+    *model_binding_id = session_start
+        .model_binding_id
+        .clone()
+        .or_else(|| model_binding_id.clone());
+    *reasoning_effort_selection = session_start
+        .reasoning_effort_selection
+        .clone()
+        .or_else(|| reasoning_effort_selection.clone());
+    let active_session_id = session_start.session_id;
+    if session_start.created {
+        let _ = event_tx.send(WorkerEvent::SessionActivated {
+            session_id: active_session_id,
+        });
+        apply_session_permissions(client, active_session_id, permission_preset).await?;
+    }
+    Ok(active_session_id)
+}
+
+/// Records the active turn returned by `turn/start`.
+///
+/// When the server queues input (`TurnStartResult::Queued`), queue state for the UI is
+/// delivered asynchronously via `inputQueue/updated` notifications.
+fn handle_turn_start_result(result: TurnStartResult, active_turn_id: &mut Option<TurnId>) {
+    *active_turn_id = Some(result.active_turn_id());
+}
+
 async fn pause_active_goal_before_session_leave(
     client: &mut StdioServerClient,
     session_id: SessionId,
@@ -3096,15 +3110,6 @@ async fn spawn_client(_cwd: &Path, server_log_level: Option<String>) -> Result<S
                     .flat_map(|level| ["--log-level".to_string(), level]),
             )
             .collect(),
-        client_capabilities: devo_protocol::AcpClientCapabilities {
-            fs: devo_protocol::AcpFileSystemCapabilities {
-                read_text_file: false,
-                write_text_file: false,
-                meta: None,
-            },
-            terminal: false,
-            meta: None,
-        },
     })
     .await
 }
@@ -6149,6 +6154,127 @@ mod tests {
                     item_id: Some(item_id),
                     kind: TextItemKind::Assistant,
                     delta: "latest child preview".to_string(),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn child_acp_turn_completed_routes_to_subagent_monitor_turn_finished() {
+        use devo_protocol::DEVO_ORIGINAL_EVENT_META;
+        use devo_protocol::DEVO_ORIGINAL_METHOD_META;
+        use devo_protocol::ServerEvent;
+        use devo_protocol::TurnEventPayload;
+        use devo_protocol::TurnKind;
+        use devo_protocol::TurnMetadata;
+        use devo_protocol::TurnStatus;
+
+        let child = SessionId::new();
+        let turn = TurnMetadata {
+            turn_id: TurnId::new(),
+            session_id: child,
+            sequence: 1,
+            status: TurnStatus::Completed,
+            kind: TurnKind::Regular,
+            model: "test-model".to_string(),
+            model_binding_id: None,
+            reasoning_effort_selection: None,
+            reasoning_effort: None,
+            request_model: "test-model".to_string(),
+            request_thinking: None,
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            usage: None,
+            stop_reason: None,
+            failure_reason: None,
+        };
+        let original_event = ServerEvent::TurnCompleted(TurnEventPayload {
+            session_id: child,
+            turn: turn.clone(),
+        });
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            DEVO_ORIGINAL_METHOD_META.to_string(),
+            serde_json::json!("turn/completed"),
+        );
+        meta.insert(
+            DEVO_ORIGINAL_EVENT_META.to_string(),
+            serde_json::to_value(original_event).expect("serialize turn completed"),
+        );
+        let notification = super::parse_acp_session_notification(&serde_json::json!({
+            "sessionId": child,
+            "update": {
+                "sessionUpdate": "session_info_update"
+            },
+            "_meta": meta
+        }))
+        .expect("ACP session notification");
+        let mut visible_terminal_ids = HashSet::new();
+        let mut pending_terminal_output = HashMap::new();
+        let mut terminal_session_ids = HashMap::new();
+
+        let events =
+            super::subagent_monitor_events_from_acp_session_notification_with_terminal_state(
+                notification,
+                &mut visible_terminal_ids,
+                &mut pending_terminal_output,
+                &mut terminal_session_ids,
+            );
+
+        assert_eq!(
+            events,
+            vec![WorkerEvent::SubagentMonitor {
+                event: SubagentMonitorEvent::TurnFinished {
+                    session_id: child,
+                    status: "done".to_string(),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn child_unwrapped_turn_completed_routes_to_subagent_monitor_turn_finished() {
+        use devo_protocol::ServerEvent;
+        use devo_protocol::TurnEventPayload;
+        use devo_protocol::TurnKind;
+        use devo_protocol::TurnMetadata;
+        use devo_protocol::TurnStatus;
+
+        let child = SessionId::new();
+        let turn = TurnMetadata {
+            turn_id: TurnId::new(),
+            session_id: child,
+            sequence: 1,
+            status: TurnStatus::Completed,
+            kind: TurnKind::Regular,
+            model: "test-model".to_string(),
+            model_binding_id: None,
+            reasoning_effort_selection: None,
+            reasoning_effort: None,
+            request_model: "test-model".to_string(),
+            request_thinking: None,
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            usage: None,
+            stop_reason: None,
+            failure_reason: None,
+        };
+        let event = ServerEvent::TurnCompleted(TurnEventPayload {
+            session_id: child,
+            turn: turn.clone(),
+        });
+
+        let events = super::acp_events::subagent_monitor_events_from_unwrapped_server_notification(
+            "turn/completed",
+            event,
+        );
+
+        assert_eq!(
+            events,
+            vec![WorkerEvent::SubagentMonitor {
+                event: SubagentMonitorEvent::TurnFinished {
+                    session_id: child,
+                    status: "done".to_string(),
                 },
             }]
         );

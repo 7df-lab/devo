@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::runtime::session_interactive::complete_approval_wait;
+
 use std::path::Component;
 use std::path::Path;
 
@@ -59,7 +61,8 @@ impl ServerRuntime {
         if self.approval_cache_allows(session_id, &request).await {
             return Ok(());
         }
-        match policy_decision(&permission_profile, &request) {
+        let policy = policy_decision(&permission_profile, &request);
+        match policy {
             PolicyAuthorization::Allow => Ok(()),
             PolicyAuthorization::Ask => {
                 if let Some(reason) = self
@@ -138,17 +141,22 @@ impl ServerRuntime {
         request: &ToolPermissionRequest,
     ) -> AutoReviewOutcome {
         let (model, runtime_context) = {
-            let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+            let Some(session_handle) = self.session(session_id).await else {
                 return AutoReviewOutcome::AskUser;
             };
-            let session = session_arc.lock().await;
+            let Some(summary) = session_handle.summary().await else {
+                return AutoReviewOutcome::AskUser;
+            };
+            let Some(runtime_context) = session_handle.runtime_context().await else {
+                return AutoReviewOutcome::AskUser;
+            };
+
             (
-                session
-                    .summary
+                summary
                     .model
                     .clone()
-                    .unwrap_or_else(|| session.runtime_context.default_model.clone()),
-                Arc::clone(&session.runtime_context),
+                    .unwrap_or_else(|| runtime_context.default_model.clone()),
+                runtime_context,
             )
         };
         let response = match runtime_context
@@ -258,12 +266,65 @@ impl ServerRuntime {
         session_id: SessionId,
         request: &ToolPermissionRequest,
     ) -> bool {
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+        if self
+            .session_approval_cache_allows(session_id, request)
+            .await
+        {
+            return true;
+        }
+        if let Some(parent_session_id) = self.parent_session_id(session_id).await {
+            return self
+                .session_approval_cache_allows(parent_session_id, request)
+                .await;
+        }
+        false
+    }
+
+    async fn session_approval_cache_allows(
+        &self,
+        session_id: SessionId,
+        request: &ToolPermissionRequest,
+    ) -> bool {
+        if let Some(stream) = self.active_stream_state(session_id).await {
+            let stream = stream.lock().await;
+            if let Some(inline) = stream.turn_inline.as_ref() {
+                return cache_allows(&inline.session_approval_cache, request)
+                    || cache_allows(&inline.turn_approval_cache, request);
+            }
+        }
+        let Some(session_handle) = self.session(session_id).await else {
             return false;
         };
-        let session = session_arc.lock().await;
-        cache_allows(&session.session_approval_cache, request)
-            || cache_allows(&session.turn_approval_cache, request)
+        let Some(cache) = session_handle.approval_cache_snapshot().await else {
+            return false;
+        };
+        cache_allows(&cache.session_approval_cache, request)
+            || cache_allows(&cache.turn_approval_cache, request)
+    }
+
+    async fn parent_session_id(&self, session_id: SessionId) -> Option<SessionId> {
+        if let Some(stream) = self.active_stream_state(session_id).await {
+            let stream = stream.lock().await;
+            if let Some(inline) = stream.turn_inline.as_ref() {
+                return inline.summary.parent_session_id;
+            }
+        }
+        let session_handle = self.sessions.lock().await.get(&session_id).cloned()?;
+        session_handle.parent_session_id().await.and_then(|p| p)
+    }
+
+    /// Sub-agent turns route interactive approvals through the parent session so
+    /// the active ACP connection and approval cache stay aligned with the UI.
+    async fn permission_host_session_id(&self, session_id: SessionId) -> SessionId {
+        let Some(parent_session_id) = self.parent_session_id(session_id).await else {
+            return session_id;
+        };
+        let connections = self.active_turn_connections.lock().await;
+        if connections.contains_key(&parent_session_id) {
+            parent_session_id
+        } else {
+            session_id
+        }
     }
 
     async fn request_tool_approval(
@@ -271,53 +332,66 @@ impl ServerRuntime {
         session_id: SessionId,
         request: ToolPermissionRequest,
     ) -> Result<(), String> {
-        let approval_id = format!("approval-{}", request.tool_call_id);
-        let (tx, rx) = oneshot::channel();
+        let host_session_id = self.permission_host_session_id(session_id).await;
         let available_scopes = approval_scopes_for_request(&request);
-        let Some(connection_id) = self
-            .active_turn_connections
-            .lock()
-            .await
-            .get(&session_id)
-            .copied()
-        else {
+        let connection_id = {
+            let connections = self.active_turn_connections.lock().await;
+            connections
+                .get(&host_session_id)
+                .or_else(|| connections.get(&session_id))
+                .copied()
+        };
+        let Some(connection_id) = connection_id else {
             return Err("no ACP client connection is available for permission request".to_string());
         };
 
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
-            return Err("session does not exist".to_string());
-        };
-        {
-            let mut session = session_arc.lock().await;
-            session.pending_approvals.insert(
-                approval_id.clone(),
-                PendingApproval {
-                    tool_name: request.tool_name.clone(),
-                    path: request.path.clone(),
-                    host: request.host.clone(),
-                    command_prefix: request.command_prefix.clone(),
-                    tx,
-                },
+        if host_session_id != session_id {
+            tracing::debug!(
+                child_session_id = %session_id,
+                parent_session_id = %host_session_id,
+                tool = %request.tool_name,
+                "routing sub-agent permission request through parent session"
             );
         }
 
-        let request_params = acp_request_permission_params(session_id, &request, &available_scopes);
+        let approval_id = request.tool_call_id.clone();
+        let (tx, rx) = oneshot::channel();
+        let pending = PendingApproval {
+            tool_name: request.tool_name.clone(),
+            path: request.path.clone(),
+            host: request.host.clone(),
+            command_prefix: request.command_prefix.clone(),
+            tx,
+        };
+        self.session_interactive
+            .register_pending_approval(host_session_id, approval_id.clone(), pending)
+            .await;
+
+        let request_params =
+            acp_request_permission_params(host_session_id, &request, &available_scopes);
+        let cancel_token = {
+            let cancellations = self.active_turn_cancellations.lock().await;
+            cancellations
+                .get(&host_session_id)
+                .or_else(|| cancellations.get(&session_id))
+                .cloned()
+                .unwrap_or_else(CancellationToken::new)
+        };
         let response = match self
-            .send_request_to_connection(
+            .send_request_to_connection_cancellable(
                 connection_id,
                 devo_protocol::ACP_SESSION_REQUEST_PERMISSION_METHOD,
                 serde_json::to_value(request_params)
                     .expect("serialize ACP permission request params"),
+                cancel_token,
             )
             .await
         {
             Ok(response) => response,
             Err(error) => {
-                session_arc
-                    .lock()
-                    .await
-                    .pending_approvals
-                    .remove(&approval_id);
+                self.session_interactive
+                    .remove_pending_approval(host_session_id, &approval_id)
+                    .await;
                 return Err(format!("permission request failed: {error}"));
             }
         };
@@ -325,11 +399,9 @@ impl ServerRuntime {
             match serde_json::from_value(response) {
                 Ok(response) => response,
                 Err(error) => {
-                    session_arc
-                        .lock()
-                        .await
-                        .pending_approvals
-                        .remove(&approval_id);
+                    self.session_interactive
+                        .remove_pending_approval(host_session_id, &approval_id)
+                        .await;
                     return Err(format!(
                         "invalid session/request_permission response: {error}"
                     ));
@@ -338,32 +410,45 @@ impl ServerRuntime {
         let (decision, scope) = match approval_decision_from_acp_outcome(response.outcome) {
             Ok(decision) => decision,
             Err(error) => {
-                session_arc
-                    .lock()
-                    .await
-                    .pending_approvals
-                    .remove(&approval_id);
+                self.session_interactive
+                    .remove_pending_approval(host_session_id, &approval_id)
+                    .await;
                 return Err(error);
             }
         };
-        let pending = {
-            let mut session = session_arc.lock().await;
-            let Some(pending) = session.pending_approvals.remove(&approval_id) else {
-                return Err("approval request was already resolved".to_string());
-            };
-            if matches!(decision, ApprovalDecisionValue::Approve) {
-                apply_approval_scope(&mut session, &scope, &pending);
-            }
-            pending
-        };
-        let _ = pending.tx.send(decision);
 
-        match rx.await {
-            Ok(ApprovalDecisionValue::Approve) => Ok(()),
-            Ok(ApprovalDecisionValue::Deny) => Err("rejected by user".to_string()),
-            Ok(ApprovalDecisionValue::Cancel) => Err("cancelled by user".to_string()),
-            Err(_) => Err("approval channel closed".to_string()),
+        if let Some(pending) = self
+            .session_interactive
+            .remove_pending_approval(host_session_id, &approval_id)
+            .await
+        {
+            let _ = pending.tx.send(decision.clone());
+            if matches!(decision, ApprovalDecisionValue::Approve)
+                && let Some(session_handle) = self.session(host_session_id).await
+            {
+                let (scope_tx, _) = oneshot::channel();
+                session_handle
+                    .apply_approval_scope(
+                        scope,
+                        PendingApproval {
+                            tool_name: pending.tool_name,
+                            path: pending.path,
+                            host: pending.host,
+                            command_prefix: pending.command_prefix,
+                            tx: scope_tx,
+                        },
+                    )
+                    .await;
+            }
         }
+
+        complete_approval_wait(rx)
+            .await
+            .and_then(|decision| match decision {
+                ApprovalDecisionValue::Approve => Ok(()),
+                ApprovalDecisionValue::Deny => Err("rejected by user".to_string()),
+                ApprovalDecisionValue::Cancel => Err("cancelled by user".to_string()),
+            })
     }
 }
 
@@ -517,52 +602,6 @@ fn approval_decision_from_acp_outcome(
         },
         devo_protocol::AcpPermissionOutcome::Cancelled => {
             Ok((ApprovalDecisionValue::Cancel, ApprovalScopeValue::Once))
-        }
-    }
-}
-
-fn apply_approval_scope(
-    session: &mut RuntimeSession,
-    scope: &ApprovalScopeValue,
-    pending: &PendingApproval,
-) {
-    match scope {
-        ApprovalScopeValue::Once => {}
-        ApprovalScopeValue::Turn => {
-            session
-                .turn_approval_cache
-                .tools
-                .insert(pending.tool_name.clone());
-        }
-        ApprovalScopeValue::Session => {
-            session
-                .session_approval_cache
-                .tools
-                .insert(pending.tool_name.clone());
-        }
-        ApprovalScopeValue::PathPrefix => {
-            if let Some(path) = pending.path.clone() {
-                session.turn_approval_cache.path_prefixes.insert(path);
-            }
-        }
-        ApprovalScopeValue::Host => {
-            if let Some(host) = pending.host.clone() {
-                session.turn_approval_cache.hosts.insert(host);
-            }
-        }
-        ApprovalScopeValue::Tool => {
-            session
-                .turn_approval_cache
-                .tools
-                .insert(pending.tool_name.clone());
-        }
-        ApprovalScopeValue::CommandPrefix => {
-            if let Some(command_prefix) = pending.command_prefix.clone() {
-                session
-                    .session_approval_cache
-                    .command_prefixes
-                    .insert(command_prefix);
-            }
         }
     }
 }

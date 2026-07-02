@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
@@ -60,7 +59,7 @@ pub(crate) struct PendingUserInput {
     pub(crate) tx: oneshot::Sender<RequestUserInputResponse>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ApprovalGrantCache {
     pub(crate) tools: HashSet<String>,
     pub(crate) hosts: HashSet<String>,
@@ -227,10 +226,6 @@ pub(crate) struct RuntimeSession {
     pub(crate) next_item_seq: u64,
     /// First user input captured from the session's first turn, used for title generation.
     pub(crate) first_user_input: Option<String>,
-    /// Active approval requests waiting for client decisions.
-    pub(crate) pending_approvals: HashMap<String, PendingApproval>,
-    /// Active request_user_input calls waiting for client answers.
-    pub(crate) pending_user_inputs: HashMap<String, PendingUserInput>,
     /// Session-specific tool registry, used when the session was created with
     /// request-scoped tool sources such as ACP MCP servers.
     pub(crate) tool_registry: Option<Arc<ToolRegistry>>,
@@ -238,13 +233,6 @@ pub(crate) struct RuntimeSession {
     pub(crate) session_approval_cache: ApprovalGrantCache,
     /// Turn-scoped approvals granted through ACP permission responses.
     pub(crate) turn_approval_cache: ApprovalGrantCache,
-}
-
-impl RuntimeSession {
-    /// Wraps a new runtime session in an async mutex for storage in the session map.
-    pub(crate) fn shared(self) -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(self))
-    }
 }
 
 #[cfg(test)]

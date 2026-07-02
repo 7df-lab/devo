@@ -13,8 +13,6 @@ mod projection;
 mod protocol;
 mod provider_config;
 mod runtime;
-#[cfg(any(windows, target_os = "macos"))]
-mod server_tray;
 mod session;
 mod session_context;
 mod singleton;

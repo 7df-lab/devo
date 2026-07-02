@@ -44,20 +44,22 @@ impl ServerRuntime {
             );
         };
 
-        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+        let Some(session_handle) = self.session(params.session_id).await else {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::SessionNotFound,
                 "session does not exist",
             );
         };
-        let (workspace_root, runtime_context) = {
-            let session = session_arc.lock().await;
-            (
-                session.summary.cwd.clone(),
-                Arc::clone(&session.runtime_context),
-            )
+        let Some(hook_context) = session_handle.hook_context_snapshot().await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
         };
+        let workspace_root = hook_context.summary.cwd.clone();
+        let runtime_context = hook_context.runtime_context;
         let Some(resolved_input) = (match runtime_context
             .resolve_input_items(&edited_input, Some(workspace_root.as_path()))
         {
@@ -128,7 +130,13 @@ impl ServerRuntime {
                 "message/editPrevious queued-only edits are not implemented",
             );
         }
-        let session = session_arc.lock().await;
+        let Some(session) = session_handle.export_runtime_session().await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
         if session.active_turn.is_some() {
             return self.error_response(
                 request_id,
@@ -189,6 +197,14 @@ impl ServerRuntime {
         let requested_reasoning_effort_selection =
             session.summary.reasoning_effort_selection.clone();
         let runtime_context = Arc::clone(&session.runtime_context);
+        let (session_context, turn_context, collaboration_mode) = {
+            let core_session = session.core_session.lock().await;
+            (
+                core_session.session_context.clone(),
+                core_session.latest_turn_context.clone(),
+                core_session.collaboration_mode,
+            )
+        };
         drop(session);
 
         let turn_config = runtime_context.resolve_turn_config(
@@ -275,15 +291,6 @@ impl ServerRuntime {
             usage: None,
             stop_reason: None,
             failure_reason: None,
-        };
-        let (session_context, turn_context, collaboration_mode) = {
-            let session = session_arc.lock().await;
-            let core_session = session.core_session.lock().await;
-            (
-                core_session.session_context.clone(),
-                core_session.latest_turn_context.clone(),
-                core_session.collaboration_mode,
-            )
         };
         if let Err(error) = self
             .rollout_store
@@ -391,46 +398,52 @@ impl ServerRuntime {
             );
         }
 
+        let Some(mut session) = session_handle.export_runtime_session().await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+        session
+            .persisted_turn_items
+            .retain(|item| item.turn_id != target_turn_id);
+        let mut rebuilt_messages = Vec::new();
+        let mut rebuilt_history_items = Vec::new();
+        let mut tool_names_by_id = HashMap::new();
+        for item in &session.persisted_turn_items {
+            crate::persistence::apply_turn_item(
+                &mut rebuilt_messages,
+                &mut rebuilt_history_items,
+                &mut tool_names_by_id,
+                &item.turn_kind,
+                item.turn_item.clone(),
+            );
+        }
+        if let Some(history_item) = history_item_from_turn_item(&replacement_item) {
+            rebuilt_history_items.push(history_item);
+        }
+        session.history_items = rebuilt_history_items;
+        session
+            .persisted_turn_items
+            .push(crate::execution::PersistedTurnItem {
+                turn_id: replacement_turn_id,
+                turn_kind: replacement_turn.kind.clone(),
+                item_id: replacement_message_id,
+                turn_item: replacement_item.clone(),
+            });
+        let branch_turn_count = session
+            .persisted_turn_items
+            .iter()
+            .filter(|item| matches!(item.turn_item, TurnItem::UserMessage(_)))
+            .count()
+            .saturating_sub(1);
+        session.latest_compaction_snapshot = None;
+        session.summary.status = SessionRuntimeStatus::ActiveTurn;
+        session.summary.updated_at = now;
+        session.summary.last_activity_at = now;
+        session.active_turn = Some(replacement_turn.clone());
         {
-            let mut session = session_arc.lock().await;
-            session
-                .persisted_turn_items
-                .retain(|item| item.turn_id != target_turn_id);
-            let mut rebuilt_messages = Vec::new();
-            let mut rebuilt_history_items = Vec::new();
-            let mut tool_names_by_id = HashMap::new();
-            for item in &session.persisted_turn_items {
-                crate::persistence::apply_turn_item(
-                    &mut rebuilt_messages,
-                    &mut rebuilt_history_items,
-                    &mut tool_names_by_id,
-                    &item.turn_kind,
-                    item.turn_item.clone(),
-                );
-            }
-            if let Some(history_item) = history_item_from_turn_item(&replacement_item) {
-                rebuilt_history_items.push(history_item);
-            }
-            session.history_items = rebuilt_history_items;
-            session
-                .persisted_turn_items
-                .push(crate::execution::PersistedTurnItem {
-                    turn_id: replacement_turn_id,
-                    turn_kind: replacement_turn.kind.clone(),
-                    item_id: replacement_message_id,
-                    turn_item: replacement_item.clone(),
-                });
-            let branch_turn_count = session
-                .persisted_turn_items
-                .iter()
-                .filter(|item| matches!(item.turn_item, TurnItem::UserMessage(_)))
-                .count()
-                .saturating_sub(1);
-            session.latest_compaction_snapshot = None;
-            session.summary.status = SessionRuntimeStatus::ActiveTurn;
-            session.summary.updated_at = now;
-            session.summary.last_activity_at = now;
-            session.active_turn = Some(replacement_turn.clone());
             let mut core_session = session.core_session.lock().await;
             core_session.messages = rebuilt_messages;
             core_session.prompt_messages = None;
@@ -443,11 +456,20 @@ impl ServerRuntime {
                 }
             }
         }
+        session_handle
+            .replace_state(
+                crate::runtime::session_actor::SessionActorState::from_runtime_session(session),
+            )
+            .await;
 
         self.active_turn_cancellations
             .lock()
             .await
             .insert(params.session_id, CancellationToken::new());
+        self.active_turn_ids
+            .lock()
+            .await
+            .insert(params.session_id, replacement_turn.turn_id);
         let runtime = Arc::clone(self);
         let replacement_turn_for_task = replacement_turn.clone();
         let turn_config_for_task = turn_config.clone();

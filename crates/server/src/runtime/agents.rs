@@ -60,39 +60,33 @@ impl ServerRuntime {
             ));
         }
 
-        let parent_arc = self.session_arc(parent_session_id).await?;
-        let parent_snapshot = {
-            let parent = parent_arc.lock().await;
-            let stable_items = if fork_turns == "all" {
-                let active_turn_id = parent.active_turn.as_ref().map(|turn| turn.turn_id);
-                parent
-                    .persisted_turn_items
-                    .iter()
-                    .filter(|item| active_turn_id.is_none_or(|turn_id| item.turn_id != turn_id))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            (
-                parent.summary.clone(),
-                parent.config.clone(),
-                stable_items,
-                parent.latest_turn.clone(),
-                parent.active_turn.as_ref().map(|turn| turn.turn_id),
-                parent.tool_registry.clone(),
-                Arc::clone(&parent.runtime_context),
-            )
+        let parent_handle = self.session(parent_session_id).await.ok_or_else(|| {
+            ToolCallError::InvalidInput(format!("session not found: {parent_session_id}"))
+        })?;
+        let parent_snapshot = if let Some(snapshot) = self
+            .active_spawn_snapshot_for_session(parent_session_id)
+            .await
+        {
+            snapshot
+        } else {
+            parent_handle.spawn_snapshot().await.ok_or_else(|| {
+                ToolCallError::InvalidInput(format!(
+                    "failed to snapshot parent session: {parent_session_id}"
+                ))
+            })?
         };
-        let (
-            parent_summary,
-            parent_config,
-            stable_items,
-            parent_latest_turn,
-            parent_active_turn_id,
-            parent_tool_registry,
-            runtime_context,
-        ) = parent_snapshot;
+        let stable_items = if fork_turns == "all" {
+            parent_snapshot.stable_items
+        } else {
+            Vec::new()
+        };
+
+        let parent_summary = parent_snapshot.parent_summary;
+        let parent_config = parent_snapshot.parent_config;
+        let parent_latest_turn = parent_snapshot.parent_latest_turn;
+        let parent_active_turn_id = parent_snapshot.parent_active_turn_id;
+        let parent_tool_registry = parent_snapshot.parent_tool_registry;
+        let runtime_context = parent_snapshot.runtime_context;
         let parent_usage_turn_id =
             parent_active_turn_id.or_else(|| parent_latest_turn.as_ref().map(|turn| turn.turn_id));
 
@@ -233,16 +227,12 @@ impl ServerRuntime {
             deferred_reasoning: None,
             next_item_seq: 1,
             first_user_input: Some(params.message.clone()),
-            pending_approvals: HashMap::new(),
-            pending_user_inputs: std::collections::HashMap::new(),
             tool_registry: parent_tool_registry,
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
         };
-        self.sessions
-            .lock()
-            .await
-            .insert(child_session_id, child_session.shared());
+        let child_state = SessionActorState::from_runtime_session(child_session);
+        self.insert_session_actor(child_state).await;
         self.agent_mailboxes
             .lock()
             .await
@@ -302,6 +292,12 @@ impl ServerRuntime {
         let start_runtime = Arc::clone(self);
         let start_summary = summary;
         let start_message = params.message.clone();
+        tracing::debug!(
+            parent_session_id = %parent_session_id,
+            child_session_id = %child_session_id,
+            agent_path = %agent_path,
+            "subagent startup task spawned"
+        );
         tokio::spawn(async move {
             start_runtime
                 .broadcast_event(ServerEvent::SessionStarted(SessionEventPayload {
@@ -377,18 +373,6 @@ impl ServerRuntime {
         })
     }
 
-    async fn session_arc(
-        &self,
-        session_id: SessionId,
-    ) -> Result<Arc<Mutex<RuntimeSession>>, ToolCallError> {
-        self.sessions
-            .lock()
-            .await
-            .get(&session_id)
-            .cloned()
-            .ok_or_else(|| ToolCallError::InvalidInput(format!("session not found: {session_id}")))
-    }
-
     async fn mailbox(&self, session_id: SessionId) -> SubagentMailbox {
         self.agent_mailboxes
             .lock()
@@ -444,47 +428,47 @@ impl ServerRuntime {
         input_text: String,
         queued_metadata: Option<serde_json::Value>,
     ) -> Result<TurnMetadata, ToolCallError> {
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
-            return Err(ToolCallError::InvalidInput(format!(
-                "session not found: {session_id}"
-            )));
-        };
-        let queued_active_turn = {
-            let session = session_arc.lock().await;
-            if session.max_turns.is_some_and(|max_turns| {
-                max_turns == 0
-                    || session
-                        .active_turn
-                        .as_ref()
-                        .is_some_and(|turn| turn.sequence >= max_turns)
-                    || session
-                        .latest_turn
-                        .as_ref()
-                        .is_some_and(|turn| turn.sequence >= max_turns)
-            }) {
-                return Err(ToolCallError::InvalidInput(
-                    "agent maximum turn count reached".to_string(),
-                ));
-            }
-            session.active_turn.as_ref().map(|turn| {
-                (
-                    turn.clone(),
-                    Arc::clone(&session.pending_turn_queue),
-                    session.summary.ephemeral,
-                )
-            })
-        };
-        if let Some((active_turn, pending_turn_queue, is_ephemeral)) = queued_active_turn {
-            let item = devo_core::PendingInputItem::new(
-                devo_core::PendingInputKind::UserText { text: input_text },
+        let session_handle = self.session(session_id).await.ok_or_else(|| {
+            ToolCallError::InvalidInput(format!("session not found: {session_id}"))
+        })?;
+
+        let reservation = session_handle
+            .turn_reservation_snapshot()
+            .await
+            .ok_or_else(|| {
+                ToolCallError::InvalidInput(format!(
+                    "failed to snapshot session reservation: {session_id}"
+                ))
+            })?;
+
+        if reservation.max_turns.is_some_and(|max_turns| {
+            max_turns == 0
+                || reservation
+                    .active_turn
+                    .as_ref()
+                    .is_some_and(|turn| turn.sequence >= max_turns)
+                || reservation
+                    .latest_turn
+                    .as_ref()
+                    .is_some_and(|turn| turn.sequence >= max_turns)
+        }) {
+            return Err(ToolCallError::InvalidInput(
+                "agent maximum turn count reached".to_string(),
+            ));
+        }
+
+        if let Some(active_turn) = reservation.active_turn.clone() {
+            let item = devo_protocol::PendingInputItem::new(
+                devo_protocol::PendingInputKind::UserText { text: input_text },
                 queued_metadata,
                 Utc::now(),
             );
-            pending_turn_queue
+            reservation
+                .pending_turn_queue
                 .lock()
                 .expect("pending turn queue mutex should not be poisoned")
                 .push_back(item.clone());
-            if !is_ephemeral
+            if !reservation.ephemeral
                 && let Err(error) = self
                     .deps
                     .db
@@ -500,54 +484,50 @@ impl ServerRuntime {
             return Ok(active_turn);
         }
 
-        let (turn_config, resolved_request) = {
-            let session = session_arc.lock().await;
-            let turn_config = session.runtime_context.resolve_turn_config(
-                session_model_selection(&session.summary),
-                session.summary.reasoning_effort_selection.clone(),
-            );
-            let resolved_request = turn_config.model.resolve_reasoning_effort_selection(
-                turn_config.reasoning_effort_selection.as_deref(),
-            );
-            (turn_config, resolved_request)
-        };
+        let turn_config = reservation.runtime_context.resolve_turn_config(
+            session_model_selection(&reservation.summary),
+            reservation.summary.reasoning_effort_selection.clone(),
+        );
+        let resolved_request = turn_config
+            .model
+            .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
+
         let request_model = turn_config.provider_request_model(&resolved_request.request_model);
         let now = Utc::now();
-        let turn = {
-            let mut session = session_arc.lock().await;
-            let turn = TurnMetadata {
-                turn_id: TurnId::new(),
-                session_id,
-                sequence: session
-                    .latest_turn
-                    .as_ref()
-                    .map_or(1, |turn| turn.sequence + 1),
-                status: TurnStatus::Running,
-                kind: devo_core::TurnKind::Regular,
-                model: turn_config.model.slug.clone(),
-                model_binding_id: turn_config.model_binding_id.clone(),
-                reasoning_effort_selection: turn_config.reasoning_effort_selection.clone(),
-                reasoning_effort: resolved_request.effective_reasoning_effort,
-                request_model,
-                request_thinking: resolved_request.request_thinking.clone(),
-                started_at: now,
-                completed_at: None,
-                usage: None,
-                stop_reason: None,
-                failure_reason: None,
-            };
-            session.summary.status = SessionRuntimeStatus::ActiveTurn;
-            session.summary.updated_at = now;
-            session.summary.last_activity_at = now;
-            apply_turn_config_to_session_summary(&mut session.summary, &turn_config);
-            session.active_turn = Some(turn.clone());
-            turn
+        let sequence = reservation
+            .latest_turn
+            .as_ref()
+            .map_or(1, |turn| turn.sequence + 1);
+        let turn = TurnMetadata {
+            turn_id: TurnId::new(),
+            session_id,
+            sequence,
+            status: TurnStatus::Running,
+            kind: devo_core::TurnKind::Regular,
+            model: turn_config.model.slug.clone(),
+            model_binding_id: turn_config.model_binding_id.clone(),
+            reasoning_effort_selection: turn_config.reasoning_effort_selection.clone(),
+            reasoning_effort: resolved_request.effective_reasoning_effort,
+            request_model,
+            request_thinking: resolved_request.request_thinking.clone(),
+            started_at: now,
+            completed_at: None,
+            usage: None,
+            stop_reason: None,
+            failure_reason: None,
         };
+
+        session_handle
+            .begin_active_turn(turn.clone(), turn_config.clone())
+            .await;
+
         if let Err(error) = self.append_turn_start(session_id, &turn).await {
-            self.clear_active_turn_reservation(&session_arc, turn.turn_id)
+            let _ = session_handle
+                .clear_active_turn_if_matches(turn.turn_id)
                 .await;
             return Err(error);
         }
+
         self.broadcast_event(ServerEvent::SessionStatusChanged(
             SessionStatusChangedPayload {
                 session_id,
@@ -560,15 +540,12 @@ impl ServerRuntime {
             turn: turn.clone(),
         }))
         .await;
+
         let runtime = Arc::clone(self);
         let turn_for_task = turn.clone();
         let turn_config_for_task = turn_config.clone();
         let cancel_token = CancellationToken::new();
-        let parent_session_id = {
-            let session = session_arc.lock().await;
-            session.summary.parent_session_id
-        };
-        if let Some(parent_session_id) = parent_session_id {
+        if let Some(parent_session_id) = reservation.parent_session_id {
             let mut connections = self.active_turn_connections.lock().await;
             if let Some(connection_id) = connections.get(&parent_session_id).copied() {
                 connections.insert(session_id, connection_id);
@@ -578,6 +555,10 @@ impl ServerRuntime {
             .lock()
             .await
             .insert(session_id, cancel_token);
+        self.active_turn_ids
+            .lock()
+            .await
+            .insert(session_id, turn.turn_id);
         let task = tokio::spawn(async move {
             runtime
                 .execute_turn(ExecuteTurnRequest {
@@ -604,24 +585,22 @@ impl ServerRuntime {
         session_id: SessionId,
         turn: &TurnMetadata,
     ) -> Result<(), ToolCallError> {
-        let session_arc = self
-            .sessions
-            .lock()
+        let session_handle = self.session(session_id).await.ok_or_else(|| {
+            ToolCallError::InvalidInput(format!("session not found: {session_id}"))
+        })?;
+        let persistence_snapshot = session_handle
+            .turn_persistence_snapshot()
             .await
-            .get(&session_id)
-            .cloned()
             .ok_or_else(|| {
-                ToolCallError::InvalidInput(format!("session not found: {session_id}"))
+                ToolCallError::InvalidInput(format!(
+                    "failed to snapshot turn persistence: {session_id}"
+                ))
             })?;
-        let (record, session_context, turn_context) = {
-            let session = session_arc.lock().await;
-            let core_session = session.core_session.lock().await;
-            (
-                session.record.clone(),
-                core_session.session_context.clone(),
-                core_session.latest_turn_context.clone(),
-            )
-        };
+        let (record, session_context, turn_context) = (
+            persistence_snapshot.record.clone(),
+            persistence_snapshot.session_context.clone(),
+            persistence_snapshot.latest_turn_context.clone(),
+        );
         if let Some(record) = record {
             self.rollout_store
                 .append_turn(
@@ -770,12 +749,13 @@ impl ServerRuntime {
     }
 
     async fn session_agent_path(&self, session_id: SessionId) -> String {
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+        let Some(session_handle) = self.session(session_id).await else {
             return "root".to_string();
         };
-        let session = session_arc.lock().await;
-        session
-            .summary
+        let Some(summary) = session_handle.summary().await else {
+            return "root".to_string();
+        };
+        summary
             .agent_path
             .clone()
             .unwrap_or_else(|| "root".to_string())
@@ -786,11 +766,73 @@ impl ServerRuntime {
         child_session_id: SessionId,
         turn: &TurnMetadata,
     ) {
-        let Some((parent_session_id, _agent_path)) =
-            self.child_parent_and_path(child_session_id).await
+        let Some((parent_session_id, status)) = self
+            .resolve_terminal_subagent_status(child_session_id, turn)
+            .await
         else {
             return;
         };
+        let detail = self
+            .subagent_terminal_status_detail(child_session_id, turn.turn_id, status)
+            .await;
+        self.finish_subagent_turn_completion(
+            parent_session_id,
+            child_session_id,
+            turn,
+            status,
+            detail,
+        )
+        .await;
+        if subagent_stop_hook_applies(status) {
+            self.run_subagent_stop_hook(child_session_id).await;
+        }
+    }
+
+    /// Same as `handle_subagent_turn_completed`, but reads any data owned by
+    /// the currently-executing session actor directly from `state` instead of
+    /// round-tripping through the session actor mailbox.
+    ///
+    /// Must be used when `child_session_id` is the session actor currently
+    /// executing this code: that actor's mailbox is not being polled until
+    /// the in-flight turn finishes, so a mailbox round-trip here would
+    /// deadlock forever waiting on itself.
+    pub(super) async fn handle_subagent_turn_completed_for_actor_state(
+        &self,
+        state: &SessionActorState,
+        child_session_id: SessionId,
+        turn: &TurnMetadata,
+    ) {
+        let Some((parent_session_id, status)) = self
+            .resolve_terminal_subagent_status(child_session_id, turn)
+            .await
+        else {
+            return;
+        };
+        let detail = subagent_terminal_status_detail_from_stable_items(
+            &state.persisted_turn_items,
+            turn.turn_id,
+            status,
+        );
+        self.finish_subagent_turn_completion(
+            parent_session_id,
+            child_session_id,
+            turn,
+            status,
+            detail,
+        )
+        .await;
+        if subagent_stop_hook_applies(status) {
+            self.run_subagent_stop_hook_for_actor_state(state, child_session_id)
+                .await;
+        }
+    }
+
+    async fn resolve_terminal_subagent_status(
+        &self,
+        child_session_id: SessionId,
+        turn: &TurnMetadata,
+    ) -> Option<(SessionId, SubagentStatus)> {
+        let (parent_session_id, _agent_path) = self.child_parent_and_path(child_session_id).await?;
         let status = match turn.status {
             TurnStatus::Completed => SubagentStatus::Completed,
             TurnStatus::Interrupted => SubagentStatus::Interrupted,
@@ -807,10 +849,18 @@ impl ServerRuntime {
         } else {
             status
         };
+        Some((parent_session_id, status))
+    }
+
+    async fn finish_subagent_turn_completion(
+        &self,
+        parent_session_id: SessionId,
+        child_session_id: SessionId,
+        turn: &TurnMetadata,
+        status: SubagentStatus,
+        detail: Option<String>,
+    ) {
         self.set_agent_status(parent_session_id, child_session_id, status)
-            .await;
-        let detail = self
-            .subagent_terminal_status_detail(child_session_id, turn.turn_id, status)
             .await;
         self.record_subagent_status_event_with_text(
             parent_session_id,
@@ -820,16 +870,6 @@ impl ServerRuntime {
             detail,
         )
         .await;
-        if matches!(
-            status,
-            SubagentStatus::Completed
-                | SubagentStatus::Failed
-                | SubagentStatus::Interrupted
-                | SubagentStatus::Canceled
-                | SubagentStatus::Closed
-        ) {
-            self.run_subagent_stop_hook(child_session_id).await;
-        }
     }
 
     async fn subagent_terminal_status_detail(
@@ -841,35 +881,9 @@ impl ServerRuntime {
         if status != SubagentStatus::Failed {
             return None;
         }
-        let session_arc = self.sessions.lock().await.get(&child_session_id).cloned()?;
-        let session = session_arc.lock().await;
-        session.persisted_turn_items.iter().rev().find_map(|item| {
-            if item.turn_id != turn_id {
-                return None;
-            }
-            match &item.turn_item {
-                TurnItem::AgentMessage(TextItem { text }) if !text.trim().is_empty() => {
-                    Some(text.trim().to_string())
-                }
-                TurnItem::UserMessage(_)
-                | TurnItem::SteerInput(_)
-                | TurnItem::HookPrompt(_)
-                | TurnItem::AgentMessage(_)
-                | TurnItem::Plan(_)
-                | TurnItem::Reasoning(_)
-                | TurnItem::ToolCall(_)
-                | TurnItem::ToolProgress(_)
-                | TurnItem::ToolResult(_)
-                | TurnItem::CommandExecution(_)
-                | TurnItem::ApprovalRequest(_)
-                | TurnItem::ApprovalDecision(_)
-                | TurnItem::WebSearch(_)
-                | TurnItem::ImageGeneration(_)
-                | TurnItem::ContextCompaction(_)
-                | TurnItem::ResearchArtifact(_)
-                | TurnItem::TurnSummary(_) => None,
-            }
-        })
+        let session_handle = self.sessions.lock().await.get(&child_session_id).cloned()?;
+        let snapshot = session_handle.spawn_snapshot().await?;
+        subagent_terminal_status_detail_from_stable_items(&snapshot.stable_items, turn_id, status)
     }
 
     pub(super) async fn child_parent_and_path(
@@ -977,6 +991,38 @@ impl ServerRuntime {
             .is_some_and(|metadata| metadata.close_requested)
     }
 
+    pub(super) async fn interrupt_all_child_agents(self: Arc<Self>, parent_session_id: SessionId) {
+        let child_session_ids = {
+            let registries = self.agent_registries.lock().await;
+            registries
+                .get(&parent_session_id)
+                .map(|registry| registry.children_of(parent_session_id))
+                .unwrap_or_default()
+        };
+        let research_children = self
+            .research_child_agents
+            .lock()
+            .await
+            .get(&parent_session_id)
+            .cloned()
+            .unwrap_or_default();
+        Arc::clone(&self)
+            .close_research_child_agents(parent_session_id)
+            .await;
+        for child_session_id in child_session_ids {
+            if research_children.contains(&child_session_id) {
+                continue;
+            }
+            let _ = self.interrupt_child_runtime_work(child_session_id).await;
+            self.set_agent_status(
+                parent_session_id,
+                child_session_id,
+                SubagentStatus::Interrupted,
+            )
+            .await;
+        }
+    }
+
     async fn close_child_agent(
         self: &Arc<Self>,
         parent_session_id: SessionId,
@@ -1009,6 +1055,16 @@ impl ServerRuntime {
             }
             terminal
         };
+        // A running turn's cancellation is now observed by the session actor's
+        // own turn-completion handling (`handle_subagent_turn_completed_for_actor_state`),
+        // which independently resolves and records the terminal "closed" status
+        // once it sees `close_requested`. Track whether a turn was actually in
+        // flight so we don't also send a duplicate closed notification below.
+        let had_active_turn = self
+            .active_turn_cancellations
+            .lock()
+            .await
+            .contains_key(&child_session_id);
         let interrupted_turn = self.interrupt_child_runtime_work(child_session_id).await;
         if already_terminal && interrupted_turn.is_none() {
             let status = self
@@ -1033,7 +1089,7 @@ impl ServerRuntime {
             .await;
             self.handle_subagent_turn_completed(child_session_id, &turn)
                 .await;
-        } else {
+        } else if !had_active_turn {
             self.send_closed_notification(parent_session_id, child_session_id)
                 .await;
         }
@@ -1107,6 +1163,54 @@ struct AgentRoute {
     to_session_id: SessionId,
     from_agent_path: String,
     to_agent_path: String,
+}
+
+fn subagent_stop_hook_applies(status: SubagentStatus) -> bool {
+    matches!(
+        status,
+        SubagentStatus::Completed
+            | SubagentStatus::Failed
+            | SubagentStatus::Interrupted
+            | SubagentStatus::Canceled
+            | SubagentStatus::Closed
+    )
+}
+
+fn subagent_terminal_status_detail_from_stable_items(
+    stable_items: &[crate::execution::PersistedTurnItem],
+    turn_id: TurnId,
+    status: SubagentStatus,
+) -> Option<String> {
+    if status != SubagentStatus::Failed {
+        return None;
+    }
+    stable_items.iter().rev().find_map(|item| {
+        if item.turn_id != turn_id {
+            return None;
+        }
+        match &item.turn_item {
+            TurnItem::AgentMessage(TextItem { text }) if !text.trim().is_empty() => {
+                Some(text.trim().to_string())
+            }
+            TurnItem::UserMessage(_)
+            | TurnItem::SteerInput(_)
+            | TurnItem::HookPrompt(_)
+            | TurnItem::AgentMessage(_)
+            | TurnItem::Plan(_)
+            | TurnItem::Reasoning(_)
+            | TurnItem::ToolCall(_)
+            | TurnItem::ToolProgress(_)
+            | TurnItem::ToolResult(_)
+            | TurnItem::CommandExecution(_)
+            | TurnItem::ApprovalRequest(_)
+            | TurnItem::ApprovalDecision(_)
+            | TurnItem::WebSearch(_)
+            | TurnItem::ImageGeneration(_)
+            | TurnItem::ContextCompaction(_)
+            | TurnItem::ResearchArtifact(_)
+            | TurnItem::TurnSummary(_) => None,
+        }
+    })
 }
 
 fn generated_name_start_index(child_session_id: SessionId, max_count: usize) -> usize {

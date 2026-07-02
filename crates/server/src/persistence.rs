@@ -341,12 +341,12 @@ impl RolloutStore {
     pub(crate) async fn load_sessions(
         &self,
         deps: &ServerRuntimeDependencies,
-    ) -> Result<HashMap<SessionId, std::sync::Arc<Mutex<RuntimeSession>>>> {
+    ) -> Result<HashMap<SessionId, RuntimeSession>> {
         let mut sessions = HashMap::new();
         for rollout_path in self.rollout_paths()? {
             match self.load_session_from_rollout(&rollout_path, deps).await {
                 Ok(recovered) => {
-                    sessions.insert(recovered.summary.session_id, recovered.shared());
+                    sessions.insert(recovered.summary.session_id, recovered);
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -916,8 +916,6 @@ impl ReplayState {
             deferred_reasoning: None,
             next_item_seq: self.next_item_seq.max(1),
             first_user_input: None,
-            pending_approvals: std::collections::HashMap::new(),
-            pending_user_inputs: std::collections::HashMap::new(),
             tool_registry: None,
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),

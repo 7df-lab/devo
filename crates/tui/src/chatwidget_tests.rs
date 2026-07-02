@@ -968,6 +968,73 @@ fn approval_request_does_not_duplicate_already_committed_assistant_text() {
 }
 
 #[test]
+fn research_clarification_artifact_streams_incremental_deltas_before_completion() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let artifact_id = ItemId::new();
+    let research = Some(ResearchArtifactMetadata {
+        artifact_type: "clarification".to_string(),
+        title: "Research Clarification".to_string(),
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        research: research.clone(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        research: research.clone(),
+        delta: "Research ".to_string(),
+    });
+    let partial_rows = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(
+        partial_rows.contains("Research "),
+        "clarification artifact delta should be visible before completion:\n{partial_rows}"
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        research: research.clone(),
+        delta: "DeepSeek official website.".to_string(),
+    });
+    let streamed_rows = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(
+        streamed_rows.contains("DeepSeek official website."),
+        "clarification artifact should grow with later deltas:\n{streamed_rows}"
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id: artifact_id,
+        kind: crate::events::TextItemKind::ResearchArtifact,
+        research,
+        final_text: "### Research Clarification\n\nResearch DeepSeek official website.".to_string(),
+    });
+
+    let committed = scrollback_plain_lines(&trim_trailing_blank_scrollback_lines(
+        widget.drain_scrollback_lines(80),
+    ))
+    .join("\n");
+    assert!(
+        committed.contains("Research DeepSeek official website."),
+        "clarification artifact should commit final content:\n{committed}"
+    );
+}
+
+#[test]
 fn research_artifact_completion_does_not_commit_assistant_turn() {
     let model = Model {
         slug: "test-model".to_string(),
@@ -5807,10 +5874,10 @@ fn terminal_subagent_status_hides_ctrl_x_hint_when_no_live_children_remain() {
     assert!(!widget.has_live_subagents_for_test());
     assert!(!widget.is_subagent_monitor_open_for_test());
     let rows = rendered_rows(&widget, 100, 18).join("\n");
-    assert!(rows.contains("builder: completed"), "rows:\n{rows}");
+    assert!(rows.contains("builder: done"), "rows:\n{rows}");
     widget.expire_subagent_inactivity_for_test();
     let rows = rendered_rows(&widget, 100, 18).join("\n");
-    assert!(!rows.contains("builder: completed"), "rows:\n{rows}");
+    assert!(!rows.contains("builder: done"), "rows:\n{rows}");
     assert!(!rows.contains("ctrl + x agents"), "rows:\n{rows}");
 }
 

@@ -21,7 +21,6 @@ use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_protocol::normalize_tool_result_messages;
 use futures::Stream;
-use futures::StreamExt;
 use reqwest::Client;
 use reqwest::header::ACCEPT_ENCODING;
 use reqwest::header::CACHE_CONTROL;
@@ -46,11 +45,13 @@ use crate::dsml::DsmlToolCallHealer;
 use crate::hosted_tools::append_anthropic_hosted_tools;
 use crate::http::invalid_status_error;
 use crate::merge_extra_body;
+use crate::timeout;
 
 /// <https://platform.claude.com/docs/en/api/messages>
 /// Anthropic provider backed by the official HTTP API.
 pub struct AnthropicProvider {
     client: Client,
+    streaming_client: Client,
     base_url: String,
     api_key: Option<String>,
     http_options: ProviderHttpOptions,
@@ -61,7 +62,10 @@ impl AnthropicProvider {
         let http_options = ProviderHttpOptions::default();
         Self {
             client: http_options
-                .build_client(None)
+                .build_request_client()
+                .unwrap_or_else(|_| Client::new()),
+            streaming_client: http_options
+                .build_streaming_client()
                 .unwrap_or_else(|_| Client::new()),
             base_url: base_url.into(),
             api_key: None,
@@ -75,7 +79,8 @@ impl AnthropicProvider {
     }
 
     pub fn with_http_options(mut self, http_options: ProviderHttpOptions) -> Result<Self> {
-        self.client = http_options.build_client(None)?;
+        self.client = http_options.build_request_client()?;
+        self.streaming_client = http_options.build_streaming_client()?;
         self.http_options = http_options;
         Ok(self)
     }
@@ -84,9 +89,8 @@ impl AnthropicProvider {
         format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
     }
 
-    fn request_builder(&self, body: &Value) -> reqwest::RequestBuilder {
-        let builder = self
-            .client
+    fn post_builder(&self, client: &Client, body: &Value) -> reqwest::RequestBuilder {
+        let builder = client
             .post(self.endpoint())
             .header("anthropic-version", "2023-06-01")
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -101,8 +105,12 @@ impl AnthropicProvider {
         self.http_options.apply_custom_headers(builder).json(body)
     }
 
+    fn request_builder(&self, body: &Value) -> reqwest::RequestBuilder {
+        self.post_builder(&self.client, body)
+    }
+
     fn streaming_request_builder(&self, body: &Value) -> reqwest::RequestBuilder {
-        self.request_builder(body)
+        self.post_builder(&self.streaming_client, body)
             .header(CACHE_CONTROL, HeaderValue::from_static("no-cache"))
             .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
     }
@@ -377,7 +385,17 @@ impl ModelProviderSDK for AnthropicProvider {
             let mut dsml_text_filters = BTreeMap::new();
 
             futures::pin_mut!(event_source);
-            while let Some(event) = event_source.next().await {
+            loop {
+                let event = match timeout::next_eventsource_event(&mut event_source).await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    Err(idle) => {
+                        Err(anyhow::anyhow!(
+                            "anthropic stream idle timeout for model {}: {idle}",
+                            request.model
+                        ))?
+                    }
+                };
                 let event = match event {
                     Ok(event) => event,
                     Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)) => {

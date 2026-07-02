@@ -18,6 +18,7 @@ pub(super) struct ResearchQueryCapture {
 #[derive(Default)]
 pub(super) struct ClarificationQueryCapture {
     pub(super) text: String,
+    pub(super) artifact: StreamedTextItem,
     pub(super) pending_request_user_input_questions: HashMap<String, Vec<(String, String)>>,
     pub(super) request_user_input_exchanges: Vec<ResearchClarificationContext>,
     pub(super) clarifications: Vec<ResearchClarificationContext>,

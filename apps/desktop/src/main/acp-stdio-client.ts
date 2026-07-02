@@ -9,7 +9,6 @@ import type { AcpTrafficLogRecord, AcpTrafficLogger } from "./acp-traffic-log"
 import { createLogger } from "./logger"
 
 const log = createLogger("acp-stdio-client")
-export const SUPPRESS_SERVER_TRAY_ENV = "DEVO_SUPPRESS_SERVER_TRAY"
 export const DESKTOP_NETWORK_PROXY_MODE_ENV = "DEVO_DESKTOP_NETWORK_PROXY_MODE"
 export const DESKTOP_NETWORK_PROXY_URL_ENV = "DEVO_DESKTOP_NETWORK_PROXY_URL"
 export const DESKTOP_NETWORK_NO_PROXY_ENV = "DEVO_DESKTOP_NETWORK_NO_PROXY"

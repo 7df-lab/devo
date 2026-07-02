@@ -130,10 +130,12 @@ use devo_protocol::SkillSetEnabledParams;
 use devo_protocol::SkillSetEnabledResult;
 use devo_protocol::SpawnAgentParams;
 use devo_protocol::SpawnAgentResult;
+use devo_protocol::TurnId;
 use devo_protocol::TurnInterruptParams;
 use devo_protocol::TurnInterruptResult;
 use devo_protocol::TurnStartParams;
 use devo_protocol::TurnStartResult;
+use devo_protocol::TurnStatus;
 use devo_protocol::TurnSteerParams;
 use devo_protocol::TurnSteerResult;
 use devo_protocol::devo_extension_inner_method;
@@ -166,7 +168,6 @@ type PendingResponses = Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value
 pub struct StdioServerClientConfig {
     pub program: PathBuf,
     pub args: Vec<String>,
-    pub client_capabilities: devo_protocol::AcpClientCapabilities,
 }
 
 #[derive(Debug, Clone)]
@@ -182,7 +183,6 @@ pub struct StdioServerClient {
     acp_pending_permissions: AcpPendingPermissions,
     acp_terminals: AcpTerminalManager,
     acp_agent_capabilities: Option<AcpAgentCapabilities>,
-    client_capabilities: devo_protocol::AcpClientCapabilities,
     next_request_id: AtomicU64,
     notifications_rx: mpsc::UnboundedReceiver<ServerNotificationMessage>,
     notifications_tx: mpsc::UnboundedSender<ServerNotificationMessage>,
@@ -234,22 +234,24 @@ impl StdioServerClient {
             acp_pending_permissions,
             acp_terminals,
             acp_agent_capabilities: None,
-            client_capabilities: config.client_capabilities,
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
         })
     }
 
-    pub async fn initialize(&mut self) -> Result<InitializeResult> {
+    pub async fn initialize(
+        &mut self,
+        client_capabilities: &devo_protocol::AcpClientCapabilities,
+    ) -> Result<InitializeResult> {
         tracing::info!("initializing stdio server client");
         let result: AcpInitializeResult = timeout(
-            Duration::from_secs(10),
+            Duration::from_secs(3),
             self.request(
                 ACP_INITIALIZE_METHOD,
                 AcpInitializeParams {
                     protocol_version: 1,
-                    client_capabilities: self.client_capabilities.clone(),
+                    client_capabilities: client_capabilities.clone(),
                     client_info: Some(
                         AcpImplementation::new("devo", env!("CARGO_PKG_VERSION"))
                             .with_title("Devo"),
@@ -581,14 +583,19 @@ impl StdioServerClient {
         self.request_devo("command/exec/terminate", params).await
     }
 
-    pub async fn turn_start(&mut self, params: TurnStartParams) -> Result<()> {
+    pub async fn turn_start(&mut self, params: TurnStartParams) -> Result<TurnStartResult> {
         match self
             .request_devo::<_, TurnStartResult>("turn/start", params.clone())
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(result) => Ok(result),
             Err(error) if is_method_not_found_error(&error) => {
-                self.turn_start_acp_prompt_detached(params).await
+                self.turn_start_acp_prompt_detached(params).await?;
+                Ok(TurnStartResult::Started {
+                    turn_id: TurnId::new(),
+                    status: TurnStatus::Running,
+                    accepted_at: Utc::now(),
+                })
             }
             Err(error) => Err(error),
         }
@@ -1367,15 +1374,16 @@ mod tests {
             acp_pending_permissions,
             acp_terminals,
             acp_agent_capabilities: None,
-            client_capabilities: client_capabilities.clone(),
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
         };
         let mut stdout_lines = BufReader::new(stdout).lines();
+        let expected_capabilities =
+            serde_json::to_value(&client_capabilities).expect("serialize client capabilities");
 
         let initialize = tokio::spawn(async move {
-            let result = client.initialize().await;
+            let result = client.initialize(&client_capabilities).await;
             (result, client)
         });
 
@@ -1384,7 +1392,7 @@ mod tests {
         assert_eq!(request["params"]["protocolVersion"], serde_json::json!(1));
         assert_eq!(
             request["params"]["clientCapabilities"],
-            serde_json::to_value(&client_capabilities).expect("serialize client capabilities")
+            expected_capabilities
         );
         pending
             .lock()
@@ -1421,7 +1429,6 @@ mod tests {
             acp_pending_permissions,
             acp_terminals,
             acp_agent_capabilities: None,
-            client_capabilities: Default::default(),
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
@@ -1518,7 +1525,6 @@ mod tests {
                 },
                 ..Default::default()
             }),
-            client_capabilities: Default::default(),
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
@@ -1626,7 +1632,6 @@ mod tests {
                 },
                 ..Default::default()
             }),
-            client_capabilities: Default::default(),
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
@@ -1756,7 +1761,6 @@ mod tests {
             acp_pending_permissions,
             acp_terminals,
             acp_agent_capabilities: None,
-            client_capabilities: Default::default(),
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,
@@ -1839,7 +1843,6 @@ mod tests {
             acp_pending_permissions,
             acp_terminals,
             acp_agent_capabilities: None,
-            client_capabilities: Default::default(),
             next_request_id: AtomicU64::new(1),
             notifications_rx,
             notifications_tx,

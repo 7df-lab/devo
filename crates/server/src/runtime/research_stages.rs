@@ -74,7 +74,11 @@ impl ResearchStageKind {
                 artifact_type: ResearchArtifactType::CompressedFinding,
                 title: "Compressed Finding: Research Evidence".to_string(),
             }),
-            ResearchStageKind::Clarify | ResearchStageKind::FinalReport => None,
+            ResearchStageKind::Clarify => Some(StreamedResearchArtifact {
+                artifact_type: ResearchArtifactType::Clarification,
+                title: "Research Clarification".to_string(),
+            }),
+            ResearchStageKind::FinalReport => None,
         }
     }
 }
@@ -132,7 +136,13 @@ mod tests {
 
     #[test]
     fn research_stage_artifacts_are_fixed() {
-        assert_eq!(ResearchStageKind::Clarify.artifact(), None);
+        assert_eq!(
+            ResearchStageKind::Clarify.artifact(),
+            Some(StreamedResearchArtifact {
+                artifact_type: ResearchArtifactType::Clarification,
+                title: "Research Clarification".to_string(),
+            }),
+        );
         assert_eq!(
             ResearchStageKind::Brief.artifact(),
             Some(StreamedResearchArtifact {

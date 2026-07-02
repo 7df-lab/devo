@@ -1,6 +1,7 @@
 use super::*;
 use crate::PendingServerRequestContext;
 use crate::ServerRequestKind;
+use crate::runtime::session_interactive::UserInputTakeError;
 
 impl ServerRuntime {
     pub(super) async fn handle_request_user_input_respond(
@@ -19,33 +20,35 @@ impl ServerRuntime {
             }
         };
 
-        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+        if self.session(params.session_id).await.is_none() {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::SessionNotFound,
                 "session does not exist",
             );
-        };
+        }
 
         let request_key = params.request_id.to_string();
-        let pending = {
-            let mut session = session_arc.lock().await;
-            let Some(pending) = session.pending_user_inputs.remove(&request_key) else {
+        let pending = match self
+            .session_interactive
+            .take_pending_user_input(params.session_id, &request_key, params.turn_id)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(UserInputTakeError::NotFound) => {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InvalidParams,
                     "no pending request_user_input request exists for this runtime",
                 );
-            };
-            if pending.turn_id != params.turn_id {
-                session.pending_user_inputs.insert(request_key, pending);
+            }
+            Err(UserInputTakeError::WrongTurn) => {
                 return self.error_response(
                     request_id,
                     ProtocolErrorCode::InvalidParams,
                     "request_user_input belongs to a different turn",
                 );
             }
-            pending
         };
 
         let _ = pending.tx.send(params.response);
@@ -75,26 +78,19 @@ impl ServerRuntime {
         let request_id = tool_call_id;
         let (tx, rx) = oneshot::channel();
 
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+        if self.session(session_id).await.is_none() {
             return Err(ToolCallError::ExecutionFailed(
                 "session does not exist".to_string(),
             ));
-        };
-        {
-            let mut session = session_arc.lock().await;
-            if session
-                .pending_user_inputs
-                .insert(request_id.clone(), PendingUserInput { turn_id, tx })
-                .is_some()
-            {
-                tracing::warn!(
-                    session_id = %session_id,
-                    turn_id = %turn_id,
-                    request_id = %request_id,
-                    "overwriting pending request_user_input request"
-                );
-            }
         }
+
+        self.session_interactive
+            .register_pending_user_input(
+                session_id,
+                request_id.clone(),
+                PendingUserInput { turn_id, tx },
+            )
+            .await;
 
         self.broadcast_event(ServerEvent::RequestUserInput(RequestUserInputPayload {
             request: PendingServerRequestContext {

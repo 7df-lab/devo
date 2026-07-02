@@ -7,7 +7,7 @@ use devo_protocol::{
     ModelRequest, ModelResponse, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
     StreamEvent, Usage,
 };
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use reqwest_eventsource::{Event, EventSource};
 use serde::Deserialize;
 use serde_json::Value;
@@ -23,6 +23,7 @@ use crate::dsml::DsmlTextStreamFilter;
 use crate::dsml::DsmlToolCallHealer;
 use crate::http::invalid_status_error;
 use crate::text_normalization::{TaggedTextFragment, TaggedTextParser};
+use crate::timeout;
 
 /// <https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events>
 /// Represents a streamed chunk of a chat completion response returned by the model, based on the provided input.
@@ -79,13 +80,23 @@ pub(super) async fn completion_stream(
         "sending openai streaming request"
     );
 
-    let event_source = EventSource::new(provider.request_builder(&body))
+    let event_source = EventSource::new(provider.streaming_request_builder(&body))
         .context("failed to create openai event source")?;
     let stream = async_stream::try_stream! {
         let mut state = ChatCompletionStreamState::for_request(&request);
 
         futures::pin_mut!(event_source);
-        while let Some(event) = event_source.next().await {
+        loop {
+            let event = match timeout::next_eventsource_event(&mut event_source).await {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(idle) => {
+                    Err(anyhow::anyhow!(
+                        "openai stream idle timeout for model {}: {idle}",
+                        request.model
+                    ))?
+                }
+            };
             let event = match event {
                 Ok(event) => event,
                 Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)) => {

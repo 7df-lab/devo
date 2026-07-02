@@ -293,7 +293,7 @@ impl WebSocketServerClient {
             .await
     }
 
-    pub async fn turn_start(&mut self, params: TurnStartParams) -> Result<()> {
+    pub async fn turn_start(&mut self, params: TurnStartParams) -> Result<TurnStartResult> {
         self.core.turn_start(params).await
     }
 

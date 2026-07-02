@@ -121,6 +121,57 @@ impl ScriptedProvider {
         ])
     }
 
+    pub fn dual_spawn_agent_tool_calls(
+        first_message: &str,
+        second_message: &str,
+        fork_turns: &str,
+    ) -> StreamScript {
+        let first_input = serde_json::json!({
+            "message": first_message,
+            "fork_turns": fork_turns,
+        });
+        let second_input = serde_json::json!({
+            "message": second_message,
+            "fork_turns": fork_turns,
+        });
+        let first_id = "spawn-agent-call-1".to_string();
+        let second_id = "spawn-agent-call-2".to_string();
+        StreamScript::Events(vec![
+            StreamEvent::ToolCallStart {
+                index: 0,
+                id: first_id.clone(),
+                name: "spawn_agent".to_string(),
+                input: first_input.clone(),
+            },
+            StreamEvent::ToolCallStart {
+                index: 1,
+                id: second_id.clone(),
+                name: "spawn_agent".to_string(),
+                input: second_input.clone(),
+            },
+            StreamEvent::MessageDone {
+                response: ModelResponse {
+                    id: "dual-spawn-agent-response".to_string(),
+                    content: vec![
+                        ResponseContent::ToolUse {
+                            id: first_id,
+                            name: "spawn_agent".to_string(),
+                            input: first_input,
+                        },
+                        ResponseContent::ToolUse {
+                            id: second_id,
+                            name: "spawn_agent".to_string(),
+                            input: second_input,
+                        },
+                    ],
+                    stop_reason: Some(StopReason::ToolUse),
+                    usage: Usage::default(),
+                    metadata: ResponseMetadata::default(),
+                },
+            },
+        ])
+    }
+
     pub fn wait_agent_tool_call(timeout_secs: u64) -> StreamScript {
         let input = serde_json::json!({ "timeout_secs": timeout_secs });
         let tool_call_id = "wait-agent-call".to_string();

@@ -46,12 +46,12 @@ describe("StdioAcpClient", () => {
 		const env = buildServerProcessEnv({
 			baseEnv: { PATH: "/usr/bin", KEEP: "base" },
 			homeDir: "/Users/tester",
-			optionsEnv: { DEVO_SUPPRESS_SERVER_TRAY: "1", PATH: "/custom/bin" },
+			optionsEnv: { CUSTOM_FLAG: "1", PATH: "/custom/bin" },
 			pathSeparator: ":",
 		})
 
 		expect(env).toMatchObject({
-			DEVO_SUPPRESS_SERVER_TRAY: "1",
+			CUSTOM_FLAG: "1",
 			KEEP: "base",
 			PATH: "/Users/tester/.devo/bin:/custom/bin",
 		})
@@ -61,13 +61,11 @@ describe("StdioAcpClient", () => {
 		const env = buildServerProcessEnv({
 			baseEnv: { PATH: "/usr/bin", KEEP: "base" },
 			homeDir: "/Users/tester",
-			optionsEnv: { DEVO_SUPPRESS_SERVER_TRAY: "1" },
 			pathSeparator: ":",
 			runtimeBinDir: "/Applications/Devo.app/Contents/Resources/runtime/bin",
 		})
 
 		expect(env).toMatchObject({
-			DEVO_SUPPRESS_SERVER_TRAY: "1",
 			KEEP: "base",
 			PATH: "/Applications/Devo.app/Contents/Resources/runtime/bin:/usr/bin",
 		})

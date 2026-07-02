@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 
 use anyhow::Result;
 use clap::Parser;
@@ -22,8 +21,6 @@ use crate::execution::ServerRuntimeDependencies;
 use crate::load_server_provider;
 use crate::resolve_listen_targets;
 use crate::run_listeners_with_internal_proxy;
-#[cfg(windows)]
-use crate::server_tray::ServerTray;
 use crate::singleton::ServerControlAction;
 use crate::singleton::SingletonRole;
 use crate::singleton::acquire_singleton_role;
@@ -32,9 +29,6 @@ use crate::singleton::run_stdio_proxy;
 use crate::transport::DEFAULT_WEBSOCKET_BIND_ADDRESS;
 use crate::transport::InternalProxyControl;
 use crate::transport::InternalProxyEndpoint;
-
-/// Matches `devo_arg0::SUPPRESS_SERVER_TRAY_ENV` without adding a dependency cycle.
-const SUPPRESS_SERVER_TRAY_ENV: &str = "DEVO_SUPPRESS_SERVER_TRAY";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ServerTransportMode {
@@ -79,56 +73,16 @@ impl ServerProcessArgs {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ServerTrayStartup {
-    Enabled,
-    Disabled,
-}
-
-pub(crate) struct ServerProcessRunOptions {
-    pub(crate) external_shutdown: Option<tokio_util::sync::CancellationToken>,
-    pub(crate) tray_startup: ServerTrayStartup,
-    pub(crate) real_server_started: Option<Sender<()>>,
-}
-
-impl Default for ServerProcessRunOptions {
-    fn default() -> Self {
-        Self {
-            external_shutdown: None,
-            tray_startup: server_tray_startup_from_env(),
-            real_server_started: None,
-        }
-    }
-}
-
-fn server_tray_startup_from_env() -> ServerTrayStartup {
-    let value = std::env::var(SUPPRESS_SERVER_TRAY_ENV).ok();
-    server_tray_startup_for(value.as_deref() == Some("1"))
-}
-
-fn server_tray_startup_for(suppress_server_tray: bool) -> ServerTrayStartup {
-    if suppress_server_tray {
-        ServerTrayStartup::Disabled
-    } else {
-        ServerTrayStartup::Enabled
-    }
+#[derive(Default)]
+pub struct ServerProcessRunOptions {
+    pub external_shutdown: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// Starts the transport-facing server runtime using the resolved application
 /// configuration and listener set.
-pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
-    run_server_process_inner(args, ServerProcessRunOptions::default()).await
-}
-
-/// Starts the macOS server process with AppKit owned by the process main thread.
-#[cfg(target_os = "macos")]
-pub fn run_server_process_with_macos_tray(args: ServerProcessArgs) -> Result<()> {
-    crate::server_tray::run_server_process_with_macos_tray(args)
-}
-
-pub(crate) async fn run_server_process_inner(
+pub async fn run_server_process(
     args: ServerProcessArgs,
-    mut options: ServerProcessRunOptions,
+    options: ServerProcessRunOptions,
 ) -> Result<()> {
     let resolver = FileSystemConfigPathResolver::from_env()?;
     let action = args.action()?;
@@ -265,80 +219,30 @@ pub(crate) async fn run_server_process_inner(
     tracing::info!("starting persisted session restore");
     runtime.load_persisted_sessions().await?;
     tracing::info!("persisted session restore completed");
-    tracing::info!("server bootstrap completed; starting listeners");
-    if let Some(real_server_started) = options.real_server_started.take() {
-        let _ = real_server_started.send(());
-    }
+
     let shutdown_signal = tokio_util::sync::CancellationToken::new();
     let internal_proxy_control = InternalProxyControl::new(shutdown_signal.clone());
     let external_shutdown = options.external_shutdown.clone();
-    #[cfg(not(windows))]
-    match options.tray_startup {
-        ServerTrayStartup::Enabled | ServerTrayStartup::Disabled => {}
-    }
 
-    #[cfg(windows)]
-    let mut server_tray = match options.tray_startup {
-        ServerTrayStartup::Enabled => match ServerTray::start() {
-            Ok(tray) => Some(tray),
-            Err(error) => {
-                tracing::warn!(%error, "failed to start server tray icon");
-                None
-            }
-        },
-        ServerTrayStartup::Disabled => None,
-    };
-
-    #[cfg(windows)]
-    {
-        tokio::select! {
-            result = run_listeners_with_internal_proxy(
-                runtime.clone(),
-                &effective_listen,
-                internal_proxy,
-                singleton_metadata.token.clone(),
-                internal_proxy_control,
-            ) => {
-                result?;
-            }
-            result = tokio::signal::ctrl_c() => {
-                result?;
-                tracing::info!("server shutdown requested");
-            }
-            _ = wait_for_server_tray_shutdown(&mut server_tray) => {
-                tracing::info!("server shutdown requested from tray icon");
-            }
-            _ = wait_for_external_shutdown(external_shutdown.as_ref()) => {
-                tracing::info!("server shutdown requested from external process controller");
-            }
-            _ = shutdown_signal.cancelled() => {
-                tracing::info!("server shutdown requested from singleton control");
-            }
+    tokio::select! {
+        result = run_listeners_with_internal_proxy(
+            runtime.clone(),
+            &effective_listen,
+            internal_proxy,
+            singleton_metadata.token.clone(),
+            internal_proxy_control,
+        ) => {
+            result?;
         }
-    }
-
-    #[cfg(not(windows))]
-    {
-        tokio::select! {
-            result = run_listeners_with_internal_proxy(
-                runtime.clone(),
-                &effective_listen,
-                internal_proxy,
-                singleton_metadata.token.clone(),
-                internal_proxy_control,
-            ) => {
-                result?;
-            }
-            result = tokio::signal::ctrl_c() => {
-                result?;
-                tracing::info!("server shutdown requested");
-            }
-            _ = wait_for_external_shutdown(external_shutdown.as_ref()) => {
-                tracing::info!("server shutdown requested from external process controller");
-            }
-            _ = shutdown_signal.cancelled() => {
-                tracing::info!("server shutdown requested from singleton control");
-            }
+        result = tokio::signal::ctrl_c() => {
+            result?;
+            tracing::info!("server shutdown requested");
+        }
+        _ = wait_for_external_shutdown(external_shutdown.as_ref()) => {
+            tracing::info!("server shutdown requested from external process controller");
+        }
+        _ = shutdown_signal.cancelled() => {
+            tracing::info!("server shutdown requested from singleton control");
         }
     }
 
@@ -354,15 +258,6 @@ fn print_existing_server_status(metadata: &crate::singleton::ServerLockMetadata,
     println!("pid: {}", metadata.pid);
     println!("endpoint: {}", metadata.endpoint);
     println!("started_at: {}", metadata.started_at);
-}
-
-#[cfg(windows)]
-async fn wait_for_server_tray_shutdown(server_tray: &mut Option<ServerTray>) {
-    if let Some(tray) = server_tray {
-        tray.shutdown_requested().await;
-    } else {
-        std::future::pending::<()>().await;
-    }
 }
 
 async fn wait_for_external_shutdown(
@@ -391,20 +286,6 @@ mod tests {
         assert_eq!(
             args.action().expect("action"),
             super::ServerProcessAction::Run
-        );
-    }
-
-    #[test]
-    fn server_tray_startup_honors_desktop_suppression() {
-        assert_eq!(
-            [
-                super::server_tray_startup_for(/*suppress_server_tray*/ false),
-                super::server_tray_startup_for(/*suppress_server_tray*/ true),
-            ],
-            [
-                super::ServerTrayStartup::Enabled,
-                super::ServerTrayStartup::Disabled,
-            ]
         );
     }
 

@@ -470,7 +470,13 @@ impl ServerRuntime {
                     format!("session not found: {session_id}"),
                 )
             })?;
-        Ok(session.lock().await.summary.cwd.clone())
+        let Some(summary) = session.summary().await else {
+            return Err((
+                ProtocolErrorCode::InternalError,
+                "failed to read session summary".to_string(),
+            ));
+        };
+        Ok(summary.cwd)
     }
 }
 

@@ -37,7 +37,13 @@ impl ServerRuntime {
     ) -> anyhow::Result<()> {
         match capture {
             ResearchStageCapture::Clarification(capture) => {
-                self.handle_clarification_query_event(context, capture, event)
+                let artifact = artifact
+                    .ok_or_else(|| anyhow::anyhow!("research {stage:?} missing artifact"))?;
+                let artifact_context = ResearchArtifactEventContext {
+                    query: context,
+                    artifact,
+                };
+                self.handle_clarification_query_event(artifact_context, capture, event)
                     .await;
             }
             ResearchStageCapture::Artifact(capture) => {
@@ -454,17 +460,25 @@ impl ServerRuntime {
 
     async fn handle_clarification_query_event(
         &self,
-        context: ResearchQueryEventContext<'_>,
+        context: ResearchArtifactEventContext<'_>,
         capture: &mut ClarificationQueryCapture,
         event: QueryEvent,
     ) {
-        let session_id = context.session_id;
-        let turn_id = context.turn_id;
-        let usage_ledger = context.usage_ledger;
-        let context_window = context.context_window;
+        let session_id = context.query.session_id;
+        let turn_id = context.query.turn_id;
+        let usage_ledger = context.query.usage_ledger;
+        let context_window = context.query.context_window;
         match event {
             QueryEvent::TextDelta(text) => {
                 capture.text.push_str(&text);
+                self.push_research_artifact_delta(
+                    session_id,
+                    turn_id,
+                    &mut capture.artifact,
+                    context.artifact,
+                    text,
+                )
+                .await;
             }
             QueryEvent::ToolUseStart {
                 id, name, input, ..

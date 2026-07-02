@@ -45,6 +45,7 @@ use crate::text_normalization::split_tagged_text;
 /// Works with OpenAI chat-completion servers by changing the base URL.
 pub struct OpenAIProvider {
     client: Client,
+    streaming_client: Client,
     base_url: String,
     api_key: Option<String>,
     http_options: ProviderHttpOptions,
@@ -52,17 +53,13 @@ pub struct OpenAIProvider {
 
 impl OpenAIProvider {
     pub fn new(base_url: impl Into<String>) -> Self {
-        // TODO: Should we pertain the env `DEV_REQUEST_TIMEOUT` here ?
-        //       maybe move to config toml is a good choice.
-        let timeout_secs = std::env::var("DEVO_REQUEST_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(300);
-        let timeout = std::time::Duration::from_secs(timeout_secs);
         let http_options = ProviderHttpOptions::default();
         Self {
             client: http_options
-                .build_client(Some(timeout))
+                .build_request_client()
+                .unwrap_or_else(|_| Client::new()),
+            streaming_client: http_options
+                .build_streaming_client()
                 .unwrap_or_else(|_| Client::new()),
             base_url: base_url.into(),
             api_key: None,
@@ -76,12 +73,8 @@ impl OpenAIProvider {
     }
 
     pub fn with_http_options(mut self, http_options: ProviderHttpOptions) -> Result<Self> {
-        let timeout_secs = std::env::var("DEVO_REQUEST_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(300);
-        let timeout = std::time::Duration::from_secs(timeout_secs);
-        self.client = http_options.build_client(Some(timeout))?;
+        self.client = http_options.build_request_client()?;
+        self.streaming_client = http_options.build_streaming_client()?;
         self.http_options = http_options;
         Ok(self)
     }
@@ -90,9 +83,8 @@ impl OpenAIProvider {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
-    fn request_builder(&self, body: &Value) -> reqwest::RequestBuilder {
-        let builder = self
-            .client
+    fn post_builder(&self, client: &Client, body: &Value) -> reqwest::RequestBuilder {
+        let builder = client
             .post(self.endpoint())
             .header(CONTENT_TYPE, "application/json");
         let builder = if let Some(api_key) = &self.api_key {
@@ -101,6 +93,14 @@ impl OpenAIProvider {
             builder
         };
         self.http_options.apply_custom_headers(builder).json(body)
+    }
+
+    fn request_builder(&self, body: &Value) -> reqwest::RequestBuilder {
+        self.post_builder(&self.client, body)
+    }
+
+    pub(super) fn streaming_request_builder(&self, body: &Value) -> reqwest::RequestBuilder {
+        self.post_builder(&self.streaming_client, body)
     }
 }
 
