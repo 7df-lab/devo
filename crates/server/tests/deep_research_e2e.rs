@@ -109,24 +109,6 @@ impl ScriptedResearchProvider {
             expected_cwd: expected_cwd.display().to_string(),
         }
     }
-
-    fn with_delegated_worker_failure_once(expected_cwd: &std::path::Path) -> Self {
-        Self::with_delegated_worker_failures_before_success(expected_cwd, 1)
-    }
-
-    fn with_delegated_worker_failures_before_success(
-        expected_cwd: &std::path::Path,
-        failures: usize,
-    ) -> Self {
-        Self {
-            stream_calls: AtomicUsize::new(0),
-            final_report_stream_calls: AtomicUsize::new(0),
-            delegated_worker_failures_before_success: AtomicUsize::new(failures),
-            researcher_gate: None,
-            final_report_mode: ScriptedFinalReportMode::Text,
-            expected_cwd: expected_cwd.display().to_string(),
-        }
-    }
 }
 
 #[async_trait]

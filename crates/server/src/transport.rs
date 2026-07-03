@@ -306,6 +306,15 @@ pub async fn run_listeners(runtime: Arc<ServerRuntime>, listen: &[String]) -> Re
 }
 
 /// Runs configured listener targets plus the internal stdio-proxy endpoint.
+///
+/// Spawns one async task per listen target (stdio and/or public WebSocket) and,
+/// when `internal_proxy` is `Some`, an additional loopback WebSocket accept loop.
+/// All tasks run concurrently inside a `JoinSet`; this function returns when the
+/// first task completes (normally only on fatal listener error).
+///
+/// The internal proxy task authenticates clients with `token`, handles one-shot
+/// control RPCs (`status` / `shutdown`), then treats the connection as a
+/// `ClientTransportKind::StdioProxy` ACP session (see `handle_internal_proxy_connection`).
 pub async fn run_listeners_with_internal_proxy(
     runtime: Arc<ServerRuntime>,
     listen: &[String],

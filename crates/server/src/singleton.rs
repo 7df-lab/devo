@@ -1,3 +1,17 @@
+//! Singleton server coordination for a single `DEVO_HOME`.
+//!
+//! At most one **real** devo-server process may run per user data directory.
+//! Coordination uses an exclusive file lock plus a small JSON metadata file:
+//!
+//! - `server.lock` — held for the lifetime of the real server (`RealServerGuard`).
+//! - `server.lock.json` — written after the real server binds its internal proxy;
+//!   contains pid, loopback WebSocket URL, and a random auth token.
+//!
+//! A second process that fails to acquire the lock becomes a **proxy** client:
+//! stdio mode forwards stdin/stdout through the internal proxy WebSocket
+//! (`run_stdio_proxy`); `--status` / `--shutdown` use one-shot control RPCs
+//! (`run_server_control`). See `bootstrap::run_server_process` for the full flow.
+
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -25,23 +39,32 @@ use uuid::Uuid;
 const LOCK_FILE_NAME: &str = "server.lock";
 const METADATA_FILE_NAME: &str = "server.lock.json";
 const METADATA_VERSION: u32 = 1;
+/// Real server may still be writing metadata when a proxy process starts.
 const METADATA_READ_RETRIES: usize = 100;
 const METADATA_READ_RETRY_DELAY: Duration = Duration::from_millis(50);
 pub(crate) const SERVER_CONTROL_STATUS_METHOD: &str = "_devo/server/status";
 pub(crate) const SERVER_CONTROL_SHUTDOWN_METHOD: &str = "_devo/server/shutdown";
 const SERVER_CONTROL_REQUEST_ID: u64 = 1;
 
+/// Outcome of [`acquire_singleton_role`]: either this process runs the server
+/// or it should connect to an already-running instance using the metadata.
 #[derive(Debug)]
 pub(crate) enum SingletonRole {
+    /// Exclusive lock acquired; caller must bind internal proxy and
+    /// [`RealServerGuard::publish_endpoint`].
     Real(RealServerGuard),
+    /// Another process holds the lock; use `endpoint` + `token` to connect.
     Proxy(ServerLockMetadata),
 }
 
+/// Published in `server.lock.json` while the real server is running.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ServerLockMetadata {
     pub(crate) version: u32,
     pub(crate) pid: u32,
+    /// Loopback WebSocket URL of the real server's internal proxy listener.
     pub(crate) endpoint: String,
+    /// Must be sent as the first WebSocket text frame after connect.
     pub(crate) token: String,
     pub(crate) started_at: String,
 }
@@ -78,6 +101,8 @@ impl ServerLockMetadata {
     }
 }
 
+/// One-shot control RPC against the real server's internal proxy
+/// (`devo server --status` / `--shutdown` from a proxy process).
 pub(crate) async fn run_server_control(
     metadata: &ServerLockMetadata,
     action: ServerControlAction,
@@ -86,6 +111,7 @@ pub(crate) async fn run_server_control(
         .await
         .with_context(|| format!("connect to singleton server {}", metadata.endpoint))?;
     let (mut writer, mut reader) = socket.split();
+    // Internal proxy requires token auth before any other traffic.
     writer
         .send(Message::Text(metadata.token.clone().into()))
         .await
@@ -111,6 +137,8 @@ pub(crate) async fn run_server_control(
     }
 }
 
+/// Holds the exclusive singleton lock until dropped; releasing the lock allows
+/// another process to become the real server.
 #[derive(Debug)]
 pub(crate) struct RealServerGuard {
     lock_file: File,
@@ -118,6 +146,7 @@ pub(crate) struct RealServerGuard {
 }
 
 impl RealServerGuard {
+    /// Writes `server.lock.json` so proxy/control clients can find this server.
     pub(crate) fn publish_endpoint(&self, endpoint: String) -> Result<ServerLockMetadata> {
         let metadata = ServerLockMetadata::new(endpoint, Uuid::new_v4().to_string());
         let encoded = serde_json::to_vec_pretty(&metadata).context("serialize server metadata")?;
@@ -133,11 +162,18 @@ impl RealServerGuard {
 
 impl Drop for RealServerGuard {
     fn drop(&mut self) {
+        // Best-effort cleanup so a crashed predecessor does not block forever
+        // once the OS releases the file handle; metadata removal signals "not running".
         let _ = fs::remove_file(&self.metadata_path);
         let _ = self.lock_file.unlock();
     }
 }
 
+/// Attempts an exclusive lock on `DEVO_HOME/server.lock`.
+///
+/// - Success → [`SingletonRole::Real`]: caller becomes the sole server process.
+/// - Lock held by another process → [`SingletonRole::Proxy`]: read metadata and
+///   connect instead of starting a second runtime.
 pub(crate) fn acquire_singleton_role(devo_home: &Path) -> Result<SingletonRole> {
     fs::create_dir_all(devo_home)
         .with_context(|| format!("create DEVO_HOME {}", devo_home.display()))?;
@@ -156,6 +192,7 @@ pub(crate) fn acquire_singleton_role(devo_home: &Path) -> Result<SingletonRole> 
             metadata_path: metadata_path(devo_home),
         })),
         Err(error) if is_lock_temporarily_unavailable(&error) => {
+            // Real server may be mid-startup; retry until metadata appears.
             Ok(SingletonRole::Proxy(read_metadata_with_retry(devo_home)?))
         }
         Err(error) => {
@@ -164,6 +201,13 @@ pub(crate) fn acquire_singleton_role(devo_home: &Path) -> Result<SingletonRole> 
     }
 }
 
+/// Lightweight stdio front-end for an already-running real server.
+///
+/// Connects to the internal proxy WebSocket, authenticates with `token`, then:
+/// - stdin lines (NDJSON) → WebSocket Text frames upstream
+/// - WebSocket Text frames → stdout (one line per frame, NDJSON framing preserved)
+///
+/// On the real server this connection is registered as `ClientTransportKind::StdioProxy`.
 pub(crate) async fn run_stdio_proxy(metadata: ServerLockMetadata) -> Result<()> {
     let (socket, _) = connect_async(metadata.endpoint.as_str())
         .await
@@ -199,6 +243,8 @@ pub(crate) async fn run_stdio_proxy(metadata: ServerLockMetadata) -> Result<()> 
                         .write_all(text.as_bytes())
                         .await
                         .context("write singleton response to stdout")?;
+                    // Real server sends one JSON-RPC message per WebSocket frame;
+                    // re-add the newline stdio clients expect.
                     stdout
                         .write_all(b"\n")
                         .await
@@ -263,6 +309,7 @@ fn is_lock_temporarily_unavailable(error: &std::io::Error) -> bool {
     }
 }
 
+/// Polls until the real server writes metadata (startup race with lock holder).
 fn read_metadata_with_retry(devo_home: &Path) -> Result<ServerLockMetadata> {
     let mut last_error = None;
     for _ in 0..METADATA_READ_RETRIES {

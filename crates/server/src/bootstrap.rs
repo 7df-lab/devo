@@ -80,22 +80,53 @@ pub struct ServerProcessRunOptions {
 
 /// Starts the transport-facing server runtime using the resolved application
 /// configuration and listener set.
+///
+/// ## Singleton server (`singleton.rs`)
+///
+/// Devo allows at most **one real server process** per `DEVO_HOME`. Coordination
+/// uses a file lock (`server.lock`) plus metadata (`server.lock.json`) that
+/// records pid, a loopback WebSocket endpoint, and an auth token.
+///
+/// - **`SingletonRole::Real`**: this process acquired the lock and becomes the
+///   sole server. It binds an internal proxy listener, writes metadata, and runs
+///   until shutdown.
+/// - **`SingletonRole::Proxy`**: another process already holds the lock. This
+///   process does not start a second runtime: stdio mode forwards to the
+///   existing server via `run_stdio_proxy`; `--status` / `--shutdown` talk to
+///   the internal control channel on that server.
+///
+/// ## Internal proxy (`run_listeners_with_internal_proxy`)
+///
+/// The real server exposes an extra **loopback-only** WebSocket listener
+/// (`127.0.0.1:0`, ephemeral port). It is used for:
+///
+/// 1. **Stdio proxy clients** — a second `devo server --transport stdio` connects
+///    here and pipes stdin/stdout through WebSocket frames (see `run_stdio_proxy`).
+/// 2. **Control plane** — `devo server --status` / `--shutdown` send
+///    `_devo/server/status` or `_devo/server/shutdown` after token auth.
+///
+/// The published `endpoint` in `server.lock.json` is this internal proxy URL, not
+/// the public config WebSocket address.
 pub async fn run_server_process(
     args: ServerProcessArgs,
     options: ServerProcessRunOptions,
 ) -> Result<()> {
     let resolver = FileSystemConfigPathResolver::from_env()?;
     let action = args.action()?;
+    // Decide whether this process is the one true server or a lightweight proxy/
+    // control client. Lock file lives under DEVO_HOME (see singleton.rs).
     let singleton_role = acquire_singleton_role(&resolver.user_config_dir())?;
     let real_server_guard = match singleton_role {
         SingletonRole::Real(guard) => match action {
             ServerProcessAction::Run => guard,
             ServerProcessAction::Status | ServerProcessAction::Shutdown => {
+                // We hold the lock but were not asked to run — no metadata file yet.
                 println!("devo server is not running");
                 return Ok(());
             }
         },
         SingletonRole::Proxy(metadata) => match action {
+            // Another server is already running: pipe stdio to its internal proxy.
             ServerProcessAction::Run if args.transport == ServerTransportMode::Stdio => {
                 tracing::info!(
                     pid = metadata.pid,
@@ -104,11 +135,13 @@ pub async fn run_server_process(
                 );
                 return run_stdio_proxy(metadata).await;
             }
+            // Non-stdio second instances are rejected (would duplicate listeners).
             ServerProcessAction::Run => {
                 print_existing_server_status(&metadata, "already running");
                 println!("Use `devo server --shutdown` to stop it.");
                 return Ok(());
             }
+            // `--status` / `--shutdown`: one-shot WebSocket control, then exit.
             ServerProcessAction::Status => {
                 let result = run_server_control(&metadata, ServerControlAction::Status).await?;
                 print_existing_server_status(&metadata, result.status.as_str());
@@ -121,7 +154,10 @@ pub async fn run_server_process(
             }
         },
     };
+    // Real server: bind ephemeral loopback WS for stdio-proxy + control clients.
     let internal_proxy = InternalProxyEndpoint::bind().await?;
+    // Persist ws://127.0.0.1:<port> + random token into server.lock.json so
+    // proxy/control processes know where and how to connect.
     let singleton_metadata =
         real_server_guard.publish_endpoint(internal_proxy.endpoint().to_string())?;
 
@@ -224,6 +260,9 @@ pub async fn run_server_process(
     let internal_proxy_control = InternalProxyControl::new(shutdown_signal.clone());
     let external_shutdown = options.external_shutdown.clone();
 
+    // Concurrent listeners: configured stdio/ws targets + internal proxy task.
+    // Returns when any listener exits; shutdown also via Ctrl+C, external token,
+    // or internal-proxy `_devo/server/shutdown` (cancels shutdown_signal).
     tokio::select! {
         result = run_listeners_with_internal_proxy(
             runtime.clone(),
