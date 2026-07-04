@@ -26,6 +26,7 @@ use crate::devo_extension_inner_method;
 
 use super::outbound::OutboundFrame;
 use super::outbound::enqueue_outbound;
+use super::outbound::enqueue_outbound_notification;
 
 pub(crate) const INBOUND_CONCURRENCY_LIMIT: usize = 64;
 
@@ -599,6 +600,53 @@ impl ServerRuntime {
             .await;
     }
 
+    /// Hot path for child/parent assistant token streaming.
+    ///
+    /// Avoids per-token `child_parent_by_session` registry scans and never waits
+    /// on the wait_agent output buffer. Uses `active_turn_connections` to find
+    /// the owning stdio connection directly.
+    pub(super) async fn broadcast_streaming_agent_message_delta(&self, event: &ServerEvent) {
+        let ServerEvent::ItemDelta {
+            delta_kind: ItemDeltaKind::AgentMessageDelta,
+            payload,
+        } = event
+        else {
+            self.broadcast_event(event.clone()).await;
+            return;
+        };
+        let session_id = payload.context.session_id;
+        let connection_id = {
+            let active_turn_connections = self.active_turn_connections.lock().await;
+            active_turn_connections.get(&session_id).copied()
+        };
+        let Some(connection_id) = connection_id else {
+            self.broadcast_event(event.clone()).await;
+            return;
+        };
+        let notification = {
+            let mut connections = self.connections.lock().await;
+            let Some(connection) = connections.get_mut(&connection_id) else {
+                return;
+            };
+            let method = event.method_name();
+            if connection.opt_out_notification_methods.contains(method) {
+                return;
+            }
+            let event_seq = connection.next_seq();
+            let event = event.clone().with_seq(event_seq);
+            let (method, value) = acp_notification_from_server_event(method, &event);
+            Some((
+                connection.outbound_tx.clone(),
+                OutboundFrame::notification(connection_id, method, event_seq, value),
+            ))
+        };
+        if let Some((outbound_tx, frame)) = notification {
+            let _ = enqueue_outbound_notification(&outbound_tx, frame, "connection_notifications")
+                .await;
+        }
+        self.record_subagent_output_event(event).await;
+    }
+
     pub(super) async fn emit_to_connection(
         &self,
         connection_id: u64,
@@ -624,7 +672,8 @@ impl ServerRuntime {
             ))
         };
         if let Some((outbound_tx, frame)) = notification {
-            let _ = enqueue_outbound(&outbound_tx, frame, "connection_notifications").await;
+            let _ = enqueue_outbound_notification(&outbound_tx, frame, "connection_notifications")
+                .await;
         }
     }
 
@@ -633,7 +682,10 @@ impl ServerRuntime {
             self.account_goal_turn_completed(&payload.turn).await;
         }
         self.update_session_last_activity_from_event(&event).await;
-        self.record_subagent_output_event(&event).await;
+        // Deliver to the client first. wait_agent's output buffer must not gate
+        // token streaming: when supervisor is blocked in wait_agent and children
+        // contend on that buffer, TUI tokens would stall while the provider SSE
+        // (visible in Burp) keeps flowing into a full event channel.
         let method = event.method_name();
         let session_id = event.session_id();
         let child_parent_by_session = self.child_parent_by_session().await;
@@ -665,8 +717,10 @@ impl ServerRuntime {
                 .collect::<Vec<_>>()
         };
         for (outbound_tx, frame) in notifications {
-            let _ = enqueue_outbound(&outbound_tx, frame, "connection_notifications").await;
+            let _ = enqueue_outbound_notification(&outbound_tx, frame, "connection_notifications")
+                .await;
         }
+        self.record_subagent_output_event(&event).await;
     }
 
     async fn update_session_last_activity_from_event(&self, event: &ServerEvent) {
@@ -680,8 +734,10 @@ impl ServerRuntime {
                 return;
             }
         }
+        // Event broadcast runs on turn event streams; never block those tasks on
+        // a session actor mailbox that may be awaiting the same stream.
         if let Some(session_handle) = self.session(session_id).await {
-            session_handle.touch_last_activity().await;
+            let _ = session_handle.try_touch_last_activity();
         }
     }
 
@@ -777,11 +833,7 @@ impl ServerRuntime {
                 request_id,
                 rx,
                 connection.outbound_tx.clone(),
-                OutboundFrame::client_request(
-                    connection_id,
-                    method.to_string(),
-                    value,
-                ),
+                OutboundFrame::client_request(connection_id, method.to_string(), value),
             )
         };
         let mut pending_request = PendingClientRequestGuard::new(

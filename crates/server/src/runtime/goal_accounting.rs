@@ -73,7 +73,8 @@ impl ServerRuntime {
     }
 
     async fn session_is_plan_mode(&self, session_id: SessionId) -> bool {
-        self.session_collaboration_mode(session_id).await == Some(devo_protocol::CollaborationMode::Plan)
+        self.session_collaboration_mode(session_id).await
+            == Some(devo_protocol::CollaborationMode::Plan)
     }
 }
 

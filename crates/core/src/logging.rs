@@ -87,7 +87,9 @@ impl LoggingBootstrap {
             Err(LoggingInitError::SubscriberAlreadyInstalled) => {
                 // Another subscriber was already installed (e.g. by tokio-console).
                 // This is not a fatal error — the process will run without file logging.
-                tracing::warn!("file logging skipped: a global tracing subscriber is already installed");
+                tracing::warn!(
+                    "file logging skipped: a global tracing subscriber is already installed"
+                );
             }
             Err(other) => return Err(other),
             Ok(()) => {}

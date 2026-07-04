@@ -211,8 +211,10 @@ impl CodeSearchService {
             return false;
         }
         let cache_path = cache_file_path(&self.cache_dir, &root, content, self.provider.model_id());
-        let has_valid_cache = load_payload(&cache_path)
-            .is_some_and(|c| c.payload.is_valid_for(&root, content, self.provider.model_id()));
+        let has_valid_cache = load_payload(&cache_path).is_some_and(|c| {
+            c.payload
+                .is_valid_for(&root, content, self.provider.model_id())
+        });
         !has_valid_cache
     }
 

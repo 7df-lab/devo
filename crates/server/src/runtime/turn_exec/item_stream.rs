@@ -166,25 +166,26 @@ pub(super) async fn push_assistant_text_delta(
     };
     assistant_text.push_str(&text);
     *assistant_delta_seq = (*assistant_delta_seq).saturating_add(1);
-    runtime
-        .broadcast_event(ServerEvent::ItemDelta {
-            delta_kind: ItemDeltaKind::AgentMessageDelta,
-            payload: ItemDeltaPayload {
-                context: crate::EventContext {
-                    session_id,
-                    turn_id: Some(turn_id),
-                    item_id: Some(item_id),
-                    seq: 0,
-                },
-                delta: text,
-                stream_index: None,
-                channel: None,
+    let event = ServerEvent::ItemDelta {
+        delta_kind: ItemDeltaKind::AgentMessageDelta,
+        payload: ItemDeltaPayload {
+            context: crate::EventContext {
+                session_id,
+                turn_id: Some(turn_id),
+                item_id: Some(item_id),
+                seq: 0,
             },
-        })
+            delta: text,
+            stream_index: None,
+            channel: None,
+        },
+    };
+    // Fast path: avoid per-token registry scans and wait_agent buffer contention.
+    runtime
+        .broadcast_streaming_agent_message_delta(&event)
         .await;
-    if let Ok(mut stream) = event_stream.try_lock() {
-        stream.deferred_assistant = Some((item_id, item_seq, assistant_text.clone()));
-    }
+    // Deferred assistant text is written once when the event stream drains.
+    let _ = (event_stream, item_seq);
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -167,9 +167,18 @@ mod tests {
         let file = File::create(&path).expect("create trace file");
         let trace = ProtocolTrace::with_file(file);
 
-        trace.record(TraceDirection::Out, r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#);
-        trace.record(TraceDirection::In, r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
-        trace.record(TraceDirection::Out, r#"{"jsonrpc":"2.0","id":2,"method":"session/new"}"#);
+        trace.record(
+            TraceDirection::Out,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+        );
+        trace.record(
+            TraceDirection::In,
+            r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+        );
+        trace.record(
+            TraceDirection::Out,
+            r#"{"jsonrpc":"2.0","id":2,"method":"session/new"}"#,
+        );
 
         let reader = BufReader::new(File::open(&path).expect("open trace file"));
         let records: Vec<serde_json::Value> = reader

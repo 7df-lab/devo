@@ -455,10 +455,7 @@ impl ServerRuntime {
         };
         let mut parent_by_session = Vec::new();
         for session_id in session_ids_in_runtime {
-            let parent_id = self
-                .session_parent_id_snapshot(session_id)
-                .await
-                .flatten();
+            let parent_id = self.session_parent_id_snapshot(session_id).await.flatten();
             parent_by_session.push((session_id, parent_id));
         }
         parent_by_session.sort_by_key(|(session_id, _parent_id)| session_id.to_string());
@@ -480,10 +477,7 @@ impl ServerRuntime {
         session_ids
     }
 
-    async fn await_session_turn_interrupt_before_delete(
-        self: &Arc<Self>,
-        session_id: SessionId,
-    ) {
+    async fn await_session_turn_interrupt_before_delete(self: &Arc<Self>, session_id: SessionId) {
         let Some(turn_id) = self.runtime_active_turn_id(session_id).await else {
             return;
         };

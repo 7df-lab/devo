@@ -52,11 +52,7 @@ impl ServerRuntime {
     }
 
     pub(super) async fn runtime_active_turn_id(&self, session_id: SessionId) -> Option<TurnId> {
-        self.active_turn_ids
-            .lock()
-            .await
-            .get(&session_id)
-            .copied()
+        self.active_turn_ids.lock().await.get(&session_id).copied()
     }
 
     pub(super) async fn clear_active_turn_runtime_handles(&self, session_id: SessionId) {

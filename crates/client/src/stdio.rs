@@ -88,11 +88,8 @@ impl StdioServerClient {
         let trace = ProtocolTrace::from_env();
 
         let writer_trace = trace.clone();
-        let writer_task = tokio::spawn(run_stdin_writer(
-            Arc::clone(&stdin),
-            write_rx,
-            writer_trace,
-        ));
+        let writer_task =
+            tokio::spawn(run_stdin_writer(Arc::clone(&stdin), write_rx, writer_trace));
         let reader_trace = trace;
         let reader_task = tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
@@ -456,7 +453,10 @@ async fn write_ndjson_to_stdin(
     }
     line.push(b'\n');
     let mut stdin = stdin.lock().await;
-    stdin.write_all(&line).await.context("write client payload")?;
+    stdin
+        .write_all(&line)
+        .await
+        .context("write client payload")?;
     stdin.flush().await.context("flush client payload")?;
     Ok(())
 }
@@ -472,20 +472,22 @@ async fn run_stderr_reader(mut lines: tokio::io::Lines<BufReader<ChildStderr>>) 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::ACP_PROMPT_COMPLETED_NOTIFICATION_METHOD;
+    use crate::ACP_PROMPT_STARTED_NOTIFICATION_METHOD;
+    use crate::client_core::ClientWriteMessage;
+    use crate::client_core::ClientWriter;
+    use crate::client_core::PendingResponses;
+    use crate::client_core::ServerClientCore;
+    use chrono::Utc;
+    use pretty_assertions::assert_eq;
     use std::sync::Arc;
     use tokio::io::AsyncBufRead;
     use tokio::io::BufReader;
     use tokio::sync::Mutex;
     use tokio::sync::oneshot;
-    use tokio::time::timeout;
     use tokio::time::Duration;
-    use super::*;
-    use chrono::Utc;
-    use pretty_assertions::assert_eq;
-    use crate::client_core::ClientWriteMessage;
-    use crate::client_core::ClientWriter;
-    use crate::client_core::PendingResponses;
-    use crate::client_core::ServerClientCore;
+    use tokio::time::timeout;
 
     fn default_test_client_capabilities() -> devo_protocol::AcpClientCapabilities {
         devo_protocol::AcpClientCapabilities {
@@ -542,7 +544,6 @@ mod tests {
         (client, pending)
     }
 
-
     #[tokio::test]
     async fn initialize_uses_configured_client_capabilities() {
         let (child, stdin, stdout) = request_capture_child_for_turn_start_test().await;
@@ -555,7 +556,8 @@ mod tests {
             terminal: true,
             meta: None,
         };
-        let (mut client, pending) = spawn_test_stdio_client(child, stdin, client_capabilities.clone()).await;
+        let (mut client, pending) =
+            spawn_test_stdio_client(child, stdin, client_capabilities.clone()).await;
         let mut stdout_lines = BufReader::new(stdout).lines();
         let expected_capabilities =
             serde_json::to_value(&client_capabilities).expect("serialize client capabilities");
@@ -595,7 +597,8 @@ mod tests {
     #[tokio::test]
     async fn session_start_accepts_standard_acp_response_without_devo_metadata() {
         let (child, stdin, stdout) = request_capture_child_for_turn_start_test().await;
-        let (mut client, pending) = spawn_test_stdio_client(child, stdin, default_test_client_capabilities()).await;
+        let (mut client, pending) =
+            spawn_test_stdio_client(child, stdin, default_test_client_capabilities()).await;
         let cwd = std::env::current_dir().expect("current dir");
         let additional_directory = cwd.join("shared");
         let session_id = devo_protocol::SessionId::new();
@@ -670,7 +673,8 @@ mod tests {
     #[tokio::test]
     async fn session_list_accepts_standard_acp_sessions_without_devo_metadata() {
         let (child, stdin, stdout) = request_capture_child_for_turn_start_test().await;
-        let (mut client, pending) = spawn_test_stdio_client(child, stdin, default_test_client_capabilities()).await;
+        let (mut client, pending) =
+            spawn_test_stdio_client(child, stdin, default_test_client_capabilities()).await;
         client
             .core
             .set_agent_capabilities_for_test(test_agent_capabilities_with_session_list());
@@ -759,7 +763,8 @@ mod tests {
     #[tokio::test]
     async fn session_resume_accepts_standard_acp_response_without_devo_metadata() {
         let (child, stdin, stdout) = request_capture_child_for_turn_start_test().await;
-        let (mut client, pending) = spawn_test_stdio_client(child, stdin, default_test_client_capabilities()).await;
+        let (mut client, pending) =
+            spawn_test_stdio_client(child, stdin, default_test_client_capabilities()).await;
         client
             .core
             .set_agent_capabilities_for_test(test_agent_capabilities_with_session_list());
@@ -876,7 +881,8 @@ mod tests {
     #[tokio::test]
     async fn turn_start_sends_devo_extension_with_full_params() {
         let (child, stdin, stdout) = request_capture_child_for_turn_start_test().await;
-        let (mut client, pending) = spawn_test_stdio_client(child, stdin, default_test_client_capabilities()).await;
+        let (mut client, pending) =
+            spawn_test_stdio_client(child, stdin, default_test_client_capabilities()).await;
         let params = TurnStartParams {
             session_id: devo_protocol::SessionId::new(),
             input: vec![devo_protocol::InputItem::Text {
@@ -943,7 +949,8 @@ mod tests {
     #[tokio::test]
     async fn turn_start_falls_back_to_acp_prompt_with_lifecycle_notifications() {
         let (child, stdin, stdout) = request_capture_child_for_turn_start_test().await;
-        let (mut client, pending) = spawn_test_stdio_client(child, stdin, default_test_client_capabilities()).await;
+        let (mut client, pending) =
+            spawn_test_stdio_client(child, stdin, default_test_client_capabilities()).await;
         let session_id = devo_protocol::SessionId::new();
         let params = TurnStartParams {
             session_id,

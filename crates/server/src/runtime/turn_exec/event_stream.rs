@@ -23,29 +23,31 @@ use crate::runtime::session_actor::state::SessionStreamState;
 use crate::{ItemDeltaKind, ItemDeltaPayload, ServerEvent};
 use tokio::sync::mpsc;
 
-pub(crate) const QUERY_EVENT_CHANNEL_CAPACITY: usize = 1024;
+pub(crate) const QUERY_EVENT_CHANNEL_CAPACITY: usize = 8192;
 
-/// Enqueue a query event without blocking the caller when the channel is full.
+/// Enqueue a query event into the turn event stream.
 ///
-/// `run_turn_model_query` holds the session `core_session` mutex for the entire
-/// `query()` call. Blocking on `event_tx.send().await` while the event task is
-/// stalled on client-notification backpressure would freeze tool execution
-/// (including `spawn_agent`) and can wedge the whole connection.
-pub(super) fn enqueue_query_event(
+/// Visible token events (`TextDelta` / `ReasoningDelta`) and `TurnComplete`
+/// must not be dropped: when the channel is full we apply backpressure to the
+/// provider reader with `send().await` so the TUI keeps receiving tokens.
+/// Other events may be dropped under pressure so coordination cannot wedge
+/// forever on a stalled consumer.
+pub(super) async fn enqueue_query_event(
     event_tx: &mpsc::Sender<devo_core::QueryEvent>,
     event: devo_core::QueryEvent,
 ) {
+    let kind = query_event_trace_kind(&event);
+    let must_deliver = matches!(kind, "text_delta" | "reasoning_delta" | "turn_complete");
+    if must_deliver {
+        let _ = event_tx.send(event).await;
+        return;
+    }
     match event_tx.try_send(event) {
         Ok(()) => {}
-        Err(tokio::sync::mpsc::error::TrySendError::Full(event)) => {
-            // Never spawn unbounded waiters here: if the event stream stalls,
-            // those tasks park forever on `send().await`, keep sender clones
-            // alive, and prevent the stream from ever observing channel close.
-            // Dropping under backpressure preserves liveness; the stream still
-            // receives later events once it resumes.
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             tracing::warn!(
                 capacity = QUERY_EVENT_CHANNEL_CAPACITY,
-                event_kind = query_event_trace_kind(&event),
+                event_kind = kind,
                 "dropping query event because the turn event channel is full"
             );
         }
@@ -303,6 +305,17 @@ pub(crate) fn spawn_turn_event_stream(
             &mut proposed_plan_leading_normal,
         )
         .await;
+        {
+            let mut stream = event_stream.lock().await;
+            if let (Some(item_id), Some(item_seq)) = (assistant_item_id, assistant_item_seq) {
+                stream.deferred_assistant =
+                    Some((item_id, item_seq, std::mem::take(&mut assistant_text)));
+            }
+            if let (Some(item_id), Some(item_seq)) = (reasoning_item_id, reasoning_item_seq) {
+                stream.deferred_reasoning =
+                    Some((item_id, item_seq, std::mem::take(&mut reasoning_text)));
+            }
+        }
         complete_deferred_stream_items(
             &runtime,
             &event_stream,
@@ -387,10 +400,8 @@ async fn handle_reasoning_delta(
             },
         })
         .await;
-    let _ = item_seq;
-    if let Ok(mut stream) = event_stream.try_lock() {
-        stream.deferred_reasoning = Some((item_id, item_seq, reasoning_text.clone()));
-    }
+    // Deferred reasoning text is written once when the event stream drains.
+    let _ = (event_stream, item_seq, item_id, reasoning_text);
 }
 
 async fn complete_open_reasoning_item(

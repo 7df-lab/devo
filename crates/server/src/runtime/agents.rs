@@ -915,19 +915,22 @@ impl ServerRuntime {
         else {
             return;
         };
-        self.output_buffer(parent_session_id)
-            .await
-            .push(devo_protocol::AgentOutputEvent {
-                sequence: 0,
-                child_session_id,
-                agent_path,
-                turn_id: payload.context.turn_id,
-                kind: devo_protocol::AgentOutputEventKind::AssistantMessage,
-                text: Some(payload.delta.clone()),
-                status: None,
-                created_at: Utc::now(),
-            })
-            .await;
+        let buffer = self.output_buffer(parent_session_id).await;
+        let output_event = devo_protocol::AgentOutputEvent {
+            sequence: 0,
+            child_session_id,
+            agent_path,
+            turn_id: payload.context.turn_id,
+            kind: devo_protocol::AgentOutputEventKind::AssistantMessage,
+            text: Some(payload.delta.clone()),
+            status: None,
+            created_at: Utc::now(),
+        };
+        // Streaming text must not block behind wait_agent's buffer lock. If the
+        // lock is busy, skip this delta for the wait buffer; the TUI already
+        // received it via outbound notifications, and a later delta/status will
+        // refresh the coalesced text.
+        let _ = buffer.try_push_text_delta(output_event);
     }
 
     async fn record_subagent_status_event(

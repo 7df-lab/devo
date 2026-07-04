@@ -57,6 +57,12 @@ impl SessionHandle {
         self.tx.send(command).await.is_ok()
     }
 
+    /// Non-blocking enqueue. Used by turn event streams so they never park on a
+    /// session actor that is itself waiting for that stream to finish.
+    fn try_send(&self, command: SessionCommand) -> bool {
+        self.tx.try_send(command).is_ok()
+    }
+
     pub(crate) async fn execute_turn(
         &self,
         runtime: Arc<crate::runtime::ServerRuntime>,
@@ -320,6 +326,7 @@ impl SessionHandle {
         let _ = self.send(SessionCommand::ResetTurnApprovalCache).await;
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn touch_last_activity(&self) {
         let _ = self.send(SessionCommand::TouchLastActivity).await;
     }
@@ -457,10 +464,21 @@ impl SessionHandle {
             .await;
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn apply_parent_usage_snapshot(&self, snapshot: ParentUsageSnapshot) {
         let _ = self
             .send(SessionCommand::ApplyParentUsageSnapshot { snapshot })
             .await;
+    }
+
+    /// Best-effort usage apply for callers that must not block on the mailbox
+    /// (child/parent turn event streams).
+    pub(crate) fn try_apply_parent_usage_snapshot(&self, snapshot: ParentUsageSnapshot) -> bool {
+        self.try_send(SessionCommand::ApplyParentUsageSnapshot { snapshot })
+    }
+
+    pub(crate) fn try_touch_last_activity(&self) -> bool {
+        self.try_send(SessionCommand::TouchLastActivity)
     }
 
     pub(crate) async fn interrupt_active_turn(&self) -> Option<Option<TurnMetadata>> {

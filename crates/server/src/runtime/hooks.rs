@@ -65,7 +65,9 @@ impl ServerRuntime {
         }
         let session_handle = self.sessions.lock().await.get(&session_id).cloned()?;
         let snapshot = session_handle.hook_context_snapshot().await?;
-        Some(Self::hook_runtime_context_from_snapshot(session_id, &snapshot)?)
+        Some(Self::hook_runtime_context_from_snapshot(
+            session_id, &snapshot,
+        )?)
     }
 
     fn hook_runtime_context_from_snapshot(

@@ -57,16 +57,15 @@ impl ConnectionTransport {
 
 enum OutboundSink {
     Stdio,
-    WebSocket(futures::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-        Message,
-    >),
+    WebSocket(
+        futures::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+            Message,
+        >,
+    ),
 }
 
-async fn write_outbound_frame(
-    sink: &mut OutboundSink,
-    frame: OutboundFrame,
-) -> Result<bool> {
+async fn write_outbound_frame(sink: &mut OutboundSink, frame: OutboundFrame) -> Result<bool> {
     let value = outbound_frame_to_value(&frame);
     log_outbound_frame(&frame, &value);
     let delivered = frame.delivered;
@@ -378,8 +377,7 @@ async fn run_stdio(runtime: Arc<ServerRuntime>) -> Result<()> {
         .await;
     tracing::info!(connection_id, "stdio connection established");
 
-    let outbound_writer =
-        spawn_outbound_writer(connection_id, outbound_rx, OutboundSink::Stdio);
+    let outbound_writer = spawn_outbound_writer(connection_id, outbound_rx, OutboundSink::Stdio);
 
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
@@ -471,11 +469,8 @@ async fn handle_internal_proxy_connection(
         .await;
     tracing::info!(connection_id, "internal stdio proxy connection established");
 
-    let outbound_writer = spawn_outbound_writer(
-        connection_id,
-        outbound_rx,
-        OutboundSink::WebSocket(writer),
-    );
+    let outbound_writer =
+        spawn_outbound_writer(connection_id, outbound_rx, OutboundSink::WebSocket(writer));
 
     if let Some(response) = runtime
         .handle_incoming_with_actions(connection_id, first_value)
@@ -595,11 +590,8 @@ async fn handle_websocket_connection(
         .await;
     tracing::info!(connection_id, "websocket connection established");
 
-    let outbound_writer = spawn_outbound_writer(
-        connection_id,
-        outbound_rx,
-        OutboundSink::WebSocket(writer),
-    );
+    let outbound_writer =
+        spawn_outbound_writer(connection_id, outbound_rx, OutboundSink::WebSocket(writer));
 
     while let Some(frame) = reader.next().await {
         let frame = frame?;
@@ -653,9 +645,7 @@ fn parse_incoming_client_payload(
 /// server-initiated calls. Returns `Err(error_response)` when the payload is
 /// structurally invalid; the caller should send that response and skip the
 /// handler.
-fn validate_incoming_client_message(
-    value: &serde_json::Value,
-) -> Result<(), serde_json::Value> {
+fn validate_incoming_client_message(value: &serde_json::Value) -> Result<(), serde_json::Value> {
     let Some(object) = value.as_object() else {
         return Err(acp_error_response(
             serde_json::Value::Null,
@@ -664,10 +654,7 @@ fn validate_incoming_client_message(
         ));
     };
 
-    let request_id = object
-        .get("id")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    let request_id = object.get("id").cloned().unwrap_or(serde_json::Value::Null);
 
     match object.get("jsonrpc").and_then(serde_json::Value::as_str) {
         Some("2.0") => {}
@@ -699,10 +686,7 @@ fn validate_incoming_client_message(
         ));
     }
 
-    if !has_method
-        && object.contains_key("id")
-        && (has_result || has_error)
-    {
+    if !has_method && object.contains_key("id") && (has_result || has_error) {
         return Ok(());
     }
 
@@ -872,9 +856,9 @@ mod tests {
     use super::InternalProxyControlRequest;
     use super::ListenTarget;
     use super::internal_proxy_control_response;
-    use super::parse_internal_proxy_control_request;
     use super::is_client_response_message;
     use super::parse_incoming_client_payload;
+    use super::parse_internal_proxy_control_request;
     use super::parse_listen_target;
     use super::resolve_listen_targets;
     use super::validate_incoming_client_message;
@@ -1046,31 +1030,37 @@ mod tests {
 
     #[test]
     fn validate_accepts_client_request_notification_and_response() {
-        assert!(validate_incoming_client_message(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {},
-        }))
-        .is_ok());
-        assert!(validate_incoming_client_message(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/cancelled",
-            "params": {},
-        }))
-        .is_ok());
-        assert!(validate_incoming_client_message(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 9,
-            "result": { "ok": true },
-        }))
-        .is_ok());
+        assert!(
+            validate_incoming_client_message(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {},
+            }))
+            .is_ok()
+        );
+        assert!(
+            validate_incoming_client_message(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {},
+            }))
+            .is_ok()
+        );
+        assert!(
+            validate_incoming_client_message(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 9,
+                "result": { "ok": true },
+            }))
+            .is_ok()
+        );
     }
 
     #[test]
     fn validate_rejects_malformed_client_messages() {
-        let invalid_request = validate_incoming_client_message(&serde_json::json!([]))
-            .expect_err("array payload");
+        let invalid_request =
+            validate_incoming_client_message(&serde_json::json!([])).expect_err("array payload");
         assert_eq!(
             invalid_request["error"]["code"],
             AcpErrorCode::InvalidRequest as i64

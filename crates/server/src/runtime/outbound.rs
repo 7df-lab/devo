@@ -9,6 +9,10 @@ use crate::NotificationEnvelope;
 
 pub(crate) const OUTBOUND_CHANNEL_CAPACITY: usize = 4096;
 pub(crate) const OUTBOUND_BACKPRESSURE_LOG_THRESHOLD: Duration = Duration::from_millis(50);
+/// Max time streaming notifications wait for outbound capacity before being
+/// dropped. Event streams must not park forever on a slow client: parent+child
+/// turns share one connection and can fill the queue quickly.
+pub(crate) const OUTBOUND_NOTIFICATION_MAX_WAIT: Duration = Duration::from_millis(200);
 
 pub(crate) enum OutboundPayload {
     Notification {
@@ -221,11 +225,60 @@ pub(crate) async fn enqueue_outbound(
     true
 }
 
+/// Enqueue a streaming notification without risking an indefinite stall.
+///
+/// Unlike [`enqueue_outbound`], this gives up after
+/// [`OUTBOUND_NOTIFICATION_MAX_WAIT`] and drops the frame. Turn event streams
+/// (including child agents) call into `broadcast_event` while the session actor
+/// is awaiting that stream; blocking here recreates the mailbox-style hang on
+/// the outbound path when the client drains stdout slowly.
+pub(crate) async fn enqueue_outbound_notification(
+    tx: &mpsc::Sender<OutboundFrame>,
+    frame: OutboundFrame,
+    queue: &'static str,
+) -> bool {
+    let connection_id = frame.connection_id();
+    match tx.try_reserve() {
+        Ok(permit) => {
+            permit.send(frame);
+            return true;
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+            tracing::debug!(connection_id, queue, "outbound queue receiver dropped");
+            return false;
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {}
+    }
+
+    match tokio::time::timeout(OUTBOUND_NOTIFICATION_MAX_WAIT, tx.reserve()).await {
+        Ok(Ok(permit)) => {
+            permit.send(frame);
+            true
+        }
+        Ok(Err(_)) => {
+            tracing::debug!(connection_id, queue, "outbound queue receiver dropped");
+            false
+        }
+        Err(_) => {
+            tracing::warn!(
+                connection_id,
+                queue,
+                max_wait_ms = OUTBOUND_NOTIFICATION_MAX_WAIT.as_millis(),
+                "dropping outbound notification under backpressure"
+            );
+            false
+        }
+    }
+}
+
 /// Test helper: drains [`OutboundFrame`] values into serialized JSON values.
 #[doc(hidden)]
 pub fn test_outbound_channel(
     capacity: usize,
-) -> (mpsc::Sender<OutboundFrame>, mpsc::Receiver<serde_json::Value>) {
+) -> (
+    mpsc::Sender<OutboundFrame>,
+    mpsc::Receiver<serde_json::Value>,
+) {
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundFrame>(capacity);
     let (json_tx, json_rx) = mpsc::channel(capacity);
     tokio::spawn(async move {

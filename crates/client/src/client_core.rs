@@ -144,10 +144,7 @@ impl ServerClientCore {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_agent_capabilities_for_test(
-        &mut self,
-        capabilities: AcpAgentCapabilities,
-    ) {
+    pub(crate) fn set_agent_capabilities_for_test(&mut self, capabilities: AcpAgentCapabilities) {
         self.acp_agent_capabilities = Some(capabilities);
     }
 
@@ -434,11 +431,17 @@ impl ServerClientCore {
         self.request_devo("agent/list", params).await
     }
 
-    pub(crate) async fn agent_spawn(&mut self, params: SpawnAgentParams) -> Result<SpawnAgentResult> {
+    pub(crate) async fn agent_spawn(
+        &mut self,
+        params: SpawnAgentParams,
+    ) -> Result<SpawnAgentResult> {
         self.request_devo("agent/spawn", params).await
     }
 
-    pub(crate) async fn agent_close(&mut self, params: CloseAgentParams) -> Result<CloseAgentResult> {
+    pub(crate) async fn agent_close(
+        &mut self,
+        params: CloseAgentParams,
+    ) -> Result<CloseAgentResult> {
         self.request_devo("agent/close", params).await
     }
 
@@ -460,7 +463,8 @@ impl ServerClientCore {
         &mut self,
         params: SessionPermissionsUpdateParams,
     ) -> Result<SessionPermissionsUpdateResult> {
-        self.request_devo("session/permissions/update", params).await
+        self.request_devo("session/permissions/update", params)
+            .await
     }
 
     pub(crate) async fn session_compact(
@@ -470,7 +474,10 @@ impl ServerClientCore {
         self.request_devo("session/compact", params).await
     }
 
-    pub(crate) async fn goal_create(&mut self, params: GoalCreateParams) -> Result<GoalCreateResult> {
+    pub(crate) async fn goal_create(
+        &mut self,
+        params: GoalCreateParams,
+    ) -> Result<GoalCreateResult> {
         self.request_devo("goal/create", params).await
     }
 
@@ -478,11 +485,17 @@ impl ServerClientCore {
         self.request_devo("goal/set", params).await
     }
 
-    pub(crate) async fn goal_status(&mut self, params: GoalStatusParams) -> Result<GoalStatusResult> {
+    pub(crate) async fn goal_status(
+        &mut self,
+        params: GoalStatusParams,
+    ) -> Result<GoalStatusResult> {
         self.request_devo("goal/status", params).await
     }
 
-    pub(crate) async fn goal_pause(&mut self, params: GoalSetStatusParams) -> Result<GoalSetStatusResult> {
+    pub(crate) async fn goal_pause(
+        &mut self,
+        params: GoalSetStatusParams,
+    ) -> Result<GoalSetStatusResult> {
         self.request_devo("goal/pause", params).await
     }
 
@@ -504,7 +517,10 @@ impl ServerClientCore {
         self.request_devo("goal/clear", params).await
     }
 
-    pub(crate) async fn session_fork(&mut self, params: SessionForkParams) -> Result<SessionForkResult> {
+    pub(crate) async fn session_fork(
+        &mut self,
+        params: SessionForkParams,
+    ) -> Result<SessionForkResult> {
         self.request_devo("session/fork", params).await
     }
 
@@ -540,7 +556,10 @@ impl ServerClientCore {
         self.request_devo("model/catalog", params).await
     }
 
-    pub(crate) async fn model_saved(&mut self, params: ModelSavedParams) -> Result<ModelSavedResult> {
+    pub(crate) async fn model_saved(
+        &mut self,
+        params: ModelSavedParams,
+    ) -> Result<ModelSavedResult> {
         self.request_devo("model/saved", params).await
     }
 
@@ -565,7 +584,10 @@ impl ServerClientCore {
         self.request_devo("provider/validate", params).await
     }
 
-    pub(crate) async fn command_exec(&mut self, params: CommandExecParams) -> Result<CommandExecResult> {
+    pub(crate) async fn command_exec(
+        &mut self,
+        params: CommandExecParams,
+    ) -> Result<CommandExecResult> {
         self.request_devo("command/exec", params).await
     }
 

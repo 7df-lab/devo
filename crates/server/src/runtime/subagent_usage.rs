@@ -152,6 +152,13 @@ pub(super) struct SubagentUsageState {
 }
 
 impl SubagentUsageState {
+    pub(super) fn parent_turn_started(&self, session_id: SessionId, turn_id: TurnId) -> bool {
+        self.parent_turns.contains_key(&ParentTurnKey {
+            session_id,
+            turn_id,
+        })
+    }
+
     pub(super) fn begin_parent_turn(
         &mut self,
         session_id: SessionId,
@@ -349,6 +356,15 @@ impl ServerRuntime {
         turn_id: TurnId,
         context_window: Option<u64>,
     ) {
+        // Skip the summary mailbox/inline fetch when the ledger entry already
+        // exists. Child agents were calling this on every UsageDelta and serializing
+        // on the parent session for no benefit (`or_insert` is a no-op).
+        {
+            let usage_state = self.subagent_usage.lock().await;
+            if usage_state.parent_turn_started(session_id, turn_id) {
+                return;
+            }
+        }
         let base_session_totals = self
             .session_summary_snapshot(session_id)
             .await
@@ -411,6 +427,23 @@ impl ServerRuntime {
         usage: TurnUsage,
         kind: UsageUpdateKind,
     ) -> Option<ParentUsageSnapshot> {
+        // Child turns must roll usage into the parent turn ledger. Ensure that
+        // ledger exists even if the parent turn entry was never started (or the
+        // child outlived the parent's begin_parent_usage_turn call).
+        let parent_owner = {
+            let usage_state = self.subagent_usage.lock().await;
+            usage_state.child_owners.get(&child_session_id).copied()
+        };
+        if let Some(owner) = parent_owner
+            && let Some(parent_turn_id) = owner.parent_turn_id
+        {
+            self.begin_parent_usage_turn(
+                owner.parent_session_id,
+                parent_turn_id,
+                /*context_window*/ None,
+            )
+            .await;
+        }
         let snapshot = {
             let mut usage_state = self.subagent_usage.lock().await;
             usage_state.record_child_turn_usage(
@@ -455,25 +488,30 @@ impl ServerRuntime {
         // forever on `send().await`, which stops the event stream from `recv`ing,
         // fills the event channel, and wedges the whole turn. Prefer the in-flight
         // turn inline state whenever it is registered.
-        let applied_inline = if let Some(stream) = self.active_stream_state(snapshot.session_id).await
-        {
-            let mut stream = stream.lock().await;
-            if let Some(inline) = stream.turn_inline.as_mut() {
-                snapshot.apply_to_summary(&mut inline.summary);
-                inline.hook_context.summary = inline.summary.clone();
-                if inline.turn_id == snapshot.turn_id {
-                    inline.active_turn_usage = Some(snapshot.turn_usage.to_turn_usage());
+        let applied_inline =
+            if let Some(stream) = self.active_stream_state(snapshot.session_id).await {
+                let mut stream = stream.lock().await;
+                if let Some(inline) = stream.turn_inline.as_mut() {
+                    snapshot.apply_to_summary(&mut inline.summary);
+                    inline.hook_context.summary = inline.summary.clone();
+                    if inline.turn_id == snapshot.turn_id {
+                        inline.active_turn_usage = Some(snapshot.turn_usage.to_turn_usage());
+                    }
+                    true
+                } else {
+                    false
                 }
-                true
             } else {
                 false
-            }
-        } else {
-            false
-        };
+            };
         if !applied_inline {
+            // Child agent event streams publish usage onto the parent session.
+            // The parent actor may be inside `execute_turn_in_actor` (or in the
+            // brief window after it unregisters its active stream but before it
+            // resumes polling). Blocking `send().await` here can fill the parent
+            // mailbox and deadlock the child stream, so only try-send.
             if let Some(session_handle) = self.session(snapshot.session_id).await {
-                session_handle.apply_parent_usage_snapshot(snapshot).await;
+                let _ = session_handle.try_apply_parent_usage_snapshot(snapshot);
             }
         }
         self.broadcast_event(ServerEvent::TurnUsageUpdated(

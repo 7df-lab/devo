@@ -80,7 +80,7 @@ impl ServerRuntime {
         let callback: devo_core::EventCallback = std::sync::Arc::new(move |event: QueryEvent| {
             let event_callback_tx = event_callback_tx.clone();
             Box::pin(async move {
-                enqueue_query_event(&event_callback_tx, event);
+                enqueue_query_event(&event_callback_tx, event).await;
             })
         });
         let tool_execution_start_tx = event_tx.clone();
@@ -159,7 +159,8 @@ impl ServerRuntime {
                         enqueue_query_event(
                             &tool_execution_start_tx,
                             QueryEvent::ToolExecutionStart { id: call.id },
-                        );
+                        )
+                        .await;
                     })
                 })),
                 ..ToolExecutionOptions::default()

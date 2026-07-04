@@ -51,9 +51,15 @@ pub(super) async fn execute_turn_in_actor(
     let event_tool_registry = runtime.tool_registry_for_actor_state(state);
     let usage_parent_session_id = state.parent_session_id();
     let usage_context_window = Some(turn_config.model.context_window as u64);
-    runtime
-        .begin_parent_usage_turn(session_id, turn.turn_id, usage_context_window)
-        .await;
+    // Only root sessions own a parent-turn usage ledger. Child turns publish
+    // through `publish_subagent_turn_usage` into their parent's ledger; starting
+    // a ledger keyed by the child session id is incorrect and can strand usage
+    // updates on the wrong session.
+    if usage_parent_session_id.is_none() {
+        runtime
+            .begin_parent_usage_turn(session_id, turn.turn_id, usage_context_window)
+            .await;
+    }
 
     let stream = Arc::clone(&state.stream);
     let event_task = spawn_turn_event_stream(

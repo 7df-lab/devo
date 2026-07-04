@@ -1,10 +1,19 @@
 use std::borrow::Cow;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use crate::titles::build_title_generation_request;
 use crate::titles::derive_provisional_title;
 use crate::titles::normalize_generated_title;
 
 use super::*;
+
+/// Used only when a turn event stream is active but inline state is missing.
+/// Avoids mailbox round-trips that deadlock the session actor.
+fn next_fallback_item_seq() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1 << 32);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 impl ServerRuntime {
     pub(super) async fn maybe_start_title_generation_from_user_input(
@@ -391,6 +400,15 @@ impl ServerRuntime {
                 }
                 return;
             }
+            // Active stream is registered but inline state is missing. The session
+            // actor is not polling its mailbox until the stream finishes, so we
+            // must not fall through to blocking actor commands.
+            tracing::warn!(
+                session_id = %session_id,
+                turn_id = %turn_id,
+                "persist_item skipped: active turn stream has no inline state"
+            );
+            return;
         }
         let Some(session_handle) = self.session(session_id).await else {
             return;
@@ -431,6 +449,9 @@ impl ServerRuntime {
             if let Some(inline) = stream.turn_inline.as_mut() {
                 return inline.allocate_item_seq();
             }
+            // Same deadlock constraint as persist_item: never wait on the actor
+            // mailbox while its turn event stream is registered.
+            return next_fallback_item_seq();
         }
         if let Some(handle) = self.session(session_id).await
             && let Some(item_seq) = handle.allocate_item_seq().await

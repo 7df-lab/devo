@@ -320,7 +320,13 @@ impl SubagentOutputBuffer {
                     last.text.get_or_insert_with(String::new).push_str(&delta);
                 }
                 last.created_at = event.created_at;
-                return last.clone();
+                // Release the lock before any clone/notify work. Callers currently
+                // discard the return value; avoid cloning the full accumulated
+                // assistant text on every token while holding the buffer mutex
+                // (multiple child event streams contend on this lock).
+                drop(inner);
+                self.notify.notify_waiters();
+                return event;
             }
         }
         event.sequence = inner.next_sequence;
@@ -329,6 +335,35 @@ impl SubagentOutputBuffer {
         drop(inner);
         self.notify.notify_waiters();
         event
+    }
+
+    /// Non-blocking variant for streaming text. Returns `false` when the buffer
+    /// lock is busy so token broadcast is never stalled behind `wait_agent`.
+    pub fn try_push_text_delta(&self, mut event: AgentOutputEvent) -> bool {
+        let Ok(mut inner) = self.inner.try_lock() else {
+            return false;
+        };
+        event.kind = AgentOutputEventKind::AssistantMessage;
+        if let Some(last) = inner.events.back_mut()
+            && last.kind == AgentOutputEventKind::AssistantMessage
+            && last.child_session_id == event.child_session_id
+            && last.turn_id == event.turn_id
+            && last.status.is_none()
+        {
+            if let Some(delta) = event.text.take() {
+                last.text.get_or_insert_with(String::new).push_str(&delta);
+            }
+            last.created_at = event.created_at;
+            drop(inner);
+            self.notify.notify_waiters();
+            return true;
+        }
+        event.sequence = inner.next_sequence;
+        inner.next_sequence = inner.next_sequence.saturating_add(1);
+        inner.events.push_back(event);
+        drop(inner);
+        self.notify.notify_waiters();
+        true
     }
 
     pub async fn wait_after(
@@ -449,16 +484,16 @@ mod tests {
                 ..base()
             })
             .await;
-        let second = buffer
+        assert_eq!(first.sequence, 1);
+        assert_eq!(first.text.as_deref(), Some("alpha "));
+        // Coalesced deltas no longer return a full snapshot (callers discard it);
+        // accumulated text is observed through wait_after / buffer reads.
+        let _ = buffer
             .push(AgentOutputEvent {
                 text: Some("beta".into()),
                 ..base()
             })
             .await;
-        assert_eq!(first.sequence, 1);
-        assert_eq!(second.sequence, 1);
-        assert_eq!(second.text.as_deref(), Some("alpha beta"));
-        assert_eq!(second.kind, AgentOutputEventKind::AssistantMessage);
 
         let (events, next_sequence, timed_out) = buffer
             .wait_after(0, &[child], Duration::from_millis(1), None)
@@ -466,7 +501,9 @@ mod tests {
         assert!(!timed_out);
         assert_eq!(next_sequence, 2);
         assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sequence, 1);
         assert_eq!(events[0].text.as_deref(), Some("alpha beta"));
+        assert_eq!(events[0].kind, AgentOutputEventKind::AssistantMessage);
     }
 
     #[tokio::test]
