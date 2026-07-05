@@ -1,7 +1,7 @@
 //! Client-side transport API for talking to a Devo server.
 //!
 //! Protocol logic (JSON-RPC routing, pending response maps, ACP client handlers)
-//! lives in [`client_core`]. [`stdio::StdioServerClient`] and
+//! lives in `client_core`. [`stdio::StdioServerClient`] and
 //! [`websocket::WebSocketServerClient`] are thin transport adapters.
 
 mod acp_fs;

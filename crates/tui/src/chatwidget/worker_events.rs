@@ -9,7 +9,6 @@ use devo_protocol::parse_command::ParsedCommand;
 use devo_protocol::protocol::ExecCommandSource;
 use ratatui::text::Line;
 
-use crate::app_event::AppEvent;
 use crate::bottom_pane::ApprovalOverlay;
 use crate::bottom_pane::ApprovalOverlayRequest;
 use crate::bottom_pane::InputMode;
@@ -18,7 +17,6 @@ use crate::events::WorkerEvent;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::new_active_exec_command;
-use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
 use crate::tool_io_cell::FileChangeToolIoCell;
 use crate::tool_io_cell::ToolIoCell;
@@ -587,13 +585,6 @@ impl ChatWidget {
                 } else {
                     "Tool completed"
                 });
-                if self.should_auto_show_git_diff_for_turn(&resolved_title, is_error) {
-                    let tx = self.app_event_tx.clone();
-                    tokio::spawn(async move {
-                        let text = Self::format_git_diff_result(get_git_diff().await);
-                        tx.send(AppEvent::DiffResult(text));
-                    });
-                }
             }
             WorkerEvent::ToolResult {
                 tool_use_id,
@@ -703,13 +694,6 @@ impl ChatWidget {
                 } else {
                     "Tool completed"
                 });
-                if self.should_auto_show_git_diff_for_turn(&resolved_title, is_error) {
-                    let tx = self.app_event_tx.clone();
-                    tokio::spawn(async move {
-                        let text = Self::format_git_diff_result(get_git_diff().await);
-                        tx.send(AppEvent::DiffResult(text));
-                    });
-                }
             }
             WorkerEvent::ShellCommandFinished { exit_code } => {
                 let interrupted = exit_code.is_none();

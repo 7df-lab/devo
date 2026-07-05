@@ -8229,45 +8229,6 @@ fn auto_git_diff_trigger_matches_editing_tools_only() {
 }
 
 #[tokio::test]
-async fn successful_write_tool_result_triggers_diff_event() {
-    let model = Model {
-        slug: "test-model".to_string(),
-        display_name: "Test Model".to_string(),
-        ..Model::default()
-    };
-    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
-
-    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
-        tool_use_id: "tool-1".to_string(),
-        summary: "write src/main.rs".to_string(),
-        preparing: false,
-        parsed_commands: None,
-    });
-    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
-        tool_use_id: "tool-1".to_string(),
-        title: "write src/main.rs".to_string(),
-        preview: "updated".to_string(),
-        is_error: false,
-        truncated: false,
-    });
-
-    let diff_event = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if let Some(AppEvent::DiffResult(text)) = app_event_rx.recv().await {
-                break text;
-            }
-        }
-    })
-    .await
-    .expect("diff event should arrive");
-
-    assert!(
-        !diff_event.is_empty(),
-        "auto diff should send some result text"
-    );
-}
-
-#[tokio::test]
 async fn research_turn_does_not_auto_show_git_diff() {
     let model = Model {
         slug: "test-model".to_string(),
