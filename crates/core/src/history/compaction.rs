@@ -13,7 +13,8 @@
 //! 1. Filter out `Reason` items (reasoning text is not useful for summaries).
 //! 2. Separate items into a "to‑compact" (old) and "to‑preserve" (recent) set
 //!    based on a user‑message token budget.
-//! 3. Call the summarizer LLM with the `prompt.md` template.
+//! 3. Call the summarizer LLM with the `prompt.md` template appended as the
+//!    last developer message after the to-compact history.
 //! 4. Wrap the returned summary with the `summary_prefix.md` template.
 //! 5. Build a new history: `[summary_msg, …preserved_items]`.
 //! 6. If the summarizer LLM call fails with a context‑length error, move the
@@ -33,6 +34,7 @@ use crate::response_item::ResponseItem;
 
 use devo_protocol::RequestContent;
 use devo_protocol::RequestMessage;
+use devo_protocol::RequestRole;
 
 use super::TokenInfo;
 use super::normalize;
@@ -77,8 +79,8 @@ pub enum CompactionError {
 /// this module does not depend directly on a specific provider SDK.
 #[async_trait]
 pub trait HistorySummarizer: Send + Sync {
-    /// Send `messages` (system prompt followed by the to‑compact history)
-    /// to the model and return the generated summary text.
+    /// Send `messages` (to-compact history followed by a developer compaction
+    /// prompt) to the model and return the generated summary text.
     async fn summarize(&self, messages: Vec<RequestMessage>) -> Result<String, CompactionError>;
 }
 
@@ -194,17 +196,7 @@ pub async fn compact_history(
     const MAX_TRANSIENT_RETRIES: u32 = 5;
 
     loop {
-        let mut messages = Vec::with_capacity(to_compact.len() + 1);
-        messages.push(RequestMessage {
-            role: "system".to_string(),
-            content: vec![RequestContent::Text {
-                text: SUMMARIZATION_PROMPT.trim().to_string(),
-            }],
-        });
-        for item in &to_compact {
-            messages.push(RequestMessage::from(item));
-        }
-        merge_consecutive_assistant_messages(&mut messages);
+        let messages = summarizer_request_messages(&to_compact);
 
         let summary = match summarizer.summarize(messages).await {
             Ok(s) => s,
@@ -290,6 +282,21 @@ fn split_by_user_message_budget(
         let preserve = items[preserve_from..].to_vec();
         (compact, preserve)
     }
+}
+
+fn summarizer_request_messages(to_compact: &[ResponseItem]) -> Vec<RequestMessage> {
+    let mut messages: Vec<RequestMessage> = to_compact
+        .iter()
+        .map(RequestMessage::from)
+        .collect();
+    merge_consecutive_assistant_messages(&mut messages);
+    messages.push(RequestMessage {
+        role: RequestRole::Developer.as_str().to_string(),
+        content: vec![RequestContent::Text {
+            text: SUMMARIZATION_PROMPT.trim().to_string(),
+        }],
+    });
+    messages
 }
 
 fn preserve_suffix_from_latest_user_message(items: &[ResponseItem]) -> Vec<ResponseItem> {
@@ -415,47 +422,67 @@ mod tests {
             },
         ];
 
-        let mut messages = vec![RequestMessage {
-            role: "system".to_string(),
-            content: vec![RequestContent::Text {
-                text: "dummy prompt".into(),
-            }],
-        }];
-        for item in &items {
-            messages.push(RequestMessage::from(item));
-        }
+        let mut messages: Vec<RequestMessage> = items
+            .iter()
+            .map(RequestMessage::from)
+            .collect();
         merge_consecutive_assistant_messages(&mut messages);
 
-        // system, user, assistant(merged), user, user
-        assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0].role, "system");
+        // user, assistant(merged), user, user
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content.len(), 1);
 
-        assert_eq!(messages[1].role, "user");
-        assert_eq!(messages[1].content.len(), 1);
-
-        assert_eq!(messages[2].role, "assistant");
-        assert_eq!(messages[2].content.len(), 3);
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].content.len(), 3);
         assert!(matches!(
-            &messages[2].content[0],
+            &messages[1].content[0],
             RequestContent::Text { .. }
         ));
         assert!(
-            matches!(&messages[2].content[1], RequestContent::ToolUse { id, .. } if id == "call-1")
+            matches!(&messages[1].content[1], RequestContent::ToolUse { id, .. } if id == "call-1")
         );
         assert!(
-            matches!(&messages[2].content[2], RequestContent::ToolUse { id, .. } if id == "call-2")
+            matches!(&messages[1].content[2], RequestContent::ToolUse { id, .. } if id == "call-2")
         );
 
+        assert_eq!(messages[2].role, "user");
+        assert_eq!(messages[2].content.len(), 1);
+        assert!(
+            matches!(&messages[2].content[0], RequestContent::ToolResult { tool_use_id, .. } if tool_use_id == "call-1")
+        );
         assert_eq!(messages[3].role, "user");
         assert_eq!(messages[3].content.len(), 1);
         assert!(
-            matches!(&messages[3].content[0], RequestContent::ToolResult { tool_use_id, .. } if tool_use_id == "call-1")
+            matches!(&messages[3].content[0], RequestContent::ToolResult { tool_use_id, .. } if tool_use_id == "call-2")
         );
-        assert_eq!(messages[4].role, "user");
-        assert_eq!(messages[4].content.len(), 1);
+    }
+
+    #[test]
+    fn compaction_summarizer_messages_put_prompt_last() {
+        let items = vec![
+            ResponseItem::Message(Message::user("hello")),
+            ResponseItem::Message(Message::assistant_text("ok")),
+            ResponseItem::ToolCall {
+                id: "call-1".into(),
+                name: "read".into(),
+                input: serde_json::json!({"filePath": "/tmp/a.txt"}),
+            },
+            ResponseItem::ToolCallOutput {
+                tool_use_id: "call-1".into(),
+                content: "content".into(),
+                is_error: false,
+            },
+        ];
+
+        let messages = summarizer_request_messages(&items);
+        let last = messages.last().expect("summarizer messages should not be empty");
+
+        assert_eq!(last.role, RequestRole::Developer.as_str());
         assert!(
-            matches!(&messages[4].content[0], RequestContent::ToolResult { tool_use_id, .. } if tool_use_id == "call-2")
+            matches!(&last.content[0], RequestContent::Text { text } if text.contains("CONTEXT CHECKPOINT COMPACTION"))
         );
+        assert_ne!(messages[0].role, RequestRole::Developer.as_str());
     }
 
     #[test]
@@ -504,6 +531,11 @@ mod tests {
                 messages: Vec<RequestMessage>,
             ) -> Result<String, CompactionError> {
                 assert_eq!(messages.len(), 4);
+                let last = messages.last().expect("summarizer messages should not be empty");
+                assert_eq!(last.role, RequestRole::Developer.as_str());
+                assert!(
+                    matches!(&last.content[0], RequestContent::Text { text } if text.contains("CONTEXT CHECKPOINT COMPACTION"))
+                );
                 Ok("summary".to_string())
             }
         }
