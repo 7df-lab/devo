@@ -953,8 +953,22 @@ async fn fork_all_inherits_stable_parent_context() -> Result<()> {
 
     let requests = provider.requests();
     assert_eq!(requests.len(), 4);
-    let completed_child_texts = message_texts(&requests[1]);
-    assert_subagent_request_hides_agent_tools(&requests[1]);
+    // Parent turn 2 and the active-fork child start concurrently, so provider
+    // request order is not stable; locate each turn by its task text.
+    let completed_child_request = find_unique_request_with_text(&requests, "use inherited context");
+    let active_child_request = find_unique_request_with_text(&requests, "fork while parent active");
+    let parent_active_turn_request =
+        find_unique_request_with_text(&requests, "active parent text should not be inherited yet");
+    assert!(
+        parent_active_turn_request
+            .tools
+            .as_ref()
+            .is_some_and(|tools| { tools.iter().any(|tool| tool.name == "spawn_agent") }),
+        "parent active turn should expose agent coordination tools"
+    );
+
+    let completed_child_texts = message_texts(completed_child_request);
+    assert_subagent_request_hides_agent_tools(completed_child_request);
     assert!(
         completed_child_texts
             .iter()
@@ -980,8 +994,8 @@ async fn fork_all_inherits_stable_parent_context() -> Result<()> {
     );
     assert_subagent_reminder_before_task(&completed_child_texts, "use inherited context");
 
-    let active_child_texts = message_texts(&requests[3]);
-    assert_subagent_request_hides_agent_tools(&requests[3]);
+    let active_child_texts = message_texts(active_child_request);
+    assert_subagent_request_hides_agent_tools(active_child_request);
     assert!(
         active_child_texts
             .iter()
@@ -1076,6 +1090,29 @@ async fn fork_none_omits_parent_context_and_places_reminder_before_task() -> Res
     .await?;
 
     Ok(())
+}
+
+fn request_contains_text(request: &ModelRequest, needle: &str) -> bool {
+    message_texts(request)
+        .iter()
+        .any(|text| text.contains(needle))
+}
+
+fn find_unique_request_with_text<'a>(
+    requests: &'a [ModelRequest],
+    needle: &str,
+) -> &'a ModelRequest {
+    let matches: Vec<_> = requests
+        .iter()
+        .filter(|request| request_contains_text(request, needle))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one request containing {needle:?}, got {} matching request(s)",
+        matches.len(),
+    );
+    matches[0]
 }
 
 fn assert_generated_name(name: &str) {

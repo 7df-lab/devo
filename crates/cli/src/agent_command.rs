@@ -23,11 +23,13 @@ use devo_util_paths::find_devo_home;
 /// when a provider config already exists. `exit_after_onboarding` exits after a
 /// successful onboarding save instead of continuing into the interactive TUI.
 /// `log_level` is forwarded to the background server process.
+/// `dangerously_skip_permissions` starts the session with full-access permissions.
 pub(crate) async fn run_agent(
     force_onboarding: bool,
     exit_after_onboarding: bool,
     log_level: Option<&str>,
     initial_session_id: Option<SessionId>,
+    dangerously_skip_permissions: bool,
 ) -> Result<devo_tui::AppExit> {
     let cwd = std::env::current_dir()?;
     let config_home = find_devo_home().context("could not determine devo home directory")?;
@@ -45,11 +47,8 @@ pub(crate) async fn run_agent(
         .collect();
     let app_config = FileSystemAppConfigLoader::new(config_home.clone()).load(Some(&cwd))?;
     let project_key = project_config_key(&cwd);
-    let permission_preset = app_config
-        .projects
-        .get(&project_key)
-        .and_then(|config| config.permission_preset)
-        .unwrap_or(PermissionPreset::Default);
+    let permission_preset =
+        initial_permission_preset(&app_config, &project_key, dangerously_skip_permissions);
     let (onboarding_mode, resolved) = resolve_initial_provider_settings(
         force_onboarding,
         &app_config,
@@ -114,6 +113,24 @@ pub(crate) async fn run_agent(
     .await?;
     tracing::info!("interactive tui returned to cli agent command");
     Ok(exit)
+}
+
+fn initial_permission_preset(
+    app_config: &AppConfig,
+    project_key: &str,
+    dangerously_skip_permissions: bool,
+) -> PermissionPreset {
+    let mut permission_preset = app_config
+        .projects
+        .get(project_key)
+        .and_then(|config| config.permission_preset)
+        .unwrap_or(PermissionPreset::Default);
+
+    if dangerously_skip_permissions {
+        permission_preset = PermissionPreset::FullAccess;
+    }
+
+    permission_preset
 }
 
 /// Resolves the initial provider settings and whether onboarding should be shown.
@@ -243,6 +260,7 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
+    use super::initial_permission_preset;
     use super::resolve_initial_provider_settings;
     use super::saved_model_entries;
     use devo_core::AppConfig;
@@ -251,10 +269,12 @@ mod tests {
     use devo_core::Model;
     use devo_core::ModelBindingConfig;
     use devo_core::PresetModelCatalog;
+    use devo_core::ProjectConfig;
     use devo_core::ProviderConfigSection;
     use devo_core::ProviderDefaultsConfig;
     use devo_core::ProviderVendorConfig;
     use devo_core::ResolvedProviderSettings;
+    use devo_protocol::PermissionPreset;
     use devo_protocol::ProviderWireApi;
     use devo_tui::SavedModelEntry;
 
@@ -281,6 +301,46 @@ mod tests {
             provider,
             ..AppConfig::default()
         }
+    }
+
+    #[test]
+    fn initial_permission_preset_uses_project_config_when_flag_is_false() {
+        let mut app_config = AppConfig::default();
+        app_config.projects.insert(
+            "project-key".to_string(),
+            ProjectConfig {
+                permission_preset: Some(PermissionPreset::ReadOnly),
+            },
+        );
+
+        assert_eq!(
+            initial_permission_preset(
+                &app_config,
+                "project-key",
+                /*dangerously_skip_permissions*/ false,
+            ),
+            PermissionPreset::ReadOnly,
+        );
+    }
+
+    #[test]
+    fn initial_permission_preset_overrides_to_full_access_when_flag_is_true() {
+        let mut app_config = AppConfig::default();
+        app_config.projects.insert(
+            "project-key".to_string(),
+            ProjectConfig {
+                permission_preset: Some(PermissionPreset::ReadOnly),
+            },
+        );
+
+        assert_eq!(
+            initial_permission_preset(
+                &app_config,
+                "project-key",
+                /*dangerously_skip_permissions*/ true,
+            ),
+            PermissionPreset::FullAccess,
+        );
     }
 
     #[test]

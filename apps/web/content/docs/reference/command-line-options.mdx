@@ -12,6 +12,7 @@ Global flags can be used with interactive mode and subcommands.
 | --- | --- | --- |
 | `--model` | string | Override the model used for this process. |
 | `--log-level` | `trace`, `debug`, `info`, `warn`, `error` | Override process logging level. |
+| `--dangerously-skip-permissions`, `--yolo` | none | Start the interactive TUI with full-access permissions, skipping approval prompts. |
 | `--help` | none | Print command help. |
 | `--version` | none | Print Devo version. |
 
@@ -19,6 +20,7 @@ Example:
 
 ```bash
 devo --model deepseek-v4-pro --log-level debug
+devo --yolo
 ```
 
 ## Commands

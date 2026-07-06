@@ -59,6 +59,14 @@ struct Cli {
             .try_map(|level| level.parse::<LevelFilter>())
     )]
     log_level: Option<LevelFilter>,
+
+    /// Start with full-access permissions, skipping approval prompts.
+    #[arg(
+        long = "dangerously-skip-permissions",
+        visible_alias = "yolo",
+        global = true
+    )]
+    dangerously_skip_permissions: bool,
 }
 
 fn main() -> Result<()> {
@@ -186,6 +194,7 @@ async fn run_cli() -> Result<()> {
                 /*exit_after_onboarding*/ true,
                 log_level.as_deref(),
                 None,
+                cli.dangerously_skip_permissions,
             )
             .await?;
             for line in onboarding_exit_messages(&exit, /*color_enabled*/ true) {
@@ -211,6 +220,7 @@ async fn run_cli() -> Result<()> {
                 /*exit_after_onboarding*/ false,
                 log_level.as_deref(),
                 Some(*session_id),
+                cli.dangerously_skip_permissions,
             )
             .await?;
             for line in exit_messages(&exit, /*color_enabled*/ true) {
@@ -240,6 +250,7 @@ async fn run_cli() -> Result<()> {
                 /*exit_after_onboarding*/ false,
                 log_level.as_deref(),
                 None,
+                cli.dangerously_skip_permissions,
             )
             .await?;
             let exit_lines = exit_messages(&exit, /*color_enabled*/ true);
@@ -421,6 +432,33 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_dangerously_skip_permissions_flag() {
+        let cli = Cli::try_parse_from(["devo", "--dangerously-skip-permissions"])
+            .expect("parse dangerously-skip-permissions");
+
+        assert!(cli.command.is_none());
+        assert!(cli.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn cli_parses_yolo_alias_for_dangerously_skip_permissions() {
+        let cli = Cli::try_parse_from(["devo", "--yolo"]).expect("parse yolo");
+
+        assert!(cli.command.is_none());
+        assert!(cli.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn cli_parses_yolo_alias_on_resume_subcommand() {
+        let session_id = SessionId::new();
+        let cli = Cli::try_parse_from(["devo", "resume", &session_id.to_string(), "--yolo"])
+            .expect("parse resume with yolo");
+
+        assert!(matches!(cli.command, Some(Command::Resume { .. })));
+        assert!(cli.dangerously_skip_permissions);
+    }
+
+    #[test]
     fn cli_rejects_unsupported_log_levels() {
         let err = Cli::try_parse_from(["devo", "--log-level", "off"]).expect_err("reject off");
 
@@ -440,6 +478,7 @@ mod tests {
                 command: None,
                 model: None,
                 log_level: Some(level),
+                dangerously_skip_permissions: false,
             };
 
             assert_eq!(
@@ -462,11 +501,13 @@ mod tests {
                 command: None,
                 model: None,
                 log_level: None,
+                dangerously_skip_permissions: false,
             },
             Cli {
                 command: Some(Command::Onboard),
                 model: None,
                 log_level: None,
+                dangerously_skip_permissions: false,
             },
             Cli {
                 command: Some(Command::Prompt {
@@ -475,6 +516,7 @@ mod tests {
                 }),
                 model: None,
                 log_level: None,
+                dangerously_skip_permissions: false,
             },
         ] {
             assert_eq!(
@@ -493,6 +535,7 @@ mod tests {
             command: Some(Command::Doctor),
             model: None,
             log_level: None,
+            dangerously_skip_permissions: false,
         };
         let server = Cli {
             command: Some(Command::Server {
@@ -502,6 +545,7 @@ mod tests {
             }),
             model: None,
             log_level: None,
+            dangerously_skip_permissions: false,
         };
 
         assert_eq!(
