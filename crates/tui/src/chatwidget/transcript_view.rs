@@ -236,8 +236,11 @@ impl ChatWidget {
                     tool_name.clone(),
                     input.clone(),
                     pending.output.clone(),
-                )
-                .transcript_lines(width);
+                );
+                let tool_lines = match mode {
+                    LiveViewportLineMode::Display => tool_lines.display_lines(width),
+                    LiveViewportLineMode::Transcript => tool_lines.transcript_lines(width),
+                };
                 Self::extend_lines_with_separator(&mut lines, tool_lines);
             } else {
                 let pending_lines = if let Some(start_time) = pending.start_time {
@@ -297,7 +300,7 @@ impl ChatWidget {
                 input.clone(),
                 tool_call.output.clone(),
             )
-            .transcript_lines(width),
+            .display_lines(width),
             _ => history_cell::AgentMessageCell::new_with_prefix(
                 tool_call.lines.clone(),
                 Self::pending_dot_prefix(),

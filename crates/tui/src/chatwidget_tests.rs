@@ -7719,47 +7719,6 @@ fn code_search_tool_call_renders_as_explored_group_in_viewport() {
 }
 
 #[test]
-fn running_code_search_with_details_shows_input_in_live_viewport() {
-    let model = Model {
-        slug: "test-model".to_string(),
-        display_name: "Test Model".to_string(),
-        ..Model::default()
-    };
-    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
-
-    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
-        tool_use_id: "tool-1".to_string(),
-        summary: "code_search live tool feedback in crates".to_string(),
-        preparing: false,
-        parsed_commands: None,
-    });
-    widget.handle_worker_event(crate::events::WorkerEvent::ToolCallDetails {
-        tool_use_id: "tool-1".to_string(),
-        tool_name: "code_search".to_string(),
-        input: serde_json::json!({
-            "operation": "search",
-            "query": "live tool feedback",
-            "path": "crates"
-        }),
-    });
-
-    let rendered = rendered_rows(&widget, 80, 16).join("\n");
-
-    assert!(
-        rendered.contains("operation") && rendered.contains("search"),
-        "live viewport should show 'operation: search' for running code_search:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("query") && rendered.contains("live tool feedback"),
-        "live viewport should show 'query: live tool feedback' for running code_search:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("path") && rendered.contains("crates"),
-        "live viewport should show 'path: crates' for running code_search:\n{rendered}"
-    );
-}
-
-#[test]
 fn exploring_code_search_with_details_shows_input_in_active_cell() {
     let model = Model {
         slug: "test-model".to_string(),

@@ -146,6 +146,13 @@ fn acp_terminal_snapshot_delta(
     (!delta.is_empty()).then_some(delta)
 }
 
+fn should_apply_terminal_turn_usage_fallback(
+    saw_usage_update_for_turn: bool,
+    has_authoritative_usage_totals: bool,
+) -> bool {
+    !saw_usage_update_for_turn && !has_authoritative_usage_totals
+}
+
 async fn maybe_discover_spawned_subagent_from_acp_update(
     update: &devo_protocol::AcpSessionUpdate,
     client: &mut StdioServerClient,
@@ -838,6 +845,7 @@ async fn run_worker_inner(
     let mut last_query_total_tokens = 0usize;
     let mut last_query_input_tokens = 0usize;
     let mut saw_usage_update_for_turn = false;
+    let mut has_authoritative_usage_totals = false;
     let mut latest_completed_agent_message: Option<String> = None;
     let mut child_agent_sessions: HashSet<SessionId> = HashSet::new();
     let mut btw_agent_sessions: HashMap<SessionId, BtwQuestionState> = HashMap::new();
@@ -899,6 +907,7 @@ async fn run_worker_inner(
                 total_tokens = resumed.session.total_tokens;
                 total_cache_read_tokens = resumed.session.total_cache_read_tokens;
                 last_query_total_tokens = resumed.session.last_query_total_tokens;
+                has_authoritative_usage_totals = true;
             }
             Err(error) => {
                 let _ = event_tx.send(WorkerEvent::TurnFailed {
@@ -1568,6 +1577,7 @@ async fn run_worker_inner(
                         total_cache_read_tokens = 0;
                         last_query_total_tokens = 0;
                         last_query_input_tokens = 0;
+                        has_authoritative_usage_totals = true;
                         let _ = event_tx.send(WorkerEvent::NewSessionPrepared {
                             cwd: session_cwd.clone(),
                             model: model.clone(),
@@ -1659,11 +1669,13 @@ async fn run_worker_inner(
                                 total_input_tokens = result.session.total_input_tokens;
                                 total_output_tokens = result.session.total_output_tokens;
                                 total_tokens = result.session.total_tokens;
+                                total_cache_read_tokens = result.session.total_cache_read_tokens;
                                 let _ =
                                     emit_skills_list(&mut client, &session_cwd, event_tx, false)
                                         .await;
                                 last_query_total_tokens =
                                     result.session.last_query_total_tokens;
+                                has_authoritative_usage_totals = true;
                             }
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
@@ -1798,8 +1810,10 @@ async fn run_worker_inner(
                                 total_input_tokens = result.session.total_input_tokens;
                                 total_output_tokens = result.session.total_output_tokens;
                                 total_tokens = result.session.total_tokens;
+                                total_cache_read_tokens = result.session.total_cache_read_tokens;
                                 last_query_total_tokens =
                                     result.session.last_query_total_tokens;
+                                has_authoritative_usage_totals = true;
                             }
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
@@ -1907,8 +1921,10 @@ async fn run_worker_inner(
                                         total_input_tokens = resumed.session.total_input_tokens;
                                         total_output_tokens = resumed.session.total_output_tokens;
                                         total_tokens = resumed.session.total_tokens;
+                                        total_cache_read_tokens = resumed.session.total_cache_read_tokens;
                                         last_query_total_tokens =
                                             resumed.session.last_query_total_tokens;
+                                        has_authoritative_usage_totals = true;
                                     }
                                     Err(error) => {
                                         let _ = event_tx.send(WorkerEvent::TurnFailed {
@@ -2645,7 +2661,10 @@ async fn run_worker_inner(
                                         if let Some(usage) = &payload.turn.usage {
                                             last_query_input_tokens = usage.input_tokens as usize;
                                             last_query_total_tokens = usage.display_total_tokens();
-                                            if !saw_usage_update_for_turn {
+                                            if should_apply_terminal_turn_usage_fallback(
+                                                saw_usage_update_for_turn,
+                                                has_authoritative_usage_totals,
+                                            ) {
                                                 total_input_tokens += usage.input_tokens as usize;
                                                 total_output_tokens += usage.output_tokens as usize;
                                                 total_tokens += usage.display_total_tokens();
@@ -2682,6 +2701,7 @@ async fn run_worker_inner(
                                     total_tokens = payload.total_tokens;
                                     total_cache_read_tokens = payload.total_cache_read_tokens;
                                     last_query_input_tokens = payload.last_query_input_tokens;
+                                    has_authoritative_usage_totals = true;
                                     let _ = event_tx.send(WorkerEvent::UsageUpdated {
                                         total_input_tokens: payload.total_input_tokens,
                                         total_output_tokens: payload.total_output_tokens,
@@ -2701,7 +2721,10 @@ async fn run_worker_inner(
                                     if let Some(usage) = &turn.usage {
                                         last_query_input_tokens = usage.input_tokens as usize;
                                         last_query_total_tokens = usage.display_total_tokens();
-                                        if !saw_usage_update_for_turn {
+                                        if should_apply_terminal_turn_usage_fallback(
+                                            saw_usage_update_for_turn,
+                                            has_authoritative_usage_totals,
+                                        ) {
                                             total_input_tokens += usage.input_tokens as usize;
                                             total_output_tokens += usage.output_tokens as usize;
                                             total_tokens += usage.display_total_tokens();
@@ -3790,13 +3813,129 @@ fn summarize_tool_call(payload: &ToolCallPayload) -> String {
         return format!("Web Fetch({})", serde_json::Value::String(url));
     }
 
-    let detail = summarize_tool_input(&payload.tool_name, &payload.parameters);
-    if detail.is_empty() {
-        payload.tool_name.clone()
-    } else if payload.tool_name == "spawn_agent" {
-        format!("spawn_agent: {detail}")
-    } else {
-        format!("{} {detail}", payload.tool_name)
+    match pretty_tool_call_summary(&payload.tool_name, &payload.parameters) {
+        Some(summary) => summary,
+        None => {
+            let detail = summarize_tool_input(&payload.tool_name, &payload.parameters);
+            if detail.is_empty() {
+                payload.tool_name.clone()
+            } else {
+                format!("{} {detail}", payload.tool_name)
+            }
+        }
+    }
+}
+
+fn pretty_tool_call_summary(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+    let quote = |text: &str| serde_json::Value::String(compact_tool_summary(text, 96)).to_string();
+    let path_value = || {
+        input
+            .get("filePath")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| input.get("path").and_then(serde_json::Value::as_str))
+            .map(make_path_relative)
+    };
+    match tool_name {
+        "bash" | "shell_command" | "exec_command" => input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| input.get("cmd").and_then(serde_json::Value::as_str))
+            .map(|command| format!("Shell {}", compact_tool_summary(command, 96))),
+        "read" => path_value().map(|path| format!("Read {path}{}", fmt_line_range(input))),
+        "write" | "edit" => path_value().map(|path| format!("Write {path}")),
+        "apply_patch" => path_value().map(|path| format!("Patch {path}")),
+        "find" | "glob" => input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(make_path_relative)
+            .or_else(|| {
+                input
+                    .get("pattern")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .map(|path| format!("List {path}")),
+        "grep" => {
+            let pattern = input.get("pattern").and_then(serde_json::Value::as_str)?;
+            let query = quote(pattern);
+            match input
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .map(make_path_relative)
+            {
+                Some(path) => Some(format!("Search {query} in {path}")),
+                None => Some(format!("Search {query}")),
+            }
+        }
+        "code_search" => {
+            let query = input
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| input.get("pattern").and_then(serde_json::Value::as_str))
+                .unwrap_or_default();
+            let path = input
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| input.get("file_path").and_then(serde_json::Value::as_str))
+                .map(make_path_relative);
+            match (query.is_empty(), path) {
+                (false, Some(path)) => Some(format!("Code-Search {} in {path}", quote(query))),
+                (false, None) => Some(format!("Code-Search {}", quote(query))),
+                (true, Some(path)) => Some(format!("Code-Search in {path}")),
+                (true, None) => Some("Code-Search".to_string()),
+            }
+        }
+        "spawn_agent" | "agent_spawn" => {
+            let nickname = input
+                .get("agent_nickname")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| input.get("nickname").and_then(serde_json::Value::as_str))
+                .or_else(|| input.get("agent_path").and_then(serde_json::Value::as_str))
+                .unwrap_or("agent");
+            let prompt = input
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| input.get("prompt").and_then(serde_json::Value::as_str))
+                .unwrap_or_default();
+            Some(format!("Spawn-Agent {} {}", quote(nickname), quote(prompt)))
+        }
+        "wait_agent" | "agent_wait" => {
+            let target = input
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    input
+                        .get("agent_nickname")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .unwrap_or("agent");
+            let timeout = input
+                .get("timeout_secs")
+                .and_then(serde_json::Value::as_u64)
+                .map(|secs| format!("{secs}s"))
+                .or_else(|| {
+                    input
+                        .get("timeout")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string)
+                })
+                .unwrap_or_else(|| "default".to_string());
+            Some(format!("Wait-Agent {} {}", quote(target), quote(&timeout)))
+        }
+        "close_agent" | "agent_close" => {
+            let target = input
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    input
+                        .get("agent_nickname")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .unwrap_or("agent");
+            Some(format!("Close-Agent {}", quote(target)))
+        }
+        "list_agent" | "agent_list" => Some("List-Agent".to_string()),
+        _ => None,
     }
 }
 
@@ -4060,6 +4199,17 @@ fn fmt_offset_limit(input: &serde_json::Value) -> String {
         (Some(o), Some(l)) => format!(" (offset:{o}, limit:{l})"),
         (Some(o), None) => format!(" (offset:{o})"),
         (None, Some(l)) => format!(" (limit:{l})"),
+        (None, None) => String::new(),
+    }
+}
+
+fn fmt_line_range(input: &serde_json::Value) -> String {
+    let offset = input.get("offset").and_then(serde_json::Value::as_u64);
+    let limit = input.get("limit").and_then(serde_json::Value::as_u64);
+    match (offset, limit) {
+        (Some(start), Some(limit)) => format!(" L:{start}-{}", start.saturating_add(limit)),
+        (Some(start), None) => format!(" L:{start}"),
+        (None, Some(limit)) => format!(" L:0-{limit}"),
         (None, None) => String::new(),
     }
 }
@@ -4574,8 +4724,70 @@ mod tests {
 
         assert_eq!(
             summarize_tool_call(&payload),
-            "bash Get-Date -Format \"yyyy-MM-dd\""
+            "Shell Get-Date -Format \"yyyy-MM-dd\""
         );
+    }
+
+    #[test]
+    fn tool_summary_uses_pretty_operation_labels() {
+        let cases = [
+            (
+                "read",
+                serde_json::json!({ "path": "/tmp/project/src/lib.rs", "offset": 9, "limit": 4 }),
+                "Read /tmp/project/src/lib.rs L:9-13",
+            ),
+            (
+                "write",
+                serde_json::json!({ "path": "src/lib.rs" }),
+                "Write src/lib.rs",
+            ),
+            (
+                "apply_patch",
+                serde_json::json!({ "path": "src/lib.rs" }),
+                "Patch src/lib.rs",
+            ),
+            (
+                "glob",
+                serde_json::json!({ "pattern": "*.rs", "path": "crates/tui" }),
+                "List crates/tui",
+            ),
+            (
+                "grep",
+                serde_json::json!({ "pattern": "Usage", "path": "crates/tui" }),
+                "Search \"Usage\" in crates/tui",
+            ),
+            (
+                "code_search",
+                serde_json::json!({ "query": "usage ledger", "path": "crates/server" }),
+                "Code-Search \"usage ledger\" in crates/server",
+            ),
+            (
+                "spawn_agent",
+                serde_json::json!({ "agent_nickname": "reviewer", "message": "check usage" }),
+                "Spawn-Agent \"reviewer\" \"check usage\"",
+            ),
+            (
+                "agent_wait",
+                serde_json::json!({ "target": "reviewer", "timeout_secs": 30 }),
+                "Wait-Agent \"reviewer\" \"30s\"",
+            ),
+            (
+                "close_agent",
+                serde_json::json!({ "target": "reviewer" }),
+                "Close-Agent \"reviewer\"",
+            ),
+            ("agent_list", serde_json::json!({}), "List-Agent"),
+        ];
+
+        for (tool_name, parameters, expected) in cases {
+            let payload = ToolCallPayload {
+                tool_call_id: "call-1".to_string(),
+                tool_name: tool_name.to_string(),
+                parameters,
+                command_actions: Vec::new(),
+            };
+            assert_eq!(summarize_tool_call(&payload), expected);
+        }
     }
 
     #[test]
@@ -4776,7 +4988,7 @@ mod tests {
             tool_call_started_event(payload),
             WorkerEvent::ToolCall {
                 tool_use_id: "call-1".to_string(),
-                summary: "code_search live tool feedback in crates".to_string(),
+                summary: "Code-Search \"live tool feedback\" in crates".to_string(),
                 preparing: false,
                 parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
                     cmd: "code_search".to_string(),
@@ -4800,7 +5012,7 @@ mod tests {
             tool_call_started_event(payload),
             WorkerEvent::ToolCall {
                 tool_use_id: "call-1".to_string(),
-                summary: "code_search".to_string(),
+                summary: "Code-Search".to_string(),
                 preparing: false,
                 parsed_commands: Some(Vec::new()),
             }
@@ -4923,9 +5135,9 @@ mod tests {
             event_rx.try_recv().expect("worker update event"),
             WorkerEvent::ToolCallUpdated {
                 tool_use_id: "call-1".to_string(),
-                summary: "glob **/Cargo.toml in crates".to_string(),
+                summary: "List crates".to_string(),
                 parsed_commands: vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
-                    cmd: "glob **/Cargo.toml in crates".to_string(),
+                    cmd: "List crates".to_string(),
                     path: Some("**/Cargo.toml in crates".to_string()),
                 }],
             }
@@ -5221,6 +5433,20 @@ mod tests {
                 cost: None,
             }]
         );
+    }
+
+    #[test]
+    fn terminal_usage_fallback_skips_sessions_with_authoritative_totals() {
+        assert!(!super::should_apply_terminal_turn_usage_fallback(
+            /*saw_usage_update_for_turn*/ false, /*has_authoritative_usage_totals*/ true,
+        ));
+        assert!(super::should_apply_terminal_turn_usage_fallback(
+            /*saw_usage_update_for_turn*/ false,
+            /*has_authoritative_usage_totals*/ false,
+        ));
+        assert!(!super::should_apply_terminal_turn_usage_fallback(
+            /*saw_usage_update_for_turn*/ true, /*has_authoritative_usage_totals*/ false,
+        ));
     }
 
     #[test]
