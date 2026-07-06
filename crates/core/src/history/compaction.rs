@@ -4,14 +4,14 @@
 //! Two compaction modes (`CompactionKind`) choose different preserve strategies:
 //!
 //! * **Auto** — token-budget threshold in the query loop (`query.rs`).
-//!   Preserves a tail window of roughly [`COMPACT_USER_MESSAGE_MAX_TOKENS`]
-//!   estimated tokens via [`split_by_user_message_budget`], regardless of user
+//!   Preserves a tail window of roughly `COMPACT_USER_MESSAGE_MAX_TOKENS`
+//!   estimated tokens via `split_by_user_message_budget`, regardless of user
 //!   message boundaries. Example: `[user1, asst1, user2, asst2, user3]` may
 //!   become `[summary, asst2, user3]` when `asst2` and `user3` fit the tail
 //!   budget but `user2` does not.
 //! * **Proactive** — `/compact` or provider `context_too_long` retry.
 //!   Preserves from the latest user message onward via
-//!   [`preserve_suffix_from_latest_user_message`]. Example: the same history
+//!   `preserve_suffix_from_latest_user_message`. Example: the same history
 //!   becomes `[summary, user3]` only.
 //!
 //! The compaction flow:
@@ -129,12 +129,12 @@ pub enum CompactionKind {
     /// Automatic compaction when context pressure is high.
     ///
     /// Skips when [`should_compact`] says the session is already within budget.
-    /// Preserve strategy: [`split_by_user_message_budget`] over the tail
-    /// [`COMPACT_USER_MESSAGE_MAX_TOKENS`] window (items, not user turns).
+    /// Preserve strategy: `split_by_user_message_budget` over the tail
+    /// `COMPACT_USER_MESSAGE_MAX_TOKENS` window (items, not user turns).
     Auto,
     /// Forced compaction that always runs.
     ///
-    /// Preserve strategy: [`preserve_suffix_from_latest_user_message`] — from
+    /// Preserve strategy: `preserve_suffix_from_latest_user_message` — from
     /// the last `Role::User` item through the end of history.
     Proactive,
 }
