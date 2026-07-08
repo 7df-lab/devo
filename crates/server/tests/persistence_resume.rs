@@ -1877,6 +1877,16 @@ async fn first_usage_update_after_resume_preserves_historical_session_totals() -
     .result
     .session;
     assert_eq!(resumed.total_input_tokens, 100);
+    // Context length comes from the latest query snapshot, not cumulative totals.
+    let last_query_usage = resumed
+        .last_query_usage
+        .expect("resumed session should include last_query_usage");
+    assert_eq!(last_query_usage.input_tokens, 100);
+    assert_eq!(last_query_usage.output_tokens, 25);
+    assert_eq!(last_query_usage.total_tokens, Some(125));
+    assert_eq!(resumed.last_query_total_tokens, 125);
+    // Cumulative session totals remain distinct from latest-query context length.
+    assert_ne!(resumed.total_input_tokens, resumed.last_query_total_tokens);
 
     let second_turn_response = rebuilt_runtime
         .handle_incoming(
@@ -2481,6 +2491,7 @@ fn sample_indexed_session(
         total_cache_creation_tokens: 0,
         total_cache_read_tokens: 0,
         prompt_token_estimate: 0,
+        last_query_usage: None,
         last_query_total_tokens: 0,
         status: devo_protocol::SessionRuntimeStatus::Idle,
     }
