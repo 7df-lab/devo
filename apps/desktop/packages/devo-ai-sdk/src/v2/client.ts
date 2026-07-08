@@ -233,6 +233,29 @@ function sessionMeta(value: unknown): Record<string, unknown> | undefined {
 	return objectRecord(meta?.["devo/session"])
 }
 
+function providerRetryStatusFromOriginalEvent(
+	original: Record<string, unknown>,
+	originalMethod?: string,
+): Record<string, unknown> | null {
+	if (originalMethod !== "turn/provider_retry_status" && !("TurnProviderRetryStatus" in original) && original.kind !== "turn_provider_retry_status") {
+		return null
+	}
+	const payload = objectRecord(original.TurnProviderRetryStatus) ?? original
+	const sessionID = String(payload.session_id ?? payload.sessionId ?? "")
+	const turnID = String(payload.turn_id ?? payload.turnId ?? "")
+	if (!sessionID || !turnID) return null
+	return {
+		sessionID,
+		turnID,
+		attempt: numberFromProtocol(payload.attempt),
+		backoffMs: numberFromProtocol(payload.backoff_ms ?? payload.backoffMs),
+		provider: String(payload.provider ?? ""),
+		model: String(payload.model ?? ""),
+		phase: String(payload.phase ?? ""),
+		message: String(payload.message ?? ""),
+	}
+}
+
 function sessionStatusFromMetadata(value: unknown): string | undefined {
 	const meta = objectRecord(value)
 	const nestedStatus = objectRecord(meta?.["devo/session"])?.status
@@ -1525,6 +1548,14 @@ class AcpClient {
 			this.handleDeletedSessionIds(deletedSessionIds, directory)
 			return
 		}
+		const retryStatus = providerRetryStatusFromOriginalEvent(original as Record<string, unknown>, originalMethod)
+		if (retryStatus) {
+			this.emit(directory, {
+				type: "turn.provider_retry_status",
+				properties: retryStatus,
+			})
+			return
+		}
 		const changedStatus = sessionStatusChangedFromOriginalEvent(original, originalMethod)
 		if (changedStatus) {
 			this.rememberSessionStatus(changedStatus.sessionId, directory, changedStatus.status)
@@ -1796,12 +1827,14 @@ class AcpClient {
 			existingMessage,
 			now,
 		)
+		const turnId = this.turnIdForUpdate(update)
 		const message = {
 			...(existingMessage ?? {}),
 			id: messageId,
 			sessionID: sessionId,
 			role,
 			...(parentID ? { parentID } : {}),
+			...(turnId ? { turnID: turnId } : {}),
 			time: { ...(existingMessage?.time ?? {}), created },
 		} as Message
 		this.appendMessage(sessionId, message)
@@ -1865,12 +1898,14 @@ class AcpClient {
 			existingMessage,
 			now,
 		)
+		const turnId = this.turnIdForUpdate(update)
 		const message = {
 			...(existingMessage ?? {}),
 			id: messageId,
 			sessionID: sessionId,
 			role: "assistant",
 			...(parentID ? { parentID } : {}),
+			...(turnId ? { turnID: turnId } : {}),
 			time: { ...(existingMessage?.time ?? {}), created },
 		} as Message
 		const partEventTime = updateHistoryCreatedAt(update) ?? now
