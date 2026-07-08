@@ -353,14 +353,7 @@ impl ChatWidget {
     pub(super) fn add_transcript_item_without_redraw(&mut self, item: TranscriptItem) {
         match item.kind {
             TranscriptItemKind::User => {
-                self.add_history_entry_without_redraw(Box::new(history_cell::new_user_prompt(
-                    item.body,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    self.active_accent_color(),
-                    InputMode::Build,
-                )));
+                self.add_restored_user_prompt(item.body);
             }
             TranscriptItemKind::Assistant => {
                 self.add_markdown_history_without_redraw("Assistant", &item.body)

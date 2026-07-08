@@ -433,6 +433,38 @@ mod tests {
     }
 
     #[test]
+    fn vt100_preserves_user_cell_boundary_blank_lines() {
+        let width: u16 = 40;
+        let height: u16 = 8;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
+
+        let lines = vec![
+            ScrollbackLine::new(Line::from("  ")),
+            ScrollbackLine::new(Line::from("▌ hello")),
+            ScrollbackLine::new(Line::from("  ")),
+        ];
+        insert_history_lines(&mut term, lines).expect("insert history");
+
+        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
+        let user_row = rows
+            .iter()
+            .position(|row| row.contains("▌ hello"))
+            .unwrap_or_else(|| panic!("expected user row, rows: {rows:?}"));
+
+        assert!(
+            user_row > 0 && rows[user_row - 1].trim().is_empty(),
+            "expected blank row above restored user cell, rows: {rows:?}"
+        );
+        assert!(
+            user_row + 1 < rows.len() && rows[user_row + 1].trim().is_empty(),
+            "expected blank row below restored user cell, rows: {rows:?}"
+        );
+    }
+
+    #[test]
     fn vt100_blockquote_line_emits_green_fg() {
         // Set up a small off-screen terminal
         let width: u16 = 40;

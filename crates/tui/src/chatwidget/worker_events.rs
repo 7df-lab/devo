@@ -858,9 +858,11 @@ impl ChatWidget {
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.total_cache_read_tokens = total_cache_read_tokens;
+                // Context length uses latest-query totals, not cumulative session
+                // total_input_tokens.
                 self.last_query_total_tokens = last_query_total_tokens;
                 self.last_query_input_tokens = last_query_input_tokens;
-                self.prompt_token_estimate = total_input_tokens;
+                self.prompt_token_estimate = last_query_input_tokens;
                 self.frame_requester.schedule_frame();
             }
             WorkerEvent::TurnFinished {
@@ -951,6 +953,7 @@ impl ChatWidget {
                 last_query_input_tokens,
             } => {
                 self.resume_browser_loading = false;
+                self.finish_session_resume();
                 self.active_turn_is_research = false;
                 self.commit_active_streams(DotStatus::Failed);
                 self.active_tool_calls.clear();
@@ -1121,6 +1124,7 @@ impl ChatWidget {
                 total_cache_read_tokens: _,
             } => {
                 self.resume_browser_loading = false;
+                self.finish_session_resume();
                 self.session.cwd = cwd;
                 self.update_session_model_selection(model, model_binding_id);
                 self.reasoning_effort_selection = reasoning_effort_selection;
@@ -1176,6 +1180,7 @@ impl ChatWidget {
                 pending_texts,
             } => {
                 self.resume_browser_loading = false;
+                self.finish_session_resume();
                 self.session.cwd = cwd;
                 if let Some(model) = model {
                     self.update_session_model_selection(model, model_binding_id);
@@ -1271,6 +1276,9 @@ impl ChatWidget {
             WorkerEvent::SessionCompactionStarted => {
                 self.busy = true;
                 self.bottom_pane.set_task_running(true);
+                if let Some(status) = self.bottom_pane.status_widget_mut() {
+                    status.update_header("Compacting session".to_string());
+                }
                 self.set_status_message("Session compaction in progress");
             }
             WorkerEvent::SessionCompacted {
@@ -1284,20 +1292,20 @@ impl ChatWidget {
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
-                self.add_to_history(history_cell::new_info_event(
+                self.add_to_history(history_cell::new_live_aligned_info_event(
                     "Session compaction done".to_string(),
                     None,
                 ));
                 self.set_status_message("Session compacted");
             }
             WorkerEvent::ContextCompactionCompleted { title } => {
-                self.add_to_history(history_cell::new_info_event(title, None));
+                self.add_to_history(history_cell::new_live_aligned_info_event(title, None));
                 self.set_status_message("Context compacted");
             }
             WorkerEvent::SessionCompactionFailed { message } => {
                 self.busy = false;
                 self.bottom_pane.set_task_running(false);
-                self.add_to_history(history_cell::new_error_event_with_hint(
+                self.add_to_history(history_cell::new_live_aligned_error_event_with_hint(
                     message,
                     Some("session compaction failed".to_string()),
                 ));

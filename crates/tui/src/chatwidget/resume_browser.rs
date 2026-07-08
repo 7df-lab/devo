@@ -123,6 +123,7 @@ impl ChatWidget {
                     let session_id = selected.session_id;
                     self.resume_browser = None;
                     self.clear_for_session_switch();
+                    self.begin_session_resume();
                     self.app_event_tx
                         .send(AppEvent::Command(AppCommand::switch_session(session_id)));
                 }

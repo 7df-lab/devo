@@ -312,6 +312,10 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         initial_theme_name,
     });
 
+    if initial_session.session_id.is_some() && !config.show_model_onboarding {
+        chat_widget.begin_session_resume();
+    }
+
     for warning in &config.startup_warnings {
         chat_widget.add_to_history(history_cell::new_warning_event(warning.clone()));
     }

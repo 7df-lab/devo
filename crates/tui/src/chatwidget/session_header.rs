@@ -240,6 +240,11 @@ impl ChatWidget {
         }
     }
 
+    /// Context length for the status bar.
+    ///
+    /// Uses the latest completed query's display total (`input_tokens +
+    /// output_tokens`, or provider `total_tokens` when available). This is
+    /// **not** the session cumulative `total_input_tokens`.
     pub(super) fn context_usage(&self) -> Option<(usize, usize, usize)> {
         let model = self.session.model.as_ref()?;
         let total = model.context_window as usize;
@@ -633,6 +638,30 @@ mod tests {
         widget.last_query_total_tokens = 9;
 
         assert_eq!(widget.context_usage(), Some((9, 200_000, 0)));
+    }
+
+    #[test]
+    fn usage_updated_prompt_estimate_uses_last_query_input_not_cumulative_total() {
+        let mut widget = widget_for_summary_bench();
+        widget.total_input_tokens = 500;
+        widget.last_query_total_tokens = 42;
+        widget.last_query_input_tokens = 30;
+        widget.prompt_token_estimate = 30;
+
+        widget.handle_worker_event(crate::events::WorkerEvent::UsageUpdated {
+            total_input_tokens: 550,
+            total_output_tokens: 110,
+            total_tokens: 660,
+            total_cache_read_tokens: 60,
+            last_query_total_tokens: 48,
+            last_query_input_tokens: 35,
+        });
+
+        assert_eq!(widget.total_input_tokens, 550);
+        assert_eq!(widget.last_query_total_tokens, 48);
+        assert_eq!(widget.last_query_input_tokens, 35);
+        assert_eq!(widget.prompt_token_estimate, 35);
+        assert_eq!(widget.context_usage(), Some((48, 200_000, 0)));
     }
 
     #[test]

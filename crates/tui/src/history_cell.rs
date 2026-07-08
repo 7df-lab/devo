@@ -1394,6 +1394,19 @@ pub(crate) fn new_info_event(message: String, hint: Option<String>) -> PlainHist
     PlainHistoryCell { lines }
 }
 
+pub(crate) fn new_live_aligned_info_event(
+    message: String,
+    hint: Option<String>,
+) -> PlainHistoryCell {
+    let mut line = vec![" ".repeat(LIVE_PREFIX_COLS as usize).into(), message.into()];
+    if let Some(hint) = hint {
+        line.push(" ".into());
+        line.push(hint.dark_gray());
+    }
+    let lines: Vec<Line<'static>> = vec![line.into()];
+    PlainHistoryCell { lines }
+}
+
 pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {
     new_error_event_with_hint(message, /*hint*/ None)
 }
@@ -1405,6 +1418,25 @@ pub(crate) fn new_error_event_with_hint(message: String, hint: Option<String>) -
     let mut lines: Vec<Line<'static>> = vec![vec![format!("■ {message}").red()].into()];
     if let Some(hint) = hint {
         lines.push(vec!["  ".into(), hint.dark_gray()].into());
+    }
+    PlainHistoryCell { lines }
+}
+
+pub(crate) fn new_live_aligned_error_event_with_hint(
+    message: String,
+    hint: Option<String>,
+) -> PlainHistoryCell {
+    let prefix = " ".repeat(LIVE_PREFIX_COLS as usize);
+    let mut lines: Vec<Line<'static>> =
+        vec![vec![prefix.into(), format!("■ {message}").red()].into()];
+    if let Some(hint) = hint {
+        lines.push(
+            vec![
+                " ".repeat(LIVE_PREFIX_COLS as usize).into(),
+                hint.dark_gray(),
+            ]
+            .into(),
+        );
     }
     PlainHistoryCell { lines }
 }

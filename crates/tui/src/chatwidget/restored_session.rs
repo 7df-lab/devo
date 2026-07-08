@@ -209,14 +209,7 @@ impl ChatWidget {
 
             match item.kind {
                 devo_protocol::SessionHistoryItemKind::User => {
-                    self.add_history_entry_without_redraw(Box::new(history_cell::new_user_prompt(
-                        item.body.clone(),
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                        self.active_accent_color(),
-                        InputMode::Build,
-                    )));
+                    self.add_restored_user_prompt(item.body.clone());
                 }
                 devo_protocol::SessionHistoryItemKind::Assistant => {
                     self.add_markdown_history_without_redraw("Assistant", &item.body);
@@ -273,6 +266,23 @@ impl ChatWidget {
 
         self.frame_requester.schedule_frame();
         true
+    }
+
+    pub(super) fn add_restored_user_prompt(&mut self, body: String) {
+        self.add_history_entry_without_redraw(Box::new(history_cell::PlainHistoryCell::new(vec![
+            Line::from(""),
+        ])));
+        self.add_history_entry_without_redraw(Box::new(history_cell::new_user_prompt(
+            body,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            self.active_accent_color(),
+            InputMode::Build,
+        )));
+        self.add_history_entry_without_redraw(Box::new(history_cell::PlainHistoryCell::new(vec![
+            Line::from(""),
+        ])));
     }
 
     fn add_restored_file_change_item(
