@@ -302,6 +302,7 @@ describe("ChatTurnComponent transcript controls", () => {
         eventProcessorSource.includes("session.compaction.failed"),
       bridgesRuntimeCompactionEvents:
         clientSource.includes("sessionCompactionFromOriginalEvent") &&
+        clientSource.includes("sessionIdFromCompactionPayload") &&
         clientSource.includes("SessionCompactionCompleted") &&
         clientSource.includes("session.compaction.${compaction.status}"),
     }).toEqual({
