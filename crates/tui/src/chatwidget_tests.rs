@@ -621,6 +621,103 @@ fn resume_browser_enter_resumes_selected_scrolled_session() {
 }
 
 #[test]
+fn resume_browser_enter_blocks_prompt_submission_until_switch_completes() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let target_session_id = SessionId::new();
+    widget.open_resume_browser_for_test(vec![crate::events::SessionListEntry {
+        session_id: target_session_id,
+        title: "Session".to_string(),
+        updated_at: "2026-05-18 10:00".to_string(),
+        is_active: false,
+    }]);
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app_event_rx.try_recv().expect("switch command"),
+        AppEvent::Command(AppCommand::switch_session(target_session_id))
+    );
+    assert!(widget.is_resuming_session_for_test());
+    assert_eq!(
+        widget.status_indicator_header_for_test(),
+        Some("Resuming session...")
+    );
+    assert!(
+        rendered_rows(&widget, 80, 12)
+            .iter()
+            .any(|row| row.contains("Resuming session"))
+    );
+
+    widget.submit_text("should not send".to_string());
+
+    assert!(
+        app_event_rx.try_recv().is_err(),
+        "prompt submission should not emit another app command while resuming"
+    );
+    assert_eq!(
+        widget.status_message_for_test(),
+        "Cannot send while resuming session"
+    );
+}
+
+#[test]
+fn session_switched_clears_resume_blocking_state() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let cwd = PathBuf::from(".");
+    let (mut widget, mut app_event_rx) = widget_with_model(model, cwd.clone());
+    widget.open_resume_browser_for_test(vec![crate::events::SessionListEntry {
+        session_id: SessionId::new(),
+        title: "Session".to_string(),
+        updated_at: "2026-05-18 10:00".to_string(),
+        is_active: false,
+    }]);
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let _ = app_event_rx.try_recv().expect("switch command");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd,
+        title: Some("Resumed".to_string()),
+        model: Some("test-model".to_string()),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        active_agent_label: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: Vec::new(),
+        rich_history_items: Vec::new(),
+        loaded_item_count: 0,
+        pending_texts: Vec::new(),
+    });
+
+    assert!(!widget.is_resuming_session_for_test());
+    widget.submit_text("after resume".to_string());
+
+    let event = app_event_rx
+        .try_recv()
+        .expect("user turn should be emitted after session switch");
+    assert!(
+        matches!(event, AppEvent::Command(AppCommand::UserTurn { .. })),
+        "expected user turn after resume, got {event:?}"
+    );
+}
+
+#[test]
 fn resume_browser_supports_page_and_home_end_navigation() {
     let model = Model {
         slug: "test-model".to_string(),
@@ -3809,12 +3906,153 @@ fn session_switch_restores_header_and_spacing_before_user_input() {
     assert!(!committed_text.contains("session 1 lingering line"));
     assert!(
         committed_rows
-            .windows(4)
-            .any(|window| window[0].trim().is_empty()
-                && window[1].contains("▌ hello")
+            .windows(5)
+            .any(|window| window[0].contains("▌ hello")
+                && window[1].trim().is_empty()
                 && window[2].trim().is_empty()
                 && window[3].contains("world")),
         "expected restored spaced user prompt before assistant response: {committed_lines:?}"
+    );
+}
+
+#[test]
+fn restored_user_spacing_matches_live_turn_batch_spacing() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut live_widget, mut live_rx) = widget_with_model(model.clone(), cwd.clone());
+    let (mut restored_widget, _restored_rx) = widget_with_model(model, cwd.clone());
+
+    let _ = live_widget.drain_scrollback_lines(80);
+    live_widget.submit_text("hello".to_string());
+    let _ = live_rx.try_recv().expect("submitted user turn");
+    let mut live_rows = scrollback_plain_lines(&live_widget.drain_scrollback_lines(80));
+    live_widget.add_markdown_history("Assistant", "world");
+    live_rows.extend(scrollback_plain_lines(
+        &live_widget.drain_scrollback_lines(80),
+    ));
+
+    let _ = restored_widget.drain_scrollback_lines(80);
+    restored_widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd,
+        title: Some("Resumed".to_string()),
+        model: Some("test-model".to_string()),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        active_agent_label: None,
+        total_input_tokens: 3,
+        total_output_tokens: 5,
+        total_tokens: 8,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 8,
+        last_query_input_tokens: 3,
+        prompt_token_estimate: 3,
+        history_items: Vec::new(),
+        rich_history_items: vec![
+            devo_protocol::SessionHistoryItem::new(
+                None,
+                devo_protocol::SessionHistoryItemKind::User,
+                String::new(),
+                "hello".to_string(),
+            ),
+            devo_protocol::SessionHistoryItem::new(
+                None,
+                devo_protocol::SessionHistoryItemKind::Assistant,
+                String::new(),
+                "world".to_string(),
+            ),
+        ],
+        loaded_item_count: 2,
+        pending_texts: vec![],
+    });
+    let restored_rows = scrollback_plain_lines(&restored_widget.drain_scrollback_lines(80));
+
+    let live_user = live_rows
+        .iter()
+        .position(|row| row.contains("▌ hello"))
+        .expect("live user row");
+    let live_assistant = live_rows
+        .iter()
+        .position(|row| row.contains("world"))
+        .expect("live assistant row");
+    let restored_user = restored_rows
+        .iter()
+        .position(|row| row.contains("▌ hello"))
+        .expect("restored user row");
+    let restored_assistant = restored_rows
+        .iter()
+        .position(|row| row.contains("world"))
+        .expect("restored assistant row");
+
+    let live_gap = &live_rows[live_user + 1..live_assistant];
+    let restored_gap = &restored_rows[restored_user + 1..restored_assistant];
+    assert_eq!(
+        live_gap, restored_gap,
+        "restored user-to-assistant spacing should match live turn batching\nlive: {live_rows:?}\nrestored: {restored_rows:?}"
+    );
+}
+
+#[test]
+fn rich_session_switch_restores_user_spacing_before_assistant_response() {
+    let initial_cwd = std::env::current_dir().expect("current directory is available");
+    let resumed_cwd = initial_cwd.join("resumed");
+    let model = Model {
+        slug: "initial-model".to_string(),
+        display_name: "Initial Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, initial_cwd);
+
+    let _ = widget.drain_scrollback_lines(80);
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: resumed_cwd,
+        title: Some("Resumed".to_string()),
+        model: Some("resumed-model".to_string()),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        active_agent_label: None,
+        total_input_tokens: 3,
+        total_output_tokens: 5,
+        total_tokens: 8,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 8,
+        last_query_input_tokens: 3,
+        prompt_token_estimate: 3,
+        history_items: Vec::new(),
+        rich_history_items: vec![
+            devo_protocol::SessionHistoryItem::new(
+                None,
+                devo_protocol::SessionHistoryItemKind::User,
+                String::new(),
+                "hello".to_string(),
+            ),
+            devo_protocol::SessionHistoryItem::new(
+                None,
+                devo_protocol::SessionHistoryItemKind::Assistant,
+                String::new(),
+                "world".to_string(),
+            ),
+        ],
+        loaded_item_count: 2,
+        pending_texts: vec![],
+    });
+
+    let committed_rows = scrollback_plain_lines(&widget.drain_scrollback_lines(80));
+    assert!(
+        committed_rows
+            .windows(5)
+            .any(|window| window[0].contains("▌ hello")
+                && window[1].trim().is_empty()
+                && window[2].trim().is_empty()
+                && window[3].contains("world")),
+        "expected restored rich user prompt to keep live spacing before assistant response: {committed_rows:?}"
     );
 }
 
@@ -5467,6 +5705,59 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
 }
 
 #[test]
+fn usage_updated_keeps_context_bar_on_last_query_not_cumulative_totals() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: Some("Resumed".to_string()),
+        model: Some("test-model".to_string()),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        active_agent_label: None,
+        // Cumulative totals are intentionally larger than latest-query usage.
+        total_input_tokens: 500,
+        total_output_tokens: 100,
+        total_tokens: 600,
+        total_cache_read_tokens: 50,
+        last_query_total_tokens: 42,
+        last_query_input_tokens: 30,
+        prompt_token_estimate: 30,
+        history_items: Vec::new(),
+        rich_history_items: Vec::new(),
+        loaded_item_count: 0,
+        pending_texts: vec![],
+    });
+
+    let idle_summary = widget.status_summary_text();
+    assert!(idle_summary.contains("↑500"));
+    assert!(idle_summary.contains("42/200k"));
+    assert!(!idle_summary.contains("500/200k"));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::UsageUpdated {
+        total_input_tokens: 550,
+        total_output_tokens: 110,
+        total_tokens: 660,
+        total_cache_read_tokens: 60,
+        last_query_total_tokens: 48,
+        last_query_input_tokens: 35,
+    });
+
+    let busy_summary = widget.status_summary_text();
+    assert!(busy_summary.contains("↑550"));
+    assert!(busy_summary.contains("48/200k"));
+    assert!(!busy_summary.contains("550/200k"));
+}
+
+#[test]
 fn streaming_controller_is_initialized_and_commit_ticks_drain_lines() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
@@ -5713,6 +6004,68 @@ fn request_user_input_keeps_working_status_indicator_visible() {
     assert!(
         rows.contains("Which scope should research use?"),
         "rows:\n{rows}"
+    );
+}
+
+#[test]
+fn session_compaction_live_rows_use_live_prefix_cols() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let live_prefix = " ".repeat(usize::from(LIVE_PREFIX_COLS));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionCompactionStarted);
+
+    let rows = rendered_rows(&widget, 120, 24);
+    assert!(
+        rows.iter().any(|row| {
+            row.starts_with(&live_prefix) && row.contains("Compacting session")
+        }),
+        "compaction in-progress row should align with live prefix:\n{}",
+        rows.join("\n")
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionCompacted {
+        total_input_tokens: 10,
+        total_output_tokens: 5,
+        total_tokens: 15,
+        prompt_token_estimate: 8,
+    });
+
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(80));
+    assert!(
+        history
+            .iter()
+            .any(|line| { line.starts_with(&format!("{live_prefix}Session compaction done")) }),
+        "compaction completion history should align with live prefix:\n{}",
+        history.join("\n")
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ContextCompactionCompleted {
+        title: "Context compacted for turn".to_string(),
+    });
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(80));
+    assert!(
+        history
+            .iter()
+            .any(|line| { line.starts_with(&format!("{live_prefix}Context compacted for turn")) }),
+        "context compaction history should align with live prefix:\n{}",
+        history.join("\n")
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionCompactionFailed {
+        message: "compaction timed out".to_string(),
+    });
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(80));
+    assert!(
+        history
+            .iter()
+            .any(|line| { line.starts_with(&format!("{live_prefix}■ compaction timed out")) }),
+        "compaction failure history should align with live prefix:\n{}",
+        history.join("\n")
     );
 }
 
