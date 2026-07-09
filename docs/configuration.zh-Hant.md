@@ -59,6 +59,8 @@ default_reasoning_effort = "high"
 專案級覆蓋也可以放在 `<workspace>/.devo/models.json`。
 在 `models.json` 中，`provider` 是該模型的預設 wire API 中繼資料；實際端點仍由
 `config.toml` 中的 `provider` 欄位選擇。
+若省略 `base_instructions`，Devo 會回退到內建預設 base instructions；明確寫空字串
+（`""`）表示該模型不使用 base instructions。
 
 範例 `models.json` 條目：
 

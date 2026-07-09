@@ -21,8 +21,9 @@ use std::path::{Path, PathBuf};
 
 use crate::{Model, ModelCatalog, ModelError, ModelPreset};
 
-const DEFAULT_BASE_INSTRUCTIONS: &str = include_str!("../default_base_instructions.txt");
 const BUILTIN_MODELS_JSON: &str = include_str!("../models.json");
+
+pub use crate::model_preset::default_base_instructions;
 
 /// Filesystem-independent loader for the built-in model catalog bundled with the binary.
 ///
@@ -208,11 +209,6 @@ fn seed_user_models_file(config_home: &Path) {
     let _ = std::fs::write(&user_path, BUILTIN_MODELS_JSON);
 }
 
-/// Returns the shared fallback base instructions used when a model has no catalog entry.
-pub fn default_base_instructions() -> &'static str {
-    DEFAULT_BASE_INSTRUCTIONS
-}
-
 /// Errors produced while loading the builtin catalog.
 #[derive(Debug, thiserror::Error)]
 pub enum PresetModelCatalogError {
@@ -274,7 +270,12 @@ mod tests {
         let presets = load_builtin_model_presets().expect("load builtin model presets");
         assert!(!presets.is_empty());
         assert_eq!(presets[0].slug, "qwen3-coder-next");
-        assert!(!presets[0].base_instructions.is_empty());
+        assert!(
+            presets[0]
+                .base_instructions
+                .as_ref()
+                .is_some_and(|instructions| !instructions.is_empty())
+        );
     }
 
     #[test]
@@ -409,6 +410,33 @@ mod tests {
         assert_eq!(model.context_window, 123456);
         assert_eq!(model.effective_context_window_percent, Some(77));
         assert_eq!(model.max_tokens, Some(7654));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_from_config_missing_base_instructions_fall_back_to_default() {
+        let root = unique_temp_dir("catalog-missing-base-instructions");
+        let home = root.join("home").join(".devo");
+        std::fs::create_dir_all(&home).expect("create home");
+
+        std::fs::write(
+            home.join("models.json"),
+            r#"[
+                {
+                    "slug": "qwen3-coder-next",
+                    "display_name": "Custom Qwen"
+                }
+            ]"#,
+        )
+        .expect("write user models");
+
+        let catalog =
+            PresetModelCatalog::load_from_config(&home, /*workspace_root*/ None).expect("load");
+        let model = model_by_slug(&catalog.into_inner(), "qwen3-coder-next");
+
+        assert_eq!(model.display_name, "Custom Qwen");
+        assert_eq!(model.base_instructions, default_base_instructions());
 
         let _ = std::fs::remove_dir_all(root);
     }

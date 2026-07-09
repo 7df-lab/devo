@@ -25,6 +25,14 @@ use devo_protocol::TruncationPolicyConfig;
 use serde::Deserialize;
 use serde::Serialize;
 
+const DEFAULT_BASE_INSTRUCTIONS: &str = include_str!("../default_base_instructions.txt");
+
+/// Returns the shared fallback base instructions used when a catalog preset
+/// omits `base_instructions`, or when a model has no catalog entry.
+pub fn default_base_instructions() -> &'static str {
+    DEFAULT_BASE_INSTRUCTIONS
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 /// Raw catalog preset loaded from the bundled model JSON.
@@ -59,7 +67,10 @@ pub struct ModelPreset {
     #[serde(default, alias = "thinking_implementation")]
     pub reasoning_implementation: Option<ReasoningImplementation>,
     /// Base system instructions bundled with the model.
-    pub base_instructions: String,
+    ///
+    /// Absent in JSON (`None`) falls back to [`default_base_instructions`] when
+    /// converting to [`Model`]. An explicit empty string keeps empty instructions.
+    pub base_instructions: Option<String>,
     /// Maximum context window in tokens.
     #[serde(default = "default_context_window")]
     pub context_window: u32,
@@ -104,7 +115,7 @@ impl Default for ModelPreset {
             supported_reasoning_levels: Vec::new(),
             default_reasoning_effort: Some(ReasoningEffort::default()),
             reasoning_implementation: None,
-            base_instructions: String::new(),
+            base_instructions: None,
             context_window: 200_000,
             effective_context_window_percent: None,
             truncation_policy: TruncationPolicyConfig::default(),
@@ -150,7 +161,9 @@ impl From<ModelPreset> for Model {
             reasoning_capability,
             default_reasoning_effort,
             reasoning_implementation: value.reasoning_implementation,
-            base_instructions: value.base_instructions,
+            base_instructions: value
+                .base_instructions
+                .unwrap_or_else(|| default_base_instructions().to_string()),
             context_window: value.context_window,
             effective_context_window_percent: value.effective_context_window_percent,
             truncation_policy: value.truncation_policy,
@@ -242,6 +255,7 @@ mod tests {
             reasoning_capability: ReasoningCapability::Toggle,
             supported_reasoning_levels: vec![ReasoningEffort::High, ReasoningEffort::Max],
             default_reasoning_effort: None,
+            base_instructions: Some(String::new()),
             ..ModelPreset::default()
         };
 
@@ -280,5 +294,50 @@ mod tests {
             preset.reasoning_implementation,
             Some(ReasoningImplementation::RequestParameter)
         );
+        assert_eq!(preset.base_instructions, Some(String::new()));
+    }
+
+    #[test]
+    fn missing_base_instructions_fall_back_to_default() {
+        let preset: ModelPreset = serde_json::from_value(serde_json::json!({
+            "slug": "missing-base",
+            "display_name": "Missing Base",
+        }))
+        .expect("deserialize preset without base_instructions");
+
+        assert_eq!(preset.base_instructions, None);
+        let model = Model::from(preset);
+        assert_eq!(model.base_instructions, default_base_instructions());
+    }
+
+    #[test]
+    fn explicit_empty_base_instructions_stay_empty() {
+        let preset: ModelPreset = serde_json::from_value(serde_json::json!({
+            "slug": "empty-base",
+            "display_name": "Empty Base",
+            "base_instructions": "",
+        }))
+        .expect("deserialize preset with empty base_instructions");
+
+        assert_eq!(preset.base_instructions, Some(String::new()));
+        let model = Model::from(preset);
+        assert_eq!(model.base_instructions, "");
+    }
+
+    #[test]
+    fn non_empty_base_instructions_are_preserved() {
+        let preset: ModelPreset = serde_json::from_value(serde_json::json!({
+            "slug": "custom-base",
+            "display_name": "Custom Base",
+            "base_instructions": "Custom instructions",
+        }))
+        .expect("deserialize preset with custom base_instructions");
+
+        assert_eq!(
+            preset.base_instructions.as_deref(),
+            Some("Custom instructions")
+        );
+        let model = Model::from(preset);
+        assert_eq!(model.base_instructions, "Custom instructions");
     }
 }

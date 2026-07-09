@@ -59,6 +59,9 @@ default_reasoning_effort = "high"
 プロジェクトレベルの上書きは `<workspace>/.devo/models.json` に配置できます。
 `models.json` の `provider` は、そのモデルのデフォルト wire API メタデータです。
 実際のエンドポイントは引き続き `config.toml` の `provider` フィールドで選択されます。
+`base_instructions` を省略した場合、Devo は組み込みのデフォルト base instructions に
+フォールバックします。明示的な空文字列（`""`）は、そのモデルに base instructions が
+ないことを意味します。
 
 `models.json` エントリの例:
 

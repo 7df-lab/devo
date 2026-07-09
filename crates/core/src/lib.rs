@@ -80,7 +80,7 @@ pub use message_edit::*;
 #[allow(ambiguous_glob_reexports)]
 pub use model_binding::*;
 pub use model_catalog::*;
-pub use model_preset::*;
+pub use model_preset::ModelPreset;
 pub use permission::*;
 pub use query::*;
 #[allow(ambiguous_glob_reexports)]
