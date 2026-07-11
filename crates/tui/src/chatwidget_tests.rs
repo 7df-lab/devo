@@ -4884,6 +4884,106 @@ fn generic_running_tool_call_disappears_after_result() {
 }
 
 #[test]
+fn edit_running_row_is_path_free_and_disappears_after_patch_result() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "edit-1".to_string(),
+        summary: "Edit".to_string(),
+        preparing: false,
+        parsed_commands: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCallDetails {
+        tool_use_id: "edit-1".to_string(),
+        tool_name: "edit".to_string(),
+        input: serde_json::json!({"filePath": "test_edit_test.md"}),
+    });
+
+    let running = rendered_rows(&widget, 80, 12).join("\n");
+    assert!(
+        running.contains("Running Edit"),
+        "expected live Edit row:\n{running}"
+    );
+    assert!(
+        !running.contains("test_edit_test.md"),
+        "live Edit row should not repeat the path:\n{running}"
+    );
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("test_edit_test.md"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: Some("old\n".to_string()),
+            new_text: Some("new\n".to_string()),
+            move_path: None,
+        },
+    );
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchAppliedIo {
+        tool_use_id: "edit-1".to_string(),
+        tool_name: "edit".to_string(),
+        input: serde_json::json!({"filePath": "test_edit_test.md"}),
+        changes,
+    });
+
+    let after = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(
+        !after.contains("Running Edit"),
+        "completed Edit should leave no live row:\n{after}"
+    );
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
+    assert!(
+        history.contains("Edited test_edit_test.md") || history.contains("Edited 1 file"),
+        "completed Edit diff should remain visible:\n{history}"
+    );
+}
+
+#[test]
+fn patch_result_removes_only_matching_running_tool_row() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "edit-1".to_string(),
+        summary: "Edit".to_string(),
+        preparing: false,
+        parsed_commands: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "search-1".to_string(),
+        summary: "code_search".to_string(),
+        preparing: false,
+        parsed_commands: Some(Vec::new()),
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "edit-1".to_string(),
+        changes: std::collections::HashMap::new(),
+    });
+
+    let after = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(
+        !after.contains("Running Edit"),
+        "Edit row should be removed:\n{after}"
+    );
+    assert!(
+        after.contains("Running code_search"),
+        "unrelated active tool row should remain:\n{after}"
+    );
+}
+
+#[test]
 fn interrupted_turn_flushes_explored_cell_before_summary() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
@@ -4991,7 +5091,10 @@ fn preparing_write_disappears_after_patch_applied() {
             content: "pub fn demo() {}\n".to_string(),
         },
     );
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let after = rendered_rows(&widget, 80, 16).join("\n");
     assert!(
@@ -5059,7 +5162,10 @@ fn preparing_apply_patch_disappears_after_patch_applied() {
             content: "pub fn demo() {}\n".to_string(),
         },
     );
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let after = rendered_rows(&widget, 80, 16).join("\n");
     assert!(
@@ -7590,6 +7696,7 @@ fn transcript_overlay_lines_include_patch_input_and_diff_output() {
     );
 
     widget.handle_worker_event(crate::events::WorkerEvent::PatchAppliedIo {
+        tool_use_id: "tool-1".to_string(),
         tool_name: "apply_patch".to_string(),
         input: serde_json::json!({
             "patch": "*** Begin Patch\n*** Update File: foo.txt\n-old\n+new\n*** End Patch"
@@ -8768,7 +8875,10 @@ fn patch_applied_event_renders_edited_block() {
         },
     );
 
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
     assert!(
@@ -8794,7 +8904,10 @@ fn added_file_patch_applied_event_renders_added_content_lines() {
             content: "pub fn quicksort() {\n    println!(\"hi\");\n}\n".to_string(),
         },
     );
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
     assert!(
@@ -8832,7 +8945,10 @@ fn apply_patch_style_full_git_diff_reports_non_zero_counts() {
         },
     );
 
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
     assert!(
@@ -8883,7 +8999,10 @@ fn write_patch_applied_event_renders_edited_block() {
         },
     );
 
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
     assert!(
@@ -8912,7 +9031,10 @@ fn write_patch_applied_event_reports_non_zero_counts() {
         },
     );
 
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
     assert!(
@@ -8945,7 +9067,10 @@ fn patch_applied_event_with_diff_only_reports_non_zero_counts() {
         },
     );
 
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
     assert!(

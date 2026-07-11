@@ -781,11 +781,14 @@ impl ChatWidget {
                 self.set_status_message("Plan updated");
             }
             WorkerEvent::PatchAppliedIo {
+                tool_use_id,
                 tool_name,
                 input,
                 changes,
             } => {
-                self.pending_tool_calls.clear();
+                self.active_tool_calls.remove(&tool_use_id);
+                self.pending_tool_calls
+                    .retain(|pending| pending.tool_use_id != tool_use_id);
                 self.add_to_history(FileChangeToolIoCell::new(
                     Some(Self::ran_tool_line(&tool_name)),
                     tool_name,
@@ -795,8 +798,13 @@ impl ChatWidget {
                 ));
                 self.set_status_message("Patch applied");
             }
-            WorkerEvent::PatchApplied { changes } => {
-                self.pending_tool_calls.clear();
+            WorkerEvent::PatchApplied {
+                tool_use_id,
+                changes,
+            } => {
+                self.active_tool_calls.remove(&tool_use_id);
+                self.pending_tool_calls
+                    .retain(|pending| pending.tool_use_id != tool_use_id);
                 self.add_to_history(history_cell::new_patch_event(changes, &self.session.cwd));
                 self.set_status_message("Patch applied");
             }

@@ -124,20 +124,17 @@ fn active_agent_label_from_session(session: &devo_server::SessionMetadata) -> Op
         .map(|label| format!("Agent: {label}"))
 }
 
-/// Prefer structured session `last_query_usage`, then latest-turn usage, then the
-/// legacy scalar. Context length is latest-query display total, not cumulative
-/// session totals.
-fn last_query_tokens_from_resume(
-    session: &devo_server::SessionMetadata,
-    latest_turn: Option<&devo_protocol::TurnMetadata>,
-) -> (usize, usize) {
+/// Prefer exact persisted latest-query usage, then the replayed prompt estimate.
+/// Aggregate turn usage and the legacy scalar are intentionally excluded because
+/// neither identifies the latest model query reliably for historical sessions.
+fn last_query_tokens_from_resume(session: &devo_server::SessionMetadata) -> (usize, usize) {
     if let Some(usage) = session.last_query_usage.as_ref() {
         return (usage.display_total_tokens(), usage.input_tokens as usize);
     }
-    if let Some(usage) = latest_turn.and_then(|turn| turn.usage.as_ref()) {
-        return (usage.display_total_tokens(), usage.input_tokens as usize);
+    if session.prompt_token_estimate > 0 {
+        return (session.prompt_token_estimate, session.prompt_token_estimate);
     }
-    (session.last_query_total_tokens, 0)
+    (0, 0)
 }
 
 struct EnsureSessionOutcome {
@@ -891,7 +888,7 @@ async fn run_worker_inner(
                 session_cwd = resumed.session.cwd.clone();
                 let active_agent_label = active_agent_label_from_session(&resumed.session);
                 let (last_query_total, last_query_input) =
-                    last_query_tokens_from_resume(&resumed.session, resumed.latest_turn.as_ref());
+                    last_query_tokens_from_resume(&resumed.session);
                 let _ = event_tx.send(WorkerEvent::SessionSwitched {
                     session_id: initial_session_id.to_string(),
                     cwd: resumed.session.cwd,
@@ -1646,10 +1643,7 @@ async fn run_worker_inner(
                                 let active_agent_label =
                                     active_agent_label_from_session(&result.session);
                                 let (last_query_total, last_query_input) =
-                                    last_query_tokens_from_resume(
-                                        &result.session,
-                                        result.latest_turn.as_ref(),
-                                    );
+                                    last_query_tokens_from_resume(&result.session);
 
                                 let _ = event_tx.send(WorkerEvent::SessionSwitched {
                                     session_id: next_session_id.to_string(),
@@ -1790,10 +1784,7 @@ async fn run_worker_inner(
                                 let active_agent_label =
                                     active_agent_label_from_session(&result.session);
                                 let (last_query_total, last_query_input) =
-                                    last_query_tokens_from_resume(
-                                        &result.session,
-                                        result.latest_turn.as_ref(),
-                                    );
+                                    last_query_tokens_from_resume(&result.session);
                                 let _ = event_tx.send(WorkerEvent::SessionSwitched {
                                     session_id: active_session_id.to_string(),
                                     cwd: result.session.cwd,
@@ -1899,10 +1890,7 @@ async fn run_worker_inner(
                                         let active_agent_label =
                                             active_agent_label_from_session(&resumed.session);
                                         let (last_query_total, last_query_input) =
-                                            last_query_tokens_from_resume(
-                                                &resumed.session,
-                                                resumed.latest_turn.as_ref(),
-                                            );
+                                            last_query_tokens_from_resume(&resumed.session);
                                         let _ = event_tx.send(WorkerEvent::SessionSwitched {
                                             session_id: next_session_id.to_string(),
                                             cwd: resumed.session.cwd,
@@ -2899,7 +2887,7 @@ async fn run_worker_inner(
                                     total_output_tokens = payload.session.total_output_tokens;
                                     total_tokens = payload.session.total_tokens;
                                     let (compacted_last_query_total, compacted_last_query_input) =
-                                        last_query_tokens_from_resume(&payload.session, None);
+                                        last_query_tokens_from_resume(&payload.session);
                                     last_query_total_tokens = if payload.session.prompt_token_estimate > 0 {
                                         payload.session.prompt_token_estimate
                                     } else {
@@ -3547,13 +3535,18 @@ pub(crate) fn handle_completed_item(
                 .changes
                 .into_iter()
                 .collect::<std::collections::HashMap<_, _>>();
+            let tool_use_id = payload.tool_call_id;
             let event = match (payload.tool_name, payload.input) {
                 (Some(tool_name), Some(input)) => WorkerEvent::PatchAppliedIo {
+                    tool_use_id,
                     tool_name,
                     input,
                     changes,
                 },
-                _ => WorkerEvent::PatchApplied { changes },
+                _ => WorkerEvent::PatchApplied {
+                    tool_use_id,
+                    changes,
+                },
             };
             let _ = event_tx.send(event);
         }
@@ -3904,7 +3897,7 @@ fn pretty_tool_call_summary(tool_name: &str, input: &serde_json::Value) -> Optio
             .map(|command| format!("Shell {}", compact_tool_summary(command, 96))),
         "read" => path_value().map(|path| format!("Read {path}{}", fmt_line_range(input))),
         "write" => path_value().map(|path| format!("Write {path}")),
-        "edit" => path_value().map(|path| format!("Edit {path}")),
+        "edit" => Some("Edit".to_string()),
         "apply_patch" => path_value().map(|path| format!("Patch {path}")),
         "find" | "glob" => input
             .get("path")
@@ -4508,11 +4501,15 @@ fn patch_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEve
     }
     match (payload.tool_name.clone(), payload.input.clone()) {
         (Some(tool_name), Some(input)) => Some(WorkerEvent::PatchAppliedIo {
+            tool_use_id: payload.tool_call_id.clone(),
             tool_name,
             input,
             changes,
         }),
-        _ => Some(WorkerEvent::PatchApplied { changes }),
+        _ => Some(WorkerEvent::PatchApplied {
+            tool_use_id: payload.tool_call_id.clone(),
+            changes,
+        }),
     }
 }
 
@@ -5135,6 +5132,26 @@ mod tests {
     }
 
     #[test]
+    fn edit_tool_call_start_uses_path_free_live_summary() {
+        let payload = ToolCallPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "edit".to_string(),
+            parameters: serde_json::json!({"filePath": "test_edit_test.md"}),
+            command_actions: Vec::new(),
+        };
+
+        assert_eq!(
+            tool_call_started_event(payload),
+            WorkerEvent::ToolCall {
+                tool_use_id: "call-1".to_string(),
+                summary: "Edit".to_string(),
+                preparing: false,
+                parsed_commands: Some(Vec::new()),
+            }
+        );
+    }
+
+    #[test]
     fn completed_read_tool_call_emits_update_event() {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         handle_completed_item(
@@ -5742,7 +5759,13 @@ mod tests {
                 content: "hello\n".to_string(),
             },
         );
-        assert_eq!(events, vec![WorkerEvent::PatchApplied { changes }]);
+        assert_eq!(
+            events,
+            vec![WorkerEvent::PatchApplied {
+                tool_use_id: "call-1".to_string(),
+                changes,
+            }]
+        );
     }
 
     #[test]
@@ -5934,10 +5957,14 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        let WorkerEvent::PatchApplied {
+            tool_use_id,
+            changes,
+        } = event_rx.try_recv().expect("worker event")
         else {
             panic!("expected patch applied event");
         };
+        assert_eq!(tool_use_id, "call-1");
         assert!(changes.contains_key(&std::path::PathBuf::from("foo.txt")));
     }
 
@@ -5980,10 +6007,14 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        let WorkerEvent::PatchApplied {
+            tool_use_id,
+            changes,
+        } = event_rx.try_recv().expect("worker event")
         else {
             panic!("expected patch applied event");
         };
+        assert_eq!(tool_use_id, "call-1");
         assert!(changes.contains_key(&std::path::PathBuf::from("foo.txt")));
     }
 
@@ -6031,10 +6062,14 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        let WorkerEvent::PatchApplied {
+            tool_use_id,
+            changes,
+        } = event_rx.try_recv().expect("worker event")
         else {
             panic!("expected patch applied event");
         };
+        assert_eq!(tool_use_id, "call-1");
         assert!(changes.contains_key(&std::path::PathBuf::from("update.txt")));
     }
 
@@ -6078,10 +6113,14 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        let WorkerEvent::PatchApplied {
+            tool_use_id,
+            changes,
+        } = event_rx.try_recv().expect("worker event")
         else {
             panic!("expected patch applied event");
         };
+        assert_eq!(tool_use_id, "call-1");
         let devo_protocol::protocol::FileChange::Update { unified_diff, .. } = changes
             .get(&std::path::PathBuf::from("update.txt"))
             .expect("update change")
@@ -6174,6 +6213,7 @@ mod tests {
         let mut session = test_session_metadata(session_id, None);
         session.total_input_tokens = 500;
         session.last_query_total_tokens = 999;
+        session.prompt_token_estimate = 55;
         session.last_query_usage = Some(TurnUsage {
             input_tokens: 30,
             output_tokens: 12,
@@ -6182,7 +6222,7 @@ mod tests {
             reasoning_output_tokens: None,
             total_tokens: Some(42),
         });
-        let turn = TurnMetadata {
+        let _turn = TurnMetadata {
             turn_id: TurnId::new(),
             session_id,
             sequence: 1,
@@ -6208,15 +6248,13 @@ mod tests {
             failure_reason: None,
         };
 
-        assert_eq!(
-            last_query_tokens_from_resume(&session, Some(&turn)),
-            (42, 30)
-        );
+        assert_eq!(last_query_tokens_from_resume(&session), (42, 30));
 
         session.last_query_usage = None;
-        assert_eq!(last_query_tokens_from_resume(&session, Some(&turn)), (9, 7));
+        assert_eq!(last_query_tokens_from_resume(&session), (55, 55));
 
-        assert_eq!(last_query_tokens_from_resume(&session, None), (999, 0));
+        session.prompt_token_estimate = 0;
+        assert_eq!(last_query_tokens_from_resume(&session), (0, 0));
     }
 
     #[test]

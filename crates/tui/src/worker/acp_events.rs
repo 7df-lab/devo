@@ -726,6 +726,7 @@ fn worker_events_from_acp_tool_content(
     if !changes.is_empty() {
         if let Some(input) = tool_call.raw_input.clone() {
             events.push(WorkerEvent::PatchAppliedIo {
+                tool_use_id: tool_call.tool_call_id.clone(),
                 tool_name: tool_call
                     .title
                     .clone()
@@ -734,7 +735,10 @@ fn worker_events_from_acp_tool_content(
                 changes,
             });
         } else {
-            events.push(WorkerEvent::PatchApplied { changes });
+            events.push(WorkerEvent::PatchApplied {
+                tool_use_id: tool_call.tool_call_id.clone(),
+                changes,
+            });
         }
     }
     let text = text_parts.join("\n");

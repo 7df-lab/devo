@@ -303,10 +303,12 @@ pub(crate) enum WorkerEvent {
     },
     /// A structured patch/edit summary derived from apply_patch output.
     PatchApplied {
+        tool_use_id: String,
         changes: HashMap<PathBuf, FileChange>,
     },
     /// A structured patch/edit summary with paired tool input for Ctrl+T.
     PatchAppliedIo {
+        tool_use_id: String,
         tool_name: String,
         input: serde_json::Value,
         changes: HashMap<PathBuf, FileChange>,
