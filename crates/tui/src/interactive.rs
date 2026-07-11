@@ -153,11 +153,10 @@ enum EscBacktrackAction {
 
 #[derive(Debug, Clone, PartialEq)]
 enum TranscriptBacktrackSelection {
-    Latest {
+    Selected {
         user_message: UserMessage,
         user_turn_index: u32,
     },
-    OlderSelected,
     NoSelection,
 }
 
@@ -498,7 +497,7 @@ fn handle_tui_event(
                 .map(selected_transcript_backtrack_selection)
                 .unwrap_or(TranscriptBacktrackSelection::NoSelection);
             match selection {
-                TranscriptBacktrackSelection::Latest {
+                TranscriptBacktrackSelection::Selected {
                     user_message,
                     user_turn_index,
                 } => {
@@ -512,15 +511,6 @@ fn handle_tui_event(
                     loop_state.session_switch_pending = true;
                     tui.replace_inline_session_ui()?;
                     worker.rollback_before_user_turn(user_turn_index)?;
-                    return Ok(LoopAction::Continue);
-                }
-                TranscriptBacktrackSelection::OlderSelected => {
-                    loop_state.overlay.close(tui)?;
-                    chat_widget.add_to_history(crate::history_cell::new_info_event(
-                        "Use rollback or fork to revise older messages".to_string(),
-                        Some("Select the message in transcript selection mode".to_string()),
-                    ));
-                    chat_widget.set_status_message("Use rollback or fork for older messages");
                     return Ok(LoopAction::Continue);
                 }
                 TranscriptBacktrackSelection::NoSelection => {}
@@ -722,13 +712,10 @@ fn selected_transcript_backtrack_selection(
     let Some(position) = transcript.selected_user_history_position() else {
         return TranscriptBacktrackSelection::NoSelection;
     };
-    if position != transcript.user_message_count().saturating_sub(1) {
-        return TranscriptBacktrackSelection::OlderSelected;
-    }
     let Ok(user_turn_index) = u32::try_from(position) else {
         return TranscriptBacktrackSelection::NoSelection;
     };
-    TranscriptBacktrackSelection::Latest {
+    TranscriptBacktrackSelection::Selected {
         user_message,
         user_turn_index,
     }
@@ -757,10 +744,9 @@ fn handle_app_event(
     }
 
     if matches!(&app_event, AppEvent::Interrupt) {
-        if loop_state.busy {
+        if loop_state.busy && chat_widget.request_interrupt() {
             worker.interrupt_turn()?;
         }
-        chat_widget.handle_app_event(app_event);
         return Ok(LoopAction::Continue);
     }
 
@@ -841,6 +827,7 @@ fn handle_worker_event(
             loop_state.total_cache_read_tokens = *next_total_cache_read_tokens;
             loop_state.session_switch_pending = false;
         }
+        WorkerEvent::InterruptFailed { .. } => {}
         WorkerEvent::TurnStarted { .. } => {
             loop_state.busy = true;
         }
@@ -1380,7 +1367,7 @@ mod tests {
 
         assert_eq!(
             selected_transcript_backtrack_selection(&overlay),
-            TranscriptBacktrackSelection::Latest {
+            TranscriptBacktrackSelection::Selected {
                 user_message: UserMessage::from("user 2"),
                 user_turn_index: 1,
             }
@@ -1388,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_backtrack_selection_rejects_older_user_turn() {
+    fn transcript_backtrack_selection_targets_older_user_turn() {
         let mut overlay = transcript_overlay_with_two_users();
 
         overlay.begin_backtrack_preview();
@@ -1396,7 +1383,10 @@ mod tests {
 
         assert_eq!(
             selected_transcript_backtrack_selection(&overlay),
-            TranscriptBacktrackSelection::OlderSelected
+            TranscriptBacktrackSelection::Selected {
+                user_message: UserMessage::from("user 1"),
+                user_turn_index: 0,
+            }
         );
     }
 

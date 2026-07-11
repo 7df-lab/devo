@@ -82,6 +82,9 @@ impl OverlayState {
             width,
         ));
         self.transcript_source = Some(TranscriptSource::Parent);
+        self.transcript_mut()
+            .expect("parent transcript overlay should exist")
+            .begin_backtrack_preview();
         tui.frame_requester().schedule_frame();
         Ok(())
     }

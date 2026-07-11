@@ -6055,6 +6055,76 @@ fn request_user_input_keeps_working_status_indicator_visible() {
 }
 
 #[test]
+fn interrupt_request_switches_working_status_to_stopping_immediately() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+
+    widget.handle_key_event(press_key(KeyCode::Esc));
+    assert!(app_event_rx.try_recv().is_err());
+    widget.handle_key_event(press_key(KeyCode::Esc));
+    assert_eq!(app_event_rx.try_recv(), Ok(AppEvent::Interrupt));
+    assert!(widget.request_interrupt());
+    let rows = rendered_rows(&widget, 120, 20).join("\n");
+    assert!(rows.contains("Stopping…"), "rows:\n{rows}");
+    assert!(!rows.contains("to interrupt"), "rows:\n{rows}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "Interrupted".to_string(),
+        turn_count: 1,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+    });
+    let rows = rendered_rows(&widget, 120, 20).join("\n");
+    assert!(!rows.contains("Stopping…"), "rows:\n{rows}");
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(120)).join("\n");
+    assert!(history.contains("interrupted"), "history:\n{history}");
+}
+
+#[test]
+fn interrupt_failure_restores_working_status() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+    assert!(widget.request_interrupt());
+
+    widget.handle_worker_event(crate::events::WorkerEvent::InterruptFailed {
+        message: "connection reset".to_string(),
+    });
+
+    let rows = rendered_rows(&widget, 120, 20).join("\n");
+    assert!(rows.contains("Working"), "rows:\n{rows}");
+    assert!(!rows.contains("Stopping…"), "rows:\n{rows}");
+}
+
+#[test]
 fn session_compaction_live_rows_use_live_prefix_cols() {
     let model = Model {
         slug: "test-model".to_string(),
@@ -7751,6 +7821,51 @@ fn read_tool_call_renders_as_explored_group_in_viewport() {
 }
 
 #[test]
+fn read_tool_call_renders_relative_path_with_line_range() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "read crates/core/src/query.rs".to_string(),
+        preparing: false,
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Read {
+            cmd: "read crates/core/src/query.rs".to_string(),
+            name: "crates/core/src/query.rs L:10-19".to_string(),
+            path: PathBuf::from("crates/core/src/query.rs"),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "read crates/core/src/query.rs".to_string(),
+        preview: "impl Query {}".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(100)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        display.contains("Read crates/core/src/query.rs L:10-19"),
+        "expected read summary with line range: {display}"
+    );
+}
+
+#[test]
 fn read_tool_call_falls_back_to_path_when_read_name_is_empty() {
     let model = Model {
         slug: "test-model".to_string(),
@@ -7790,7 +7905,7 @@ fn read_tool_call_falls_back_to_path_when_read_name_is_empty() {
         .join("\n");
 
     assert!(
-        display.contains("Read mod.rs"),
+        display.contains("Read crates/tui/src/mod.rs"),
         "expected read summary fallback in explored viewport: {display}"
     );
     assert!(
@@ -7867,7 +7982,7 @@ fn read_tool_call_updates_placeholder_from_completed_tool_call_metadata() {
         .join("\n");
 
     assert!(
-        updated_display.contains("Read mod.rs"),
+        updated_display.contains("Read crates/tui/src/mod.rs"),
         "expected read placeholder to update in place: {updated_display}"
     );
 
@@ -7892,7 +8007,7 @@ fn read_tool_call_updates_placeholder_from_completed_tool_call_metadata() {
         .join("\n");
 
     assert!(
-        completed_display.contains("Read mod.rs"),
+        completed_display.contains("Read crates/tui/src/mod.rs"),
         "expected completed read to remain explored: {completed_display}"
     );
     assert!(
@@ -7953,7 +8068,9 @@ fn consecutive_read_tool_calls_render_on_one_line_with_spaces() {
         .join("\n");
 
     assert!(
-        display.contains("Read mod.rs lib.rs file1.rs file2.rs"),
+        display.contains(
+            "Read crates/tui/src/mod.rs crates/tui/src/lib.rs crates/tui/src/file1.rs crates/tui/src/file2.rs"
+        ),
         "expected consecutive reads to render space-separated: {display}"
     );
 }

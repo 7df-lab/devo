@@ -12,75 +12,29 @@ use crate::persistence::build_turn_record;
 use crate::runtime::session_actor::SessionActorState;
 use crate::{ItemKind, SessionRuntimeStatus, SessionStatusChangedPayload, TurnEventPayload};
 
-#[cfg(test)]
-mod tests {
-    use devo_core::{SessionId, TurnId, TurnUsage};
-    use pretty_assertions::assert_eq;
-
-    use super::super::super::subagent_usage::{ParentUsageSnapshot, UsageTotals};
-    use super::super::types::TurnEventStreamSummary;
-    use super::terminal_usages;
-
-    #[test]
-    fn terminal_usage_keeps_turn_total_separate_from_latest_query() {
-        let session_id = SessionId::new();
-        let turn_id = TurnId::new();
-        let summary = TurnEventStreamSummary {
-            turn_usage: Some(TurnUsage {
-                input_tokens: 1_300,
-                output_tokens: 80,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                total_tokens: Some(1_380),
-            }),
-            latest_query_usage: Some(TurnUsage {
-                input_tokens: 700,
-                output_tokens: 30,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                total_tokens: Some(730),
-            }),
-            stop_reason: None,
-        };
-        let snapshot = ParentUsageSnapshot {
-            session_id,
-            turn_id,
-            turn_usage: UsageTotals {
-                input_tokens: 1_300,
-                output_tokens: 80,
-                total_tokens: 1_380,
-                ..UsageTotals::default()
-            },
-            latest_query_usage: UsageTotals {
-                input_tokens: 700,
-                output_tokens: 30,
-                total_tokens: 730,
-                ..UsageTotals::default()
-            },
-            session_totals: UsageTotals::default(),
-            context_window: None,
-        };
-
-        let (turn_usage, latest_query_usage) = terminal_usages(Some(&summary), Some(&snapshot));
-
-        assert_eq!(turn_usage, summary.turn_usage);
-        assert_eq!(latest_query_usage, summary.latest_query_usage);
-    }
-}
-
 fn terminal_usages(
     event_summary: Option<&TurnEventStreamSummary>,
     snapshot: Option<&ParentUsageSnapshot>,
 ) -> (Option<TurnUsage>, Option<TurnUsage>) {
     let turn_usage = snapshot
-        .map(|snapshot| snapshot.turn_usage.to_turn_usage())
-        .or_else(|| event_summary.and_then(|summary| summary.turn_usage.clone()));
+        .and_then(|snapshot| reported_usage(snapshot.turn_usage.to_turn_usage()))
+        .or_else(|| {
+            event_summary
+                .and_then(|summary| summary.turn_usage.clone())
+                .and_then(reported_usage)
+        });
     let latest_query_usage = snapshot
-        .map(|snapshot| snapshot.latest_query_usage.to_turn_usage())
-        .or_else(|| event_summary.and_then(|summary| summary.latest_query_usage.clone()));
+        .and_then(|snapshot| reported_usage(snapshot.latest_query_usage.to_turn_usage()))
+        .or_else(|| {
+            event_summary
+                .and_then(|summary| summary.latest_query_usage.clone())
+                .and_then(reported_usage)
+        });
     (turn_usage, latest_query_usage)
+}
+
+fn reported_usage(usage: TurnUsage) -> Option<TurnUsage> {
+    (usage.display_total_tokens() > 0).then_some(usage)
 }
 
 pub(crate) struct FinalizeTurnParams<'a> {
@@ -396,5 +350,118 @@ impl ServerRuntime {
             },
         ))
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use devo_core::{SessionId, TurnId, TurnUsage};
+    use pretty_assertions::assert_eq;
+
+    use super::super::super::subagent_usage::{ParentUsageSnapshot, UsageTotals};
+    use super::super::types::TurnEventStreamSummary;
+    use super::terminal_usages;
+
+    #[test]
+    fn terminal_usage_keeps_turn_total_separate_from_latest_query() {
+        let session_id = SessionId::new();
+        let turn_id = TurnId::new();
+        let summary = TurnEventStreamSummary {
+            turn_usage: Some(TurnUsage {
+                input_tokens: 1_300,
+                output_tokens: 80,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                total_tokens: Some(1_380),
+            }),
+            latest_query_usage: Some(TurnUsage {
+                input_tokens: 700,
+                output_tokens: 30,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                total_tokens: Some(730),
+            }),
+            stop_reason: None,
+        };
+        let snapshot = ParentUsageSnapshot {
+            session_id,
+            turn_id,
+            turn_usage: UsageTotals {
+                input_tokens: 1_300,
+                output_tokens: 80,
+                total_tokens: 1_380,
+                ..UsageTotals::default()
+            },
+            latest_query_usage: UsageTotals {
+                input_tokens: 700,
+                output_tokens: 30,
+                total_tokens: 730,
+                ..UsageTotals::default()
+            },
+            session_totals: UsageTotals::default(),
+            context_window: None,
+        };
+
+        let (turn_usage, latest_query_usage) = terminal_usages(Some(&summary), Some(&snapshot));
+
+        assert_eq!(turn_usage, summary.turn_usage);
+        assert_eq!(latest_query_usage, summary.latest_query_usage);
+    }
+
+    #[test]
+    fn terminal_usage_ignores_unreported_zero_snapshot() {
+        let snapshot = ParentUsageSnapshot {
+            session_id: SessionId::new(),
+            turn_id: TurnId::new(),
+            turn_usage: UsageTotals::default(),
+            latest_query_usage: UsageTotals::default(),
+            session_totals: UsageTotals {
+                input_tokens: 1_000,
+                output_tokens: 100,
+                total_tokens: 1_100,
+                ..UsageTotals::default()
+            },
+            context_window: None,
+        };
+
+        assert_eq!(terminal_usages(None, Some(&snapshot)), (None, None));
+    }
+
+    #[test]
+    fn terminal_usage_falls_back_to_reported_event_when_snapshot_is_empty() {
+        let summary = TurnEventStreamSummary {
+            turn_usage: Some(TurnUsage {
+                input_tokens: 500,
+                output_tokens: 20,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                total_tokens: Some(520),
+            }),
+            latest_query_usage: Some(TurnUsage {
+                input_tokens: 300,
+                output_tokens: 10,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                reasoning_output_tokens: None,
+                total_tokens: Some(310),
+            }),
+            stop_reason: None,
+        };
+        let snapshot = ParentUsageSnapshot {
+            session_id: SessionId::new(),
+            turn_id: TurnId::new(),
+            turn_usage: UsageTotals::default(),
+            latest_query_usage: UsageTotals::default(),
+            session_totals: UsageTotals::default(),
+            context_window: None,
+        };
+
+        let (turn_usage, latest_query_usage) = terminal_usages(Some(&summary), Some(&snapshot));
+
+        assert_eq!(turn_usage, summary.turn_usage);
+        assert_eq!(latest_query_usage, summary.latest_query_usage);
     }
 }

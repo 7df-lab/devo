@@ -123,6 +123,18 @@ impl ServerRuntime {
             .pop_queued_turn_input(require_idle_session)
             .await
             .flatten()?;
+        if let Err(error) = self.deps.db.remove_pending_by_id(
+            &session_id,
+            crate::db::QueueType::Turn,
+            &popped.queued_input_id,
+        ) {
+            tracing::warn!(
+                session_id = %session_id,
+                queued_input_id = %popped.queued_input_id,
+                error = %error,
+                "failed to remove dequeued turn input from database"
+            );
+        }
         Some(QueuedTurnInput {
             display_input: popped.display_input,
             input_text: popped.input_text,

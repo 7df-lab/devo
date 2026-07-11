@@ -48,6 +48,7 @@ mod onboarding_widget;
 #[cfg(test)]
 mod onboarding_widget_tests;
 mod pager_overlay;
+mod read_display;
 mod render;
 mod research_artifact_cell;
 mod shimmer;

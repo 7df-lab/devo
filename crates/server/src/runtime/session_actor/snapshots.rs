@@ -81,8 +81,9 @@ pub(crate) struct SessionResumeSnapshot {
 }
 
 /// Popped queued turn input for follow-up execution.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct QueuedTurnInputData {
+    pub(crate) queued_input_id: devo_core::PendingInputId,
     pub(crate) display_input: String,
     pub(crate) input_text: String,
     pub(crate) input_messages: Vec<String>,

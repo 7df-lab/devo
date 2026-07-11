@@ -817,7 +817,7 @@ mod tests {
                 assert!(matches!(
                     &actions[0],
                     devo_protocol::parse_command::ParsedCommand::Read { name, .. }
-                    if name == "mod.rs"
+                    if name == "crates/tui/src/mod.rs"
                 ));
             }
             other => panic!("unexpected metadata: {other:?}"),

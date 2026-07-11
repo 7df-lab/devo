@@ -1973,15 +1973,8 @@ async fn run_worker_inner(
                                 })
                                 .await
                             {
-                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                            let _ = event_tx.send(WorkerEvent::InterruptFailed {
                                 message: error.to_string(),
-                                turn_count,
-                                total_input_tokens,
-                                total_output_tokens,
-                                total_tokens,
-                                total_cache_read_tokens,
-                                prompt_token_estimate: total_input_tokens,
-                                last_query_input_tokens,
                             });
                             }
                     }
@@ -4083,10 +4076,18 @@ fn read_command_action_from_parameters(
     if path.is_empty() {
         return None;
     }
-    let name = Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string());
+    let mut name = path.to_string();
+    let offset = input.get("offset").and_then(serde_json::Value::as_u64);
+    let limit = input.get("limit").and_then(serde_json::Value::as_u64);
+    match (offset, limit) {
+        (Some(offset), Some(limit)) => {
+            let end = offset.saturating_add(limit.saturating_sub(1));
+            name.push_str(&format!(" L:{offset}-{end}"));
+        }
+        (Some(offset), None) => name.push_str(&format!(" L:{offset}-")),
+        (None, Some(limit)) => name.push_str(&format!(" L:1-{limit}")),
+        (None, None) => {}
+    }
     Some(devo_protocol::parse_command::ParsedCommand::Read {
         cmd: command.to_string(),
         name,
@@ -5037,6 +5038,29 @@ mod tests {
                 cmd: String::new(),
                 name: String::new(),
                 path: PathBuf::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn read_tool_call_start_with_offset_and_limit_emits_line_range() {
+        let payload = ToolCallPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "read".to_string(),
+            parameters: serde_json::json!({
+                "filePath": "crates/core/src/query.rs",
+                "offset": 10,
+                "limit": 5,
+            }),
+            command_actions: Vec::new(),
+        };
+
+        assert_eq!(
+            tool_call_started_actions(&payload),
+            vec![devo_protocol::parse_command::ParsedCommand::Read {
+                cmd: "read".to_string(),
+                name: "crates/core/src/query.rs L:10-14".to_string(),
+                path: PathBuf::from("crates/core/src/query.rs"),
             }]
         );
     }

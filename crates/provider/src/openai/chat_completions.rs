@@ -602,6 +602,9 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                         RequestContent::ToolResult { .. } => {}
                     }
                 }
+                if text_parts.is_empty() && reasoning_parts.is_empty() && tool_calls.is_empty() {
+                    continue;
+                }
                 let mut entry = json!({ "role": super::OpenAIRole::Assistant });
                 entry["content"] = if text_parts.is_empty() {
                     Value::String(String::new())
@@ -1596,32 +1599,46 @@ mod tests {
     }
 
     #[test]
-    fn build_request_documents_hosted_tool_history_is_not_replayed_yet() {
+    fn build_request_omits_unsupported_hosted_tool_history() {
         let request = ModelRequest {
             model: "gpt-4o-mini".to_string(),
             system: None,
-            messages: vec![RequestMessage {
-                role: "assistant".to_string(),
-                content: vec![
-                    RequestContent::HostedToolUse {
-                        id: "hosted_ws_1".to_string(),
-                        name: "web_search".to_string(),
-                        input: json!({"query": "Rust docs"}),
-                        output: None,
-                        status: None,
-                    },
-                    RequestContent::HostedToolUse {
-                        id: "hosted_ws_1".to_string(),
-                        name: "web_search".to_string(),
-                        input: json!({"query": "Rust docs"}),
-                        output: Some(json!([{
-                            "title": "Rust documentation",
-                            "url": "https://example.test/rust"
-                        }])),
-                        status: Some("completed".to_string()),
-                    },
-                ],
-            }],
+            messages: vec![
+                RequestMessage {
+                    role: "user".to_string(),
+                    content: vec![RequestContent::Text {
+                        text: "before".to_string(),
+                    }],
+                },
+                RequestMessage {
+                    role: "assistant".to_string(),
+                    content: vec![
+                        RequestContent::HostedToolUse {
+                            id: "hosted_ws_1".to_string(),
+                            name: "web_search".to_string(),
+                            input: json!({"query": "Rust docs"}),
+                            output: None,
+                            status: None,
+                        },
+                        RequestContent::HostedToolUse {
+                            id: "hosted_ws_1".to_string(),
+                            name: "web_search".to_string(),
+                            input: json!({"query": "Rust docs"}),
+                            output: Some(json!([{
+                                "title": "Rust documentation",
+                                "url": "https://example.test/rust"
+                            }])),
+                            status: Some("completed".to_string()),
+                        },
+                    ],
+                },
+                RequestMessage {
+                    role: "user".to_string(),
+                    content: vec![RequestContent::Text {
+                        text: "after".to_string(),
+                    }],
+                },
+            ],
             max_tokens: 256,
             tools: None,
             hosted_tools: Vec::new(),
@@ -1633,9 +1650,9 @@ mod tests {
 
         let body = build_request(&request, false);
 
-        assert_eq!(body["messages"][0]["role"], json!("assistant"));
-        assert_eq!(body["messages"][0]["content"], json!(""));
-        assert!(body["messages"][0].get("tool_calls").is_none());
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(2));
+        assert_eq!(body["messages"][0]["role"], json!("user"));
+        assert_eq!(body["messages"][1]["role"], json!("user"));
         let serialized = serde_json::to_string(&body).expect("serialize request body");
         assert!(!serialized.contains("hosted_tool_use"));
         assert!(!serialized.contains("web_search_tool_result"));

@@ -256,7 +256,7 @@ impl ChatWidget {
             AppEvent::ClearTranscript => {
                 self.clear_transcript_view();
             }
-            AppEvent::Interrupt => self.set_status_message("Interrupted"),
+            AppEvent::Interrupt => {}
             AppEvent::Command(command) => {
                 if matches!(
                     &command,
@@ -313,6 +313,20 @@ impl ChatWidget {
                 self.set_status_message("Diff shown");
             }
         }
+    }
+
+    pub(crate) fn request_interrupt(&mut self) -> bool {
+        if !self.busy || self.active_turn_id.is_none() {
+            return false;
+        }
+        self.bottom_pane.begin_interrupt();
+        self.set_status_message("Stopping…");
+        true
+    }
+
+    pub(crate) fn interrupt_failed(&mut self, message: String) {
+        self.bottom_pane.interrupt_failed();
+        self.set_status_message(format!("Interrupt failed: {message}"));
     }
 
     pub(crate) fn submit_text(&mut self, text: String) {

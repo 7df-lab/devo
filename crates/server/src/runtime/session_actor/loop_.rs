@@ -568,6 +568,7 @@ fn pop_queued_turn_input_data(
 ) -> Option<QueuedTurnInputData> {
     match item.kind {
         devo_core::PendingInputKind::UserText { text } => Some(QueuedTurnInputData {
+            queued_input_id: item.id,
             display_input: text.clone(),
             input_text: text,
             input_messages: Vec::new(),
@@ -583,6 +584,7 @@ fn pop_queued_turn_input_data(
             prompt_messages,
             ..
         } => Some(QueuedTurnInputData {
+            queued_input_id: item.id,
             display_input: display_text,
             input_text: prompt_text,
             input_messages: prompt_messages,
@@ -637,6 +639,44 @@ fn subagent_usage_owner_from_pending_metadata(
         string_field_from_pending_metadata(metadata, "devo_subagent_usage_parent_turn_id")
             .and_then(|value| devo_core::TurnId::try_from(value).ok());
     Some((parent_session_id, parent_turn_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use devo_protocol::PendingInputItem;
+    use devo_protocol::PendingInputKind;
+    use pretty_assertions::assert_eq;
+
+    use super::QueuedTurnInputData;
+    use super::pop_queued_turn_input_data;
+
+    #[test]
+    fn pop_queued_turn_input_data_preserves_pending_input_id() {
+        let item = PendingInputItem::new(
+            PendingInputKind::UserText {
+                text: "queued prompt".to_string(),
+            },
+            None,
+            Utc::now(),
+        );
+        let queued_input_id = item.id;
+
+        let popped = pop_queued_turn_input_data(item).expect("user input should be queued");
+
+        assert_eq!(
+            popped,
+            QueuedTurnInputData {
+                queued_input_id,
+                display_input: "queued prompt".to_string(),
+                input_text: "queued prompt".to_string(),
+                input_messages: Vec::new(),
+                collaboration_mode: devo_protocol::CollaborationMode::default(),
+                model_selection: None,
+                subagent_usage_owner: None,
+            }
+        );
+    }
 }
 
 fn apply_approval_scope_to_state(

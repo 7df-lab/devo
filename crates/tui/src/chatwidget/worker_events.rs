@@ -146,6 +146,9 @@ impl ChatWidget {
                 self.stream_chunking_policy.reset();
                 self.bottom_pane.set_task_running(true);
             }
+            WorkerEvent::InterruptFailed { message } => {
+                self.interrupt_failed(message);
+            }
             WorkerEvent::ProviderRetryStatus {
                 turn_id,
                 attempt,
@@ -300,7 +303,8 @@ impl ChatWidget {
                 parsed_commands,
             } => {
                 let command = crate::exec_command::split_command_string(&summary);
-                let parsed = parsed_commands.unwrap_or_else(|| parse_command(&command));
+                let mut parsed = parsed_commands.unwrap_or_else(|| parse_command(&command));
+                crate::read_display::normalize_read_actions(&mut parsed, &self.session.cwd);
                 let exec_like = !parsed.is_empty()
                     && parsed.iter().all(|parsed| {
                         !matches!(
@@ -352,6 +356,13 @@ impl ChatWidget {
                         ..tool_call
                     });
                 } else {
+                    // Remove abandoned preparing entries from pending_tool_calls.
+                    // When the agent sends a preparing ToolCall for write/apply_patch
+                    // but then switches to a different tool, the preparing entry
+                    // was never added to active_tool_calls and would never be
+                    // cleaned up by ToolResultIo/ToolResult (which match by tool_use_id).
+                    self.pending_tool_calls
+                        .retain(|pc| self.active_tool_calls.contains_key(&pc.tool_use_id));
                     self.active_tool_calls
                         .insert(tool_use_id.clone(), tool_call);
                     let pending_title =
@@ -422,8 +433,12 @@ impl ChatWidget {
                 command,
                 input,
                 source,
-                command_actions,
+                mut command_actions,
             } => {
+                crate::read_display::normalize_read_actions(
+                    &mut command_actions,
+                    &self.session.cwd,
+                );
                 let command_parts = crate::exec_command::split_command_string(&command);
                 self.start_command_execution_cell(
                     tool_use_id,
@@ -437,8 +452,12 @@ impl ChatWidget {
             WorkerEvent::ToolCallUpdated {
                 tool_use_id,
                 summary,
-                parsed_commands,
+                mut parsed_commands,
             } => {
+                crate::read_display::normalize_read_actions(
+                    &mut parsed_commands,
+                    &self.session.cwd,
+                );
                 if let Some(tool_call) = self.active_tool_calls.get_mut(&tool_use_id) {
                     tool_call.title = summary.clone();
                     tool_call.exec_like = true;
@@ -893,6 +912,7 @@ impl ChatWidget {
                 self.pending_approval = None;
                 self.committed_server_assistant_in_turn = false;
                 self.busy = false;
+                self.active_turn_id = None;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
@@ -961,6 +981,7 @@ impl ChatWidget {
                 self.pending_approval = None;
                 self.committed_server_assistant_in_turn = false;
                 self.busy = false;
+                self.active_turn_id = None;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;

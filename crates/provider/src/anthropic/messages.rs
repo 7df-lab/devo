@@ -912,7 +912,10 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
         model: request.model.clone(),
         max_tokens: request.max_tokens,
         stream,
-        messages: messages.iter().map(build_message).collect::<Vec<_>>(),
+        messages: messages
+            .iter()
+            .filter_map(build_message)
+            .collect::<Vec<_>>(),
         system: request.system.clone(),
         tools: request.tools.as_ref().map(|tools| {
             tools
@@ -1109,7 +1112,7 @@ fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<Mode
     })
 }
 
-fn build_message(message: &RequestMessage) -> AnthropicInputMessage {
+fn build_message(message: &RequestMessage) -> Option<AnthropicInputMessage> {
     let role = message
         .role
         .parse::<AnthropicAIRole>()
@@ -1120,7 +1123,7 @@ fn build_message(message: &RequestMessage) -> AnthropicInputMessage {
         .filter_map(build_content_block)
         .collect::<Vec<_>>();
 
-    AnthropicInputMessage { role, content }
+    (!content.is_empty()).then_some(AnthropicInputMessage { role, content })
 }
 
 fn build_content_block(block: &RequestContent) -> Option<AnthropicInputContentBlock> {
@@ -1567,6 +1570,41 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn build_request_omits_messages_with_no_anthropic_content() {
+        let request = ModelRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            system: None,
+            messages: vec![
+                RequestMessage {
+                    role: "assistant".to_string(),
+                    content: vec![RequestContent::Reasoning {
+                        text: "unsigned reasoning".to_string(),
+                    }],
+                },
+                RequestMessage {
+                    role: "user".to_string(),
+                    content: vec![RequestContent::Text {
+                        text: "continue".to_string(),
+                    }],
+                },
+            ],
+            max_tokens: 1024,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: SamplingControls::default(),
+            request_thinking: None,
+            reasoning_effort: None,
+            extra_body: None,
+        };
+
+        let body = build_request(&request, false);
+
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["messages"][0]["role"], json!("user"));
+        assert_eq!(body["messages"][0]["content"][0]["text"], json!("continue"));
     }
 
     #[test]

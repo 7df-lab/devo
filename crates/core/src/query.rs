@@ -382,6 +382,17 @@ fn classify_error(e: &anyhow::Error) -> ErrorClass {
         || msg.contains("invalid content-type")
         || msg.contains("invalid header value")
         || msg.contains("text/event-stream")
+        // Stream-level decode/decrypt errors (e.g. TLS decrypt failure, chunk
+        // deserialization).  These are typically transient — the proxy or
+        // TLS-terminator that sits between us and the provider may have had a
+        // hiccup; retrying usually succeeds.
+        || msg.contains("error decoding")
+        || msg.contains("decoding response")
+        || msg.contains("cannot decrypt")
+        || msg.contains("decrypt error")
+        || msg.contains("decrypterror")
+        || msg.contains("stream error")
+        || msg.contains("failed to decode")
     {
         ErrorClass::NetworkError
     } else if msg.contains("400")

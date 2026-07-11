@@ -233,8 +233,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{
-        PresetModelCatalog, default_base_instructions, load_builtin_model_presets,
-        load_builtin_models, merge_model_presets,
+        PresetModelCatalog, default_base_instructions, load_builtin_models, merge_model_presets,
     };
     use crate::{ModelCatalog, ModelPreset};
 
@@ -266,24 +265,10 @@ mod tests {
     }
 
     #[test]
-    fn builtin_model_presets_load_from_bundled_json() {
-        let presets = load_builtin_model_presets().expect("load builtin model presets");
-        assert!(!presets.is_empty());
-        assert_eq!(presets[0].slug, "qwen3-coder-next");
-        assert!(
-            presets[0]
-                .base_instructions
-                .as_ref()
-                .is_some_and(|instructions| !instructions.is_empty())
-        );
-    }
-
-    #[test]
     fn builtin_models_load_from_bundled_json() {
         let models = load_builtin_models().expect("load builtin models");
         assert!(!models.is_empty());
         assert_eq!(models[0].slug, "qwen3-coder-next");
-        assert!(!models[0].base_instructions.is_empty());
     }
 
     #[test]

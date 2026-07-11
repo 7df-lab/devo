@@ -6,10 +6,9 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use devo_tools::ClientTextFileRead;
 use devo_tools::ClientTextFileWrite;
-use devo_tools::FileReadFreshnessError;
 use tracing::info;
 
-use super::file_change_metadata::{file_mtime, write_tool_result};
+use super::file_change_metadata::write_tool_result;
 use crate::contracts::{
     ToolCallError, ToolContext, ToolProgressSender, ToolResult, ToolResultContent,
 };
@@ -124,16 +123,6 @@ impl ToolHandler for EditHandler {
         let path = resolve_path(&ctx.workspace_root, path_str);
         info!(path = %path.display(), replace_all, "editing file");
 
-        let Some(ledger) = ctx.file_read_ledger.as_ref() else {
-            return Ok(ToolResult::error(
-                ToolResultContent::Text(
-                    "File has not been read in this session. Use the Read tool first.".into(),
-                ),
-                "Not read",
-                ToolCallError::ExecutionFailed("file read ledger unavailable".into()),
-            ));
-        };
-
         let previous = match read_text_file(&ctx, &path).await? {
             Some(content) => content,
             None => {
@@ -156,30 +145,6 @@ impl ToolHandler for EditHandler {
             ));
         }
 
-        let mtime = file_mtime(&path);
-        match ledger.require_fresh(&path, &previous, mtime) {
-            Ok(()) => {}
-            Err(FileReadFreshnessError::NotRead) => {
-                return Ok(ToolResult::error(
-                    ToolResultContent::Text(
-                        "File has not been read in this session. Use the Read tool first (full file, without offset/limit).".into(),
-                    ),
-                    "Not read",
-                    ToolCallError::ExecutionFailed("file not read".into()),
-                ));
-            }
-            Err(FileReadFreshnessError::Stale) => {
-                return Ok(ToolResult::error(
-                    ToolResultContent::Text(
-                        "File has changed since it was last read. Re-read the file before editing."
-                            .into(),
-                    ),
-                    "Stale file",
-                    ToolCallError::ExecutionFailed("file stale".into()),
-                ));
-            }
-        }
-
         let match_count = previous.matches(old_string).count();
         if match_count == 0 {
             return Ok(ToolResult::error(
@@ -188,16 +153,6 @@ impl ToolHandler for EditHandler {
                 ToolCallError::ExecutionFailed("oldString not found".into()),
             ));
         }
-        if match_count > 1 && !replace_all {
-            return Ok(ToolResult::error(
-                ToolResultContent::Text(
-                    "Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match.".into(),
-                ),
-                "Multiple matches",
-                ToolCallError::ExecutionFailed("multiple matches".into()),
-            ));
-        }
-
         let content = if replace_all {
             previous.replace(old_string, new_string)
         } else {
@@ -205,9 +160,6 @@ impl ToolHandler for EditHandler {
         };
 
         write_text_file(&ctx, &path, &content).await?;
-
-        let post_mtime = file_mtime(&path);
-        ledger.record_write(&path, &content, post_mtime);
 
         let summary = if replace_all {
             format!(
@@ -329,140 +281,6 @@ mod tests {
             network_proxy: None,
             network_no_proxy: None,
         }
-    }
-
-    #[tokio::test]
-    async fn edit_fails_when_file_not_read() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let path = root.path().join("a.txt");
-        std::fs::write(&path, "hello world").expect("write");
-        let ledger = Arc::new(FileReadLedger::new());
-
-        let result = EditHandler::new()
-            .handle(
-                ctx(root.path(), ledger),
-                serde_json::json!({
-                    "filePath": path,
-                    "oldString": "hello",
-                    "newString": "hi",
-                }),
-                None,
-            )
-            .await
-            .expect("handle");
-
-        assert!(matches!(
-            result.structured_status,
-            ToolTerminalStatus::Failed(_)
-        ));
-        assert_eq!(result.result_summary, "Not read");
-    }
-
-    #[tokio::test]
-    async fn edit_succeeds_after_full_read() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let path = root.path().join("a.txt");
-        std::fs::write(&path, "hello world").expect("write");
-        let ledger = Arc::new(FileReadLedger::new());
-        let content = std::fs::read_to_string(&path).expect("read");
-        ledger.record_full_read(&path, &content, file_mtime(&path));
-
-        let result = EditHandler::new()
-            .handle(
-                ctx(root.path(), Arc::clone(&ledger)),
-                serde_json::json!({
-                    "filePath": path,
-                    "oldString": "hello",
-                    "newString": "hi",
-                }),
-                None,
-            )
-            .await
-            .expect("handle");
-
-        assert!(matches!(
-            result.structured_status,
-            ToolTerminalStatus::Completed
-        ));
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "hi world");
-        assert_eq!(
-            ledger.require_fresh(&path, "hi world", file_mtime(&path)),
-            Ok(())
-        );
-    }
-
-    #[tokio::test]
-    async fn edit_detects_stale_content() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let path = root.path().join("a.txt");
-        std::fs::write(&path, "hello world").expect("write");
-        let ledger = Arc::new(FileReadLedger::new());
-        ledger.record_full_read(&path, "hello world", file_mtime(&path));
-        std::fs::write(&path, "hello world!").expect("external change");
-
-        let result = EditHandler::new()
-            .handle(
-                ctx(root.path(), ledger),
-                serde_json::json!({
-                    "filePath": path,
-                    "oldString": "hello",
-                    "newString": "hi",
-                }),
-                None,
-            )
-            .await
-            .expect("handle");
-
-        assert!(matches!(
-            result.structured_status,
-            ToolTerminalStatus::Failed(_)
-        ));
-        assert_eq!(result.result_summary, "Stale file");
-    }
-
-    #[tokio::test]
-    async fn edit_requires_unique_match_unless_replace_all() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let path = root.path().join("a.txt");
-        std::fs::write(&path, "foo bar foo").expect("write");
-        let ledger = Arc::new(FileReadLedger::new());
-        ledger.record_full_read(&path, "foo bar foo", file_mtime(&path));
-
-        let multi = EditHandler::new()
-            .handle(
-                ctx(root.path(), Arc::clone(&ledger)),
-                serde_json::json!({
-                    "filePath": path,
-                    "oldString": "foo",
-                    "newString": "baz",
-                }),
-                None,
-            )
-            .await
-            .expect("handle");
-        assert!(matches!(
-            multi.structured_status,
-            ToolTerminalStatus::Failed(_)
-        ));
-
-        let replaced = EditHandler::new()
-            .handle(
-                ctx(root.path(), ledger),
-                serde_json::json!({
-                    "filePath": path,
-                    "oldString": "foo",
-                    "newString": "baz",
-                    "replaceAll": true,
-                }),
-                None,
-            )
-            .await
-            .expect("handle");
-        assert!(matches!(
-            replaced.structured_status,
-            ToolTerminalStatus::Completed
-        ));
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "baz bar baz");
     }
 
     #[tokio::test]

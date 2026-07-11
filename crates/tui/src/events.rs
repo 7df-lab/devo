@@ -375,6 +375,11 @@ pub(crate) enum WorkerEvent {
         /// Estimated prompt tokens for the just-completed request.
         prompt_token_estimate: usize,
     },
+    /// The interrupt request could not be delivered or accepted.
+    InterruptFailed {
+        /// Human-readable failure reason to restore into the working status.
+        message: String,
+    },
     /// The current turn failed.
     TurnFailed {
         /// Human-readable error text to surface in the transcript and status bar.

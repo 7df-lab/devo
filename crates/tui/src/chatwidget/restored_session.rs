@@ -531,6 +531,8 @@ impl ChatWidget {
         item: &SessionHistoryItem,
         actions: Vec<devo_protocol::parse_command::ParsedCommand>,
     ) {
+        let mut actions = actions;
+        crate::read_display::normalize_read_actions(&mut actions, &self.session.cwd);
         let command = item.title.clone();
         let command_tokens = crate::exec_command::split_command_string(&command);
         if let Some(cell) = self
