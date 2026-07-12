@@ -35,9 +35,19 @@ impl ServerRuntime {
         self: &Arc<Self>,
         params: devo_protocol::AgentMessageParams,
     ) -> Result<devo_protocol::AgentMessageResult, ToolCallError> {
+        let message = params.message;
         let route = self
-            .queue_agent_message(params.session_id, &params.target, params.message)
+            .queue_agent_message(params.session_id, &params.target, message.clone())
             .await?;
+        if let Some(metadata) = self
+            .agent_registries
+            .lock()
+            .await
+            .get_mut(&params.session_id)
+            .and_then(|registry| registry.agents.get_mut(&route.to_session_id))
+        {
+            metadata.last_task_message = Some(message);
+        }
         if self
             .active_turn_id_for_session(route.to_session_id)
             .await
@@ -46,7 +56,10 @@ impl ServerRuntime {
             self.drain_child_mailbox_into_user_turns(route.to_session_id)
                 .await?;
         }
-        Ok(devo_protocol::AgentMessageResult { delivered: true })
+        Ok(devo_protocol::AgentMessageResult {
+            delivered: true,
+            task_id: devo_protocol::TaskId::from(route.to_session_id),
+        })
     }
 
     async fn wait_agent_inner(
@@ -119,6 +132,126 @@ impl ServerRuntime {
             status,
         })
     }
+
+    fn task_state_from_agent_status(status: &str) -> devo_protocol::TaskState {
+        match status {
+            "completed" | "waiting_for_input" => devo_protocol::TaskState::Completed,
+            "failed" => devo_protocol::TaskState::Failed,
+            "interrupted" | "canceled" | "closed" => devo_protocol::TaskState::Canceled,
+            "spawning" | "running" => devo_protocol::TaskState::Running,
+            _ => devo_protocol::TaskState::Failed,
+        }
+    }
+
+    async fn task_info_from_agent(
+        &self,
+        info: devo_protocol::AgentInfo,
+    ) -> devo_protocol::TaskInfo {
+        let waiting_approval = match info.parent_session_id {
+            Some(parent_session_id) => {
+                self.session_interactive
+                    .has_pending_approval_for_session(parent_session_id, info.session_id)
+                    .await
+                    || self
+                        .session_interactive
+                        .has_pending_approval_for_session(info.session_id, info.session_id)
+                        .await
+            }
+            None => {
+                self.session_interactive
+                    .has_pending_approval_for_session(info.session_id, info.session_id)
+                    .await
+            }
+        };
+        let state = if waiting_approval {
+            devo_protocol::TaskState::WaitingApproval
+        } else {
+            Self::task_state_from_agent_status(&info.status)
+        };
+        devo_protocol::TaskInfo {
+            task_id: devo_protocol::TaskId::from(info.session_id),
+            kind: devo_protocol::TaskKind::Agent,
+            state,
+            agent: Some(devo_protocol::AgentTaskMetadata {
+                session_id: info.session_id,
+                parent_session_id: info.parent_session_id,
+                agent_path: info.agent_path,
+                agent_nickname: info.agent_nickname,
+                agent_role: info.agent_role,
+                last_task_message: info.last_task_message,
+            }),
+            command: None,
+        }
+    }
+
+    async fn await_task_inner(
+        &self,
+        params: devo_protocol::AwaitTaskParams,
+    ) -> Result<devo_protocol::AwaitTaskResult, ToolCallError> {
+        let task_id = params.task_id;
+        let wait_result = self
+            .wait_agent_inner(devo_protocol::WaitAgentParams {
+                session_id: params.session_id,
+                target: Some(task_id.0.clone()),
+                after_sequence: None,
+                timeout_secs: params.timeout_secs,
+            })
+            .await?;
+        let task = self
+            .task_info_from_agent(self.agent_info(params.session_id, task_id.as_ref()).await?)
+            .await;
+        if wait_result.timed_out {
+            return Ok(devo_protocol::AwaitTaskResult::TimedOut { task });
+        }
+        let output = wait_result
+            .events
+            .into_iter()
+            .rev()
+            .filter(|event| event.kind.is_assistant_text())
+            .filter_map(|event| event.text)
+            .next();
+        Ok(devo_protocol::AwaitTaskResult::Terminal { task, output })
+    }
+
+    async fn list_tasks_inner(
+        &self,
+        params: devo_protocol::ListTasksParams,
+    ) -> Result<devo_protocol::ListTasksResult, ToolCallError> {
+        let agents = self
+            .list_agents_inner(devo_protocol::AgentListParams {
+                session_id: params.session_id,
+                path_prefix: params.path_prefix,
+            })
+            .await?;
+        let mut tasks = Vec::with_capacity(agents.len());
+        for agent in agents {
+            tasks.push(self.task_info_from_agent(agent).await);
+        }
+        Ok(devo_protocol::ListTasksResult { tasks })
+    }
+
+    async fn cancel_task_inner(
+        self: &Arc<Self>,
+        params: devo_protocol::CancelTaskParams,
+    ) -> Result<devo_protocol::CancelTaskResult, ToolCallError> {
+        let child = self
+            .resolve_child_agent(params.session_id, params.task_id.as_ref())
+            .await?;
+        self.close_agent_inner(devo_protocol::CloseAgentParams {
+            session_id: params.session_id,
+            target: params.task_id.0.clone(),
+        })
+        .await?;
+        self.set_agent_status(params.session_id, child.session_id, SubagentStatus::Closed)
+            .await;
+        let task = self
+            .task_info_from_agent(
+                self.agent_info(params.session_id, params.task_id.as_ref())
+                    .await?,
+            )
+            .await;
+        Ok(devo_protocol::CancelTaskResult { task })
+    }
 }
 
 #[async_trait::async_trait]
@@ -156,6 +289,27 @@ impl AgentToolCoordinator for ServerRuntime {
         params: devo_protocol::CloseAgentParams,
     ) -> Result<devo_protocol::CloseAgentResult, ToolCallError> {
         self.close_agent_inner(params).await
+    }
+
+    async fn await_task(
+        self: Arc<Self>,
+        params: devo_protocol::AwaitTaskParams,
+    ) -> Result<devo_protocol::AwaitTaskResult, ToolCallError> {
+        self.await_task_inner(params).await
+    }
+
+    async fn list_tasks(
+        self: Arc<Self>,
+        params: devo_protocol::ListTasksParams,
+    ) -> Result<devo_protocol::ListTasksResult, ToolCallError> {
+        self.list_tasks_inner(params).await
+    }
+
+    async fn cancel_task(
+        self: Arc<Self>,
+        params: devo_protocol::CancelTaskParams,
+    ) -> Result<devo_protocol::CancelTaskResult, ToolCallError> {
+        self.cancel_task_inner(params).await
     }
 
     async fn request_user_input(

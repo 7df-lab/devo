@@ -90,6 +90,8 @@ after confirming crates/file-search/src/lib.rs
 ┃ @lib.rs
 ```
 
+Skill confirmations use the same `@` chip shape (for example `@deep-research`). MCP entries keep the stable `@mcp:<id>` form.
+
 The rendered mention may be a chip, styled token, or plain inline text depending on client capabilities. The underlying composer state should retain a structured mention reference.
 
 ## Result Grouping

@@ -24,6 +24,7 @@ use ratatui::widgets::WidgetRef;
 use crate::key_hint;
 use crate::render::Insets;
 use crate::render::RectExt;
+use crate::text_formatting::center_truncate_path;
 use crate::text_formatting::truncate_text;
 
 use super::popup_consts::MAX_POPUP_ROWS;
@@ -32,6 +33,9 @@ use super::selection_popup_common::GenericDisplayRow;
 use super::selection_popup_common::render_rows_single_line;
 
 const REFERENCE_NAME_TRUNCATE_LEN: usize = 34;
+/// Minimum display width (columns) reserved for file path rendering in the
+/// reference popup. Derived as: area.width - 2 (left inset) - 10 (prefix).
+const FILE_NAME_CONTAINER_MIN_WIDTH: usize = 30;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ReferenceSelection {
@@ -44,8 +48,12 @@ pub(crate) enum ReferenceSelection {
         path: String,
     },
     File {
+        /// Absolute filesystem path (used for image attach and similar).
         path: PathBuf,
+        /// Visible composer token, for example `@interactive.rs`.
         insert_text: String,
+        /// Relative workspace path stored in the mention binding.
+        mention_path: String,
     },
 }
 
@@ -121,13 +129,20 @@ impl ReferencePopup {
                     path,
                 })
             }
-            ReferenceSearchResultKind::File => Some(ReferenceSelection::File {
-                path: selected
-                    .file_path
+            ReferenceSearchResultKind::File => {
+                let mention_path = selected
+                    .mention_path
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from(&selected.insert_text)),
-                insert_text: selected.insert_text.clone(),
-            }),
+                    .unwrap_or_else(|| selected.display_name.clone());
+                Some(ReferenceSelection::File {
+                    path: selected
+                        .file_path
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from(&mention_path)),
+                    insert_text: selected.insert_text.clone(),
+                    mention_path,
+                })
+            }
         }
     }
 
@@ -137,19 +152,27 @@ impl ReferencePopup {
         self.state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
     }
 
-    fn rows(&self) -> Vec<GenericDisplayRow> {
+    fn rows(&self, name_container_width: usize) -> Vec<GenericDisplayRow> {
         self.results
             .iter()
-            .map(|result| GenericDisplayRow {
-                name: truncate_text(&result.display_name, REFERENCE_NAME_TRUNCATE_LEN),
-                name_prefix_spans: vec![category_prefix(result.kind)],
-                match_indices: result.match_indices.clone(),
-                display_shortcut: None,
-                description: result.description.clone(),
-                category_tag: None,
-                is_disabled: result.is_disabled,
-                disabled_reason: result.disabled_reason.clone(),
-                wrap_indent: None,
+            .map(|result| {
+                let name = match result.kind {
+                    ReferenceSearchResultKind::File => {
+                        center_truncate_path(&result.display_name, name_container_width)
+                    }
+                    _ => truncate_text(&result.display_name, REFERENCE_NAME_TRUNCATE_LEN),
+                };
+                GenericDisplayRow {
+                    name,
+                    name_prefix_spans: vec![category_prefix(result.kind)],
+                    match_indices: result.match_indices.clone(),
+                    display_shortcut: None,
+                    description: result.description.clone(),
+                    category_tag: None,
+                    is_disabled: result.is_disabled,
+                    disabled_reason: result.disabled_reason.clone(),
+                    wrap_indent: None,
+                }
             })
             .collect()
     }
@@ -181,7 +204,12 @@ impl WidgetRef for ReferencePopup {
         } else {
             (area, None)
         };
-        let rows = self.rows();
+        // Available columns for the name: area width minus 2 (left inset in
+        // render_rows_single_line) minus 10 (prefix like " [≣ FILE] ").
+        let name_container_width = (area.width as usize)
+            .saturating_sub(12)
+            .max(FILE_NAME_CONTAINER_MIN_WIDTH);
+        let rows = self.rows(name_container_width);
         let empty_message = if self.waiting {
             "loading..."
         } else {
@@ -227,11 +255,20 @@ mod tests {
 
     use super::*;
 
+    /// Default name container width used in tests.
+    const TEST_NAME_WIDTH: usize = 60;
+
     fn result(kind: ReferenceSearchResultKind, display_name: &str) -> ReferenceSearchResult {
         let insert_text = match kind {
-            ReferenceSearchResultKind::Skill => format!("${display_name}"),
+            ReferenceSearchResultKind::Skill => format!("@{display_name}"),
             ReferenceSearchResultKind::Mcp => format!("@mcp:{}", display_name.to_ascii_lowercase()),
-            ReferenceSearchResultKind::File => display_name.to_string(),
+            ReferenceSearchResultKind::File => {
+                let basename = std::path::Path::new(display_name)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(display_name);
+                format!("@{basename}")
+            }
         };
         ReferenceSearchResult {
             kind,
@@ -244,7 +281,7 @@ mod tests {
                     "mcp://server/{}",
                     display_name.to_ascii_lowercase()
                 )),
-                ReferenceSearchResultKind::File => None,
+                ReferenceSearchResultKind::File => Some(display_name.to_string()),
             },
             file_path: (kind == ReferenceSearchResultKind::File)
                 .then(|| PathBuf::from(display_name)),
@@ -288,7 +325,7 @@ mod tests {
 
         assert_eq!(
             popup
-                .rows()
+                .rows(TEST_NAME_WIDTH)
                 .into_iter()
                 .map(|row| (row_name_prefix(&row), row.name, row.category_tag))
                 .collect::<Vec<_>>(),
@@ -329,7 +366,7 @@ mod tests {
 
         assert_eq!(
             popup
-                .rows()
+                .rows(TEST_NAME_WIDTH)
                 .into_iter()
                 .map(|row| (row_name_prefix(&row), row.name, row.category_tag))
                 .collect::<Vec<_>>(),
@@ -378,6 +415,30 @@ mod tests {
     }
 
     /// Trace: L2-DES-CLIENT-002
+    /// Verifies: File selections use an `@basename` insert token and relative mention path.
+    #[test]
+    fn selected_file_reference_uses_basename_insert_token() {
+        let mut popup = ReferencePopup::new(Color::Cyan);
+        popup.set_query("interactive");
+        popup.set_snapshot(snapshot(
+            "interactive",
+            vec![result(
+                ReferenceSearchResultKind::File,
+                "crates/tui/src/interactive.rs",
+            )],
+        ));
+
+        assert_eq!(
+            popup.selected_reference(),
+            Some(ReferenceSelection::File {
+                path: PathBuf::from("crates/tui/src/interactive.rs"),
+                insert_text: "@interactive.rs".to_string(),
+                mention_path: "crates/tui/src/interactive.rs".to_string(),
+            })
+        );
+    }
+
+    /// Trace: L2-DES-CLIENT-002
     /// Verifies: Stale reference-search snapshots are rejected.
     #[test]
     fn stale_file_results_are_ignored() {
@@ -388,6 +449,6 @@ mod tests {
             vec![result(ReferenceSearchResultKind::File, "src/old.rs")],
         ));
 
-        assert_eq!(popup.rows().len(), 0);
+        assert_eq!(popup.rows(TEST_NAME_WIDTH).len(), 0);
     }
 }

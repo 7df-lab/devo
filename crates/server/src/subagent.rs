@@ -388,7 +388,7 @@ impl SubagentOutputBuffer {
             let notified = self.notify.notified();
             let (events, next_sequence) =
                 self.events_after(after_sequence, &target_session_ids).await;
-            if !events.is_empty() {
+            if events.iter().any(is_terminal_agent_output_event) {
                 return (events, next_sequence, false);
             }
             let elapsed = start.elapsed();
@@ -435,6 +435,14 @@ impl SubagentOutputBuffer {
             .collect();
         (events, inner.next_sequence)
     }
+}
+
+fn is_terminal_agent_output_event(event: &AgentOutputEvent) -> bool {
+    event.kind == AgentOutputEventKind::Status
+        && matches!(
+            event.status.as_deref(),
+            Some("completed" | "failed" | "interrupted" | "canceled" | "closed")
+        )
 }
 
 // ── Errors ─────────────────────────────────────────────────────────
@@ -494,16 +502,63 @@ mod tests {
                 ..base()
             })
             .await;
+        buffer
+            .push(AgentOutputEvent {
+                sequence: 0,
+                child_session_id: child,
+                agent_path: "root/worker".into(),
+                turn_id: Some(turn_id),
+                kind: AgentOutputEventKind::Status,
+                text: None,
+                status: Some("completed".into()),
+                created_at: Utc::now(),
+            })
+            .await;
 
         let (events, next_sequence, timed_out) = buffer
             .wait_after(0, &[child], Duration::from_millis(1), None)
             .await;
         assert!(!timed_out);
-        assert_eq!(next_sequence, 2);
-        assert_eq!(events.len(), 1);
+        assert_eq!(next_sequence, 3);
+        assert_eq!(events.len(), 2);
         assert_eq!(events[0].sequence, 1);
         assert_eq!(events[0].text.as_deref(), Some("alpha beta"));
         assert_eq!(events[0].kind, AgentOutputEventKind::AssistantMessage);
+    }
+
+    #[tokio::test]
+    async fn wait_after_ignores_streaming_text_until_deadline() {
+        let buffer = SubagentOutputBuffer::new();
+        let child = SessionId::new();
+        let turn_id = devo_protocol::TurnId::new();
+        let producer = buffer.clone();
+        let streaming = tokio::spawn(async move {
+            for text in ["alpha", " beta", " gamma"] {
+                producer
+                    .push(AgentOutputEvent {
+                        sequence: 0,
+                        child_session_id: child,
+                        agent_path: "root/worker".into(),
+                        turn_id: Some(turn_id),
+                        kind: AgentOutputEventKind::AssistantMessage,
+                        text: Some(text.into()),
+                        status: None,
+                        created_at: Utc::now(),
+                    })
+                    .await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let started = Instant::now();
+        let (events, _next_sequence, timed_out) = buffer
+            .wait_after(0, &[child], Duration::from_millis(50), None)
+            .await;
+        streaming.await.expect("streaming producer");
+
+        assert!(timed_out);
+        assert!(events.is_empty());
+        assert!(started.elapsed() >= Duration::from_millis(50));
     }
 
     #[tokio::test]

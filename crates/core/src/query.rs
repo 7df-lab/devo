@@ -61,7 +61,7 @@ use crate::history::summarizer::DefaultHistorySummarizer;
 use crate::response_item::ResponseItem;
 use crate::response_item::message_to_response_items;
 
-const SUBAGENT_MODE_REMINDER: &str = "<system-reminder>\nYou are running as a sub-agent. Complete the delegated task using the available non-agent tools. Do not call agent coordination tools such as spawn_agent, send_message, wait_agent, list_agents, or close_agent; report progress and final results through assistant output.\n</system-reminder>";
+const SUBAGENT_MODE_REMINDER: &str = "<system-reminder>\nYou are running as a sub-agent. Complete the delegated task using the available non-agent tools. Do not call agent coordination tools such as spawn_agent, send_message, await_task, list_tasks, or cancel_task; report progress and final results through assistant output.\n</system-reminder>";
 const DEEPSEEK_THINKING_ONLY_CONTINUATION_PROMPT: &str = "Your previous response contained only hidden reasoning and no user-visible answer. Provide the final answer to the user's original request now. Do not reveal or summarize hidden reasoning; return only user-visible content.";
 const MAX_DSML_TEXT_TOOL_CALL_CONTINUATIONS: usize = 3;
 const DSML_TEXT_TOOL_CALL_CONTINUATION_REMINDER: &str = "Your previous assistant message contained DSML tagged tool-call text. Those tags were emitted as ordinary text and no tool was executed. Do not repeat the DSML block. Continue now by using the provider's native hosted tool interface when you need a hosted tool, by invoking one of the available local tools when appropriate, or by producing normal prose if no tool is needed.";
@@ -554,7 +554,10 @@ fn truncate_tool_result_for_model(
 }
 
 fn preserve_full_tool_result(tool_name: Option<&str>) -> bool {
-    matches!(tool_name, Some("wait_agent" | "subagent_result"))
+    matches!(
+        tool_name,
+        Some("await_task" | "wait_agent" | "subagent_result")
+    )
 }
 
 fn insert_subagent_request_reminders(messages: &mut Vec<RequestMessage>) {
@@ -792,7 +795,7 @@ fn dsml_text_tool_call_continuation_message(
         reminder.push_str(&hosted_tool_names.join(", "));
         reminder.push_str(". Hosted tools must be invoked through provider-native server tool calls, not by writing DSML tags in text.");
     }
-    if local_tool_names.contains(&"spawn_agent") && local_tool_names.contains(&"wait_agent") {
+    if local_tool_names.contains(&"spawn_agent") && local_tool_names.contains(&"await_task") {
         reminder.push_str("\nFor research work with separable subtasks, prefer spawning independent agents first and then waiting for their results.");
     }
     reminder.push_str("\n</system-reminder>");
@@ -2156,7 +2159,11 @@ mod tests {
     fn model_tool_result_truncation_preserves_agent_coordination_results() {
         let content = "abcdefghijklmnopqrstuvwxyz".to_string();
 
-        for tool_name in [Some("wait_agent"), Some("subagent_result")] {
+        for tool_name in [
+            Some("await_task"),
+            Some("wait_agent"),
+            Some("subagent_result"),
+        ] {
             assert_eq!(
                 truncate_tool_result_for_model(
                     content.clone(),
@@ -3149,9 +3156,9 @@ mod tests {
         for (name, description) in [
             ("spawn_agent", "Create a child agent."),
             ("send_message", "Send input to a child agent."),
-            ("wait_agent", "Poll child output."),
-            ("list_agents", "List child agents."),
-            ("close_agent", "Close a child agent."),
+            ("await_task", "Wait for task completion."),
+            ("list_tasks", "List child tasks."),
+            ("cancel_task", "Cancel a child task."),
         ] {
             builder.push_spec_with_exposure(
                 ToolSpec::new(
@@ -3475,7 +3482,7 @@ mod tests {
         let mut builder = ToolRegistryBuilder::new();
         for (name, description) in [
             ("spawn_agent", "Create a child agent."),
-            ("wait_agent", "Poll child output."),
+            ("await_task", "Wait for task completion."),
         ] {
             builder.push_spec_with_exposure(
                 ToolSpec::new(
@@ -3524,7 +3531,7 @@ mod tests {
         assert!(continuation.messages.iter().any(|message| {
             message_contains(message, "DSML tagged tool-call text")
                 && message_contains(message, "spawn_agent")
-                && message_contains(message, "wait_agent")
+                && message_contains(message, "await_task")
                 && message_contains(message, "web_search")
         }));
 

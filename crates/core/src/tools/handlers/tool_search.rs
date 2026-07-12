@@ -494,6 +494,30 @@ mod tests {
                 ),
                 (
                     definition(
+                        "await_task",
+                        "Wait for task completion",
+                        serde_json::json!({"type": "object"}),
+                    ),
+                    None,
+                ),
+                (
+                    definition(
+                        "list_tasks",
+                        "List child tasks",
+                        serde_json::json!({"type": "object"}),
+                    ),
+                    None,
+                ),
+                (
+                    definition(
+                        "cancel_task",
+                        "Cancel a child task",
+                        serde_json::json!({"type": "object"}),
+                    ),
+                    None,
+                ),
+                (
+                    definition(
                         "wait_agent",
                         "Poll child output",
                         serde_json::json!({"type": "object"}),
@@ -530,6 +554,15 @@ mod tests {
             "send_message",
             "send-message",
             "sendmessage",
+            "await_task",
+            "await-task",
+            "awaittask",
+            "list_tasks",
+            "list-tasks",
+            "listtasks",
+            "cancel_task",
+            "cancel-task",
+            "canceltask",
             "wait_agent",
             "wait-agent",
             "waitagent",

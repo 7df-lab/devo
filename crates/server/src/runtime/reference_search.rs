@@ -369,7 +369,7 @@ fn skill_source(skill: &SkillRecord) -> SkillReferenceSource {
     SkillReferenceSource {
         display_name,
         description,
-        insert_text: format!("${}", skill.name),
+        insert_text: format!("@{}", skill.name),
         mention_path: skill.path.to_string_lossy().into_owned(),
         search_terms,
     }
@@ -479,13 +479,20 @@ fn file_results(file_matches: &[FileMatch]) -> Vec<ReferenceSearchResult> {
             if display_name.trim().is_empty() {
                 return None;
             }
+            let basename = file_match
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or(display_name.as_str());
+            let insert_text = format!("@{basename}");
 
             Some(ReferenceSearchResult {
                 kind: ReferenceSearchResultKind::File,
                 display_name: display_name.clone(),
                 description: None,
-                insert_text: display_name,
-                mention_path: None,
+                insert_text,
+                mention_path: Some(display_name),
                 file_path: Some(file_match.full_path()),
                 match_indices: file_match
                     .indices
@@ -542,7 +549,7 @@ mod tests {
         SkillReferenceSource {
             display_name: name.to_string(),
             description: Some(format!("{name} skill")),
-            insert_text: format!("${name}"),
+            insert_text: format!("@{name}"),
             mention_path: format!("skills/{name}/SKILL.md"),
             search_terms: vec![name.to_string()],
         }
@@ -623,6 +630,21 @@ mod tests {
                 .map(|result| (result.kind, result.display_name))
                 .collect::<Vec<_>>(),
             vec![(ReferenceSearchResultKind::File, "apps".to_string())]
+        );
+    }
+
+    #[test]
+    fn file_results_use_basename_insert_text_and_relative_mention_path() {
+        let results = reference_results("", &[], &[], &[file("crates/tui/src/interactive.rs")]);
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(result.kind, ReferenceSearchResultKind::File);
+        assert_eq!(result.display_name, "crates/tui/src/interactive.rs");
+        assert_eq!(result.insert_text, "@interactive.rs");
+        assert_eq!(
+            result.mention_path.as_deref(),
+            Some("crates/tui/src/interactive.rs")
         );
     }
 

@@ -333,6 +333,7 @@ impl ServerRuntime {
         });
 
         Ok(devo_protocol::SpawnAgentResult {
+            task_id: devo_protocol::TaskId::from(child_session_id),
             child_session_id,
             agent_path,
             agent_nickname: nickname,

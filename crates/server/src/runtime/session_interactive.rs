@@ -104,6 +104,23 @@ impl SessionInteractiveLanes {
             })
     }
 
+    pub(crate) async fn has_pending_approval_for_session(
+        &self,
+        host_session_id: SessionId,
+        owner_session_id: SessionId,
+    ) -> bool {
+        self.inner
+            .lock()
+            .await
+            .get(&host_session_id)
+            .is_some_and(|state| {
+                state
+                    .pending_approvals
+                    .values()
+                    .any(|pending| pending.owner_session_id == owner_session_id)
+            })
+    }
+
     pub(crate) async fn clear_pending_user_inputs_for_turn(
         &self,
         session_id: SessionId,
@@ -143,5 +160,47 @@ pub(crate) async fn complete_approval_wait(
         Ok(ApprovalDecisionValue::Deny) => Err("rejected by user".to_string()),
         Ok(ApprovalDecisionValue::Cancel) => Err("cancelled by user".to_string()),
         Err(_) => Err("approval channel closed".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn pending_approval_tracks_the_originating_child_session() {
+        let lanes = SessionInteractiveLanes::default();
+        let parent_session_id = SessionId::new();
+        let child_session_id = SessionId::new();
+        let (tx, _rx) = oneshot::channel();
+        lanes
+            .register_pending_approval(
+                parent_session_id,
+                "approval-1".to_string(),
+                PendingApproval {
+                    owner_session_id: child_session_id,
+                    tool_name: "exec_command".to_string(),
+                    path: None,
+                    host: None,
+                    command_prefix: None,
+                    tx,
+                },
+            )
+            .await;
+
+        assert_eq!(
+            lanes
+                .has_pending_approval_for_session(parent_session_id, child_session_id)
+                .await,
+            true
+        );
+        assert_eq!(
+            lanes
+                .has_pending_approval_for_session(parent_session_id, parent_session_id)
+                .await,
+            false
+        );
     }
 }

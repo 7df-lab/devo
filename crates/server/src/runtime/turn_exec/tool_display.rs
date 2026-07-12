@@ -379,6 +379,9 @@ pub(super) fn user_shell_command_payload(
 const AGENT_COORDINATION_TOOL_NAMES: &[&str] = &[
     "spawn_agent",
     "send_message",
+    "await_task",
+    "list_tasks",
+    "cancel_task",
     "wait_agent",
     "list_agents",
     "close_agent",

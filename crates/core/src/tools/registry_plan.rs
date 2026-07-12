@@ -621,6 +621,12 @@ fn exec_command_schema() -> JsonSchema {
                 )),
             ),
             (
+                "execution_mode".to_string(),
+                JsonSchema::string(Some(
+                    "attached (default) returns output or a process session; background returns a task id immediately.",
+                )),
+            ),
+            (
                 "yield_time_ms".to_string(),
                 JsonSchema::number(Some(
                     "How long to wait (in ms) for output before returning. Default 10000.",
@@ -935,7 +941,7 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
             ToolSpec {
                 name: "exec_command".to_string(),
                 description:
-                    "Run a shell command in a PTY and return output. If the process runs longer than yield_time_ms, a session_id is returned so you can interact with the process using write_stdin."
+                    "Run a shell command in attached or background mode. Attached mode returns output or a process session for write_stdin; background mode returns a task id for await_task, list_tasks, and cancel_task."
                         .to_string(),
                 input_schema: exec_command_schema(),
                 output_mode: ToolOutputMode::Mixed,
@@ -1027,6 +1033,12 @@ mod tests {
         let schema = exec_command_schema();
         let required = schema.required.as_ref().unwrap();
         assert!(required.contains(&"cmd".to_string()));
+        assert!(
+            schema
+                .properties
+                .as_ref()
+                .is_some_and(|properties| properties.contains_key("execution_mode"))
+        );
     }
 
     #[test]

@@ -3798,10 +3798,11 @@ fn pretty_tool_call_summary(tool_name: &str, input: &serde_json::Value) -> Optio
                 .unwrap_or_default();
             Some(format!("Spawn-Agent {} {}", quote(nickname), quote(prompt)))
         }
-        "wait_agent" | "agent_wait" => {
+        "await_task" | "wait_agent" | "agent_wait" => {
             let target = input
-                .get("target")
+                .get("task_id")
                 .and_then(serde_json::Value::as_str)
+                .or_else(|| input.get("target").and_then(serde_json::Value::as_str))
                 .or_else(|| {
                     input
                         .get("agent_nickname")
@@ -3819,21 +3820,24 @@ fn pretty_tool_call_summary(tool_name: &str, input: &serde_json::Value) -> Optio
                         .map(ToString::to_string)
                 })
                 .unwrap_or_else(|| "default".to_string());
-            Some(format!("Wait-Agent {} {}", quote(target), quote(&timeout)))
+            Some(format!("Await-Task {} {}", quote(target), quote(&timeout)))
         }
-        "close_agent" | "agent_close" => {
+        "cancel_task" | "close_agent" | "agent_close" => {
             let target = input
-                .get("target")
+                .get("task_id")
                 .and_then(serde_json::Value::as_str)
+                .or_else(|| input.get("target").and_then(serde_json::Value::as_str))
                 .or_else(|| {
                     input
                         .get("agent_nickname")
                         .and_then(serde_json::Value::as_str)
                 })
                 .unwrap_or("agent");
-            Some(format!("Close-Agent {}", quote(target)))
+            Some(format!("Cancel-Task {}", quote(target)))
         }
-        "list_agent" | "agent_list" => Some("List-Agent".to_string()),
+        "list_tasks" | "list_agents" | "list_agent" | "agent_list" => {
+            Some("List-Tasks".to_string())
+        }
         _ => None,
     }
 }
@@ -4643,16 +4647,16 @@ mod tests {
                 "Spawn-Agent \"reviewer\" \"check usage\"",
             ),
             (
-                "agent_wait",
-                serde_json::json!({ "target": "reviewer", "timeout_secs": 30 }),
-                "Wait-Agent \"reviewer\" \"30s\"",
+                "await_task",
+                serde_json::json!({ "task_id": "task-1", "timeout_secs": 30 }),
+                "Await-Task \"task-1\" \"30s\"",
             ),
             (
-                "close_agent",
-                serde_json::json!({ "target": "reviewer" }),
-                "Close-Agent \"reviewer\"",
+                "cancel_task",
+                serde_json::json!({ "task_id": "task-1" }),
+                "Cancel-Task \"task-1\"",
             ),
-            ("agent_list", serde_json::json!({}), "List-Agent"),
+            ("list_tasks", serde_json::json!({}), "List-Tasks"),
         ];
 
         for (tool_name, parameters, expected) in cases {
@@ -6390,6 +6394,7 @@ mod tests {
                 "toolCallId": "call-spawn",
                 "status": "completed",
                 "rawOutput": {
+                    "task_id": "task-1",
                     "child_session_id": child,
                     "agent_path": "root/researcher",
                     "agent_nickname": "researcher",

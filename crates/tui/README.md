@@ -326,7 +326,7 @@ The bottom pane is the user-facing input area. It contains:
 | Module | Purpose |
 |--------|---------|
 | `mod.rs` | `BottomPane` orchestrator. Assembles composer, footer, and popup stack. Routes key events to the active surface (composer or popup). |
-| `chat_composer.rs` | Multiline text input with slash commands, token-local `@` reference search, `$` skill mentions, paste handling, and input history. |
+| `chat_composer.rs` | Multiline text input with slash commands, token-local `@` reference search (skills/MCP/files), paste handling, and input history. |
 | `bottom_pane_view.rs` | Layout: splits the bottom area into composer + footer rows. |
 | `textarea.rs` | Custom textarea with cursor positioning and selection support. |
 | `footer.rs` | Status footer rendering: mode indicators, session info. |
@@ -340,7 +340,6 @@ The bottom pane is the user-facing input area. It contains:
 | `pending_input_preview.rs` | Preview of user input before submission. |
 | `paste_burst.rs` | Multi-line paste detection and debouncing. |
 | `theme_picker.rs` | Theme selection popup. |
-| `skill_popup.rs` | `$` skill selection popup retained for compatibility. |
 | `reference_popup.rs` | Combined `@` fuzzy-search popup that renders server-provided skill, MCP server, and file reference rows. |
 | `onboarding_view.rs` | First-run model/provider configuration. |
 | `scroll_state.rs` | Scroll position tracking for the composer. |

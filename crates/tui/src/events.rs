@@ -484,7 +484,7 @@ pub(crate) enum WorkerEvent {
     SkillsListed {
         /// Pre-rendered skill summary shown in the bottom panel.
         body: String,
-        /// Structured skill metadata used by the composer `$skill` popup.
+        /// Structured skill metadata used by the composer `@skill` popup.
         skills: Vec<SkillMetadata>,
         /// Whether this list should be rendered into the transcript.
         show_in_transcript: bool,

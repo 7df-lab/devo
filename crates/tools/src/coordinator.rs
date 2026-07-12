@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use devo_protocol::{
-    AgentInfo, AgentListParams, AgentMessageParams, AgentMessageResult, CloseAgentParams,
-    CloseAgentResult, RequestUserInputArgs, RequestUserInputResponse, SpawnAgentParams,
-    SpawnAgentResult, WaitAgentParams, WaitAgentResult,
+    AgentInfo, AgentListParams, AgentMessageParams, AgentMessageResult, AwaitTaskParams,
+    AwaitTaskResult, CancelTaskParams, CancelTaskResult, CloseAgentParams, CloseAgentResult,
+    ListTasksParams, ListTasksResult, RequestUserInputArgs, RequestUserInputResponse,
+    SpawnAgentParams, SpawnAgentResult, WaitAgentParams, WaitAgentResult,
 };
 use serde_json::Value;
 
@@ -41,6 +42,33 @@ pub trait AgentToolCoordinator: Send + Sync {
         self: Arc<Self>,
         params: CloseAgentParams,
     ) -> Result<CloseAgentResult, ToolCallError>;
+
+    async fn await_task(
+        self: Arc<Self>,
+        _params: AwaitTaskParams,
+    ) -> Result<AwaitTaskResult, ToolCallError> {
+        Err(ToolCallError::ExecutionFailed(
+            "await_task is unavailable in this runtime".to_string(),
+        ))
+    }
+
+    async fn list_tasks(
+        self: Arc<Self>,
+        _params: ListTasksParams,
+    ) -> Result<ListTasksResult, ToolCallError> {
+        Err(ToolCallError::ExecutionFailed(
+            "list_tasks is unavailable in this runtime".to_string(),
+        ))
+    }
+
+    async fn cancel_task(
+        self: Arc<Self>,
+        _params: CancelTaskParams,
+    ) -> Result<CancelTaskResult, ToolCallError> {
+        Err(ToolCallError::ExecutionFailed(
+            "cancel_task is unavailable in this runtime".to_string(),
+        ))
+    }
 
     async fn request_user_input(
         self: Arc<Self>,

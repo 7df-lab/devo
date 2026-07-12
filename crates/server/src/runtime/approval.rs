@@ -354,6 +354,7 @@ impl ServerRuntime {
         let approval_id = request.tool_call_id.clone();
         let (tx, rx) = oneshot::channel();
         let pending = PendingApproval {
+            owner_session_id: session_id,
             tool_name: request.tool_name.clone(),
             path: request.path.clone(),
             host: request.host.clone(),
@@ -424,6 +425,7 @@ impl ServerRuntime {
                     .apply_approval_scope(
                         scope,
                         PendingApproval {
+                            owner_session_id: pending.owner_session_id,
                             tool_name: pending.tool_name,
                             path: pending.path,
                             host: pending.host,

@@ -39,7 +39,6 @@ mod reference_popup;
 mod request_user_input_overlay;
 pub(crate) mod scroll_state;
 mod selection_popup_common;
-mod skill_popup;
 pub(crate) mod slash_commands;
 pub(crate) mod textarea;
 mod theme_picker;

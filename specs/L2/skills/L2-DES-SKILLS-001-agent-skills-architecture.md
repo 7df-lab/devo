@@ -299,7 +299,7 @@ Errors should be actionable. For example, a missing explicitly requested skill s
 
 Complex optional workflows should be shipped as built-in skills when they can be
 expressed through ordinary model turns and existing tools. The bundled
-`deep-research` skill follows this rule: explicit `$deep-research` activation
+`deep-research` skill follows this rule: explicit `@deep-research` activation
 injects a source-backed investigation workflow into a regular turn, and the
 agent may use existing web, code-search, and coordination tools according to
 their normal availability and safety policy. It does not define a dedicated

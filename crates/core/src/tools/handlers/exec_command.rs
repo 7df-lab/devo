@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use devo_protocol::SessionId;
 use uuid::Uuid;
 
 use crate::apply_patch::exec_apply_patch;
@@ -16,6 +17,7 @@ use crate::tool_spec::ToolCapabilityTag;
 use crate::tool_spec::ToolExecutionMode;
 use crate::tool_spec::ToolOutputMode;
 use crate::tool_spec::ToolSpec;
+use crate::tools::background_tasks::BackgroundTaskStore;
 use crate::unified_exec::ExecCommandArgs;
 use crate::unified_exec::ProcessOutput;
 use crate::unified_exec::WARNING_PROCESSES;
@@ -31,13 +33,18 @@ const UNIFIED_EXEC_OUTPUT_DELTA_MAX_BYTES: usize = 8_192;
 
 pub struct ExecCommandHandler {
     store: Arc<ProcessStore>,
+    background_tasks: Arc<BackgroundTaskStore>,
     spec: ToolSpec,
 }
 
 impl ExecCommandHandler {
-    pub fn new(store: Arc<ProcessStore>) -> Self {
+    pub(crate) fn new(
+        store: Arc<ProcessStore>,
+        background_tasks: Arc<BackgroundTaskStore>,
+    ) -> Self {
         Self {
             store,
+            background_tasks,
             spec: ToolSpec {
                 name: "exec_command".into(),
                 description: "Execute a command with PTY support and process management.".into(),
@@ -62,6 +69,10 @@ impl ExecCommandHandler {
                         (
                             "tty".to_string(),
                             JsonSchema::boolean(Some("Whether to use PTY")),
+                        ),
+                        (
+                            "execution_mode".to_string(),
+                            JsonSchema::string(Some("attached (default) or background")),
                         ),
                     ]),
                     Some(vec!["cmd".to_string()]),
@@ -110,6 +121,15 @@ impl ToolHandler for ExecCommandHandler {
                 .as_u64()
                 .map(|v| v as usize)
                 .unwrap_or(crate::unified_exec::MAX_OUTPUT_TOKENS),
+        };
+        let execution_mode = match input["execution_mode"].as_str().unwrap_or("attached") {
+            "attached" => ExecExecutionMode::Attached,
+            "background" => ExecExecutionMode::Background,
+            value => {
+                return Err(ToolCallError::InvalidInput(format!(
+                    "execution_mode must be attached or background, got {value}"
+                )));
+            }
         };
 
         let cwd = input["workdir"]
@@ -220,6 +240,48 @@ impl ToolHandler for ExecCommandHandler {
             .insert_reserved(session_id, Arc::clone(&proc))
             .await;
 
+        if execution_mode == ExecExecutionMode::Background {
+            let owner_session_id =
+                SessionId::try_from(ctx.session_id.as_str()).map_err(|error| {
+                    ToolCallError::InvalidInput(format!("invalid current session id: {error}"))
+                })?;
+            let task = self
+                .background_tasks
+                .register_command(owner_session_id, session_id, args.cmd, Arc::clone(&proc))
+                .await;
+            let task_id = task.task_id.clone();
+            let background_tasks = Arc::clone(&self.background_tasks);
+            tokio::spawn(async move {
+                while proc.is_running() && proc.exit_code().is_none() {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
+                let mut rx = proc.subscribe();
+                let output = collect_output(&mut rx, &proc, 100, args.max_output_tokens).await;
+                let response = format_exec_response(
+                    &output,
+                    Some(session_id),
+                    Some(generate_chunk_id()),
+                    /*warning*/ None,
+                );
+                background_tasks
+                    .complete_command(&task_id, output.exit_code, response)
+                    .await;
+            });
+            return Ok(ToolResult::success(
+                ToolResultContent::Mixed {
+                    text: Some(format!(
+                        "Command running as background task {}",
+                        task.task_id.0
+                    )),
+                    json: Some(
+                        serde_json::to_value(task)
+                            .map_err(|error| ToolCallError::InternalError(error.to_string()))?,
+                    ),
+                },
+                "Command started in background",
+            ));
+        }
+
         let cancel_token = ctx.cancel_token.clone();
         let store_for_cancel = Arc::clone(&self.store);
         let proc_for_cancel = Arc::clone(&proc);
@@ -264,6 +326,12 @@ impl ToolHandler for ExecCommandHandler {
             "Command executed",
         ))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecExecutionMode {
+    Attached,
+    Background,
 }
 
 pub struct WriteStdinHandler {
@@ -537,6 +605,12 @@ mod tests {
     use super::*;
     use devo_tools::contracts::ToolBudgets;
     use pretty_assertions::assert_eq;
+
+    fn test_exec_handler() -> ExecCommandHandler {
+        let process_store = Arc::new(ProcessStore::new());
+        let background_tasks = Arc::new(BackgroundTaskStore::new(Arc::clone(&process_store)));
+        ExecCommandHandler::new(process_store, background_tasks)
+    }
     use tokio_util::sync::CancellationToken;
 
     fn result_text_and_metadata(
@@ -676,7 +750,7 @@ mod tests {
     async fn exec_command_streams_progress_before_final_output() {
         let root = std::env::temp_dir().join(format!("devo-exec-stream-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("create temp test dir");
-        let handler = ExecCommandHandler::new(Arc::new(ProcessStore::new()));
+        let handler = test_exec_handler();
 
         let output = handler
             .handle(
@@ -773,7 +847,7 @@ mod tests {
     async fn exec_command_rejects_raw_apply_patch_body() {
         let root = std::env::temp_dir().join(format!("devo-apply-patch-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("create temp test dir");
-        let handler = ExecCommandHandler::new(Arc::new(ProcessStore::new()));
+        let handler = test_exec_handler();
         let command = "*** Begin Patch\n*** Add File: file.txt\n+hello\n*** End Patch\n";
 
         let output = handler
@@ -802,7 +876,7 @@ mod tests {
     async fn exec_command_intercepts_apply_patch_heredoc() {
         let root = std::env::temp_dir().join(format!("devo-apply-patch-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("create temp test dir");
-        let handler = ExecCommandHandler::new(Arc::new(ProcessStore::new()));
+        let handler = test_exec_handler();
         let command = "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: file.txt\n+hello\n*** End Patch\nPATCH\n";
 
         let output = handler
@@ -837,7 +911,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("devo-apply-patch-{}", Uuid::new_v4()));
         let subdir = root.join("sub");
         std::fs::create_dir_all(&subdir).expect("create temp test dir");
-        let handler = ExecCommandHandler::new(Arc::new(ProcessStore::new()));
+        let handler = test_exec_handler();
         let command = "cd sub && apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: nested.txt\n+hello\n*** End Patch\nPATCH\n";
 
         let output = handler

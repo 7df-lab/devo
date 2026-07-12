@@ -23,7 +23,7 @@ mod tool_search;
 mod webfetch;
 mod websearch;
 
-pub use agent::register_agent_tools;
+pub(crate) use agent::register_agent_tools;
 pub use apply_patch::ApplyPatchHandler;
 pub use bash::BashHandler;
 #[cfg(feature = "code-search")]
@@ -123,11 +123,14 @@ fn build_registry_from_builder(
     mcp_handlers: Vec<(String, Arc<dyn ToolHandler>)>,
     config: &ToolPlanConfig,
 ) -> crate::registry::ToolRegistry {
-    register_agent_tools(&mut builder);
+    let process_store = Arc::new(ProcessStore::new());
+    let background_tasks = Arc::new(crate::tools::background_tasks::BackgroundTaskStore::new(
+        Arc::clone(&process_store),
+    ));
+    register_agent_tools(&mut builder, Arc::clone(&background_tasks));
     builder.push_spec(goal_update_spec());
     builder.push_spec(tool_search_spec());
 
-    let process_store = Arc::new(ProcessStore::new());
     let loaded_deferred_tools = Arc::new(std::sync::Mutex::new(LoadedDeferredTools::default()));
     builder.set_unified_exec_store(Arc::clone(&process_store));
     builder.set_loaded_deferred_tools(Arc::clone(&loaded_deferred_tools));
@@ -169,9 +172,10 @@ fn build_registry_from_builder(
             ToolHandlerKind::Skill => Arc::new(SkillHandler::new()),
             ToolHandlerKind::Lsp => Arc::new(LspHandler::new()),
             ToolHandlerKind::Invalid => Arc::new(InvalidHandler::new()),
-            ToolHandlerKind::ExecCommand => {
-                Arc::new(ExecCommandHandler::new(Arc::clone(&process_store)))
-            }
+            ToolHandlerKind::ExecCommand => Arc::new(ExecCommandHandler::new(
+                Arc::clone(&process_store),
+                Arc::clone(&background_tasks),
+            )),
             ToolHandlerKind::WriteStdin => {
                 Arc::new(WriteStdinHandler::new(Arc::clone(&process_store)))
             }

@@ -2798,7 +2798,7 @@ fn session_switch_merges_consecutive_explored_items() {
         "expected one merged explored block, got:\n{blob}"
     );
     assert!(
-        blob.contains("Read worker.rs"),
+        blob.contains("Read crates/tui/src/worker.rs"),
         "expected read entry, got:\n{blob}"
     );
     assert!(
@@ -7342,7 +7342,7 @@ fn transcript_overlay_lines_include_completed_read_input_and_full_output() {
     let transcript = line_texts(widget.transcript_overlay_lines(80)).join("\n");
 
     assert!(
-        inline.contains("Explored") && inline.contains("Read lib.rs"),
+        inline.contains("Explored") && inline.contains("Read src/lib.rs"),
         "inline read rendering should stay as the compact explored block: {inline}"
     );
     assert!(

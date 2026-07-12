@@ -5,12 +5,16 @@ use async_trait::async_trait;
 use devo_protocol::AgentListParams;
 use devo_protocol::AgentMessageParams;
 use devo_protocol::AgentToolPolicy;
+use devo_protocol::AwaitTaskParams;
+use devo_protocol::CancelTaskParams;
 use devo_protocol::CloseAgentParams;
+use devo_protocol::ListTasksParams;
 use devo_protocol::ParentAgentInfo;
 use devo_protocol::ParentAgentListResult;
 use devo_protocol::ParentSpawnAgentResult;
 use devo_protocol::SessionId;
 use devo_protocol::SpawnAgentParams;
+use devo_protocol::TaskId;
 use devo_protocol::WaitAgentParams;
 
 use crate::contracts::ToolCallError;
@@ -27,6 +31,7 @@ use crate::tool_spec::ToolExecutionMode;
 use crate::tool_spec::ToolOutputMode;
 use crate::tool_spec::ToolPreparationFeedback;
 use crate::tool_spec::ToolSpec;
+use crate::tools::background_tasks::BackgroundTaskStore;
 
 #[derive(Clone, Copy)]
 enum AgentToolKind {
@@ -35,47 +40,101 @@ enum AgentToolKind {
     Wait,
     List,
     Close,
+    AwaitTask,
+    ListTasks,
+    CancelTask,
 }
 
 pub struct AgentToolHandler {
     spec: ToolSpec,
     kind: AgentToolKind,
+    background_tasks: Arc<BackgroundTaskStore>,
 }
 
 impl AgentToolHandler {
-    fn new(spec: ToolSpec, kind: AgentToolKind) -> Self {
-        Self { spec, kind }
+    fn new(
+        spec: ToolSpec,
+        kind: AgentToolKind,
+        background_tasks: Arc<BackgroundTaskStore>,
+    ) -> Self {
+        Self {
+            spec,
+            kind,
+            background_tasks,
+        }
     }
 }
 
-pub fn register_agent_tools(builder: &mut ToolRegistryBuilder) {
-    let spawn = Arc::new(AgentToolHandler::new(spawn_spec(), AgentToolKind::Spawn));
+pub fn register_agent_tools(
+    builder: &mut ToolRegistryBuilder,
+    background_tasks: Arc<BackgroundTaskStore>,
+) {
+    let spawn = Arc::new(AgentToolHandler::new(
+        spawn_spec(),
+        AgentToolKind::Spawn,
+        Arc::clone(&background_tasks),
+    ));
     let send = Arc::new(AgentToolHandler::new(
         send_message_spec(),
         AgentToolKind::SendMessage,
+        Arc::clone(&background_tasks),
     ));
     let wait = Arc::new(AgentToolHandler::new(
         wait_agent_spec(),
         AgentToolKind::Wait,
+        Arc::clone(&background_tasks),
     ));
     let list = Arc::new(AgentToolHandler::new(
         list_agents_spec(),
         AgentToolKind::List,
+        Arc::clone(&background_tasks),
     ));
     let close = Arc::new(AgentToolHandler::new(
         close_agent_spec(),
         AgentToolKind::Close,
+        Arc::clone(&background_tasks),
+    ));
+    let await_task = Arc::new(AgentToolHandler::new(
+        await_task_spec(),
+        AgentToolKind::AwaitTask,
+        Arc::clone(&background_tasks),
+    ));
+    let list_tasks = Arc::new(AgentToolHandler::new(
+        list_tasks_spec(),
+        AgentToolKind::ListTasks,
+        Arc::clone(&background_tasks),
+    ));
+    let cancel_task = Arc::new(AgentToolHandler::new(
+        cancel_task_spec(),
+        AgentToolKind::CancelTask,
+        background_tasks,
     ));
 
     register(builder, spawn, &["spawn_subagent", "subagent", "delegate"]);
     register(builder, send, &[]);
-    register(builder, wait, &["subagent_result"]);
-    register(builder, list, &["subagent_status"]);
-    register(builder, close, &[]);
+    register(builder, await_task, &[]);
+    register(builder, list_tasks, &[]);
+    register(builder, cancel_task, &[]);
+    register_compatibility_handler(builder, wait, &["subagent_result"]);
+    register_compatibility_handler(builder, list, &["subagent_status"]);
+    register_compatibility_handler(builder, close, &[]);
 }
 
 fn register(builder: &mut ToolRegistryBuilder, handler: Arc<AgentToolHandler>, aliases: &[&str]) {
     builder.push_spec_with_exposure(handler.spec().clone(), ToolExposure::Direct);
+    let handler: Arc<dyn ToolHandler> = handler;
+    let name = handler.spec().name.clone();
+    builder.register_handler(&name, Arc::clone(&handler));
+    for alias in aliases {
+        builder.register_handler(alias, Arc::clone(&handler));
+    }
+}
+
+fn register_compatibility_handler(
+    builder: &mut ToolRegistryBuilder,
+    handler: Arc<AgentToolHandler>,
+    aliases: &[&str],
+) {
     let handler: Arc<dyn ToolHandler> = handler;
     let name = handler.spec().name.clone();
     builder.register_handler(&name, Arc::clone(&handler));
@@ -173,6 +232,82 @@ impl ToolHandler for AgentToolHandler {
                     .await?;
                 json_result(result, "agent closed")
             }
+            AgentToolKind::AwaitTask => {
+                if let Some(progress) = progress {
+                    let _ = progress.send(ToolProgress::StatusUpdate {
+                        message: "Waiting for task completion...".to_string(),
+                        percent: None,
+                    });
+                }
+                let input: AwaitTaskInput = parse_input(input)?;
+                if let Some(result) = self
+                    .background_tasks
+                    .await_task(
+                        session_id,
+                        &input.task_id,
+                        std::time::Duration::from_secs(devo_protocol::resolve_wait_agent_timeout(
+                            input.timeout_secs,
+                        )),
+                    )
+                    .await
+                {
+                    return json_result(result, "task wait completed");
+                }
+                if input.task_id.0.starts_with("task-") {
+                    return Err(ToolCallError::InvalidInput(format!(
+                        "task not found: {}",
+                        input.task_id.0
+                    )));
+                }
+                let result = tokio::select! {
+                    result = coordinator.await_task(AwaitTaskParams {
+                        session_id,
+                        task_id: input.task_id,
+                        timeout_secs: input.timeout_secs,
+                    }) => result?,
+                    _ = ctx.cancel_token.cancelled() => return Err(ToolCallError::Cancelled),
+                };
+                json_result(result, "task wait completed")
+            }
+            AgentToolKind::ListTasks => {
+                let input: ListTasksInput = parse_input(input)?;
+                let mut result = coordinator
+                    .list_tasks(ListTasksParams {
+                        session_id,
+                        path_prefix: input.path_prefix,
+                    })
+                    .await?;
+                result
+                    .tasks
+                    .extend(self.background_tasks.list(session_id).await);
+                result
+                    .tasks
+                    .sort_by(|left, right| left.task_id.0.cmp(&right.task_id.0));
+                json_result(result, "tasks listed")
+            }
+            AgentToolKind::CancelTask => {
+                let input: CancelTaskInput = parse_input(input)?;
+                if let Some(task) = self
+                    .background_tasks
+                    .cancel(session_id, &input.task_id)
+                    .await
+                {
+                    return json_result(devo_protocol::CancelTaskResult { task }, "task canceled");
+                }
+                if input.task_id.0.starts_with("task-") {
+                    return Err(ToolCallError::InvalidInput(format!(
+                        "task not found: {}",
+                        input.task_id.0
+                    )));
+                }
+                let result = coordinator
+                    .cancel_task(CancelTaskParams {
+                        session_id,
+                        task_id: input.task_id,
+                    })
+                    .await?;
+                json_result(result, "task canceled")
+            }
         }
     }
 }
@@ -209,6 +344,24 @@ struct ListAgentsInput {
 #[derive(serde::Deserialize)]
 struct CloseAgentInput {
     target: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AwaitTaskInput {
+    task_id: TaskId,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct ListTasksInput {
+    #[serde(default)]
+    path_prefix: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct CancelTaskInput {
+    task_id: TaskId,
 }
 
 fn current_session_id(ctx: &ToolContext) -> Result<SessionId, ToolCallError> {
@@ -251,7 +404,7 @@ fn spec(name: &str, description: &str, schema: JsonSchema) -> ToolSpec {
 fn spawn_spec() -> ToolSpec {
     spec(
         "spawn_agent",
-        "Launch a new child agent for complex multi-step work. Agent coordination tools (spawn_agent, send_message, wait_agent, list_agents, close_agent) are parent-only.\n\nTypical flow: spawn_agent -> wait_agent until status completes -> optionally send_message for a follow-up turn -> wait_agent again. Use list_agents for status without child text; close_agent to stop a child. Parallelize independent work by spawning multiple children whenever possible.\n\nChild output is only visible through wait_agent. Never infer or summarize child findings before wait_agent returns.\n\nWriting the prompt:\n- Brief the agent like a colleague who just arrived: no shared conversation unless fork_turns provides history.\n- State goal, why it matters, what you already ruled out, and the expected deliverable.\n- Lookups: give exact commands. Investigations: give the question, not a brittle script.\n- Never delegate understanding with phrases like \"based on your findings, fix it.\" Include concrete paths, symbols, and constraints.\n\nWhen not to use:\n- Reading a known file path -> read tool.\n- Searching a symbol or string -> grep/code search.\n- Small scoped file reads -> read directly.\n\nThe user does not see child output directly. Summarize for the user after wait_agent returns.\n\nExample: spawn_agent({message:\"Survey crates/server for wait_agent usage and summarize call sites.\"})",
+        "Launch a child-agent task for complex multi-step work. Task coordination tools (spawn_agent, send_message, await_task, list_tasks, cancel_task) are parent-only.\n\nTypical flow: spawn_agent -> await_task until terminal -> optionally send_message for a follow-up turn -> await_task again. Use list_tasks for nonblocking status and cancel_task to stop and close a task. Parallelize independent work whenever possible.\n\nChild output becomes model-visible through await_task only after the child turn reaches a terminal state.\n\nWriting the prompt:\n- Brief the agent like a colleague who just arrived: no shared conversation unless fork_turns provides history.\n- State goal, why it matters, what you already ruled out, and the expected deliverable.\n- Lookups: give exact commands. Investigations: give the question, not a brittle script.\n- Never delegate understanding with phrases like \"based on your findings, fix it.\" Include concrete paths, symbols, and constraints.\n\nWhen not to use:\n- Reading a known file path -> read tool.\n- Searching a symbol or string -> grep/code search.\n- Small scoped file reads -> read directly.\n\nExample: spawn_agent({message:\"Survey crates/server for await_task usage and summarize call sites.\"})",
         JsonSchema::object(
             BTreeMap::from([
                 (
@@ -276,8 +429,59 @@ fn spawn_spec() -> ToolSpec {
 fn send_message_spec() -> ToolSpec {
     spec(
         "send_message",
-        "Send more input to an existing child agent. Idle children start a new turn immediately; active children queue the message for the next turn.\n\nWhen to use:\n- Follow up after a completed turn on the same child.\n- Correct or narrow the task without spawning a duplicate worker.\n\nWhen not to use:\n- Collecting output -> wait_agent.\n- Checking if still running -> list_agents.\n- Stopping a child -> close_agent.\n\nMulti-turn rule: each send_message starts a new child turn. Prior wait_agent results belong to the previous turn only. After send_message, call wait_agent again and wait for a fresh status event before treating output as final.\n\nExample: send_message({target:\"brave-apple\", message:\"Also check error paths in coordinator.rs.\"})",
+        "Send more input to an existing child-agent task. Completed tasks start a new child turn immediately; running tasks queue the message for the next turn.\n\nWhen to use:\n- Follow up after a completed turn on the same child.\n- Correct or narrow the task without spawning a duplicate worker.\n\nWhen not to use:\n- Collecting output -> await_task.\n- Checking task state -> list_tasks.\n- Stopping and closing a task -> cancel_task.\n\nEach send_message reactivates the same task id. After sending, call await_task again before treating the new output as final.\n\nExample: send_message({target:\"brave-apple\", message:\"Also check error paths in coordinator.rs.\"})",
         message_schema(),
+    )
+}
+
+fn await_task_spec() -> ToolSpec {
+    spec(
+        "await_task",
+        "Wait for one task to reach Completed, Failed, or Canceled. Streaming progress remains visible to the UI but does not wake the model. The timeout is an absolute deadline, not an inactivity timer. A timed-out result contains current task metadata without partial assistant output.",
+        JsonSchema::object(
+            BTreeMap::from([
+                (
+                    "task_id".to_string(),
+                    JsonSchema::string(Some("Task id returned by spawn_agent or send_message.")),
+                ),
+                (
+                    "timeout_secs".to_string(),
+                    JsonSchema::integer(Some("Maximum seconds to wait (default 5, max 120).")),
+                ),
+            ]),
+            Some(vec!["task_id".to_string()]),
+            Some(false),
+        ),
+    )
+}
+
+fn list_tasks_spec() -> ToolSpec {
+    spec(
+        "list_tasks",
+        "Return a nonblocking snapshot of child tasks. Agent tasks include session id, parent session id, path, nickname, role, and last task message. Public states are waiting_approval, running, completed, failed, and canceled.",
+        JsonSchema::object(
+            BTreeMap::from([(
+                "path_prefix".to_string(),
+                JsonSchema::string(Some("Optional agent_path prefix filter.")),
+            )]),
+            None,
+            Some(false),
+        ),
+    )
+}
+
+fn cancel_task_spec() -> ToolSpec {
+    spec(
+        "cancel_task",
+        "Cancel a child task, interrupt active work, close its agent session and spawn edge, and return the final task metadata.",
+        JsonSchema::object(
+            BTreeMap::from([(
+                "task_id".to_string(),
+                JsonSchema::string(Some("Task id returned by spawn_agent or send_message.")),
+            )]),
+            Some(vec!["task_id".to_string()]),
+            Some(false),
+        ),
     )
 }
 
@@ -375,6 +579,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeAgentCoordinator {
         spawned: Mutex<Vec<SpawnAgentParams>>,
+        messages: Mutex<Vec<AgentMessageParams>>,
     }
 
     #[derive(Debug, Default)]
@@ -387,8 +592,10 @@ mod tests {
             params: SpawnAgentParams,
         ) -> Result<devo_protocol::SpawnAgentResult, ToolCallError> {
             self.spawned.lock().await.push(params);
+            let child_session_id = SessionId::new();
             Ok(devo_protocol::SpawnAgentResult {
-                child_session_id: SessionId::new(),
+                task_id: TaskId::from(child_session_id),
+                child_session_id,
                 agent_path: "root/reviewer".to_string(),
                 agent_nickname: "reviewer".to_string(),
                 status: "running".to_string(),
@@ -397,9 +604,15 @@ mod tests {
 
         async fn send_message(
             self: Arc<Self>,
-            _params: AgentMessageParams,
+            params: AgentMessageParams,
         ) -> Result<devo_protocol::AgentMessageResult, ToolCallError> {
-            Ok(devo_protocol::AgentMessageResult { delivered: true })
+            let child_session_id = SessionId::try_from(params.target.as_str())
+                .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
+            self.messages.lock().await.push(params);
+            Ok(devo_protocol::AgentMessageResult {
+                delivered: true,
+                task_id: TaskId::from(child_session_id),
+            })
         }
 
         async fn wait_agent(
@@ -473,7 +686,8 @@ mod tests {
     async fn spawn_handler_delegates_to_coordinator() {
         let session_id = SessionId::new();
         let coordinator = Arc::new(FakeAgentCoordinator::default());
-        let handler = AgentToolHandler::new(spawn_spec(), AgentToolKind::Spawn);
+        let handler =
+            AgentToolHandler::new(spawn_spec(), AgentToolKind::Spawn, test_background_tasks());
         let result = handler
             .handle(
                 tool_context(
@@ -503,6 +717,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn send_message_handler_delivers_parent_message_to_child_task() {
+        let session_id = SessionId::new();
+        let child_session_id = SessionId::new();
+        let coordinator = Arc::new(FakeAgentCoordinator::default());
+        let handler = AgentToolHandler::new(
+            send_message_spec(),
+            AgentToolKind::SendMessage,
+            test_background_tasks(),
+        );
+
+        let result = handler
+            .handle(
+                tool_context(
+                    session_id,
+                    Some(coordinator.clone() as Arc<dyn devo_tools::AgentToolCoordinator>),
+                ),
+                serde_json::json!({
+                    "target": child_session_id.to_string(),
+                    "message": "inspect the follow-up failure"
+                }),
+                None,
+            )
+            .await
+            .expect("send_message succeeds");
+
+        assert_eq!(result.result_summary, "message delivered");
+        assert_eq!(
+            coordinator.messages.lock().await.as_slice(),
+            &[AgentMessageParams {
+                session_id,
+                target: child_session_id.to_string(),
+                message: "inspect the follow-up failure".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn registry_exposes_generic_task_tools_and_hides_legacy_agent_adapters() {
+        let mut builder = ToolRegistryBuilder::new();
+        register_agent_tools(&mut builder, test_background_tasks());
+        let names = builder
+            .tool_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "spawn_agent".to_string(),
+                "send_message".to_string(),
+                "await_task".to_string(),
+                "list_tasks".to_string(),
+                "cancel_task".to_string(),
+            ]
+        );
+    }
+
     #[test]
     fn agent_tool_schemas_explain_subagent_workflow() {
         let spawn = spawn_spec();
@@ -512,11 +785,11 @@ mod tests {
             .expect("fork_turns description");
 
         assert!(spawn.description.contains("parent-only"));
-        assert!(spawn.description.contains("wait_agent"));
+        assert!(spawn.description.contains("await_task"));
         assert!(
             spawn
                 .description
-                .contains("only visible through wait_agent")
+                .contains("model-visible through await_task")
         );
         assert!(fork_description.contains("\"all\" (default)"));
         assert!(fork_description.contains("stable completed parent history"));
@@ -529,8 +802,22 @@ mod tests {
             send.description
                 .contains("queue the message for the next turn")
         );
-        assert!(send.description.contains("Multi-turn rule"));
-        assert!(send.description.contains("wait_agent again"));
+        assert!(send.description.contains("reactivates the same task id"));
+        assert!(send.description.contains("await_task again"));
+
+        let await_task = await_task_spec();
+        assert!(await_task.description.contains("absolute deadline"));
+        assert!(await_task.description.contains("does not wake the model"));
+        let await_schema = await_task.input_schema.to_json_value();
+        assert!(await_schema["properties"].get("task_id").is_some());
+        assert!(await_schema["properties"].get("timeout_secs").is_some());
+
+        let list_tasks = list_tasks_spec();
+        assert!(list_tasks.description.contains("parent session id"));
+        assert!(list_tasks.description.contains("waiting_approval"));
+
+        let cancel_task = cancel_task_spec();
+        assert!(cancel_task.description.contains("close its agent session"));
 
         let wait = wait_agent_spec();
         assert!(!wait.description.contains("Parent-only"));
@@ -561,7 +848,8 @@ mod tests {
 
     #[tokio::test]
     async fn agent_handler_requires_configured_coordinator() {
-        let handler = AgentToolHandler::new(spawn_spec(), AgentToolKind::Spawn);
+        let handler =
+            AgentToolHandler::new(spawn_spec(), AgentToolKind::Spawn, test_background_tasks());
         let error = handler
             .handle(
                 tool_context(SessionId::new(), None),
@@ -584,7 +872,11 @@ mod tests {
     async fn wait_handler_stops_when_context_is_cancelled() {
         let session_id = SessionId::new();
         let coordinator = Arc::new(BlockingWaitCoordinator);
-        let handler = AgentToolHandler::new(wait_agent_spec(), AgentToolKind::Wait);
+        let handler = AgentToolHandler::new(
+            wait_agent_spec(),
+            AgentToolKind::Wait,
+            test_background_tasks(),
+        );
         let cancel_token = CancellationToken::new();
         let ctx = tool_context_with_cancel_token(
             session_id,
@@ -606,6 +898,11 @@ mod tests {
         agent_coordinator: Option<Arc<dyn devo_tools::AgentToolCoordinator>>,
     ) -> ToolContext {
         tool_context_with_cancel_token(session_id, agent_coordinator, CancellationToken::new())
+    }
+
+    fn test_background_tasks() -> Arc<BackgroundTaskStore> {
+        let process_store = Arc::new(crate::unified_exec::store::ProcessStore::new());
+        Arc::new(BackgroundTaskStore::new(process_store))
     }
 
     fn tool_context_with_cancel_token(

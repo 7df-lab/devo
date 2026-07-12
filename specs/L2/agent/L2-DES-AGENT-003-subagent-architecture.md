@@ -61,11 +61,11 @@ Parent agents need to send additional input to child agents without treating the
 
 **Decision**: Each child session has an internal mailbox for parent-to-child text. `send_message` writes to that mailbox and the runtime consumes mailbox entries as normal child user turns. If the child is idle, the message starts a turn immediately. If the child is active, the message is queued for the next child turn. Child-to-parent mailbox routing is not supported.
 
-### DD-5: Parent polling reads a child-output buffer
+### DD-5: Parent task waiting is terminal-aware
 
 The parent must be able to monitor child progress and completion without receiving child-authored mailbox messages.
 
-**Decision**: Each parent session has a sequence-numbered output buffer for direct child assistant text and terminal status events. Child assistant streaming deltas for the same turn are accumulated into a single `assistant_message` event before the parent polls them. Child terminal status changes are appended as status events. The `wait_agent` tool polls this buffer with an optional target and sequence cursor. When `after_sequence` is omitted, the runtime fills it from a per-parent, per-target cursor so repeated polls do not re-deliver consumed events.
+**Decision**: Each spawned child session is also an agent task, identified by a `TaskId` derived from the child session id. Child assistant deltas continue streaming to clients, while the parent output buffer accumulates them without waking the parent model. `await_task` returns only when the child turn reaches a terminal state or the absolute timeout expires. The legacy `wait_agent` tool remains dispatchable as a compatibility adapter but is omitted from new model tool schemas.
 
 ### DD-6: Subagents inherit permission and safety boundaries, never bypass them
 
@@ -165,7 +165,7 @@ The parent-child spawn relationship is persisted to the agent graph store as an 
 
 #### Step 8: Output Buffer Initialization
 
-The parent output buffer records child assistant text deltas and terminal status events. The parent polls this buffer with `wait_agent`.
+The parent output buffer accumulates child assistant text and terminal status. The parent waits with `await_task`; UI clients continue receiving live deltas independently.
 
 #### Slot Reservation Lifecycle
 
@@ -279,33 +279,27 @@ struct ParentAgentOutputEvent {
 }
 ```
 
-`wait_agent` reads events after an optional `after_sequence` cursor. When `after_sequence` is omitted, the runtime substitutes the stored cursor for the target key. If matching events already exist, it returns immediately. Otherwise it waits with a deadline and returns either new events or `timed_out = true`.
+`await_task` waits for the selected task's current child turn to become terminal. Streaming text does not satisfy the wait predicate. If the absolute deadline expires, it returns current task metadata without partial assistant output. If the task is already terminal, it returns immediately with the accumulated final assistant output.
 
 Default and maximum wait timeouts are server constants (`default_wait_timeout_secs = 5`, `max_wait_timeout_secs = 120`). Callers pass `timeout_secs`.
 
-### Agent Status Lifecycle
+### Public Task Status Lifecycle
 
 ```
-PendingInit ──► Running ──► Completed(Option<String>)
-                  │
-                  ├──► Interrupted ──► Running  (received new input)
-                  │
-                  ├──► Errored(String)
-                  │
-                  └──► Shutdown
-
-NotFound  (queried before spawn or after removal)
+Running ──► WaitingApproval ──► Running
+   │                                │
+   ├──────────────► Completed ◄─────┤
+   ├──────────────► Failed
+   └──────────────► Canceled
 ```
 
 | Status | Meaning |
 |--------|---------|
-| `PendingInit` | Child session created but not yet started its first turn |
-| `Running` | Agent is actively processing a turn |
-| `Interrupted` | Agent's current turn was interrupted; may receive more input |
-| `Completed` | Agent finished a turn successfully |
-| `Errored(String)` | Agent encountered a fatal error |
-| `Shutdown` | Agent was explicitly closed or the parent session ended |
-| `NotFound` | Agent is not known to the registry |
+| `WaitingApproval` | The active child turn is waiting for an approval decision |
+| `Running` | The task is spawning, queued internally, or actively processing |
+| `Completed` | The current child turn finished successfully |
+| `Failed` | The task encountered a terminal execution failure |
+| `Canceled` | The task was interrupted, canceled, or explicitly closed |
 
 Terminal statuses append status events to the parent output buffer.
 
@@ -322,7 +316,7 @@ Creates a new subagent (child session) and sends an initial task message.
 | `message` | Yes | string | Initial task description |
 | `fork_turns` | No | string | `"all"` (default stable-history fork excluding the active parent turn) or `"none"` (clean child context) |
 
-**Output**: Child session id, generated agent path, generated nickname, and current status.
+**Output**: Task id, generated agent path, generated nickname, and public task state. The legacy protocol response may additionally include the child session id and internal agent status.
 
 **Errors**:
 - `AgentLimitReached`: Concurrent agent limit exceeded
@@ -338,45 +332,44 @@ Sends parent-authored text to an existing child agent as child user input.
 | `target` | Yes | string | Target agent path (absolute or relative) |
 | `message` | Yes | string | Text message content |
 
-**Output**: Empty success acknowledgment.
+**Output**: Delivery acknowledgment and the reactivated task id.
 
 **Errors**: Target not found, empty message, or caller attempts child-to-parent delivery.
 
-#### `wait_agent`
+#### `await_task`
 
-Polls child assistant output and terminal status events, optionally waiting for new output.
+Waits for one child task to reach a terminal state.
 
 | Parameter | Required | Type | Description |
 |-----------|----------|------|-------------|
-| `target` | No | string | Optional child agent path or nickname |
-| `after_sequence` | No | integer | Only return events after this parent-buffer sequence; omitted values use the runtime per-target cursor |
-| `timeout_secs` | No | integer | Wait timeout in seconds (default 5, max 120). Returns immediately when matching events already exist. |
+| `task_id` | Yes | string | Task id returned by `spawn_agent` or `send_message` |
+| `timeout_secs` | No | integer | Absolute wait deadline in seconds (default 5, max 120) |
 
-**Output**: `{ "events": ParentAgentOutputEvent[], "next_sequence": integer, "timed_out": bool }`. Model-facing events omit internal session and turn ids; address children by `agent_path` or nickname.
+**Output**: Tagged `terminal` or `timed_out` result. Terminal results include task metadata and final assistant output; timed-out results omit partial output.
 
-**Behavior**: If matching output events after `after_sequence` already exist, returns immediately. Otherwise waits until a matching event arrives or the timeout expires.
+**Behavior**: Streaming output remains visible to clients but never wakes the parent model. An already-terminal task returns immediately.
 
-#### `list_agents`
+#### `list_tasks`
 
-Lists live agents in the current root tree, optionally filtered by path prefix.
+Lists child tasks, optionally filtered by agent path prefix.
 
 | Parameter | Required | Type | Description |
 |-----------|----------|------|-------------|
 | `path_prefix` | No | string | Filter agents by path prefix (absolute or relative) |
 
-**Output**: Array of `{ agent_name, agent_status, last_task_message }`.
+**Output**: Array of task records containing `task_id`, task kind, one of the five public states, and agent-session metadata (`session_id`, `parent_session_id`, path, nickname, role, and last task message).
 
 The root agent is always included when no prefix or a matching prefix is specified.
 
-#### `close_agent`
+#### `cancel_task`
 
-Closes a direct child agent and records terminal status for parent polling.
+Cancels a direct child task and performs the complete agent-close lifecycle.
 
 | Parameter | Required | Type | Description |
 |-----------|----------|------|-------------|
-| `target` | Yes | string | Target agent path or session ID |
+| `task_id` | Yes | string | Task id returned by `spawn_agent` or `send_message` |
 
-**Output**: Success acknowledgment.
+**Output**: Final task metadata with state `canceled`.
 
 **Errors**: Target not found.
 
@@ -384,6 +377,8 @@ Closes a direct child agent and records terminal status for parent polling.
 1. Marks the target child as close-requested.
 2. Interrupts active target work if needed.
 3. Records one terminal `closed` status event for parent polling.
+
+`wait_agent`, `list_agents`, and `close_agent` remain runtime compatibility adapters for older transcripts and clients. They are not included in new model tool schemas.
 
 ### Depth and Concurrency Limits
 
@@ -427,7 +422,7 @@ The agent registry is rebuilt in-memory from the persisted edges. Resume is recu
 | State | Meaning |
 |-------|---------|
 | `Open` | Agent was spawned and may still be active or resumable |
-| `Closed` | Agent was explicitly closed via `close_agent` |
+| `Closed` | Agent was explicitly closed via `cancel_task` or the legacy `close_agent` adapter |
 
 Closing an edge does not delete the child's transcript — closed agents remain in the session history for audit and review.
 
@@ -487,8 +482,9 @@ When multi-agent features are enabled, a dedicated set of instructions is inject
 - **Assign clear ownership.** When multiple workers are spawned to modify code, explicitly assign files or modules to each to avoid merge conflicts.
 - **Reuse existing sub-agents for related follow-up questions** rather than spawning new ones.
 - **Use `send_message`** to send additional user input to an existing child agent.
-- **Use `wait_agent`** to poll child output and terminal status events, with an appropriate timeout.
-- **Close sub-agents when done** to free resources and prevent stale agents from consuming limits.
+- **Use `await_task`** to wait for terminal child output, with an appropriate absolute timeout.
+- **Use `list_tasks`** for nonblocking status and complete agent-session metadata.
+- **Use `cancel_task`** to stop work and close the child agent resources.
 
 These instructions adapt to the active tool surface. Parent sessions can see the agent coordination tools and their schema descriptions. Subagent sessions cannot see or load agent coordination tools, even when the parent used `fork_turns = "all"`.
 
@@ -498,7 +494,7 @@ Subagent `ModelRequest.system` contains only the inherited base instructions; de
 
 #### Tool Visibility
 
-In subagent mode, `spawn_agent`, `send_message`, `wait_agent`, `list_agents`, `close_agent`, and their aliases are hidden from model tool schemas, deferred tool reminders, and `ToolSearch` selection. Runtime dispatch still rejects those calls as defense-in-depth if a model attempts one from inherited context or hallucination.
+In subagent mode, `spawn_agent`, `send_message`, `await_task`, `list_tasks`, `cancel_task`, the legacy adapters, and their aliases are hidden from model tool schemas, deferred tool reminders, and `ToolSearch` selection. Runtime dispatch still rejects those calls as defense-in-depth if a model attempts one from inherited context or hallucination.
 
 ## Traceability
 

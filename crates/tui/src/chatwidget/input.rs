@@ -599,30 +599,44 @@ impl ChatWidget {
 }
 
 fn input_items_for_user_message(user_message: &UserMessage) -> Vec<InputItem> {
-    let mut input = vec![InputItem::Text {
-        text: user_message.text.clone(),
-    }];
+    let mut text = user_message.text.clone();
+    let mut structured = Vec::new();
 
     for binding in &user_message.mention_bindings {
         if is_skill_binding_path(&binding.path) {
             let name = binding
                 .mention
-                .strip_prefix('$')
+                .strip_prefix('@')
+                .or_else(|| binding.mention.strip_prefix('$'))
                 .unwrap_or(binding.mention.as_str());
-            input.push(InputItem::Skill {
+            structured.push(InputItem::Skill {
                 name: name.to_string(),
                 path: Path::new(&binding.path).to_path_buf(),
             });
             continue;
         }
         if binding.path.starts_with("mcp://") {
-            input.push(InputItem::Mention {
+            structured.push(InputItem::Mention {
                 path: binding.path.clone(),
                 name: Some(binding.mention.clone()),
             });
+            continue;
+        }
+
+        // File mentions keep a short `@basename` chip in the composer/transcript.
+        // Expand them to the bound relative path in the model-facing text.
+        let token = if binding.mention.starts_with('@') {
+            binding.mention.clone()
+        } else {
+            format!("@{}", binding.mention)
+        };
+        if let Some(idx) = text.find(&token) {
+            text.replace_range(idx..idx + token.len(), &binding.path);
         }
     }
 
+    let mut input = vec![InputItem::Text { text }];
+    input.extend(structured);
     input.extend(
         user_message
             .local_images
@@ -639,4 +653,63 @@ fn is_skill_binding_path(path: &str) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+    use crate::bottom_pane::MentionBinding;
+    use crate::chatwidget::UserMessage;
+
+    /// Trace: L2-DES-CLIENT-002
+    /// Verifies: File mention chips expand to bound relative paths in model-facing text.
+    #[test]
+    fn file_mentions_expand_to_bound_paths_in_text_item() {
+        let user_message = UserMessage {
+            text: "please inspect @interactive.rs".to_string(),
+            mention_bindings: vec![MentionBinding {
+                mention: "interactive.rs".to_string(),
+                path: "crates/tui/src/interactive.rs".to_string(),
+            }],
+            ..UserMessage::default()
+        };
+
+        assert_eq!(
+            input_items_for_user_message(&user_message),
+            vec![InputItem::Text {
+                text: "please inspect crates/tui/src/interactive.rs".to_string(),
+            }]
+        );
+    }
+
+    /// Trace: L2-DES-CLIENT-002
+    /// Verifies: Skill chips keep `@name` text and emit a structured Skill item.
+    #[test]
+    fn skill_mentions_emit_structured_skill_items() {
+        let user_message = UserMessage {
+            text: "run @deep-research now".to_string(),
+            mention_bindings: vec![MentionBinding {
+                mention: "deep-research".to_string(),
+                path: "skills/deep-research/SKILL.md".to_string(),
+            }],
+            ..UserMessage::default()
+        };
+
+        assert_eq!(
+            input_items_for_user_message(&user_message),
+            vec![
+                InputItem::Text {
+                    text: "run @deep-research now".to_string(),
+                },
+                InputItem::Skill {
+                    name: "deep-research".to_string(),
+                    path: PathBuf::from("skills/deep-research/SKILL.md"),
+                },
+            ]
+        );
+    }
 }

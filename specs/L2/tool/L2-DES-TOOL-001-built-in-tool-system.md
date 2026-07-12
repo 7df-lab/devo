@@ -331,6 +331,10 @@ Output must be bounded so noisy commands, large files, web content, or backgroun
 
 Command tools may start processes that continue after the originating tool call returns. Such processes should be registered with the tool supervisor and exposed through `L2-DES-AGENT-002` and `L2-DES-APP-003`.
 
+`exec_command.execution_mode` accepts `attached` (default) or `background`. Attached execution preserves the interactive `session_id` and `write_stdin` contract. Background execution returns a `TaskId` immediately and registers a command task that is visible through the shared `list_tasks`, `await_task`, and `cancel_task` tools. Command tasks use the same public states as agent tasks: `waiting_approval`, `running`, `completed`, `failed`, and `canceled`.
+
+`await_task` returns background command output only after terminal completion; a deadline expiry returns task metadata without partial command output. `cancel_task` terminates the process, removes it from the live process store, and retains canceled task metadata for subsequent inspection.
+
 The built-in tool system should record:
 
 - Process id where available.

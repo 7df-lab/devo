@@ -67,3 +67,4 @@ pub use tool_spec::*;
 pub fn create_default_tool_registry() -> registry::ToolRegistry {
     handlers::build_registry_from_plan(&ToolPlanConfig::default())
 }
+pub(crate) mod background_tasks;

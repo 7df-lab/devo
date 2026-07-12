@@ -3,13 +3,21 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use devo_core::tools::AgentToolCoordinator;
 use devo_protocol::AgentInfo;
-use devo_protocol::AgentMessageResult;
 use devo_protocol::AgentOutputEventKind;
+use devo_protocol::AgentTaskMetadata;
+use devo_protocol::AwaitTaskParams;
+use devo_protocol::AwaitTaskResult;
+use devo_protocol::CancelTaskParams;
 use devo_protocol::ErrorResponse;
+use devo_protocol::ListTasksParams;
 use devo_protocol::ModelRequest;
 use devo_protocol::ParentAgentOutputEvent;
 use devo_protocol::ProtocolErrorCode;
+use devo_protocol::TaskInfo;
+use devo_protocol::TaskKind;
+use devo_protocol::TaskState;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -243,7 +251,76 @@ async fn wait_agent_reports_child_output_and_terminal_status() -> Result<()> {
 }
 
 #[tokio::test]
-async fn wait_agent_polls_incremental_child_output() -> Result<()> {
+async fn task_tools_include_agent_metadata_and_cancel_closes_agent() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
+        "child task result",
+    )]));
+    let runtime = build_runtime(data_root.path(), provider as _)?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
+    let child = spawn_child(&runtime, connection_id, parent_session_id).await?;
+    wait_for_session_notification(
+        &mut notifications_rx,
+        "turn/completed",
+        child.child_session_id,
+    )
+    .await?;
+
+    let awaited = Arc::clone(&runtime)
+        .await_task(AwaitTaskParams {
+            session_id: parent_session_id,
+            task_id: child.task_id.clone(),
+            timeout_secs: Some(1),
+        })
+        .await?;
+    let expected_task = TaskInfo {
+        task_id: child.task_id.clone(),
+        kind: TaskKind::Agent,
+        state: TaskState::Completed,
+        agent: Some(AgentTaskMetadata {
+            session_id: child.child_session_id,
+            parent_session_id: Some(parent_session_id),
+            agent_path: child.agent_path.clone(),
+            agent_nickname: child.agent_nickname.clone(),
+            agent_role: "default".to_string(),
+            last_task_message: Some("review the current changes".to_string()),
+        }),
+        command: None,
+    };
+    assert_eq!(
+        awaited,
+        AwaitTaskResult::Terminal {
+            task: expected_task.clone(),
+            output: Some("child task result".to_string()),
+        }
+    );
+
+    let listed = Arc::clone(&runtime)
+        .list_tasks(ListTasksParams {
+            session_id: parent_session_id,
+            path_prefix: None,
+        })
+        .await?;
+    assert_eq!(listed.tasks, vec![expected_task]);
+
+    let canceled = Arc::clone(&runtime)
+        .cancel_task(CancelTaskParams {
+            session_id: parent_session_id,
+            task_id: child.task_id,
+        })
+        .await?;
+    assert_eq!(canceled.task.state, TaskState::Canceled);
+    assert_eq!(
+        canceled.task.agent.as_ref().map(|agent| agent.session_id),
+        Some(child.child_session_id)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_agent_returns_accumulated_output_with_terminal_status() -> Result<()> {
     let data_root = TempDir::new()?;
     let provider = Arc::new(ScriptedProvider::new([
         ScriptedProvider::completed_with_deltas(&["alpha ", "beta"]),
@@ -383,7 +460,8 @@ async fn send_message_to_idle_child_starts_user_turn() -> Result<()> {
         "start follow-up",
     )
     .await?;
-    assert_eq!(delivered, AgentMessageResult { delivered: true });
+    assert_eq!(delivered.task_id, child.task_id);
+    assert!(delivered.delivered);
     wait_for_child_turn_started(&mut notifications_rx, child.child_session_id).await?;
     wait_for_stream_calls(&provider, 2).await?;
 
@@ -429,7 +507,8 @@ async fn send_message_to_active_child_drains_after_turn() -> Result<()> {
         "queue while busy",
     )
     .await?;
-    assert_eq!(delivered, AgentMessageResult { delivered: true });
+    assert_eq!(delivered.task_id, child.task_id);
+    assert!(delivered.delivered);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(provider.stream_calls(), 1);
 
@@ -938,6 +1017,9 @@ fn assert_subagent_request_hides_agent_tools(request: &ModelRequest) {
     for name in [
         "spawn_agent",
         "send_message",
+        "await_task",
+        "list_tasks",
+        "cancel_task",
         "wait_agent",
         "list_agents",
         "close_agent",

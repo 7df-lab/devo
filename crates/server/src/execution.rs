@@ -47,6 +47,7 @@ pub(crate) struct PersistedTurnItem {
 }
 
 pub(crate) struct PendingApproval {
+    pub(crate) owner_session_id: devo_protocol::SessionId,
     pub(crate) tool_name: String,
     pub(crate) path: Option<PathBuf>,
     pub(crate) host: Option<String>,
