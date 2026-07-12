@@ -152,13 +152,15 @@ fn build_input(request: &ModelRequest) -> Vec<Value> {
 
     for message in &request.messages {
         let role = request_role(&message.role);
-        input.push(build_input_message(role, &message.content));
+        if let Some(message) = build_input_message(role, &message.content) {
+            input.push(message);
+        }
     }
 
     input
 }
 
-fn build_input_message(role: OpenAIRole, content: &[RequestContent]) -> Value {
+fn build_input_message(role: OpenAIRole, content: &[RequestContent]) -> Option<Value> {
     let mut content_blocks = Vec::with_capacity(content.len());
     for block in content {
         match block {
@@ -190,10 +192,12 @@ fn build_input_message(role: OpenAIRole, content: &[RequestContent]) -> Value {
         }
     }
 
-    json!({
-        "type": "message",
-        "role": role,
-        "content": content_blocks,
+    (!content_blocks.is_empty()).then(|| {
+        json!({
+            "type": "message",
+            "role": role,
+            "content": content_blocks,
+        })
     })
 }
 
@@ -1034,32 +1038,46 @@ mod tests {
     }
 
     #[test]
-    fn build_request_documents_hosted_tool_history_is_not_replayed_yet() {
+    fn build_request_omits_unsupported_hosted_tool_history() {
         let request = ModelRequest {
             model: "gpt-5.4".to_string(),
             system: None,
-            messages: vec![RequestMessage {
-                role: "assistant".to_string(),
-                content: vec![
-                    RequestContent::HostedToolUse {
-                        id: "hosted_ws_1".to_string(),
-                        name: "web_search".to_string(),
-                        input: json!({"query": "Rust docs"}),
-                        output: None,
-                        status: None,
-                    },
-                    RequestContent::HostedToolUse {
-                        id: "hosted_ws_1".to_string(),
-                        name: "web_search".to_string(),
-                        input: json!({"query": "Rust docs"}),
-                        output: Some(json!([{
-                            "title": "Rust documentation",
-                            "url": "https://example.test/rust"
-                        }])),
-                        status: Some("completed".to_string()),
-                    },
-                ],
-            }],
+            messages: vec![
+                RequestMessage {
+                    role: "user".to_string(),
+                    content: vec![RequestContent::Text {
+                        text: "before".to_string(),
+                    }],
+                },
+                RequestMessage {
+                    role: "assistant".to_string(),
+                    content: vec![
+                        RequestContent::HostedToolUse {
+                            id: "hosted_ws_1".to_string(),
+                            name: "web_search".to_string(),
+                            input: json!({"query": "Rust docs"}),
+                            output: None,
+                            status: None,
+                        },
+                        RequestContent::HostedToolUse {
+                            id: "hosted_ws_1".to_string(),
+                            name: "web_search".to_string(),
+                            input: json!({"query": "Rust docs"}),
+                            output: Some(json!([{
+                                "title": "Rust documentation",
+                                "url": "https://example.test/rust"
+                            }])),
+                            status: Some("completed".to_string()),
+                        },
+                    ],
+                },
+                RequestMessage {
+                    role: "user".to_string(),
+                    content: vec![RequestContent::Text {
+                        text: "after".to_string(),
+                    }],
+                },
+            ],
             max_tokens: 256,
             tools: None,
             hosted_tools: Vec::new(),
@@ -1071,8 +1089,9 @@ mod tests {
 
         let body = build_request(&request, false);
 
-        assert_eq!(body["input"][0]["role"], json!("assistant"));
-        assert_eq!(body["input"][0]["content"], json!([]));
+        assert_eq!(body["input"].as_array().map(Vec::len), Some(2));
+        assert_eq!(body["input"][0]["role"], json!("user"));
+        assert_eq!(body["input"][1]["role"], json!("user"));
         let serialized = serde_json::to_string(&body).expect("serialize request body");
         assert!(!serialized.contains("hosted_tool_use"));
         assert!(!serialized.contains("web_search_tool_result"));

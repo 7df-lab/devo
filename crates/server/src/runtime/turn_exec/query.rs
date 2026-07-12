@@ -84,19 +84,6 @@ impl ServerRuntime {
             })
         });
         let tool_execution_start_tx = event_tx.clone();
-        let agent_context_mode = state
-            .core
-            .session_context
-            .as_ref()
-            .map(|context| match context.system_prompt_mode {
-                devo_core::SystemPromptMode::CodingAgent => {
-                    devo_protocol::AgentContextMode::CodingAgent
-                }
-                devo_core::SystemPromptMode::DeepResearch => {
-                    devo_protocol::AgentContextMode::DeepResearch
-                }
-            })
-            .unwrap_or_default();
         let registry = match agent_tool_policy {
             devo_protocol::AgentToolPolicy::Inherit if usage_parent_session_id.is_some() => {
                 Arc::new(without_agent_coordination_tools(&session_tool_registry))
@@ -105,11 +92,6 @@ impl ServerRuntime {
             devo_protocol::AgentToolPolicy::DenyAll => {
                 Arc::new(devo_core::tools::ToolRegistry::new())
             }
-            devo_protocol::AgentToolPolicy::DeepResearch => Arc::new(
-                runtime_context
-                    .registry
-                    .restricted_to_specs(super::super::research::RESEARCH_WORKER_TOOL_NAMES),
-            ),
         };
         let permission_mode = state.core.config.permission_mode;
         let permission_profile = state.core.config.permission_profile.clone();
@@ -135,11 +117,11 @@ impl ServerRuntime {
                 turn_id: Some(turn_id.to_string()),
                 cwd: state.core.cwd.clone(),
                 agent_scope,
-                agent_context_mode,
                 collaboration_mode,
                 agent_coordinator: Some(Arc::clone(self) as Arc<dyn AgentToolCoordinator>),
                 client_filesystem: Some(Arc::clone(self) as Arc<dyn ClientFilesystem>),
                 client_terminal: Some(Arc::clone(self) as Arc<dyn ClientTerminal>),
+                file_read_ledger: Arc::clone(&state.file_read_ledger),
                 local_web_search: match &turn_config.web_search {
                     devo_core::ResolvedWebSearchConfig::Local(config) => Some(config.clone()),
                     devo_core::ResolvedWebSearchConfig::Disabled

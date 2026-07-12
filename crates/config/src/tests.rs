@@ -26,7 +26,6 @@ use super::ProviderConfigSection;
 use super::ProviderDefaultsConfig;
 use super::ProviderHttpConfig;
 use super::ProviderVendorConfig;
-use super::ResearchConfig;
 use super::SummaryModelSelection;
 use super::ToolsConfig;
 use super::UpdatesConfig;
@@ -133,7 +132,6 @@ check_interval_hours = 48
             hooks: HooksConfig::default(),
             provider: ProviderConfigSection::default(),
             provider_http: super::ProviderHttpConfig::default(),
-            research: ResearchConfig::default(),
             updates: UpdatesConfig {
                 enabled: false,
                 check_on_startup: true,

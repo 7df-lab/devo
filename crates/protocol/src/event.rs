@@ -277,7 +277,6 @@ pub enum ItemKind {
     ContextCompaction,
     ApprovalRequest,
     ApprovalDecision,
-    ResearchArtifact,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,7 +288,6 @@ pub enum ItemDeltaKind {
     CommandExecutionOutputDelta,
     FileChangeOutputDelta,
     PlanDelta,
-    ResearchArtifactDelta,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,7 +297,6 @@ pub enum ServerRequestKind {
     ItemFileChangeRequestApproval,
     ItemPermissionsRequestApproval,
     ItemToolRequestUserInput,
-    ResearchClarificationRequest,
     McpServerElicitationRequest,
 }
 
@@ -468,7 +465,6 @@ impl ServerEvent {
                 ItemDeltaKind::CommandExecutionOutputDelta => "item/commandExecution/outputDelta",
                 ItemDeltaKind::FileChangeOutputDelta => "item/fileChange/outputDelta",
                 ItemDeltaKind::PlanDelta => "item/plan/delta",
-                ItemDeltaKind::ResearchArtifactDelta => "item/researchArtifact/delta",
             },
             Self::ServerRequestResolved(_) => "serverRequest/resolved",
             Self::ReferenceSearchUpdated(_) => "search/updated",
@@ -699,28 +695,6 @@ mod tests {
         });
 
         assert_eq!(event.method_name(), "workspace/changes/updated");
-        assert_eq!(event.session_id(), Some(session_id));
-    }
-
-    #[test]
-    fn research_artifact_delta_method_name() {
-        let session_id = SessionId::new();
-        let event = ServerEvent::ItemDelta {
-            delta_kind: ItemDeltaKind::ResearchArtifactDelta,
-            payload: ItemDeltaPayload {
-                context: EventContext {
-                    session_id,
-                    turn_id: Some(TurnId::new()),
-                    item_id: Some(ItemId::new()),
-                    seq: 0,
-                },
-                delta: "partial finding".to_string(),
-                stream_index: None,
-                channel: None,
-            },
-        };
-
-        assert_eq!(event.method_name(), "item/researchArtifact/delta");
         assert_eq!(event.session_id(), Some(session_id));
     }
 }

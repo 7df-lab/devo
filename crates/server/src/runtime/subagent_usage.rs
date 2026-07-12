@@ -244,32 +244,6 @@ impl SubagentUsageState {
         self.snapshot_for_parent_turn(session_id, turn_id)
     }
 
-    /// Replace parent-turn totals with an explicit snapshot (research ledger)
-    /// while tracking the latest single invocation for context-window display.
-    pub(super) fn record_parent_turn_totals_and_latest(
-        &mut self,
-        session_id: SessionId,
-        turn_id: TurnId,
-        turn_totals: UsageTotals,
-        latest_query: UsageTotals,
-        context_window: Option<u64>,
-    ) -> Option<ParentUsageSnapshot> {
-        let key = ParentTurnKey {
-            session_id,
-            turn_id,
-        };
-        let state = self.parent_turns.get_mut(&key)?;
-        // Research owns the full turn total as a single in-flight snapshot so
-        // repeated ledger publishes do not double-count completed legs.
-        state.parent_turn_usage = UsageTotals::default();
-        state.inflight_usage = turn_totals;
-        state.latest_query_usage = latest_query;
-        if context_window.is_some() {
-            state.context_window = context_window;
-        }
-        self.snapshot_for_parent_turn(session_id, turn_id)
-    }
-
     pub(super) fn record_child_turn_usage(
         &mut self,
         child_session_id: SessionId,
@@ -495,32 +469,6 @@ impl ServerRuntime {
                 UsageTotals::from_turn_usage(&usage),
                 context_window,
                 kind,
-            )
-        }?;
-        self.apply_parent_usage_snapshot(snapshot).await;
-        Some(snapshot)
-    }
-
-    /// Publish research-ledger turn totals while keeping context display on the
-    /// latest single invocation (not the sum of all research stages).
-    pub(super) async fn publish_parent_turn_totals_and_latest(
-        &self,
-        session_id: SessionId,
-        turn_id: TurnId,
-        turn_totals: TurnUsage,
-        latest_query: TurnUsage,
-        context_window: Option<u64>,
-    ) -> Option<ParentUsageSnapshot> {
-        self.begin_parent_usage_turn(session_id, turn_id, context_window)
-            .await;
-        let snapshot = {
-            let mut usage_state = self.subagent_usage.lock().await;
-            usage_state.record_parent_turn_totals_and_latest(
-                session_id,
-                turn_id,
-                UsageTotals::from_turn_usage(&turn_totals),
-                UsageTotals::from_turn_usage(&latest_query),
-                context_window,
             )
         }?;
         self.apply_parent_usage_snapshot(snapshot).await;
@@ -862,52 +810,6 @@ mod tests {
         assert_eq!(after_second_leg.turn_usage, totals(1300, 80));
         assert_eq!(after_second_leg.latest_query_usage, totals(700, 30));
         assert_eq!(after_second_leg.session_totals, totals(1400, 90));
-    }
-
-    #[test]
-    fn research_totals_accumulate_but_context_uses_latest_invocation() {
-        let mut state = SubagentUsageState::default();
-        let parent_session_id = SessionId::new();
-        let parent_turn_id = TurnId::new();
-
-        state.begin_parent_turn(
-            parent_session_id,
-            parent_turn_id,
-            totals(0, 0),
-            Some(200_000),
-        );
-
-        let after_first = state
-            .record_parent_turn_totals_and_latest(
-                parent_session_id,
-                parent_turn_id,
-                totals(8_000, 1_000),
-                totals(8_000, 1_000),
-                Some(200_000),
-            )
-            .expect("first research invocation");
-        assert_eq!(after_first.turn_usage, totals(8_000, 1_000));
-        assert_eq!(after_first.latest_query_usage, totals(8_000, 1_000));
-
-        let after_second = state
-            .record_parent_turn_totals_and_latest(
-                parent_session_id,
-                parent_turn_id,
-                totals(20_000, 3_000),
-                totals(12_000, 2_000),
-                Some(200_000),
-            )
-            .expect("second research invocation");
-        assert_eq!(after_second.turn_usage, totals(20_000, 3_000));
-        assert_eq!(after_second.latest_query_usage, totals(12_000, 2_000));
-        assert_eq!(after_second.session_totals, totals(20_000, 3_000));
-
-        let payload = after_second.to_turn_usage_updated_payload();
-        assert_eq!(payload.usage.input_tokens, 12_000);
-        assert_eq!(payload.usage.output_tokens, 2_000);
-        assert_eq!(payload.last_query_input_tokens, 12_000);
-        assert_eq!(payload.total_input_tokens, 20_000);
-        assert_eq!(payload.total_output_tokens, 3_000);
     }
 
     #[test]

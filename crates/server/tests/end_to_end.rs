@@ -794,7 +794,13 @@ async fn websocket_turn_streams_final_tool_metadata_for_read_and_glob() -> Resul
     );
     assert_eq!(
         original_event(read_call)["item"]["payload"]["command_actions"][0]["name"],
-        serde_json::json!("README.md")
+        serde_json::json!(
+            workspace
+                .path()
+                .join("README.md")
+                .to_string_lossy()
+                .to_string()
+        )
     );
 
     let glob_call = completed_tool_calls

@@ -611,10 +611,6 @@ impl TranscriptOverlay {
             .and_then(|selected| positions.iter().position(|idx| *idx == selected))
     }
 
-    pub(crate) fn user_message_count(&self) -> usize {
-        self.user_positions().len()
-    }
-
     fn user_positions(&self) -> Vec<usize> {
         self.cells
             .iter()

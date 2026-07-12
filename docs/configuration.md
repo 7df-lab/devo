@@ -62,6 +62,9 @@ Catalog precedence is `<workspace>/.devo/models.json`, then
 `<DEVO_HOME>/models.json`, then the built-in catalog.
 In `models.json`, `provider` is the default wire API metadata for the model; the
 actual endpoint is still selected by the `provider` field in `config.toml`.
+If `base_instructions` is omitted, Devo falls back to the built-in default base
+instructions. An explicit empty string (`""`) means the model has no base
+instructions.
 
 Example `models.json` entry:
 

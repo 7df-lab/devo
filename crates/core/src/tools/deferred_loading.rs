@@ -82,6 +82,15 @@ const SUBAGENT_PROHIBITED_AGENT_COORDINATION_TOOLS: &[&str] = &[
     "send_message",
     "send-message",
     "sendmessage",
+    "await_task",
+    "await-task",
+    "awaittask",
+    "list_tasks",
+    "list-tasks",
+    "listtasks",
+    "cancel_task",
+    "cancel-task",
+    "canceltask",
     "wait_agent",
     "wait-agent",
     "waitagent",
@@ -149,6 +158,9 @@ pub fn hide_subagent_agent_coordination_tools(config: &mut DeferredLoadingConfig
     for name in [
         "spawn_agent",
         "send_message",
+        "await_task",
+        "list_tasks",
+        "cancel_task",
         "wait_agent",
         "list_agents",
         "close_agent",
@@ -461,9 +473,9 @@ fn default_preloaded_tools() -> BTreeSet<String> {
         "fetch_url",
         "spawn_agent",
         "send_message",
-        "wait_agent",
-        "list_agents",
-        "close_agent",
+        "await_task",
+        "list_tasks",
+        "cancel_task",
     ]
     .into_iter()
     .map(str::to_string)
@@ -525,6 +537,9 @@ mod tests {
             tool("ToolSearch", "Search available tools."),
             tool("spawn_agent", "Spawn a subagent."),
             tool("send_message", "Send input to a child agent."),
+            tool("await_task", "Wait for task completion."),
+            tool("list_tasks", "List child tasks."),
+            tool("cancel_task", "Cancel a child task."),
             tool("wait_agent", "Poll child output."),
             tool("list_agents", "List child agents."),
             tool("close_agent", "Close a child agent."),
@@ -660,6 +675,15 @@ mod tests {
             "send_message",
             "send-message",
             "sendmessage",
+            "await_task",
+            "await-task",
+            "awaittask",
+            "list_tasks",
+            "list-tasks",
+            "listtasks",
+            "cancel_task",
+            "cancel-task",
+            "canceltask",
             "wait_agent",
             "wait-agent",
             "waitagent",
@@ -687,6 +711,9 @@ mod tests {
             assert!(err.contains("Not found"));
             assert!(!loaded.is_loaded("session-1", "spawn_agent"));
             assert!(!loaded.is_loaded("session-1", "send_message"));
+            assert!(!loaded.is_loaded("session-1", "await_task"));
+            assert!(!loaded.is_loaded("session-1", "list_tasks"));
+            assert!(!loaded.is_loaded("session-1", "cancel_task"));
             assert!(!loaded.is_loaded("session-1", "wait_agent"));
             assert!(!loaded.is_loaded("session-1", "list_agents"));
             assert!(!loaded.is_loaded("session-1", "close_agent"));
@@ -700,6 +727,9 @@ mod tests {
         let loaded = BTreeSet::from([
             "spawn_agent".to_string(),
             "send_message".to_string(),
+            "await_task".to_string(),
+            "list_tasks".to_string(),
+            "cancel_task".to_string(),
             "wait_agent".to_string(),
             "list_agents".to_string(),
             "close_agent".to_string(),

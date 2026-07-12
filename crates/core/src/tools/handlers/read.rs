@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use devo_tools::ClientTextFileRead;
 
+use super::file_change_metadata::file_mtime;
 use crate::contracts::{
     ToolCallError, ToolContext, ToolProgressSender, ToolResult, ToolResultContent,
 };
@@ -136,6 +137,9 @@ impl ToolHandler for ReadHandler {
                 .await?
             {
                 ClientTextFileRead::Content(content) => {
+                    if is_full_file_read(offset, limit) {
+                        record_full_read_in_ledger(&ctx, &path, &content);
+                    }
                     return Ok(client_text_file_result(
                         &path,
                         offset.unwrap_or(1),
@@ -164,6 +168,19 @@ impl ToolHandler for ReadHandler {
             ));
         }
 
+        if is_full_file_read(offset, limit) {
+            match tokio::fs::read_to_string(&path).await {
+                Ok(content) => record_full_read_in_ledger(&ctx, &path, &content),
+                Err(error) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        %error,
+                        "failed to capture full file content for read ledger"
+                    );
+                }
+            }
+        }
+
         let output = read_file(&path, limit.unwrap_or(usize::MAX), offset.unwrap_or(1));
         let output = output.map_err(|e| ToolCallError::ExecutionFailed(format!("{e}")))?;
         let display = output.display_content;
@@ -171,6 +188,16 @@ impl ToolHandler for ReadHandler {
         let mut result = ToolResult::success(ToolResultContent::Text(text), "File read");
         result.display_content = display;
         Ok(result)
+    }
+}
+
+fn is_full_file_read(offset: Option<usize>, limit: Option<usize>) -> bool {
+    matches!(offset, None | Some(1)) && limit.is_none()
+}
+
+fn record_full_read_in_ledger(ctx: &ToolContext, path: &Path, content: &str) {
+    if let Some(ledger) = ctx.file_read_ledger.as_ref() {
+        ledger.record_full_read(path, content, file_mtime(path));
     }
 }
 
@@ -226,11 +253,11 @@ mod tests {
                     },
                     cancel_token: CancellationToken::new(),
                     agent_scope: ToolAgentScope::Parent,
-                    agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                     collaboration_mode: devo_protocol::CollaborationMode::Build,
                     agent_coordinator: None,
                     client_filesystem: None,
                     client_terminal: None,
+                    file_read_ledger: None,
                     network_proxy: None,
                     network_no_proxy: None,
                 },

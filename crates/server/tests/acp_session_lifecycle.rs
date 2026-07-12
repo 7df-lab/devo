@@ -1191,15 +1191,11 @@ fn assert_acp_slash_command_advertisement(commands: &[AcpAvailableCommand]) {
         .iter()
         .map(|command| command.name.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["compact", "goal", "research"]);
+    assert_eq!(names, vec!["compact", "goal"]);
     assert_eq!(commands[0].input, None);
     assert_eq!(
         commands[1].input.as_ref().map(|input| input.hint.as_str()),
         Some("objective, pause, resume, or clear")
-    );
-    assert_eq!(
-        commands[2].input.as_ref().map(|input| input.hint.as_str()),
-        Some("research question")
     );
 }
 

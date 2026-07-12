@@ -99,16 +99,6 @@ impl ServerRuntime {
                 self.handle_acp_goal_slash_command(connection_id, request_id, session_id, argument)
                     .await
             }
-            SlashCommand::Research => {
-                self.handle_acp_research_slash_command(
-                    connection_id,
-                    request_id,
-                    session_id,
-                    argument,
-                    prompt,
-                )
-                .await
-            }
             SlashCommand::Theme
             | SlashCommand::Model
             | SlashCommand::Skills
@@ -354,81 +344,6 @@ impl ServerRuntime {
         AcpSlashCommandPromptResult::Response(acp_prompt_success_response(request_id))
     }
 
-    async fn handle_acp_research_slash_command(
-        self: &Arc<Self>,
-        connection_id: u64,
-        request_id: serde_json::Value,
-        session_id: SessionId,
-        argument: &str,
-        prompt: &[AcpContentBlock],
-    ) -> AcpSlashCommandPromptResult {
-        let input = match input_items_from_research_prompt(argument, prompt) {
-            Ok(input) => input,
-            Err(error) => {
-                return AcpSlashCommandPromptResult::Response(acp_error_response(
-                    request_id,
-                    AcpErrorCode::InvalidParams,
-                    error,
-                ));
-            }
-        };
-        let legacy_response = self
-            .handle_turn_start_with_queue_policy(
-                Some(connection_id),
-                request_id.clone(),
-                TurnStartParams {
-                    session_id,
-                    input,
-                    model: None,
-                    model_binding_id: None,
-                    reasoning_effort_selection: None,
-                    sandbox: None,
-                    approval_policy: None,
-                    cwd: None,
-                    collaboration_mode: CollaborationMode::Build,
-                    execution_mode: TurnExecutionMode::Research,
-                },
-                TurnStartQueuePolicy::RejectActive,
-            )
-            .await;
-        let legacy: SuccessResponse<TurnStartResult> =
-            match serde_json::from_value(legacy_response.clone()) {
-                Ok(legacy) => legacy,
-                Err(_) => {
-                    return AcpSlashCommandPromptResult::Response(legacy_error_to_acp(
-                        request_id,
-                        legacy_response,
-                    ));
-                }
-            };
-        let Some(turn_id) = legacy.result.turn_id() else {
-            return AcpSlashCommandPromptResult::Response(acp_error_response(
-                request_id,
-                AcpErrorCode::ServerError,
-                "session/prompt cannot queue behind an active turn",
-            ));
-        };
-        let runtime = Arc::clone(self);
-        tokio::spawn(async move {
-            let stop_reason = runtime
-                .wait_for_acp_prompt_stop_reason(session_id, turn_id)
-                .await;
-            runtime
-                .send_raw_to_connection(
-                    connection_id,
-                    acp_success_response(
-                        request_id,
-                        AcpPromptResult {
-                            stop_reason,
-                            meta: None,
-                        },
-                    ),
-                )
-                .await;
-        });
-        AcpSlashCommandPromptResult::Pending
-    }
-
     async fn handle_acp_plan_slash_command(
         self: &Arc<Self>,
         connection_id: u64,
@@ -566,13 +481,6 @@ fn acp_slash_command_text(prompt: &[AcpContentBlock]) -> Option<(&str, &str)> {
     Some((command, argument))
 }
 
-fn input_items_from_research_prompt(
-    argument: &str,
-    prompt: &[AcpContentBlock],
-) -> Result<Vec<InputItem>, String> {
-    input_items_from_argument_slash_prompt(argument, prompt, "Usage: /research <research question>")
-}
-
 fn input_items_from_argument_slash_prompt(
     argument: &str,
     prompt: &[AcpContentBlock],
@@ -643,30 +551,6 @@ mod tests {
         );
         assert_eq!(acp_slash_command_text(&[AcpContentBlock::text("/")]), None);
         assert_eq!(acp_slash_command_text(&[]), None);
-    }
-
-    #[test]
-    fn research_prompt_uses_command_argument_and_preserves_extra_content() {
-        let input = input_items_from_research_prompt(
-            "agent client protocol",
-            &[
-                AcpContentBlock::text("/research agent client protocol"),
-                AcpContentBlock::text("include slash command docs"),
-            ],
-        )
-        .expect("research input");
-
-        assert_eq!(
-            input,
-            vec![
-                InputItem::Text {
-                    text: "agent client protocol".to_string()
-                },
-                InputItem::Text {
-                    text: "include slash command docs".to_string()
-                },
-            ]
-        );
     }
 
     #[test]

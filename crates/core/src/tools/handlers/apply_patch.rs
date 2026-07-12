@@ -79,13 +79,64 @@ impl ToolHandler for ApplyPatchHandler {
         } else {
             let content = match output.content {
                 ToolContent::Text(text) => ToolResultContent::Text(text),
-                ToolContent::Json(json) => ToolResultContent::Json(json),
-                ToolContent::Mixed { text, json } => ToolResultContent::Mixed { text, json },
+                ToolContent::Json(json) => {
+                    record_patch_files_in_ledger(&ctx, &json);
+                    ToolResultContent::Json(json)
+                }
+                ToolContent::Mixed { text, json } => {
+                    if let Some(json) = json.as_ref() {
+                        record_patch_files_in_ledger(&ctx, json);
+                    }
+                    ToolResultContent::Mixed { text, json }
+                }
             };
             let mut result = ToolResult::success(content, "Patch applied");
             result.display_content = output.display_content;
             Ok(result)
         }
+    }
+}
+
+fn record_patch_files_in_ledger(ctx: &ToolContext, metadata: &serde_json::Value) {
+    let Some(ledger) = ctx.file_read_ledger.as_ref() else {
+        return;
+    };
+    let Some(files) = metadata.get("files").and_then(|value| value.as_array()) else {
+        return;
+    };
+    for file in files {
+        let path = file
+            .get("filePath")
+            .or_else(|| file.get("path"))
+            .and_then(|value| value.as_str())
+            .map(std::path::PathBuf::from);
+        let Some(path) = path else {
+            continue;
+        };
+        let absolute = if path.is_absolute() {
+            path
+        } else {
+            ctx.workspace_root.join(path)
+        };
+        let kind = file
+            .get("kind")
+            .or_else(|| file.get("type"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("update");
+        if kind == "delete" {
+            ledger.invalidate(&absolute);
+            continue;
+        }
+        let Some(content) = file
+            .get("postContent")
+            .or_else(|| file.get("post_content"))
+            .or_else(|| file.get("content"))
+            .and_then(|value| value.as_str())
+        else {
+            continue;
+        };
+        let mtime = super::file_change_metadata::file_mtime(&absolute);
+        ledger.record_write(&absolute, content, mtime);
     }
 }
 
@@ -132,11 +183,11 @@ mod tests {
                     },
                     cancel_token: tokio_util::sync::CancellationToken::new(),
                     agent_scope: crate::contracts::ToolAgentScope::Parent,
-                    agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                     collaboration_mode: devo_protocol::CollaborationMode::Build,
                     agent_coordinator: None,
                     client_filesystem: None,
                     client_terminal: None,
+                    file_read_ledger: None,
                     network_proxy: None,
                     network_no_proxy: None,
                 },

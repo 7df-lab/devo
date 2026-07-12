@@ -18,6 +18,7 @@ chrono = "0.4.43"
 crossterm = { workspace = true }
 derive_more = { workspace = true, features = ["is_variant"] }
 devo-core = { workspace = true }
+devo-client = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }
 devo-server = { workspace = true }

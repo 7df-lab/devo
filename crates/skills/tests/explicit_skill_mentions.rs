@@ -63,6 +63,20 @@ fn explicit_skill_mentions_preserve_selection_order_and_skip_duplicates() {
 }
 
 #[test]
+fn deep_research_skill_is_selected_from_explicit_dollar_mention() {
+    let deep_research = skill("deep-research", "/system/skills/deep-research/SKILL.md");
+    let load_outcome = outcome(vec![deep_research.clone()]);
+
+    let actual = collect_explicit_skill_mentions(
+        &["$deep-research investigate indexing strategies".to_string()],
+        &[],
+        &load_outcome,
+    );
+
+    assert_eq!(actual, vec![deep_research]);
+}
+
+#[test]
 #[ignore]
 fn bench_collect_explicit_skill_mentions_without_mentions() {
     let skills = (0..2_000)

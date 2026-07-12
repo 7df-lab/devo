@@ -28,7 +28,6 @@ use crate::OAuthCredentialsStoreMode;
 use crate::ProviderConfigError;
 use crate::ProviderConfigSection;
 use crate::ProviderHttpConfig;
-use crate::ResearchConfig;
 use crate::ResolvedProviderSettings;
 use crate::ServerConfig;
 use crate::SkillsConfig;
@@ -69,9 +68,6 @@ pub struct AppConfig {
     /// Tool-specific runtime configuration.
     #[serde(default, skip_serializing_if = "ToolsConfig::is_empty")]
     pub tools: ToolsConfig,
-    /// Server-owned deep research workflow defaults.
-    #[serde(default, skip_serializing_if = "ResearchConfig::is_default")]
-    pub research: ResearchConfig,
     /// External lifecycle hooks keyed by event name.
     #[serde(default, skip_serializing_if = "HooksConfig::is_empty")]
     pub hooks: HooksConfig,
@@ -165,7 +161,6 @@ impl Default for AppConfig {
             mcp_oauth_credentials_store: Some(OAuthCredentialsStoreMode::default()),
             mcp: McpConfig::default(),
             tools: ToolsConfig::default(),
-            research: ResearchConfig::default(),
             hooks: HooksConfig::default(),
             provider: ProviderConfigSection::default(),
             provider_http: ProviderHttpConfig::default(),

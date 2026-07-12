@@ -22,10 +22,7 @@ use devo_core::tools::ToolPlanConfig;
 use devo_mcp::manager::RmcpMcpManager;
 use devo_protocol::AcpMeta;
 use devo_protocol::DEVO_HISTORY_INDEX_META;
-use devo_protocol::DEVO_ITEM_KIND_META;
 use devo_protocol::DEVO_PARENT_MESSAGE_ID_META;
-use devo_protocol::DEVO_RESEARCH_ARTIFACT_TITLE_META;
-use devo_protocol::DEVO_RESEARCH_ARTIFACT_TYPE_META;
 
 use crate::ACP_SESSION_UPDATE_METHOD;
 use crate::AcpAgentCapabilities;

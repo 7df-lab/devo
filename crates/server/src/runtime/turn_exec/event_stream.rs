@@ -96,7 +96,8 @@ pub(crate) fn spawn_turn_event_stream(
             .then(ProposedPlanParser::default);
         let mut proposed_plan_item = ProposedPlanStreamItem::default();
         let mut proposed_plan_leading_normal = String::new();
-        let mut latest_usage = None;
+        let mut turn_usage = None;
+        let mut latest_query_usage = None;
         let mut stop_reason = None;
         while let Some(event) = event_rx.recv().await {
             log_dequeued_query_event(&event);
@@ -256,15 +257,16 @@ pub(crate) fn spawn_turn_event_stream(
                     .await;
                 }
                 devo_core::QueryEvent::UsageDelta { usage } => {
-                    let turn_usage = devo_core::TurnUsage::from_usage(&usage);
-                    latest_usage = Some(turn_usage.clone());
+                    let usage = devo_core::TurnUsage::from_usage(&usage);
+                    turn_usage = Some(usage.clone());
+                    latest_query_usage = Some(usage.clone());
                     let kind = super::super::subagent_usage::UsageUpdateKind::InFlight;
                     if usage_parent_session_id.is_some() {
                         let _ = runtime
                             .publish_subagent_turn_usage(
                                 session_id,
                                 turn_for_events.turn_id,
-                                turn_usage,
+                                usage,
                                 kind,
                             )
                             .await;
@@ -272,25 +274,27 @@ pub(crate) fn spawn_turn_event_stream(
                         .publish_parent_turn_usage(
                             session_id,
                             turn_for_events.turn_id,
-                            turn_usage,
+                            usage,
                             usage_context_window,
                             kind,
                         )
                         .await
                     {
-                        latest_usage = Some(snapshot.turn_usage.to_turn_usage());
+                        turn_usage = Some(snapshot.turn_usage.to_turn_usage());
+                        latest_query_usage = Some(snapshot.latest_query_usage.to_turn_usage());
                     }
                 }
                 devo_core::QueryEvent::Usage { usage } => {
-                    let turn_usage = devo_core::TurnUsage::from_usage(&usage);
-                    latest_usage = Some(turn_usage.clone());
+                    let usage = devo_core::TurnUsage::from_usage(&usage);
+                    turn_usage = Some(usage.clone());
+                    latest_query_usage = Some(usage.clone());
                     let kind = super::super::subagent_usage::UsageUpdateKind::CompletedLeg;
                     if usage_parent_session_id.is_some() {
                         let _ = runtime
                             .publish_subagent_turn_usage(
                                 session_id,
                                 turn_for_events.turn_id,
-                                turn_usage,
+                                usage,
                                 kind,
                             )
                             .await;
@@ -298,13 +302,14 @@ pub(crate) fn spawn_turn_event_stream(
                         .publish_parent_turn_usage(
                             session_id,
                             turn_for_events.turn_id,
-                            turn_usage,
+                            usage,
                             usage_context_window,
                             kind,
                         )
                         .await
                     {
-                        latest_usage = Some(snapshot.turn_usage.to_turn_usage());
+                        turn_usage = Some(snapshot.turn_usage.to_turn_usage());
+                        latest_query_usage = Some(snapshot.latest_query_usage.to_turn_usage());
                     }
                 }
                 devo_core::QueryEvent::TurnComplete {
@@ -361,7 +366,8 @@ pub(crate) fn spawn_turn_event_stream(
             "query event stream drained"
         );
         TurnEventStreamSummary {
-            latest_usage,
+            turn_usage,
+            latest_query_usage,
             stop_reason,
         }
     })

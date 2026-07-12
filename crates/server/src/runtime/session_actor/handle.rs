@@ -656,37 +656,6 @@ impl SessionHandle {
         reply_rx.await.ok()
     }
 
-    /// Begin out-of-actor turn inline state (research). Returns the session
-    /// stream for `register_active_stream`.
-    pub(crate) async fn begin_inline_turn(
-        &self,
-        turn: TurnMetadata,
-    ) -> Option<Arc<tokio::sync::Mutex<super::state::SessionStreamState>>> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if !self
-            .send(SessionCommand::BeginInlineTurn {
-                turn,
-                reply: reply_tx,
-            })
-            .await
-        {
-            return None;
-        }
-        reply_rx.await.ok()
-    }
-
-    /// Merge and clear out-of-actor turn inline state.
-    pub(crate) async fn end_inline_turn(&self) {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if !self
-            .send(SessionCommand::EndInlineTurn { reply: reply_tx })
-            .await
-        {
-            return;
-        }
-        let _ = reply_rx.await;
-    }
-
     pub(crate) async fn shutdown(&self) {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self

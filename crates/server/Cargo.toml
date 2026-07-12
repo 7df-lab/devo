@@ -15,6 +15,7 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 devo-client = { workspace = true }
+devo-code-search = { workspace = true }
 devo-core = { workspace = true }
 devo-file-search = { workspace = true }
 devo-mcp = { workspace = true }

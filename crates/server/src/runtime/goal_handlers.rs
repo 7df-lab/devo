@@ -539,10 +539,10 @@ impl ServerRuntime {
         session_handle.set_active_goal(goal).await;
     }
 
-    /// Title generation and continuation startup both need session-actor mailbox
-    /// replies. When a turn is already running inline on that actor, awaiting
-    /// those replies deadlocks the goal handler. Defer title work to a task and
-    /// rely on the post-turn hook for continuation while a turn is active.
+    /// Title generation needs session-actor mailbox replies. When a turn is
+    /// already running inline on that actor, awaiting those replies deadlocks
+    /// the goal handler. Defer title work to a task and rely on the post-turn
+    /// hook as a fallback while a turn is active.
     async fn schedule_goal_followup_work(
         self: &Arc<Self>,
         session_id: SessionId,
@@ -555,7 +555,7 @@ impl ServerRuntime {
                 let runtime = Arc::clone(self);
                 tokio::spawn(async move {
                     runtime
-                        .maybe_prepare_title_generation_from_user_input(session_id, &title_input)
+                        .maybe_start_title_generation_from_user_input(session_id, &title_input)
                         .await;
                 });
             } else {

@@ -1,11 +1,8 @@
 use devo_core::{
-    CommandExecutionItem, ContentBlock, Message, ResearchArtifactItem, SessionRecord, TextItem,
-    ToolCallItem, ToolResultItem, TurnItem, TurnRecord,
+    CommandExecutionItem, ContentBlock, Message, SessionRecord, TextItem, ToolCallItem,
+    ToolResultItem, TurnItem, TurnRecord,
 };
-use devo_protocol::{
-    SessionHistoryMetadata, SessionHistoryResearchArtifactType, SessionPlanStep,
-    SessionPlanStepStatus,
-};
+use devo_protocol::{SessionHistoryMetadata, SessionPlanStep, SessionPlanStepStatus};
 use devo_util_git::extract_paths_from_patch;
 use devo_util_shell_command::parse_command::parse_command;
 
@@ -179,49 +176,6 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
             }
             Some(item)
         }
-        TurnItem::ResearchArtifact(ResearchArtifactItem {
-            artifact_type: devo_core::ResearchArtifactType::FinalReportMetadata,
-            ..
-        }) => None,
-        TurnItem::ResearchArtifact(ResearchArtifactItem {
-            artifact_type,
-            title,
-            content,
-        }) => {
-            let history_artifact_type = match artifact_type {
-                devo_core::ResearchArtifactType::Clarification => {
-                    SessionHistoryResearchArtifactType::Clarification
-                }
-                devo_core::ResearchArtifactType::Brief => SessionHistoryResearchArtifactType::Brief,
-                devo_core::ResearchArtifactType::Plan => SessionHistoryResearchArtifactType::Plan,
-                devo_core::ResearchArtifactType::Finding => {
-                    SessionHistoryResearchArtifactType::Finding
-                }
-                devo_core::ResearchArtifactType::CompressedFinding => {
-                    SessionHistoryResearchArtifactType::CompressedFinding
-                }
-                devo_core::ResearchArtifactType::WebpageSummary => {
-                    SessionHistoryResearchArtifactType::WebpageSummary
-                }
-                devo_core::ResearchArtifactType::Failure => {
-                    SessionHistoryResearchArtifactType::Failure
-                }
-                devo_core::ResearchArtifactType::FinalReportMetadata => unreachable!(
-                    "final report metadata is hidden before research history metadata projection"
-                ),
-            };
-            Some(
-                SessionHistoryItem::new(
-                    None,
-                    SessionHistoryItemKind::Assistant,
-                    title.clone(),
-                    content.clone(),
-                )
-                .with_metadata(SessionHistoryMetadata::ResearchArtifact {
-                    artifact_type: history_artifact_type,
-                }),
-            )
-        }
         TurnItem::ContextCompaction(TextItem { .. }) => None,
         TurnItem::Reasoning(TextItem { text }) => Some(SessionHistoryItem::new(
             None,
@@ -316,7 +270,7 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
                 item = item.with_metadata(metadata);
             }
             if !*is_error
-                && matches!(tool_name.as_deref(), Some("apply_patch" | "write"))
+                && matches!(tool_name.as_deref(), Some("apply_patch" | "write" | "edit"))
                 && let Some(metadata) = parse_edited_history_metadata(output)
             {
                 item = item.with_metadata(metadata);
@@ -593,12 +547,9 @@ mod tests {
 
     use super::history_item_from_turn_item;
     use crate::session::SessionHistoryItemKind;
+    use devo_core::TurnItem;
     use devo_core::{CommandExecutionItem, TextItem, ToolCallItem, ToolResultItem};
-    use devo_core::{ResearchArtifactItem, ResearchArtifactType, TurnItem};
-    use devo_protocol::{
-        SessionHistoryMetadata, SessionHistoryResearchArtifactType, SessionHistoryToolIo,
-        SessionPlanStepStatus,
-    };
+    use devo_protocol::{SessionHistoryMetadata, SessionHistoryToolIo, SessionPlanStepStatus};
 
     #[test]
     fn history_projection_omits_empty_agent_message() {
@@ -746,42 +697,6 @@ mod tests {
     }
 
     #[test]
-    fn research_artifact_projects_to_assistant_history_item() {
-        // Trace: L2-DES-RESEARCH-001
-        // Verifies: replay projection exposes durable research artifacts as history items.
-        let item = TurnItem::ResearchArtifact(ResearchArtifactItem {
-            artifact_type: ResearchArtifactType::Brief,
-            title: "Research Brief".to_string(),
-            content: "brief body".to_string(),
-        });
-
-        let history_item = history_item_from_turn_item(&item).expect("history item");
-
-        assert_eq!(history_item.kind, SessionHistoryItemKind::Assistant);
-        assert_eq!(history_item.title, "Research Brief");
-        assert_eq!(history_item.body, "brief body");
-        assert_eq!(
-            history_item.metadata,
-            Some(SessionHistoryMetadata::ResearchArtifact {
-                artifact_type: SessionHistoryResearchArtifactType::Brief,
-            })
-        );
-    }
-
-    #[test]
-    fn final_report_metadata_is_hidden_from_history_projection() {
-        // Trace: L2-DES-RESEARCH-001
-        // Verifies: compact research handoff metadata remains prompt-only.
-        let item = TurnItem::ResearchArtifact(ResearchArtifactItem {
-            artifact_type: ResearchArtifactType::FinalReportMetadata,
-            title: "Research Context Reference".to_string(),
-            content: "compact reference".to_string(),
-        });
-
-        assert_eq!(history_item_from_turn_item(&item), None);
-    }
-
-    #[test]
     fn command_execution_turn_item_emits_explored_metadata() {
         let item = TurnItem::CommandExecution(CommandExecutionItem {
             tool_call_id: "call-1".to_string(),
@@ -817,7 +732,7 @@ mod tests {
                 assert!(matches!(
                     &actions[0],
                     devo_protocol::parse_command::ParsedCommand::Read { name, .. }
-                    if name == "mod.rs"
+                    if name == "crates/tui/src/mod.rs"
                 ));
             }
             other => panic!("unexpected metadata: {other:?}"),

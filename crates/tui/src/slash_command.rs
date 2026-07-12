@@ -34,27 +34,6 @@ mod tests {
     }
 
     #[test]
-    fn research_slash_command_parses_and_accepts_inline_args() {
-        // Trace: L2-DES-RESEARCH-001
-        // Verifies: /research is discoverable and accepts a question parameter.
-        assert_eq!(
-            "research".parse::<SlashCommand>(),
-            Ok(SlashCommand::Research)
-        );
-        assert!(SlashCommand::Research.supports_inline_args());
-        assert!(!SlashCommand::Research.available_during_task());
-        assert_eq!(
-            SlashCommand::Research.parameter_hint(),
-            Some("<research question>")
-        );
-        assert!(
-            built_in_slash_commands()
-                .iter()
-                .any(|(name, command)| *name == "research" && *command == SlashCommand::Research)
-        );
-    }
-
-    #[test]
     fn agents_slash_command_is_not_available() {
         assert_eq!("agents".parse::<SlashCommand>(), Err(()));
         assert!(

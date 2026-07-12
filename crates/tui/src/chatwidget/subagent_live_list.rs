@@ -1,6 +1,5 @@
 //! Inline live-list rendering for active direct sub-agents.
 
-use devo_core::ItemId;
 use devo_core::SessionId;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -35,15 +34,12 @@ pub(super) struct SubagentLiveListRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SubagentLiveListRowKey {
     Session(SessionId),
-    Research(ItemId),
 }
 
 impl SubagentLiveListRowKey {
     fn session_id(self) -> Option<SessionId> {
-        match self {
-            Self::Session(session_id) => Some(session_id),
-            Self::Research(_) => None,
-        }
+        let Self::Session(session_id) = self;
+        Some(session_id)
     }
 }
 

@@ -64,7 +64,7 @@ pub(super) fn discover_restore_candidates(
         else {
             continue;
         };
-        if !matches!(tool_name.as_str(), "write" | "apply_patch") {
+        if !matches!(tool_name.as_str(), "write" | "apply_patch" | "edit") {
             continue;
         }
         collect_candidates_from_tool_output(output, &mut candidates);

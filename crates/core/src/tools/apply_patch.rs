@@ -114,27 +114,12 @@ pub(crate) async fn exec_apply_patch(
                 )
             }
             PatchKind::Update | PatchKind::Move => {
-                let old_line_count = old_content.lines().count();
-                let new_line_count = new_content.lines().count();
-                let patch_body = change
-                    .hunks
-                    .iter()
-                    .flat_map(|hunk| {
-                        let mut lines = Vec::with_capacity(hunk.lines.len() + 1);
-                        lines.push(format!("@@ -1,{old_line_count} +1,{new_line_count} @@"));
-                        lines.extend(hunk.lines.iter().map(|line| match line {
-                            HunkLine::Context(text) => format!(" {text}"),
-                            HunkLine::Remove(text) => format!("-{text}"),
-                            HunkLine::Add(text) => format!("+{text}"),
-                        }));
-                        lines
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!(
-                    "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}\n",
-                    relative_path, patch_body
-                )
+                let mut diff_options = diffy::DiffOptions::new();
+                diff_options
+                    .set_original_filename(format!("a/{relative_path}"))
+                    .set_modified_filename(format!("b/{relative_path}"));
+                let diffy_patch = diff_options.create_patch(&old_content, &new_content);
+                format!("diff --git a/{0} b/{0}\n{1}", relative_path, diffy_patch)
             }
         };
 

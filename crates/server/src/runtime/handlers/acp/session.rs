@@ -514,13 +514,6 @@ impl ServerRuntime {
                 registry.unregister(session_id);
             }
         }
-        {
-            let mut research_child_agents = self.research_child_agents.lock().await;
-            research_child_agents.remove(&session_id);
-            for child_agents in research_child_agents.values_mut() {
-                child_agents.remove(&session_id);
-            }
-        }
     }
 
     pub(crate) async fn handle_acp_session_set_mode(

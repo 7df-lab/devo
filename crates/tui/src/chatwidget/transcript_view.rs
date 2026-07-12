@@ -344,10 +344,7 @@ impl ChatWidget {
     }
 
     fn text_item_precedes_assistant(kind: TextItemKind) -> bool {
-        matches!(
-            kind,
-            TextItemKind::Reasoning | TextItemKind::ResearchArtifact
-        )
+        matches!(kind, TextItemKind::Reasoning)
     }
 
     fn compare_live_viewport_items(

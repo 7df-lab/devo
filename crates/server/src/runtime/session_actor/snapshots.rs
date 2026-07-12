@@ -51,6 +51,7 @@ pub(crate) struct ShellExecContextSnapshot {
     pub(crate) permission_profile: RuntimePermissionProfile,
     pub(crate) runtime_context: Arc<SessionRuntimeContext>,
     pub(crate) tool_registry: Arc<ToolRegistry>,
+    pub(crate) file_read_ledger: Arc<devo_core::tools::FileReadLedger>,
 }
 
 /// Context for async title generation.
@@ -80,8 +81,9 @@ pub(crate) struct SessionResumeSnapshot {
 }
 
 /// Popped queued turn input for follow-up execution.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct QueuedTurnInputData {
+    pub(crate) queued_input_id: devo_core::PendingInputId,
     pub(crate) display_input: String,
     pub(crate) input_text: String,
     pub(crate) input_messages: Vec<String>,

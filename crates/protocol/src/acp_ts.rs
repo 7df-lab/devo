@@ -186,7 +186,6 @@ pub fn generate_protocol_typescript() -> String {
     push_decl::<SessionHistoryItemKind>(&cfg, &mut output);
     push_decl::<SessionPlanStepStatus>(&cfg, &mut output);
     push_decl::<SessionPlanStep>(&cfg, &mut output);
-    push_decl::<SessionHistoryResearchArtifactType>(&cfg, &mut output);
     push_decl::<SessionHistoryMetadata>(&cfg, &mut output);
     push_decl::<SessionHistoryToolIo>(&cfg, &mut output);
     push_decl::<SessionHistoryItem>(&cfg, &mut output);
@@ -327,7 +326,6 @@ pub fn generate_protocol_typescript() -> String {
     push_decl::<ReferenceSearchFailedPayload>(&cfg, &mut output);
 
     push_decl::<AgentToolPolicy>(&cfg, &mut output);
-    push_decl::<AgentContextMode>(&cfg, &mut output);
     push_decl::<SpawnAgentParams>(&cfg, &mut output);
     push_decl::<SpawnAgentResult>(&cfg, &mut output);
     push_decl::<AgentMessageParams>(&cfg, &mut output);
@@ -341,6 +339,18 @@ pub fn generate_protocol_typescript() -> String {
     push_decl::<ParentAgentInfo>(&cfg, &mut output);
     push_decl::<ParentAgentListResult>(&cfg, &mut output);
     push_decl::<AgentInfo>(&cfg, &mut output);
+    push_decl::<TaskId>(&cfg, &mut output);
+    push_decl::<TaskState>(&cfg, &mut output);
+    push_decl::<TaskKind>(&cfg, &mut output);
+    push_decl::<AgentTaskMetadata>(&cfg, &mut output);
+    push_decl::<CommandTaskMetadata>(&cfg, &mut output);
+    push_decl::<TaskInfo>(&cfg, &mut output);
+    push_decl::<AwaitTaskParams>(&cfg, &mut output);
+    push_decl::<AwaitTaskResult>(&cfg, &mut output);
+    push_decl::<ListTasksParams>(&cfg, &mut output);
+    push_decl::<ListTasksResult>(&cfg, &mut output);
+    push_decl::<CancelTaskParams>(&cfg, &mut output);
+    push_decl::<CancelTaskResult>(&cfg, &mut output);
     push_decl::<AgentListParams>(&cfg, &mut output);
     push_decl::<AgentListResult>(&cfg, &mut output);
     push_decl::<AgentStatusParams>(&cfg, &mut output);
@@ -740,6 +750,18 @@ fn register_devo_protocol_schemas(
     schema::<AgentListResult>(schemas);
     schema::<AgentStatusParams>(schemas);
     schema::<AgentInfo>(schemas);
+    schema::<TaskId>(schemas);
+    schema::<TaskState>(schemas);
+    schema::<TaskKind>(schemas);
+    schema::<AgentTaskMetadata>(schemas);
+    schema::<CommandTaskMetadata>(schemas);
+    schema::<TaskInfo>(schemas);
+    schema::<AwaitTaskParams>(schemas);
+    schema::<AwaitTaskResult>(schemas);
+    schema::<ListTasksParams>(schemas);
+    schema::<ListTasksResult>(schemas);
+    schema::<CancelTaskParams>(schemas);
+    schema::<CancelTaskResult>(schemas);
     schema::<CloseAgentParams>(schemas);
     schema::<CloseAgentResult>(schemas);
     schema::<ProviderVendorListParams>(schemas);

@@ -196,7 +196,7 @@ fn assert_available_command_names(message: &serde_json::Value) -> Result<()> {
         .iter()
         .filter_map(|command| command["name"].as_str())
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["compact", "goal", "research"]);
+    assert_eq!(names, vec!["compact", "goal"]);
     Ok(())
 }
 

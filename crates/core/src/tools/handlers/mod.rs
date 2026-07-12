@@ -3,7 +3,9 @@ mod apply_patch;
 mod bash;
 #[cfg(feature = "code-search")]
 mod code_search;
+mod edit;
 mod exec_command;
+mod file_change_metadata;
 mod file_write;
 mod glob;
 mod goal_update;
@@ -21,11 +23,12 @@ mod tool_search;
 mod webfetch;
 mod websearch;
 
-pub use agent::register_agent_tools;
+pub(crate) use agent::register_agent_tools;
 pub use apply_patch::ApplyPatchHandler;
 pub use bash::BashHandler;
 #[cfg(feature = "code-search")]
 pub use code_search::CodeSearchHandler;
+pub use edit::EditHandler;
 pub use exec_command::{ExecCommandHandler, WriteStdinHandler};
 pub use file_write::WriteHandler;
 pub use glob::GlobHandler;
@@ -120,11 +123,14 @@ fn build_registry_from_builder(
     mcp_handlers: Vec<(String, Arc<dyn ToolHandler>)>,
     config: &ToolPlanConfig,
 ) -> crate::registry::ToolRegistry {
-    register_agent_tools(&mut builder);
+    let process_store = Arc::new(ProcessStore::new());
+    let background_tasks = Arc::new(crate::tools::background_tasks::BackgroundTaskStore::new(
+        Arc::clone(&process_store),
+    ));
+    register_agent_tools(&mut builder, Arc::clone(&background_tasks));
     builder.push_spec(goal_update_spec());
     builder.push_spec(tool_search_spec());
 
-    let process_store = Arc::new(ProcessStore::new());
     let loaded_deferred_tools = Arc::new(std::sync::Mutex::new(LoadedDeferredTools::default()));
     builder.set_unified_exec_store(Arc::clone(&process_store));
     builder.set_loaded_deferred_tools(Arc::clone(&loaded_deferred_tools));
@@ -134,12 +140,18 @@ fn build_registry_from_builder(
         let handler: Arc<dyn ToolHandler> = match kind {
             ToolHandlerKind::Bash => Arc::new(BashHandler::new()),
             #[cfg(feature = "code-search")]
-            ToolHandlerKind::CodeSearch => Arc::new(CodeSearchHandler::new_with_network_proxy(
-                devo_network_proxy::NetworkProxyConfig {
-                    proxy_url: config.network_proxy.clone(),
-                    no_proxy: config.network_no_proxy.clone(),
-                },
-            )),
+            ToolHandlerKind::CodeSearch => {
+                let service = Arc::new(
+                    devo_code_search::CodeSearchService::production_with_network_proxy(
+                        devo_network_proxy::NetworkProxyConfig {
+                            proxy_url: config.network_proxy.clone(),
+                            no_proxy: config.network_no_proxy.clone(),
+                        },
+                    ),
+                );
+                builder.set_code_search_service(Arc::clone(&service));
+                Arc::new(CodeSearchHandler::with_service(service))
+            }
             // When the `code-search` feature is disabled the planner never emits
             // this handler kind (see registry_plan), so the arm is unreachable.
             #[cfg(not(feature = "code-search"))]
@@ -149,6 +161,7 @@ fn build_registry_from_builder(
             ToolHandlerKind::ShellCommand => Arc::new(ShellCommandHandler::new()),
             ToolHandlerKind::Read => Arc::new(ReadHandler::new()),
             ToolHandlerKind::Write => Arc::new(WriteHandler::new()),
+            ToolHandlerKind::Edit => Arc::new(EditHandler::new()),
             ToolHandlerKind::Glob => Arc::new(GlobHandler::new()),
             ToolHandlerKind::Grep => Arc::new(GrepHandler::new()),
             ToolHandlerKind::ApplyPatch => Arc::new(ApplyPatchHandler::new()),
@@ -159,9 +172,10 @@ fn build_registry_from_builder(
             ToolHandlerKind::Skill => Arc::new(SkillHandler::new()),
             ToolHandlerKind::Lsp => Arc::new(LspHandler::new()),
             ToolHandlerKind::Invalid => Arc::new(InvalidHandler::new()),
-            ToolHandlerKind::ExecCommand => {
-                Arc::new(ExecCommandHandler::new(Arc::clone(&process_store)))
-            }
+            ToolHandlerKind::ExecCommand => Arc::new(ExecCommandHandler::new(
+                Arc::clone(&process_store),
+                Arc::clone(&background_tasks),
+            )),
             ToolHandlerKind::WriteStdin => {
                 Arc::new(WriteStdinHandler::new(Arc::clone(&process_store)))
             }
@@ -204,6 +218,7 @@ fn build_registry_from_builder(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_spec::ToolExecutionMode;
 
     #[test]
     fn default_registry_exposes_shell_command_and_accepts_bash_alias() {
@@ -215,6 +230,27 @@ mod tests {
         assert!(registry.get("bash").is_some());
     }
 
+    #[cfg(feature = "code-search")]
+    #[test]
+    fn registry_exposes_the_code_search_handlers_shared_service() {
+        let registry = build_registry_from_plan(&ToolPlanConfig::default());
+
+        assert!(registry.get("code_search").is_some());
+        assert!(registry.code_search_service().is_some());
+    }
+
+    #[cfg(feature = "code-search")]
+    #[test]
+    fn registry_has_no_code_search_service_when_the_tool_is_disabled() {
+        let registry = build_registry_from_plan(&ToolPlanConfig {
+            code_search: false,
+            ..ToolPlanConfig::default()
+        });
+
+        assert!(registry.get("code_search").is_none());
+        assert!(registry.code_search_service().is_none());
+    }
+
     #[test]
     fn default_registry_exposes_update_goal_tool() {
         // Trace: L2-DES-GOAL-001
@@ -222,5 +258,16 @@ mod tests {
 
         assert!(registry.spec("update_goal").is_some());
         assert!(registry.get("update_goal").is_some());
+    }
+
+    #[test]
+    fn default_registry_exposes_edit_tool() {
+        let registry = build_registry_from_plan(&ToolPlanConfig::default());
+
+        assert!(registry.spec("edit").is_some());
+        assert!(registry.get("edit").is_some());
+        let spec = registry.spec("edit").expect("edit spec");
+        assert_eq!(spec.execution_mode, ToolExecutionMode::Mutating);
+        assert!(!spec.supports_parallel);
     }
 }

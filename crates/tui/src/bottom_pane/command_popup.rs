@@ -337,7 +337,6 @@ mod tests {
                 "clear",
                 "diff",
                 "goal",
-                "research",
                 "btw",
                 "exit",
             ]

@@ -287,11 +287,11 @@ mod tests {
             },
             cancel_token: CancellationToken::new(),
             agent_scope: crate::contracts::ToolAgentScope::Parent,
-            agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
             client_filesystem: None,
             client_terminal: None,
+            file_read_ledger: None,
             network_proxy: None,
             network_no_proxy: None,
         }

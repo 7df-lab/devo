@@ -190,16 +190,6 @@ pub(crate) enum SessionCommand {
         state: Box<SessionActorState>,
         reply: oneshot::Sender<()>,
     },
-    /// Install [`TurnInlineState`] for an out-of-actor turn (research) and
-    /// return the session stream so the runtime can register `active_stream`.
-    BeginInlineTurn {
-        turn: TurnMetadata,
-        reply: oneshot::Sender<Arc<tokio::sync::Mutex<super::state::SessionStreamState>>>,
-    },
-    /// Merge inline turn mutations back into actor state after an out-of-actor turn.
-    EndInlineTurn {
-        reply: oneshot::Sender<()>,
-    },
     PersistTurnLine {
         runtime: Arc<crate::runtime::ServerRuntime>,
         turn: TurnMetadata,

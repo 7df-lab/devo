@@ -192,24 +192,18 @@ pub(crate) enum WorkerEvent {
         phase: ProviderRetryPhase,
         message: String,
     },
-    /// A streamed assistant, reasoning, or research artifact text item started.
-    TextItemStarted {
-        item_id: ItemId,
-        kind: TextItemKind,
-        research: Option<ResearchArtifactMetadata>,
-    },
+    /// A streamed assistant or reasoning text item started.
+    TextItemStarted { item_id: ItemId, kind: TextItemKind },
     /// Incremental text for a streamed assistant or reasoning item.
     TextItemDelta {
         item_id: ItemId,
         kind: TextItemKind,
-        research: Option<ResearchArtifactMetadata>,
         delta: String,
     },
-    /// A streamed assistant, reasoning, or research artifact text item completed.
+    /// A streamed assistant or reasoning text item completed.
     TextItemCompleted {
         item_id: ItemId,
         kind: TextItemKind,
-        research: Option<ResearchArtifactMetadata>,
         final_text: String,
     },
     /// A streamed Plan Mode proposal item started.
@@ -303,10 +297,12 @@ pub(crate) enum WorkerEvent {
     },
     /// A structured patch/edit summary derived from apply_patch output.
     PatchApplied {
+        tool_use_id: String,
         changes: HashMap<PathBuf, FileChange>,
     },
     /// A structured patch/edit summary with paired tool input for Ctrl+T.
     PatchAppliedIo {
+        tool_use_id: String,
         tool_name: String,
         input: serde_json::Value,
         changes: HashMap<PathBuf, FileChange>,
@@ -374,6 +370,11 @@ pub(crate) enum WorkerEvent {
         last_query_input_tokens: usize,
         /// Estimated prompt tokens for the just-completed request.
         prompt_token_estimate: usize,
+    },
+    /// The interrupt request could not be delivered or accepted.
+    InterruptFailed {
+        /// Human-readable failure reason to restore into the working status.
+        message: String,
     },
     /// The current turn failed.
     TurnFailed {
@@ -483,7 +484,7 @@ pub(crate) enum WorkerEvent {
     SkillsListed {
         /// Pre-rendered skill summary shown in the bottom panel.
         body: String,
-        /// Structured skill metadata used by the composer `$skill` popup.
+        /// Structured skill metadata used by the composer `@skill` popup.
         skills: Vec<SkillMetadata>,
         /// Whether this list should be rendered into the transcript.
         show_in_transcript: bool,
@@ -633,19 +634,6 @@ pub(crate) enum WorkerEvent {
 pub(crate) enum TextItemKind {
     Assistant,
     Reasoning,
-    ResearchArtifact,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResearchArtifactMetadata {
-    pub(crate) artifact_type: String,
-    pub(crate) title: String,
-}
-
-impl ResearchArtifactMetadata {
-    pub(crate) fn is_delegated_finding(&self) -> bool {
-        self.artifact_type.eq_ignore_ascii_case("finding")
-    }
 }
 
 /// One rendered transcript item shown in the history pane.

@@ -423,21 +423,6 @@ Supported modes:
 - `local`: expose the existing local `webfetch` function tool. This is the
   default to preserve the existing local fetch behavior.
 
-## Deep Research
-
-`[research]` controls the server-owned `/research` workflow. The workflow reuses
-the active session model, provider, reasoning effort, `web_search`, and `web_fetch`
-configuration for all stages.
-
-Supported keys:
-
-- `max_researcher_iterations` (default `5`): search/fetch iteration guidance
-  passed to researcher prompts.
-- `fetch_summary_threshold_chars` (default `24000`): local `webfetch` text
-  length above which research summarizes the fetched page for downstream stages.
-- `max_summary_chars` (default `8000`): target cap for oversized webpage
-  summaries.
-
 ## Provider Resolution
 
 `resolve_provider_settings_from_config_and_auth` chooses the active model

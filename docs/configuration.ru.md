@@ -62,6 +62,8 @@ default_reasoning_effort = "high"
 `<workspace>/.devo/models.json`. В `models.json` поле `provider` является
 метаданными wire API по умолчанию для модели; фактический endpoint по-прежнему
 выбирается полем `provider` в `config.toml`.
+Если `base_instructions` опущено, Devo использует встроенные base instructions по
+умолчанию. Явная пустая строка (`""`) означает, что у модели нет base instructions.
 
 Пример записи `models.json`:
 

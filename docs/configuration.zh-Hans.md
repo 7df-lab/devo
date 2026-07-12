@@ -59,6 +59,8 @@ default_reasoning_effort = "high"
 项目级覆盖也可以放在 `<workspace>/.devo/models.json`。
 在 `models.json` 中，`provider` 是该模型的默认 wire API 元数据；实际端点仍由
 `config.toml` 中的 `provider` 字段选择。
+若省略 `base_instructions`，Devo 会回退到内置默认 base instructions；显式写空字符串
+（`""`）表示该模型不使用 base instructions。
 
 示例 `models.json` 条目：
 

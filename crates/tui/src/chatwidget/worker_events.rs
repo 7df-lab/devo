@@ -146,6 +146,9 @@ impl ChatWidget {
                 self.stream_chunking_policy.reset();
                 self.bottom_pane.set_task_running(true);
             }
+            WorkerEvent::InterruptFailed { message } => {
+                self.interrupt_failed(message);
+            }
             WorkerEvent::ProviderRetryStatus {
                 turn_id,
                 attempt,
@@ -180,53 +183,34 @@ impl ChatWidget {
                 }
                 self.frame_requester.schedule_frame();
             }
-            WorkerEvent::TextItemStarted {
-                item_id,
-                kind,
-                research,
-            } => {
+            WorkerEvent::TextItemStarted { item_id, kind } => {
                 self.flush_active_cell();
-                self.start_text_item(ActiveTextItemId::Server(item_id), kind, research);
+                self.start_text_item(ActiveTextItemId::Server(item_id), kind);
                 self.set_status_message(match kind {
                     TextItemKind::Assistant => "Generating",
                     TextItemKind::Reasoning => "Thinking",
-                    TextItemKind::ResearchArtifact => "Researching",
                 });
             }
             WorkerEvent::TextItemDelta {
                 item_id,
                 kind,
-                research,
                 delta,
             } => {
-                self.push_text_item_delta(
-                    ActiveTextItemId::Server(item_id),
-                    kind,
-                    research,
-                    &delta,
-                );
+                self.push_text_item_delta(ActiveTextItemId::Server(item_id), kind, &delta);
                 self.set_status_message(match kind {
                     TextItemKind::Assistant => "Generating",
                     TextItemKind::Reasoning => "Thinking",
-                    TextItemKind::ResearchArtifact => "Researching",
                 });
             }
             WorkerEvent::TextItemCompleted {
                 item_id,
                 kind,
-                research,
                 final_text,
             } => {
-                self.complete_text_item(
-                    ActiveTextItemId::Server(item_id),
-                    kind,
-                    research,
-                    final_text,
-                );
+                self.complete_text_item(ActiveTextItemId::Server(item_id), kind, final_text);
                 self.set_status_message(match kind {
                     TextItemKind::Assistant => "Generating",
                     TextItemKind::Reasoning => "Thought",
-                    TextItemKind::ResearchArtifact => "Researching",
                 });
             }
             WorkerEvent::ProposedPlanStarted { item_id } => {
@@ -247,7 +231,6 @@ impl ChatWidget {
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Assistant),
                         TextItemKind::Assistant,
-                        None,
                         &text,
                     );
                 }
@@ -259,7 +242,6 @@ impl ChatWidget {
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Reasoning),
                         TextItemKind::Reasoning,
-                        None,
                         &text,
                     );
                 }
@@ -276,7 +258,6 @@ impl ChatWidget {
                     self.complete_text_item(
                         ActiveTextItemId::Legacy(TextItemKind::Assistant),
                         TextItemKind::Assistant,
-                        None,
                         text,
                     );
                 }
@@ -287,7 +268,6 @@ impl ChatWidget {
                     self.complete_text_item(
                         ActiveTextItemId::Legacy(TextItemKind::Reasoning),
                         TextItemKind::Reasoning,
-                        None,
                         text,
                     );
                 }
@@ -300,7 +280,8 @@ impl ChatWidget {
                 parsed_commands,
             } => {
                 let command = crate::exec_command::split_command_string(&summary);
-                let parsed = parsed_commands.unwrap_or_else(|| parse_command(&command));
+                let mut parsed = parsed_commands.unwrap_or_else(|| parse_command(&command));
+                crate::read_display::normalize_read_actions(&mut parsed, &self.session.cwd);
                 let exec_like = !parsed.is_empty()
                     && parsed.iter().all(|parsed| {
                         !matches!(
@@ -352,6 +333,13 @@ impl ChatWidget {
                         ..tool_call
                     });
                 } else {
+                    // Remove abandoned preparing entries from pending_tool_calls.
+                    // When the agent sends a preparing ToolCall for write/apply_patch
+                    // but then switches to a different tool, the preparing entry
+                    // was never added to active_tool_calls and would never be
+                    // cleaned up by ToolResultIo/ToolResult (which match by tool_use_id).
+                    self.pending_tool_calls
+                        .retain(|pc| self.active_tool_calls.contains_key(&pc.tool_use_id));
                     self.active_tool_calls
                         .insert(tool_use_id.clone(), tool_call);
                     let pending_title =
@@ -422,8 +410,12 @@ impl ChatWidget {
                 command,
                 input,
                 source,
-                command_actions,
+                mut command_actions,
             } => {
+                crate::read_display::normalize_read_actions(
+                    &mut command_actions,
+                    &self.session.cwd,
+                );
                 let command_parts = crate::exec_command::split_command_string(&command);
                 self.start_command_execution_cell(
                     tool_use_id,
@@ -437,8 +429,12 @@ impl ChatWidget {
             WorkerEvent::ToolCallUpdated {
                 tool_use_id,
                 summary,
-                parsed_commands,
+                mut parsed_commands,
             } => {
+                crate::read_display::normalize_read_actions(
+                    &mut parsed_commands,
+                    &self.session.cwd,
+                );
                 if let Some(tool_call) = self.active_tool_calls.get_mut(&tool_use_id) {
                     tool_call.title = summary.clone();
                     tool_call.exec_like = true;
@@ -762,11 +758,14 @@ impl ChatWidget {
                 self.set_status_message("Plan updated");
             }
             WorkerEvent::PatchAppliedIo {
+                tool_use_id,
                 tool_name,
                 input,
                 changes,
             } => {
-                self.pending_tool_calls.clear();
+                self.active_tool_calls.remove(&tool_use_id);
+                self.pending_tool_calls
+                    .retain(|pending| pending.tool_use_id != tool_use_id);
                 self.add_to_history(FileChangeToolIoCell::new(
                     Some(Self::ran_tool_line(&tool_name)),
                     tool_name,
@@ -776,8 +775,13 @@ impl ChatWidget {
                 ));
                 self.set_status_message("Patch applied");
             }
-            WorkerEvent::PatchApplied { changes } => {
-                self.pending_tool_calls.clear();
+            WorkerEvent::PatchApplied {
+                tool_use_id,
+                changes,
+            } => {
+                self.active_tool_calls.remove(&tool_use_id);
+                self.pending_tool_calls
+                    .retain(|pending| pending.tool_use_id != tool_use_id);
                 self.add_to_history(history_cell::new_patch_event(changes, &self.session.cwd));
                 self.set_status_message("Patch applied");
             }
@@ -877,7 +881,6 @@ impl ChatWidget {
                 prompt_token_estimate,
             } => {
                 let was_interrupted = stop_reason.contains("Interrupted");
-                self.active_turn_is_research = false;
                 self.commit_active_streams(DotStatus::Completed);
                 if was_interrupted
                     && let Some(cell) = self
@@ -893,6 +896,7 @@ impl ChatWidget {
                 self.pending_approval = None;
                 self.committed_server_assistant_in_turn = false;
                 self.busy = false;
+                self.active_turn_id = None;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
@@ -954,13 +958,13 @@ impl ChatWidget {
             } => {
                 self.resume_browser_loading = false;
                 self.finish_session_resume();
-                self.active_turn_is_research = false;
                 self.commit_active_streams(DotStatus::Failed);
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
                 self.pending_approval = None;
                 self.committed_server_assistant_in_turn = false;
                 self.busy = false;
+                self.active_turn_id = None;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;

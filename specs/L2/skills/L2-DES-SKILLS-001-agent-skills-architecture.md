@@ -1,6 +1,6 @@
 ---
 artifact_id: L2-DES-SKILLS-001
-revision: 1
+revision: 2
 status: Draft
 active_baseline: no
 supersedes:
@@ -295,6 +295,17 @@ Errors should be actionable. For example, a missing explicitly requested skill s
 - Skill activation is bounded, auditable, and replayable.
 - Duplicate skill names are resolved deterministically or reported as conflicts.
 
+## Bundled Workflow Skills
+
+Complex optional workflows should be shipped as built-in skills when they can be
+expressed through ordinary model turns and existing tools. The bundled
+`deep-research` skill follows this rule: explicit `@deep-research` activation
+injects a source-backed investigation workflow into a regular turn, and the
+agent may use existing web, code-search, and coordination tools according to
+their normal availability and safety policy. It does not define a dedicated
+turn kind, protocol event family, persistence projection, slash command, or
+configuration section.
+
 ## Traceability
 
 | Relationship | Target ID | Target Revision | Target Path | Rationale |
@@ -327,3 +338,4 @@ Errors should be actionable. For example, a missing explicitly requested skill s
 |---:|---|---|---|---|
 | 1 | 2026-05-25 | Assistant | Initial | Initial Agent Skills architecture based on Agent Skills reference documentation and product requirements. |
 | 1 | 2026-05-25 | Human | Refinement | Linked skill configuration to the concrete `config.toml` schema. |
+| 2 | 2026-07-11 | Assistant | Update | Defines deep research as a bundled regular-turn workflow skill. |

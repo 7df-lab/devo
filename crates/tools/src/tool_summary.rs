@@ -100,6 +100,11 @@ pub fn tool_summary(name: &str, input: &serde_json::Value, cwd: &Path) -> String
             let rel = make_relative(cwd, path);
             format!("write: {rel}")
         }
+        "edit" => {
+            let path = string_arg(input, "filePath", "");
+            let rel = make_relative(cwd, path);
+            format!("edit: {rel}")
+        }
         "grep" => {
             let pattern = string_arg(input, "pattern", "");
             let path = string_arg(input, "path", ".");

@@ -11,6 +11,7 @@ use devo_config::AppConfig;
 const BASH_DESCRIPTION: &str = include_str!("bash.txt");
 const READ_DESCRIPTION: &str = include_str!("read.txt");
 const WRITE_DESCRIPTION: &str = include_str!("write.txt");
+const EDIT_DESCRIPTION: &str = include_str!("edit.txt");
 const GLOB_DESCRIPTION: &str = include_str!("glob.txt");
 const GREP_DESCRIPTION: &str = include_str!("grep.txt");
 const WEBFETCH_DESCRIPTION: &str = include_str!("webfetch.txt");
@@ -216,6 +217,41 @@ fn write_schema() -> JsonSchema {
             ),
         ]),
         Some(vec!["filePath".to_string(), "content".to_string()]),
+        Some(false),
+    )
+}
+
+fn edit_schema() -> JsonSchema {
+    JsonSchema::object(
+        BTreeMap::from([
+            (
+                "filePath".to_string(),
+                JsonSchema::string(Some("The absolute path to the file to modify")),
+            ),
+            (
+                "oldString".to_string(),
+                JsonSchema::string(Some(
+                    "The exact text to replace. Must be non-empty and unique unless replaceAll is true.",
+                )),
+            ),
+            (
+                "newString".to_string(),
+                JsonSchema::string(Some(
+                    "The text to replace oldString with. May be empty to delete text.",
+                )),
+            ),
+            (
+                "replaceAll".to_string(),
+                JsonSchema::boolean(Some(
+                    "Replace every occurrence of oldString. Defaults to false.",
+                )),
+            ),
+        ]),
+        Some(vec![
+            "filePath".to_string(),
+            "oldString".to_string(),
+            "newString".to_string(),
+        ]),
         Some(false),
     )
 }
@@ -585,6 +621,12 @@ fn exec_command_schema() -> JsonSchema {
                 )),
             ),
             (
+                "execution_mode".to_string(),
+                JsonSchema::string(Some(
+                    "attached (default) returns output or a process session; background returns a task id immediately.",
+                )),
+            ),
+            (
                 "yield_time_ms".to_string(),
                 JsonSchema::number(Some(
                     "How long to wait (in ms) for output before returning. Default 10000.",
@@ -705,6 +747,23 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
             supports_streaming: None,
         },
         ToolHandlerKind::Write,
+    );
+
+    plan.push(
+        ToolSpec {
+            name: "edit".to_string(),
+            description: EDIT_DESCRIPTION.to_string(),
+            input_schema: edit_schema(),
+            output_mode: ToolOutputMode::Mixed,
+            execution_mode: ToolExecutionMode::Mutating,
+            capability_tags: vec![ToolCapabilityTag::WriteFiles],
+            supports_parallel: false,
+            preparation_feedback: ToolPreparationFeedback::LiveOnly,
+            display_name: None,
+            supports_cancellation: None,
+            supports_streaming: None,
+        },
+        ToolHandlerKind::Edit,
     );
 
     let find_description = GLOB_DESCRIPTION;
@@ -882,7 +941,7 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
             ToolSpec {
                 name: "exec_command".to_string(),
                 description:
-                    "Run a shell command in a PTY and return output. If the process runs longer than yield_time_ms, a session_id is returned so you can interact with the process using write_stdin."
+                    "Run a shell command in attached or background mode. Attached mode returns output or a process session for write_stdin; background mode returns a task id for await_task, list_tasks, and cancel_task."
                         .to_string(),
                 input_schema: exec_command_schema(),
                 output_mode: ToolOutputMode::Mixed,
@@ -974,6 +1033,12 @@ mod tests {
         let schema = exec_command_schema();
         let required = schema.required.as_ref().unwrap();
         assert!(required.contains(&"cmd".to_string()));
+        assert!(
+            schema
+                .properties
+                .as_ref()
+                .is_some_and(|properties| properties.contains_key("execution_mode"))
+        );
     }
 
     #[test]

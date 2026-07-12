@@ -272,6 +272,7 @@ fn turn_projection_preserves_turn_status_vocabulary() {
         request_thinking: None,
         input_token_estimate: None,
         usage: None,
+        latest_query_usage: None,
         stop_reason: None,
         failure_reason: None,
         session_context: None,

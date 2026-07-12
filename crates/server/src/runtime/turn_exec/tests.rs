@@ -50,6 +50,7 @@ fn command_progress_uses_command_execution_item_id() {
 fn file_change_tool_detection_matches_apply_patch_and_write() {
     assert!(is_file_change_tool("apply_patch"));
     assert!(is_file_change_tool("write"));
+    assert!(is_file_change_tool("edit"));
     assert!(!is_file_change_tool("read"));
 }
 
@@ -85,7 +86,7 @@ fn read_tool_start_item_contains_live_read_action() {
             parameters: input,
             command_actions: vec![devo_protocol::parse_command::ParsedCommand::Read {
                 cmd: "read crates/tui/src/mod.rs".to_string(),
-                name: "mod.rs".to_string(),
+                name: "crates/tui/src/mod.rs".to_string(),
                 path: std::path::PathBuf::from("crates/tui/src/mod.rs"),
             }],
         }
@@ -282,7 +283,7 @@ fn command_actions_from_read_tool_input_builds_read_action() {
         actions,
         vec![devo_protocol::parse_command::ParsedCommand::Read {
             cmd: "read crates/tui/src/mod.rs".to_string(),
-            name: "mod.rs".to_string(),
+            name: "crates/tui/src/mod.rs".to_string(),
             path: std::path::PathBuf::from("crates/tui/src/mod.rs"),
         }]
     );
@@ -307,7 +308,7 @@ fn command_actions_from_read_tool_result_summary_recovers_final_path() {
         actions,
         vec![devo_protocol::parse_command::ParsedCommand::Read {
             cmd: "read crates/tui/src/mod.rs".to_string(),
-            name: "mod.rs".to_string(),
+            name: "crates/tui/src/mod.rs".to_string(),
             path: std::path::PathBuf::from("crates/tui/src/mod.rs"),
         }]
     );

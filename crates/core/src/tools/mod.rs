@@ -48,7 +48,8 @@ pub use deferred_loading::*;
 pub use devo_tools::{
     AgentToolCoordinator, ClientFilesystem, ClientTerminal, ClientTerminalCreate,
     ClientTerminalCreateRequest, ClientTerminalEnv, ClientTerminalExitStatus, ClientTerminalOutput,
-    ClientTerminalRequest, ClientTextFileRead, ClientTextFileWrite,
+    ClientTerminalRequest, ClientTextFileRead, ClientTextFileWrite, FileReadFreshnessError,
+    FileReadLedger,
 };
 pub use errors::*;
 pub use events::ToolEvent;
@@ -66,3 +67,4 @@ pub use tool_spec::*;
 pub fn create_default_tool_registry() -> registry::ToolRegistry {
     handlers::build_registry_from_plan(&ToolPlanConfig::default())
 }
+pub(crate) mod background_tasks;

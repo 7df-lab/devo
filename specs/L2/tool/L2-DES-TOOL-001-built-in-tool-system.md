@@ -170,6 +170,7 @@ The semantic retrieval tool should:
 - Chunk supported programming and structured config languages with tree-sitter AST boundaries, while using line-based fallback for docs, data, unsupported language labels, parser errors, or empty AST output.
 - Cache indexes locally when possible, while invalidating them when the indexed file manifest, content mode, or embedding model changes.
 - Refresh cached indexes incrementally when possible, re-embedding changed files while reusing unchanged file records, and use watcher-backed warm reuse only when the watched root is clean and within a bounded safety interval.
+- Warm the default code-only index on a dedicated background thread when a root session establishes its authoritative workspace. Session readiness must not wait for indexing, concurrent searches must share the in-flight build, and warmup failure must remain retryable by the first foreground search.
 - Store local vector cache data in compact binary form where practical, and use approximate nearest-neighbor candidate search plus exact reranking for large semantic indexes while preserving exact fallbacks for filtered or small searches.
 - Return a structured unavailable result when the embedding model cannot be loaded or cached, rather than fabricating semantic results.
 
@@ -329,6 +330,10 @@ Output must be bounded so noisy commands, large files, web content, or backgroun
 ## Background Processes
 
 Command tools may start processes that continue after the originating tool call returns. Such processes should be registered with the tool supervisor and exposed through `L2-DES-AGENT-002` and `L2-DES-APP-003`.
+
+`exec_command.execution_mode` accepts `attached` (default) or `background`. Attached execution preserves the interactive `session_id` and `write_stdin` contract. Background execution returns a `TaskId` immediately and registers a command task that is visible through the shared `list_tasks`, `await_task`, and `cancel_task` tools. Command tasks use the same public states as agent tasks: `waiting_approval`, `running`, `completed`, `failed`, and `canceled`.
+
+`await_task` returns background command output only after terminal completion; a deadline expiry returns task metadata without partial command output. `cancel_task` terminates the process, removes it from the live process store, and retains canceled task metadata for subsequent inspection.
 
 The built-in tool system should record:
 

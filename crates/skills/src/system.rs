@@ -150,11 +150,13 @@ mod tests {
     use std::fs;
 
     use pretty_assertions::assert_eq;
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     use super::SYSTEM_SKILLS_DIR;
     use super::collect_fingerprint_items;
+    use super::install_system_skills;
     use super::read_marker;
+    use super::system_cache_root_dir;
 
     #[test]
     fn fingerprint_traverses_nested_entries() {
@@ -173,7 +175,28 @@ mod tests {
                 .binary_search(&"skill-creator/scripts/init_skill.py".to_string())
                 .is_ok()
         );
+        assert!(
+            paths
+                .binary_search(&"deep-research/SKILL.md".to_string())
+                .is_ok()
+        );
         assert_eq!(paths.is_empty(), false);
+    }
+
+    #[test]
+    fn bundled_deep_research_skill_installs_with_interface_metadata() {
+        let devo_home = TempDir::new().expect("devo home");
+
+        install_system_skills(devo_home.path()).expect("install system skills");
+
+        let skill_root = system_cache_root_dir(devo_home.path()).join("deep-research");
+        assert_eq!(
+            [
+                skill_root.join("SKILL.md").is_file(),
+                skill_root.join("agents/openai.yaml").is_file(),
+            ],
+            [true, true]
+        );
     }
 
     #[test]

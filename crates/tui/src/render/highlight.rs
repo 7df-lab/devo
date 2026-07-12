@@ -106,7 +106,7 @@ pub(crate) fn validate_theme_name(name: Option<&str>, devo_home: Option<&Path>) 
     let name = name?;
     let custom_theme_path_display = devo_home
         .map(|home| custom_theme_path(name, home).display().to_string())
-        .unwrap_or_else(|| format!("$CLAWR_HOME/themes/{name}.tmTheme"));
+        .unwrap_or_else(|| format!("$DEVO_HOME/themes/{name}.tmTheme"));
     // Bundled themes always resolve.
     if parse_theme_name(name).is_some() {
         return None;

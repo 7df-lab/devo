@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use devo_protocol::AgentContextMode;
 use devo_protocol::CollaborationMode;
 use devo_protocol::RequestUserInputArgs;
 use devo_protocol::RequestUserInputQuestion;
@@ -50,12 +49,8 @@ impl ToolHandler for QuestionHandler {
         input: serde_json::Value,
         _progress: Option<ToolProgressSender>,
     ) -> Result<ToolResult, ToolCallError> {
-        if ctx.collaboration_mode != CollaborationMode::Plan
-            && ctx.agent_context_mode != AgentContextMode::DeepResearch
-        {
-            return Err(ToolCallError::BlockedByMode(
-                "plan mode or deep research".to_string(),
-            ));
+        if ctx.collaboration_mode != CollaborationMode::Plan {
+            return Err(ToolCallError::BlockedByMode("plan mode".to_string()));
         }
 
         let args = request_user_input_args(input)?;

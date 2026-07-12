@@ -93,11 +93,11 @@ pub(crate) async fn run_prompt(
             turn_id: None,
             cwd: cwd.clone(),
             agent_scope: devo_core::tools::ToolAgentScope::Parent,
-            agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
             client_filesystem: None,
             client_terminal: None,
+            file_read_ledger: std::sync::Arc::new(devo_core::tools::FileReadLedger::new()),
             local_web_search: None,
             hooks: (!app_config.hooks.is_empty()).then(|| devo_core::HookRuntimeContext {
                 runner: devo_core::HookRunner::new(app_config.hooks.clone()),

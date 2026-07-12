@@ -39,7 +39,6 @@ mod reference_popup;
 mod request_user_input_overlay;
 pub(crate) mod scroll_state;
 mod selection_popup_common;
-mod skill_popup;
 pub(crate) mod slash_commands;
 pub(crate) mod textarea;
 mod theme_picker;
@@ -230,6 +229,7 @@ pub(crate) struct BottomPane {
     subagent_hint_visible: bool,
     is_task_running: bool,
     pending_interrupt_esc: bool,
+    interrupt_requested: bool,
     animations_enabled: bool,
     has_input_focus: bool,
     allow_empty_submit: bool,
@@ -274,6 +274,7 @@ impl BottomPane {
             subagent_hint_visible: false,
             is_task_running: false,
             pending_interrupt_esc: false,
+            interrupt_requested: false,
             animations_enabled,
             has_input_focus,
             allow_empty_submit: false,
@@ -334,12 +335,12 @@ impl BottomPane {
         if key.code == KeyCode::Esc
             && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
             && self.is_task_running
+            && !self.interrupt_requested
             && !self.composer.popup_active()
         {
             if self.pending_interrupt_esc {
                 self.pending_interrupt_esc = false;
                 self.app_event_tx.send(AppEvent::Interrupt);
-                self.restore_status_indicator();
             } else {
                 self.pending_interrupt_esc = true;
                 if let Some(status) = self.status.as_mut() {
@@ -588,6 +589,7 @@ impl BottomPane {
         self.is_task_running = running;
         if running {
             self.pending_interrupt_esc = false;
+            self.interrupt_requested = false;
             if !was_running {
                 if self.status.is_none() {
                     self.status = Some(StatusIndicatorWidget::new(
@@ -603,23 +605,40 @@ impl BottomPane {
                 self.request_redraw();
             }
         } else {
+            self.interrupt_requested = false;
             self.hide_status_indicator();
         }
+    }
+
+    pub(crate) fn begin_interrupt(&mut self) {
+        self.interrupt_requested = true;
+        if let Some(status) = self.status.as_mut() {
+            status.update_header("Stopping…".to_string());
+            status.set_interrupt_hint_visible(false);
+            status.set_working_tip_visible(false);
+            status.pause_timer();
+            status.update_inline_message(None);
+        }
+        self.request_redraw();
+    }
+
+    pub(crate) fn interrupt_failed(&mut self) {
+        self.interrupt_requested = false;
+        if let Some(status) = self.status.as_mut() {
+            status.update_header("Working".to_string());
+            status.set_interrupt_hint_visible(true);
+            status.set_working_tip_visible(true);
+            status.resume_timer();
+        }
+        self.request_redraw();
     }
 
     pub(crate) fn hide_status_indicator(&mut self) {
         if self.status.take().is_some() {
             self.pending_interrupt_esc = false;
+            self.interrupt_requested = false;
             self.sync_subagent_hint_surface();
             self.request_redraw();
-        }
-    }
-
-    fn restore_status_indicator(&mut self) {
-        self.pending_interrupt_esc = false;
-        if let Some(status) = self.status.as_mut() {
-            status.set_interrupt_hint_visible(true);
-            status.update_inline_message(None);
         }
     }
 
@@ -895,16 +914,20 @@ impl Renderable for PendingCellList<'_> {
         }
         let mut lines: Vec<Line<'static>> = Vec::new();
         for text in self.texts {
+            lines.push(Line::from(""));
+            lines.push(Line::from("  QUEUED".cyan().bold()));
             let wrapped = crate::wrapping::adaptive_wrap_lines(
                 text.lines().map(|line| Line::from(line.to_string())),
-                crate::wrapping::RtOptions::new(area.width as usize)
-                    .subsequent_indent(Line::from("┃ ".cyan())),
+                crate::wrapping::RtOptions::new(area.width as usize),
             );
-            lines.push(Line::from(""));
             if !wrapped.is_empty() {
-                lines.extend(prefix_lines(wrapped, "┃ ".cyan(), "┃ ".cyan()));
+                let has_more = wrapped.len() > 3;
+                let truncated: Vec<_> = wrapped.into_iter().take(3).collect();
+                lines.extend(prefix_lines(truncated, "┃ ".cyan(), "┃ ".cyan()));
+                if has_more {
+                    lines.push(Line::from("┃ …".cyan())); // truncated_extra
+                }
             }
-            lines.push(Line::from("  QUEUED".cyan().bold()));
         }
         Paragraph::new(lines).render(area, buf);
     }
@@ -918,9 +941,11 @@ impl Renderable for PendingCellList<'_> {
             .texts
             .iter()
             .map(|t| {
-                let line_count = t.lines().count();
-                // blank + content + QUEUED
-                line_count + 2
+                // blank + QUEUED badge + min(content_lines, 3) + "..."
+                let line_count = t.lines().count().min(3);
+                let truncated_extra = if t.lines().count() > 3 { 1 } else { 0 };
+                // blank line + QUEUED + content +
+                2 + line_count + truncated_extra
             })
             .sum();
         content_lines as u16

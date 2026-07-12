@@ -3,15 +3,11 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use devo_tools::ClientTextFileRead;
 use devo_tools::ClientTextFileWrite;
-use diffy::PatchFormatter;
-use diffy::create_patch;
-use serde_json::json;
 use tracing::debug;
 use tracing::info;
 
-use crate::contracts::{
-    ToolCallError, ToolContext, ToolProgressSender, ToolResult, ToolResultContent,
-};
+use super::file_change_metadata::{file_mtime, write_tool_result};
+use crate::contracts::{ToolCallError, ToolContext, ToolProgressSender, ToolResult};
 use crate::json_schema::JsonSchema;
 use crate::tool_handler::ToolHandler;
 use crate::tool_spec::{ToolCapabilityTag, ToolExecutionMode, ToolOutputMode, ToolSpec};
@@ -116,7 +112,13 @@ impl ToolHandler for WriteHandler {
                 .await?
             {
                 ClientTextFileWrite::Written => {
-                    return Ok(write_tool_result(&path, previous.as_deref(), content));
+                    record_write_in_ledger(&ctx, &path, content);
+                    return Ok(write_tool_result(
+                        &path,
+                        previous.as_deref(),
+                        content,
+                        format!("wrote {} bytes to {}", content.len(), path.display()),
+                    ));
                 }
                 ClientTextFileWrite::Unsupported => {}
             }
@@ -134,7 +136,13 @@ impl ToolHandler for WriteHandler {
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(format!("failed to write file: {e}")))?;
 
-        Ok(write_tool_result(&path, previous.as_deref(), content))
+        record_write_in_ledger(&ctx, &path, content);
+        Ok(write_tool_result(
+            &path,
+            previous.as_deref(),
+            content,
+            format!("wrote {} bytes to {}", content.len(), path.display()),
+        ))
     }
 }
 
@@ -143,77 +151,9 @@ fn resolve_path(cwd: &std::path::Path, path: &str) -> PathBuf {
     if p.is_absolute() { p } else { cwd.join(p) }
 }
 
-fn write_tool_result(path: &std::path::Path, previous: Option<&str>, content: &str) -> ToolResult {
-    let metadata = build_write_metadata(path, previous, content);
-    let summary = format!("wrote {} bytes to {}", content.len(), path.display());
-    let mut result = ToolResult::success(
-        ToolResultContent::Mixed {
-            text: Some(summary.clone()),
-            json: Some(metadata),
-        },
-        &summary,
-    );
-    result.display_content = Some(summary);
-    result
-}
-
-fn build_write_metadata(
-    path: &std::path::Path,
-    previous: Option<&str>,
-    content: &str,
-) -> serde_json::Value {
-    match previous {
-        None => {
-            let additions = content.lines().count();
-            let mut added_content = String::with_capacity(content.len() + additions);
-            for (index, line) in content.lines().enumerate() {
-                if index > 0 {
-                    added_content.push('\n');
-                }
-                added_content.push('+');
-                added_content.push_str(line);
-            }
-            json!({
-                "diff": format!(
-                    "diff --git a/{0} b/{0}\nnew file mode 100644\n--- /dev/null\n+++ b/{0}\n@@ -0,0 +1,{1} @@\n{2}",
-                    path.display(),
-                    additions,
-                    added_content
-                ),
-                "files": [{
-                    "path": path.display().to_string(),
-                    "kind": "add",
-                    "content": content,
-                    "additions": additions,
-                    "deletions": 0
-                }]
-            })
-        }
-        Some(old) => {
-            let patch = create_patch(old, content);
-            let patch_text = PatchFormatter::new().fmt_patch(&patch).to_string();
-            let additions = content.lines().count();
-            let deletions = old.lines().count();
-            json!({
-                "diff": format!(
-                    "diff --git a/{0} b/{0}\n{1}",
-                    path.display(),
-                    patch_text
-                ),
-                "files": [{
-                    "path": path.display().to_string(),
-                    "kind": "update",
-                    "content": content,
-                    "postContent": content,
-                    "post_content": content,
-                    "oldContent": old,
-                    "preContent": old,
-                    "pre_content": old,
-                    "additions": additions,
-                    "deletions": deletions
-                }]
-            })
-        }
+fn record_write_in_ledger(ctx: &ToolContext, path: &std::path::Path, content: &str) {
+    if let Some(ledger) = ctx.file_read_ledger.as_ref() {
+        ledger.record_write(path, content, file_mtime(path));
     }
 }
 
@@ -226,7 +166,9 @@ mod tests {
     use pretty_assertions::assert_eq;
     use tokio_util::sync::CancellationToken;
 
+    use super::super::file_change_metadata::build_write_metadata;
     use super::*;
+    use crate::contracts::{ToolCallError, ToolResultContent};
 
     #[test]
     fn build_write_metadata_for_new_file_marks_add() {
@@ -258,11 +200,11 @@ mod tests {
                     },
                     cancel_token: CancellationToken::new(),
                     agent_scope: crate::contracts::ToolAgentScope::Parent,
-                    agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                     collaboration_mode: devo_protocol::CollaborationMode::Build,
                     agent_coordinator: None,
                     client_filesystem: Some(client_filesystem),
                     client_terminal: None,
+                    file_read_ledger: None,
                     network_proxy: None,
                     network_no_proxy: None,
                 },

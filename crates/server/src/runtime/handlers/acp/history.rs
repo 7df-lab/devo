@@ -7,23 +7,7 @@ pub(super) fn acp_update_from_history_item(
     item: &SessionHistoryItem,
     parent_message_id: Option<&str>,
 ) -> Option<AcpSessionUpdate> {
-    let mut meta = history_meta(index, parent_message_id);
-    if let Some(SessionHistoryMetadata::ResearchArtifact { artifact_type }) = &item.metadata {
-        meta.insert(
-            DEVO_ITEM_KIND_META.to_string(),
-            serde_json::json!("research_artifact"),
-        );
-        meta.insert(
-            DEVO_RESEARCH_ARTIFACT_TYPE_META.to_string(),
-            serde_json::to_value(artifact_type).expect("serialize research artifact type"),
-        );
-        if !item.title.is_empty() {
-            meta.insert(
-                DEVO_RESEARCH_ARTIFACT_TITLE_META.to_string(),
-                serde_json::Value::String(item.title.clone()),
-            );
-        }
-    }
+    let meta = history_meta(index, parent_message_id);
     if let Some(SessionHistoryMetadata::PlanUpdate { steps, .. }) = &item.metadata {
         return Some(AcpSessionUpdate::Plan {
             entries: steps
@@ -149,7 +133,6 @@ fn history_tool_call_id(index: usize, item: &SessionHistoryItem) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use devo_protocol::SessionHistoryResearchArtifactType;
     use pretty_assertions::assert_eq;
 
     fn history_item(kind: SessionHistoryItemKind, title: &str, body: &str) -> SessionHistoryItem {
@@ -210,43 +193,6 @@ mod tests {
             serde_json::json!(42_000_u64),
         );
         assert_eq!(message_id, Some("history-5".to_string()));
-        assert_eq!(meta, Some(expected));
-    }
-
-    #[test]
-    fn history_research_artifact_includes_stable_metadata() {
-        let item = history_item(
-            SessionHistoryItemKind::Assistant,
-            "Research Brief",
-            "brief body",
-        )
-        .with_metadata(SessionHistoryMetadata::ResearchArtifact {
-            artifact_type: SessionHistoryResearchArtifactType::Brief,
-        });
-
-        let update =
-            acp_update_from_history_item(6, &item, Some("history-0")).expect("history update");
-
-        let AcpSessionUpdate::AgentMessageChunk {
-            message_id, meta, ..
-        } = update
-        else {
-            panic!("expected agent message chunk");
-        };
-        let mut expected = history_meta(6, Some("history-0"));
-        expected.insert(
-            DEVO_ITEM_KIND_META.to_string(),
-            serde_json::json!("research_artifact"),
-        );
-        expected.insert(
-            DEVO_RESEARCH_ARTIFACT_TYPE_META.to_string(),
-            serde_json::json!("brief"),
-        );
-        expected.insert(
-            DEVO_RESEARCH_ARTIFACT_TITLE_META.to_string(),
-            serde_json::json!("Research Brief"),
-        );
-        assert_eq!(message_id, Some("history-6".to_string()));
         assert_eq!(meta, Some(expected));
     }
 }

@@ -23,13 +23,12 @@ impl ServerRuntime {
     ) {
         self.maybe_prepare_title_generation_from_user_input(session_id, user_input)
             .await;
-        self.maybe_schedule_final_title_generation(session_id, None)
+        self.maybe_schedule_final_title_generation(session_id, Some(user_input.to_string()))
             .await;
     }
 
     /// Assigns a provisional title and records the first user input without
-    /// calling the title model. Used at turn start while the session actor may
-    /// soon block on `ExecuteTurn`; final title generation runs post-turn.
+    /// calling the title model.
     pub(super) async fn maybe_prepare_title_generation_from_user_input(
         self: &Arc<Self>,
         session_id: SessionId,
@@ -46,6 +45,12 @@ impl ServerRuntime {
             .await;
     }
 
+    /// Spawns final (LLM) title generation in the background.
+    ///
+    /// Safe to call at turn start: actor mailbox round-trips happen here, then
+    /// the model call runs on a detached task so it does not block `ExecuteTurn`.
+    /// Duplicate schedules for the same session are ignored while a generation
+    /// task is already in flight.
     pub(super) async fn maybe_schedule_final_title_generation(
         self: &Arc<Self>,
         session_id: SessionId,
@@ -76,11 +81,23 @@ impl ServerRuntime {
         if first_input.is_empty() {
             return;
         }
+        {
+            let mut in_flight = self.title_generation_in_flight.lock().await;
+            if !in_flight.insert(session_id) {
+                return;
+            }
+        }
         let runtime = Arc::clone(self);
         tokio::spawn(async move {
             runtime
+                .clone()
                 .maybe_generate_final_title(session_id, first_input)
                 .await;
+            runtime
+                .title_generation_in_flight
+                .lock()
+                .await
+                .remove(&session_id);
         });
     }
 
@@ -257,22 +274,6 @@ impl ServerRuntime {
         turn_item: TurnItem,
         payload: serde_json::Value,
     ) {
-        if !should_emit_turn_item_events(&turn_item) {
-            let item_id = ItemId::new();
-            let item_seq = self.allocate_item_sequence(session_id).await;
-            self.persist_item(
-                session_id,
-                turn_id,
-                item_id,
-                item_seq,
-                turn_item,
-                Some(TurnStatus::Running),
-                None,
-            )
-            .await;
-            return;
-        }
-
         let (item_id, item_seq) = self
             .start_item(session_id, turn_id, item_kind.clone(), payload.clone())
             .await;
@@ -524,16 +525,6 @@ pub(crate) fn render_input_items(input: &[crate::InputItem]) -> Option<String> {
     (!rendered.is_empty()).then_some(rendered)
 }
 
-fn should_emit_turn_item_events(turn_item: &TurnItem) -> bool {
-    !matches!(
-        turn_item,
-        TurnItem::ResearchArtifact(ResearchArtifactItem {
-            artifact_type: ResearchArtifactType::FinalReportMetadata,
-            ..
-        })
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -585,28 +576,6 @@ mod tests {
                 text: " \n\t ".to_string(),
             }]),
             None
-        );
-    }
-
-    #[test]
-    fn final_report_metadata_is_prompt_only() {
-        let prompt_only = TurnItem::ResearchArtifact(ResearchArtifactItem {
-            artifact_type: ResearchArtifactType::FinalReportMetadata,
-            title: "Research Context Reference".to_string(),
-            content: "compact reference".to_string(),
-        });
-        let visible_artifact = TurnItem::ResearchArtifact(ResearchArtifactItem {
-            artifact_type: ResearchArtifactType::Finding,
-            title: "Research Finding".to_string(),
-            content: "finding body".to_string(),
-        });
-
-        assert_eq!(
-            vec![
-                should_emit_turn_item_events(&prompt_only),
-                should_emit_turn_item_events(&visible_artifact),
-            ],
-            vec![false, true]
         );
     }
 }

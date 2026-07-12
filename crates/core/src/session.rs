@@ -21,7 +21,6 @@ use crate::AgentsMdConfig;
 use crate::Message;
 use crate::Model;
 use crate::SessionContext;
-use crate::SystemPromptMode;
 use crate::TokenBudget;
 use crate::TurnContext;
 use crate::state::turn::TurnState;
@@ -383,13 +382,6 @@ impl SessionState {
     }
 
     pub fn insert_context_message(&mut self, msg: Message) {
-        if self
-            .session_context
-            .as_ref()
-            .is_some_and(|context| context.system_prompt_mode == SystemPromptMode::DeepResearch)
-        {
-            return;
-        }
         crate::history::insert_context_diff_message(&mut self.messages, msg.clone());
         if let Some(prompt_messages) = self.prompt_messages.as_mut() {
             crate::history::insert_context_diff_message(prompt_messages, msg);

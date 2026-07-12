@@ -5,6 +5,7 @@ pub enum ToolHandlerKind {
     ShellCommand,
     Read,
     Write,
+    Edit,
     Glob,
     Grep,
     ApplyPatch,

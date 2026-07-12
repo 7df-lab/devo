@@ -18,8 +18,7 @@ use super::snapshots::HookContextSnapshot;
 /// Mutable session fields updated during an in-actor turn without mailbox round-trips.
 ///
 /// Transient scratch state registered in `ActiveTurnRegistry` while the actor
-/// mailbox is blocked or an out-of-actor turn runs. Merges into durable actor
-/// state when the turn completes.
+/// mailbox is blocked. Merges into durable actor state when the turn completes.
 pub(crate) struct TurnInlineState {
     pub(crate) turn_id: TurnId,
     pub(crate) turn_kind: TurnKind,

@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use devo_protocol::AgentContextMode;
-use devo_protocol::AgentToolPolicy;
-
 use super::*;
 
 mod coordinator;
@@ -34,26 +31,8 @@ impl ServerRuntime {
                 "fork_turns must be \"none\" or \"all\"".to_string(),
             ));
         }
-        let effective_context_mode = match (params.context_mode, params.tool_policy) {
-            (AgentContextMode::DeepResearch, AgentToolPolicy::Inherit)
-            | (AgentContextMode::DeepResearch, AgentToolPolicy::DenyAll)
-            | (AgentContextMode::DeepResearch, AgentToolPolicy::DeepResearch)
-            | (AgentContextMode::CodingAgent, AgentToolPolicy::DeepResearch) => {
-                AgentContextMode::DeepResearch
-            }
-            (AgentContextMode::CodingAgent, AgentToolPolicy::Inherit)
-            | (AgentContextMode::CodingAgent, AgentToolPolicy::DenyAll) => {
-                AgentContextMode::CodingAgent
-            }
-        };
-        let effective_tool_policy = match effective_context_mode {
-            AgentContextMode::CodingAgent => params.tool_policy,
-            AgentContextMode::DeepResearch => AgentToolPolicy::DeepResearch,
-        };
-        let fork_turns = match effective_context_mode {
-            AgentContextMode::CodingAgent => params.fork_turns.as_deref().unwrap_or("all"),
-            AgentContextMode::DeepResearch => "none",
-        };
+        let effective_tool_policy = params.tool_policy;
+        let fork_turns = params.fork_turns.as_deref().unwrap_or("all");
         if params.max_turns == Some(0) {
             return Err(ToolCallError::InvalidInput(
                 "max_turns must be positive when provided".to_string(),
@@ -190,25 +169,6 @@ impl ServerRuntime {
             last_query_total_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
-        if effective_context_mode == AgentContextMode::DeepResearch {
-            let turn_config = runtime_context.resolve_turn_config(
-                session_model_selection(&summary),
-                summary.reasoning_effort_selection.clone(),
-            );
-            core_session.session_context = Some(research::research_session_context(
-                &core_session,
-                &turn_config,
-                research::research_stage_system(devo_core::research::prompts::subagent()),
-            ));
-            let cwd = core_session.cwd.display().to_string();
-            core_session.push_message(Message::user(
-                devo_core::research::prompts::environment_context(
-                    &devo_core::research::prompts::today_string(),
-                    &devo_core::research::prompts::timezone_string(),
-                    &cwd,
-                ),
-            ));
-        }
         let child_session = RuntimeSession {
             runtime_context,
             record,
@@ -230,6 +190,7 @@ impl ServerRuntime {
             next_item_seq: 1,
             first_user_input: Some(params.message.clone()),
             tool_registry: parent_tool_registry,
+            file_read_ledger: std::sync::Arc::new(devo_core::tools::FileReadLedger::new()),
             session_approval_cache: crate::execution::ApprovalGrantCache::default(),
             turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
             session_context_recorded: false,
@@ -372,6 +333,7 @@ impl ServerRuntime {
         });
 
         Ok(devo_protocol::SpawnAgentResult {
+            task_id: devo_protocol::TaskId::from(child_session_id),
             child_session_id,
             agent_path,
             agent_nickname: nickname,
@@ -1007,20 +969,7 @@ impl ServerRuntime {
                 .map(|registry| registry.children_of(parent_session_id))
                 .unwrap_or_default()
         };
-        let research_children = self
-            .research_child_agents
-            .lock()
-            .await
-            .get(&parent_session_id)
-            .cloned()
-            .unwrap_or_default();
-        Arc::clone(&self)
-            .close_research_child_agents(parent_session_id)
-            .await;
         for child_session_id in child_session_ids {
-            if research_children.contains(&child_session_id) {
-                continue;
-            }
             let _ = self.interrupt_child_runtime_work(child_session_id).await;
             self.set_agent_status(
                 parent_session_id,
@@ -1211,7 +1160,6 @@ fn subagent_terminal_status_detail_from_stable_items(
             | TurnItem::WebSearch(_)
             | TurnItem::ImageGeneration(_)
             | TurnItem::ContextCompaction(_)
-            | TurnItem::ResearchArtifact(_)
             | TurnItem::TurnSummary(_) => None,
         }
     })

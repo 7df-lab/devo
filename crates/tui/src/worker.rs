@@ -10,6 +10,7 @@ use anyhow::Context;
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use devo_client::{ClientEvent, client_event_from_notification};
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
@@ -85,7 +86,6 @@ use crate::bottom_pane::SkillInterfaceMetadata;
 use crate::bottom_pane::SkillMetadata;
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
-use crate::events::ResearchArtifactMetadata;
 use crate::events::SessionListEntry;
 use crate::events::SubagentMonitorAgent;
 use crate::events::SubagentMonitorEvent;
@@ -123,20 +123,17 @@ fn active_agent_label_from_session(session: &devo_server::SessionMetadata) -> Op
         .map(|label| format!("Agent: {label}"))
 }
 
-/// Prefer structured session `last_query_usage`, then latest-turn usage, then the
-/// legacy scalar. Context length is latest-query display total, not cumulative
-/// session totals.
-fn last_query_tokens_from_resume(
-    session: &devo_server::SessionMetadata,
-    latest_turn: Option<&devo_protocol::TurnMetadata>,
-) -> (usize, usize) {
+/// Prefer exact persisted latest-query usage, then the replayed prompt estimate.
+/// Aggregate turn usage and the legacy scalar are intentionally excluded because
+/// neither identifies the latest model query reliably for historical sessions.
+fn last_query_tokens_from_resume(session: &devo_server::SessionMetadata) -> (usize, usize) {
     if let Some(usage) = session.last_query_usage.as_ref() {
         return (usage.display_total_tokens(), usage.input_tokens as usize);
     }
-    if let Some(usage) = latest_turn.and_then(|turn| turn.usage.as_ref()) {
-        return (usage.display_total_tokens(), usage.input_tokens as usize);
+    if session.prompt_token_estimate > 0 {
+        return (session.prompt_token_estimate, session.prompt_token_estimate);
     }
-    (session.last_query_total_tokens, 0)
+    (0, 0)
 }
 
 struct EnsureSessionOutcome {
@@ -347,9 +344,6 @@ enum OperationCommand {
     },
     /// Ask a side question in a one-turn forked agent.
     RunBtwQuestion {
-        question: String,
-    },
-    RunResearch {
         question: String,
     },
     ApprovalRespond {
@@ -722,12 +716,6 @@ impl QueryWorkerHandle {
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
-    pub(crate) fn run_research(&self, question: String) -> Result<()> {
-        self.command_tx
-            .send(OperationCommand::RunResearch { question })
-            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
-    }
-
     pub(crate) fn approval_respond(
         &self,
         session_id: SessionId,
@@ -865,8 +853,6 @@ async fn run_worker_inner(
     let mut latest_completed_agent_message: Option<String> = None;
     let mut child_agent_sessions: HashSet<SessionId> = HashSet::new();
     let mut btw_agent_sessions: HashMap<SessionId, BtwQuestionState> = HashMap::new();
-    let mut research_artifacts: HashMap<devo_core::ItemId, ResearchArtifactMetadata> =
-        HashMap::new();
     let mut input_history_cursor: Option<usize> = None;
     let mut active_reference_search_id: Option<ReferenceSearchId> = None;
     let mut active_shell_process_ids: HashSet<String> = HashSet::new();
@@ -890,7 +876,7 @@ async fn run_worker_inner(
                 session_cwd = resumed.session.cwd.clone();
                 let active_agent_label = active_agent_label_from_session(&resumed.session);
                 let (last_query_total, last_query_input) =
-                    last_query_tokens_from_resume(&resumed.session, resumed.latest_turn.as_ref());
+                    last_query_tokens_from_resume(&resumed.session);
                 let _ = event_tx.send(WorkerEvent::SessionSwitched {
                     session_id: initial_session_id.to_string(),
                     cwd: resumed.session.cwd,
@@ -1645,10 +1631,7 @@ async fn run_worker_inner(
                                 let active_agent_label =
                                     active_agent_label_from_session(&result.session);
                                 let (last_query_total, last_query_input) =
-                                    last_query_tokens_from_resume(
-                                        &result.session,
-                                        result.latest_turn.as_ref(),
-                                    );
+                                    last_query_tokens_from_resume(&result.session);
 
                                 let _ = event_tx.send(WorkerEvent::SessionSwitched {
                                     session_id: next_session_id.to_string(),
@@ -1789,10 +1772,7 @@ async fn run_worker_inner(
                                 let active_agent_label =
                                     active_agent_label_from_session(&result.session);
                                 let (last_query_total, last_query_input) =
-                                    last_query_tokens_from_resume(
-                                        &result.session,
-                                        result.latest_turn.as_ref(),
-                                    );
+                                    last_query_tokens_from_resume(&result.session);
                                 let _ = event_tx.send(WorkerEvent::SessionSwitched {
                                     session_id: active_session_id.to_string(),
                                     cwd: result.session.cwd,
@@ -1898,10 +1878,7 @@ async fn run_worker_inner(
                                         let active_agent_label =
                                             active_agent_label_from_session(&resumed.session);
                                         let (last_query_total, last_query_input) =
-                                            last_query_tokens_from_resume(
-                                                &resumed.session,
-                                                resumed.latest_turn.as_ref(),
-                                            );
+                                            last_query_tokens_from_resume(&resumed.session);
                                         let _ = event_tx.send(WorkerEvent::SessionSwitched {
                                             session_id: next_session_id.to_string(),
                                             cwd: resumed.session.cwd,
@@ -1972,15 +1949,8 @@ async fn run_worker_inner(
                                 })
                                 .await
                             {
-                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                            let _ = event_tx.send(WorkerEvent::InterruptFailed {
                                 message: error.to_string(),
-                                turn_count,
-                                total_input_tokens,
-                                total_output_tokens,
-                                total_tokens,
-                                total_cache_read_tokens,
-                                prompt_token_estimate: total_input_tokens,
-                                last_query_input_tokens,
                             });
                             }
                     }
@@ -1999,7 +1969,6 @@ async fn run_worker_inner(
                                 fork_turns: Some("all".to_string()),
                                 max_turns: Some(1),
                                 tool_policy: AgentToolPolicy::DenyAll,
-                                context_mode: devo_protocol::AgentContextMode::CodingAgent,
                                 ephemeral: true,
                             })
                             .await
@@ -2018,50 +1987,6 @@ async fn run_worker_inner(
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::BtwFailed {
                                     message: error.to_string(),
-                                });
-                            }
-                        }
-                    }
-                    Some(OperationCommand::RunResearch { question }) => {
-                        let active_session_id = prepare_session_for_command(
-                            &mut client,
-                            &config.cwd,
-                            &mut model,
-                            &mut model_binding_id,
-                            &mut reasoning_effort_selection,
-                            &mut session_id,
-                            permission_preset,
-                            event_tx,
-                        )
-                        .await?;
-                        match client
-                            .turn_start(TurnStartParams {
-                                session_id: active_session_id,
-                                input: vec![InputItem::Text { text: question }],
-                                model: Some(model.clone()),
-                                model_binding_id: model_binding_id.clone(),
-                                reasoning_effort_selection: reasoning_effort_selection.clone(),
-                                sandbox: None,
-                                approval_policy: None,
-                                cwd: Some(session_cwd.clone()),
-                                collaboration_mode: CollaborationMode::Build,
-                                execution_mode: TurnExecutionMode::Research,
-                            })
-                            .await
-                        {
-                            Ok(result) => {
-                                handle_turn_start_result(result, &mut active_turn_id);
-                            }
-                            Err(error) => {
-                                let _ = event_tx.send(WorkerEvent::TurnFailed {
-                                    message: error.to_string(),
-                                    turn_count,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    total_tokens,
-                                    total_cache_read_tokens,
-                                    prompt_token_estimate: total_input_tokens,
-                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -2299,6 +2224,33 @@ async fn run_worker_inner(
                     Some(notification) => {
                         let method = notification.method;
                         let params = notification.params;
+                        let normalized_event = client_event_from_notification(
+                            &devo_client::ServerNotificationMessage {
+                                method: method.clone(),
+                                params: params.clone(),
+                            },
+                        )
+                        .ok()
+                        .flatten();
+                        if let Some(ClientEvent::TurnUsageUpdated(payload)) = normalized_event {
+                            saw_usage_update_for_turn = true;
+                            total_input_tokens = payload.total_input_tokens;
+                            total_output_tokens = payload.total_output_tokens;
+                            total_tokens = payload.total_tokens;
+                            total_cache_read_tokens = payload.total_cache_read_tokens;
+                            last_query_total_tokens = payload.usage.display_total_tokens();
+                            last_query_input_tokens = payload.last_query_input_tokens;
+                            has_authoritative_usage_totals = true;
+                            let _ = event_tx.send(WorkerEvent::UsageUpdated {
+                                total_input_tokens: payload.total_input_tokens,
+                                total_output_tokens: payload.total_output_tokens,
+                                total_tokens: payload.total_tokens,
+                                total_cache_read_tokens: payload.total_cache_read_tokens,
+                                last_query_total_tokens: payload.usage.display_total_tokens(),
+                                last_query_input_tokens: payload.last_query_input_tokens,
+                            });
+                            continue;
+                        }
                         if method == ACP_TERMINAL_OUTPUT_NOTIFICATION_METHOD {
                             if let Some(terminal_id) =
                                 params.get("terminalId").and_then(serde_json::Value::as_str)
@@ -2423,27 +2375,12 @@ async fn run_worker_inner(
                                             let _ = event_tx.send(WorkerEvent::TextItemStarted {
                                                 item_id: payload.item.item_id,
                                                 kind: TextItemKind::Assistant,
-                                                research: None,
                                             });
                                         }
                                         ItemKind::Reasoning => {
                                             let _ = event_tx.send(WorkerEvent::TextItemStarted {
                                                 item_id: payload.item.item_id,
                                                 kind: TextItemKind::Reasoning,
-                                                research: None,
-                                            });
-                                        }
-                                        ItemKind::ResearchArtifact => {
-                                            let research =
-                                                research_artifact_metadata(&payload.item.payload);
-                                            if let Some(research) = research.clone() {
-                                                research_artifacts
-                                                    .insert(payload.item.item_id, research);
-                                            }
-                                            let _ = event_tx.send(WorkerEvent::TextItemStarted {
-                                                item_id: payload.item.item_id,
-                                                kind: TextItemKind::ResearchArtifact,
-                                                research,
                                             });
                                         }
                                         ItemKind::Plan => {
@@ -2522,20 +2459,11 @@ async fn run_worker_inner(
                                         let _ = event_tx.send(WorkerEvent::TextItemDelta {
                                             item_id,
                                             kind: TextItemKind::Assistant,
-                                            research: None,
                                             delta: payload.delta,
                                         });
                                     } else {
                                         let _ = event_tx.send(WorkerEvent::TextDelta(payload.delta));
                                     }
-                                }
-                            }
-                            "item/researchArtifact/delta" => {
-                                if let ServerEvent::ItemDelta { payload, .. } = event
-                                    && let Some(worker_event) =
-                                        research_artifact_delta_event(payload, &research_artifacts)
-                                {
-                                    let _ = event_tx.send(worker_event);
                                 }
                             }
                             "item/plan/delta" => {
@@ -2628,7 +2556,6 @@ async fn run_worker_inner(
                                         let _ = event_tx.send(WorkerEvent::TextItemDelta {
                                             item_id,
                                             kind: TextItemKind::Reasoning,
-                                            research: None,
                                             delta: payload.delta,
                                         });
                                     } else {
@@ -2645,9 +2572,6 @@ async fn run_worker_inner(
                                     );
                                     if let Some(text) = completed_agent_message_text(&payload) {
                                         latest_completed_agent_message = Some(text);
-                                    }
-                                    if payload.item.item_kind == ItemKind::ResearchArtifact {
-                                        research_artifacts.remove(&payload.item.item_id);
                                     }
                                     // Completed tool items are mapped into compact UI events
                                     // with pre-rendered summaries and previews.
@@ -2667,8 +2591,10 @@ async fn run_worker_inner(
                                     if completed {
                                         turn_count += 1;
                                         if let Some(usage) = &payload.turn.usage {
-                                            last_query_input_tokens = usage.input_tokens as usize;
-                                            last_query_total_tokens = usage.display_total_tokens();
+                                            if !saw_usage_update_for_turn {
+                                                last_query_input_tokens = usage.input_tokens as usize;
+                                                last_query_total_tokens = usage.display_total_tokens();
+                                            }
                                             if should_apply_terminal_turn_usage_fallback(
                                                 saw_usage_update_for_turn,
                                                 has_authoritative_usage_totals,
@@ -2741,8 +2667,10 @@ async fn run_worker_inner(
                                         .take()
                                         .unwrap_or_else(|| format!("turn failed with status {:?}", turn.status));
                                     if let Some(usage) = &turn.usage {
-                                        last_query_input_tokens = usage.input_tokens as usize;
-                                        last_query_total_tokens = usage.display_total_tokens();
+                                        if !saw_usage_update_for_turn {
+                                            last_query_input_tokens = usage.input_tokens as usize;
+                                            last_query_total_tokens = usage.display_total_tokens();
+                                        }
                                         if should_apply_terminal_turn_usage_fallback(
                                             saw_usage_update_for_turn,
                                             has_authoritative_usage_totals,
@@ -2874,7 +2802,7 @@ async fn run_worker_inner(
                                     total_output_tokens = payload.session.total_output_tokens;
                                     total_tokens = payload.session.total_tokens;
                                     let (compacted_last_query_total, compacted_last_query_input) =
-                                        last_query_tokens_from_resume(&payload.session, None);
+                                        last_query_tokens_from_resume(&payload.session);
                                     last_query_total_tokens = if payload.session.prompt_token_estimate > 0 {
                                         payload.session.prompt_token_estimate
                                     } else {
@@ -3010,7 +2938,6 @@ async fn ensure_session_started(
 /// Prepares the worker session state before turn or goal commands run.
 ///
 /// Commands such as [`OperationCommand::SubmitInput`], [`OperationCommand::SetGoalObjective`],
-/// and [`OperationCommand::RunResearch`] share this path instead of duplicating session-start
 /// follow-up. When no session is active yet, [`ensure_session_started`] creates one on the
 /// server; the returned metadata is merged into the worker's current model, model binding, and
 /// reasoning-effort selection. For a newly created session, this also notifies the UI via
@@ -3277,44 +3204,6 @@ fn completed_agent_message_text(payload: &ItemEventPayload) -> Option<String> {
     }
 }
 
-fn research_artifact_delta_event(
-    payload: devo_server::ItemDeltaPayload,
-    research_artifacts: &HashMap<devo_core::ItemId, ResearchArtifactMetadata>,
-) -> Option<WorkerEvent> {
-    payload.context.item_id.map(|item_id| {
-        let research = research_artifacts.get(&item_id).cloned();
-        WorkerEvent::TextItemDelta {
-            item_id,
-            kind: TextItemKind::ResearchArtifact,
-            research,
-            delta: payload.delta,
-        }
-    })
-}
-
-fn research_artifact_metadata(payload: &serde_json::Value) -> Option<ResearchArtifactMetadata> {
-    let artifact_type = payload
-        .get("artifact_type")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            payload
-                .get("artifactType")
-                .and_then(serde_json::Value::as_str)
-        })
-        .map(str::trim)
-        .filter(|artifact_type| !artifact_type.is_empty())?;
-    let title = payload
-        .get("title")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or("Research Artifact");
-    Some(ResearchArtifactMetadata {
-        artifact_type: artifact_type.to_string(),
-        title: title.to_string(),
-    })
-}
-
 fn btw_agent_prompt(question: &str) -> String {
     format!(
         "You are answering a /btw side question in a lightweight forked agent.\n\
@@ -3426,7 +3315,6 @@ pub(crate) fn handle_completed_item(
                 let _ = event_tx.send(WorkerEvent::TextItemCompleted {
                     item_id,
                     kind: TextItemKind::Assistant,
-                    research: None,
                     final_text: text,
                 });
             }
@@ -3452,39 +3340,9 @@ pub(crate) fn handle_completed_item(
                 let _ = event_tx.send(WorkerEvent::TextItemCompleted {
                     item_id,
                     kind: TextItemKind::Reasoning,
-                    research: None,
                     final_text: text,
                 });
             }
-        }
-        ItemEnvelope {
-            item_id,
-            item_kind: ItemKind::ResearchArtifact,
-            payload,
-            ..
-        } => {
-            let title = payload
-                .get("title")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .unwrap_or("Research Artifact");
-            let content = payload
-                .get("content")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|text| !text.is_empty());
-            let research = research_artifact_metadata(&payload);
-            let final_text = match content {
-                Some(content) => format!("### {title}\n\n{content}"),
-                None => format!("### {title}"),
-            };
-            let _ = event_tx.send(WorkerEvent::TextItemCompleted {
-                item_id,
-                kind: TextItemKind::ResearchArtifact,
-                research,
-                final_text,
-            });
         }
         ItemEnvelope {
             item_kind: ItemKind::ToolCall,
@@ -3522,13 +3380,18 @@ pub(crate) fn handle_completed_item(
                 .changes
                 .into_iter()
                 .collect::<std::collections::HashMap<_, _>>();
+            let tool_use_id = payload.tool_call_id;
             let event = match (payload.tool_name, payload.input) {
                 (Some(tool_name), Some(input)) => WorkerEvent::PatchAppliedIo {
+                    tool_use_id,
                     tool_name,
                     input,
                     changes,
                 },
-                _ => WorkerEvent::PatchApplied { changes },
+                _ => WorkerEvent::PatchApplied {
+                    tool_use_id,
+                    changes,
+                },
             };
             let _ = event_tx.send(event);
         }
@@ -3735,8 +3598,7 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
                     index += 1;
                     continue;
                 }
-                SessionHistoryMetadata::Edited { .. }
-                | SessionHistoryMetadata::ResearchArtifact { .. } => {}
+                SessionHistoryMetadata::Edited { .. } => {}
             }
         }
         if item.kind == SessionHistoryItemKind::ToolCall
@@ -3878,7 +3740,8 @@ fn pretty_tool_call_summary(tool_name: &str, input: &serde_json::Value) -> Optio
             .or_else(|| input.get("cmd").and_then(serde_json::Value::as_str))
             .map(|command| format!("Shell {}", compact_tool_summary(command, 96))),
         "read" => path_value().map(|path| format!("Read {path}{}", fmt_line_range(input))),
-        "write" | "edit" => path_value().map(|path| format!("Write {path}")),
+        "write" => path_value().map(|path| format!("Write {path}")),
+        "edit" => Some("Edit".to_string()),
         "apply_patch" => path_value().map(|path| format!("Patch {path}")),
         "find" | "glob" => input
             .get("path")
@@ -3935,10 +3798,11 @@ fn pretty_tool_call_summary(tool_name: &str, input: &serde_json::Value) -> Optio
                 .unwrap_or_default();
             Some(format!("Spawn-Agent {} {}", quote(nickname), quote(prompt)))
         }
-        "wait_agent" | "agent_wait" => {
+        "await_task" | "wait_agent" | "agent_wait" => {
             let target = input
-                .get("target")
+                .get("task_id")
                 .and_then(serde_json::Value::as_str)
+                .or_else(|| input.get("target").and_then(serde_json::Value::as_str))
                 .or_else(|| {
                     input
                         .get("agent_nickname")
@@ -3956,21 +3820,24 @@ fn pretty_tool_call_summary(tool_name: &str, input: &serde_json::Value) -> Optio
                         .map(ToString::to_string)
                 })
                 .unwrap_or_else(|| "default".to_string());
-            Some(format!("Wait-Agent {} {}", quote(target), quote(&timeout)))
+            Some(format!("Await-Task {} {}", quote(target), quote(&timeout)))
         }
-        "close_agent" | "agent_close" => {
+        "cancel_task" | "close_agent" | "agent_close" => {
             let target = input
-                .get("target")
+                .get("task_id")
                 .and_then(serde_json::Value::as_str)
+                .or_else(|| input.get("target").and_then(serde_json::Value::as_str))
                 .or_else(|| {
                     input
                         .get("agent_nickname")
                         .and_then(serde_json::Value::as_str)
                 })
                 .unwrap_or("agent");
-            Some(format!("Close-Agent {}", quote(target)))
+            Some(format!("Cancel-Task {}", quote(target)))
         }
-        "list_agent" | "agent_list" => Some("List-Agent".to_string()),
+        "list_tasks" | "list_agents" | "list_agent" | "agent_list" => {
+            Some("List-Tasks".to_string())
+        }
         _ => None,
     }
 }
@@ -4051,10 +3918,18 @@ fn read_command_action_from_parameters(
     if path.is_empty() {
         return None;
     }
-    let name = Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string());
+    let mut name = path.to_string();
+    let offset = input.get("offset").and_then(serde_json::Value::as_u64);
+    let limit = input.get("limit").and_then(serde_json::Value::as_u64);
+    match (offset, limit) {
+        (Some(offset), Some(limit)) => {
+            let end = offset.saturating_add(limit.saturating_sub(1));
+            name.push_str(&format!(" L:{offset}-{end}"));
+        }
+        (Some(offset), None) => name.push_str(&format!(" L:{offset}-")),
+        (None, Some(limit)) => name.push_str(&format!(" L:1-{limit}")),
+        (None, None) => {}
+    }
     Some(devo_protocol::parse_command::ParsedCommand::Read {
         cmd: command.to_string(),
         name,
@@ -4474,11 +4349,15 @@ fn patch_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEve
     }
     match (payload.tool_name.clone(), payload.input.clone()) {
         (Some(tool_name), Some(input)) => Some(WorkerEvent::PatchAppliedIo {
+            tool_use_id: payload.tool_call_id.clone(),
             tool_name,
             input,
             changes,
         }),
-        _ => Some(WorkerEvent::PatchApplied { changes }),
+        _ => Some(WorkerEvent::PatchApplied {
+            tool_use_id: payload.tool_call_id.clone(),
+            changes,
+        }),
     }
 }
 
@@ -4589,7 +4468,6 @@ mod tests {
     use super::normalize_display_output;
     use super::project_history_items;
     use super::render_skill_list_body;
-    use super::research_artifact_delta_event;
     use super::should_apply_terminal_turn_usage_fallback;
     use super::should_pause_goal_before_session_leave;
     use super::summarize_tool_call;
@@ -4615,8 +4493,6 @@ mod tests {
     use devo_protocol::SessionPlanStepStatus;
     use devo_protocol::ThreadGoal;
     use devo_protocol::ThreadGoalStatus;
-    use devo_server::EventContext;
-    use devo_server::ItemDeltaPayload;
     use devo_server::ItemEnvelope;
     use devo_server::ItemEventPayload;
     use devo_server::ItemKind;
@@ -4643,40 +4519,6 @@ mod tests {
             .unwrap_or(false);
 
         assert_eq!([completed], [true]);
-    }
-
-    #[test]
-    fn research_artifact_delta_maps_to_research_artifact_text_item_delta() {
-        // Trace: L2-DES-RESEARCH-001
-        // Verifies: research artifact deltas append through the normal TUI text item path
-        // without occupying the assistant stream.
-        let session_id = SessionId::new();
-        let turn_id = TurnId::new();
-        let item_id = ItemId::new();
-        let event = research_artifact_delta_event(
-            ItemDeltaPayload {
-                context: EventContext {
-                    session_id,
-                    turn_id: Some(turn_id),
-                    item_id: Some(item_id),
-                    seq: 0,
-                },
-                delta: "partial finding".to_string(),
-                stream_index: None,
-                channel: None,
-            },
-            &HashMap::new(),
-        );
-
-        assert_eq!(
-            event,
-            Some(WorkerEvent::TextItemDelta {
-                item_id,
-                kind: TextItemKind::ResearchArtifact,
-                research: None,
-                delta: "partial finding".to_string()
-            })
-        );
     }
 
     #[test]
@@ -4805,16 +4647,16 @@ mod tests {
                 "Spawn-Agent \"reviewer\" \"check usage\"",
             ),
             (
-                "agent_wait",
-                serde_json::json!({ "target": "reviewer", "timeout_secs": 30 }),
-                "Wait-Agent \"reviewer\" \"30s\"",
+                "await_task",
+                serde_json::json!({ "task_id": "task-1", "timeout_secs": 30 }),
+                "Await-Task \"task-1\" \"30s\"",
             ),
             (
-                "close_agent",
-                serde_json::json!({ "target": "reviewer" }),
-                "Close-Agent \"reviewer\"",
+                "cancel_task",
+                serde_json::json!({ "task_id": "task-1" }),
+                "Cancel-Task \"task-1\"",
             ),
-            ("agent_list", serde_json::json!({}), "List-Agent"),
+            ("list_tasks", serde_json::json!({}), "List-Tasks"),
         ];
 
         for (tool_name, parameters, expected) in cases {
@@ -5010,6 +4852,29 @@ mod tests {
     }
 
     #[test]
+    fn read_tool_call_start_with_offset_and_limit_emits_line_range() {
+        let payload = ToolCallPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "read".to_string(),
+            parameters: serde_json::json!({
+                "filePath": "crates/core/src/query.rs",
+                "offset": 10,
+                "limit": 5,
+            }),
+            command_actions: Vec::new(),
+        };
+
+        assert_eq!(
+            tool_call_started_actions(&payload),
+            vec![devo_protocol::parse_command::ParsedCommand::Read {
+                cmd: "read".to_string(),
+                name: "crates/core/src/query.rs L:10-14".to_string(),
+                path: PathBuf::from("crates/core/src/query.rs"),
+            }]
+        );
+    }
+
+    #[test]
     fn code_search_tool_call_start_emits_search_action() {
         let payload = ToolCallPayload {
             tool_call_id: "call-1".to_string(),
@@ -5072,6 +4937,26 @@ mod tests {
                 tool_use_id: "call-1".to_string(),
                 summary: "apply_patch".to_string(),
                 preparing: true,
+                parsed_commands: Some(Vec::new()),
+            }
+        );
+    }
+
+    #[test]
+    fn edit_tool_call_start_uses_path_free_live_summary() {
+        let payload = ToolCallPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "edit".to_string(),
+            parameters: serde_json::json!({"filePath": "test_edit_test.md"}),
+            command_actions: Vec::new(),
+        };
+
+        assert_eq!(
+            tool_call_started_event(payload),
+            WorkerEvent::ToolCall {
+                tool_use_id: "call-1".to_string(),
+                summary: "Edit".to_string(),
+                preparing: false,
                 parsed_commands: Some(Vec::new()),
             }
         );
@@ -5379,7 +5264,6 @@ mod tests {
             vec![WorkerEvent::TextItemDelta {
                 item_id,
                 kind: TextItemKind::Assistant,
-                research: None,
                 delta: "streamed answer".to_string()
             }]
         );
@@ -5601,17 +5485,10 @@ mod tests {
         );
         assert_eq!(
             output_events,
-            vec![
-                WorkerEvent::ToolCallUpdated {
-                    tool_use_id: "call-1".to_string(),
-                    summary: "Running".to_string(),
-                    parsed_commands: Vec::new(),
-                },
-                WorkerEvent::ToolOutputDelta {
-                    tool_use_id: "call-1".to_string(),
-                    delta: "streamed output".to_string(),
-                },
-            ]
+            vec![WorkerEvent::ToolOutputDelta {
+                tool_use_id: "call-1".to_string(),
+                delta: "streamed output".to_string(),
+            }]
         );
 
         let result_events = worker_events_from_acp_notification(
@@ -5692,7 +5569,13 @@ mod tests {
                 content: "hello\n".to_string(),
             },
         );
-        assert_eq!(events, vec![WorkerEvent::PatchApplied { changes }]);
+        assert_eq!(
+            events,
+            vec![WorkerEvent::PatchApplied {
+                tool_use_id: "call-1".to_string(),
+                changes,
+            }]
+        );
     }
 
     #[test]
@@ -5884,10 +5767,14 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        let WorkerEvent::PatchApplied {
+            tool_use_id,
+            changes,
+        } = event_rx.try_recv().expect("worker event")
         else {
             panic!("expected patch applied event");
         };
+        assert_eq!(tool_use_id, "call-1");
         assert!(changes.contains_key(&std::path::PathBuf::from("foo.txt")));
     }
 
@@ -5930,10 +5817,14 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        let WorkerEvent::PatchApplied {
+            tool_use_id,
+            changes,
+        } = event_rx.try_recv().expect("worker event")
         else {
             panic!("expected patch applied event");
         };
+        assert_eq!(tool_use_id, "call-1");
         assert!(changes.contains_key(&std::path::PathBuf::from("foo.txt")));
     }
 
@@ -5981,10 +5872,14 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        let WorkerEvent::PatchApplied {
+            tool_use_id,
+            changes,
+        } = event_rx.try_recv().expect("worker event")
         else {
             panic!("expected patch applied event");
         };
+        assert_eq!(tool_use_id, "call-1");
         assert!(changes.contains_key(&std::path::PathBuf::from("update.txt")));
     }
 
@@ -6028,10 +5923,14 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        let WorkerEvent::PatchApplied {
+            tool_use_id,
+            changes,
+        } = event_rx.try_recv().expect("worker event")
         else {
             panic!("expected patch applied event");
         };
+        assert_eq!(tool_use_id, "call-1");
         let devo_protocol::protocol::FileChange::Update { unified_diff, .. } = changes
             .get(&std::path::PathBuf::from("update.txt"))
             .expect("update change")
@@ -6124,6 +6023,7 @@ mod tests {
         let mut session = test_session_metadata(session_id, None);
         session.total_input_tokens = 500;
         session.last_query_total_tokens = 999;
+        session.prompt_token_estimate = 55;
         session.last_query_usage = Some(TurnUsage {
             input_tokens: 30,
             output_tokens: 12,
@@ -6132,7 +6032,7 @@ mod tests {
             reasoning_output_tokens: None,
             total_tokens: Some(42),
         });
-        let turn = TurnMetadata {
+        let _turn = TurnMetadata {
             turn_id: TurnId::new(),
             session_id,
             sequence: 1,
@@ -6158,15 +6058,13 @@ mod tests {
             failure_reason: None,
         };
 
-        assert_eq!(
-            last_query_tokens_from_resume(&session, Some(&turn)),
-            (42, 30)
-        );
+        assert_eq!(last_query_tokens_from_resume(&session), (42, 30));
 
         session.last_query_usage = None;
-        assert_eq!(last_query_tokens_from_resume(&session, Some(&turn)), (9, 7));
+        assert_eq!(last_query_tokens_from_resume(&session), (55, 55));
 
-        assert_eq!(last_query_tokens_from_resume(&session, None), (999, 0));
+        session.prompt_token_estimate = 0;
+        assert_eq!(last_query_tokens_from_resume(&session), (0, 0));
     }
 
     #[test]
@@ -6496,6 +6394,7 @@ mod tests {
                 "toolCallId": "call-spawn",
                 "status": "completed",
                 "rawOutput": {
+                    "task_id": "task-1",
                     "child_session_id": child,
                     "agent_path": "root/researcher",
                     "agent_nickname": "researcher",

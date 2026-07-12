@@ -33,7 +33,6 @@ pub use crate::client_core::ServerNotificationMessage;
 
 const SERVER_CHILD_STDIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 const SERVER_CHILD_EXIT_TIMEOUT: Duration = Duration::from_millis(500);
-const STDIO_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub struct StdioServerClientConfig {
@@ -123,9 +122,7 @@ impl StdioServerClient {
         tracing::info!("initializing stdio server client");
         self.core
             .set_client_capabilities(client_capabilities.clone());
-        let result = timeout(STDIO_INITIALIZE_TIMEOUT, self.core.initialize())
-            .await
-            .context("timed out waiting for initialize response from server")??;
+        let result = self.core.initialize().await?;
         tracing::info!("stdio server client initialized");
         Ok(result)
     }
@@ -371,6 +368,10 @@ impl StdioServerClient {
 
     pub async fn recv_notification(&mut self) -> Option<ServerNotificationMessage> {
         self.core.recv_notification().await
+    }
+
+    pub async fn recv_client_event(&mut self) -> Result<Option<crate::ClientEvent>> {
+        self.core.recv_client_event().await
     }
 
     pub async fn recv_event(&mut self) -> Result<Option<(String, ServerEvent)>> {
@@ -898,7 +899,7 @@ mod tests {
             approval_policy: Some("on-request".to_string()),
             cwd: Some(PathBuf::from("workspace")),
             collaboration_mode: devo_protocol::CollaborationMode::Plan,
-            execution_mode: devo_protocol::TurnExecutionMode::Research,
+            execution_mode: devo_protocol::TurnExecutionMode::Regular,
         };
         let expected_params = serde_json::to_value(&params).expect("serialize turn params");
         let mut stdout_lines = BufReader::new(stdout).lines();

@@ -88,7 +88,6 @@ impl From<AcpSessionUpdateRender<'_>> for Vec<WorkerEvent> {
                         WorkerEvent::TextItemDelta {
                             item_id,
                             kind: TextItemKind::Assistant,
-                            research: None,
                             delta,
                         }
                     } else {
@@ -107,7 +106,6 @@ impl From<AcpSessionUpdateRender<'_>> for Vec<WorkerEvent> {
                         WorkerEvent::TextItemDelta {
                             item_id,
                             kind: TextItemKind::Reasoning,
-                            research: None,
                             delta,
                         }
                     } else {
@@ -667,11 +665,10 @@ fn worker_events_from_acp_tool_call_update(
             input,
         });
     }
-    if let Some(summary) = tool_call
-        .title
-        .clone()
-        .or_else(|| tool_call.status.map(acp_tool_status_text))
-    {
+    // Status-only updates (e.g. pending → in_progress) must not overwrite the
+    // live title with a generic "Running"/"Pending" label. Only apply a title
+    // when the ACP update actually carries one.
+    if let Some(summary) = tool_call.title.clone() {
         events.push(WorkerEvent::ToolCallUpdated {
             tool_use_id: tool_call.tool_call_id.clone(),
             summary,
@@ -727,6 +724,7 @@ fn worker_events_from_acp_tool_content(
     if !changes.is_empty() {
         if let Some(input) = tool_call.raw_input.clone() {
             events.push(WorkerEvent::PatchAppliedIo {
+                tool_use_id: tool_call.tool_call_id.clone(),
                 tool_name: tool_call
                     .title
                     .clone()
@@ -735,7 +733,10 @@ fn worker_events_from_acp_tool_content(
                 changes,
             });
         } else {
-            events.push(WorkerEvent::PatchApplied { changes });
+            events.push(WorkerEvent::PatchApplied {
+                tool_use_id: tool_call.tool_call_id.clone(),
+                changes,
+            });
         }
     }
     let text = text_parts.join("\n");
@@ -803,11 +804,9 @@ fn subagent_events_from_acp_tool_call_update(
     terminal_state: AcpTerminalRenderState<'_>,
 ) -> Vec<WorkerEvent> {
     let mut events = Vec::new();
-    if let Some(summary) = tool_call
-        .title
-        .clone()
-        .or_else(|| tool_call.status.map(acp_tool_status_text))
-    {
+    // Status-only updates must not overwrite the live title with a generic
+    // "Running"/"Pending" label.
+    if let Some(summary) = tool_call.title.clone() {
         events.push(WorkerEvent::SubagentMonitor {
             event: SubagentMonitorEvent::ToolCallUpdated {
                 session_id,
@@ -989,17 +988,6 @@ fn acp_tool_kind_label(kind: AcpToolKind) -> &'static str {
         AcpToolKind::Fetch => "fetch",
         AcpToolKind::Other => "tool",
     }
-}
-
-fn acp_tool_status_text(status: AcpToolCallStatus) -> String {
-    match status {
-        AcpToolCallStatus::Pending => "Pending",
-        AcpToolCallStatus::InProgress => "Running",
-        AcpToolCallStatus::Completed => "Completed",
-        AcpToolCallStatus::Failed => "Failed",
-        AcpToolCallStatus::Cancelled => "Cancelled",
-    }
-    .to_string()
 }
 
 fn acp_content_display_text(content: &AcpContentBlock) -> Option<String> {

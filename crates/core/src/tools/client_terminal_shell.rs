@@ -426,11 +426,11 @@ mod tests {
             },
             cancel_token: CancellationToken::new(),
             agent_scope: ToolAgentScope::Parent,
-            agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
             collaboration_mode: devo_protocol::CollaborationMode::Build,
             agent_coordinator: None,
             client_filesystem: None,
             client_terminal: Some(client_terminal),
+            file_read_ledger: None,
             network_proxy: None,
             network_no_proxy: None,
         }

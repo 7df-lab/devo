@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deep Research"
+  short_description: "Structured multi-agent research with cited evidence"
+  default_prompt: "Use $deep-research to investigate this question and save a structured, cited report to Markdown."

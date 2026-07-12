@@ -153,11 +153,17 @@ impl CodeSearchService {
         })
     }
 
+    /// Prepares the default retrieval index without running a query.
+    pub fn prewarm(
+        &self,
+        root: &Path,
+        content: ContentFilter,
+    ) -> Result<IndexStats, CodeSearchError> {
+        let root = canonical_root(root)?;
+        self.index(root, content).map(|index| index.stats())
+    }
+
     /// Returns a warm or refreshed index for a root/content pair.
-    ///
-    /// The fast path is a clean watcher inside the safety interval. If that does
-    /// not hold, the service performs a manifest walk, checks memory, checks disk,
-    /// then asks `IndexRefresh` to reuse or re-embed at file granularity.
     fn index(
         &self,
         root: PathBuf,
@@ -168,34 +174,44 @@ impl CodeSearchService {
             return Ok(index);
         }
 
-        // A watcher-clean index is an optimization only. Once the watcher is
-        // dirty, unavailable, or beyond the safety interval, the manifest walk is
-        // the source of truth for reuse decisions.
-        let files = discover_files(&root, content)?;
-        if let Some(index) = self.matching_memory_index(&key, &root, &files)? {
+        let build_key = format!("{}|{key}", self.cache_dir.display());
+        let index =
+            crate::singleflight::run(build_key, || self.build_or_load_index(&key, &root, content))?;
+        self.store_index(key, &root, Arc::clone(&index))?;
+        Ok(index)
+    }
+
+    fn build_or_load_index(
+        &self,
+        key: &str,
+        root: &Path,
+        content: ContentFilter,
+    ) -> Result<Arc<SearchIndex>, CodeSearchError> {
+        let files = discover_files(root, content)?;
+        if let Some(index) = self.matching_memory_index(key, root, &files)? {
             return Ok(index);
         }
 
-        let cache_path = cache_file_path(&self.cache_dir, &root, content, self.provider.model_id());
+        let cache_path = cache_file_path(&self.cache_dir, root, content, self.provider.model_id());
         let previous_payload = load_payload(&cache_path).filter(|cache| {
             cache
                 .payload
-                .is_valid_for(&root, content, self.provider.model_id())
+                .is_valid_for(root, content, self.provider.model_id())
         });
         let outcome = IndexRefresh::refresh(
-            &root,
+            root,
             content,
             files,
             previous_payload,
             self.provider.as_ref(),
         )?;
         save_payload(&cache_path, &outcome.payload, &outcome.embeddings)?;
-        let index = Arc::new(SearchIndex::from_cached(crate::cache::CachedIndex {
-            payload: outcome.payload,
-            embeddings: outcome.embeddings,
-        })?);
-        self.store_index(key, &root, Arc::clone(&index))?;
-        Ok(index)
+        Ok(Arc::new(SearchIndex::from_cached(
+            crate::cache::CachedIndex {
+                payload: outcome.payload,
+                embeddings: outcome.embeddings,
+            },
+        )?))
     }
 
     /// Returns `true` when the next `search` or `find_related` call for this
@@ -821,15 +837,16 @@ mod tests {
             "should need build before first search"
         );
 
-        service
-            .search(SearchRequest {
-                root: temp.path().to_path_buf(),
-                query: "alpha".to_string(),
-                content: ContentFilter::Code,
-                top_k: 1,
-                filters: SearchFilters::empty(),
-            })
-            .expect("search");
+        let stats = service
+            .prewarm(temp.path(), ContentFilter::Code)
+            .expect("prewarm");
+        assert_eq!(
+            stats,
+            IndexStats {
+                indexed_files: 1,
+                total_chunks: 1,
+            }
+        );
 
         assert!(
             !service.needs_index_build(temp.path(), ContentFilter::Code),

@@ -15,6 +15,7 @@ use serde::Serialize;
 use crate::client_fs::ClientFilesystem;
 use crate::client_terminal::ClientTerminal;
 use crate::coordinator::AgentToolCoordinator;
+use crate::file_read_ledger::FileReadLedger;
 use crate::invocation::ToolCallId;
 use crate::tool_spec::ToolSpec;
 use tokio_util::sync::CancellationToken;
@@ -48,11 +49,12 @@ pub struct ToolContext {
     pub budgets: ToolBudgets,
     pub cancel_token: CancellationToken,
     pub agent_scope: ToolAgentScope,
-    pub agent_context_mode: devo_protocol::AgentContextMode,
     pub collaboration_mode: CollaborationMode,
     pub agent_coordinator: Option<Arc<dyn AgentToolCoordinator>>,
     pub client_filesystem: Option<Arc<dyn ClientFilesystem>>,
     pub client_terminal: Option<Arc<dyn ClientTerminal>>,
+    /// Session-scoped ledger of files read/written by tools (used by `edit`).
+    pub file_read_ledger: Option<Arc<FileReadLedger>>,
     pub network_proxy: Option<String>,
     pub network_no_proxy: Option<String>,
 }
@@ -67,7 +69,6 @@ impl std::fmt::Debug for ToolContext {
             .field("budgets", &self.budgets)
             .field("cancel_token", &self.cancel_token)
             .field("agent_scope", &self.agent_scope)
-            .field("agent_context_mode", &self.agent_context_mode)
             .field("collaboration_mode", &self.collaboration_mode)
             .field(
                 "agent_coordinator",
@@ -80,6 +81,10 @@ impl std::fmt::Debug for ToolContext {
             .field(
                 "client_terminal",
                 &self.client_terminal.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "file_read_ledger",
+                &self.file_read_ledger.as_ref().map(|_| "<configured>"),
             )
             .field(
                 "network_proxy",

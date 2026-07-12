@@ -6,6 +6,8 @@ use serde::Serialize;
 use ts_rs::TS;
 
 use crate::SessionId;
+use crate::TaskId;
+use crate::TaskState;
 use crate::TurnId;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -14,15 +16,6 @@ pub enum AgentToolPolicy {
     #[default]
     Inherit,
     DenyAll,
-    DeepResearch,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentContextMode {
-    #[default]
-    CodingAgent,
-    DeepResearch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -51,13 +44,12 @@ pub struct SpawnAgentParams {
     #[serde(default)]
     pub tool_policy: AgentToolPolicy,
     #[serde(default)]
-    pub context_mode: AgentContextMode,
-    #[serde(default)]
     pub ephemeral: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SpawnAgentResult {
+    pub task_id: TaskId,
     pub child_session_id: SessionId,
     pub agent_path: String,
     pub agent_nickname: String,
@@ -67,17 +59,25 @@ pub struct SpawnAgentResult {
 /// Model-facing spawn result: address children by path or nickname, not session ids.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ParentSpawnAgentResult {
+    pub task_id: TaskId,
     pub agent_path: String,
     pub agent_nickname: String,
-    pub status: String,
+    pub state: TaskState,
 }
 
 impl From<SpawnAgentResult> for ParentSpawnAgentResult {
     fn from(result: SpawnAgentResult) -> Self {
         Self {
+            task_id: result.task_id,
             agent_path: result.agent_path,
             agent_nickname: result.agent_nickname,
-            status: result.status,
+            state: match result.status.as_str() {
+                "completed" | "waiting_for_input" => TaskState::Completed,
+                "failed" => TaskState::Failed,
+                "interrupted" | "canceled" | "closed" => TaskState::Canceled,
+                "spawning" | "running" => TaskState::Running,
+                _ => TaskState::Failed,
+            },
         }
     }
 }
@@ -92,6 +92,7 @@ pub struct AgentMessageParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct AgentMessageResult {
     pub delivered: bool,
+    pub task_id: TaskId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -277,10 +278,10 @@ mod tests {
                 fork_turns: Some("all".to_string()),
                 max_turns: None,
                 tool_policy: AgentToolPolicy::Inherit,
-                context_mode: AgentContextMode::CodingAgent,
                 ephemeral: false,
             },
             "result": SpawnAgentResult {
+                task_id: TaskId::from(child_session_id),
                 child_session_id,
                 agent_path: "root/review".to_string(),
                 agent_nickname: "review".to_string(),

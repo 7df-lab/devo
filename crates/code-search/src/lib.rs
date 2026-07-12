@@ -17,6 +17,7 @@ mod ranking;
 mod refresh;
 mod semantic;
 mod service;
+mod singleflight;
 mod tokens;
 mod types;
 mod watch;

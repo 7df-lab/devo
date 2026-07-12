@@ -18,9 +18,6 @@ use devo_core::ApprovalDecisionItem;
 use devo_core::CommandExecutionItem;
 use devo_core::ItemId;
 use devo_core::Message;
-use devo_core::QueryEvent;
-use devo_core::ResearchArtifactItem;
-use devo_core::ResearchArtifactType;
 use devo_core::ResponseItem;
 use devo_core::SessionId;
 use devo_core::SessionTitleFinalSource;
@@ -29,7 +26,6 @@ use devo_core::TextItem;
 use devo_core::TokenInfo;
 use devo_core::ToolCallItem;
 use devo_core::ToolResultItem;
-use devo_core::TurnConfig;
 use devo_core::TurnId;
 use devo_core::TurnItem;
 use devo_core::TurnStatus;
@@ -42,17 +38,9 @@ use devo_core::history::compaction::compact_history;
 use devo_core::history::summarizer::DefaultHistorySummarizer;
 use devo_core::message_to_response_items;
 use devo_core::tools::AgentToolCoordinator;
-use devo_core::tools::ClientFilesystem;
-use devo_core::tools::ClientTerminal;
 use devo_core::tools::PermissionChecker;
-use devo_core::tools::ToolAgentScope;
-use devo_core::tools::ToolCall;
 use devo_core::tools::ToolCallError;
-use devo_core::tools::ToolExecutionOptions;
 use devo_core::tools::ToolPermissionRequest;
-use devo_core::tools::ToolRegistry;
-use devo_core::tools::ToolRuntime;
-use devo_core::tools::ToolRuntimeContext;
 use devo_protocol::{
     SessionDeletedPayload, WorkspaceChangeAttribution, WorkspaceChangeScope, WorkspaceChangeView,
     WorkspaceChangesReadParams, WorkspaceChangesReadResult, WorkspaceChangesUpdatedPayload,
@@ -71,7 +59,6 @@ use crate::EventsSubscribeParams;
 use crate::EventsSubscribeResult;
 use crate::InitializeResult;
 use crate::ItemDeltaKind;
-use crate::ItemDeltaPayload;
 use crate::ItemEnvelope;
 use crate::ItemEventPayload;
 use crate::ItemKind;
@@ -108,8 +95,6 @@ use crate::SessionTitleUpdateResult;
 use crate::ShellCommandParams;
 use crate::ShellCommandResult;
 use crate::SuccessResponse;
-use crate::ToolCallPayload;
-use crate::ToolResultPayload;
 use crate::TurnEventPayload;
 use crate::TurnInterruptParams;
 use crate::TurnInterruptResult;
@@ -149,6 +134,7 @@ mod acp_terminal;
 mod active_turn;
 mod agents;
 mod approval;
+mod code_index_warmup;
 mod command_exec;
 mod connection;
 mod goal_accounting;
@@ -163,19 +149,6 @@ mod outbound;
 mod proposed_plan;
 mod provider_vendor_api;
 mod reference_search;
-mod research;
-mod research_capture;
-mod research_child_agents;
-mod research_context;
-mod research_events;
-mod research_final_report;
-mod research_formatting;
-mod research_parsing;
-mod research_session;
-mod research_stages;
-mod research_streaming;
-mod research_tool_runtime;
-mod research_tools;
 mod session_actor;
 mod session_cache;
 mod session_interactive;
@@ -199,8 +172,6 @@ pub(crate) use outbound::enqueue_outbound;
 pub(crate) use outbound::log_outbound_frame;
 pub(crate) use outbound::outbound_frame_to_value;
 pub use outbound::test_outbound_channel;
-pub(crate) use research_tools::extract_written_file_path;
-pub(crate) use research_tools::is_write_tool_name;
 use session_actor::SessionHandle;
 use session_interactive::SessionInteractiveLanes;
 use turn_exec::ExecuteTurnRequest;
@@ -234,8 +205,6 @@ pub struct ServerRuntime {
     agent_output_buffers: Mutex<HashMap<SessionId, SubagentOutputBuffer>>,
     /// Per-parent `wait_agent` sequence cursors keyed by optional target string.
     agent_wait_cursors: Mutex<HashMap<SessionId, HashMap<String, u64>>>,
-    /// Child agents owned by an active `/research` pipeline.
-    research_child_agents: Mutex<HashMap<SessionId, HashSet<SessionId>>>,
     /// Latest subagent turn usage grouped under the parent turn that requested the work.
     subagent_usage: Mutex<subagent_usage::SubagentUsageState>,
     /// Live client-owned reference search sessions.
@@ -243,8 +212,11 @@ pub struct ServerRuntime {
         Mutex<HashMap<devo_protocol::ReferenceSearchId, reference_search::ReferenceSearchState>>,
     /// Live client-owned shell/process sessions.
     command_exec_manager: command_exec::CommandExecManager,
+    code_index_warmup: code_index_warmup::CodeIndexWarmup,
     /// Turn-scoped workspace baselines captured at actual execution start.
     active_workspace_baselines: Mutex<HashMap<TurnId, ActiveWorkspaceBaseline>>,
+    /// Sessions with an in-flight model title-generation task.
+    title_generation_in_flight: Mutex<HashSet<SessionId>>,
     /// Weak back-reference used when session actors need the owning runtime `Arc`.
     self_weak: std::sync::Weak<ServerRuntime>,
     /// LRU order for loaded root session actors.
@@ -349,11 +321,12 @@ impl ServerRuntime {
             agent_mailboxes: Mutex::new(HashMap::new()),
             agent_output_buffers: Mutex::new(HashMap::new()),
             agent_wait_cursors: Mutex::new(HashMap::new()),
-            research_child_agents: Mutex::new(HashMap::new()),
             subagent_usage: Mutex::new(subagent_usage::SubagentUsageState::default()),
             reference_searches: Mutex::new(HashMap::new()),
             command_exec_manager: command_exec::CommandExecManager::new(),
+            code_index_warmup: code_index_warmup::CodeIndexWarmup::new(),
             active_workspace_baselines: Mutex::new(HashMap::new()),
+            title_generation_in_flight: Mutex::new(HashSet::new()),
             self_weak: self_weak.clone(),
             session_lru: Mutex::new(session_cache::ParentSessionLru::new(
                 session_cache::PARENT_SESSION_LRU_CAPACITY,

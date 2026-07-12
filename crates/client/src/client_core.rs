@@ -46,7 +46,7 @@ pub const ACP_PROMPT_COMPLETED_NOTIFICATION_METHOD: &str = "_devo/acp_prompt/com
 const SERVER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Synthetic notifications emitted when falling back to detached `session/prompt`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ServerNotificationMessage {
     pub method: String,
     pub params: serde_json::Value,
@@ -410,6 +410,13 @@ impl ServerClientCore {
 
     pub(crate) async fn recv_notification(&mut self) -> Option<ServerNotificationMessage> {
         self.notifications_rx.recv().await
+    }
+
+    pub(crate) async fn recv_client_event(&mut self) -> Result<Option<crate::ClientEvent>> {
+        let Some(notification) = self.recv_notification().await else {
+            return Ok(None);
+        };
+        crate::events::client_event_from_notification(&notification)
     }
 
     pub(crate) async fn recv_event(&mut self) -> Result<Option<(String, ServerEvent)>> {

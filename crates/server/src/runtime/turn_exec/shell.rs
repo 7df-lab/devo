@@ -59,6 +59,7 @@ impl ServerRuntime {
         let permission_mode = shell_context.permission_mode;
         let permission_profile = shell_context.permission_profile;
         let registry = shell_context.tool_registry;
+        let file_read_ledger = shell_context.file_read_ledger;
         let provider_http = shell_context
             .runtime_context
             .config_store
@@ -88,11 +89,11 @@ impl ServerRuntime {
                 turn_id: Some(turn.turn_id.to_string()),
                 cwd,
                 agent_scope: ToolAgentScope::Parent,
-                agent_context_mode: devo_protocol::AgentContextMode::CodingAgent,
                 collaboration_mode: devo_protocol::CollaborationMode::Build,
                 agent_coordinator: None,
                 client_filesystem: None,
                 client_terminal: None,
+                file_read_ledger,
                 local_web_search: None,
                 hooks: self.hook_context_for_session(session_id).await,
                 network_proxy: provider_http.proxy_url,

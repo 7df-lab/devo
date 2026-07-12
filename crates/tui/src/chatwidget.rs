@@ -159,13 +159,6 @@ pub(crate) struct UserMessage {
     pub(crate) mention_bindings: Vec<MentionBinding>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResearchTaskPreview {
-    item_id: ItemId,
-    title: String,
-    preview: String,
-}
-
 impl From<String> for UserMessage {
     fn from(text: String) -> Self {
         Self {
@@ -267,7 +260,6 @@ pub(crate) struct ChatWidget {
     external_editor_state: ExternalEditorState,
     status_message: String,
     active_text_items: Vec<ActiveTextItem>,
-    research_task_previews: Vec<ResearchTaskPreview>,
     stream_chunking_policy: AdaptiveChunkingPolicy,
     available_models: Vec<Model>,
     saved_models: Vec<SavedModelEntry>,
@@ -299,8 +291,6 @@ pub(crate) struct ChatWidget {
     queued_input_modes: VecDeque<InputMode>,
     promoted_input_modes: VecDeque<InputMode>,
     active_turn_id: Option<TurnId>,
-    /// True while a `/research` turn is active; suppresses automatic git-diff overlays.
-    active_turn_is_research: bool,
     current_turn_mode: InputMode,
     committed_server_assistant_in_turn: bool,
     boundary_committed_assistant_items: HashSet<ItemId>,
@@ -391,7 +381,7 @@ impl ChatWidget {
         tool_title: &str,
         is_error: bool,
     ) -> bool {
-        !self.active_turn_is_research && diff_rules::should_auto_show_git_diff(tool_title, is_error)
+        diff_rules::should_auto_show_git_diff(tool_title, is_error)
     }
     pub(crate) fn new_with_app_event(common: ChatWidgetInit) -> Self {
         // Pull the constructor inputs apart up front so the setup below reads in stages.
@@ -491,7 +481,6 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             status_message: "Ready".to_string(),
             active_text_items: Vec::new(),
-            research_task_previews: Vec::new(),
             stream_chunking_policy: AdaptiveChunkingPolicy::default(),
             available_models,
             current_model_binding_id,
@@ -523,7 +512,6 @@ impl ChatWidget {
             queued_input_modes: VecDeque::new(),
             promoted_input_modes: VecDeque::new(),
             active_turn_id: None,
-            active_turn_is_research: false,
             current_turn_mode: InputMode::Build,
             committed_server_assistant_in_turn: false,
             boundary_committed_assistant_items: HashSet::new(),

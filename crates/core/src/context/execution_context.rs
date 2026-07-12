@@ -42,7 +42,6 @@ impl Persona {
 pub enum SystemPromptMode {
     #[default]
     CodingAgent,
-    DeepResearch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,9 +152,6 @@ impl SessionContext {
 
     pub fn build_system_prompt(&self) -> String {
         let base = self.base_instructions.trim();
-        if self.system_prompt_mode == SystemPromptMode::DeepResearch {
-            return base.to_string();
-        }
         let mode_prompt = crate::collaboration_mode_prompts::mode_introductions_prompt();
         if base.is_empty() {
             mode_prompt
@@ -165,10 +161,6 @@ impl SessionContext {
     }
 
     pub fn prefix_user_inputs(&self) -> Vec<UserInput> {
-        if self.system_prompt_mode == SystemPromptMode::DeepResearch {
-            return Vec::new();
-        }
-
         let mut inputs = Vec::new();
         if let Some(text) = self
             .available_skills
@@ -741,23 +733,5 @@ mod tests {
                 crate::collaboration_mode_prompts::mode_introductions_prompt()
             )
         );
-    }
-
-    #[test]
-    fn deep_research_session_context_uses_only_base_system_prompt() {
-        let mut context = SessionContext::capture(
-            &Model {
-                base_instructions: "research system".into(),
-                ..Model::default()
-            },
-            None,
-            Path::new("/tmp/a"),
-            None,
-            /*available_skills*/ None,
-        );
-        context.system_prompt_mode = super::SystemPromptMode::DeepResearch;
-
-        assert_eq!(context.build_system_prompt(), "research system");
-        assert_eq!(context.prefix_user_inputs(), Vec::<UserInput>::new());
     }
 }

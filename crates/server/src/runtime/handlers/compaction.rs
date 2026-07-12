@@ -405,14 +405,6 @@ impl ServerRuntime {
                         ResponseItem::Message(Message::assistant_text(text.clone())),
                     ));
                 }
-                TurnItem::ResearchArtifact(ResearchArtifactItem { title, content, .. }) => {
-                    normalized_persisted_items.push((
-                        item.item_id,
-                        ResponseItem::Message(Message::assistant_text(format!(
-                            "### {title}\n\n{content}"
-                        ))),
-                    ));
-                }
                 TurnItem::Reasoning(_) => {}
                 TurnItem::ToolCall(ToolCallItem {
                     tool_call_id,
@@ -563,57 +555,6 @@ mod tests {
                 &compacted_items
             ),
             vec![command_item_id, command_item_id]
-        );
-    }
-
-    #[test]
-    fn preserved_item_ids_ignore_research_internal_tool_payloads() {
-        let tool_item_id = ItemId::new();
-        let tool_input = serde_json::json!({ "query": "internal research query" });
-        let persisted_turn_items = vec![
-            crate::execution::PersistedTurnItem {
-                turn_id: TurnId::new(),
-                turn_kind: devo_core::TurnKind::Research,
-                item_id: tool_item_id,
-                turn_item: TurnItem::ToolCall(ToolCallItem {
-                    tool_call_id: "search-1".to_string(),
-                    tool_name: "web_search".to_string(),
-                    input: tool_input.clone(),
-                }),
-            },
-            crate::execution::PersistedTurnItem {
-                turn_id: TurnId::new(),
-                turn_kind: devo_core::TurnKind::Research,
-                item_id: tool_item_id,
-                turn_item: TurnItem::ToolResult(ToolResultItem {
-                    tool_call_id: "search-1".to_string(),
-                    tool_name: Some("web_search".to_string()),
-                    output: serde_json::Value::String("opaque provider payload".to_string()),
-                    display_content: None,
-                    is_error: false,
-                }),
-            },
-        ];
-        let compacted_items = vec![
-            ResponseItem::Message(Message::assistant_text("summary")),
-            ResponseItem::ToolCall {
-                id: "search-1".to_string(),
-                name: "web_search".to_string(),
-                input: tool_input,
-            },
-            ResponseItem::ToolCallOutput {
-                tool_use_id: "search-1".to_string(),
-                content: "opaque provider payload".to_string(),
-                is_error: false,
-            },
-        ];
-
-        assert_eq!(
-            ServerRuntime::preserved_item_ids_from_compacted(
-                &persisted_turn_items,
-                &compacted_items
-            ),
-            Vec::<ItemId>::new()
         );
     }
 }

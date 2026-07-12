@@ -11,7 +11,7 @@ pub(super) fn is_unified_exec_tool(name: &str) -> bool {
 }
 
 pub(super) fn is_file_change_tool(name: &str) -> bool {
-    matches!(name, "apply_patch" | "write")
+    matches!(name, "apply_patch" | "write" | "edit")
 }
 
 pub(super) fn is_plan_tool(name: &str) -> bool {
@@ -86,8 +86,7 @@ fn tool_start_item(
         | ItemKind::ImageView
         | ItemKind::ContextCompaction
         | ItemKind::ApprovalRequest
-        | ItemKind::ApprovalDecision
-        | ItemKind::ResearchArtifact => unreachable!("tool start item kind must be tool-like"),
+        | ItemKind::ApprovalDecision => unreachable!("tool start item kind must be tool-like"),
     };
     ToolStartItem { item_kind, payload }
 }
@@ -380,6 +379,9 @@ pub(super) fn user_shell_command_payload(
 const AGENT_COORDINATION_TOOL_NAMES: &[&str] = &[
     "spawn_agent",
     "send_message",
+    "await_task",
+    "list_tasks",
+    "cancel_task",
     "wait_agent",
     "list_agents",
     "close_agent",

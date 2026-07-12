@@ -1,7 +1,7 @@
-use devo_protocol::SessionId;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
+use devo_protocol::SessionId;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
@@ -80,7 +80,11 @@ pub(crate) struct AppLinkView {
 }
 
 impl AppLinkView {
-    pub(crate) fn new(params: AppLinkViewParams, app_event_tx: AppEventSender, accent_color: Color) -> Self {
+    pub(crate) fn new(
+        params: AppLinkViewParams,
+        app_event_tx: AppEventSender,
+        accent_color: Color,
+    ) -> Self {
         let AppLinkViewParams {
             app_id,
             title,
@@ -227,7 +231,7 @@ impl AppLinkView {
             lines.push(Line::from(""));
         }
         if self.is_installed {
-            for line in wrap("Use $ to insert this app into the prompt.", usable_width) {
+            for line in wrap("Use @ to insert this app into the prompt.", usable_width) {
                 lines.push(Line::from(line.into_owned()));
             }
             lines.push(Line::from(""));
@@ -246,7 +250,7 @@ impl AppLinkView {
             }
             if !self.is_installed {
                 for line in wrap(
-                    "After installed, use $ to insert this app into the prompt.",
+                    "After installed, use @ to insert this app into the prompt.",
                     usable_width,
                 ) {
                     lines.push(Line::from(line.into_owned()));

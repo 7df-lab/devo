@@ -36,7 +36,6 @@ use crate::chatwidget::ReasoningEffortListEntry;
 use crate::chatwidget::TuiSessionState;
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
-use crate::events::ResearchArtifactMetadata;
 use crate::events::SavedModelEntry;
 use crate::events::TextItemKind;
 use crate::history_cell::HistoryCell;
@@ -1015,18 +1014,15 @@ fn approval_request_does_not_duplicate_already_committed_assistant_text() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id,
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id,
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
         delta: text.clone(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id,
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
         final_text: text.clone(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::AssistantMessageCompleted(
@@ -1062,302 +1058,6 @@ fn approval_request_does_not_duplicate_already_committed_assistant_text() {
         1,
         "assistant text should not be committed twice around approval request:\n{rows}"
     );
-}
-
-#[test]
-fn research_clarification_artifact_streams_incremental_deltas_before_completion() {
-    let model = Model {
-        slug: "test-model".to_string(),
-        display_name: "Test Model".to_string(),
-        ..Model::default()
-    };
-    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
-    let artifact_id = ItemId::new();
-    let research = Some(ResearchArtifactMetadata {
-        artifact_type: "clarification".to_string(),
-        title: "Research Clarification".to_string(),
-    });
-
-    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
-        model: "test-model".to_string(),
-        model_binding_id: None,
-        reasoning_effort_selection: None,
-        reasoning_effort: None,
-        turn_id: Default::default(),
-    });
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research: research.clone(),
-    });
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research: research.clone(),
-        delta: "Research ".to_string(),
-    });
-    let partial_rows = rendered_rows(&widget, 80, 16).join("\n");
-    assert!(
-        partial_rows.contains("Research "),
-        "clarification artifact delta should be visible before completion:\n{partial_rows}"
-    );
-
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research: research.clone(),
-        delta: "DeepSeek official website.".to_string(),
-    });
-    let streamed_rows = rendered_rows(&widget, 80, 16).join("\n");
-    assert!(
-        streamed_rows.contains("DeepSeek official website."),
-        "clarification artifact should grow with later deltas:\n{streamed_rows}"
-    );
-
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research,
-        final_text: "### Research Clarification\n\nResearch DeepSeek official website.".to_string(),
-    });
-
-    let committed = scrollback_plain_lines(&trim_trailing_blank_scrollback_lines(
-        widget.drain_scrollback_lines(80),
-    ))
-    .join("\n");
-    assert!(
-        committed.contains("Research DeepSeek official website."),
-        "clarification artifact should commit final content:\n{committed}"
-    );
-}
-
-#[test]
-fn research_artifact_completion_does_not_commit_assistant_turn() {
-    let model = Model {
-        slug: "test-model".to_string(),
-        display_name: "Test Model".to_string(),
-        ..Model::default()
-    };
-    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
-    let artifact_id = ItemId::new();
-
-    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
-        model: "test-model".to_string(),
-        model_binding_id: None,
-        reasoning_effort_selection: None,
-        reasoning_effort: None,
-        turn_id: Default::default(),
-    });
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research: None,
-    });
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research: None,
-        delta: "partial finding".to_string(),
-    });
-    let live_rows = rendered_rows(&widget, 80, 16).join("\n");
-    assert!(
-        live_rows.contains("partial finding"),
-        "research artifact delta should be visible before completion:\n{live_rows}"
-    );
-
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research: None,
-        final_text: "### Finding\n\npartial finding".to_string(),
-    });
-    widget.handle_worker_event(crate::events::WorkerEvent::AssistantMessageCompleted(
-        "final report".to_string(),
-    ));
-
-    let committed = scrollback_plain_lines(&trim_trailing_blank_scrollback_lines(
-        widget.drain_scrollback_lines(80),
-    ))
-    .join("\n");
-    assert!(
-        committed.contains("partial finding"),
-        "research artifact should commit independently:\n{committed}"
-    );
-    assert!(
-        committed.contains("final report"),
-        "research artifact completion must not suppress assistant completion:\n{committed}"
-    );
-}
-
-#[test]
-fn research_artifact_finding_updates_inline_preview_without_research_cell() {
-    let model = Model {
-        slug: "test-model".to_string(),
-        display_name: "Test Model".to_string(),
-        ..Model::default()
-    };
-    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
-    let artifact_id = ItemId::new();
-    let research = Some(ResearchArtifactMetadata {
-        artifact_type: "finding".to_string(),
-        title: "Research Finding: API behavior".to_string(),
-    });
-
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research: research.clone(),
-    });
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research: research.clone(),
-        delta: "child agent found the API contract".to_string(),
-    });
-
-    let live_rows = rendered_rows(&widget, 100, 16).join("\n");
-    assert!(
-        live_rows.contains("Research Finding: API behavior: working"),
-        "finding should render as an inline research preview row:\n{live_rows}"
-    );
-    assert!(
-        live_rows.contains("child agent found the API contract"),
-        "finding delta should update the inline preview:\n{live_rows}"
-    );
-    assert!(
-        !live_rows.contains("▌ Research"),
-        "finding should not render the generic research artifact cell:\n{live_rows}"
-    );
-
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research,
-        final_text: "### Research Finding: API behavior\n\nchild agent found the API contract"
-            .to_string(),
-    });
-
-    let after_completion = rendered_rows(&widget, 100, 16).join("\n");
-    assert!(
-        !after_completion.contains("Research Finding: API behavior"),
-        "completed finding preview should disappear:\n{after_completion}"
-    );
-    let transcript = line_texts(widget.transcript_overlay_lines(100)).join("\n");
-    assert!(
-        !transcript.contains("child agent found the API contract"),
-        "finding should not commit to the parent transcript:\n{transcript}"
-    );
-}
-
-#[test]
-fn research_artifact_brief_and_plan_still_render_research_cells() {
-    let model = Model {
-        slug: "test-model".to_string(),
-        display_name: "Test Model".to_string(),
-        ..Model::default()
-    };
-    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
-    for (artifact_type, title, content) in [
-        (
-            "brief",
-            "Research Brief",
-            "Understand the current behavior.",
-        ),
-        (
-            "plan",
-            "Research Plan",
-            "Compare the relevant implementation paths.",
-        ),
-    ] {
-        let artifact_id = ItemId::new();
-        let research = Some(ResearchArtifactMetadata {
-            artifact_type: artifact_type.to_string(),
-            title: title.to_string(),
-        });
-        widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
-            item_id: artifact_id,
-            kind: crate::events::TextItemKind::ResearchArtifact,
-            research: research.clone(),
-        });
-        widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
-            item_id: artifact_id,
-            kind: crate::events::TextItemKind::ResearchArtifact,
-            research: research.clone(),
-            delta: content.to_string(),
-        });
-        let live_rows = rendered_rows(&widget, 100, 16).join("\n");
-        assert!(
-            live_rows.contains(content),
-            "{title} body should still render as a research artifact cell:\n{live_rows}"
-        );
-        assert!(
-            live_rows.contains('▌'),
-            "{title} should keep the research artifact block style:\n{live_rows}"
-        );
-        assert!(
-            !live_rows.contains(title),
-            "{title} title should not be visible:\n{live_rows}"
-        );
-        widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
-            item_id: artifact_id,
-            kind: crate::events::TextItemKind::ResearchArtifact,
-            research,
-            final_text: format!("### {title}\n\n{content}"),
-        });
-    }
-
-    let transcript = line_texts(widget.transcript_overlay_lines(100)).join("\n");
-    assert!(
-        transcript.contains("Understand the current behavior."),
-        "{transcript}"
-    );
-    assert!(
-        transcript.contains("Compare the relevant implementation paths."),
-        "{transcript}"
-    );
-    assert!(!transcript.contains("Research Brief"), "{transcript}");
-    assert!(!transcript.contains("Research Plan"), "{transcript}");
-}
-
-#[test]
-fn research_artifact_title_only_heading_does_not_render_empty_cell() {
-    let model = Model {
-        slug: "test-model".to_string(),
-        display_name: "Test Model".to_string(),
-        ..Model::default()
-    };
-    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
-    let artifact_id = ItemId::new();
-    let research = Some(ResearchArtifactMetadata {
-        artifact_type: "brief".to_string(),
-        title: "Research Brief".to_string(),
-    });
-
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research: research.clone(),
-    });
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research: research.clone(),
-        delta: "### Research Brief".to_string(),
-    });
-    let live_rows = rendered_rows(&widget, 100, 16).join("\n");
-    assert!(!live_rows.contains("Research Brief"), "{live_rows}");
-    assert!(!live_rows.contains('▌'), "{live_rows}");
-
-    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
-        item_id: artifact_id,
-        kind: crate::events::TextItemKind::ResearchArtifact,
-        research,
-        final_text: "### Research Brief".to_string(),
-    });
-
-    let transcript = line_texts(widget.transcript_overlay_lines(100)).join("\n");
-    assert!(!transcript.contains("Research Brief"), "{transcript}");
-    assert!(!transcript.contains('▌'), "{transcript}");
 }
 
 #[test]
@@ -1731,12 +1431,10 @@ fn queued_prompt_promotes_after_active_assistant_stream() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id,
         kind: TextItemKind::Assistant,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id,
         kind: TextItemKind::Assistant,
-        research: None,
         delta: "assistant before promotion".to_string(),
     });
 
@@ -1748,7 +1446,6 @@ fn queued_prompt_promotes_after_active_assistant_stream() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id,
         kind: TextItemKind::Assistant,
-        research: None,
         final_text: "assistant before promotion".to_string(),
     });
 
@@ -2695,12 +2392,10 @@ fn proposed_plan_keeps_assistant_preamble_before_plan() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: TextItemKind::Assistant,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: assistant_id,
         kind: TextItemKind::Assistant,
-        research: None,
         delta: "现在我已经了解了代码库。以下是计划：\n".to_string(),
     });
     widget
@@ -2742,12 +2437,10 @@ fn proposed_plan_completion_does_not_duplicate_boundary_preamble() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: TextItemKind::Assistant,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: assistant_id,
         kind: TextItemKind::Assistant,
-        research: None,
         delta: "Intro before plan.\n".to_string(),
     });
     widget
@@ -2759,7 +2452,6 @@ fn proposed_plan_completion_does_not_duplicate_boundary_preamble() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id: assistant_id,
         kind: TextItemKind::Assistant,
-        research: None,
         final_text: "Intro before plan.\n".to_string(),
     });
 
@@ -2800,9 +2492,19 @@ fn proposed_plan_implement_action_sends_build_turn() {
         item_id: plan_id,
         final_text: "## Summary\n\nBuild the feature.".to_string(),
     });
+    widget.handle_app_event(AppEvent::PreparePlanSuggestionInput);
+    assert_eq!(
+        widget.input_mode_for_test(),
+        crate::bottom_pane::InputMode::Plan
+    );
     widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     let event = app_event_rx.try_recv().expect("implement event is emitted");
+    widget.handle_app_event(event.clone());
+    assert_eq!(
+        widget.input_mode_for_test(),
+        crate::bottom_pane::InputMode::Build
+    );
     let AppEvent::Command(AppCommand::UserTurn {
         input,
         cwd: event_cwd,
@@ -3096,7 +2798,7 @@ fn session_switch_merges_consecutive_explored_items() {
         "expected one merged explored block, got:\n{blob}"
     );
     assert!(
-        blob.contains("Read worker.rs"),
+        blob.contains("Read crates/tui/src/worker.rs"),
         "expected read entry, got:\n{blob}"
     );
     assert!(
@@ -4884,6 +4586,106 @@ fn generic_running_tool_call_disappears_after_result() {
 }
 
 #[test]
+fn edit_running_row_is_path_free_and_disappears_after_patch_result() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "edit-1".to_string(),
+        summary: "Edit".to_string(),
+        preparing: false,
+        parsed_commands: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCallDetails {
+        tool_use_id: "edit-1".to_string(),
+        tool_name: "edit".to_string(),
+        input: serde_json::json!({"filePath": "test_edit_test.md"}),
+    });
+
+    let running = rendered_rows(&widget, 80, 12).join("\n");
+    assert!(
+        running.contains("Running Edit"),
+        "expected live Edit row:\n{running}"
+    );
+    assert!(
+        !running.contains("test_edit_test.md"),
+        "live Edit row should not repeat the path:\n{running}"
+    );
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("test_edit_test.md"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            old_text: Some("old\n".to_string()),
+            new_text: Some("new\n".to_string()),
+            move_path: None,
+        },
+    );
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchAppliedIo {
+        tool_use_id: "edit-1".to_string(),
+        tool_name: "edit".to_string(),
+        input: serde_json::json!({"filePath": "test_edit_test.md"}),
+        changes,
+    });
+
+    let after = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(
+        !after.contains("Running Edit"),
+        "completed Edit should leave no live row:\n{after}"
+    );
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
+    assert!(
+        history.contains("Edited test_edit_test.md") || history.contains("Edited 1 file"),
+        "completed Edit diff should remain visible:\n{history}"
+    );
+}
+
+#[test]
+fn patch_result_removes_only_matching_running_tool_row() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "edit-1".to_string(),
+        summary: "Edit".to_string(),
+        preparing: false,
+        parsed_commands: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "search-1".to_string(),
+        summary: "code_search".to_string(),
+        preparing: false,
+        parsed_commands: Some(Vec::new()),
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "edit-1".to_string(),
+        changes: std::collections::HashMap::new(),
+    });
+
+    let after = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(
+        !after.contains("Running Edit"),
+        "Edit row should be removed:\n{after}"
+    );
+    assert!(
+        after.contains("Running code_search"),
+        "unrelated active tool row should remain:\n{after}"
+    );
+}
+
+#[test]
 fn interrupted_turn_flushes_explored_cell_before_summary() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
@@ -4991,7 +4793,10 @@ fn preparing_write_disappears_after_patch_applied() {
             content: "pub fn demo() {}\n".to_string(),
         },
     );
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let after = rendered_rows(&widget, 80, 16).join("\n");
     assert!(
@@ -5059,7 +4864,10 @@ fn preparing_apply_patch_disappears_after_patch_applied() {
             content: "pub fn demo() {}\n".to_string(),
         },
     );
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let after = rendered_rows(&widget, 80, 16).join("\n");
     assert!(
@@ -5302,23 +5110,19 @@ fn lifecycle_text_items_render_as_ordered_sibling_cells() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
-        research: None,
         delta: "thinking".to_string(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
         delta: "Line1\nLine2\n".to_string(),
     });
 
@@ -5337,7 +5141,6 @@ fn lifecycle_text_items_render_as_ordered_sibling_cells() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
-        research: None,
         final_text: "thinking".to_string(),
     });
     let rows_after_reasoning = rendered_rows(&widget, 80, 16);
@@ -5389,23 +5192,19 @@ fn lifecycle_text_items_keep_reasoning_before_assistant_when_events_arrive_out_o
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
         delta: "answer line\n".to_string(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
-        research: None,
         delta: "thinking text".to_string(),
     });
 
@@ -5421,7 +5220,6 @@ fn lifecycle_text_items_keep_reasoning_before_assistant_when_events_arrive_out_o
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
         final_text: "answer line".to_string(),
     });
     let committed_before_reasoning = widget.drain_scrollback_lines(80);
@@ -5433,7 +5231,6 @@ fn lifecycle_text_items_keep_reasoning_before_assistant_when_events_arrive_out_o
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
-        research: None,
         final_text: "thinking text".to_string(),
     });
     let committed = scrollback_plain_lines(&trim_trailing_blank_scrollback_lines(
@@ -5475,23 +5272,19 @@ fn assistant_stream_commit_tick_runs_while_reasoning_is_pending() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: reasoning_id,
         kind: crate::events::TextItemKind::Reasoning,
-        research: None,
         delta: "thinking text".to_string(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
         delta: "first line\nsecond line\n".to_string(),
     });
 
@@ -5863,7 +5656,6 @@ fn fragmented_random_assistant_stream_keeps_rendering_without_queue_stall() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: assistant_id,
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
     });
 
     let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
@@ -5879,7 +5671,6 @@ fn fragmented_random_assistant_stream_keeps_rendering_without_queue_stall() {
             widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
                 item_id: assistant_id,
                 kind: crate::events::TextItemKind::Assistant,
-                research: None,
                 delta: delta.to_string(),
             });
             widget.pre_draw_tick();
@@ -6052,6 +5843,76 @@ fn request_user_input_keeps_working_status_indicator_visible() {
         rows.contains("Which scope should research use?"),
         "rows:\n{rows}"
     );
+}
+
+#[test]
+fn interrupt_request_switches_working_status_to_stopping_immediately() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+
+    widget.handle_key_event(press_key(KeyCode::Esc));
+    assert!(app_event_rx.try_recv().is_err());
+    widget.handle_key_event(press_key(KeyCode::Esc));
+    assert_eq!(app_event_rx.try_recv(), Ok(AppEvent::Interrupt));
+    assert!(widget.request_interrupt());
+    let rows = rendered_rows(&widget, 120, 20).join("\n");
+    assert!(rows.contains("Stopping…"), "rows:\n{rows}");
+    assert!(!rows.contains("to interrupt"), "rows:\n{rows}");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "Interrupted".to_string(),
+        turn_count: 1,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+    });
+    let rows = rendered_rows(&widget, 120, 20).join("\n");
+    assert!(!rows.contains("Stopping…"), "rows:\n{rows}");
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(120)).join("\n");
+    assert!(history.contains("interrupted"), "history:\n{history}");
+}
+
+#[test]
+fn interrupt_failure_restores_working_status() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+    assert!(widget.request_interrupt());
+
+    widget.handle_worker_event(crate::events::WorkerEvent::InterruptFailed {
+        message: "connection reset".to_string(),
+    });
+
+    let rows = rendered_rows(&widget, 120, 20).join("\n");
+    assert!(rows.contains("Working"), "rows:\n{rows}");
+    assert!(!rows.contains("Stopping…"), "rows:\n{rows}");
 }
 
 #[test]
@@ -7481,7 +7342,7 @@ fn transcript_overlay_lines_include_completed_read_input_and_full_output() {
     let transcript = line_texts(widget.transcript_overlay_lines(80)).join("\n");
 
     assert!(
-        inline.contains("Explored") && inline.contains("Read lib.rs"),
+        inline.contains("Explored") && inline.contains("Read src/lib.rs"),
         "inline read rendering should stay as the compact explored block: {inline}"
     );
     assert!(
@@ -7520,6 +7381,7 @@ fn transcript_overlay_lines_include_patch_input_and_diff_output() {
     );
 
     widget.handle_worker_event(crate::events::WorkerEvent::PatchAppliedIo {
+        tool_use_id: "tool-1".to_string(),
         tool_name: "apply_patch".to_string(),
         input: serde_json::json!({
             "patch": "*** Begin Patch\n*** Update File: foo.txt\n-old\n+new\n*** End Patch"
@@ -7751,6 +7613,51 @@ fn read_tool_call_renders_as_explored_group_in_viewport() {
 }
 
 #[test]
+fn read_tool_call_renders_relative_path_with_line_range() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "read crates/core/src/query.rs".to_string(),
+        preparing: false,
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Read {
+            cmd: "read crates/core/src/query.rs".to_string(),
+            name: "crates/core/src/query.rs L:10-19".to_string(),
+            path: PathBuf::from("crates/core/src/query.rs"),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "read crates/core/src/query.rs".to_string(),
+        preview: "impl Query {}".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(100)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        display.contains("Read crates/core/src/query.rs L:10-19"),
+        "expected read summary with line range: {display}"
+    );
+}
+
+#[test]
 fn read_tool_call_falls_back_to_path_when_read_name_is_empty() {
     let model = Model {
         slug: "test-model".to_string(),
@@ -7790,7 +7697,7 @@ fn read_tool_call_falls_back_to_path_when_read_name_is_empty() {
         .join("\n");
 
     assert!(
-        display.contains("Read mod.rs"),
+        display.contains("Read crates/tui/src/mod.rs"),
         "expected read summary fallback in explored viewport: {display}"
     );
     assert!(
@@ -7867,7 +7774,7 @@ fn read_tool_call_updates_placeholder_from_completed_tool_call_metadata() {
         .join("\n");
 
     assert!(
-        updated_display.contains("Read mod.rs"),
+        updated_display.contains("Read crates/tui/src/mod.rs"),
         "expected read placeholder to update in place: {updated_display}"
     );
 
@@ -7892,7 +7799,7 @@ fn read_tool_call_updates_placeholder_from_completed_tool_call_metadata() {
         .join("\n");
 
     assert!(
-        completed_display.contains("Read mod.rs"),
+        completed_display.contains("Read crates/tui/src/mod.rs"),
         "expected completed read to remain explored: {completed_display}"
     );
     assert!(
@@ -7953,7 +7860,9 @@ fn consecutive_read_tool_calls_render_on_one_line_with_spaces() {
         .join("\n");
 
     assert!(
-        display.contains("Read mod.rs lib.rs file1.rs file2.rs"),
+        display.contains(
+            "Read crates/tui/src/mod.rs crates/tui/src/lib.rs crates/tui/src/file1.rs crates/tui/src/file2.rs"
+        ),
         "expected consecutive reads to render space-separated: {display}"
     );
 }
@@ -8321,7 +8230,6 @@ fn reasoning_start_closes_current_explored_group() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: devo_core::ItemId::new(),
         kind: crate::events::TextItemKind::Reasoning,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-2".to_string(),
@@ -8376,7 +8284,6 @@ fn assistant_text_start_closes_current_explored_group() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
         item_id: devo_core::ItemId::new(),
         kind: crate::events::TextItemKind::Assistant,
-        research: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-2".to_string(),
@@ -8588,49 +8495,6 @@ fn auto_git_diff_trigger_matches_editing_tools_only() {
     ));
 }
 
-#[tokio::test]
-async fn research_turn_does_not_auto_show_git_diff() {
-    let model = Model {
-        slug: "test-model".to_string(),
-        display_name: "Test Model".to_string(),
-        ..Model::default()
-    };
-    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
-
-    widget.handle_slash_command(
-        crate::slash_command::SlashCommand::Research,
-        "DeepSeek official website".to_string(),
-    );
-    assert!(!widget.should_auto_show_git_diff_for_turn("write report.md", false));
-
-    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
-        tool_use_id: "tool-1".to_string(),
-        summary: "write report.md".to_string(),
-        preparing: false,
-        parsed_commands: None,
-    });
-    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
-        tool_use_id: "tool-1".to_string(),
-        title: "write report.md".to_string(),
-        preview: "updated".to_string(),
-        is_error: false,
-        truncated: false,
-    });
-
-    let auto_diff = tokio::time::timeout(std::time::Duration::from_millis(200), async {
-        loop {
-            if let Some(AppEvent::DiffResult(_)) = app_event_rx.recv().await {
-                break true;
-            }
-        }
-    })
-    .await;
-    assert!(
-        auto_diff.is_err(),
-        "research turns must not emit automatic DiffResult events"
-    );
-}
-
 #[test]
 fn patch_applied_event_renders_edited_block() {
     let model = Model {
@@ -8651,7 +8515,10 @@ fn patch_applied_event_renders_edited_block() {
         },
     );
 
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
     assert!(
@@ -8677,7 +8544,10 @@ fn added_file_patch_applied_event_renders_added_content_lines() {
             content: "pub fn quicksort() {\n    println!(\"hi\");\n}\n".to_string(),
         },
     );
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
     assert!(
@@ -8715,7 +8585,10 @@ fn apply_patch_style_full_git_diff_reports_non_zero_counts() {
         },
     );
 
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
     assert!(
@@ -8766,7 +8639,10 @@ fn write_patch_applied_event_renders_edited_block() {
         },
     );
 
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
     assert!(
@@ -8795,7 +8671,10 @@ fn write_patch_applied_event_reports_non_zero_counts() {
         },
     );
 
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
     assert!(
@@ -8828,7 +8707,10 @@ fn patch_applied_event_with_diff_only_reports_non_zero_counts() {
         },
     );
 
-    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied {
+        tool_use_id: "tool-1".to_string(),
+        changes,
+    });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
     assert!(

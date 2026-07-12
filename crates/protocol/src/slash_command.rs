@@ -20,7 +20,6 @@ pub enum SlashCommand {
     Exit,
     Btw,
     Goal,
-    Research,
 }
 
 impl SlashCommand {
@@ -41,7 +40,6 @@ impl SlashCommand {
                 "Ask a quick side question without interrupting the main conversation"
             }
             SlashCommand::Goal => "set or view the goal for a long-running task",
-            SlashCommand::Research => "run a deep research workflow",
             SlashCommand::Exit => "exit Devo",
         }
     }
@@ -61,7 +59,6 @@ impl SlashCommand {
             SlashCommand::Diff => "diff",
             SlashCommand::Btw => "btw",
             SlashCommand::Goal => "goal",
-            SlashCommand::Research => "research",
             SlashCommand::Exit => "exit",
         }
     }
@@ -69,7 +66,7 @@ impl SlashCommand {
     pub fn supports_inline_args(self) -> bool {
         matches!(
             self,
-            SlashCommand::Model | SlashCommand::Btw | SlashCommand::Goal | SlashCommand::Research
+            SlashCommand::Model | SlashCommand::Btw | SlashCommand::Goal
         )
     }
 
@@ -77,7 +74,6 @@ impl SlashCommand {
         match self {
             SlashCommand::Btw => Some("<side conversation message>"),
             SlashCommand::Goal => Some("<objective for autonomous work>"),
-            SlashCommand::Research => Some("<research question>"),
             SlashCommand::Theme
             | SlashCommand::Model
             | SlashCommand::Skills
@@ -101,22 +97,17 @@ impl SlashCommand {
                 | SlashCommand::Compact
                 | SlashCommand::Diff
                 | SlashCommand::New
-                | SlashCommand::Research
                 | SlashCommand::Resume
         )
     }
 
     pub fn available_over_acp(self) -> bool {
-        matches!(
-            self,
-            SlashCommand::Compact | SlashCommand::Goal | SlashCommand::Research
-        )
+        matches!(self, SlashCommand::Compact | SlashCommand::Goal)
     }
 
     fn acp_input_hint(self) -> Option<&'static str> {
         match self {
             SlashCommand::Goal => Some("objective, pause, resume, or clear"),
-            SlashCommand::Research => Some("research question"),
             SlashCommand::Theme
             | SlashCommand::Model
             | SlashCommand::Skills
@@ -152,7 +143,6 @@ impl FromStr for SlashCommand {
             "diff" => Ok(Self::Diff),
             "btw" => Ok(Self::Btw),
             "goal" => Ok(Self::Goal),
-            "research" => Ok(Self::Research),
             "exit" => Ok(Self::Exit),
             _ => Err(()),
         }
@@ -173,18 +163,13 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
         ("clear", SlashCommand::Clear),
         ("diff", SlashCommand::Diff),
         ("goal", SlashCommand::Goal),
-        ("research", SlashCommand::Research),
         ("btw", SlashCommand::Btw),
         ("exit", SlashCommand::Exit),
     ]
 }
 
 pub fn acp_slash_commands() -> Vec<SlashCommand> {
-    vec![
-        SlashCommand::Compact,
-        SlashCommand::Goal,
-        SlashCommand::Research,
-    ]
+    vec![SlashCommand::Compact, SlashCommand::Goal]
 }
 
 pub fn acp_available_slash_commands() -> Vec<AcpAvailableCommand> {
@@ -214,11 +199,7 @@ mod tests {
     fn acp_slash_commands_export_server_backed_subset() {
         assert_eq!(
             acp_slash_commands(),
-            vec![
-                SlashCommand::Compact,
-                SlashCommand::Goal,
-                SlashCommand::Research
-            ]
+            vec![SlashCommand::Compact, SlashCommand::Goal]
         );
         assert_eq!(
             acp_available_slash_commands(),
@@ -234,15 +215,6 @@ mod tests {
                     description: "set or view the goal for a long-running task".to_string(),
                     input: Some(AcpAvailableCommandInput {
                         hint: "objective, pause, resume, or clear".to_string(),
-                        meta: None,
-                    }),
-                    meta: None,
-                },
-                AcpAvailableCommand {
-                    name: "research".to_string(),
-                    description: "run a deep research workflow".to_string(),
-                    input: Some(AcpAvailableCommandInput {
-                        hint: "research question".to_string(),
                         meta: None,
                     }),
                     meta: None,

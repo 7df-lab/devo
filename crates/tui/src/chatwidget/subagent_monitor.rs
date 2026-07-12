@@ -669,8 +669,7 @@ impl ChatWidget {
 
     fn compute_subagent_live_list_rows(&self) -> Vec<SubagentLiveListRow> {
         let now = Instant::now();
-        let mut rows = self
-            .visible_subagent_ids(now)
+        self.visible_subagent_ids(now)
             .into_iter()
             .filter_map(|session_id| {
                 let agent = self.subagent_agent(session_id)?;
@@ -694,18 +693,7 @@ impl ChatWidget {
                     preview,
                 })
             })
-            .collect::<Vec<_>>();
-        rows.extend(
-            self.research_task_previews
-                .iter()
-                .map(|preview| SubagentLiveListRow {
-                    key: SubagentLiveListRowKey::Research(preview.item_id),
-                    name: preview.title.clone(),
-                    status: "working".to_string(),
-                    preview: preview.preview.clone(),
-                }),
-        );
-        rows
+            .collect::<Vec<_>>()
     }
 
     fn subagent_agent(&self, session_id: SessionId) -> Option<&SubagentMonitorAgent> {
@@ -824,13 +812,6 @@ impl ChatWidget {
                 TextItemKind::Reasoning => history_cell::AgentMessageCell::new_with_prefix(
                     titled_body_lines("Reasoning", &text.text),
                     Self::reasoning_dot_prefix(DotStatus::Pending),
-                    "  ",
-                    false,
-                )
-                .transcript_lines(width),
-                TextItemKind::ResearchArtifact => history_cell::AgentMessageCell::new_with_prefix(
-                    titled_body_lines("Research", &text.text),
-                    Self::pending_dot_prefix(),
                     "  ",
                     false,
                 )
@@ -1312,7 +1293,6 @@ fn text_title(kind: TextItemKind) -> &'static str {
     match kind {
         TextItemKind::Assistant => "Assistant",
         TextItemKind::Reasoning => "Reasoning",
-        TextItemKind::ResearchArtifact => "Research",
     }
 }
 
@@ -1320,7 +1300,6 @@ fn transcript_kind_for_text(kind: TextItemKind) -> MonitorTranscriptKind {
     match kind {
         TextItemKind::Assistant => MonitorTranscriptKind::Assistant,
         TextItemKind::Reasoning => MonitorTranscriptKind::Reasoning,
-        TextItemKind::ResearchArtifact => MonitorTranscriptKind::Assistant,
     }
 }
 

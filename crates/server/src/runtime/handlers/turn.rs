@@ -162,18 +162,6 @@ impl ServerRuntime {
                 format!("prompt blocked by hook: {reason}"),
             );
         }
-        if params.execution_mode == devo_protocol::TurnExecutionMode::Research {
-            return self
-                .handle_research_turn_start(
-                    connection_id,
-                    request_id,
-                    params,
-                    display_input,
-                    resolved_input.prompt_text,
-                )
-                .await;
-        }
-
         let now = Utc::now();
         let mut cwd_change = None;
         if let Some(active_turn) = reservation.active_turn.as_ref() {
@@ -313,7 +301,7 @@ impl ServerRuntime {
             )
             .await;
         }
-        self.maybe_prepare_title_generation_from_user_input(params.session_id, &display_input)
+        self.maybe_start_title_generation_from_user_input(params.session_id, &display_input)
             .await;
         if let Some(persistence) = session_handle.turn_persistence_snapshot().await
             && persistence.record.is_some()

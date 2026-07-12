@@ -37,24 +37,24 @@ pub fn acp_notification_from_server_event(
         );
     };
     let (update, meta) = if let Some(update) = acp_update_from_server_event(event) {
-        (update, None)
+        // Tool item events keep the ACP surface for ACP clients, but also embed
+        // the original server event so TUI/legacy clients can unwrap
+        // `item/started` / `item/completed` with full ToolCallPayload
+        // (parameters + command_actions) instead of the lossy ACP title.
+        let meta = if should_preserve_original_tool_event(event) {
+            Some(original_event_meta(method, event))
+        } else {
+            None
+        };
+        (update, meta)
     } else {
-        let mut meta = AcpMeta::new();
-        meta.insert(
-            DEVO_ORIGINAL_METHOD_META.to_string(),
-            serde_json::Value::String(method.to_string()),
-        );
-        meta.insert(
-            DEVO_ORIGINAL_EVENT_META.to_string(),
-            serde_json::to_value(event).expect("serialize original server event"),
-        );
         (
             AcpSessionUpdate::SessionInfoUpdate {
                 title: None,
                 updated_at: None,
                 meta: None,
             },
-            Some(meta),
+            Some(original_event_meta(method, event)),
         )
     };
     (
@@ -66,6 +66,38 @@ pub fn acp_notification_from_server_event(
         })
         .expect("serialize ACP session update"),
     )
+}
+
+fn original_event_meta(method: &str, event: &ServerEvent) -> AcpMeta {
+    let mut meta = AcpMeta::new();
+    meta.insert(
+        DEVO_ORIGINAL_METHOD_META.to_string(),
+        serde_json::Value::String(method.to_string()),
+    );
+    meta.insert(
+        DEVO_ORIGINAL_EVENT_META.to_string(),
+        serde_json::to_value(event).expect("serialize original server event"),
+    );
+    meta
+}
+
+fn should_preserve_original_tool_event(event: &ServerEvent) -> bool {
+    match event {
+        ServerEvent::ItemStarted(payload) => matches!(
+            payload.item.item_kind,
+            ItemKind::ToolCall | ItemKind::CommandExecution
+        ),
+        ServerEvent::ItemCompleted(payload) => matches!(
+            payload.item.item_kind,
+            ItemKind::ToolCall
+                | ItemKind::ToolResult
+                | ItemKind::CommandExecution
+                | ItemKind::FileChange
+        ),
+        // Keep status updates on the ACP surface so terminal content can still
+        // arrive via tool_call_update; TUI ignores title-less status updates.
+        _ => false,
+    }
 }
 
 pub fn original_event_from_acp_notification(

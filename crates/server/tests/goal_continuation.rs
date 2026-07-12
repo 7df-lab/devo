@@ -412,7 +412,7 @@ async fn provider_400_tool_call_adjacency_failure_pauses_goal_without_looping() 
     let data_root = TempDir::new()?;
     let provider = Arc::new(FailingProvider {
         requests: std::sync::atomic::AtomicUsize::new(0),
-        message: "model provider error: openai stream error: Invalid status code: 400 Bad Request; response body: assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'".to_string(),
+        message: "Invalid status code: 400 Bad Request;".to_string(),
     });
     let runtime = build_runtime(data_root.path(), provider.clone())?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
