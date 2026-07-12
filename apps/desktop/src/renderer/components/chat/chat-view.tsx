@@ -107,8 +107,8 @@ import type { MentionOption } from "./mention-popover"
 import { MentionPopover, type MentionPopoverHandle } from "./mention-popover"
 import { PromptAttachmentPreview } from "./prompt-attachments"
 import {
-	createAgentMention,
-	createFileMention,
+	createMentionFromOption,
+	getMentionKey,
 	getMentionMarker,
 	insertMentionIntoText,
 	type PromptMention,
@@ -736,7 +736,7 @@ interface ChatViewProps {
 	onSendMessage?: (
 		agent: Agent,
 		message: string,
-		options?: { model?: ModelRef; agentName?: string; variant?: string; files?: FileAttachment[] },
+		options?: { model?: ModelRef; agentName?: string; variant?: string; files?: FileAttachment[]; collaborationMode?: string },
 	) => Promise<void>
 	/** Callback to stop/abort the running session */
 	onStop?: (agent: Agent) => Promise<void>
@@ -1201,6 +1201,12 @@ function ChatInputSection({
 	const [activeTrigger, setActiveTrigger] = useState<ComposerTrigger | null>(null)
 	const [activeGoal, setActiveGoal] = useState<ComposerGoal | null>(null)
 	const [goalAction, setGoalAction] = useState<ComposerGoalAction | null>(null)
+	const [collaborationMode, setCollaborationMode] = useState<"build" | "plan">("build")
+
+	// Reset collaboration mode when session changes
+	useEffect(() => {
+		setCollaborationMode("build")
+	}, [agent.sessionId])
 
 	// User requirement: the /goal footer chip is only an input trigger;
 	// the composer-adjacent status row reflects the real session goal state.
@@ -1671,6 +1677,7 @@ function ChatInputSection({
 						agentName: selectedAgent || undefined,
 						variant: selectedVariant,
 						files,
+						collaborationMode,
 					})
 					log.debug("handleSend onSendMessage completed", { sessionId: agent.sessionId })
 				}
@@ -1797,8 +1804,7 @@ function ChatInputSection({
 			const textarea = document.querySelector<HTMLTextAreaElement>("textarea[data-prompt-input]")
 			const cursorPos = textarea?.selectionStart ?? currentText.length
 
-			const mention =
-				option.type === "file" ? createFileMention(option.path) : createAgentMention(option.name)
+			const mention = createMentionFromOption(option)
 
 			const { text: newText, cursorPosition: newCursor } = insertMentionIntoText(
 				currentText,
@@ -1809,8 +1815,8 @@ function ChatInputSection({
 			ctrl.setText(newText)
 
 			setMentions((prev) => {
-				const key = mention.type === "file" ? `file:${mention.path}` : `agent:${mention.name}`
-				if (prev.some((m) => (m.type === "file" ? `file:${m.path}` : `agent:${m.name}`) === key))
+				const key = getMentionKey(mention)
+				if (prev.some((candidate) => getMentionKey(candidate) === key))
 					return prev
 				return [...prev, mention]
 			})
@@ -1834,8 +1840,8 @@ function ChatInputSection({
 			ctrl.setText(currentText.replace(`${marker} `, "").replace(marker, ""))
 		}
 		setMentions((prev) => {
-			const key = mention.type === "file" ? `file:${mention.path}` : `agent:${mention.name}`
-			return prev.filter((m) => (m.type === "file" ? `file:${m.path}` : `agent:${m.name}`) !== key)
+			const key = getMentionKey(mention)
+			return prev.filter((candidate) => getMentionKey(candidate) !== key)
 		})
 	}, [])
 

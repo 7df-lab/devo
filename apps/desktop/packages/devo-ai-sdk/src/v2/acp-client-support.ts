@@ -133,7 +133,21 @@ export function questionInfoFromAcp(question: unknown): any {
 		header: String(value.header ?? ""),
 		question: String(value.question ?? ""),
 		options,
+		isOther: Boolean(value.isOther ?? value.is_other ?? true),
+		isSecret: Boolean(value.isSecret ?? value.is_secret ?? false),
 	}
+}
+
+export function requestUserInputFromOriginalEvent(
+	original: unknown,
+): Record<string, unknown> | undefined {
+	if (!original || typeof original !== "object") return undefined
+	const event = original as Record<string, unknown>
+	if (event.kind === "request_user_input") return event
+	const legacy = event.RequestUserInput
+	return legacy && typeof legacy === "object"
+		? (legacy as Record<string, unknown>)
+		: undefined
 }
 
 export function partTime(existingPart: any, now: number): { start: number; end?: number } {

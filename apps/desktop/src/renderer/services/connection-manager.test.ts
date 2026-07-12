@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import type { DevoClient } from "@devo-ai/sdk/v2/client"
 import type { Event, Session } from "../lib/types"
 import { partsFamily, partStorageKey } from "../atoms/parts"
-import { sessionFamily, upsertSessionAtom } from "../atoms/sessions"
+import { projectPaginationFamily, sessionFamily, upsertSessionAtom } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
 
 class FakeEventStream {
@@ -184,5 +184,41 @@ describe("connection manager project event bridge", () => {
 		await manager.loadProjectSessions(directory)
 
 		expect(appStore.get(sessionFamily(session.id))?.status).toEqual({ type: "busy" })
+	})
+
+	test("refills the current project page after a visible session is deleted", async () => {
+		const directory = "/repo/delete-refill"
+		const sessions: Session[] = Array.from({ length: 6 }, (_, index) => ({
+			id: `delete-refill-${index + 1}`,
+			directory,
+			title: `Session ${index + 1}`,
+			time: { created: 6 - index, updated: 6 - index },
+		}))
+		listSessionsImpl = async () => sessions
+
+		const manager = await import(`./connection-manager?case=${Date.now()}`)
+		activeManager = manager
+		await manager.connectToDevo("devo://stdio")
+		await manager.loadAllProjects()
+		await manager.loadProjectSessions(directory, undefined, { limit: 5, roots: true })
+
+		expect(appStore.get(sessionFamily(sessions[5].id))).toBeNull()
+
+		await manager.refillProjectSessionsAfterDelete(directory, sessions[0].id)
+
+		expect({
+			deleted: appStore.get(sessionFamily(sessions[0].id)),
+			refilled: appStore.get(sessionFamily(sessions[5].id))?.session,
+			pagination: appStore.get(projectPaginationFamily(directory)),
+		}).toEqual({
+			deleted: null,
+			refilled: sessions[5],
+			pagination: {
+				loaded: true,
+				currentLimit: 5,
+				hasMore: false,
+				loading: false,
+			},
+		})
 	})
 })

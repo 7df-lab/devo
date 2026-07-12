@@ -9,7 +9,61 @@ use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
 use serde_json::Value;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use tracing::warn;
+
+#[derive(Clone, Copy)]
+enum HttpClientKind {
+    Request,
+    Streaming,
+}
+
+#[derive(Default)]
+struct HttpClientCache {
+    request_clients: Vec<(NetworkProxyConfig, Client)>,
+    streaming_clients: Vec<(NetworkProxyConfig, Client)>,
+}
+
+impl HttpClientCache {
+    fn get_or_build(
+        &mut self,
+        kind: HttpClientKind,
+        network_proxy: &NetworkProxyConfig,
+        build: impl FnOnce() -> Result<Client>,
+    ) -> Result<Client> {
+        let clients = match kind {
+            HttpClientKind::Request => &mut self.request_clients,
+            HttpClientKind::Streaming => &mut self.streaming_clients,
+        };
+        if let Some((_, client)) = clients
+            .iter()
+            .find(|(cached_proxy, _)| cached_proxy == network_proxy)
+        {
+            return Ok(client.clone());
+        }
+
+        let client = build()?;
+        clients.push((network_proxy.clone(), client.clone()));
+        Ok(client)
+    }
+}
+
+fn cached_http_client(
+    kind: HttpClientKind,
+    network_proxy: &NetworkProxyConfig,
+    build: impl FnOnce() -> Result<Client>,
+) -> Result<Client> {
+    // An empty config resolves proxy environment variables during the first
+    // build. The server fixes its environment before provider initialization,
+    // so equivalent empty configs can safely share that client for its lifetime.
+    static CACHE: OnceLock<Mutex<HttpClientCache>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| Mutex::new(HttpClientCache::default()))
+        .lock()
+        .expect("provider HTTP client cache mutex should not be poisoned")
+        .get_or_build(kind, network_proxy, build)
+}
 
 /// HTTP options shared by model-provider adapters.
 #[derive(Clone, Debug, Default)]
@@ -46,21 +100,25 @@ impl ProviderHttpOptions {
 
     /// HTTP client for non-streaming requests with total request timeout.
     pub(crate) fn build_request_client(&self) -> Result<Client> {
-        let builder = Client::builder()
-            .connect_timeout(crate::timeout::connect_timeout())
-            .timeout(crate::timeout::request_timeout());
-        devo_network_proxy::apply_proxy_config(builder, &self.network_proxy)?
-            .build()
-            .context("failed to build provider HTTP client")
+        cached_http_client(HttpClientKind::Request, &self.network_proxy, || {
+            let builder = Client::builder()
+                .connect_timeout(crate::timeout::connect_timeout())
+                .timeout(crate::timeout::request_timeout());
+            devo_network_proxy::apply_proxy_config(builder, &self.network_proxy)?
+                .build()
+                .context("failed to build provider HTTP client")
+        })
     }
 
     /// HTTP client for SSE streaming. Duration is bounded by per-chunk idle
     /// timeout in the stream layer, not a single wall-clock request timeout.
     pub(crate) fn build_streaming_client(&self) -> Result<Client> {
-        let builder = Client::builder().connect_timeout(crate::timeout::connect_timeout());
-        devo_network_proxy::apply_proxy_config(builder, &self.network_proxy)?
-            .build()
-            .context("failed to build provider streaming HTTP client")
+        cached_http_client(HttpClientKind::Streaming, &self.network_proxy, || {
+            let builder = Client::builder().connect_timeout(crate::timeout::connect_timeout());
+            devo_network_proxy::apply_proxy_config(builder, &self.network_proxy)?
+                .build()
+                .context("failed to build provider streaming HTTP client")
+        })
     }
 
     pub(crate) fn apply_custom_headers(&self, builder: RequestBuilder) -> RequestBuilder {
@@ -143,9 +201,97 @@ fn non_empty_owned_string(mut value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::Barrier;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[test]
+    fn http_client_cache_reuses_equivalent_clients() {
+        let mut cache = HttpClientCache::default();
+        let config = NetworkProxyConfig::default();
+        let build_count = AtomicUsize::new(0);
+        let client = Client::new();
+
+        for _ in 0..2 {
+            cache
+                .get_or_build(HttpClientKind::Request, &config, || {
+                    build_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(client.clone())
+                })
+                .expect("cached HTTP client");
+        }
+
+        assert_eq!(build_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn http_client_cache_separates_kinds_and_proxy_configs() {
+        let mut cache = HttpClientCache::default();
+        let default_proxy = NetworkProxyConfig::default();
+        let explicit_proxy = NetworkProxyConfig {
+            proxy_url: Some("http://proxy.example:8080".to_string()),
+            no_proxy: Some("localhost".to_string()),
+        };
+        let build_count = AtomicUsize::new(0);
+        let client = Client::new();
+
+        for (kind, config) in [
+            (HttpClientKind::Request, &default_proxy),
+            (HttpClientKind::Streaming, &default_proxy),
+            (HttpClientKind::Request, &explicit_proxy),
+        ] {
+            cache
+                .get_or_build(kind, config, || {
+                    build_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(client.clone())
+                })
+                .expect("cached HTTP client");
+        }
+
+        assert_eq!(build_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn http_client_cache_builds_once_for_concurrent_callers() {
+        let cache = Arc::new(Mutex::new(HttpClientCache::default()));
+        let barrier = Arc::new(Barrier::new(4));
+        let build_count = Arc::new(AtomicUsize::new(0));
+        let client = Client::new();
+        let mut threads = Vec::new();
+
+        for _ in 0..4 {
+            let cache = Arc::clone(&cache);
+            let barrier = Arc::clone(&barrier);
+            let build_count = Arc::clone(&build_count);
+            let client = client.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                cache
+                    .lock()
+                    .expect("cache mutex")
+                    .get_or_build(
+                        HttpClientKind::Request,
+                        &NetworkProxyConfig::default(),
+                        || {
+                            build_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(client)
+                        },
+                    )
+                    .expect("cached HTTP client");
+            }));
+        }
+
+        for thread in threads {
+            thread.join().expect("cache caller joins");
+        }
+
+        assert_eq!(build_count.load(Ordering::SeqCst), 1);
+    }
 
     /// Trace: L2-DES-APP-005
     /// Verifies: provider custom headers parse from a JSON object string.

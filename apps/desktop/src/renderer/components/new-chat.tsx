@@ -11,8 +11,7 @@ import {
 } from "@devo/ui/components/ai-elements/prompt-input"
 import { type MentionOption, MentionPopover, type MentionPopoverHandle } from "./chat/mention-popover"
 import {
-	createAgentMention,
-	createFileMention,
+	createMentionFromOption,
 	insertMentionIntoText,
 } from "./chat/prompt-mentions"
 import { SlashCommandPopover, type SlashCommandPopoverHandle } from "./chat/slash-command-popover"
@@ -388,8 +387,7 @@ export function NewChat() {
 			const currentText = ctrl.getText()
 			const textarea = document.querySelector<HTMLTextAreaElement>("textarea[data-prompt-input]")
 			const cursorPos = textarea?.selectionStart ?? currentText.length
-			const mention =
-				option.type === "file" ? createFileMention(option.path) : createAgentMention(option.name)
+			const mention = createMentionFromOption(option)
 			const { text: newText, cursorPosition: newCursor } = insertMentionIntoText(
 				currentText,
 				cursorPos,

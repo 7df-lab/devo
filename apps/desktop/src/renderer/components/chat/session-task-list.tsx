@@ -1,9 +1,16 @@
 import { cn } from "@devo/ui/lib/utils"
 import { useAtomValue } from "jotai"
-import { CheckCircle2Icon, CircleDotIcon, Loader2Icon, XCircleIcon } from "lucide-react"
+import {
+	CheckCircle2Icon,
+	ChevronDownIcon,
+	ChevronUpIcon,
+	CircleDotIcon,
+	Loader2Icon,
+	XCircleIcon,
+} from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { messagesFamily } from "../../atoms/messages"
-import { partsFamily, partStorageKey } from "../../atoms/parts"
+import { partStorageKey, partsFamily } from "../../atoms/parts"
 import { appStore } from "../../atoms/store"
 import { streamingVersionFamily } from "../../atoms/streaming"
 import { todosFamily } from "../../atoms/todos"
@@ -43,7 +50,7 @@ function useSessionTodos(sessionId: string | null): Todo[] {
 			}
 		}
 		return []
-	}, [storeTodos, storeMessages, streamingVersion])
+	}, [storeTodos, storeMessages, streamingVersion, sessionId])
 }
 
 /** Compact status icon for a todo item */
@@ -97,13 +104,14 @@ export function SessionTaskList({ sessionId }: SessionTaskListProps) {
 	if (todos.length === 0) return null
 
 	return (
-		<div className="mb-2 animate-in fade-in duration-400 rounded-lg border border-border/40 bg-muted/10">
+		<div className="mb-2 animate-in fade-in overflow-hidden rounded-lg border border-border/60 bg-card shadow-sm duration-400">
 			{/* Header — always visible, toggles expansion */}
 			<button
 				type="button"
 				onClick={() => setIsExpanded((prev) => !prev)}
+				aria-expanded={isExpanded}
 				className={cn(
-					"flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-muted/20",
+					"flex w-full items-center gap-2.5 bg-card px-3 py-1.5 text-left transition-colors hover:bg-muted/40",
 					isExpanded ? "rounded-t-lg" : "rounded-lg",
 				)}
 			>
@@ -122,21 +130,17 @@ export function SessionTaskList({ sessionId }: SessionTaskListProps) {
 				</span>
 
 				{/* Chevron indicator */}
-				<svg
-					className={cn(
-						"size-3 shrink-0 text-muted-foreground/30 transition-transform duration-200",
-						isExpanded ? "rotate-180" : "rotate-0",
-					)}
-					aria-hidden="true"
-					viewBox="0 0 16 16"
-					fill="none"
-					stroke="currentColor"
-					strokeWidth="2"
-					strokeLinecap="round"
-					strokeLinejoin="round"
-				>
-					<path d="M4 6l4 4 4-4" />
-				</svg>
+				{isExpanded ? (
+					<ChevronDownIcon
+						className="size-3.5 shrink-0 stroke-[1.5] text-muted-foreground/60"
+						aria-hidden="true"
+					/>
+				) : (
+					<ChevronUpIcon
+						className="size-3.5 shrink-0 stroke-[1.5] text-muted-foreground/60"
+						aria-hidden="true"
+					/>
+				)}
 			</button>
 
 			{/* Expandable task list — smooth height transition via grid trick */}

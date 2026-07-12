@@ -228,6 +228,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 				agentName?: string
 				variant?: string
 				files?: FileAttachment[]
+				collaborationMode?: string
 			},
 		) => {
 			log.debug("handleSendMessage", {
@@ -237,6 +238,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 				model: options?.model,
 				agentName: options?.agentName,
 				variant: options?.variant,
+				collaborationMode: options?.collaborationMode,
 			})
 			try {
 				await sendPrompt(agent.directory, agent.sessionId, message, {
@@ -244,6 +246,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 					agent: options?.agentName || undefined,
 					variant: options?.variant,
 					files: options?.files,
+					collaborationMode: options?.collaborationMode,
 				})
 				log.debug("handleSendMessage completed", { sessionId: agent.sessionId })
 			} catch (err) {

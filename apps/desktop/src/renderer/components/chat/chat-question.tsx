@@ -35,10 +35,9 @@ function buildAnswers(
 	customTexts: Map<number, string>,
 ): QuestionAnswer[] {
 	return questions.map((_, idx) => {
-		const selected = Array.from(selections.get(idx) ?? [])
 		const custom = (customTexts.get(idx) ?? "").trim()
-		if (custom) selected.push(custom)
-		return selected
+		if (custom) return [custom]
+		return Array.from(selections.get(idx) ?? []).slice(0, 1)
 	})
 }
 
@@ -78,13 +77,19 @@ function QuestionSection({
 	onSubmitCustom,
 	disabled,
 }: QuestionSectionProps) {
-	const isMultiple = info.multiple === true
-	const allowCustom = info.custom !== false
+	// Note: the protocol doesn't support multi-select yet; always false for now.
+	const isMultiple = false
+	const allowCustom = info.isOther !== false
 
 	return (
 		<fieldset aria-label={info.header} className="border-none p-0 m-0">
+			<legend className="sr-only">{info.question}</legend>
 			{/* Options */}
-			<div className="space-y-0.5 px-3 pt-2 pb-1">
+			<div
+				role="radiogroup"
+				aria-label={info.header}
+				className="space-y-1.5 px-3 pt-3 pb-1.5"
+			>
 				{info.options.map((option: { label: string; description: string }) => {
 					const isSelected = selected.has(option.label)
 
@@ -92,24 +97,27 @@ function QuestionSection({
 						<button
 							key={option.label}
 							type="button"
-							aria-pressed={isSelected}
+							role="radio"
+							aria-checked={isSelected}
 							onClick={() => onToggle(index, option.label)}
 							disabled={disabled}
-							className={`flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
-								isSelected ? "bg-muted" : "hover:bg-muted/50"
+							className={`flex w-full items-start gap-2.5 rounded-lg border px-2.5 py-2 text-left text-sm transition-all ${
+								isSelected
+									? "border-primary/30 bg-primary/10 shadow-xs"
+									: "border-transparent bg-muted/25 hover:border-border/70 hover:bg-muted/50"
 							} ${disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
 						>
 							{/* Radio / checkbox indicator */}
 							<span
-								className={`mt-1 flex size-3.5 shrink-0 items-center justify-center border transition-colors ${
+								className={`mt-0.5 flex size-3.5 shrink-0 items-center justify-center border transition-colors ${
 									isMultiple ? "rounded" : "rounded-full"
-								} ${isSelected ? "border-foreground bg-foreground" : "border-muted-foreground/40"}`}
+								} ${isSelected ? "border-primary bg-primary" : "border-muted-foreground/40 bg-card"}`}
 								aria-hidden="true"
 							>
 								{isSelected && (
 									<svg
 										viewBox="0 0 12 12"
-										className="size-2 fill-current text-background"
+										className="size-2 fill-current text-primary-foreground"
 										aria-hidden="true"
 									>
 										{isMultiple ? (
@@ -130,7 +138,7 @@ function QuestionSection({
 
 							{/* Label + description */}
 							<span className="min-w-0 flex-1">
-								<span className="text-foreground">{option.label}</span>
+								<span className="font-medium text-foreground">{option.label}</span>
 								{option.description && (
 									<span className="block text-muted-foreground text-xs mt-0.5 line-clamp-2">
 										{option.description}
@@ -144,10 +152,13 @@ function QuestionSection({
 
 			{/* Custom text input */}
 			{allowCustom && (
-				<div className="px-3 pb-2 pt-1">
+				<div className="px-3 pb-3 pt-1.5">
+					<label htmlFor={`question-custom-${index}`} className="sr-only">
+						Other answer for {info.header || info.question}
+					</label>
 					<input
 						id={`question-custom-${index}`}
-						type="text"
+						type={info.isSecret ? "password" : "text"}
 						value={customText}
 						onChange={(e) => onCustomChange(index, e.target.value)}
 						onKeyDown={(e) => {
@@ -156,9 +167,9 @@ function QuestionSection({
 								onSubmitCustom?.()
 							}
 						}}
-						placeholder="Type a custom answer..."
+						placeholder={info.isSecret ? "Type a secret value..." : "Type a custom answer..."}
 						disabled={disabled}
-						className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/50 transition-colors focus:border-muted-foreground focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+						className="w-full rounded-lg border border-border/70 bg-background px-3 py-2 text-sm text-foreground shadow-xs placeholder:text-muted-foreground/50 transition-[border-color,box-shadow] focus:border-primary/50 focus:outline-none focus:ring-2 focus:ring-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
 					/>
 				</div>
 			)}
@@ -276,30 +287,34 @@ const QuestionRequestStepper = memo(function QuestionRequestStepper({
 	// --- Selection toggle ---
 	const handleToggle = useCallback(
 		(questionIndex: number, label: string) => {
+			setCustomTexts((prev) => {
+				if (!prev.has(questionIndex)) return prev
+				const next = new Map(prev)
+				next.delete(questionIndex)
+				return next
+			})
 			setSelections((prev) => {
 				const next = new Map(prev)
 				const current = new Set(next.get(questionIndex) ?? [])
-				const info = questions[questionIndex]
-				const isMultiple = info?.multiple === true
-
-				if (current.has(label)) {
-					current.delete(label)
-				} else {
-					if (!isMultiple) {
-						current.clear()
-					}
-					current.add(label)
-				}
-
+				current.clear()
+				current.add(label)
 				next.set(questionIndex, current)
 				return next
 			})
 		},
-		[questions],
+		[],
 	)
 
 	// --- Custom text change ---
 	const handleCustomChange = useCallback((questionIndex: number, value: string) => {
+		if (value.trim()) {
+			setSelections((prev) => {
+				if (!prev.has(questionIndex)) return prev
+				const next = new Map(prev)
+				next.delete(questionIndex)
+				return next
+			})
+		}
 		setCustomTexts((prev) => {
 			const next = new Map(prev)
 			next.set(questionIndex, value)
@@ -408,31 +423,40 @@ const QuestionRequestStepper = memo(function QuestionRequestStepper({
 			ref={cardRef}
 			tabIndex={-1}
 			aria-label="Agent question"
-			className="animate-in fade-in slide-in-from-bottom-2 rounded-xl border border-border bg-card outline-none duration-300"
+			className="animate-in fade-in slide-in-from-bottom-2 overflow-hidden rounded-xl border border-border/70 bg-card shadow-lg shadow-black/5 ring-1 ring-foreground/5 outline-none duration-300"
 		>
 			{/* Sub-agent indicator */}
 			{isFromSubAgent && (
-				<div className="flex items-center gap-1 px-3 pt-2 text-[11px] text-muted-foreground/70">
-					<ZapIcon className="size-3 shrink-0" aria-hidden="true" />
+				<div className="flex items-center gap-1 px-4 pt-3 text-[11px] font-medium text-muted-foreground/70">
+					<ZapIcon className="size-3.5 shrink-0 stroke-[1.5]" aria-hidden="true" />
 					<span>Sub-agent asking a question</span>
 				</div>
 			)}
 			{/* Header */}
-			<div className="flex items-center gap-2 px-3 py-2 text-sm">
-				<MessageCircleQuestionIcon
-					className="size-4 shrink-0 text-muted-foreground"
-					aria-hidden="true"
-				/>
-				<span className="flex-1 text-foreground">{currentQuestion.question}</span>
+			<div className="flex items-start gap-3 px-4 py-3.5">
+				<div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/15">
+					<MessageCircleQuestionIcon
+						className="size-3.5 stroke-[1.5]"
+						aria-hidden="true"
+					/>
+				</div>
+				<div className="min-w-0 flex-1">
+					<div className="mb-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+						{currentQuestion.header || "Question"}
+					</div>
+					<div className="text-sm font-medium leading-5 text-foreground">
+						{currentQuestion.question}
+					</div>
+				</div>
 				{totalRequests > 1 && (
-					<span className="shrink-0 text-[11px] text-muted-foreground">
+					<span className="mt-1 shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
 						+{totalRequests - 1} more
 					</span>
 				)}
 			</div>
 
 			{/* Question content */}
-			<div className="border-t border-border">
+			<div className="border-t border-border/60 bg-muted/10">
 				<QuestionSection
 					info={currentQuestion}
 					index={currentStep}
@@ -446,7 +470,7 @@ const QuestionRequestStepper = memo(function QuestionRequestStepper({
 			</div>
 
 			{/* Footer with navigation */}
-			<div className="flex items-center gap-2 border-t border-border px-3 py-2">
+			<div className="flex items-center gap-2 border-t border-border/60 bg-card px-3 py-2.5">
 				{/* Left side: back + step dots */}
 				<div className="flex flex-1 items-center gap-2">
 					{currentStep > 0 && (
@@ -470,7 +494,7 @@ const QuestionRequestStepper = memo(function QuestionRequestStepper({
 					className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
 					aria-label="Skip question"
 				>
-					<SkipForwardIcon className="size-3" aria-hidden="true" />
+					<SkipForwardIcon className="size-3.5 stroke-[1.5]" aria-hidden="true" />
 					Skip
 				</button>
 				{isLastStep ? (
@@ -482,9 +506,9 @@ const QuestionRequestStepper = memo(function QuestionRequestStepper({
 						aria-label="Send answer"
 					>
 						{submitting ? (
-							<Loader2Icon className="size-3 animate-spin" aria-hidden="true" />
+							<Loader2Icon className="size-3.5 animate-spin stroke-[1.5]" aria-hidden="true" />
 						) : (
-							<SendIcon className="size-3" aria-hidden="true" />
+							<SendIcon className="size-3.5 stroke-[1.5]" aria-hidden="true" />
 						)}
 						Send
 					</Button>
@@ -498,7 +522,7 @@ const QuestionRequestStepper = memo(function QuestionRequestStepper({
 						aria-label="Next question"
 					>
 						Next
-						<ArrowRightIcon className="size-3" aria-hidden="true" />
+						<ArrowRightIcon className="size-3.5 stroke-[1.5]" aria-hidden="true" />
 					</Button>
 				)}
 			</div>

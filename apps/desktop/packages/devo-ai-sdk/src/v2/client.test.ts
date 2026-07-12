@@ -1208,22 +1208,23 @@ describe("ACP desktop SDK session mapping", () => {
 			update: { sessionUpdate: "session_info_update" },
 			_meta: {
 				"devo/originalEvent": {
-					RequestUserInput: {
-						request: {
-							request_id: "rq1",
-							session_id: "s1",
-							turn_id: "t1",
-							item_id: null,
-						},
-						questions: [
-							{
-								id: "scope",
-								header: "Scope",
-								question: "Which scope?",
-								options: [{ label: "Repo", description: "Current repository" }],
-							},
-						],
+					kind: "request_user_input",
+					request: {
+						request_id: "rq1",
+						session_id: "s1",
+						turn_id: "t1",
+						item_id: null,
 					},
+					questions: [
+						{
+							id: "scope",
+							header: "Scope",
+							question: "Which scope?",
+							isOther: true,
+							isSecret: false,
+							options: [{ label: "Repo", description: "Current repository" }],
+						},
+					],
 				},
 			},
 		} satisfies AcpSessionNotification)
@@ -1255,6 +1256,8 @@ describe("ACP desktop SDK session mapping", () => {
 						header: "Scope",
 						question: "Which scope?",
 						options: [{ label: "Repo", description: "Current repository" }],
+						isOther: true,
+						isSecret: false,
 					},
 				],
 			},

@@ -41,6 +41,7 @@ use crate::response_item::ResponseItem;
 use devo_protocol::RequestContent;
 use devo_protocol::RequestMessage;
 use devo_protocol::RequestRole;
+use devo_protocol::normalize_tool_result_messages;
 
 use super::TokenInfo;
 use super::normalize;
@@ -197,6 +198,12 @@ pub async fn compact_history(
         split_by_user_message_budget(&filtered, COMPACT_USER_MESSAGE_MAX_TOKENS)
     };
 
+    // The split can sever ToolCall ↔ ToolCallOutput pairs: e.g. a ToolCall lands
+    // in `to_compact` while its ToolCallOutput falls into `preserved` (or vice
+    // versa). Re-run pairing on each half so neither side carries an orphan.
+    normalize::pair_tool_call_items(&mut to_compact);
+    normalize::pair_tool_call_items(&mut preserved);
+
     if to_compact.is_empty() {
         // Nothing to compact — everything is within the preserve budget.
         return Ok(CompactAction::Skipped);
@@ -315,6 +322,7 @@ fn split_by_user_message_budget(
 fn summarizer_request_messages(to_compact: &[ResponseItem]) -> Vec<RequestMessage> {
     let mut messages: Vec<RequestMessage> = to_compact.iter().map(RequestMessage::from).collect();
     merge_consecutive_assistant_messages(&mut messages);
+    normalize_tool_result_messages(&mut messages);
     messages.push(RequestMessage {
         role: RequestRole::Developer.as_str().to_string(),
         content: vec![RequestContent::Text {

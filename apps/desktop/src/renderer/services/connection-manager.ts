@@ -4,6 +4,8 @@ import { authHeaderAtom, serverConnectedAtom, serverUrlAtom } from "../atoms/con
 import { batchUpsertPartsAtom } from "../atoms/parts"
 import {
 	SESSIONS_PAGE_SIZE,
+	projectPaginationFamily,
+	removeSessionAtom,
 	setProjectPaginationLoadingAtom,
 	setSessionsAtom,
 	updateProjectPaginationAtom,
@@ -141,7 +143,14 @@ async function hydrateProjectSessionsFromCache(
 	const baseClient = getBaseClient()
 	if (!baseClient) return false
 
-	const sessions = filterDiscoveredSessions(discoveredSessions, directory, options)
+	const allMatchingSessions = filterDiscoveredSessions(discoveredSessions, directory, {
+		...options,
+		limit: undefined,
+	})
+	const sessions =
+		options?.limit === undefined
+			? allMatchingSessions
+			: allMatchingSessions.slice(0, options.limit)
 	const statuses = await getSessionStatuses(baseClient)
 	appStore.set(setSessionsAtom, { sessions, statuses, directory, sandboxDirs })
 
@@ -150,6 +159,7 @@ async function hydrateProjectSessionsFromCache(
 			directory,
 			fetchedCount: sessions.length,
 			limit: options.limit,
+			hasMore: allMatchingSessions.length > options.limit,
 		})
 	}
 
@@ -355,6 +365,39 @@ export async function loadMoreProjectSessions(
 			directory,
 			fetchedCount: currentLimit,
 			limit: currentLimit,
+		})
+	}
+}
+
+/**
+ * Remove a confirmed deletion from the discovery cache and refill the project's
+ * existing pagination window. Keeping the same limit replaces the deleted row
+ * without implicitly advancing a full page.
+ */
+export async function refillProjectSessionsAfterDelete(
+	projectDirectory: string,
+	sessionId: string,
+): Promise<void> {
+	if (discoveredSessions) {
+		discoveredSessions = discoveredSessions.filter((session) => session.id !== sessionId)
+	}
+	appStore.set(removeSessionAtom, sessionId)
+
+	const pagination = appStore.get(projectPaginationFamily(projectDirectory))
+	if (!pagination.loaded) return
+
+	try {
+		await loadProjectSessions(projectDirectory, undefined, {
+			limit: pagination.currentLimit,
+			roots: true,
+		})
+	} catch (error) {
+		// The server-side deletion already succeeded. Keep the deletion result
+		// authoritative and allow a later discovery refresh to retry the refill.
+		log.warn("Failed to refill project sessions after deletion", {
+			projectDirectory,
+			sessionId,
+			error,
 		})
 	}
 }

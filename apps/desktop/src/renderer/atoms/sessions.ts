@@ -436,12 +436,13 @@ export const updateProjectPaginationAtom = atom(
 			directory: string
 			fetchedCount: number
 			limit: number
+			hasMore?: boolean
 		},
 	) => {
 		set(projectPaginationFamily(args.directory), {
 			loaded: true,
 			currentLimit: args.limit,
-			hasMore: args.fetchedCount >= args.limit,
+			hasMore: args.hasMore ?? args.fetchedCount >= args.limit,
 			loading: false,
 		})
 	},

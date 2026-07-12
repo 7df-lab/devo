@@ -37,7 +37,10 @@ import { formatShortcut } from "../lib/shortcut-display"
 import { isSettingsRoute } from "../lib/app-navigation"
 import type { Agent, SidebarProject } from "../lib/types"
 import { createDesktopFolder, pickDirectory, statDesktopFolders } from "../services/backend"
-import { loadProjectSessions } from "../services/connection-manager"
+import {
+	loadProjectSessions,
+	refillProjectSessionsAfterDelete,
+} from "../services/connection-manager"
 import { APP_BAR_HEIGHT, AppBar } from "./app-bar"
 import { DesktopProjectActionsProvider } from "./desktop-project-actions-context"
 import { DesktopTerminalPanel } from "./desktop-terminal-panel"
@@ -272,6 +275,10 @@ export function SidebarLayout() {
 		setDeleteError(null)
 		try {
 			await deleteSession(deleteTarget.directory, deleteTarget.sessionId)
+			await refillProjectSessionsAfterDelete(
+				deleteTarget.projectDirectory,
+				deleteTarget.sessionId,
+			)
 			const navigationTarget = deleteSessionNavigationTarget({
 				deletedSessionId: deleteTarget.sessionId,
 				currentSessionId: sessionId,

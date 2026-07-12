@@ -42,6 +42,7 @@ export function getToolCategory(tool: string): ToolCategory {
 		case "todoread":
 			return "plan"
 		case "question":
+		case "request_user_input":
 			return "ask"
 		case "webfetch":
 			return "fetch"
