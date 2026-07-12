@@ -141,43 +141,22 @@
         }
     },
     {
-        "slug": "glm-5.1",
-        "display_name": "glm-5.1",
+        "slug": "glm-5.2",
+        "display_name": "glm-5.2",
         "channel": "GLM",
         "provider": "openai_chat_completions",
-        "description": "754B flagship open-weight model released at 04/2026 by z.ai",
+        "description": "flagship open-weight model released by z.ai",
         "reasoning_capability": "toggle",
-        "default_reasoning_level": "",
-        "supported_reasoning_levels": [],
-        "reasoning_implementation": {
-            "model_variant": {
-                "variants": [
-                    {
-                        "selection_value": "disabled",
-                        "model_slug": "glm-5.1",
-                        "reasoning_effort": null,
-                        "extra_body": {
-                            "thinking": {
-                                "type": "disabled"
-                            }
-                        },
-                        "label": "Off",
-                        "description": "Disable reasoning effort"
-                    },
-                    {
-                        "selection_value": "enabled",
-                        "model_slug": "glm-5.1",
-                        "reasoning_effort": "medium",
-                        "label": "On",
-                        "description": "Enable thinking"
-                    }
-                ]
-            }
-        },
+        "default_reasoning_level": "high",
+        "supported_reasoning_levels": [
+            "none",
+            "high",
+            "max"
+        ],
         "temperature": 1.0,
         "top_p": 0.95,
-        "context_window": 200000,
-        "max_tokens": 8192,
+        "context_window": 1000000,
+        "max_tokens": 131000,
         "effective_context_window_percent": 95,
         "truncation_policy": {
             "mode": "tokens",
@@ -290,9 +269,11 @@
         "reasoning_capability": "toggle",
         "default_reasoning_level": "medium",
         "supported_reasoning_levels": [
+            "none",
             "low",
             "medium",
-            "max"
+            "high",
+            "xhigh"
         ],
         "context_window": 1000000,
         "max_tokens": 128000,

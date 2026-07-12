@@ -200,6 +200,7 @@ export function getToolInfo(tool: string): {
 		case "todoread":
 			return { icon: SquareCheckIcon, title: "Todos" }
 		case "question":
+		case "request_user_input":
 			return { icon: BookOpenIcon, title: "Question" }
 		default:
 			return { icon: WrenchIcon, title: tool }
@@ -247,6 +248,9 @@ function getPendingLabel(tool: string): string {
 			return "Preparing agent..."
 		case "webfetch":
 			return "Preparing fetch..."
+		case "question":
+		case "request_user_input":
+			return "Asking a question..."
 		default:
 			return `Preparing ${tool}...`
 	}
@@ -336,6 +340,18 @@ export function getToolSubtitle(
 			if (todos && todos.length > 0) {
 				const completed = todos.filter((t) => t.status === "completed").length
 				subtitle = `${completed}/${todos.length} completed`
+			} else {
+				subtitle = title
+			}
+			break
+		}
+		case "question":
+		case "request_user_input": {
+			const questions = input?.questions as Array<{ question: string }> | undefined
+			if (questions && questions.length > 0) {
+				subtitle = questions.length === 1
+					? questions[0].question
+					: `${questions.length} questions`
 			} else {
 				subtitle = title
 			}

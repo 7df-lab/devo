@@ -233,6 +233,12 @@ body {
 	}
 }
 
+/* Plan card — always fully opaque for readability, overriding glass transparency */
+[data-slot="plan"] {
+	background: var(--card) !important;
+	background-color: var(--card) !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.devo-brand-mark-attention,
 	.devo-brand-word-attention .devo-brand-word-track {

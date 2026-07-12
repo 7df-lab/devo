@@ -1,26 +1,18 @@
 /**
- * Hook for server-backed `@` reference file search in the composer.
+ * Hook for server-backed composer `@` reference search.
  *
- * Uses connection-local `search/start` + `search/update` RPCs and listens for
- * `search/updated` / `search/completed` notifications. Replaces the legacy
- * `find.files` stub; debounce + cancel behavior matches the TUI composer.
+ * Preserves the server-ranked Skill, MCP, and File result stream from the
+ * connection-local `search/*` session.
  */
+import type { ReferenceSearchResult, ReferenceSearchSnapshot } from "@devo-ai/sdk/v2/client"
 import { useEffect, useRef, useState } from "react"
-import type { ReferenceSearchSnapshot } from "@devo-ai/sdk/v2/client"
 import { getProjectClient } from "../services/connection-manager"
 
-const FILE_SEARCH_DEBOUNCE_MS = 150
+const REFERENCE_SEARCH_DEBOUNCE_MS = 150
 
-function filePathsFromSnapshot(snapshot: ReferenceSearchSnapshot): string[] {
-	return snapshot.results
-		.filter((result) => result.kind === "file")
-		.map((result) => result.display_name)
-		.filter((path) => path.trim().length > 0)
-}
-
-export function useFileSearch(directory: string | null, query: string, enabled = true) {
+export function useReferenceSearch(directory: string | null, query: string, enabled = true) {
 	const [debouncedQuery, setDebouncedQuery] = useState(query)
-	const [files, setFiles] = useState<string[]>([])
+	const [results, setResults] = useState<ReferenceSearchResult[]>([])
 	const [isLoading, setIsLoading] = useState(false)
 	const [error, setError] = useState<string | null>(null)
 	const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -29,7 +21,7 @@ export function useFileSearch(directory: string | null, query: string, enabled =
 		if (timerRef.current) clearTimeout(timerRef.current)
 		timerRef.current = setTimeout(() => {
 			setDebouncedQuery(query)
-		}, FILE_SEARCH_DEBOUNCE_MS)
+		}, REFERENCE_SEARCH_DEBOUNCE_MS)
 		return () => {
 			if (timerRef.current) clearTimeout(timerRef.current)
 		}
@@ -37,7 +29,7 @@ export function useFileSearch(directory: string | null, query: string, enabled =
 
 	useEffect(() => {
 		if (!directory || !enabled) {
-			setFiles([])
+			setResults([])
 			setIsLoading(false)
 			setError(null)
 			return
@@ -45,7 +37,7 @@ export function useFileSearch(directory: string | null, query: string, enabled =
 
 		const client = getProjectClient(directory)
 		if (!client) {
-			setFiles([])
+			setResults([])
 			setIsLoading(false)
 			setError(null)
 			return
@@ -54,7 +46,7 @@ export function useFileSearch(directory: string | null, query: string, enabled =
 		let cancelled = false
 		const applySnapshot = (snapshot: ReferenceSearchSnapshot) => {
 			if (cancelled) return
-			setFiles(filePathsFromSnapshot(snapshot).slice(0, 20))
+			setResults(snapshot.results)
 			setIsLoading(!snapshot.file_search_complete)
 			setError(client.referenceSearch.getState().error)
 		}
@@ -62,11 +54,11 @@ export function useFileSearch(directory: string | null, query: string, enabled =
 		const unsubscribe = client.referenceSearch.subscribe(applySnapshot)
 		setIsLoading(true)
 		setError(null)
-		void client.referenceSearch.startOrUpdate({ query: debouncedQuery }).catch((searchError) => {
+		void client.referenceSearch.startOrUpdate({ query: debouncedQuery }).catch((searchError: unknown) => {
 			if (cancelled) return
-			setFiles([])
+			setResults([])
 			setIsLoading(false)
-			setError(searchError instanceof Error ? searchError.message : "file search failed")
+			setError(searchError instanceof Error ? searchError.message : "reference search failed")
 		})
 
 		return () => {
@@ -77,7 +69,7 @@ export function useFileSearch(directory: string | null, query: string, enabled =
 	}, [directory, debouncedQuery, enabled])
 
 	return {
-		files,
+		results,
 		isLoading,
 		error,
 	}

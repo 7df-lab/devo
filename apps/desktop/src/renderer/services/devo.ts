@@ -146,6 +146,7 @@ export async function sendPrompt(
 		modelID?: string
 		agent?: string
 		variant?: string
+		collaborationMode?: string
 	},
 ): Promise<void> {
 	await client.session.promptAsync({
@@ -157,6 +158,7 @@ export async function sendPrompt(
 				: undefined,
 		agent: options?.agent,
 		variant: options?.variant,
+		collaborationMode: options?.collaborationMode,
 	})
 }
 

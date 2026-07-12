@@ -10,6 +10,7 @@ import {
 	partTime,
 	providerDataFromConfigOptions,
 	questionInfoFromAcp,
+	requestUserInputFromOriginalEvent,
 	sessionErrorEvent,
 	stableId,
 	statusFromDevo,
@@ -68,7 +69,10 @@ import {
 	type ReferenceSearchSnapshot,
 } from "./reference-search-session"
 
-export type { ReferenceSearchSnapshot } from "./reference-search-session"
+export type {
+	ReferenceSearchResult,
+	ReferenceSearchSnapshot,
+} from "./reference-search-session"
 
 export type JsonRpcId = number | string
 
@@ -132,10 +136,28 @@ export type Project = any
 export type Provider = any
 export type ProviderAuthMethod = any
 export type ProviderConfig = any
-export type QuestionAnswer = any
-export type QuestionInfo = any
-export type QuestionOption = any
-export type QuestionRequest = any
+export type QuestionOption = {
+	label: string
+	description: string
+}
+
+export type QuestionInfo = {
+	id: string
+	header: string
+	question: string
+	options: QuestionOption[]
+	isOther: boolean
+	isSecret: boolean
+}
+
+export type QuestionRequest = {
+	id: string
+	requestID: string
+	sessionID: string
+	questions: QuestionInfo[]
+}
+
+export type QuestionAnswer = string[]
 export type ReasoningPart = any
 export type RetryPart = any
 export type ServerConfig = any
@@ -636,7 +658,19 @@ class AcpClient {
 			model?: unknown
 			agent?: string
 			variant?: string
+			collaborationMode?: string
 		}) => {
+			// Plan mode uses turn/start which supports collaboration_mode
+			if (params.collaborationMode === "plan") {
+				const result = await this.turn.start({
+					sessionID: params.sessionID,
+					parts: params.parts,
+					model: params.model,
+					variant: params.variant,
+					collaborationMode: "plan",
+				})
+				return result
+			}
 			const model = params.model as { modelID?: string } | undefined
 			if (model?.modelID) await this.setSessionConfigOption(params.sessionID, "model", model.modelID)
 			if (params.variant) await this.setSessionConfigOption(params.sessionID, "thought_level", params.variant)
@@ -760,6 +794,7 @@ class AcpClient {
 			model?: unknown
 			variant?: string
 			cwd?: string | null
+			collaborationMode?: string
 		}) => {
 			const model = params.model as { modelID?: string } | undefined
 			if (model?.modelID) await this.setSessionConfigOption(params.sessionID, "model", model.modelID)
@@ -771,7 +806,7 @@ class AcpClient {
 				sandbox: null,
 				approval_policy: null,
 				cwd: params.cwd ?? null,
-				collaboration_mode: "build",
+				collaboration_mode: params.collaborationMode ?? "build",
 			})) as TurnStartResult
 			return { data: result }
 		},
@@ -1580,8 +1615,8 @@ class AcpClient {
 			})
 			return
 		}
-		if ("RequestUserInput" in original) {
-			const payload = (original as { RequestUserInput: Record<string, unknown> }).RequestUserInput
+		const payload = requestUserInputFromOriginalEvent(original)
+		if (payload) {
 			this.handleRequestUserInput(sessionId, directory, payload)
 		}
 		const workspaceChanges = workspaceChangesUpdatedFromOriginalEvent(original)

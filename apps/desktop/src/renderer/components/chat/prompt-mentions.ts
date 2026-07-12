@@ -1,10 +1,11 @@
 /**
  * Mention tracking system.
  *
- * Maintains a list of @-mentions (files and agents) alongside the textarea text.
+ * Maintains a list of @-mentions alongside the textarea text.
  * When the text changes, mentions whose `@displayName` text is no longer present
  * are automatically removed.
  */
+import type { MentionOption } from "./mention-popover"
 
 // ============================================================
 // Types
@@ -14,6 +15,7 @@ export interface FileMention {
 	type: "file"
 	path: string
 	displayName: string
+	marker: string
 }
 
 export interface AgentMention {
@@ -22,7 +24,16 @@ export interface AgentMention {
 	displayName: string
 }
 
-export type PromptMention = FileMention | AgentMention
+export interface ReferenceMention {
+	type: "reference"
+	kind: "skill" | "mcp"
+	name: string
+	displayName: string
+	marker: string
+	path?: string
+}
+
+export type PromptMention = FileMention | AgentMention | ReferenceMention
 
 // ============================================================
 // Helpers
@@ -30,12 +41,19 @@ export type PromptMention = FileMention | AgentMention
 
 /** Get the text marker for a mention (what appears in the textarea) */
 export function getMentionMarker(mention: PromptMention): string {
-	return `@${mention.displayName}`
+	return mention.type === "agent" ? `@${mention.displayName}` : mention.marker
 }
 
 /** Get the unique key for a mention */
 export function getMentionKey(mention: PromptMention): string {
-	return mention.type === "file" ? `file:${mention.path}` : `agent:${mention.name}`
+	switch (mention.type) {
+		case "file":
+			return `file:${mention.path}`
+		case "agent":
+			return `agent:${mention.name}`
+		case "reference":
+			return `${mention.kind}:${mention.path ?? mention.name}`
+	}
 }
 
 /**
@@ -84,7 +102,7 @@ export function insertMentionIntoText(
 /**
  * Create a FileMention from a file path.
  */
-export function createFileMention(path: string): FileMention {
+export function createFileMention(path: string, marker?: string): FileMention {
 	// Display name is the filename (or full path for short paths)
 	const parts = path.split("/")
 	const fileName = parts[parts.length - 1] || path
@@ -92,6 +110,7 @@ export function createFileMention(path: string): FileMention {
 		type: "file",
 		path,
 		displayName: path.length > 40 ? fileName : path,
+		marker: marker ?? `@${path.length > 40 ? fileName : path}`,
 	}
 }
 
@@ -103,5 +122,38 @@ export function createAgentMention(name: string): AgentMention {
 		type: "agent",
 		name,
 		displayName: name,
+	}
+}
+
+export function createReferenceMention(
+	kind: "skill" | "mcp",
+	name: string,
+	insertText: string,
+	path?: string,
+): ReferenceMention {
+	return {
+		type: "reference",
+		kind,
+		name,
+		displayName: name,
+		marker: insertText,
+		path,
+	}
+}
+
+export function createMentionFromOption(option: MentionOption): PromptMention {
+	switch (option.type) {
+		case "agent":
+			return createAgentMention(option.name)
+		case "file":
+			return createFileMention(option.path, option.insertText)
+		case "skill":
+		case "mcp":
+			return createReferenceMention(
+				option.type,
+				option.name,
+				option.insertText,
+				option.mentionPath,
+			)
 	}
 }

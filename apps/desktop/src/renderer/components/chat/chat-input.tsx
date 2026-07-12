@@ -26,8 +26,8 @@ import { ContextItems } from "./context-items"
 import { type MentionOption, MentionPopover, type MentionPopoverHandle } from "./mention-popover"
 import { PromptAttachmentPreview } from "./prompt-attachments"
 import {
-	createAgentMention,
-	createFileMention,
+	createMentionFromOption,
+	getMentionKey,
 	getMentionMarker,
 	insertMentionIntoText,
 	type PromptMention,
@@ -261,8 +261,7 @@ export function ChatInput({
 		const currentText = ctrl.getText()
 		const textarea = document.querySelector<HTMLTextAreaElement>("textarea[data-prompt-input]")
 		const cursorPos = textarea?.selectionStart ?? currentText.length
-		const mention =
-			option.type === "file" ? createFileMention(option.path) : createAgentMention(option.name)
+		const mention = createMentionFromOption(option)
 		const { text: newText, cursorPosition: newCursor } = insertMentionIntoText(
 			currentText,
 			cursorPos,
@@ -270,8 +269,8 @@ export function ChatInput({
 		)
 		ctrl.setText(newText)
 		setMentions((prev) => {
-			const key = mention.type === "file" ? `file:${mention.path}` : `agent:${mention.name}`
-			if (prev.some((m) => (m.type === "file" ? `file:${m.path}` : `agent:${m.name}`) === key))
+			const key = getMentionKey(mention)
+			if (prev.some((candidate) => getMentionKey(candidate) === key))
 				return prev
 			return [...prev, mention]
 		})
