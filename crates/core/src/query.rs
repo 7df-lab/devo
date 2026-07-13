@@ -462,6 +462,7 @@ fn provider_retry_decision(
 async fn summarize_and_compact(
     session: &mut SessionState,
     provider: &Arc<dyn ModelProviderSDK>,
+    model_slug: &str,
     request_model: &str,
     max_tokens: usize,
     kind: CompactionKind,
@@ -484,8 +485,12 @@ async fn summarize_and_compact(
         kind,
     };
 
-    let summarizer =
-        DefaultHistorySummarizer::with_slug(Arc::clone(provider), request_model, max_tokens);
+    let summarizer = DefaultHistorySummarizer::with_models(
+        Arc::clone(provider),
+        model_slug,
+        request_model,
+        max_tokens,
+    );
 
     match compact_history(&items, &token_info, &summarizer, &config).await {
         Ok(CompactAction::Replaced(compacted_items)) => {
@@ -913,6 +918,12 @@ pub async fn query_with_options(
         session.start_turn(devo_protocol::TurnKind::Regular);
     }
 
+    let compaction_model_slug = turn_config
+        .model
+        .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref())
+        .request_model;
+    let compaction_request_model = turn_config.provider_request_model(&compaction_model_slug);
+
     // Explicit interrupted-turn notice for the next user message after a user
     // interrupt. Placed before pending-input processing so it sits just above the
     // latest user text in prompt construction (after any context diff).
@@ -986,7 +997,8 @@ pub async fn query_with_options(
             summarize_and_compact(
                 session,
                 &provider,
-                &turn_config.request_model,
+                &compaction_model_slug,
+                &compaction_request_model,
                 turn_config.model.max_tokens.unwrap_or(4096) as usize,
                 CompactionKind::Auto,
             )
@@ -1029,7 +1041,8 @@ pub async fn query_with_options(
         } = turn_config
             .model
             .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
-        let provider_request_model = turn_config.provider_request_model(&request_model);
+        let catalog_request_model = request_model.clone();
+        let provider_request_model = turn_config.provider_request_model(&catalog_request_model);
 
         let prompt_source_message_count = session.prompt_source_messages().len();
         let history_items = session
@@ -1067,6 +1080,7 @@ pub async fn query_with_options(
         let hosted_tools =
             hosted_tools_for_web_capabilities(&turn_config.web_search, turn_config.web_fetch);
         let request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::CatalogSlug(catalog_request_model),
             model: provider_request_model,
             system: request_system,
             messages,
@@ -1121,7 +1135,8 @@ pub async fn query_with_options(
                         summarize_and_compact(
                             session,
                             &provider,
-                            &turn_config.request_model,
+                            &compaction_model_slug,
+                            &compaction_request_model,
                             turn_config.model.max_tokens.unwrap_or(4096) as usize,
                             CompactionKind::Proactive,
                         )
@@ -1310,7 +1325,8 @@ pub async fn query_with_options(
                             summarize_and_compact(
                                 session,
                                 &provider,
-                                &turn_config.request_model,
+                                &compaction_model_slug,
+                                &compaction_request_model,
                                 turn_config.model.max_tokens.unwrap_or(4096) as usize,
                                 CompactionKind::Proactive,
                             )
@@ -1536,13 +1552,13 @@ pub async fn query_with_options(
         // Build assistant message
         let mut assistant_content: Vec<ContentBlock> = response_assistant_content;
 
-        if assistant_content.is_empty()
-            && !reasoning_text.is_empty()
-            && !has_provider_reasoning_content
-        {
-            assistant_content.push(ContentBlock::Reasoning {
-                text: reasoning_text,
-            });
+        if !reasoning_text.trim().is_empty() && !has_provider_reasoning_content {
+            assistant_content.insert(
+                0,
+                ContentBlock::Reasoning {
+                    text: reasoning_text,
+                },
+            );
         }
 
         let assistant_text_has_visible_content = !assistant_text.trim().is_empty();
@@ -1787,17 +1803,20 @@ pub async fn query_with_options(
 pub async fn test_model_connection(
     provider: &dyn ModelProviderSDK,
     model: &Model,
+    model_profile: devo_protocol::ModelProfileKey,
+    request_model: &str,
     prompt: &str,
 ) -> Result<String, AgentError> {
     let ResolvedReasoningRequest {
-        request_model,
+        request_model: _,
         request_thinking,
         request_reasoning_effort,
         extra_body,
         effective_reasoning_effort: _,
     } = model.resolve_reasoning_effort_selection(None);
     let request = ModelRequest {
-        model: request_model,
+        model_slug: model_profile,
+        model: request_model.to_string(),
         system: None,
         messages: vec![devo_protocol::RequestMessage {
             role: "user".to_string(),
@@ -4621,16 +4640,29 @@ mod tests {
         };
         let model = Model {
             slug: "glm-4.5".into(),
+            reasoning_capability: devo_protocol::ReasoningCapability::Toggle,
             top_p: Some(0.95),
             ..Model::default()
         };
-        let preview = test_model_connection(&provider, &model, "Reply with OK only.")
-            .await
-            .expect("probe request should succeed");
+        let preview = test_model_connection(
+            &provider,
+            &model,
+            devo_protocol::ModelProfileKey::CatalogSlug(model.slug.clone()),
+            "renamed-provider-model",
+            "Reply with OK only.",
+        )
+        .await
+        .expect("probe request should succeed");
 
         let captured = requests.lock().expect("lock requests");
         assert_eq!(preview, "done");
         assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].model_slug,
+            devo_protocol::ModelProfileKey::CatalogSlug("glm-4.5".to_string())
+        );
+        assert_eq!(captured[0].model, "renamed-provider-model");
+        assert_eq!(captured[0].request_thinking.as_deref(), Some("enabled"));
         assert_eq!(captured[0].system, None);
         assert!(captured[0].tools.is_none());
         assert_eq!(captured[0].messages.len(), 1);
@@ -4638,8 +4670,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_emits_reasoning_without_polluting_assistant_message_content() {
-        struct ReasoningProvider;
+    async fn query_persists_streamed_reasoning_for_follow_up_request() {
+        struct ReasoningProvider {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
 
         #[async_trait]
         impl devo_provider::ModelProviderSDK for ReasoningProvider {
@@ -4649,8 +4683,9 @@ mod tests {
 
             async fn completion_stream(
                 &self,
-                _request: ModelRequest,
+                request: ModelRequest,
             ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+                self.requests.lock().expect("lock requests").push(request);
                 Ok(Box::pin(futures::stream::iter(vec![
                     Ok(StreamEvent::ReasoningStart { index: 0 }),
                     Ok(StreamEvent::ReasoningDelta {
@@ -4683,6 +4718,10 @@ mod tests {
             }
         }
 
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(ReasoningProvider {
+            requests: Arc::clone(&requests),
+        });
         let registry = Arc::new(ToolRegistry::new());
         let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
         let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
@@ -4699,13 +4738,13 @@ mod tests {
         query(
             &mut session,
             &TurnConfig::new(Model::default(), None),
-            Arc::new(ReasoningProvider),
-            registry,
+            provider.clone(),
+            Arc::clone(&registry),
             &runtime,
             Some(callback),
         )
         .await
-        .expect("query should succeed");
+        .expect("first query should succeed");
 
         let events = seen_events.lock().expect("lock events");
         assert!(events.iter().any(|event| matches!(
@@ -4723,10 +4762,45 @@ mod tests {
             assistant_message,
             &Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::Text {
-                    text: "final".into(),
-                }],
+                content: vec![
+                    ContentBlock::Reasoning {
+                        text: "plan".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "final".into(),
+                    },
+                ],
             }
+        );
+
+        session.push_message(Message::user("follow up"));
+        query(
+            &mut session,
+            &TurnConfig::new(Model::default(), None),
+            provider,
+            registry,
+            &runtime,
+            None,
+        )
+        .await
+        .expect("second query should succeed");
+
+        let captured = requests.lock().expect("lock requests");
+        assert_eq!(captured.len(), 2);
+        let replayed_assistant = captured[1]
+            .messages
+            .iter()
+            .find(|message| message.role == "assistant")
+            .expect("assistant replay");
+        assert_eq!(
+            serde_json::to_value(replayed_assistant).expect("serialize assistant replay"),
+            json!({
+                "role": "assistant",
+                "content": [
+                    { "type": "reasoning", "text": "plan" },
+                    { "type": "text", "text": "final" }
+                ]
+            })
         );
     }
 
@@ -5278,6 +5352,10 @@ mod tests {
 
         let captured = requests.lock().expect("lock requests");
         assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].model_slug,
+            devo_protocol::ModelProfileKey::CatalogSlug("deepseek-v4-flash".to_string())
+        );
         assert_eq!(captured[0].request_thinking.as_deref(), Some("enabled"));
         // Toggle capability does not set reasoning_effort on the request.
         assert_eq!(captured[0].reasoning_effort, None);

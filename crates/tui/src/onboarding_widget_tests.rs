@@ -269,7 +269,7 @@ fn onboarding_existing_provider_validation_payload_preserves_edited_model_name()
     let payload = command_payload(&command, "onboard ");
 
     assert_eq!(payload["model_slug"], "deepseek-v4-flash");
-    assert_eq!(payload["model_name"], "DeepSeek-V4-Flash");
+    assert_eq!(payload["request_model"], "DeepSeek-V4-Flash");
     assert_eq!(payload["display_name"], "Deepseek V4 Flash");
 }
 
@@ -285,7 +285,7 @@ fn onboarding_existing_provider_bypass_payload_preserves_edited_model_name() {
     let payload = command_payload(&command, "onboard-skip-validation ");
 
     assert_eq!(payload["model_slug"], "deepseek-v4-flash");
-    assert_eq!(payload["model_name"], "DeepSeek-V4-Flash");
+    assert_eq!(payload["request_model"], "DeepSeek-V4-Flash");
     assert_eq!(payload["display_name"], "Deepseek V4 Flash");
     assert_eq!(widget.take_result(), None);
 }
@@ -298,7 +298,7 @@ fn onboarding_existing_provider_validation_payload_preserves_edited_display_name
     let payload = command_payload(&command, "onboard ");
 
     assert_eq!(payload["model_slug"], "deepseek-v4-flash");
-    assert_eq!(payload["model_name"], "deepseek-v4-flash");
+    assert_eq!(payload["request_model"], "deepseek-v4-flash");
     assert_eq!(payload["display_name"], "DeepSeek V4 Flash Custom");
 }
 
@@ -316,7 +316,7 @@ fn onboarding_validation_failure_can_bypass_validation() {
         binding_id: "deepseek-v4-flash-deepseek".to_string(),
         model_slug: "deepseek-v4-flash".to_string(),
         provider: "Deepseek".to_string(),
-        model_name: "deepseek-v4-flash".to_string(),
+        request_model: "deepseek-v4-flash".to_string(),
         display_name: Some("deepseek-v4-flash".to_string()),
         invocation_method: ProviderWireApi::OpenAIChatCompletions,
         default_reasoning_effort: Some("high".to_string()),
@@ -326,7 +326,7 @@ fn onboarding_validation_failure_can_bypass_validation() {
         widget.take_result(),
         Some(OnboardingResult::ValidationBypassed {
             model_slug: "deepseek-v4-flash".to_string(),
-            model_name: "deepseek-v4-flash".to_string(),
+            request_model: "deepseek-v4-flash".to_string(),
             display_name: "deepseek-v4-flash".to_string(),
         })
     );
@@ -383,7 +383,7 @@ fn onboarding_settings_summary_masks_entered_api_key() {
         vec![OnboardingTranscriptEvent::SettingsConfirmed {
             provider_name: "Deepseek".to_string(),
             base_url: Some("https://api.deepseek.com".to_string()),
-            model_name: "deepseek-v4-flash".to_string(),
+            request_model: "deepseek-v4-flash".to_string(),
             display_name: "Deepseek V4 Flash".to_string(),
             invocation_method: ProviderWireApi::OpenAIChatCompletions,
             default_reasoning_effort: Some("high".to_string()),

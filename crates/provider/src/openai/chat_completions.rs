@@ -13,6 +13,7 @@ use serde_json::Value;
 use serde_json::json;
 use tracing::debug;
 mod stream;
+use devo_protocol::ModelProfileKey;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::ProviderWireApi;
@@ -562,7 +563,7 @@ where
 }
 
 fn build_request(request: &ModelRequest, stream: bool) -> Value {
-    let profile = resolve_request_profile(&request.model, OpenAITransport::ChatCompletions);
+    let profile = resolve_request_profile(&request.model_slug, OpenAITransport::ChatCompletions);
     let include_empty_reasoning_content = profile.require_reasoning_content
         && !matches!(
             request
@@ -1151,8 +1152,11 @@ impl ProviderAdapter for OpenAIProvider {
         ProviderWireApi::OpenAIChatCompletions
     }
 
-    fn capabilities(&self, model: &str) -> ProviderCapabilities {
-        let profile = resolve_request_profile(model, OpenAITransport::ChatCompletions);
+    fn capabilities(&self, model_slug: &str) -> ProviderCapabilities {
+        let profile = resolve_request_profile(
+            &ModelProfileKey::CatalogSlug(model_slug.to_string()),
+            OpenAITransport::ChatCompletions,
+        );
         let mut capabilities = ProviderCapabilities::openai();
         capabilities.supports_temperature = profile.supports_temperature;
         capabilities.supports_top_p = profile.supports_top_p;
@@ -1170,6 +1174,7 @@ impl ProviderAdapter for OpenAIProvider {
 #[cfg(test)]
 mod tests {
     use crate::dsml::DsmlToolCallHealer;
+    use devo_protocol::ModelProfileKey;
     use devo_protocol::ModelRequest;
     use devo_protocol::RequestContent;
     use devo_protocol::RequestMessage;
@@ -1190,6 +1195,7 @@ mod tests {
     #[test]
     fn debug_request_body_includes_tools_and_reasoning_effort() {
         let request = ModelRequest {
+            model_slug: ModelProfileKey::CatalogSlug("gpt-4o-mini".to_string()),
             model: "gpt-4o-mini".to_string(),
             system: Some("You are helpful.".to_string()),
             messages: vec![
@@ -1262,35 +1268,57 @@ mod tests {
     }
 
     #[test]
-    fn debug_request_body_uses_thinking_object_for_zai_models() {
+    fn debug_request_body_uses_thinking_and_replays_reasoning_for_zai_models() {
         let request = ModelRequest {
-            model: "glm-4.5".to_string(),
+            model_slug: ModelProfileKey::CatalogSlug("glm-4.5".to_string()),
+            model: "renamed-provider-model".to_string(),
             system: None,
-            messages: vec![RequestMessage {
-                role: "user".to_string(),
-                content: vec![RequestContent::Text {
-                    text: "hi".to_string(),
-                }],
-            }],
+            messages: vec![
+                RequestMessage {
+                    role: "assistant".to_string(),
+                    content: vec![
+                        RequestContent::Reasoning {
+                            text: "prior plan".to_string(),
+                        },
+                        RequestContent::Text {
+                            text: "prior answer".to_string(),
+                        },
+                    ],
+                },
+                RequestMessage {
+                    role: "user".to_string(),
+                    content: vec![RequestContent::Text {
+                        text: "hi".to_string(),
+                    }],
+                },
+            ],
             max_tokens: 64,
             tools: None,
             hosted_tools: Vec::new(),
             sampling: SamplingControls::default(),
-            request_thinking: Some("disabled".to_string()),
+            request_thinking: Some("enabled".to_string()),
             reasoning_effort: None,
             extra_body: None,
         };
 
         let body = build_request(&request, false);
 
-        assert_eq!(body["thinking"]["type"], json!("disabled"));
+        assert_eq!(body["model"], json!("renamed-provider-model"));
+        assert_eq!(body["thinking"], json!({ "type": "enabled" }));
+        assert_eq!(body["messages"][0]["role"], json!("assistant"));
+        assert_eq!(
+            body["messages"][0]["reasoning_content"],
+            json!("prior plan")
+        );
+        assert_eq!(body["messages"][0]["content"], json!("prior answer"));
         assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
     fn debug_request_body_includes_sampling_controls_for_capable_models() {
         let request = ModelRequest {
-            model: "glm-4.5".to_string(),
+            model_slug: ModelProfileKey::CatalogSlug("glm-4.5".to_string()),
+            model: "renamed-provider-model".to_string(),
             system: None,
             messages: vec![RequestMessage {
                 role: "user".to_string(),
@@ -1322,6 +1350,7 @@ mod tests {
     #[test]
     fn debug_request_body_preserves_top_p_precision() {
         let request = ModelRequest {
+            model_slug: ModelProfileKey::CatalogSlug("glm-5.1".to_string()),
             model: "glm-5.1".to_string(),
             system: None,
             messages: vec![RequestMessage {
@@ -1601,6 +1630,7 @@ mod tests {
     #[test]
     fn build_request_omits_unsupported_hosted_tool_history() {
         let request = ModelRequest {
+            model_slug: ModelProfileKey::CatalogSlug("gpt-4o-mini".to_string()),
             model: "gpt-4o-mini".to_string(),
             system: None,
             messages: vec![
@@ -1661,6 +1691,7 @@ mod tests {
     #[test]
     fn debug_request_body_uses_explicit_reasoning_effort_field() {
         let request = ModelRequest {
+            model_slug: ModelProfileKey::CatalogSlug("deepseek-v4".to_string()),
             model: "deepseek-v4".to_string(),
             system: None,
             messages: vec![RequestMessage {
@@ -1687,6 +1718,7 @@ mod tests {
     #[test]
     fn debug_request_body_includes_empty_reasoning_content_for_deepseek_assistant_messages() {
         let request = ModelRequest {
+            model_slug: ModelProfileKey::CatalogSlug("deepseek-v4".to_string()),
             model: "deepseek-v4".to_string(),
             system: None,
             messages: vec![RequestMessage {

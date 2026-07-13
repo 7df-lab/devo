@@ -57,7 +57,7 @@ struct PendingOnboarding {
 #[derive(Debug, serde::Deserialize)]
 struct OnboardingCommandPayload {
     model_slug: String,
-    model_name: String,
+    request_model: String,
     display_name: String,
     provider_id: String,
     provider_name: String,
@@ -873,13 +873,13 @@ fn handle_worker_event(
         }
         WorkerEvent::ProviderVendorUpserted { model_binding, .. } => {
             if let Some(pending) = loop_state.pending_onboarding.take() {
-                let model_name = model_binding
+                let request_model = model_binding
                     .as_ref()
-                    .map(|binding| binding.model_name.clone())
-                    .unwrap_or_else(|| pending.binding.model_name.clone());
+                    .map(|binding| binding.request_model.clone())
+                    .unwrap_or_else(|| pending.binding.request_model.clone());
                 worker.reconfigure_provider(
                     pending.binding.invocation_method,
-                    model_name,
+                    request_model,
                     pending.base_url,
                     pending.api_key,
                 )?;
@@ -1145,7 +1145,7 @@ fn handle_app_command(
                 let provider_credential_id = payload.provider_credential_id;
                 let binding = OnboardingModelBinding {
                     model_slug: payload.model_slug,
-                    model_name: payload.model_name,
+                    request_model: payload.request_model,
                     display_name,
                     provider_id: payload.provider_id,
                     provider_name: payload.provider_name,

@@ -84,7 +84,7 @@ pub trait ProviderAdapter: ModelProviderSDK {
     fn family(&self) -> ProviderWireApi;
 
     /// Returns the capabilities that should be used for this model.
-    fn capabilities(&self, model: &str) -> ProviderCapabilities;
+    fn capabilities(&self, model_slug: &str) -> ProviderCapabilities;
 }
 
 /// A unified interface for model provider SDKs.

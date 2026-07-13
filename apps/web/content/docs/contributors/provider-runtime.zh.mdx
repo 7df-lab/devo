@@ -65,11 +65,11 @@ Model binding 将本地身份和 provider request name 分开：
 [model_bindings.deepseek-v4-pro-deepseek-anthropic]
 model_slug = "deepseek-v4-pro"
 provider = "deepseek-anthropic"
-model_name = "deepseek-v4-pro"
+request_model = "deepseek-v4-pro"
 invocation_method = "anthropic_messages"
 ```
 
-如果 `model_name` 与 `model_slug` 不同，Devo 可以在 UI 中显示 local slug，同时向 API 发送 provider-specific model string。
+如果 `request_model` 与 `model_slug` 不同，Devo 可以在 UI 中显示 local slug，同时向 API 发送 provider-specific model string。
 
 ## Web Search 和 Fetch
 

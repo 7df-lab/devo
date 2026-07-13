@@ -79,7 +79,7 @@ const providerValidateParams = {
 		binding_id: "openai-gpt-4o",
 		model_slug: "gpt-4o",
 		provider: "openai",
-		model_name: "gpt-4o",
+		request_model: "gpt-4o",
 		display_name: "GPT-4o",
 		invocation_method: "openai_chat_completions",
 		default_reasoning_effort: null,

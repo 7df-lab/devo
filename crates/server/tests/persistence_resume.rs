@@ -344,7 +344,6 @@ async fn runtime_rebuilds_sessions_from_rollout_and_resume_works() -> Result<()>
                 "params": {
                     "session_id": session_id,
                     "input": [{ "type": "text", "text": "persist this session" }],
-                    "model": null,
                     "sandbox": null,
                     "approval_policy": null,
                     "cwd": null
@@ -1276,7 +1275,7 @@ async fn compacted_session_next_query_uses_compaction_summary_after_restart() ->
 }
 
 #[tokio::test]
-async fn configured_model_name_is_used_for_turn_metadata_and_provider_request() -> Result<()> {
+async fn configured_request_model_is_used_for_turn_metadata_and_provider_request() -> Result<()> {
     let data_root = TempDir::new()?;
     std::fs::create_dir_all(data_root.path().join(".devo"))?;
     std::fs::write(
@@ -1327,7 +1326,7 @@ async fn configured_model_name_is_used_for_turn_metadata_and_provider_request() 
                 "params": {
                     "cwd": data_root.path(),
                     "ephemeral": false,
-                    "title": "Model name session",
+                    "title": "Request model session",
                     "model": "test-model"
                 }
             }),
@@ -1349,7 +1348,7 @@ async fn configured_model_name_is_used_for_turn_metadata_and_provider_request() 
                 "method": "_devo/turn/start",
                 "params": {
                     "session_id": session_id,
-                    "input": [{ "type": "text", "text": "use configured model name" }],
+                    "input": [{ "type": "text", "text": "use configured request model" }],
                     "model": null,
                     "sandbox": null,
                     "approval_policy": null,

@@ -1,3 +1,4 @@
+use devo_protocol::ModelProfileKey;
 use devo_protocol::RequestRole;
 
 /// Transport variants used to resolve OpenAI-family capabilities.
@@ -59,8 +60,9 @@ enum ModelMatcher {
 impl ModelMatcher {
     fn matches(self, model: &str) -> bool {
         match self {
-            // Capability resolution runs for every provider request; active
-            // rules are prefix checks, so avoid lowercasing the whole model id.
+            // Capability resolution uses the catalog slug, not the provider's
+            // configurable wire model name. Avoid lowercasing the whole slug
+            // for every provider request.
             ModelMatcher::Prefix(value) => model
                 .get(..value.len())
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case(value)),
@@ -173,11 +175,13 @@ const OPENAI_PROFILE_RULES: &[ProfileRule] = &[
 
 /// Resolves the wire profile for an OpenAI-family model on the given transport.
 pub(crate) fn resolve_request_profile(
-    model: &str,
+    model_profile: &ModelProfileKey,
     transport: OpenAITransport,
 ) -> OpenAIRequestProfile {
     for rule in OPENAI_PROFILE_RULES {
-        if rule.transport == transport && rule.matcher.matches(model) {
+        if rule.transport == transport
+            && matches!(model_profile, ModelProfileKey::CatalogSlug(model) if rule.matcher.matches(model))
+        {
             return rule.profile;
         }
     }
@@ -195,21 +199,37 @@ mod tests {
 
     #[test]
     fn resolve_request_profile_uses_zai_thinking_for_chat_completions() {
-        let profile = resolve_request_profile("glm-4.5", OpenAITransport::ChatCompletions);
+        let profile = resolve_request_profile(
+            &ModelProfileKey::CatalogSlug("glm-4.5".to_string()),
+            OpenAITransport::ChatCompletions,
+        );
         assert_eq!(profile.reasoning_mode, OpenAIReasoningMode::Thinking);
         assert!(profile.supports_top_k);
         assert!(profile.require_reasoning_content);
     }
 
     #[test]
+    fn resolve_request_profile_uses_generic_profile_without_catalog_slug() {
+        let profile =
+            resolve_request_profile(&ModelProfileKey::Generic, OpenAITransport::ChatCompletions);
+        assert_eq!(profile.reasoning_mode, OpenAIReasoningMode::Effort);
+    }
+
+    #[test]
     fn resolve_request_profile_matches_prefix_case_insensitively() {
-        let profile = resolve_request_profile("GLM-4.5", OpenAITransport::ChatCompletions);
+        let profile = resolve_request_profile(
+            &ModelProfileKey::CatalogSlug("GLM-4.5".to_string()),
+            OpenAITransport::ChatCompletions,
+        );
         assert_eq!(profile.reasoning_mode, OpenAIReasoningMode::Thinking);
     }
 
     #[test]
     fn resolve_request_profile_defaults_to_effort_for_responses() {
-        let profile = resolve_request_profile("glm-4.5", OpenAITransport::Responses);
+        let profile = resolve_request_profile(
+            &ModelProfileKey::CatalogSlug("glm-4.5".to_string()),
+            OpenAITransport::Responses,
+        );
         assert_eq!(profile.reasoning_mode, OpenAIReasoningMode::Effort);
     }
 }

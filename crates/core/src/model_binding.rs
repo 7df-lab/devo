@@ -96,7 +96,7 @@ pub struct ModelProviderBinding {
     pub binding_id: ModelBindingId,
     pub canonical_model_slug: String,
     pub provider_id: ProviderId,
-    pub model_name: String,
+    pub request_model: String,
     pub display_name: String,
     pub invocation_method: InvocationMethod,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -128,7 +128,7 @@ pub struct ResolvedModelProfile {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub modalities: Vec<ModelModality>,
     pub invocation_method: InvocationMethod,
-    pub model_name: String,
+    pub request_model: String,
     pub base_url: Option<String>,
     pub supports_tool_use: bool,
     pub supports_streaming: bool,
@@ -167,7 +167,7 @@ pub enum ProviderError {
     #[error("model not found: {message}")]
     ModelNotFoundError {
         message: String,
-        model_name: Option<String>,
+        request_model: Option<String>,
     },
     #[error("quota exceeded: {message}")]
     QuotaExceededError { message: String },
@@ -248,7 +248,7 @@ mod tests {
             binding_id: ModelBindingId::new(),
             canonical_model_slug: "claude-opus-4-7".into(),
             provider_id: ProviderId::new(),
-            model_name: "claude-opus-4-7".into(),
+            request_model: "claude-opus-4-7".into(),
             display_name: "Claude Opus 4.7".into(),
             invocation_method: InvocationMethod::AnthropicMessages,
             reasoning_effort: Some(ReasoningEffort::High),
@@ -260,7 +260,7 @@ mod tests {
             }),
             priority: 1,
         };
-        assert_eq!(binding.model_name, "claude-opus-4-7");
+        assert_eq!(binding.request_model, "claude-opus-4-7");
         assert_eq!(
             binding.invocation_method,
             InvocationMethod::AnthropicMessages
@@ -279,7 +279,7 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::Medium),
             modalities: vec![ModelModality::Text, ModelModality::Image],
             invocation_method: InvocationMethod::AnthropicMessages,
-            model_name: "claude-sonnet-4-6".into(),
+            request_model: "claude-sonnet-4-6".into(),
             base_url: None,
             supports_tool_use: true,
             supports_streaming: true,

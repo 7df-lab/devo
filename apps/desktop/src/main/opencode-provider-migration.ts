@@ -85,14 +85,14 @@ export async function executeOpenCodeProviderMigration(
 
 	for (const params of buildProviderUpsertParams(settings)) {
 		const providerName = params.model_binding.provider
-		const modelName = params.model_binding.model_name
+		const requestModel = params.model_binding.request_model
 		const bindingId = params.model_binding.binding_id
 		try {
 			await requestProviderUpsert("provider/upsert", params)
 			filesWritten.push(`provider/upsert:${providerName}/${bindingId}`)
 		} catch (error) {
 			errors.push(
-				`OpenCode provider migration failed for ${providerName}/${modelName}: ${error instanceof Error ? error.message : String(error)}`,
+				`OpenCode provider migration failed for ${providerName}/${requestModel}: ${error instanceof Error ? error.message : String(error)}`,
 			)
 		}
 	}
@@ -118,7 +118,7 @@ function buildProviderUpsertParams(settings: OpenCodeProviderSettings): Array<{
 		binding_id: string
 		model_slug: string
 		provider: string
-		model_name: string
+		request_model: string
 		display_name: string
 		invocation_method: string
 		default_reasoning_effort: null
@@ -145,7 +145,7 @@ function buildProviderUpsertParams(settings: OpenCodeProviderSettings): Array<{
 					binding_id: bindingId,
 					model_slug: model.modelId,
 					provider: provider.providerId,
-					model_name: model.modelId,
+					request_model: model.modelId,
 					display_name: model.displayName,
 					invocation_method: provider.wireApi,
 					default_reasoning_effort: null,

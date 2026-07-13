@@ -341,7 +341,7 @@ impl SessionRuntimeContext {
             let binding_id = binding.binding_id.clone();
             let mut turn_config = TurnConfig::with_provider_route_and_web_tools(
                 self.catalog_model_or_fallback(&binding.model_slug),
-                binding.model_name,
+                binding.request_model,
                 provider_request_models,
                 ProviderRoute::binding(binding.provider_id, binding.invocation_method),
                 web_search,

@@ -115,6 +115,35 @@ impl ServerRuntime {
         } else {
             reservation.runtime_context
         };
+        if let Some(binding_id) = params.model_binding_id.as_deref() {
+            let binding_error = {
+                let config_store = runtime_context
+                    .config_store
+                    .lock()
+                    .expect("app config store mutex should not be poisoned");
+                let provider_config = &config_store.effective_config().provider;
+                match provider_config.model_bindings.get(binding_id) {
+                    None => Some(format!("model binding `{binding_id}` does not exist")),
+                    Some(binding) if !binding.enabled => {
+                        Some(format!("model binding `{binding_id}` is disabled"))
+                    }
+                    Some(binding) => match provider_config.providers.get(&binding.provider) {
+                        None => Some(format!(
+                            "model binding `{binding_id}` references missing provider `{}`",
+                            binding.provider
+                        )),
+                        Some(provider) if !provider.enabled => Some(format!(
+                            "model binding `{binding_id}` references disabled provider `{}`",
+                            binding.provider
+                        )),
+                        Some(_) => None,
+                    },
+                }
+            };
+            if let Some(error) = binding_error {
+                return self.error_response(request_id, ProtocolErrorCode::InvalidParams, error);
+            }
+        }
         let Some(resolved_input) = (match runtime_context
             .resolve_input_items(&params.input, Some(workspace_root.as_path()))
         {

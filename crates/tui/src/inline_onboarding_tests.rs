@@ -186,7 +186,7 @@ fn onboarding_completion_appends_header_after_success_record() {
             binding_id: "deepseek-v4-flash-deepseek".to_string(),
             model_slug: "deepseek-v4-flash".to_string(),
             provider: "Deepseek".to_string(),
-            model_name: "DeepSeek-V4-Flash".to_string(),
+            request_model: "DeepSeek-V4-Flash".to_string(),
             display_name: Some("DeepSeek-V4-Flash".to_string()),
             invocation_method: ProviderWireApi::OpenAIChatCompletions,
             default_reasoning_effort: None,

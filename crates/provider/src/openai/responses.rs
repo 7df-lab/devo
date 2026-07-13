@@ -93,7 +93,7 @@ impl OpenAIResponsesProvider {
 
 /// Builds the exact OpenAI Responses request body used by this provider.
 fn build_request(request: &ModelRequest, stream: bool) -> Value {
-    let profile = resolve_request_profile(&request.model, OpenAITransport::Responses);
+    let profile = resolve_request_profile(&request.model_slug, OpenAITransport::Responses);
     let mut root = json!({
         "model": request.model,
         "input": build_input(request),
@@ -999,6 +999,7 @@ mod tests {
     #[test]
     fn debug_request_body_includes_reasoning_and_tools() {
         let request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::CatalogSlug("gpt-5.4".to_string()),
             model: "gpt-5.4".to_string(),
             system: Some("You are helpful.".to_string()),
             messages: vec![RequestMessage {
@@ -1040,6 +1041,7 @@ mod tests {
     #[test]
     fn build_request_omits_unsupported_hosted_tool_history() {
         let request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::CatalogSlug("gpt-5.4".to_string()),
             model: "gpt-5.4".to_string(),
             system: None,
             messages: vec![

@@ -74,7 +74,7 @@ describe("Claude Code provider migration", () => {
 				binding_id: "deepseek-v4-pro-1m-claude-code",
 				model_slug: "deepseek-v4-pro[1m]",
 				provider: "claude-code",
-				model_name: "deepseek-v4-pro[1m]",
+				request_model: "deepseek-v4-pro[1m]",
 				display_name: "deepseek-v4-pro[1m]",
 				invocation_method: "anthropic_messages",
 				default_reasoning_effort: null,

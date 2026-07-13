@@ -60,7 +60,7 @@ export interface ProviderVendorFormValues {
 	apiKey: string
 	bindingId: string
 	modelSlug: string
-	modelName: string
+	requestModel: string
 	displayName: string
 	defaultReasoningEffort: string
 	makeDefault: boolean
@@ -118,7 +118,7 @@ function initialValues(providerVendor: ProviderVendor | null): ProviderVendorFor
 		apiKey: "",
 		bindingId: providerName ? `${providerName}-model` : "",
 		modelSlug: "",
-		modelName: "",
+		requestModel: "",
 		displayName: "",
 		defaultReasoningEffort: "",
 		makeDefault: false,
@@ -138,7 +138,7 @@ export function buildProviderUpsertParams(
 	const providerName = requireText(values.providerName, "Provider name")
 	const bindingId = requireText(values.bindingId, "Model binding id")
 	const modelSlug = requireText(values.modelSlug, "Model slug")
-	const modelName = requireText(values.modelName, "Request model name")
+	const requestModel = requireText(values.requestModel, "Request model name")
 	const apiKey = trimToNull(values.apiKey)
 	const credential =
 		existingProvider?.credential ?? (apiKey ? credentialIdForProvider(providerName) : null)
@@ -156,7 +156,7 @@ export function buildProviderUpsertParams(
 			binding_id: bindingId,
 			model_slug: modelSlug,
 			provider: providerName,
-			model_name: modelName,
+			request_model: requestModel,
 			display_name: trimToNull(values.displayName),
 			invocation_method: values.wireApi,
 			default_reasoning_effort: trimToNull(values.defaultReasoningEffort),
@@ -345,10 +345,10 @@ export function ProviderVendorDialog({
 
 								<div className="grid gap-4 sm:grid-cols-2">
 									<TextField
-										id="model-name"
+										id="request-model"
 										label="Request model name"
-										value={values.modelName}
-										onChange={(value) => setValue("modelName", value)}
+										value={values.requestModel}
+										onChange={(value) => setValue("requestModel", value)}
 										placeholder="gpt-4o"
 										disabled={saving}
 									/>

@@ -71,7 +71,7 @@ pub struct TurnConfig {
     /// Catalog model keyed by `model_slug`; used for prompts, capabilities,
     /// reasoning metadata, context limits, session metadata, and UI state.
     pub model: Model,
-    /// Provider wire model name from the selected binding's `model_name`.
+    /// Provider wire model identifier from the selected binding's `request_model`.
     /// This is the string sent as `ModelRequest.model` for the base model.
     pub request_model: String,
     /// Provider model binding id selected for this turn, when the request was
@@ -216,7 +216,7 @@ impl TurnConfig {
         }
         // Thinking may resolve the catalog model to a variant slug. Keep catalog
         // metadata from the variant, but translate the final request back to the
-        // selected provider's `model_name` when a matching binding exists.
+        // selected provider's `request_model` when a matching binding exists.
         self.provider_request_models
             .get(resolved_catalog_model)
             .map(str::to_string)

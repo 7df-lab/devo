@@ -127,7 +127,7 @@ enabled = true
 model_slug = "openai/gpt-5.5"
 display_name = "GPT 5.5"
 provider = "openrouter"
-model_name = "openai/gpt-5.5"
+request_model = "openai/gpt-5.5"
 invocation_method = "openai_responses"
 default_reasoning_effort = "medium"
 
@@ -136,7 +136,7 @@ enabled = true
 model_slug = "deepseek/deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
 provider = "openrouter"
-model_name = "deepseek/deepseek-v4-pro"
+request_model = "deepseek/deepseek-v4-pro"
 invocation_method = "openai_chat_completions"
 default_reasoning_effort = "high"
 
@@ -317,7 +317,7 @@ Optional fields:
 
 Provider ids are stable program-generated identifiers. Changing `name` must not change the provider id.
 
-Provider records must not contain model-specific fields such as `model_name`, `model_slug`, binding `display_name`, `invocation_method`, or reasoning effort.
+Provider records must not contain model-specific fields such as `request_model`, legacy `model_name`, `model_slug`, binding `display_name`, `invocation_method`, or reasoning effort.
 
 Custom provider headers:
 
@@ -392,13 +392,15 @@ Required fields for an enabled binding:
 - `model_slug`: canonical model slug matching the effective model catalog.
 - `display_name`: user-configurable client display label for this binding.
 - `provider`: provider id from `[providers]`.
-- `model_name`: provider-specific model name used for API requests.
+- `request_model`: provider-specific model identifier used for API requests.
 - `invocation_method`: program-known invocation method id.
 
 Optional fields:
 
 - `default_reasoning_effort`: logical reasoning effort selected by onboarding or default setup.
 - `availability_status`: last known safe status.
+
+Legacy configuration may provide `model_name` as a read alias for `request_model`. Writes persist only `request_model` and remove `model_name` from updated bindings.
 
 Allowed `invocation_method` values for the initial schema:
 

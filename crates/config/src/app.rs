@@ -286,7 +286,7 @@ impl AppConfigStore {
                 ModelBindingConfig {
                     model_slug: binding.model_slug.trim().to_string(),
                     provider: binding.provider.trim().to_string(),
-                    model_name: binding.model_name.trim().to_string(),
+                    request_model: binding.request_model.trim().to_string(),
                     display_name: binding.display_name.as_deref().and_then(non_empty_string),
                     invocation_method: binding.invocation_method,
                     default_reasoning_effort: binding
@@ -432,8 +432,8 @@ fn validate_provider_model_binding(
     if binding.model_slug.trim().is_empty() {
         anyhow::bail!("model binding model_slug cannot be empty");
     }
-    if binding.model_name.trim().is_empty() {
-        anyhow::bail!("model binding model_name cannot be empty");
+    if binding.request_model.trim().is_empty() {
+        anyhow::bail!("model binding request_model cannot be empty");
     }
     if binding.provider.trim() != provider_id {
         anyhow::bail!("model binding provider must match provider vendor");

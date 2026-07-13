@@ -650,6 +650,7 @@ fn request_body_json(request: &str) -> serde_json::Value {
 
 fn minimal_request() -> ModelRequest {
     ModelRequest {
+        model_slug: devo_protocol::ModelProfileKey::Generic,
         model: "test-model".to_string(),
         system: None,
         messages: vec![RequestMessage {
@@ -670,6 +671,7 @@ fn minimal_request() -> ModelRequest {
 
 fn anthropic_split_tool_result_request() -> ModelRequest {
     ModelRequest {
+        model_slug: devo_protocol::ModelProfileKey::Generic,
         model: "test-model".to_string(),
         system: None,
         messages: vec![
@@ -730,6 +732,9 @@ fn deepseek_api_key() -> Option<String> {
 
 fn deepseek_provider_hosted_web_search_request() -> ModelRequest {
     ModelRequest {
+        model_slug: devo_protocol::ModelProfileKey::CatalogSlug(
+            "deepseek-v4-flash".to_string(),
+        ),
         model: "deepseek-v4-flash".to_string(),
         system: None,
         messages: vec![RequestMessage {

@@ -1456,6 +1456,7 @@ mod tests {
     #[test]
     fn build_request_includes_sampling_tools_and_thinking() {
         let request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
             model: "claude-sonnet-4-6".to_string(),
             system: Some("You are helpful.".to_string()),
             messages: vec![
@@ -1526,6 +1527,7 @@ mod tests {
     #[test]
     fn build_request_skips_unsigned_reasoning_blocks() {
         let request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
             model: "deepseek-v4-flash".to_string(),
             system: None,
             messages: vec![RequestMessage {
@@ -1575,6 +1577,7 @@ mod tests {
     #[test]
     fn build_request_omits_messages_with_no_anthropic_content() {
         let request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
             model: "claude-sonnet-4-6".to_string(),
             system: None,
             messages: vec![
@@ -1610,6 +1613,7 @@ mod tests {
     #[test]
     fn build_request_serializes_provider_reasoning_with_signature() {
         let request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: vec![RequestMessage {
@@ -1647,6 +1651,7 @@ mod tests {
     #[test]
     fn build_request_serializes_hosted_tool_use_blocks() {
         let request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: vec![RequestMessage {
@@ -1707,6 +1712,7 @@ mod tests {
     #[test]
     fn build_request_sends_disabled_thinking_without_output_config() {
         let mut request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
             model: "deepseek-v4-flash".to_string(),
             system: None,
             messages: vec![RequestMessage {
@@ -1737,6 +1743,7 @@ mod tests {
     #[test]
     fn build_request_maps_max_thinking_to_output_config_effort() {
         let request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: vec![RequestMessage {
@@ -1763,6 +1770,7 @@ mod tests {
     #[test]
     fn build_request_prefers_reasoning_effort_for_output_config_effort() {
         let request = ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
             model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: vec![RequestMessage {

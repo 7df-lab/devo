@@ -17,6 +17,7 @@ pub(crate) fn build_approval_review_request(
     request: &ToolPermissionRequest,
 ) -> ModelRequest {
     ModelRequest {
+        model_slug: devo_protocol::ModelProfileKey::Generic,
         model,
         system: Some(
             "You are Devo's automatic approval reviewer. Decide whether a tool approval request is safe under the user's active policy. Respond with exactly one compact JSON object and no markdown: {\"decision\":\"approve|deny|uncertain\",\"rationale\":\"short reason\"}. Approve only when the action is clearly low risk and scoped to the stated target. Deny destructive, credential, privilege escalation, or ambiguous high-impact actions. Use uncertain when more context or user intent is needed."

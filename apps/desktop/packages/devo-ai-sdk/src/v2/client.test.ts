@@ -573,6 +573,49 @@ describe("ACP desktop SDK session mapping", () => {
 		})
 	})
 
+	test("turn start sends the selected model binding without a legacy model", async () => {
+		const transport = new FakeTransport((method) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/set_config_option") return { configOptions }
+			if (method === "turn/start") {
+				return {
+					disposition: "started",
+					turn_id: "00000000-0000-0000-0000-000000000001",
+					status: "Running",
+					accepted_at: "2026-07-13T00:00:00Z",
+				}
+			}
+			throw new Error("unexpected request " + method)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+
+		await client.turn.start({
+			sessionID: "s1",
+			parts: [{ type: "text", text: "plan this" }],
+			model: { providerID: "session", modelID: "glm-zai" },
+			collaborationMode: "plan",
+		})
+
+		expect(transport.requests.at(-2)).toEqual({
+			method: "session/set_config_option",
+			directory: "/repo",
+			params: { sessionId: "s1", configId: "model", value: "glm-zai" },
+		})
+		expect(transport.requests.at(-1)).toEqual({
+			method: "turn/start",
+			directory: "/repo",
+			params: {
+				session_id: "s1",
+				input: [{ type: "text", text: "plan this" }],
+				model_binding_id: "glm-zai",
+				sandbox: null,
+				approval_policy: null,
+				cwd: null,
+				collaboration_mode: "plan",
+			},
+		})
+	})
+
 	test("starts ACP prompt without waiting for the final turn response", async () => {
 		const transport = new FakeTransport((method, _params, _directory, tx) => {
 			if (method === "initialize") return initializeResult

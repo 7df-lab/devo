@@ -124,17 +124,17 @@ impl ChatWidget {
             .and_then(|resolved| resolved.effective_reasoning_effort);
     }
 
-    pub(super) fn apply_session_model_name(
+    pub(super) fn apply_session_request_model(
         &mut self,
         model_slug: String,
-        model_name: String,
+        request_model: String,
         display_name: String,
     ) {
         self.sync_session_catalog_model(model_slug.clone());
-        self.session.request_model = if model_name == model_slug {
+        self.session.request_model = if request_model == model_slug {
             None
         } else {
-            Some(model_name)
+            Some(request_model)
         };
         let display_name = display_name.trim();
         if !display_name.is_empty()
@@ -150,13 +150,13 @@ impl ChatWidget {
     }
 
     pub(super) fn apply_session_model_binding(&mut self, binding: &ProviderModelBinding) {
-        self.apply_session_model_name(
+        self.apply_session_request_model(
             binding.model_slug.clone(),
-            binding.model_name.clone(),
+            binding.request_model.clone(),
             binding
                 .display_name
                 .clone()
-                .unwrap_or_else(|| binding.model_name.clone()),
+                .unwrap_or_else(|| binding.request_model.clone()),
         );
     }
 

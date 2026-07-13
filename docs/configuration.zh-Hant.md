@@ -30,7 +30,7 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "deepseek-v4-flash"
 provider = "api.deepseek.com"
-model_name = "deepseek-v4-flash"
+request_model = "deepseek-v4-flash"
 display_name = "DeepSeek V4 Flash"
 invocation_method = "openai_chat_completions"
 default_reasoning_effort = "high"
@@ -40,7 +40,7 @@ default_reasoning_effort = "high"
 
 - `model_slug` 從 `models.json` 中選擇 Devo 的本地模型中繼資料。
 - `provider` 選擇已配置的連線記錄。
-- `model_name` 是傳送到 provider 的特定模型字串。
+- `request_model` 是傳送到 provider 的特定模型字串。
 - `invocation_method` 選擇 provider 協議，例如
   [`openai_chat_completions`](https://developers.openai.com/api/reference/chat-completions/overview)、
   [`openai_responses`](https://developers.openai.com/api/reference/responses/overview)，
@@ -89,7 +89,7 @@ default_reasoning_effort = "high"
 enabled = true
 model_slug = "my-coding-model"
 provider = "my.provider"
-model_name = "provider-specific-model-name"
+request_model = "provider-specific-model-name"
 display_name = "My Coding Model"
 invocation_method = "openai_chat_completions"
 ```

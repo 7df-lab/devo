@@ -418,7 +418,7 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "catalog-slug"
 provider = "openrouter"
-model_name = "vendor/model-name"
+request_model = "vendor/model-name"
 invocation_method = "openai_chat_completions"
 "#,
         );
@@ -444,7 +444,7 @@ proxy_url = "http://workspace-proxy.example:8080"
     }
 
     #[test]
-    fn resolve_turn_config_preserves_catalog_slug_and_uses_binding_model_name_for_request() {
+    fn resolve_turn_config_preserves_catalog_slug_and_uses_binding_request_model() {
         let deps = test_deps(
             r#"
 [defaults]
@@ -464,7 +464,7 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "catalog-slug"
 provider = "openrouter"
-model_name = "vendor/model-name"
+request_model = "vendor/model-name"
 invocation_method = "openai_chat_completions"
 "#,
         );
@@ -495,7 +495,7 @@ invocation_method = "openai_chat_completions"
     }
 
     #[test]
-    fn resolve_turn_config_maps_variant_slug_to_binding_model_name() {
+    fn resolve_turn_config_maps_variant_slug_to_binding_request_model() {
         let deps = test_deps(
             r#"
 [defaults]
@@ -510,21 +510,21 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "catalog-slug"
 provider = "openrouter"
-model_name = "vendor/model-name"
+request_model = "vendor/model-name"
 invocation_method = "openai_chat_completions"
 
 [model_bindings.thinking]
 enabled = true
 model_slug = "catalog-slug-thinking"
 provider = "openrouter"
-model_name = "vendor/model-name-thinking"
+request_model = "vendor/model-name-thinking"
 invocation_method = "openai_chat_completions"
 
 [model_bindings.other-thinking]
 enabled = true
 model_slug = "catalog-slug-thinking"
 provider = "other"
-model_name = "other-provider/model-name-thinking"
+request_model = "other-provider/model-name-thinking"
 invocation_method = "openai_chat_completions"
 "#,
         );
@@ -563,7 +563,7 @@ mode = "provider"
 enabled = true
 model_slug = "catalog-slug"
 provider = "openrouter"
-model_name = "vendor/model-name"
+request_model = "vendor/model-name"
 invocation_method = "openai_chat_completions"
 "#,
         );
@@ -601,7 +601,7 @@ mode = "provider"
 enabled = true
 model_slug = "catalog-slug"
 provider = "openrouter"
-model_name = "vendor/model-name"
+request_model = "vendor/model-name"
 invocation_method = "openai_chat_completions"
 
 [model_bindings.main.web_search]

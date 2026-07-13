@@ -51,8 +51,13 @@ pub(crate) fn derive_provisional_title(input: &str) -> Option<String> {
 }
 
 /// Builds a non-tool model request used to generate one final session title.
-pub(crate) fn build_title_generation_request(model: String, user_input: &str) -> ModelRequest {
+pub(crate) fn build_title_generation_request(
+    model_slug: String,
+    model: String,
+    user_input: &str,
+) -> ModelRequest {
     ModelRequest {
+        model_slug: devo_protocol::ModelProfileKey::CatalogSlug(model_slug),
         model,
         system: Some(
             "Generate a short session title. Respond with only the title in sentence case. Use 3 to 8 words. No markdown, no quotes, no trailing punctuation unless required by a proper noun.".to_string(),

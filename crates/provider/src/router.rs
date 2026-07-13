@@ -246,6 +246,7 @@ mod tests {
 
     fn request(model: &str) -> ModelRequest {
         ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
             model: model.to_string(),
             system: None,
             messages: vec![RequestMessage {

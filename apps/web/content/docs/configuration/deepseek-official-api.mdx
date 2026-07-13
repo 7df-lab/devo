@@ -51,7 +51,7 @@ mode = "provider"
 enabled = true
 model_slug = "deepseek-v4-pro"
 provider = "deepseek-anthropic"
-model_name = "deepseek-v4-pro"
+request_model = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
 invocation_method = "anthropic_messages"
 default_reasoning_effort = "high"
@@ -81,7 +81,7 @@ the `/model` picker:
 enabled = true
 model_slug = "deepseek-v4-flash"
 provider = "deepseek-anthropic"
-model_name = "deepseek-v4-flash"
+request_model = "deepseek-v4-flash"
 display_name = "DeepSeek V4 Flash"
 invocation_method = "anthropic_messages"
 default_reasoning_effort = "high"
@@ -118,7 +118,7 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "deepseek-v4-pro"
 provider = "deepseek-openai"
-model_name = "deepseek-v4-pro"
+request_model = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
 invocation_method = "openai_chat_completions"
 default_reasoning_effort = "high"
@@ -158,5 +158,5 @@ If setup fails, check:
 - `credential` matches an id in `auth.json`;
 - `base_url` matches the selected wire API;
 - `wire_apis` includes the binding `invocation_method`;
-- `model_name` is listed in current DeepSeek docs;
+- `request_model` is listed in current DeepSeek docs;
 - the API key has access to the selected model.

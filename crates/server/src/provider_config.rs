@@ -332,7 +332,7 @@ fn resolve_server_provider_settings(
         }
         return Ok(ServerProviderSettings {
             wire_api: binding.invocation_method,
-            model: binding.model_name.clone(),
+            model: binding.request_model.clone(),
             base_url: provider.base_url.clone(),
             api_key: resolve_provider_api_key(&binding.provider_id, provider, auth)?,
         });
@@ -502,6 +502,7 @@ mod tests {
         let error = actual
             .provider
             .completion(devo_protocol::ModelRequest {
+                model_slug: devo_protocol::ModelProfileKey::Generic,
                 model: "onboard-model".to_string(),
                 system: None,
                 messages: Vec::new(),
@@ -546,7 +547,7 @@ mod tests {
                     ModelBindingConfig {
                         model_slug: "test-model".to_string(),
                         provider: "openai".to_string(),
-                        model_name: "test-model".to_string(),
+                        request_model: "test-model".to_string(),
                         invocation_method: ProviderWireApi::OpenAIChatCompletions,
                         ..ModelBindingConfig::default()
                     },
@@ -589,7 +590,7 @@ mod tests {
                 ModelBindingConfig {
                     model_slug: "gpt-test".to_string(),
                     provider: "openrouter".to_string(),
-                    model_name: "openai/gpt-test".to_string(),
+                    request_model: "openai/gpt-test".to_string(),
                     invocation_method: ProviderWireApi::OpenAIResponses,
                     ..ModelBindingConfig::default()
                 },

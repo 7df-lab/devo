@@ -32,6 +32,7 @@ use devo_provider::error::ProviderError;
 
 fn model_request(model: &str) -> ModelRequest {
     ModelRequest {
+        model_slug: devo_protocol::ModelProfileKey::Generic,
         model: model.to_string(),
         system: None,
         messages: Vec::new(),
@@ -136,7 +137,7 @@ fn prompt_turn_config_routes_requested_binding_to_provider_route() {
                     ModelBindingConfig {
                         model_slug: "catalog-main".to_string(),
                         provider: "default-provider".to_string(),
-                        model_name: "vendor/main".to_string(),
+                        request_model: "vendor/main".to_string(),
                         invocation_method: ProviderWireApi::OpenAIChatCompletions,
                         ..ModelBindingConfig::default()
                     },
@@ -146,7 +147,7 @@ fn prompt_turn_config_routes_requested_binding_to_provider_route() {
                     ModelBindingConfig {
                         model_slug: "catalog-alt".to_string(),
                         provider: "anthropic-provider".to_string(),
-                        model_name: "vendor/alt".to_string(),
+                        request_model: "vendor/alt".to_string(),
                         invocation_method: ProviderWireApi::AnthropicMessages,
                         ..ModelBindingConfig::default()
                     },
@@ -156,7 +157,7 @@ fn prompt_turn_config_routes_requested_binding_to_provider_route() {
                     ModelBindingConfig {
                         model_slug: "catalog-alt-thinking".to_string(),
                         provider: "anthropic-provider".to_string(),
-                        model_name: "vendor/alt-thinking".to_string(),
+                        request_model: "vendor/alt-thinking".to_string(),
                         invocation_method: ProviderWireApi::AnthropicMessages,
                         ..ModelBindingConfig::default()
                     },
@@ -166,7 +167,7 @@ fn prompt_turn_config_routes_requested_binding_to_provider_route() {
                     ModelBindingConfig {
                         model_slug: "catalog-alt-thinking".to_string(),
                         provider: "other-provider".to_string(),
-                        model_name: "other/alt-thinking".to_string(),
+                        request_model: "other/alt-thinking".to_string(),
                         invocation_method: ProviderWireApi::AnthropicMessages,
                         ..ModelBindingConfig::default()
                     },

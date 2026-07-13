@@ -114,7 +114,11 @@ fn is_default_turn_execution_mode(mode: &TurnExecutionMode) -> bool {
 pub struct TurnStartParams {
     pub session_id: SessionId,
     pub input: Vec<InputItem>,
+    /// Legacy model selector retained for compatibility with older clients.
+    /// New clients should send [`Self::model_binding_id`] instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Provider model binding selected for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_binding_id: Option<String>,
     #[serde(default, alias = "thinking", skip_serializing_if = "Option::is_none")]
@@ -423,6 +427,71 @@ mod tests {
 
         assert_eq!(restored.collaboration_mode, CollaborationMode::Build);
         assert_eq!(restored.execution_mode, TurnExecutionMode::Regular);
+    }
+
+    #[test]
+    fn turn_start_params_serialize_binding_without_legacy_model() {
+        let session_id = SessionId::new();
+        let params = TurnStartParams {
+            session_id,
+            input: vec![InputItem::Text {
+                text: "hello".to_string(),
+            }],
+            model: None,
+            model_binding_id: Some("glm-zai".to_string()),
+            reasoning_effort_selection: None,
+            sandbox: None,
+            approval_policy: None,
+            cwd: None,
+            collaboration_mode: CollaborationMode::Build,
+            execution_mode: TurnExecutionMode::Regular,
+        };
+
+        assert_eq!(
+            serde_json::to_value(params).expect("serialize"),
+            serde_json::json!({
+                "session_id": session_id,
+                "input": [{ "type": "text", "text": "hello" }],
+                "model_binding_id": "glm-zai",
+                "sandbox": null,
+                "approval_policy": null,
+                "cwd": null,
+                "collaboration_mode": "build"
+            })
+        );
+    }
+
+    #[test]
+    fn turn_start_params_read_legacy_model_without_binding() {
+        let session_id = SessionId::new();
+        let restored: TurnStartParams = serde_json::from_value(serde_json::json!({
+            "session_id": session_id,
+            "input": [{ "type": "text", "text": "hello" }],
+            "model": "glm-4.5",
+            "sandbox": null,
+            "approval_policy": null,
+            "cwd": null,
+            "collaboration_mode": "build"
+        }))
+        .expect("deserialize legacy turn request");
+
+        assert_eq!(
+            restored,
+            TurnStartParams {
+                session_id,
+                input: vec![InputItem::Text {
+                    text: "hello".to_string(),
+                }],
+                model: Some("glm-4.5".to_string()),
+                model_binding_id: None,
+                reasoning_effort_selection: None,
+                sandbox: None,
+                approval_policy: None,
+                cwd: None,
+                collaboration_mode: CollaborationMode::Build,
+                execution_mode: TurnExecutionMode::Regular,
+            }
+        );
     }
 
     #[test]

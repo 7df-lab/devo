@@ -252,7 +252,7 @@ fn prompt_turn_config(
             .or(binding.default_reasoning_effort.clone());
         let mut turn_config = TurnConfig::with_provider_route(
             catalog_model(&binding.model_slug),
-            binding.model_name.clone(),
+            binding.request_model.clone(),
             provider_request_models,
             ProviderRoute::binding(binding.provider_id.clone(), binding.invocation_method),
             reasoning_effort_selection,

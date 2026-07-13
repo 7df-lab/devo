@@ -13,6 +13,7 @@ use devo_core::ProviderVendorUpsertResult;
 use devo_core::UserAuthConfigFile;
 use devo_core::read_user_auth_config;
 use devo_core::test_model_connection;
+use devo_protocol::ModelProfileKey;
 use devo_provider::ModelProviderSDK;
 use devo_provider::ProviderHttpOptions;
 use devo_provider::anthropic::AnthropicProvider;
@@ -200,8 +201,8 @@ async fn validate_provider_candidate(
     if params.model_binding.provider.trim() != provider_id {
         anyhow::bail!("model binding provider must match provider vendor");
     }
-    if params.model_binding.model_name.trim().is_empty() {
-        anyhow::bail!("model binding model_name cannot be empty");
+    if params.model_binding.request_model.trim().is_empty() {
+        anyhow::bail!("model binding request_model cannot be empty");
     }
     if params.provider_vendor.wire_apis.is_empty() {
         anyhow::bail!("wire_apis must contain at least one wire API");
@@ -214,11 +215,10 @@ async fn validate_provider_candidate(
         anyhow::bail!("model binding invocation_method must be supported by provider vendor");
     }
 
-    let validation_model = resolve_validation_model(
+    let (validation_model, model_profile) = resolve_validation_model(
         catalog,
         params.model_binding.invocation_method,
         &params.model_binding.model_slug,
-        &params.model_binding.model_name,
     );
     let api_key = resolve_validation_api_key(&provider_id, &params)?;
     let provider = build_validation_provider(
@@ -234,7 +234,13 @@ async fn validate_provider_candidate(
 
     tokio::time::timeout(
         Duration::from_secs(20),
-        test_model_connection(provider.as_ref(), &validation_model, "Reply with OK only."),
+        test_model_connection(
+            provider.as_ref(),
+            &validation_model,
+            model_profile,
+            &params.model_binding.request_model,
+            "Reply with OK only.",
+        ),
     )
     .await
     .context("provider validation timed out after 20s")?
@@ -245,20 +251,21 @@ fn resolve_validation_model(
     catalog: &dyn ModelCatalog,
     wire_api: devo_core::ProviderWireApi,
     model_slug: &str,
-    model_name: &str,
-) -> Model {
+) -> (Model, ModelProfileKey) {
     if let Some(entry) = catalog.get(model_slug) {
         let mut model = entry.clone();
-        model.slug = model_name.to_string();
         model.provider = wire_api;
-        return model;
+        return (model, ModelProfileKey::CatalogSlug(model_slug.to_string()));
     }
-    Model {
-        slug: model_name.to_string(),
-        display_name: model_slug.to_string(),
-        provider: wire_api,
-        ..Model::default()
-    }
+    (
+        Model {
+            slug: model_slug.to_string(),
+            display_name: model_slug.to_string(),
+            provider: wire_api,
+            ..Model::default()
+        },
+        ModelProfileKey::Generic,
+    )
 }
 
 fn resolve_validation_api_key(
@@ -374,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_validation_model_uses_runtime_catalog_metadata_and_wire_model_name() {
+    fn resolve_validation_model_preserves_runtime_catalog_profile() {
         let catalog = PresetModelCatalog::new(vec![Model {
             slug: "catalog-slug".to_string(),
             display_name: "Catalog Model".to_string(),
@@ -385,24 +392,48 @@ mod tests {
             ..Model::default()
         }]);
 
-        let model = resolve_validation_model(
+        let resolved = resolve_validation_model(
             &catalog,
             ProviderWireApi::OpenAIChatCompletions,
             "catalog-slug",
-            "vendor/model-name",
         );
 
         assert_eq!(
-            model,
-            Model {
-                slug: "vendor/model-name".to_string(),
-                display_name: "Catalog Model".to_string(),
-                context_window: 123_456,
-                effective_context_window_percent: Some(70),
-                max_tokens: Some(7_654),
-                provider: ProviderWireApi::OpenAIChatCompletions,
-                ..Model::default()
-            }
+            resolved,
+            (
+                Model {
+                    slug: "catalog-slug".to_string(),
+                    display_name: "Catalog Model".to_string(),
+                    context_window: 123_456,
+                    effective_context_window_percent: Some(70),
+                    max_tokens: Some(7_654),
+                    provider: ProviderWireApi::OpenAIChatCompletions,
+                    ..Model::default()
+                },
+                ModelProfileKey::CatalogSlug("catalog-slug".to_string()),
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_validation_model_uses_generic_profile_for_unknown_slug() {
+        let resolved = resolve_validation_model(
+            &PresetModelCatalog::default(),
+            ProviderWireApi::OpenAIChatCompletions,
+            "custom-catalog-slug",
+        );
+
+        assert_eq!(
+            resolved,
+            (
+                Model {
+                    slug: "custom-catalog-slug".to_string(),
+                    display_name: "custom-catalog-slug".to_string(),
+                    provider: ProviderWireApi::OpenAIChatCompletions,
+                    ..Model::default()
+                },
+                ModelProfileKey::Generic,
+            )
         );
     }
 
@@ -423,7 +454,7 @@ mod tests {
                 binding_id: "main".to_string(),
                 model_slug: "test-model".to_string(),
                 provider: "openai".to_string(),
-                model_name: "test-model".to_string(),
+                request_model: "test-model".to_string(),
                 display_name: None,
                 invocation_method: ProviderWireApi::OpenAIChatCompletions,
                 default_reasoning_effort: None,

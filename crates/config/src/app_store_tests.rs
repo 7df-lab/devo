@@ -40,14 +40,14 @@ enabled = true
 [model_bindings.test-binding]
 model_slug = "test-model"
 provider = "openai"
-model_name = "test-model"
+request_model = "test-model"
 invocation_method = "openai_chat_completions"
 enabled = true
 
 [model_bindings.alt-binding]
 model_slug = "alt-model"
 provider = "openai"
-model_name = "alt-model"
+request_model = "alt-model"
 invocation_method = "openai_chat_completions"
 enabled = true
 "#,

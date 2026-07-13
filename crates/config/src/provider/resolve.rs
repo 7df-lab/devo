@@ -21,7 +21,7 @@ use super::schema::UserAuthConfigFile;
 pub struct ResolvedModelBinding {
     pub binding_id: String,
     pub model_slug: String,
-    pub model_name: String,
+    pub request_model: String,
     pub provider_id: String,
     pub invocation_method: devo_protocol::ProviderWireApi,
     pub default_reasoning_effort: Option<String>,
@@ -33,7 +33,7 @@ impl ResolvedModelBinding {
         Self {
             binding_id: binding_id.to_string(),
             model_slug: binding.model_slug.clone(),
-            model_name: binding.model_name.clone(),
+            request_model: binding.request_model.clone(),
             provider_id: binding.provider.clone(),
             invocation_method: binding.invocation_method,
             default_reasoning_effort: binding.default_reasoning_effort.clone(),
@@ -132,7 +132,7 @@ pub fn resolve_provider_settings_from_config_and_auth(
         return Ok(ResolvedProviderSettings {
             provider_id: binding.provider_id,
             wire_api: binding.invocation_method,
-            model: binding.model_name,
+            model: binding.request_model,
             base_url: provider_config.base_url.clone(),
             api_key,
             proxy_url: None,
@@ -261,7 +261,7 @@ fn requested_model_binding(
             config.model_bindings.iter().find(|(_, binding)| {
                 visibility.allows(binding)
                     && (binding.model_slug == requested_model
-                        || binding.model_name == requested_model)
+                        || binding.request_model == requested_model)
             })
         })
         .map(|(binding_id, binding)| ResolvedModelBinding::from_config(binding_id, binding))
@@ -273,7 +273,7 @@ pub fn provider_request_model_map_for_binding(
 ) -> std::collections::HashMap<String, String> {
     // Reasoning model variants are catalog slugs first. When `kimi-k2.5` resolves
     // to variant slug `kimi-k2.5-thinking`, the provider request must use the
-    // matching binding's `model_name`, such as `moonshotai/kimi-k2.5-thinking`.
+    // matching binding's `request_model`, such as `moonshotai/kimi-k2.5-thinking`.
     // Scope this map to the selected provider so another provider with the same
     // variant slug cannot hijack the wire model name.
     let mut request_model_map =
@@ -283,7 +283,10 @@ pub fn provider_request_model_map_for_binding(
         .values()
         .filter(|candidate| candidate.enabled && candidate.provider == binding.provider_id)
     {
-        request_model_map.insert(candidate.model_slug.clone(), candidate.model_name.clone());
+        request_model_map.insert(
+            candidate.model_slug.clone(),
+            candidate.request_model.clone(),
+        );
     }
     request_model_map
 }

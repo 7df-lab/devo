@@ -316,6 +316,7 @@ fn sse_data(value: serde_json::Value) -> String {
 
 fn minimal_request() -> ModelRequest {
     ModelRequest {
+        model_slug: devo_protocol::ModelProfileKey::Generic,
         model: "test-model".to_string(),
         system: None,
         messages: vec![RequestMessage {

@@ -15,7 +15,7 @@ Bindings live under `[model_bindings.<id>]`.
 enabled = true
 model_slug = "deepseek-v4-pro"
 provider = "deepseek-anthropic"
-model_name = "deepseek-v4-pro"
+request_model = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
 invocation_method = "anthropic_messages"
 default_reasoning_effort = "high"
@@ -25,7 +25,7 @@ default_reasoning_effort = "high"
 | --- | --- | --- |
 | `model_slug` | Yes | Devo's local model metadata id. |
 | `provider` | Yes | Provider id from `[providers.<id>]`. |
-| `model_name` | Yes | Model string sent to the provider. |
+| `request_model` | Yes | Model string sent to the provider. |
 | `display_name` | No | Label shown in the TUI model picker and header. |
 | `invocation_method` | Yes | Wire API used for this binding. |
 | `default_reasoning_effort` | No | Default reasoning effort for capable models. |
@@ -33,12 +33,15 @@ default_reasoning_effort = "high"
 | `web_fetch` | No | Binding-specific web fetch override. |
 | `enabled` | No | Whether this binding can be selected. Defaults to `true`. |
 
-## Slug Versus Model Name
+## Slug Versus Request Model
 
 `model_slug` is the Devo-side identity. It maps to local model metadata such as
 context window, reasoning support, and display defaults.
 
-`model_name` is the provider-side value sent in the API request.
+`request_model` is the provider-side value sent in the API request.
+
+The legacy `model_name` key remains readable, but Devo writes `request_model`
+when the binding is saved again.
 
 They are often the same, but they do not have to be. Use different values when
 a gateway expects names like `openai/gpt-5.2` while Devo should still use a

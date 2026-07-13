@@ -404,7 +404,7 @@ wire_apis = ["openai_responses"]
 [model_bindings.main]
 model_slug = "user-model"
 provider = "main"
-model_name = "user/model"
+request_model = "user/model"
 invocation_method = "openai_responses"
 "#,
     )
@@ -421,7 +421,7 @@ name = "Project Provider"
 [model_bindings.main]
 model_slug = "project-model"
 provider = "main"
-model_name = "project/model"
+request_model = "project/model"
 invocation_method = "openai_responses"
 "#,
     )
@@ -461,7 +461,7 @@ invocation_method = "openai_responses"
                 ModelBindingConfig {
                     model_slug: "project-model".to_string(),
                     provider: "main".to_string(),
-                    model_name: "project/model".to_string(),
+                    request_model: "project/model".to_string(),
                     invocation_method: ProviderWireApi::OpenAIResponses,
                     ..ModelBindingConfig::default()
                 },
@@ -500,7 +500,7 @@ enabled = false
 [model_bindings.main]
 model_slug = "user-model"
 provider = "main"
-model_name = "user/model"
+request_model = "user/model"
 invocation_method = "openai_responses"
 enabled = false
 "#,
@@ -515,7 +515,7 @@ name = "Project Provider"
 [model_bindings.main]
 model_slug = "project-model"
 provider = "main"
-model_name = "project/model"
+request_model = "project/model"
 "#,
     )
     .expect("write project config");
@@ -547,7 +547,7 @@ model_name = "project/model"
                 ModelBindingConfig {
                     model_slug: "project-model".to_string(),
                     provider: "main".to_string(),
-                    model_name: "project/model".to_string(),
+                    request_model: "project/model".to_string(),
                     invocation_method: ProviderWireApi::OpenAIResponses,
                     enabled: false,
                     ..ModelBindingConfig::default()
@@ -583,7 +583,7 @@ wire_apis = ["openai_responses"]
 [model_bindings.main]
 model_slug = "user-model"
 provider = "main"
-model_name = "user/model"
+request_model = "user/model"
 invocation_method = "openai_responses"
 "#,
     )
@@ -596,7 +596,7 @@ enabled = false
 [model_bindings.main]
 model_slug = "cli-model"
 provider = "main"
-model_name = "cli/model"
+request_model = "cli/model"
 invocation_method = "openai_responses"
 enabled = false
 "#
@@ -630,7 +630,7 @@ enabled = false
                 ModelBindingConfig {
                     model_slug: "cli-model".to_string(),
                     provider: "main".to_string(),
-                    model_name: "cli/model".to_string(),
+                    request_model: "cli/model".to_string(),
                     invocation_method: ProviderWireApi::OpenAIResponses,
                     enabled: false,
                     ..ModelBindingConfig::default()
@@ -669,7 +669,7 @@ fn provider_upsert_writes_user_config_when_workspace_is_active() {
                 binding_id: "qwen-openrouter".to_string(),
                 model_slug: "qwen".to_string(),
                 provider: "openrouter".to_string(),
-                model_name: "qwen/qwen3".to_string(),
+                request_model: "qwen/qwen3".to_string(),
                 display_name: Some("Qwen".to_string()),
                 invocation_method: ProviderWireApi::OpenAIChatCompletions,
                 default_reasoning_effort: Some("medium".to_string()),
@@ -705,7 +705,7 @@ fn provider_upsert_writes_user_config_when_workspace_is_active() {
 }
 
 #[test]
-fn provider_upsert_updates_existing_binding_model_name() {
+fn provider_upsert_migrates_legacy_model_name_to_request_model() {
     let root = unique_temp_dir("provider-upsert-existing-binding");
     let home = root.join("home").join(".devo");
     std::fs::create_dir_all(&home).expect("home config dir");
@@ -727,6 +727,7 @@ display_name = "deepseek-v4-flash"
 enabled = true
 invocation_method = "openai_chat_completions"
 model_name = "deepseek-v4-flash"
+custom_binding_key = "preserved"
 model_slug = "deepseek-v4-flash"
 provider = "Deepseek"
 "#,
@@ -750,7 +751,7 @@ provider = "Deepseek"
                 binding_id: "deepseek-v4-flash-deepseek".to_string(),
                 model_slug: "deepseek-v4-flash".to_string(),
                 provider: "Deepseek".to_string(),
-                model_name: "DeepSeek-V4-Flash".to_string(),
+                request_model: "DeepSeek-V4-Flash".to_string(),
                 display_name: Some("DeepSeek-V4-Flash".to_string()),
                 invocation_method: ProviderWireApi::OpenAIChatCompletions,
                 default_reasoning_effort: None,
@@ -766,7 +767,9 @@ provider = "Deepseek"
     let binding = &document["model_bindings"]["deepseek-v4-flash-deepseek"];
 
     assert_eq!(binding["model_slug"].as_str(), Some("deepseek-v4-flash"));
-    assert_eq!(binding["model_name"].as_str(), Some("DeepSeek-V4-Flash"));
+    assert_eq!(binding["request_model"].as_str(), Some("DeepSeek-V4-Flash"));
+    assert_eq!(binding.get("model_name"), None);
+    assert_eq!(binding["custom_binding_key"].as_str(), Some("preserved"));
     assert_eq!(binding["display_name"].as_str(), Some("DeepSeek-V4-Flash"));
 
     let _ = std::fs::remove_dir_all(root);

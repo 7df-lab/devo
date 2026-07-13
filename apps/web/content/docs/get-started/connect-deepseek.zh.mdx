@@ -92,7 +92,7 @@ mode = "provider"
 enabled = true
 model_slug = "deepseek-v4-pro"
 provider = "deepseek-anthropic"
-model_name = "deepseek-v4-pro"
+request_model = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
 invocation_method = "anthropic_messages"
 default_reasoning_effort = "high"
@@ -124,7 +124,7 @@ default_reasoning_effort = "high"
 | `credential` | `auth.json` 中 API key 的 id。 |
 | `wire_apis` | 该 provider entry 支持的协议。 |
 | `model_slug` | Devo 本地模型元数据 id。 |
-| `model_name` | 发给 DeepSeek 的模型字符串。 |
+| `request_model` | 发给 DeepSeek 的模型字符串。 |
 | `invocation_method` | 此 binding 使用的协议。 |
 
 ## OpenAI 兼容 DeepSeek
@@ -157,7 +157,7 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "deepseek-v4-pro"
 provider = "deepseek-openai"
-model_name = "deepseek-v4-pro"
+request_model = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
 invocation_method = "openai_chat_completions"
 default_reasoning_effort = "high"
@@ -190,5 +190,5 @@ Explain this repository's main runtime path. Do not edit files yet.
 - API key 是否存在于 `auth.json`。
 - `config.toml` 中的 `credential` 是否匹配 `auth.json` 中的 credential id。
 - `base_url` 是否匹配所选 invocation method。
-- `model_name` 是否是当前支持的 DeepSeek 模型名称。
+- `request_model` 是否是当前支持的 DeepSeek 模型名称。
 - `invocation_method` 是否列在 provider 的 `wire_apis` 中。

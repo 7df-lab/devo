@@ -115,7 +115,7 @@ describe("OpenCode provider migration", () => {
 				binding_id: "deepseek-v4-pro-deepseek",
 				model_slug: "deepseek-v4-pro",
 				provider: "deepseek",
-				model_name: "deepseek-v4-pro",
+				request_model: "deepseek-v4-pro",
 				display_name: "DeepSeek V4 Pro",
 				invocation_method: "openai_chat_completions",
 				default_reasoning_effort: null,

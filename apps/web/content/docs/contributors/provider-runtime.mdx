@@ -73,11 +73,11 @@ Model binding separates local identity from provider request name:
 [model_bindings.deepseek-v4-pro-deepseek-anthropic]
 model_slug = "deepseek-v4-pro"
 provider = "deepseek-anthropic"
-model_name = "deepseek-v4-pro"
+request_model = "deepseek-v4-pro"
 invocation_method = "anthropic_messages"
 ```
 
-If `model_name` differs from `model_slug`, Devo can show the local slug in UI
+If `request_model` differs from `model_slug`, Devo can show the local slug in UI
 while sending the provider-specific model string to the API.
 
 ## Web Search And Fetch

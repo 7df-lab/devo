@@ -15,7 +15,8 @@ use super::compaction::{CompactionError, HistorySummarizer};
 /// recover by shrinking the input.
 pub struct DefaultHistorySummarizer {
     provider: Arc<dyn ModelProviderSDK>,
-    model: String,
+    model_slug: String,
+    request_model: String,
     max_tokens: usize,
 }
 
@@ -24,21 +25,23 @@ impl DefaultHistorySummarizer {
         let max_tokens = model.max_tokens.unwrap_or(4096) as usize;
         Self {
             provider,
-            model: model.slug.clone(),
+            model_slug: model.slug.clone(),
+            request_model: model.slug.clone(),
             max_tokens,
         }
     }
 
-    /// Convenience constructor when only a model slug and max tokens are
-    /// available (e.g. when the `Model` struct cannot be resolved).
-    pub fn with_slug(
+    /// Convenience constructor for a catalog slug and provider wire model.
+    pub fn with_models(
         provider: Arc<dyn ModelProviderSDK>,
         model_slug: impl Into<String>,
+        request_model: impl Into<String>,
         max_tokens: usize,
     ) -> Self {
         Self {
             provider,
-            model: model_slug.into(),
+            model_slug: model_slug.into(),
+            request_model: request_model.into(),
             max_tokens,
         }
     }
@@ -68,7 +71,8 @@ fn should_keep_summary_line(line: &str) -> bool {
 impl HistorySummarizer for DefaultHistorySummarizer {
     async fn summarize(&self, messages: Vec<RequestMessage>) -> Result<String, CompactionError> {
         let request = ModelRequest {
-            model: self.model.clone(),
+            model_slug: devo_protocol::ModelProfileKey::CatalogSlug(self.model_slug.clone()),
+            model: self.request_model.clone(),
             system: None,
             messages,
             max_tokens: self.max_tokens,
@@ -83,7 +87,7 @@ impl HistorySummarizer for DefaultHistorySummarizer {
             format!("<failed to serialize compaction request for logging: {error}>")
         });
         debug!(
-            model = %self.model,
+            model = %self.request_model,
             message_count = request.messages.len(),
             max_tokens = request.max_tokens,
             compaction_request = %request_preview,
@@ -123,7 +127,7 @@ impl HistorySummarizer for DefaultHistorySummarizer {
         }
 
         debug!(
-            model = %self.model,
+            model = %self.request_model,
             response_chars = text.len(),
             compaction_response = %text,
             "received LLM compaction response"

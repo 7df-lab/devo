@@ -393,25 +393,25 @@ impl ChatWidget {
     }
 
     pub(super) fn handle_onboarding_result(&mut self, result: OnboardingResult) {
-        let (model_slug, model_name, display_name, message, hint) = match result {
+        let (model_slug, request_model, display_name, message, hint) = match result {
             OnboardingResult::ValidationSucceeded {
                 model_slug,
-                model_name,
+                request_model,
                 display_name,
             } => (
                 model_slug,
-                model_name,
+                request_model,
                 display_name,
                 "Provider configured successfully".to_string(),
                 Some("onboarding complete".to_string()),
             ),
             OnboardingResult::ValidationBypassed {
                 model_slug,
-                model_name,
+                request_model,
                 display_name,
             } => (
                 model_slug,
-                model_name,
+                request_model,
                 display_name,
                 "Provider added without validation".to_string(),
                 Some("onboarding validation skipped".to_string()),
@@ -424,7 +424,7 @@ impl ChatWidget {
             }
         };
 
-        self.apply_session_model_name(model_slug, model_name, display_name);
+        self.apply_session_request_model(model_slug, request_model, display_name);
         self.add_to_history(history_cell::new_info_event(message, hint));
         self.onboarding = None;
         self.set_status_message("Onboarding complete");
@@ -495,7 +495,7 @@ impl ChatWidget {
             OnboardingTranscriptEvent::SettingsConfirmed {
                 provider_name,
                 base_url,
-                model_name,
+                request_model,
                 display_name,
                 invocation_method,
                 default_reasoning_effort,
@@ -510,7 +510,9 @@ impl ChatWidget {
                 if let Some(base_url) = base_url {
                     lines.push(Line::from(format!("  base URL: {base_url}").dim()));
                 }
-                lines.push(Line::from(format!("  request model: {model_name}").dim()));
+                lines.push(Line::from(
+                    format!("  request model: {request_model}").dim(),
+                ));
                 lines.push(Line::from(format!("  display name: {display_name}").dim()));
                 lines.push(Line::from(format!("  wire API: {invocation_method}").dim()));
                 lines.push(Line::from(

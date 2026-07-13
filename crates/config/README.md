@@ -331,7 +331,7 @@ wire_apis = ["openai_responses"]
 enabled = true
 model_slug = "gpt-5.4"
 provider = "main"
-model_name = "gpt-5.4"
+request_model = "gpt-5.4"
 invocation_method = "openai_responses"
 default_reasoning_effort = "medium"
 ```
@@ -430,11 +430,11 @@ binding in this order:
 
 1. `[defaults].model_binding`, when it points to an existing binding.
 2. The top-level `model`, when it matches a binding's `model_slug` or
-   `model_name`.
+   `request_model`.
 3. The first enabled model binding.
 
 Runtime turn resolution uses an explicit requested model first, when it matches
-an enabled binding's `model_slug` or `model_name`. Without a requested model, it
+an enabled binding's `model_slug` or `request_model`. Without a requested model, it
 uses `[defaults].model_binding` only when that binding is enabled, then falls
 back to the first enabled binding.
 
@@ -454,8 +454,9 @@ name, optional base URL, optional API key, model limits, reasoning effort select
 response-storage flag, and preferred auth method.
 
 `model_slug` is the local catalog key matching a `slug` in the effective
-`models.json` catalog. `model_name` is the provider-specific model name used for
-the API request. The effective catalog precedence is
+`models.json` catalog. `request_model` is the provider-specific model name used for
+the API request. The legacy `model_name` key is accepted when reading existing
+configuration, while subsequent writes use `request_model`. The effective catalog precedence is
 `<workspace>/.devo/models.json`, then `<DEVO_HOME>/models.json`, then built-in
 defaults, merged by `slug`. Turn metadata records `model` as the catalog slug
 and `request_model` as the provider request model; these values may be

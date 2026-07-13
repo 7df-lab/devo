@@ -105,7 +105,8 @@ pub type ModelProviderConfig = ProviderVendorConfig;
 pub struct ModelBindingConfig {
     pub model_slug: String,
     pub provider: String,
-    pub model_name: String,
+    #[serde(alias = "model_name")]
+    pub request_model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default = "default_provider_wire_api")]
@@ -125,7 +126,7 @@ impl Default for ModelBindingConfig {
         Self {
             model_slug: String::new(),
             provider: String::new(),
-            model_name: String::new(),
+            request_model: String::new(),
             display_name: None,
             invocation_method: default_provider_wire_api(),
             default_reasoning_effort: None,
@@ -347,8 +348,8 @@ impl ProviderConfigSection {
             if !overlay_binding.provider.is_empty() {
                 binding.provider = overlay_binding.provider;
             }
-            if !overlay_binding.model_name.is_empty() {
-                binding.model_name = overlay_binding.model_name;
+            if !overlay_binding.request_model.is_empty() {
+                binding.request_model = overlay_binding.request_model;
             }
             if overlay_binding.display_name.is_some() {
                 binding.display_name = overlay_binding.display_name;

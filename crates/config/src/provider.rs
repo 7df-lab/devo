@@ -82,7 +82,7 @@ wire_apis = ["openai_responses"]
 enabled = true
 model_slug = "gpt-5.4"
 provider = "xxxxx"
-model_name = "gpt-5.4"
+request_model = "gpt-5.4"
 invocation_method = "openai_responses"
 "#,
         )
@@ -137,7 +137,7 @@ credential = "xxxxx_api_key"
 [model_bindings.gpt54-xxxxx]
 model_slug = "gpt-5.4"
 provider = "xxxxx"
-model_name = "gpt-5.4"
+request_model = "gpt-5.4"
 "#,
         )
         .expect("parse config");
@@ -161,13 +161,36 @@ model_name = "gpt-5.4"
     }
 
     #[test]
-    fn enabled_model_binding_resolves_requested_model_name() {
+    fn enabled_model_binding_resolves_requested_request_model() {
         let config = provider_config_with_bindings();
 
         let binding =
             resolve_enabled_model_binding(&config, Some("vendor/two")).expect("resolve binding");
 
         assert_eq!(binding, expected_resolved_binding("two"));
+    }
+
+    #[test]
+    fn model_binding_config_accepts_legacy_model_name() {
+        let config = toml::from_str::<ProviderConfigSection>(
+            r#"
+[model_bindings.glm-zai]
+model_slug = "glm-4.5"
+provider = "zai"
+model_name = "renamed-provider-model"
+"#,
+        )
+        .expect("parse legacy binding");
+
+        assert_eq!(
+            config.model_bindings["glm-zai"],
+            ModelBindingConfig {
+                model_slug: "glm-4.5".to_string(),
+                provider: "zai".to_string(),
+                request_model: "renamed-provider-model".to_string(),
+                ..ModelBindingConfig::default()
+            }
+        );
     }
 
     #[test]
@@ -179,7 +202,7 @@ model_name = "gpt-5.4"
                 enabled: true,
                 model_slug: "catalog-one".to_string(),
                 provider: "direct".to_string(),
-                model_name: "direct/one".to_string(),
+                request_model: "direct/one".to_string(),
                 invocation_method: ProviderWireApi::OpenAIChatCompletions,
                 ..ModelBindingConfig::default()
             },
@@ -193,7 +216,7 @@ model_name = "gpt-5.4"
             ResolvedModelBinding {
                 binding_id: "catalog-two".to_string(),
                 model_slug: "catalog-one".to_string(),
-                model_name: "direct/one".to_string(),
+                request_model: "direct/one".to_string(),
                 provider_id: "direct".to_string(),
                 invocation_method: ProviderWireApi::OpenAIChatCompletions,
                 default_reasoning_effort: None,
@@ -262,7 +285,7 @@ model_name = "gpt-5.4"
                         enabled: true,
                         model_slug: "catalog-one".to_string(),
                         provider: "openrouter".to_string(),
-                        model_name: "vendor/one".to_string(),
+                        request_model: "vendor/one".to_string(),
                         invocation_method: ProviderWireApi::OpenAIResponses,
                         ..ModelBindingConfig::default()
                     },
@@ -273,7 +296,7 @@ model_name = "gpt-5.4"
                         enabled: true,
                         model_slug: "catalog-two".to_string(),
                         provider: "openrouter".to_string(),
-                        model_name: "vendor/two".to_string(),
+                        request_model: "vendor/two".to_string(),
                         invocation_method: ProviderWireApi::OpenAIResponses,
                         ..ModelBindingConfig::default()
                     },
@@ -294,7 +317,7 @@ model_name = "gpt-5.4"
         ResolvedModelBinding {
             binding_id: binding_id.to_string(),
             model_slug: format!("catalog-{model_suffix}"),
-            model_name: format!("vendor/{model_suffix}"),
+            request_model: format!("vendor/{model_suffix}"),
             provider_id: "openrouter".to_string(),
             invocation_method: ProviderWireApi::OpenAIResponses,
             default_reasoning_effort: None,
@@ -440,7 +463,7 @@ base_url = "https://old.example/v1"
 [model_bindings.existing-binding]
 model_slug = "old-model"
 provider = "existing"
-model_name = "old-model"
+request_model = "old-model"
 invocation_method = "openai_chat_completions"
 "#,
         )
@@ -466,7 +489,7 @@ invocation_method = "openai_chat_completions"
                     ModelBindingConfig {
                         model_slug: "new-model".to_string(),
                         provider: "existing".to_string(),
-                        model_name: "new-provider-model".to_string(),
+                        request_model: "new-provider-model".to_string(),
                         invocation_method: ProviderWireApi::OpenAIResponses,
                         ..ModelBindingConfig::default()
                     },
@@ -492,7 +515,7 @@ invocation_method = "openai_chat_completions"
         );
         assert!(document["providers"]["existing"].get("base_url").is_none());
         assert_eq!(
-            document["model_bindings"]["existing-binding"]["model_name"].as_str(),
+            document["model_bindings"]["existing-binding"]["request_model"].as_str(),
             Some("new-provider-model")
         );
     }

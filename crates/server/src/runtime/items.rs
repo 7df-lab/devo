@@ -184,13 +184,18 @@ impl ServerRuntime {
             let resolved_request = turn_config.model.resolve_reasoning_effort_selection(
                 turn_config.reasoning_effort_selection.as_deref(),
             );
-            let request_model = turn_config.provider_request_model(&resolved_request.request_model);
+            let catalog_request_model = resolved_request.request_model.clone();
+            let request_model = turn_config.provider_request_model(&catalog_request_model);
 
             let response = match runtime_context
                 .provider_router
                 .complete(
                     turn_config.provider_route.clone(),
-                    build_title_generation_request(request_model.clone(), &first_user_input),
+                    build_title_generation_request(
+                        catalog_request_model,
+                        request_model.clone(),
+                        &first_user_input,
+                    ),
                 )
                 .await
             {

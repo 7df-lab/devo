@@ -802,7 +802,7 @@ class AcpClient {
 			const result = (await this.request("turn/start", {
 				session_id: params.sessionID,
 				input: inputItemsFromPromptParts(params.parts),
-				model: model?.modelID ?? null,
+				model_binding_id: model?.modelID ?? null,
 				sandbox: null,
 				approval_policy: null,
 				cwd: params.cwd ?? null,

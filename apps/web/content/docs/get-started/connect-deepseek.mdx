@@ -104,7 +104,7 @@ mode = "provider"
 enabled = true
 model_slug = "deepseek-v4-pro"
 provider = "deepseek-anthropic"
-model_name = "deepseek-v4-pro"
+request_model = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
 invocation_method = "anthropic_messages"
 default_reasoning_effort = "high"
@@ -136,7 +136,7 @@ The important fields are:
 | `credential` | The id of the API key stored in `auth.json`. |
 | `wire_apis` | Protocols the provider entry supports. |
 | `model_slug` | Devo's local model metadata id. |
-| `model_name` | The model string sent to DeepSeek. |
+| `request_model` | The model string sent to DeepSeek. |
 | `invocation_method` | The protocol Devo uses for this binding. |
 
 ## OpenAI-Compatible DeepSeek
@@ -170,7 +170,7 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "deepseek-v4-pro"
 provider = "deepseek-openai"
-model_name = "deepseek-v4-pro"
+request_model = "deepseek-v4-pro"
 display_name = "DeepSeek V4 Pro"
 invocation_method = "openai_chat_completions"
 default_reasoning_effort = "high"
@@ -205,5 +205,5 @@ If the request fails, check:
 - The API key exists in `auth.json`.
 - `credential` in `config.toml` matches the credential id in `auth.json`.
 - `base_url` matches the selected invocation method.
-- `model_name` is a currently supported DeepSeek model name.
+- `request_model` is a currently supported DeepSeek model name.
 - `invocation_method` is listed in the provider's `wire_apis`.

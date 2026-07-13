@@ -143,7 +143,8 @@ fn update_provider_config_document(
         if let Some(replacement_binding) = replacement_binding {
             overlay_optional_key(binding, replacement_binding, "model_slug");
             overlay_optional_key(binding, replacement_binding, "provider");
-            overlay_optional_key(binding, replacement_binding, "model_name");
+            overlay_optional_key(binding, replacement_binding, "request_model");
+            binding.remove("model_name");
             overlay_optional_key(binding, replacement_binding, "display_name");
             overlay_optional_key(binding, replacement_binding, "invocation_method");
             overlay_optional_key(binding, replacement_binding, "default_reasoning_effort");

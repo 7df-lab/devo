@@ -75,10 +75,10 @@ pub(crate) async fn run_agent(
         resolve_model_binding(&app_config.provider, /*requested_model*/ None)
     };
     let request_model = active_model_binding.as_ref().and_then(|binding| {
-        if binding.model_name == binding.model_slug {
+        if binding.request_model == binding.model_slug {
             None
         } else {
-            Some(binding.model_name.clone())
+            Some(binding.request_model.clone())
         }
     });
     let model_binding_id = active_model_binding
@@ -184,10 +184,10 @@ fn saved_model_entries(app_config: &AppConfig) -> Vec<SavedModelEntry> {
         .filter(|(_, binding)| binding.enabled)
         .filter_map(|(binding_id, binding)| {
             let provider = stored_config.providers.get(&binding.provider)?;
-            let request_model = if binding.model_name == binding.model_slug {
+            let request_model = if binding.request_model == binding.model_slug {
                 None
             } else {
-                Some(binding.model_name.clone())
+                Some(binding.request_model.clone())
             };
             let display_name = binding
                 .display_name
@@ -436,7 +436,7 @@ mod tests {
                 ModelBindingConfig {
                     model_slug: "deepseek-v4-flash".to_string(),
                     provider: "deepseek".to_string(),
-                    model_name: "deepseek-v4-flash".to_string(),
+                    request_model: "deepseek-v4-flash".to_string(),
                     invocation_method: ProviderWireApi::OpenAIChatCompletions,
                     ..ModelBindingConfig::default()
                 },
@@ -493,7 +493,7 @@ mod tests {
                 ModelBindingConfig {
                     model_slug: "provider-defaults".to_string(),
                     provider: "openai".to_string(),
-                    model_name: "provider-defaults".to_string(),
+                    request_model: "provider-defaults".to_string(),
                     invocation_method: ProviderWireApi::OpenAIResponses,
                     ..ModelBindingConfig::default()
                 },
@@ -561,7 +561,7 @@ mod tests {
                 ModelBindingConfig {
                     model_slug: "deepseek-v4-flash".to_string(),
                     provider: "deepseek".to_string(),
-                    model_name: "DeepSeek-V4-Flash".to_string(),
+                    request_model: "DeepSeek-V4-Flash".to_string(),
                     display_name: Some("DeepSeek-V4-Flash".to_string()),
                     invocation_method: ProviderWireApi::OpenAIChatCompletions,
                     ..ModelBindingConfig::default()

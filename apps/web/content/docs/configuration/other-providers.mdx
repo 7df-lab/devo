@@ -26,12 +26,12 @@ wire_apis = ["anthropic_messages"]
 enabled = true
 model_slug = "claude-sonnet"
 provider = "anthropic"
-model_name = "claude-sonnet-provider-name"
+request_model = "claude-sonnet-provider-name"
 display_name = "Claude Sonnet"
 invocation_method = "anthropic_messages"
 ```
 
-Replace `model_slug` and `model_name` with the model profile and provider model
+Replace `model_slug` and `request_model` with the model profile and provider model
 name you actually use.
 
 ## OpenAI Responses-Compatible
@@ -51,7 +51,7 @@ wire_apis = ["openai_responses"]
 enabled = true
 model_slug = "gpt-5"
 provider = "openai"
-model_name = "gpt-5"
+request_model = "gpt-5"
 display_name = "GPT-5"
 invocation_method = "openai_responses"
 ```
@@ -76,7 +76,7 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "custom-main"
 provider = "gateway"
-model_name = "provider/model-name"
+request_model = "provider/model-name"
 display_name = "Gateway Main"
 invocation_method = "openai_chat_completions"
 ```
@@ -99,12 +99,12 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "kimi-k2.5"
 provider = "openrouter"
-model_name = "moonshotai/kimi-k2.5"
+request_model = "moonshotai/kimi-k2.5"
 display_name = "Kimi K2.5"
 invocation_method = "openai_chat_completions"
 ```
 
-The `model_slug` can stay Devo-local while `model_name` follows the gateway's
+The `model_slug` can stay Devo-local while `request_model` follows the gateway's
 required naming convention.
 
 ## Local Provider Or Proxy
@@ -122,7 +122,7 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "local-main"
 provider = "local"
-model_name = "local-main"
+request_model = "local-main"
 display_name = "Local Main"
 invocation_method = "openai_chat_completions"
 ```

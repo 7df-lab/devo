@@ -79,7 +79,7 @@ export async function executeClaudeCodeProviderMigration(
 			filesWritten.push(`provider/upsert:${settings.providerId}/${bindingId}`)
 		} catch (error) {
 			errors.push(
-				`Claude Code provider migration failed for ${params.model_binding.model_name}: ${error instanceof Error ? error.message : String(error)}`,
+				`Claude Code provider migration failed for ${params.model_binding.request_model}: ${error instanceof Error ? error.message : String(error)}`,
 			)
 		}
 	}
@@ -105,7 +105,7 @@ function buildProviderUpsertParams(settings: ClaudeCodeProviderSettings): Array<
 		binding_id: string
 		model_slug: string
 		provider: string
-		model_name: string
+		request_model: string
 		display_name: string
 		invocation_method: string
 		default_reasoning_effort: null
@@ -129,7 +129,7 @@ function buildProviderUpsertParams(settings: ClaudeCodeProviderSettings): Array<
 				binding_id: bindingId,
 				model_slug: model,
 				provider: settings.providerId,
-				model_name: model,
+				request_model: model,
 				display_name: model,
 				invocation_method: settings.wireApi,
 				default_reasoning_effort: null,

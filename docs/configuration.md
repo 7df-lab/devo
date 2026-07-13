@@ -31,7 +31,7 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "deepseek-v4-flash"
 provider = "api.deepseek.com"
-model_name = "deepseek-v4-flash"
+request_model = "deepseek-v4-flash"
 display_name = "DeepSeek V4 Flash"
 invocation_method = "openai_chat_completions"
 default_reasoning_effort = "high"
@@ -41,11 +41,14 @@ The important separation is:
 
 - `model_slug` selects Devo's local model metadata from `models.json`.
 - `provider` selects the configured connection record.
-- `model_name` is the provider-specific model string sent on the wire.
+- `request_model` is the provider-specific model string sent on the wire.
 - `invocation_method` selects the provider protocol, such as
   [`openai_chat_completions`](https://developers.openai.com/api/reference/chat-completions/overview),
   [`openai_responses`](https://developers.openai.com/api/reference/responses/overview),
   or [`anthropic_messages`](https://platform.claude.com/docs/en/api/messages).
+
+Existing configuration using `model_name` remains readable. Devo writes the
+field as `request_model` the next time that binding is saved.
 
 ## Custom Models
 
@@ -93,7 +96,7 @@ Then reference that `slug` from a model binding:
 enabled = true
 model_slug = "my-coding-model"
 provider = "my.provider"
-model_name = "provider-specific-model-name"
+request_model = "provider-specific-model-name"
 display_name = "My Coding Model"
 invocation_method = "openai_chat_completions"
 ```

@@ -17,7 +17,7 @@ use toml::Value;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OnboardingModelBinding {
     pub model_slug: String,
-    pub model_name: String,
+    pub request_model: String,
     pub display_name: String,
     pub provider_id: String,
     pub provider_name: String,
@@ -60,7 +60,7 @@ pub(crate) fn onboarding_provider_model_binding(
         binding_id: model_binding_id(&binding.model_slug, &provider_id),
         model_slug: binding.model_slug.clone(),
         provider: provider_id,
-        model_name: binding.model_name.clone(),
+        request_model: binding.request_model.clone(),
         display_name: Some(binding.display_name.clone()),
         invocation_method: binding.invocation_method,
         default_reasoning_effort: binding.default_reasoning_effort.clone(),
@@ -327,7 +327,7 @@ fn merge_onboarding_config(
             ModelBindingConfig {
                 model_slug: binding_config.model_slug.clone(),
                 provider: provider_id,
-                model_name: binding_config.model_name.clone(),
+                request_model: binding_config.request_model.clone(),
                 display_name: Some(binding_config.display_name.clone()),
                 invocation_method: binding_config.invocation_method,
                 default_reasoning_effort: binding_config.default_reasoning_effort.clone(),
@@ -369,13 +369,26 @@ fn overlay_provider_section(
         &[
             "model_slug",
             "provider",
-            "model_name",
+            "request_model",
             "display_name",
             "invocation_method",
             "default_reasoning_effort",
             "enabled",
         ],
     )?;
+    if let Some(model_bindings) = table
+        .get_mut("model_bindings")
+        .and_then(Value::as_table_mut)
+    {
+        for binding_id in section.model_bindings.keys() {
+            if let Some(binding) = model_bindings
+                .get_mut(binding_id)
+                .and_then(Value::as_table_mut)
+            {
+                binding.remove("model_name");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -503,7 +516,11 @@ fn merge_last_used_model(
         binding.insert("enabled".to_string(), Value::Boolean(true));
         binding.insert("model_slug".to_string(), Value::String(model.to_string()));
         binding.insert("provider".to_string(), Value::String(provider_id));
-        binding.insert("model_name".to_string(), Value::String(model.to_string()));
+        binding.insert(
+            "request_model".to_string(),
+            Value::String(model.to_string()),
+        );
+        binding.remove("model_name");
         binding.insert(
             "invocation_method".to_string(),
             Value::String(wire_api_to_string(wire_api).to_string()),
@@ -525,7 +542,11 @@ fn current_provider_id(
                 let binding = value.as_table()?;
                 let matches_model = binding.get("model_slug").and_then(Value::as_str)
                     == Some(model)
-                    || binding.get("model_name").and_then(Value::as_str) == Some(model);
+                    || binding
+                        .get("request_model")
+                        .or_else(|| binding.get("model_name"))
+                        .and_then(Value::as_str)
+                        == Some(model);
                 let matches_provider = binding
                     .get("invocation_method")
                     .and_then(Value::as_str)
@@ -636,7 +657,11 @@ fn current_model_binding_id(
                     binding.get("provider").and_then(Value::as_str) == Some(provider_id);
                 let matches_model = binding.get("model_slug").and_then(Value::as_str)
                     == Some(model)
-                    || binding.get("model_name").and_then(Value::as_str) == Some(model);
+                    || binding
+                        .get("request_model")
+                        .or_else(|| binding.get("model_name"))
+                        .and_then(Value::as_str)
+                        == Some(model);
                 (matches_provider && matches_model).then(|| binding_id.clone())
             })
         })
@@ -767,7 +792,7 @@ mod tests {
     fn onboarding_provider_vendor_uses_provider_id_and_auth_reference() {
         let binding_config = OnboardingModelBinding {
             model_slug: "qwen3-coder-next".to_string(),
-            model_name: "qwen3-coder-next".to_string(),
+            request_model: "qwen3-coder-next".to_string(),
             display_name: "Qwen3 Coder Next".to_string(),
             provider_id: "openai_chat_completions".to_string(),
             provider_name: "OpenAI".to_string(),
@@ -797,7 +822,7 @@ mod tests {
         let root = Value::Table(Default::default());
         let binding_config = OnboardingModelBinding {
             model_slug: "qwen3-coder-next".to_string(),
-            model_name: "qwen3-coder-next".to_string(),
+            request_model: "qwen3-coder-next".to_string(),
             display_name: "Qwen3 Coder Next".to_string(),
             provider_id: "openai_chat_completions".to_string(),
             provider_name: "OpenAI".to_string(),
@@ -861,7 +886,7 @@ mod tests {
             Some("openai_chat_completions")
         );
         assert_eq!(
-            binding.get("model_name").and_then(Value::as_str),
+            binding.get("request_model").and_then(Value::as_str),
             Some("qwen3-coder-next")
         );
         assert_eq!(
@@ -877,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_onboarding_config_upserts_existing_model_binding() {
+    fn merge_onboarding_config_migrates_legacy_model_name_without_losing_custom_fields() {
         let mut root = Value::Table(Default::default());
         {
             let table = root.as_table_mut().expect("table");
@@ -901,6 +926,10 @@ mod tests {
                 Value::String("old-provider-name".to_string()),
             );
             binding.insert(
+                "custom_binding_key".to_string(),
+                Value::String("preserved".to_string()),
+            );
+            binding.insert(
                 "invocation_method".to_string(),
                 Value::String("openai_chat_completions".to_string()),
             );
@@ -914,7 +943,7 @@ mod tests {
 
         let binding_config = OnboardingModelBinding {
             model_slug: "qwen3-coder-next".to_string(),
-            model_name: "qwen3-coder-next".to_string(),
+            request_model: "qwen3-coder-next".to_string(),
             display_name: "Qwen3 Coder Next".to_string(),
             provider_id: "openai_chat_completions".to_string(),
             provider_name: "OpenAI".to_string(),
@@ -951,8 +980,13 @@ mod tests {
             .and_then(Value::as_table)
             .expect("binding");
         assert_eq!(
-            binding.get("model_name").and_then(Value::as_str),
+            binding.get("request_model").and_then(Value::as_str),
             Some("qwen3-coder-next")
+        );
+        assert_eq!(binding.get("model_name"), None);
+        assert_eq!(
+            binding.get("custom_binding_key").and_then(Value::as_str),
+            Some("preserved")
         );
         assert_eq!(
             table
@@ -969,7 +1003,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let binding_config = OnboardingModelBinding {
             model_slug: "qwen3-coder-next".to_string(),
-            model_name: "qwen3-coder-next".to_string(),
+            request_model: "qwen3-coder-next".to_string(),
             display_name: "Qwen3 Coder Next".to_string(),
             provider_id: "openai_chat_completions".to_string(),
             provider_name: "OpenAI".to_string(),
@@ -1010,6 +1044,36 @@ mod tests {
                 .collect(),
                 ..UserAuthConfigFile::default()
             }
+        );
+    }
+
+    #[test]
+    fn legacy_model_name_remains_discoverable_for_provider_and_binding_lookup() {
+        let root: Value = r#"
+[providers.openrouter]
+wire_apis = ["openai_chat_completions"]
+
+[model_bindings.main]
+model_slug = "catalog-model"
+provider = "openrouter"
+model_name = "vendor/model"
+invocation_method = "openai_chat_completions"
+"#
+        .parse()
+        .expect("parse");
+        let table = root.as_table().expect("table");
+
+        assert_eq!(
+            current_provider_id(
+                table,
+                &ProviderWireApi::OpenAIChatCompletions,
+                "vendor/model",
+            ),
+            "openrouter"
+        );
+        assert_eq!(
+            current_model_binding_id(table, "openrouter", "vendor/model"),
+            Some("main".to_string())
         );
     }
 
@@ -1072,13 +1136,13 @@ wire_apis = ["openai_chat_completions"]
 [model_bindings.deepseek-v4-flash-deepseek]
 model_slug = "deepseek-v4-flash"
 provider = "deepseek"
-model_name = "deepseek-v4-flash"
+request_model = "deepseek-v4-flash"
 invocation_method = "openai_chat_completions"
 
 [model_bindings.deepseek-v4-flash-openrouter]
 model_slug = "deepseek-v4-flash"
 provider = "openrouter"
-model_name = "deepseek-v4-flash"
+request_model = "deepseek-v4-flash"
 invocation_method = "openai_chat_completions"
 "#
         .parse()

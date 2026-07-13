@@ -65,6 +65,13 @@ pub struct RequestMessage {
 /// Full request to the model provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRequest {
+    /// Identity used for provider capability resolution.
+    ///
+    /// The catalog slug is metadata and is not sent as the provider's wire
+    /// model name. Requests that do not originate from the catalog must opt
+    /// into the generic profile explicitly.
+    #[serde(skip)]
+    pub model_slug: ModelProfileKey,
     pub model: String,
     pub system: Option<String>,
     pub messages: Vec<RequestMessage>,
@@ -81,6 +88,16 @@ pub struct ModelRequest {
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<Value>,
+}
+
+/// Identifies the model metadata a provider adapter should use when shaping a request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ModelProfileKey {
+    /// Resolve provider capabilities using this Devo catalog slug.
+    CatalogSlug(String),
+    /// Use the provider's generic capability profile.
+    #[default]
+    Generic,
 }
 
 /// A tool definition sent to the model.
@@ -956,6 +973,7 @@ mod tests {
     #[test]
     fn model_request_serde() {
         let req = ModelRequest {
+            model_slug: ModelProfileKey::Generic,
             model: "claude-sonnet-4-20250514".into(),
             system: Some("You are helpful.".into()),
             messages: vec![RequestMessage {
@@ -971,9 +989,11 @@ mod tests {
             extra_body: None,
         };
         let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("model_slug"));
         assert!(!json.contains("tools"));
         assert!(!json.contains("temperature"));
         let deserialized: ModelRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.model_slug, ModelProfileKey::Generic);
         assert_eq!(deserialized.model, "claude-sonnet-4-20250514");
         assert_eq!(deserialized.messages.len(), 1);
     }

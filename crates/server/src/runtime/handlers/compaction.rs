@@ -110,30 +110,20 @@ impl ServerRuntime {
 
             let model_selection = session_model_selection(&runtime_session.summary)
                 .unwrap_or(&runtime_session.runtime_context.default_model);
-            let model_slug = runtime_session
-                .summary
-                .model
-                .as_deref()
-                .unwrap_or(model_selection);
             let turn_config = runtime_session.runtime_context.resolve_turn_config(
                 Some(model_selection),
                 /*reasoning_effort_selection*/ None,
             );
-            let request_model = turn_config.request_model.clone();
+            let resolved_request = turn_config.model.resolve_reasoning_effort_selection(None);
+            let model_slug = resolved_request.request_model;
+            let request_model = turn_config.provider_request_model(&model_slug);
             let max_tokens = runtime_session
                 .runtime_context
                 .model_catalog
-                .get(model_slug)
+                .get(&model_slug)
                 .and_then(|m| m.max_tokens.map(|t| t as usize))
                 .unwrap_or(4096);
 
-            let summarizer = DefaultHistorySummarizer::with_slug(
-                runtime_session
-                    .runtime_context
-                    .provider_for_route(turn_config.provider_route.clone()),
-                request_model.clone(),
-                max_tokens,
-            );
             tracing::debug!(
                 session_id = %session_id,
                 model = %model_slug,
@@ -143,6 +133,14 @@ impl ServerRuntime {
                 cached_input_tokens = token_info.cached_input_tokens,
                 output_tokens = token_info.output_tokens,
                 "starting compaction summarization"
+            );
+            let summarizer = DefaultHistorySummarizer::with_models(
+                runtime_session
+                    .runtime_context
+                    .provider_for_route(turn_config.provider_route.clone()),
+                model_slug,
+                request_model,
+                max_tokens,
             );
 
             let config = CompactionConfig {

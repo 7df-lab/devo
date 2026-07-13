@@ -532,6 +532,7 @@ mod tests {
         hosted_tools: Vec<HostedToolDefinition>,
     ) -> ModelRequest {
         ModelRequest {
+            model_slug: devo_protocol::ModelProfileKey::Generic,
             model: model.to_string(),
             system: None,
             messages: Vec::new(),

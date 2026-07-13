@@ -405,7 +405,7 @@ fn acp_model_config_option_for_turn_config(
             name,
             description: Some(format!(
                 "{provider_name}: {} via {}",
-                binding.model_name, binding.invocation_method
+                binding.request_model, binding.invocation_method
             )),
             meta: None,
         });

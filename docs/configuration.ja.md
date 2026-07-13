@@ -30,7 +30,7 @@ wire_apis = ["openai_chat_completions"]
 enabled = true
 model_slug = "deepseek-v4-flash"
 provider = "api.deepseek.com"
-model_name = "deepseek-v4-flash"
+request_model = "deepseek-v4-flash"
 display_name = "DeepSeek V4 Flash"
 invocation_method = "openai_chat_completions"
 default_reasoning_effort = "high"
@@ -40,7 +40,7 @@ default_reasoning_effort = "high"
 
 - `model_slug` は `models.json` から Devo のローカルモデルメタデータを選択します。
 - `provider` は設定済みの接続レコードを選択します。
-- `model_name` はプロバイダーへ送信される、そのプロバイダー固有のモデル文字列です。
+- `request_model` はプロバイダーへ送信される、そのプロバイダー固有のモデル文字列です。
 - `invocation_method` はプロバイダープロトコルを選択します。例:
   [`openai_chat_completions`](https://developers.openai.com/api/reference/chat-completions/overview)、
   [`openai_responses`](https://developers.openai.com/api/reference/responses/overview)、
@@ -90,7 +90,7 @@ default_reasoning_effort = "high"
 enabled = true
 model_slug = "my-coding-model"
 provider = "my.provider"
-model_name = "provider-specific-model-name"
+request_model = "provider-specific-model-name"
 display_name = "My Coding Model"
 invocation_method = "openai_chat_completions"
 ```
