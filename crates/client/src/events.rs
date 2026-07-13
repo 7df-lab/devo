@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use devo_protocol::{
     ACP_SESSION_UPDATE_METHOD, AcpSessionNotification, AcpSessionUpdate, DEVO_TURN_USAGE_META,
     ServerEvent, SessionCompactionFailedPayload, SessionEventPayload, TurnEventPayload,
-    TurnUsageUpdatedPayload,
+    TurnFailedPayload, TurnUsageUpdatedPayload,
 };
 
 use crate::client_core::ServerNotificationMessage;
@@ -11,7 +11,7 @@ use crate::client_core::ServerNotificationMessage;
 pub enum ClientEvent {
     TurnStarted(TurnEventPayload),
     TurnCompleted(TurnEventPayload),
-    TurnFailed(TurnEventPayload),
+    TurnFailed(TurnFailedPayload),
     TurnUsageUpdated(TurnUsageUpdatedPayload),
     SessionCompactionStarted(SessionEventPayload),
     SessionCompactionCompleted(SessionEventPayload),

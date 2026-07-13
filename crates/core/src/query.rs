@@ -1931,6 +1931,8 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use crate::EventCallback;
+    use crate::ProviderRetryStatus;
+    use crate::QueryProviderRetryPhase;
     use crate::tools::ToolAgentScope;
     use crate::tools::ToolContent;
     use crate::tools::ToolPreparationFeedback;
@@ -3060,7 +3062,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn query_retries_transient_stream_event_errors_before_content() {
         let provider = Arc::new(TransientStreamEventProvider {
             attempts: AtomicUsize::new(0),
@@ -3070,23 +3072,75 @@ mod tests {
         let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
         let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
         session.push_message(Message::user("hello"));
+        let turn_config = TurnConfig::new(Model::default(), None);
+        let model = turn_config.model.slug.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured_events = Arc::clone(&events);
+        let callback: EventCallback = Arc::new(move |event| {
+            let captured_events = Arc::clone(&captured_events);
+            Box::pin(async move {
+                captured_events.lock().expect("lock events").push(event);
+            })
+        });
 
         query(
             &mut session,
-            &TurnConfig::new(Model::default(), None),
+            &turn_config,
             provider_sdk,
             registry,
             &runtime,
-            None,
+            Some(callback),
         )
         .await
         .expect("query should retry and succeed");
 
-        assert_eq!(provider.attempts.load(Ordering::SeqCst), 2);
+        let retry_statuses = events
+            .lock()
+            .expect("lock events")
+            .iter()
+            .filter_map(|event| match event {
+                QueryEvent::ProviderRetryStatus(status) => Some(status.clone()),
+                QueryEvent::TextDelta(_)
+                | QueryEvent::ReasoningDelta(_)
+                | QueryEvent::ReasoningCompleted
+                | QueryEvent::UsageDelta { .. }
+                | QueryEvent::ToolUseStart { .. }
+                | QueryEvent::ToolExecutionStart { .. }
+                | QueryEvent::ToolProgress { .. }
+                | QueryEvent::ToolResult { .. }
+                | QueryEvent::TurnComplete { .. }
+                | QueryEvent::Usage { .. } => None,
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            session.messages.last(),
-            Some(&Message::assistant_text("done"))
+            retry_statuses,
+            vec![
+                ProviderRetryStatus {
+                    provider: "transient-stream-event-provider".to_string(),
+                    model: model.clone(),
+                    attempt: 1,
+                    backoff_ms: 250,
+                    phase: QueryProviderRetryPhase::Scheduled,
+                    message: "Retrying provider request in 0.2s".to_string(),
+                },
+                ProviderRetryStatus {
+                    provider: "transient-stream-event-provider".to_string(),
+                    model,
+                    attempt: 1,
+                    backoff_ms: 0,
+                    phase: QueryProviderRetryPhase::Resumed,
+                    message: "Retrying provider request now".to_string(),
+                },
+            ]
         );
+        assert_eq!(provider.attempts.load(Ordering::SeqCst), 2);
+        let assistant_messages = session
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_messages, vec![Message::assistant_text("done")]);
     }
 
     #[tokio::test(start_paused = true)]

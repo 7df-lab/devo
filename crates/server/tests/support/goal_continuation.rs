@@ -525,8 +525,8 @@ fn legacy_event_from_acp_notification(value: serde_json::Value) -> serde_json::V
     let params = match event {
         ServerEvent::TurnCompleted(payload)
         | ServerEvent::TurnInterrupted(payload)
-        | ServerEvent::TurnFailed(payload)
         | ServerEvent::TurnStarted(payload) => serde_json::to_value(payload),
+        ServerEvent::TurnFailed(payload) => serde_json::to_value(payload),
         ServerEvent::ItemCompleted(payload) | ServerEvent::ItemStarted(payload) => {
             serde_json::to_value(payload)
         }

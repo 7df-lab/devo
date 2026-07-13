@@ -23,6 +23,7 @@ use crate::dsml::DsmlTextStreamFilter;
 use crate::dsml::DsmlToolCallHealer;
 use crate::error::ProviderError;
 use crate::http::invalid_status_error;
+use crate::openai::error_payload::provider_error_from_payload;
 use crate::text_normalization::{TaggedTextFragment, TaggedTextParser};
 use crate::timeout;
 
@@ -136,9 +137,16 @@ pub(super) async fn completion_stream(
                         break;
                     }
 
-                    let chunk: ChatCompletionStreamChunk = serde_json::from_str(&message.data)
+                    let value: Value = serde_json::from_str(&message.data)
                         .map_err(|error| {
                             anyhow::anyhow!("failed to parse openai stream chunk: {error}")
+                        })?;
+                    if let Some(error) = provider_error_from_payload(&value, &request) {
+                        Err(error)?;
+                    }
+                    let chunk: ChatCompletionStreamChunk = serde_json::from_value(value)
+                        .map_err(|error| {
+                            anyhow::anyhow!("failed to deserialize openai stream chunk: {error}")
                         })?;
 
                     for stream_event in state.apply_chunk(chunk) {

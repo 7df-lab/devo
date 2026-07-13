@@ -1,5 +1,6 @@
 pub mod capabilities;
 pub mod chat_completions;
+mod error_payload;
 pub mod responses;
 pub mod role;
 mod shared;

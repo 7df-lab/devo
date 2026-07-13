@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { processEvent } from "./actions/event-processor"
 import { partsFamily, partStorageKey } from "./parts"
 import { sessionAcpFamily } from "./session-acp"
+import { sessionFamily, upsertSessionAtom } from "./sessions"
 import { appStore } from "./store"
 import { streamingVersionFamily } from "./streaming"
 
@@ -82,5 +83,74 @@ describe("ACP session renderer state", () => {
 			},
 		])
 		expect(appStore.get(streamingVersionFamily(sessionID))).toBe(initialVersion + 1)
+	})
+
+	test("stores scheduled retries, clears resumed retries, and reports transient failures", () => {
+		const sessionID = "session-provider-retry"
+		appStore.set(upsertSessionAtom, {
+			session: { id: sessionID, title: "Retry test" },
+			directory: "/repo",
+		})
+
+		processEvent({
+			type: "turn.provider_retry_status",
+			properties: {
+				sessionID,
+				turnID: "turn-1",
+				attempt: 2,
+				backoffMs: 1000,
+				provider: "openai",
+				model: "test-model",
+				phase: "scheduled",
+				message: "Retrying provider request in 1.0s",
+			},
+		})
+
+		expect(appStore.get(sessionFamily(sessionID))?.retryStatus).toEqual({
+			turnId: "turn-1",
+			attempt: 2,
+			backoffMs: 1000,
+			provider: "openai",
+			model: "test-model",
+			phase: "scheduled",
+			message: "Retrying provider request in 1.0s",
+		})
+
+		processEvent({
+			type: "turn.provider_retry_status",
+			properties: {
+				sessionID,
+				turnID: "turn-1",
+				attempt: 2,
+				backoffMs: 0,
+				provider: "openai",
+				model: "test-model",
+				phase: "resumed",
+				message: "Retrying provider request now",
+			},
+		})
+		processEvent({
+			type: "session.error",
+			properties: {
+				sessionID,
+				error: {
+					name: "PROVIDER_SERVER_ERROR",
+					data: { message: "Internal server error" },
+				},
+			},
+		})
+
+		expect(appStore.get(sessionFamily(sessionID))).toEqual({
+			session: { id: sessionID, title: "Retry test" },
+			directory: "/repo",
+			status: { type: "idle" },
+			permissions: [],
+			questions: [],
+			retryStatus: undefined,
+			error: {
+				name: "PROVIDER_SERVER_ERROR",
+				data: { message: "Internal server error" },
+			},
+		})
 	})
 })

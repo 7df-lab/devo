@@ -104,6 +104,20 @@ pub struct TurnEventPayload {
     pub turn: TurnMetadata,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+pub struct TurnFailedPayload {
+    pub session_id: SessionId,
+    pub turn: TurnMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<TurnErrorPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+pub struct TurnErrorPayload {
+    pub code: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnPlanStepPayload {
     pub step: String,
@@ -356,7 +370,7 @@ pub enum ServerEvent {
     TurnStarted(TurnEventPayload),
     TurnCompleted(TurnEventPayload),
     TurnInterrupted(TurnEventPayload),
-    TurnFailed(TurnEventPayload),
+    TurnFailed(TurnFailedPayload),
     TurnPlanUpdated(TurnPlanUpdatedPayload),
     TurnDiffUpdated(TurnEventPayload),
     TurnUsageUpdated(TurnUsageUpdatedPayload),
@@ -400,8 +414,8 @@ impl ServerEvent {
             Self::TurnStarted(payload)
             | Self::TurnCompleted(payload)
             | Self::TurnInterrupted(payload)
-            | Self::TurnFailed(payload)
             | Self::TurnDiffUpdated(payload) => Some(payload.session_id),
+            Self::TurnFailed(payload) => Some(payload.session_id),
             Self::TurnPlanUpdated(payload) => Some(payload.session_id),
             Self::TurnUsageUpdated(payload) => Some(payload.session_id),
             Self::TurnProviderRetryStatus(payload) => Some(payload.session_id),
@@ -524,6 +538,60 @@ mod tests {
         let restored: InputQueueUpdatedPayload = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.pending_count, 3);
         assert_eq!(restored.pending_texts, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn turn_failed_payload_serializes_error_and_accepts_legacy_shape() {
+        let session_id = SessionId::new();
+        let turn = TurnMetadata {
+            turn_id: TurnId::new(),
+            session_id,
+            sequence: 1,
+            status: crate::TurnStatus::Failed,
+            kind: crate::TurnKind::Regular,
+            model: "catalog-model".to_string(),
+            model_binding_id: None,
+            reasoning_effort_selection: None,
+            reasoning_effort: None,
+            request_model: "provider-model".to_string(),
+            request_thinking: None,
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            usage: None,
+            stop_reason: None,
+            failure_reason: None,
+        };
+        let payload = TurnFailedPayload {
+            session_id,
+            turn,
+            error: Some(TurnErrorPayload {
+                code: "PROVIDER_SERVER_ERROR".to_string(),
+                message: "Internal server error".to_string(),
+            }),
+        };
+
+        let mut value = serde_json::to_value(&payload).expect("serialize turn failure");
+        assert_eq!(
+            value["error"],
+            serde_json::json!({
+                "code": "PROVIDER_SERVER_ERROR",
+                "message": "Internal server error"
+            })
+        );
+        value
+            .as_object_mut()
+            .expect("turn failure object")
+            .remove("error");
+        let legacy = serde_json::from_value::<TurnFailedPayload>(value)
+            .expect("deserialize legacy turn failure");
+
+        assert_eq!(
+            legacy,
+            TurnFailedPayload {
+                error: None,
+                ..payload
+            }
+        );
     }
 
     #[test]

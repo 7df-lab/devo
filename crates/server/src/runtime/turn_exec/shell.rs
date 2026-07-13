@@ -5,6 +5,7 @@ use devo_core::tools::{
     ToolRuntimeContext,
 };
 use devo_core::{CommandExecutionItem, SessionId, TurnItem};
+use devo_protocol::TurnFailedPayload;
 use devo_util_shell_command::parse_command::parse_command;
 use tokio_util::sync::CancellationToken;
 
@@ -183,9 +184,10 @@ impl ServerRuntime {
         self.finalize_turn_workspace_changes(session_id, &final_turn)
             .await;
         if is_error {
-            self.broadcast_event(ServerEvent::TurnFailed(TurnEventPayload {
+            self.broadcast_event(ServerEvent::TurnFailed(TurnFailedPayload {
                 session_id,
                 turn: final_turn.clone(),
+                error: None,
             }))
             .await;
         }

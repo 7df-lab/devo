@@ -46,6 +46,7 @@ use devo_protocol::SessionHistoryMetadata;
 use devo_protocol::SessionPlanStepStatus;
 use devo_protocol::SpawnAgentParams;
 use devo_protocol::ThreadGoalStatus;
+use devo_protocol::TurnFailedPayload;
 use devo_server::ACP_TERMINAL_OUTPUT_NOTIFICATION_METHOD;
 use devo_server::ApprovalDecisionPayload;
 use devo_server::ApprovalRequestPayload;
@@ -2661,10 +2662,11 @@ async fn run_worker_inner(
                                 }
                             }
                             "turn/failed" => {
-                                if let ServerEvent::TurnFailed(TurnEventPayload { turn, .. }) = event {
+                                if let ServerEvent::TurnFailed(TurnFailedPayload { turn, error, .. }) = event {
                                     active_turn_id = None;
-                                    let message = latest_completed_agent_message
-                                        .take()
+                                    let message = error
+                                        .map(|error| error.message)
+                                        .or_else(|| latest_completed_agent_message.take())
                                         .unwrap_or_else(|| format!("turn failed with status {:?}", turn.status));
                                     if let Some(usage) = &turn.usage {
                                         if !saw_usage_update_for_turn {

@@ -2,12 +2,53 @@ use std::io;
 
 use devo_protocol::{ModelRequest, RequestContent, RequestMessage, ResponseContent, StreamEvent};
 use devo_provider::ModelProviderSDK;
+use devo_provider::error::ProviderError;
 use devo_provider::openai::OpenAIProvider;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+#[tokio::test]
+async fn chat_stream_reports_error_payload_returned_with_http_200() {
+    let base_url = spawn_sse_server(vec![
+        sse_data(json!({
+            "error": {
+                "message": "Internal server error",
+                "type": "internal_server_error",
+                "code": 500
+            }
+        })),
+        "data: [DONE]\n\n".to_string(),
+    ])
+    .await;
+    let provider = OpenAIProvider::new(base_url);
+
+    let mut stream = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("openai chat stream");
+    let error = stream
+        .next()
+        .await
+        .expect("provider error stream item")
+        .expect_err("error payload must not become a successful chunk");
+    let provider_error = error
+        .downcast_ref::<ProviderError>()
+        .expect("structured provider error");
+
+    assert_eq!(
+        serde_json::to_value(provider_error).expect("serialize provider error"),
+        json!({
+            "error_kind": "provider_server_error",
+            "message": "Internal server error",
+            "status_code": 500,
+            "provider_name": "openai"
+        })
+    );
+    assert!(stream.next().await.is_none());
+}
 
 #[tokio::test]
 async fn chat_stream_buffers_tool_arguments_until_identity_arrives() {

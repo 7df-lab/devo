@@ -522,7 +522,10 @@ fn subagent_monitor_events_from_server_event(
             vec![WorkerEvent::SubagentMonitor {
                 event: SubagentMonitorEvent::TurnFailed {
                     session_id,
-                    message: subagent_turn_failure_message(&payload.turn),
+                    message: payload
+                        .error
+                        .map(|error| error.message)
+                        .unwrap_or_else(|| subagent_turn_failure_message(&payload.turn)),
                 },
             }]
         }

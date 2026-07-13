@@ -278,6 +278,25 @@ function providerRetryStatusFromOriginalEvent(
 	}
 }
 
+function turnFailureFromOriginalEvent(
+	original: Record<string, unknown>,
+	originalMethod?: string,
+): { sessionID: string; code: string; message: string } | null {
+	if (originalMethod !== "turn/failed" && !("TurnFailed" in original) && original.kind !== "turn_failed") {
+		return null
+	}
+	const payload = objectRecord(original.TurnFailed) ?? original
+	const sessionID = String(payload.session_id ?? payload.sessionId ?? "")
+	if (!sessionID) return null
+	const error = objectRecord(payload.error)
+	if (!error || typeof error.message !== "string" || !error.message.trim()) return null
+	return {
+		sessionID,
+		code: String(error.code ?? "TURN_FAILED"),
+		message: error.message,
+	}
+}
+
 function sessionStatusFromMetadata(value: unknown): string | undefined {
 	const meta = objectRecord(value)
 	const nestedStatus = objectRecord(meta?.["devo/session"])?.status
@@ -1596,6 +1615,20 @@ class AcpClient {
 			this.emit(directory, {
 				type: "turn.provider_retry_status",
 				properties: retryStatus,
+			})
+			return
+		}
+		const turnFailure = turnFailureFromOriginalEvent(original as Record<string, unknown>, originalMethod)
+		if (turnFailure) {
+			this.emit(directory, {
+				type: "session.error",
+				properties: {
+					sessionID: turnFailure.sessionID,
+					error: {
+						name: turnFailure.code,
+						data: { message: turnFailure.message },
+					},
+				},
 			})
 			return
 		}

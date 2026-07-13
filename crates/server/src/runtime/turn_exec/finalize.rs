@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use devo_core::{SessionId, TextItem, TurnItem, TurnStatus, TurnUsage};
+use devo_core::{SessionId, TurnStatus, TurnUsage};
+use devo_protocol::TurnFailedPayload;
 
 use super::super::ServerRuntime;
 use super::super::subagent_usage::ParentUsageSnapshot;
-use super::event_stream::turn_failure_reason_from_error;
+use super::failure::{turn_error_payload_from_error, turn_failure_reason_from_error};
 use super::types::{TurnEventStreamSummary, TurnQueryOutcome};
 use crate::db::{QueueType, SessionStats};
 use crate::persistence::build_turn_record;
 use crate::runtime::session_actor::SessionActorState;
-use crate::{ItemKind, SessionRuntimeStatus, SessionStatusChangedPayload, TurnEventPayload};
+use crate::{SessionRuntimeStatus, SessionStatusChangedPayload, TurnEventPayload};
 
 fn terminal_usages(
     event_summary: Option<&TurnEventStreamSummary>,
@@ -311,19 +312,10 @@ impl ServerRuntime {
                     error = %error,
                     "turn execution failed"
                 );
-                self.emit_turn_item(
-                    session_id,
-                    final_turn.turn_id,
-                    ItemKind::AgentMessage,
-                    TurnItem::AgentMessage(TextItem {
-                        text: error.to_string(),
-                    }),
-                    serde_json::json!({ "title": "Error", "text": error.to_string() }),
-                )
-                .await;
-                self.broadcast_event(crate::ServerEvent::TurnFailed(TurnEventPayload {
+                self.broadcast_event(crate::ServerEvent::TurnFailed(TurnFailedPayload {
                     session_id,
                     turn: final_turn.clone(),
+                    error: Some(turn_error_payload_from_error(error)),
                 }))
                 .await;
             }

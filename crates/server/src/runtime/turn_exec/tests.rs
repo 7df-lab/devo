@@ -6,6 +6,8 @@ use devo_core::tools::tool_spec::ToolPreparationFeedback;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 
+use super::event_stream::enqueue_query_event;
+
 #[test]
 fn command_progress_uses_command_execution_item_id() {
     let command_item_id = ItemId::new();
@@ -369,4 +371,40 @@ fn command_actions_from_find_tool_input_include_pattern_and_path() {
             path: Some("**/Cargo.toml in crates".to_string()),
         }]
     );
+}
+
+#[tokio::test]
+async fn provider_retry_status_waits_for_channel_capacity() {
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+    event_tx
+        .send(devo_core::QueryEvent::Usage {
+            usage: devo_protocol::Usage::default(),
+        })
+        .await
+        .expect("fill event channel");
+    let retry_status = devo_core::ProviderRetryStatus {
+        provider: "openai".to_string(),
+        model: "test-model".to_string(),
+        attempt: 1,
+        backoff_ms: 250,
+        phase: devo_core::QueryProviderRetryPhase::Scheduled,
+        message: "Retrying provider request in 0.2s".to_string(),
+    };
+    let retry_event = devo_core::QueryEvent::ProviderRetryStatus(retry_status.clone());
+    let enqueue = tokio::spawn(async move {
+        enqueue_query_event(&event_tx, retry_event).await;
+    });
+    tokio::task::yield_now().await;
+
+    assert!(!enqueue.is_finished());
+    assert!(matches!(
+        event_rx.recv().await,
+        Some(devo_core::QueryEvent::Usage { .. })
+    ));
+    enqueue.await.expect("enqueue retry event");
+    let received_status = match event_rx.recv().await {
+        Some(devo_core::QueryEvent::ProviderRetryStatus(status)) => status,
+        Some(_) | None => panic!("expected provider retry status"),
+    };
+    assert_eq!(received_status, retry_status);
 }

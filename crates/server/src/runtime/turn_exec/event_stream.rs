@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use devo_core::{ItemId, SessionId, TurnId};
-use devo_protocol::TurnFailureReason;
 
 use super::super::ServerRuntime;
 use super::super::proposed_plan::ProposedPlanParser;
@@ -27,7 +26,7 @@ pub(crate) const QUERY_EVENT_CHANNEL_CAPACITY: usize = 8192;
 
 /// Enqueue a query event into the turn event stream.
 ///
-/// Visible token events (`TextDelta` / `ReasoningDelta`) and `TurnComplete`
+/// Visible token events (`TextDelta` / `ReasoningDelta`), retry status, and `TurnComplete`
 /// must not be dropped: when the channel is full we apply backpressure to the
 /// provider reader with `send().await` so the TUI keeps receiving tokens.
 /// Other events may be dropped under pressure so coordination cannot wedge
@@ -37,7 +36,10 @@ pub(super) async fn enqueue_query_event(
     event: devo_core::QueryEvent,
 ) {
     let kind = query_event_trace_kind(&event);
-    let must_deliver = matches!(kind, "text_delta" | "reasoning_delta" | "turn_complete");
+    let must_deliver = matches!(
+        kind,
+        "text_delta" | "reasoning_delta" | "provider_retry_status" | "turn_complete"
+    );
     if must_deliver {
         let _ = event_tx.send(event).await;
         return;
@@ -52,17 +54,6 @@ pub(super) async fn enqueue_query_event(
             );
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
-    }
-}
-
-pub(super) fn turn_failure_reason_from_error(
-    error: &devo_core::AgentError,
-) -> Option<TurnFailureReason> {
-    match error {
-        devo_core::AgentError::MaxTurnsExceeded(_) => Some(TurnFailureReason::MaxTurnRequests),
-        devo_core::AgentError::Provider(_)
-        | devo_core::AgentError::ContextTooLong
-        | devo_core::AgentError::Aborted => None,
     }
 }
 
