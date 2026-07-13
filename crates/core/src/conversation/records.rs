@@ -128,6 +128,9 @@ pub struct TurnRecord {
     /// The typed terminal failure reason, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<TurnFailureReason>,
+    /// The normalized terminal error for a failed turn, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<TurnError>,
     /// The locked session context used to build the stable request prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_context: Option<SessionContext>,
@@ -618,10 +621,31 @@ mod tests {
 
     #[test]
     fn turn_record_serde_roundtrip() {
-        let turn = make_test_turn(TurnStatus::Running);
+        let turn = TurnRecord {
+            status: TurnStatus::Failed,
+            error: Some(TurnError {
+                code: "PROVIDER_SERVER_ERROR".into(),
+                message: "provider request failed".into(),
+            }),
+            schema_version: 4,
+            ..make_test_turn(TurnStatus::Running)
+        };
         let json = serde_json::to_string(&turn).expect("serialize");
         let restored: TurnRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(turn, restored);
+    }
+
+    #[test]
+    fn turn_record_reads_legacy_record_without_terminal_error() {
+        let expected = make_test_turn(TurnStatus::Completed);
+        let mut value = serde_json::to_value(&expected).expect("serialize value");
+        value
+            .as_object_mut()
+            .expect("turn json object")
+            .remove("error");
+
+        let restored: TurnRecord = serde_json::from_value(value).expect("deserialize legacy");
+        assert_eq!(restored, expected);
     }
 
     #[test]
@@ -1113,6 +1137,7 @@ mod tests {
             latest_query_usage: None,
             stop_reason: None,
             failure_reason: None,
+            error: None,
             session_context: None,
             turn_context: None,
             schema_version: 2,

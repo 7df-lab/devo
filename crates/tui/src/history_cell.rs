@@ -1651,16 +1651,24 @@ impl HistoryCell for FinalMessageSeparator {
     }
 }
 
-/// End-of-turn summary showing ▣ symbol, input mode, model name, and duration.
+/// End-of-turn summary showing ▣ symbol, input mode, model name, and outcome.
 ///
 /// Inspired by opencode's assistant message footer, with Devo's mode label included:
-/// `▣ BUILD · model-name · 4m17s` or `▣ PLAN · model-name · interrupted`
+/// `▣ BUILD · model-name · 4m17s`, `▣ PLAN · model-name · interrupted`, or
+/// `▣ BUILD · model-name · failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnOutcome {
+    Completed,
+    Interrupted,
+    Failed,
+}
+
 #[derive(Debug)]
 pub struct TurnSummaryCell {
     pub input_mode: InputMode,
     pub model_name: String,
     pub duration: Option<u64>,
-    pub interrupted: bool,
+    outcome: TurnOutcome,
 }
 
 impl TurnSummaryCell {
@@ -1674,7 +1682,7 @@ impl TurnSummaryCell {
             input_mode,
             model_name,
             duration,
-            interrupted: false,
+            outcome: TurnOutcome::Completed,
         }
     }
 
@@ -1687,7 +1695,20 @@ impl TurnSummaryCell {
             input_mode,
             model_name,
             duration: None,
-            interrupted: true,
+            outcome: TurnOutcome::Interrupted,
+        }
+    }
+
+    pub(crate) fn new_failed(
+        input_mode: InputMode,
+        model_name: String,
+        _accent_color: Color,
+    ) -> Self {
+        Self {
+            input_mode,
+            model_name,
+            duration: None,
+            outcome: TurnOutcome::Failed,
         }
     }
 }
@@ -1726,13 +1747,14 @@ impl HistoryCell for TurnSummaryCell {
             Span::styled(" · ", Style::default().dim()),
             Span::styled(self.model_name.clone(), Style::default().dim()),
         ];
-        if self.interrupted {
+        let outcome_suffix = match self.outcome {
+            TurnOutcome::Completed => self.duration.map(format_duration_hms),
+            TurnOutcome::Interrupted => Some("interrupted".to_string()),
+            TurnOutcome::Failed => Some("failed".to_string()),
+        };
+        if let Some(outcome_suffix) = outcome_suffix {
             spans.push(Span::styled(" · ", Style::default().dim()));
-            spans.push(Span::styled("interrupted", Style::default().dim()));
-        } else if let Some(duration) = self.duration {
-            let formatted = format_duration_hms(duration);
-            spans.push(Span::styled(" · ", Style::default().dim()));
-            spans.push(Span::styled(formatted, Style::default().dim()));
+            spans.push(Span::styled(outcome_suffix, Style::default().dim()));
         }
         vec![Line::from(spans)]
     }

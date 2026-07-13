@@ -129,6 +129,7 @@ impl ChatWidget {
                 ..
             } => {
                 self.active_turn_id = Some(turn_id);
+                self.failed_turn_visually_finalized = false;
                 if let Some(input_mode) = self.promoted_input_modes.pop_front() {
                     self.current_turn_mode = input_mode;
                 }
@@ -881,12 +882,120 @@ impl ChatWidget {
                 prompt_token_estimate,
             } => {
                 let was_interrupted = stop_reason.contains("Interrupted");
-                self.commit_active_streams(DotStatus::Completed);
-                if was_interrupted
+                let was_failed = stop_reason == "Failed";
+                let failed_turn_was_finalized = was_failed && self.failed_turn_visually_finalized;
+                if !failed_turn_was_finalized {
+                    let stream_status = if was_failed {
+                        DotStatus::Failed
+                    } else {
+                        DotStatus::Completed
+                    };
+                    self.commit_active_streams(stream_status);
+                }
+                if !failed_turn_was_finalized
+                    && (was_interrupted || was_failed)
                     && let Some(cell) = self
                         .active_cell
                         .as_mut()
                         .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+                {
+                    cell.mark_failed();
+                }
+                if !failed_turn_was_finalized {
+                    self.flush_active_cell();
+                }
+                self.active_tool_calls.clear();
+                self.pending_tool_calls.clear();
+                self.pending_approval = None;
+                self.committed_server_assistant_in_turn = false;
+                self.busy = false;
+                self.active_turn_id = None;
+                self.turn_count = turn_count;
+                self.total_input_tokens = total_input_tokens;
+                self.total_output_tokens = total_output_tokens;
+                self.total_cache_read_tokens = total_cache_read_tokens;
+                self.last_query_total_tokens = last_query_total_tokens;
+                self.last_query_input_tokens = last_query_input_tokens;
+                self.prompt_token_estimate = prompt_token_estimate;
+                let elapsed = if failed_turn_was_finalized {
+                    None
+                } else {
+                    self.bottom_pane
+                        .status_widget()
+                        .map(|status| status.elapsed_seconds())
+                        .filter(|&secs| secs > 0)
+                };
+                self.bottom_pane.set_task_running(false);
+                if !failed_turn_was_finalized {
+                    let input_mode = if self.current_turn_has_user_shell_command {
+                        InputMode::Shell
+                    } else {
+                        self.current_turn_mode
+                    };
+                    let model_name = if self.current_turn_has_user_shell_command {
+                        "Shell".to_string()
+                    } else {
+                        self.session
+                            .model
+                            .as_ref()
+                            .map(|m| m.display_name.clone())
+                            .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
+                            .unwrap_or_default()
+                    };
+                    let accent_color = self.active_accent_color();
+                    let cell = if was_failed {
+                        self.set_status_message("Query failed");
+                        history_cell::TurnSummaryCell::new_failed(
+                            input_mode,
+                            model_name,
+                            accent_color,
+                        )
+                    } else if was_interrupted {
+                        self.set_status_message("Ready");
+                        history_cell::TurnSummaryCell::new_interrupted(
+                            input_mode,
+                            model_name,
+                            accent_color,
+                        )
+                    } else {
+                        self.set_status_message("Ready");
+                        history_cell::TurnSummaryCell::new(
+                            input_mode,
+                            model_name,
+                            elapsed,
+                            accent_color,
+                        )
+                    };
+                    self.add_to_history(cell);
+                    if was_failed {
+                        self.failed_turn_visually_finalized = true;
+                    }
+                }
+                self.current_turn_has_user_shell_command = false;
+                self.current_turn_mode = InputMode::Build;
+                if was_failed {
+                    self.pending_proposed_plan_actions = false;
+                } else {
+                    self.maybe_open_proposed_plan_actions();
+                }
+            }
+            WorkerEvent::TurnFailed {
+                message,
+                turn_count,
+                total_input_tokens,
+                total_output_tokens,
+                total_tokens: _,
+                total_cache_read_tokens,
+                prompt_token_estimate,
+                last_query_input_tokens,
+            } => {
+                self.resume_browser_loading = false;
+                self.finish_session_resume();
+                self.commit_active_streams(DotStatus::Failed);
+                if let Some(cell) = self
+                    .active_cell
+                    .as_mut()
+                    .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
                 {
                     cell.mark_failed();
                 }
@@ -901,7 +1010,6 @@ impl ChatWidget {
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.total_cache_read_tokens = total_cache_read_tokens;
-                self.last_query_total_tokens = last_query_total_tokens;
                 self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
                 let input_mode = if self.current_turn_has_user_shell_command {
@@ -920,78 +1028,13 @@ impl ChatWidget {
                         .unwrap_or_default()
                 };
                 let accent_color = self.active_accent_color();
-                let elapsed = self
-                    .bottom_pane
-                    .status_widget()
-                    .map(|status| status.elapsed_seconds())
-                    .filter(|&secs| secs > 0);
-                self.bottom_pane.set_task_running(false);
-                self.set_status_message("Ready");
-                let cell = if was_interrupted {
-                    history_cell::TurnSummaryCell::new_interrupted(
-                        input_mode,
-                        model_name,
-                        accent_color,
-                    )
-                } else {
-                    history_cell::TurnSummaryCell::new(
-                        input_mode,
-                        model_name,
-                        elapsed,
-                        accent_color,
-                    )
-                };
-                self.add_to_history(cell);
-                self.current_turn_has_user_shell_command = false;
-                self.current_turn_mode = InputMode::Build;
-                self.maybe_open_proposed_plan_actions();
-            }
-            WorkerEvent::TurnFailed {
-                message,
-                turn_count,
-                total_input_tokens,
-                total_output_tokens,
-                total_tokens: _,
-                total_cache_read_tokens,
-                prompt_token_estimate,
-                last_query_input_tokens,
-            } => {
-                self.resume_browser_loading = false;
-                self.finish_session_resume();
-                self.commit_active_streams(DotStatus::Failed);
-                self.active_tool_calls.clear();
-                self.pending_tool_calls.clear();
-                self.pending_approval = None;
-                self.committed_server_assistant_in_turn = false;
-                self.busy = false;
-                self.active_turn_id = None;
-                self.turn_count = turn_count;
-                self.total_input_tokens = total_input_tokens;
-                self.total_output_tokens = total_output_tokens;
-                self.total_cache_read_tokens = total_cache_read_tokens;
-                self.last_query_input_tokens = last_query_input_tokens;
-                self.prompt_token_estimate = prompt_token_estimate;
-                let input_mode = if self.current_turn_has_user_shell_command {
-                    InputMode::Shell
-                } else {
-                    self.current_turn_mode
-                };
-                let model_name = if self.current_turn_has_user_shell_command {
-                    "Shell".to_string()
-                } else {
-                    self.session
-                        .model
-                        .as_ref()
-                        .map(|m| m.display_name.clone())
-                        .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
-                        .unwrap_or_default()
-                };
-                self.add_to_history(history_cell::TurnSummaryCell::new_interrupted(
+                self.add_to_history(history_cell::new_error_event(message));
+                self.add_to_history(history_cell::TurnSummaryCell::new_failed(
                     input_mode,
                     model_name,
-                    self.active_accent_color(),
+                    accent_color,
                 ));
-                self.add_to_history(history_cell::new_error_event(message));
+                self.failed_turn_visually_finalized = true;
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Query failed; see error above");
                 self.current_turn_has_user_shell_command = false;

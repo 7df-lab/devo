@@ -20,11 +20,16 @@ use tokio::time::Duration;
 use tokio::time::timeout;
 
 use devo_core::FileSystemSkillCatalog;
+use devo_core::ItemLine;
+use devo_core::ItemRecord;
 use devo_core::PresetModelCatalog;
 use devo_core::RolloutLine;
 use devo_core::SessionMetaLine;
 use devo_core::SessionRecord;
 use devo_core::SkillsConfig;
+use devo_core::TextItem;
+use devo_core::TurnError;
+use devo_core::TurnItem;
 use devo_core::TurnLine;
 use devo_core::TurnRecord;
 use devo_core::tools::ToolRegistry;
@@ -772,6 +777,7 @@ async fn resume_normalizes_historical_default_reasoning_effort() -> Result<()> {
             latest_query_usage: None,
             stop_reason: None,
             failure_reason: None,
+            error: None,
             session_context: None,
             turn_context: None,
             schema_version: 2,
@@ -844,6 +850,255 @@ async fn resume_normalizes_historical_default_reasoning_effort() -> Result<()> {
             Some(ReasoningEffort::High)
         );
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_turn_resume_restores_terminal_history_without_prompt_contamination() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let session_id = SessionId::new();
+    let failed_turn_id = devo_protocol::TurnId::new();
+    let completed_turn_id = devo_protocol::TurnId::new();
+    let now = chrono::Utc::now();
+    let rollout_dir = data_root.path().join("sessions/2026/07/14");
+    std::fs::create_dir_all(&rollout_dir)?;
+    let rollout_path = rollout_dir.join(format!("rollout-2026-07-14T00-00-00-{session_id}.jsonl"));
+    let terminal_error = TurnError {
+        code: "PROVIDER_SERVER_ERROR".to_string(),
+        message: "exact persisted provider failure".to_string(),
+    };
+    let session = SessionRecord {
+        id: session_id,
+        rollout_path: rollout_path.clone(),
+        created_at: now,
+        updated_at: now + chrono::Duration::seconds(5),
+        last_activity_at: Some(now + chrono::Duration::seconds(5)),
+        source: "cli".into(),
+        agent_nickname: None,
+        agent_role: None,
+        agent_path: None,
+        model_provider: "test-provider".into(),
+        model: Some("test-model".into()),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        cwd: data_root.path().to_path_buf(),
+        additional_directories: Vec::new(),
+        cli_version: "0.1.0".into(),
+        title: Some("Failed turn resume".into()),
+        title_state: devo_core::SessionTitleState::Final(
+            devo_core::SessionTitleFinalSource::ExplicitCreate,
+        ),
+        sandbox_policy: "workspace-write".into(),
+        approval_mode: "on-request".into(),
+        tokens_used: 0,
+        first_user_message: Some("failing prompt".into()),
+        archived_at: None,
+        git_sha: None,
+        git_branch: None,
+        git_origin_url: None,
+        parent_session_id: None,
+        session_context: None,
+        latest_turn_context: None,
+        schema_version: 2,
+    };
+    let failed_running = TurnRecord {
+        id: failed_turn_id,
+        session_id,
+        sequence: 1,
+        started_at: now,
+        completed_at: None,
+        status: TurnStatus::Running,
+        kind: devo_core::TurnKind::Regular,
+        model: "test-model".into(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        request_model: "test-model".into(),
+        request_thinking: None,
+        input_token_estimate: None,
+        usage: None,
+        latest_query_usage: None,
+        stop_reason: None,
+        failure_reason: None,
+        error: None,
+        session_context: None,
+        turn_context: None,
+        schema_version: 4,
+    };
+    let failed_terminal = TurnRecord {
+        completed_at: Some(now + chrono::Duration::seconds(2)),
+        status: TurnStatus::Failed,
+        error: Some(terminal_error.clone()),
+        ..failed_running.clone()
+    };
+    let completed_running = TurnRecord {
+        id: completed_turn_id,
+        sequence: 2,
+        started_at: now + chrono::Duration::seconds(3),
+        ..failed_running.clone()
+    };
+    let completed_terminal = TurnRecord {
+        completed_at: Some(now + chrono::Duration::seconds(5)),
+        status: TurnStatus::Completed,
+        ..completed_running.clone()
+    };
+    let item_record = |turn_id, seq, timestamp, turn_item| ItemRecord {
+        id: devo_core::ItemId::new(),
+        session_id,
+        turn_id,
+        seq,
+        timestamp,
+        attempt_placement: None,
+        turn_status: None,
+        sibling_turn_ids: Vec::new(),
+        input_items: Vec::new(),
+        output_items: vec![turn_item],
+        worklog: None,
+        error: None,
+        schema_version: 1,
+    };
+    let rollout_lines = vec![
+        RolloutLine::SessionMeta(Box::new(SessionMetaLine {
+            timestamp: now,
+            session,
+        })),
+        RolloutLine::Turn(Box::new(TurnLine {
+            timestamp: now,
+            turn: failed_running,
+        })),
+        RolloutLine::Item(ItemLine {
+            timestamp: now,
+            item: item_record(
+                failed_turn_id,
+                1,
+                now,
+                TurnItem::UserMessage(TextItem {
+                    text: "failing prompt".into(),
+                }),
+            ),
+        }),
+        RolloutLine::Item(ItemLine {
+            timestamp: now + chrono::Duration::seconds(1),
+            item: item_record(
+                failed_turn_id,
+                2,
+                now + chrono::Duration::seconds(1),
+                TurnItem::AgentMessage(TextItem {
+                    text: "partial response".into(),
+                }),
+            ),
+        }),
+        RolloutLine::Turn(Box::new(TurnLine {
+            timestamp: now + chrono::Duration::seconds(2),
+            turn: failed_terminal,
+        })),
+        RolloutLine::Turn(Box::new(TurnLine {
+            timestamp: now + chrono::Duration::seconds(3),
+            turn: completed_running,
+        })),
+        RolloutLine::Item(ItemLine {
+            timestamp: now + chrono::Duration::seconds(3),
+            item: item_record(
+                completed_turn_id,
+                3,
+                now + chrono::Duration::seconds(3),
+                TurnItem::UserMessage(TextItem {
+                    text: "next prompt".into(),
+                }),
+            ),
+        }),
+        RolloutLine::Item(ItemLine {
+            timestamp: now + chrono::Duration::seconds(4),
+            item: item_record(
+                completed_turn_id,
+                4,
+                now + chrono::Duration::seconds(4),
+                TurnItem::AgentMessage(TextItem {
+                    text: "next response".into(),
+                }),
+            ),
+        }),
+        RolloutLine::Turn(Box::new(TurnLine {
+            timestamp: now + chrono::Duration::seconds(5),
+            turn: completed_terminal,
+        })),
+    ];
+    let mut file = std::fs::File::create(&rollout_path)?;
+    for line in rollout_lines {
+        writeln!(file, "{}", serde_json::to_string(&line)?)?;
+    }
+
+    let provider = Arc::new(CapturingProvider::default());
+    let runtime = build_runtime_with_provider(data_root.path(), provider.clone())?;
+    runtime.load_persisted_sessions().await?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let resume_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 35,
+                "method": "_devo/session/resume",
+                "params": { "session_id": session_id }
+            }),
+        )
+        .await
+        .context("session/resume failed turn history")?;
+    let resume = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_server::SessionResumeResult>,
+    >(resume_response)?
+    .result;
+    let expected_error = devo_protocol::SessionHistoryItem::new(
+        None,
+        SessionHistoryItemKind::Error,
+        terminal_error.code.clone(),
+        terminal_error.message.clone(),
+    );
+    let expected_summary = devo_protocol::SessionHistoryItem {
+        tool_call_id: None,
+        kind: SessionHistoryItemKind::TurnSummary,
+        title: "test-model".to_string(),
+        body: "failed".to_string(),
+        tool_io: None,
+        metadata: None,
+        duration_ms: Some(2),
+    };
+    let terminal_index = resume
+        .history_items
+        .windows(2)
+        .position(|items| items == [expected_error.clone(), expected_summary.clone()])
+        .context("top-level terminal error followed by failed summary")?;
+    assert_eq!(resume.history_items[terminal_index + 2].body, "next prompt");
+    assert!(
+        resume.history_items[..terminal_index]
+            .iter()
+            .any(|item| item.body == "partial response")
+    );
+
+    let turn_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 36,
+                "method": "_devo/turn/start",
+                "params": {
+                    "session_id": session_id,
+                    "input": [{ "type": "text", "text": "continue after failure" }],
+                    "model": null,
+                    "sandbox": null,
+                    "approval_policy": null,
+                    "cwd": null
+                }
+            }),
+        )
+        .await
+        .context("turn/start after failed resume")?;
+    let _: devo_server::SuccessResponse<devo_server::TurnStartResult> =
+        serde_json::from_value(turn_response)?;
+    wait_for_turn_completed(&mut notifications_rx).await?;
+    let requests = provider.requests.lock().expect("lock requests");
+    let request_json = serde_json::to_string(requests.last().context("captured model request")?)?;
+    assert!(!request_json.contains(&terminal_error.code));
+    assert!(!request_json.contains(&terminal_error.message));
 
     Ok(())
 }

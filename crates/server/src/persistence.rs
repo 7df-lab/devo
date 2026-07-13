@@ -658,36 +658,8 @@ impl ReplayState {
             }
             RolloutLine::Turn(line) => {
                 // Insert turn summary for the previous turn before processing the new turn
-                if let Some(prev_turn) = self.latest_turn_metadata.clone()
-                    && prev_turn.status == devo_core::TurnStatus::Completed
-                    && !self.superseded_turn_ids.contains(&prev_turn.turn_id)
-                    && self.summarized_turn_ids.insert(prev_turn.turn_id)
-                {
-                    let ts = prev_turn.completed_at.unwrap_or(prev_turn.started_at);
-                    let duration_secs = prev_turn.completed_at.and_then(|completed| {
-                        let dur = completed - prev_turn.started_at;
-                        let secs = dur.num_seconds();
-                        if secs > 0 { Some(secs as u64) } else { None }
-                    });
-                    let body = duration_secs.map(|s| s.to_string()).unwrap_or_default();
-                    self.pending_items.push(ReplayHistoryItem {
-                        turn_id: prev_turn.turn_id,
-                        turn_kind: prev_turn.kind.clone(),
-                        item_id: devo_core::ItemId::new(),
-                        seq: self.loaded_item_count,
-                        timestamp: ts,
-                        record_timestamp: ts,
-                        line_timestamp: ts,
-                        bucket_priority: 0,
-                        intra_record_order: u32::MAX as usize,
-                        turn_item: devo_core::TurnItem::TurnSummary(devo_core::TextItem {
-                            text: if duration_secs.is_some() {
-                                format!("{}:{}", prev_turn.model, body)
-                            } else {
-                                prev_turn.model.clone()
-                            },
-                        }),
-                    });
+                if let Some(prev_turn) = self.latest_turn.clone() {
+                    self.enqueue_terminal_history_items(&prev_turn);
                 }
 
                 let turn = line.turn;
@@ -858,36 +830,8 @@ impl ReplayState {
         deps: &ServerRuntimeDependencies,
     ) -> Result<RuntimeSession> {
         // Insert turn summary for the last turn before converting
-        if let Some(last_turn) = self.latest_turn_metadata.clone()
-            && last_turn.status == devo_core::TurnStatus::Completed
-            && !self.superseded_turn_ids.contains(&last_turn.turn_id)
-            && self.summarized_turn_ids.insert(last_turn.turn_id)
-        {
-            let ts = last_turn.completed_at.unwrap_or(last_turn.started_at);
-            let duration_secs = last_turn.completed_at.and_then(|completed| {
-                let dur = completed - last_turn.started_at;
-                let secs = dur.num_seconds();
-                if secs > 0 { Some(secs as u64) } else { None }
-            });
-            let body = duration_secs.map(|s| s.to_string()).unwrap_or_default();
-            self.pending_items.push(ReplayHistoryItem {
-                turn_id: last_turn.turn_id,
-                turn_kind: last_turn.kind.clone(),
-                item_id: devo_core::ItemId::new(),
-                seq: self.loaded_item_count,
-                timestamp: ts,
-                record_timestamp: ts,
-                line_timestamp: ts,
-                bucket_priority: 0,
-                intra_record_order: u32::MAX as usize,
-                turn_item: devo_core::TurnItem::TurnSummary(devo_core::TextItem {
-                    text: if duration_secs.is_some() {
-                        format!("{}:{}", last_turn.model, body)
-                    } else {
-                        last_turn.model.clone()
-                    },
-                }),
-            });
+        if let Some(last_turn) = self.latest_turn.clone() {
+            self.enqueue_terminal_history_items(&last_turn);
         }
 
         let mut record = self.session.context("missing SessionMetaLine in rollout")?;
@@ -918,19 +862,26 @@ impl ReplayState {
         let mut replayed_persisted_turn_items = Vec::with_capacity(ordered_items.len());
         let mut tool_names_by_id = HashMap::new();
         for pending_item in ordered_items {
-            apply_turn_item(
-                &mut replayed_messages,
-                &mut replayed_history_items,
-                &mut tool_names_by_id,
-                &pending_item.turn_kind,
-                pending_item.turn_item.clone(),
-            );
-            replayed_persisted_turn_items.push(PersistedTurnItem {
-                turn_id: pending_item.turn_id,
-                turn_kind: pending_item.turn_kind,
-                item_id: pending_item.item_id,
-                turn_item: pending_item.turn_item,
-            });
+            match pending_item.payload {
+                ReplayHistoryItemPayload::TurnItem(turn_item) => {
+                    apply_turn_item(
+                        &mut replayed_messages,
+                        &mut replayed_history_items,
+                        &mut tool_names_by_id,
+                        &pending_item.turn_kind,
+                        turn_item.clone(),
+                    );
+                    replayed_persisted_turn_items.push(PersistedTurnItem {
+                        turn_id: pending_item.turn_id,
+                        turn_kind: pending_item.turn_kind,
+                        item_id: pending_item.item_id,
+                        turn_item,
+                    });
+                }
+                ReplayHistoryItemPayload::HistoryOnly(history_item) => {
+                    replayed_history_items.push(history_item);
+                }
+            }
         }
 
         core_session.messages = replayed_messages;
@@ -1187,7 +1138,9 @@ impl ReplayState {
             .collect::<HashSet<_>>();
 
         self.pending_items.retain(|item| {
-            retained_turn_ids.contains(&item.turn_id) && retained_item_ids.contains(&item.item_id)
+            retained_turn_ids.contains(&item.turn_id)
+                && (matches!(&item.payload, ReplayHistoryItemPayload::HistoryOnly(_))
+                    || retained_item_ids.contains(&item.item_id))
         });
         self.turn_order
             .retain(|turn_id| retained_turn_ids.contains(turn_id));
@@ -1314,7 +1267,7 @@ impl ReplayState {
                 line_timestamp,
                 bucket_priority: 0,
                 intra_record_order,
-                turn_item,
+                payload: ReplayHistoryItemPayload::TurnItem(turn_item),
             });
             intra_record_order += 1;
         }
@@ -1330,10 +1283,81 @@ impl ReplayState {
                 line_timestamp,
                 bucket_priority: 1,
                 intra_record_order,
-                turn_item,
+                payload: ReplayHistoryItemPayload::TurnItem(turn_item),
             });
             intra_record_order += 1;
         }
+    }
+
+    fn enqueue_terminal_history_items(&mut self, turn: &TurnRecord) {
+        let outcome = match turn.status {
+            TurnStatus::Failed => "failed",
+            TurnStatus::Interrupted => "interrupted",
+            TurnStatus::Completed => "",
+            TurnStatus::Pending | TurnStatus::Running | TurnStatus::WaitingApproval => return,
+        };
+        if self.superseded_turn_ids.contains(&turn.id) || !self.summarized_turn_ids.insert(turn.id)
+        {
+            return;
+        }
+
+        let seq = self
+            .pending_items
+            .iter()
+            .filter(|item| item.turn_id == turn.id)
+            .map(|item| item.seq)
+            .max()
+            .unwrap_or(0);
+        let timestamp = turn.completed_at.unwrap_or(turn.started_at);
+        let duration_secs = turn.completed_at.and_then(|completed| {
+            let seconds = (completed - turn.started_at).num_seconds();
+            (seconds > 0).then_some(seconds as u64)
+        });
+        let mut intra_record_order = 0;
+
+        if matches!(turn.status, TurnStatus::Failed)
+            && let Some(error) = &turn.error
+        {
+            self.pending_items.push(ReplayHistoryItem {
+                turn_id: turn.id,
+                turn_kind: turn.kind.clone(),
+                item_id: ItemId::new(),
+                seq,
+                timestamp,
+                record_timestamp: timestamp,
+                line_timestamp: timestamp,
+                bucket_priority: 2,
+                intra_record_order,
+                payload: ReplayHistoryItemPayload::HistoryOnly(crate::SessionHistoryItem::new(
+                    None,
+                    crate::SessionHistoryItemKind::Error,
+                    error.code.clone(),
+                    error.message.clone(),
+                )),
+            });
+            intra_record_order += 1;
+        }
+
+        self.pending_items.push(ReplayHistoryItem {
+            turn_id: turn.id,
+            turn_kind: turn.kind.clone(),
+            item_id: ItemId::new(),
+            seq,
+            timestamp,
+            record_timestamp: timestamp,
+            line_timestamp: timestamp,
+            bucket_priority: 2,
+            intra_record_order,
+            payload: ReplayHistoryItemPayload::HistoryOnly(crate::SessionHistoryItem {
+                tool_call_id: None,
+                kind: crate::SessionHistoryItemKind::TurnSummary,
+                title: turn.model.clone(),
+                body: outcome.to_string(),
+                tool_io: None,
+                metadata: None,
+                duration_ms: duration_secs,
+            }),
+        });
     }
 }
 
@@ -1348,7 +1372,13 @@ struct ReplayHistoryItem {
     line_timestamp: chrono::DateTime<Utc>,
     bucket_priority: u8,
     intra_record_order: usize,
-    turn_item: TurnItem,
+    payload: ReplayHistoryItemPayload,
+}
+
+#[derive(Debug, Clone)]
+enum ReplayHistoryItemPayload {
+    TurnItem(TurnItem),
+    HistoryOnly(crate::SessionHistoryItem),
 }
 
 pub(crate) fn build_prompt_messages_from_snapshot(
@@ -1786,9 +1816,10 @@ pub(crate) fn build_turn_record(
         latest_query_usage,
         stop_reason: turn.stop_reason.clone(),
         failure_reason: turn.failure_reason,
+        error: None,
         session_context,
         turn_context,
-        schema_version: 3,
+        schema_version: 4,
     }
 }
 
@@ -1857,6 +1888,7 @@ mod tests {
     use chrono::Utc;
     use pretty_assertions::assert_eq;
 
+    use super::ReplayHistoryItemPayload;
     use super::ReplayState;
     use super::build_prompt_messages_from_snapshot;
     use crate::execution::PersistedTurnItem;
@@ -1961,11 +1993,14 @@ mod tests {
 
         let titles = items
             .into_iter()
-            .map(|item| match item.turn_item {
-                TurnItem::AgentMessage(TextItem { text }) => text,
-                TurnItem::ToolCall(ToolCallItem { input, .. }) => {
-                    input["command"].as_str().unwrap().to_string()
+            .map(|item| match item.payload {
+                ReplayHistoryItemPayload::TurnItem(TurnItem::AgentMessage(TextItem { text })) => {
+                    text
                 }
+                ReplayHistoryItemPayload::TurnItem(TurnItem::ToolCall(ToolCallItem {
+                    input,
+                    ..
+                })) => input["command"].as_str().unwrap().to_string(),
                 other => format!("{other:?}"),
             })
             .collect::<Vec<_>>();
@@ -2010,6 +2045,7 @@ mod tests {
                     latest_query_usage: Some(usage.clone()),
                     stop_reason: None,
                     failure_reason: None,
+                    error: None,
                     session_context: None,
                     turn_context: None,
                     schema_version: 2,
@@ -2037,6 +2073,7 @@ mod tests {
                     latest_query_usage: None,
                     stop_reason: None,
                     failure_reason: Some(devo_protocol::TurnFailureReason::MaxTurnRequests),
+                    error: None,
                     session_context: None,
                     turn_context: None,
                     schema_version: 2,
@@ -2086,6 +2123,7 @@ mod tests {
                     latest_query_usage: None,
                     stop_reason: None,
                     failure_reason: None,
+                    error: None,
                     session_context: None,
                     turn_context: None,
                     schema_version: 2,
@@ -2130,6 +2168,7 @@ mod tests {
                     latest_query_usage: None,
                     stop_reason: None,
                     failure_reason: None,
+                    error: None,
                     session_context: None,
                     turn_context: None,
                     schema_version: 2,
@@ -2217,6 +2256,7 @@ mod tests {
                     latest_query_usage: None,
                     stop_reason: None,
                     failure_reason: None,
+                    error: None,
                     session_context: None,
                     turn_context: None,
                     schema_version: 2,
@@ -2249,7 +2289,10 @@ mod tests {
         let projected_items = replay
             .pending_items
             .iter()
-            .map(|item| item.turn_item.clone())
+            .filter_map(|item| match &item.payload {
+                ReplayHistoryItemPayload::TurnItem(turn_item) => Some(turn_item.clone()),
+                ReplayHistoryItemPayload::HistoryOnly(_) => None,
+            })
             .collect::<Vec<_>>();
 
         assert_eq!(
@@ -2758,6 +2801,7 @@ mod tests {
                     latest_query_usage: None,
                     stop_reason: None,
                     failure_reason: None,
+                    error: None,
                     session_context: Some(session_context.clone()),
                     turn_context: Some(turn_context.clone()),
                     schema_version: 2,
@@ -2887,6 +2931,7 @@ mod tests {
                     latest_query_usage: None,
                     stop_reason: None,
                     failure_reason: None,
+                    error: None,
                     session_context: None,
                     turn_context: Some(turn_context.clone()),
                     schema_version: 2,
@@ -2992,6 +3037,7 @@ mod tests {
                     latest_query_usage: None,
                     stop_reason: None,
                     failure_reason: None,
+                    error: None,
                     session_context: None,
                     turn_context: Some(turn_context),
                     schema_version: 2,

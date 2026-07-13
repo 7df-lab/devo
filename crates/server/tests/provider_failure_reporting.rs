@@ -126,7 +126,7 @@ impl ModelProviderSDK for UnusedProvider {
 }
 
 #[tokio::test(start_paused = true)]
-async fn exhausted_provider_retries_are_transient_and_do_not_enter_context() -> Result<()> {
+async fn exhausted_provider_retries_persist_for_history_but_do_not_enter_context() -> Result<()> {
     let data_root = TempDir::new()?;
     write_provider_config(data_root.path())?;
     let router = Arc::new(ExhaustingRouter::default());
@@ -211,7 +211,78 @@ async fn exhausted_provider_retries_are_transient_and_do_not_enter_context() -> 
 
     wait_for_original_event(&mut notifications_rx, "turn/completed").await?;
     let rollout = std::fs::read_to_string(rollout_path(data_root.path(), &session))?;
-    assert!(!rollout.contains(PROVIDER_ERROR_TEXT));
+    assert!(rollout.contains(PROVIDER_ERROR_TEXT));
+    let persisted_error = rollout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<devo_core::RolloutLine>(line).ok())
+        .find_map(|line| match line {
+            devo_core::RolloutLine::Turn(line) if line.turn.id == failed_turn_id => line.turn.error,
+            _ => None,
+        });
+    assert_eq!(
+        persisted_error,
+        Some(devo_core::TurnError {
+            code: "PROVIDER_SERVER_ERROR".to_string(),
+            message: format!(
+                "model provider error: provider server error (Some(500)): {PROVIDER_ERROR_TEXT}"
+            ),
+        })
+    );
+
+    let resume_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 5,
+                "method": "_devo/session/resume",
+                "params": { "session_id": session.session_id }
+            }),
+        )
+        .await
+        .context("session/resume after failed turn")?;
+    let resume = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_server::SessionResumeResult>,
+    >(resume_response)?
+    .result;
+    let terminal_history = resume
+        .history_items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                devo_protocol::SessionHistoryItemKind::Error
+                    | devo_protocol::SessionHistoryItemKind::TurnSummary
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let failed_turn = resume.latest_turn.context("latest failed turn")?;
+    let duration_secs = failed_turn.completed_at.and_then(|completed| {
+        let seconds = (completed - failed_turn.started_at).num_seconds();
+        (seconds > 0).then_some(seconds as u64)
+    });
+    assert_eq!(
+        terminal_history,
+        vec![
+            devo_protocol::SessionHistoryItem::new(
+                None,
+                devo_protocol::SessionHistoryItemKind::Error,
+                "PROVIDER_SERVER_ERROR".to_string(),
+                format!(
+                    "model provider error: provider server error (Some(500)): {PROVIDER_ERROR_TEXT}"
+                ),
+            ),
+            devo_protocol::SessionHistoryItem {
+                tool_call_id: None,
+                kind: devo_protocol::SessionHistoryItemKind::TurnSummary,
+                title: failed_turn.model,
+                body: "failed".to_string(),
+                tool_io: None,
+                metadata: None,
+                duration_ms: duration_secs,
+            },
+        ]
+    );
 
     let successful_turn_id = start_turn(&runtime, connection_id, session.session_id, 4).await?;
     wait_for_original_event(&mut notifications_rx, "turn/completed").await?;

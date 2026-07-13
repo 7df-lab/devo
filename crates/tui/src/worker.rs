@@ -3654,11 +3654,15 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
                 TranscriptItem::restored_tool_result(item.title.clone(), item.body.clone())
             }
             SessionHistoryItemKind::Error => {
-                TranscriptItem::tool_error(item.title.clone(), item.body.clone())
+                if item.tool_call_id.is_some() {
+                    TranscriptItem::tool_error(item.title.clone(), item.body.clone())
+                } else {
+                    TranscriptItem::new(kind, String::new(), item.body.clone())
+                }
             }
             SessionHistoryItemKind::TurnSummary => {
                 // TurnSummary uses title for model name, duration_ms for duration in seconds
-                TranscriptItem::new(kind, item.title.clone(), String::new())
+                TranscriptItem::new(kind, item.title.clone(), item.body.clone())
             }
             SessionHistoryItemKind::User
             | SessionHistoryItemKind::Assistant

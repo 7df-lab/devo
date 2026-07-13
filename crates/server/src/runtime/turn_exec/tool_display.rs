@@ -203,30 +203,7 @@ pub(super) fn command_actions_from_tool_input(
     command: &str,
     input: &serde_json::Value,
 ) -> Vec<devo_protocol::parse_command::ParsedCommand> {
-    match tool_name {
-        "read" => crate::tool_actions::read_action_from_tool_input(command, input)
-            .into_iter()
-            .collect(),
-        "find" | "glob" => vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
-            cmd: command.to_string(),
-            path: find_display_from_input(input),
-        }],
-        "grep" => vec![devo_protocol::parse_command::ParsedCommand::Search {
-            cmd: command.to_string(),
-            query: input
-                .get("pattern")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned),
-            path: input
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned),
-        }],
-        "code_search" => code_search_action_from_input(command, input)
-            .into_iter()
-            .collect(),
-        _ => Vec::new(),
-    }
+    crate::tool_actions::exploration_actions_from_tool_input(tool_name, command, input)
 }
 
 fn code_search_display_from_input(input: &serde_json::Value) -> String {
@@ -264,60 +241,6 @@ fn code_search_display_from_input(input: &serde_json::Value) -> String {
             }
         }
     }
-}
-
-fn code_search_action_from_input(
-    command: &str,
-    input: &serde_json::Value,
-) -> Option<devo_protocol::parse_command::ParsedCommand> {
-    match input
-        .get("operation")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("search")
-    {
-        "find_related" => {
-            let path = input
-                .get("file_path")
-                .and_then(serde_json::Value::as_str)
-                .filter(|path| !path.is_empty())?;
-            let line = input
-                .get("line")
-                .and_then(serde_json::Value::as_u64)
-                .map(|line| line.to_string())
-                .unwrap_or_else(|| "?".to_string());
-            Some(devo_protocol::parse_command::ParsedCommand::Search {
-                cmd: command.to_string(),
-                query: Some(format!("related {path}:{line}")),
-                path: Some(path.to_string()),
-            })
-        }
-        _ => {
-            let query = input
-                .get("query")
-                .and_then(serde_json::Value::as_str)
-                .filter(|query| !query.is_empty())?;
-            Some(devo_protocol::parse_command::ParsedCommand::Search {
-                cmd: command.to_string(),
-                query: Some(query.to_string()),
-                path: input
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned),
-            })
-        }
-    }
-}
-
-fn find_display_from_input(input: &serde_json::Value) -> Option<String> {
-    let pattern = input
-        .get("pattern")
-        .and_then(serde_json::Value::as_str)
-        .filter(|pattern| !pattern.is_empty())?;
-    let path = input.get("path").and_then(serde_json::Value::as_str);
-    Some(match path.filter(|path| !path.is_empty()) {
-        Some(path) => format!("{pattern} in {path}"),
-        None => pattern.to_string(),
-    })
 }
 
 pub(super) fn command_actions_from_tool_result(
@@ -402,4 +325,77 @@ pub(super) fn without_agent_coordination_tools(
         .collect::<Vec<_>>();
     let names = names.iter().map(String::as_str).collect::<Vec<_>>();
     registry.restricted_to_specs(&names)
+}
+
+#[cfg(test)]
+mod tests {
+    use devo_core::{ToolCallItem, TurnItem};
+    use devo_protocol::SessionHistoryMetadata;
+    use pretty_assertions::assert_eq;
+
+    use super::command_actions_from_tool_input;
+    use crate::projection::history_item_from_turn_item;
+
+    #[test]
+    fn live_and_replayed_exploration_actions_are_identical() {
+        let cases = [
+            (
+                "read",
+                serde_json::json!({
+                    "filePath": "crates/server/src/projection.rs",
+                    "offset": 20,
+                    "limit": 10
+                }),
+            ),
+            (
+                "glob",
+                serde_json::json!({
+                    "pattern": "**/*.rs",
+                    "path": "crates/server/src"
+                }),
+            ),
+            (
+                "grep",
+                serde_json::json!({
+                    "pattern": "SessionHistoryMetadata",
+                    "path": "crates/server/src"
+                }),
+            ),
+            (
+                "code_search",
+                serde_json::json!({
+                    "operation": "search",
+                    "query": "restored exploration metadata",
+                    "path": "crates/server/src"
+                }),
+            ),
+            (
+                "code_search",
+                serde_json::json!({
+                    "operation": "find_related",
+                    "file_path": "crates/server/src/projection.rs",
+                    "line": 214
+                }),
+            ),
+        ];
+
+        for (tool_name, input) in cases {
+            let projected = history_item_from_turn_item(&TurnItem::ToolCall(ToolCallItem {
+                tool_call_id: "call-1".to_string(),
+                tool_name: tool_name.to_string(),
+                input: input.clone(),
+            }))
+            .expect("history item");
+            let replay_actions = match projected.metadata.expect("explored metadata") {
+                SessionHistoryMetadata::Explored { actions } => actions,
+                other => panic!("unexpected metadata: {other:?}"),
+            };
+
+            assert_eq!(
+                command_actions_from_tool_input(tool_name, &projected.title, &input),
+                replay_actions,
+                "live and replay actions differ for {tool_name}"
+            );
+        }
+    }
 }

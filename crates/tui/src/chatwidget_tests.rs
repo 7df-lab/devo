@@ -2860,6 +2860,99 @@ fn session_switch_restores_error_via_tool_result_cell_style() {
 }
 
 #[test]
+fn rich_session_restore_orders_terminal_error_before_single_failed_footer() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd.clone());
+    let terminal_error = "exact persisted provider failure";
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd,
+        title: None,
+        model: Some("test-model".to_string()),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        active_agent_label: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: vec![],
+        rich_history_items: vec![
+            devo_protocol::SessionHistoryItem {
+                tool_call_id: Some("call-1".to_string()),
+                kind: devo_protocol::SessionHistoryItemKind::ToolCall,
+                title: "bash error".to_string(),
+                body: String::new(),
+                tool_io: None,
+                metadata: None,
+                duration_ms: None,
+            },
+            devo_protocol::SessionHistoryItem {
+                tool_call_id: Some("call-1".to_string()),
+                kind: devo_protocol::SessionHistoryItemKind::Error,
+                title: "bash error".to_string(),
+                body: "permission denied".to_string(),
+                tool_io: None,
+                metadata: None,
+                duration_ms: None,
+            },
+            devo_protocol::SessionHistoryItem {
+                tool_call_id: None,
+                kind: devo_protocol::SessionHistoryItemKind::Error,
+                title: "PROVIDER_SERVER_ERROR".to_string(),
+                body: terminal_error.to_string(),
+                tool_io: None,
+                metadata: None,
+                duration_ms: None,
+            },
+            devo_protocol::SessionHistoryItem {
+                tool_call_id: None,
+                kind: devo_protocol::SessionHistoryItemKind::TurnSummary,
+                title: "test-model".to_string(),
+                body: "failed".to_string(),
+                tool_io: None,
+                metadata: None,
+                duration_ms: Some(7),
+            },
+        ],
+        loaded_item_count: 4,
+        pending_texts: vec![],
+    });
+
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
+    let tool_error_index = history
+        .find("permission denied")
+        .expect("history should contain tool error");
+    let terminal_error_index = history
+        .find(terminal_error)
+        .expect("history should contain exact terminal error");
+    let failed_index = history
+        .find(" · failed")
+        .expect("history should contain failed footer");
+    assert!(
+        tool_error_index < terminal_error_index && terminal_error_index < failed_index,
+        "expected tool error < terminal error < failed footer:\n{history}"
+    );
+    assert!(history.contains("Ran bash error"), "history:\n{history}");
+    assert_eq!(history.matches(" · failed").count(), 1);
+    assert_eq!(history.matches(terminal_error).count(), 1);
+    assert!(
+        !history.contains("PROVIDER_SERVER_ERROR"),
+        "history:\n{history}"
+    );
+}
+
+#[test]
 fn live_and_resume_error_share_same_rendering_chain() {
     let model = Model {
         slug: "test-model".to_string(),
@@ -4762,6 +4855,157 @@ fn interrupted_turn_flushes_explored_cell_before_summary() {
         explored_index < interrupted_index,
         "explored cell should appear before interrupted summary:\n{history}"
     );
+}
+
+fn widget_with_live_explored_cell() -> ChatWidget {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "deepseek-v4-flash".to_string(),
+        display_name: "DeepSeek V4 Flash".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let _ = widget.drain_scrollback_lines(100);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "deepseek-v4-flash".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "code_search update_plan tool handler".to_string(),
+        preparing: false,
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "code_search update_plan tool handler".to_string(),
+            query: Some("update_plan tool handler".to_string()),
+            path: Some("crates/core/src/tools/handlers".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "code_search update_plan tool handler".to_string(),
+        preview: "crates/core/src/tools/handlers/plan.rs".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let live_display = rendered_rows(&widget, 100, 12).join("\n");
+    assert!(
+        live_display.contains("▌ Explored"),
+        "expected completed exploration to be live before turn finish:\n{live_display}"
+    );
+    widget
+}
+
+#[test]
+fn paired_failed_turn_events_finalize_ui_once_in_order() {
+    let mut widget = widget_with_live_explored_cell();
+    let provider_error = "provider rejected the request: quota exceeded";
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFailed {
+        message: provider_error.to_string(),
+        turn_count: 0,
+        total_input_tokens: 10,
+        total_output_tokens: 2,
+        total_tokens: 12,
+        total_cache_read_tokens: 1,
+        prompt_token_estimate: 10,
+        last_query_input_tokens: 10,
+    });
+    assert_eq!(
+        widget.status_message_for_test(),
+        "Query failed; see error above"
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "Failed".to_string(),
+        turn_count: 1,
+        total_input_tokens: 20,
+        total_output_tokens: 4,
+        total_tokens: 24,
+        total_cache_read_tokens: 2,
+        last_query_total_tokens: 14,
+        last_query_input_tokens: 11,
+        prompt_token_estimate: 11,
+    });
+
+    assert_eq!(
+        widget.status_message_for_test(),
+        "Query failed; see error above"
+    );
+    let authoritative_summary = widget.status_summary_text();
+    assert!(
+        authoritative_summary.contains("↑20"),
+        "summary should use TurnFinished input total: {authoritative_summary}"
+    );
+    assert!(
+        authoritative_summary.contains("cached 2 10%"),
+        "summary should use TurnFinished cache total: {authoritative_summary}"
+    );
+    assert!(
+        authoritative_summary.contains("↓4"),
+        "summary should use TurnFinished output total: {authoritative_summary}"
+    );
+    assert!(
+        authoritative_summary.contains("14/200k"),
+        "summary should use TurnFinished latest-query total: {authoritative_summary}"
+    );
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
+    let explored_index = history
+        .find("▌ Explored")
+        .expect("history should contain explored cell");
+    let error_index = history
+        .find(provider_error)
+        .expect("history should contain the exact provider error");
+    let failed_index = history
+        .find(" · failed")
+        .expect("history should contain failed summary");
+    assert!(
+        explored_index < error_index && error_index < failed_index,
+        "expected Explored < provider error < failed:\n{history}"
+    );
+    assert_eq!(history.matches(" · failed").count(), 1);
+    assert!(!history.contains("interrupted"), "history:\n{history}");
+}
+
+#[test]
+fn legacy_failed_turn_finished_flushes_explored_before_footer() {
+    let mut widget = widget_with_live_explored_cell();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "Failed".to_string(),
+        turn_count: 1,
+        total_input_tokens: 10,
+        total_output_tokens: 2,
+        total_tokens: 12,
+        total_cache_read_tokens: 1,
+        last_query_total_tokens: 12,
+        last_query_input_tokens: 10,
+        prompt_token_estimate: 10,
+    });
+
+    let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
+    let explored_index = history
+        .find("▌ Explored")
+        .expect("history should contain explored cell");
+    let failed_index = history
+        .find(" · failed")
+        .expect("history should contain failed summary");
+    assert!(
+        explored_index < failed_index,
+        "explored cell should appear before failed summary:\n{history}"
+    );
+    assert_eq!(history.matches(" · failed").count(), 1);
+    assert!(
+        !history
+            .lines()
+            .any(|line| line.trim_start().starts_with("■ ")),
+        "standalone failed completion should not invent an error message:\n{history}"
+    );
+    assert!(!history.contains("interrupted"), "history:\n{history}");
 }
 
 #[test]

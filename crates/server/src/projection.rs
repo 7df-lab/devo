@@ -201,33 +201,10 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
                 output: None,
                 display_content: None,
             });
-            if matches!(tool_name.as_str(), "read" | "find" | "glob" | "grep") {
-                let parsed = match tool_name.as_str() {
-                    "read" => crate::tool_actions::read_action_from_tool_input(&title, input)
-                        .into_iter()
-                        .collect(),
-                    "find" | "glob" => {
-                        vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
-                            cmd: title.clone(),
-                            path: find_display_from_input(input),
-                        }]
-                    }
-                    "grep" => vec![devo_protocol::parse_command::ParsedCommand::Search {
-                        cmd: title.clone(),
-                        query: input
-                            .get("pattern")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToOwned::to_owned),
-                        path: input
-                            .get("path")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToOwned::to_owned),
-                    }],
-                    _ => Vec::new(),
-                };
-                if !parsed.is_empty() {
-                    item = item.with_metadata(SessionHistoryMetadata::Explored { actions: parsed });
-                }
+            let parsed =
+                crate::tool_actions::exploration_actions_from_tool_input(tool_name, &title, input);
+            if !parsed.is_empty() {
+                item = item.with_metadata(SessionHistoryMetadata::Explored { actions: parsed });
             }
             Some(item)
         }
@@ -520,18 +497,6 @@ fn summarize_tool_call(tool_name: &str, input: &serde_json::Value) -> String {
     devo_core::tools::tool_summary::tool_summary(tool_name, input, &cwd).replacen(": ", " ", 1)
 }
 
-fn find_display_from_input(input: &serde_json::Value) -> Option<String> {
-    let pattern = input
-        .get("pattern")
-        .and_then(serde_json::Value::as_str)
-        .filter(|pattern| !pattern.is_empty())?;
-    let path = input.get("path").and_then(serde_json::Value::as_str);
-    Some(match path.filter(|path| !path.is_empty()) {
-        Some(path) => format!("{pattern} in {path}"),
-        None => pattern.to_string(),
-    })
-}
-
 fn summarize_tool_result(tool_name: Option<&str>, is_error: bool) -> String {
     match (tool_name, is_error) {
         (Some(tool_name), true) => format!("{tool_name} error"),
@@ -546,10 +511,13 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::history_item_from_turn_item;
-    use crate::session::SessionHistoryItemKind;
+    use crate::session::{SessionHistoryItem, SessionHistoryItemKind};
     use devo_core::TurnItem;
     use devo_core::{CommandExecutionItem, TextItem, ToolCallItem, ToolResultItem};
-    use devo_protocol::{SessionHistoryMetadata, SessionHistoryToolIo, SessionPlanStepStatus};
+    use devo_protocol::{
+        SessionHistoryMetadata, SessionHistoryToolIo, SessionPlanStepStatus,
+        parse_command::ParsedCommand,
+    };
 
     #[test]
     fn history_projection_omits_empty_agent_message() {
@@ -737,6 +705,83 @@ mod tests {
             }
             other => panic!("unexpected metadata: {other:?}"),
         }
+    }
+
+    #[test]
+    fn code_search_search_projection_emits_explored_metadata_and_preserves_tool_io() {
+        let input = serde_json::json!({
+            "operation": "search",
+            "query": "restored exploration metadata",
+            "path": "crates/server/src"
+        });
+        let item = TurnItem::ToolCall(ToolCallItem {
+            tool_call_id: "call-search".to_string(),
+            tool_name: "code_search".to_string(),
+            input: input.clone(),
+        });
+
+        assert_eq!(
+            history_item_from_turn_item(&item),
+            Some(SessionHistoryItem {
+                tool_call_id: Some("call-search".to_string()),
+                kind: SessionHistoryItemKind::ToolCall,
+                title: "code_search restored exploration metadata in crates/server/src".to_string(),
+                body: String::new(),
+                tool_io: Some(SessionHistoryToolIo {
+                    tool_name: "code_search".to_string(),
+                    input,
+                    output: None,
+                    display_content: None,
+                }),
+                metadata: Some(SessionHistoryMetadata::Explored {
+                    actions: vec![ParsedCommand::Search {
+                        cmd: "code_search restored exploration metadata in crates/server/src"
+                            .to_string(),
+                        query: Some("restored exploration metadata".to_string()),
+                        path: Some("crates/server/src".to_string()),
+                    }],
+                }),
+                duration_ms: None,
+            })
+        );
+    }
+
+    #[test]
+    fn code_search_find_related_projection_emits_explored_metadata_and_preserves_tool_io() {
+        let input = serde_json::json!({
+            "operation": "find_related",
+            "file_path": "crates/server/src/projection.rs",
+            "line": 214
+        });
+        let item = TurnItem::ToolCall(ToolCallItem {
+            tool_call_id: "call-related".to_string(),
+            tool_name: "code_search".to_string(),
+            input: input.clone(),
+        });
+
+        assert_eq!(
+            history_item_from_turn_item(&item),
+            Some(SessionHistoryItem {
+                tool_call_id: Some("call-related".to_string()),
+                kind: SessionHistoryItemKind::ToolCall,
+                title: "code_search related crates/server/src/projection.rs:214".to_string(),
+                body: String::new(),
+                tool_io: Some(SessionHistoryToolIo {
+                    tool_name: "code_search".to_string(),
+                    input,
+                    output: None,
+                    display_content: None,
+                }),
+                metadata: Some(SessionHistoryMetadata::Explored {
+                    actions: vec![ParsedCommand::Search {
+                        cmd: "code_search related crates/server/src/projection.rs:214".to_string(),
+                        query: Some("related crates/server/src/projection.rs:214".to_string()),
+                        path: Some("crates/server/src/projection.rs".to_string()),
+                    }],
+                }),
+                duration_ms: None,
+            })
+        );
     }
 
     #[test]

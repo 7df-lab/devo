@@ -275,6 +275,7 @@ fn turn_projection_preserves_turn_status_vocabulary() {
         latest_query_usage: None,
         stop_reason: None,
         failure_reason: None,
+        error: None,
         session_context: None,
         turn_context: None,
         schema_version: 2,

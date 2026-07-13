@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use devo_core::{SessionId, TurnStatus, TurnUsage};
-use devo_protocol::TurnFailedPayload;
+use devo_core::{SessionId, TurnError, TurnStatus, TurnUsage};
+use devo_protocol::{SessionHistoryItem, SessionHistoryItemKind, TurnFailedPayload};
 
 use super::super::ServerRuntime;
 use super::super::subagent_usage::ParentUsageSnapshot;
@@ -84,6 +84,15 @@ impl ServerRuntime {
         };
         let (turn_usage, latest_query_usage) =
             terminal_usages(event_summary.as_ref(), usage_snapshot.as_ref());
+        let terminal_error = result
+            .as_ref()
+            .err()
+            .filter(|error| !matches!(error, devo_core::AgentError::Aborted))
+            .map(turn_error_payload_from_error)
+            .map(|error| TurnError {
+                code: error.code,
+                message: error.message,
+            });
         if let Some(snapshot) = usage_snapshot {
             session_total_input_tokens = snapshot.session_totals.input_tokens;
             session_total_output_tokens = snapshot.session_totals.output_tokens;
@@ -150,12 +159,25 @@ impl ServerRuntime {
             state.core.last_turn_interrupted = false;
         }
         self.clear_btw_input_queue(state, session_id).await;
-        self.append_terminal_turn_record(state, session_id, &final_turn, latest_query_usage)
-            .await;
+        self.append_terminal_turn_record(
+            state,
+            session_id,
+            &final_turn,
+            latest_query_usage,
+            terminal_error.clone(),
+        )
+        .await;
+        append_terminal_history_items(state, &final_turn, terminal_error.as_ref());
         self.finalize_turn_workspace_changes(session_id, &final_turn)
             .await;
-        self.emit_terminal_turn_events(state, session_id, &final_turn, &result)
-            .await;
+        self.emit_terminal_turn_events(
+            state,
+            session_id,
+            &final_turn,
+            &result,
+            terminal_error.as_ref(),
+        )
+        .await;
         self.record_terminal_turn_status(
             final_turn.turn_id,
             super::super::TerminalTurnSnapshot::from_turn(&final_turn),
@@ -268,15 +290,18 @@ impl ServerRuntime {
         session_id: SessionId,
         final_turn: &crate::TurnMetadata,
         latest_query_usage: Option<devo_core::TurnUsage>,
+        terminal_error: Option<TurnError>,
     ) {
         let record = state.record.clone();
         let turn_context = state.core.latest_turn_context.clone();
         let session_context = state.core.session_context.clone();
+        let mut turn_record = build_turn_record(final_turn, None, turn_context, latest_query_usage);
+        turn_record.error = terminal_error;
         if let Some(record) = record
             && let Err(error) = self.rollout_store.append_turn_deduped(
                 &record,
                 &mut state.session_context_recorded,
-                build_turn_record(final_turn, None, turn_context, latest_query_usage),
+                turn_record,
                 session_context,
             )
         {
@@ -290,6 +315,7 @@ impl ServerRuntime {
         session_id: SessionId,
         final_turn: &crate::TurnMetadata,
         result: &Result<(), devo_core::AgentError>,
+        terminal_error: Option<&TurnError>,
     ) {
         if let Err(error) = result {
             if matches!(error, devo_core::AgentError::Aborted) {
@@ -315,7 +341,10 @@ impl ServerRuntime {
                 self.broadcast_event(crate::ServerEvent::TurnFailed(TurnFailedPayload {
                     session_id,
                     turn: final_turn.clone(),
-                    error: Some(turn_error_payload_from_error(error)),
+                    error: terminal_error.map(|error| devo_protocol::TurnErrorPayload {
+                        code: error.code.clone(),
+                        message: error.message.clone(),
+                    }),
                 }))
                 .await;
             }
@@ -344,6 +373,41 @@ impl ServerRuntime {
         ))
         .await;
     }
+}
+
+fn append_terminal_history_items(
+    state: &mut SessionActorState,
+    final_turn: &crate::TurnMetadata,
+    terminal_error: Option<&TurnError>,
+) {
+    if let Some(error) = terminal_error {
+        state.history_items.push(SessionHistoryItem::new(
+            None,
+            SessionHistoryItemKind::Error,
+            error.code.clone(),
+            error.message.clone(),
+        ));
+    }
+
+    let outcome = match final_turn.status {
+        TurnStatus::Failed => "failed",
+        TurnStatus::Interrupted => "interrupted",
+        TurnStatus::Completed => "",
+        TurnStatus::Pending | TurnStatus::Running | TurnStatus::WaitingApproval => return,
+    };
+    let duration_secs = final_turn.completed_at.and_then(|completed| {
+        let seconds = (completed - final_turn.started_at).num_seconds();
+        (seconds > 0).then_some(seconds as u64)
+    });
+    state.history_items.push(SessionHistoryItem {
+        tool_call_id: None,
+        kind: SessionHistoryItemKind::TurnSummary,
+        title: final_turn.model.clone(),
+        body: outcome.to_string(),
+        tool_io: None,
+        metadata: None,
+        duration_ms: duration_secs,
+    });
 }
 
 #[cfg(test)]

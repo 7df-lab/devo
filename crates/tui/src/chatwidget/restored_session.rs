@@ -241,24 +241,41 @@ impl ChatWidget {
                     )));
                 }
                 devo_protocol::SessionHistoryItemKind::Error => {
-                    self.add_history_entry_without_redraw(Box::new(ToolResultCell::new(
-                        (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title)),
-                        item.body.clone(),
-                        Self::failed_dot_prefix(),
-                        Line::from("  "),
-                        Self::tool_text_style(),
-                        false,
-                    )));
+                    if item.tool_call_id.is_none() {
+                        self.add_history_entry_without_redraw(Box::new(
+                            history_cell::new_error_event(item.body.clone()),
+                        ));
+                    } else {
+                        self.add_history_entry_without_redraw(Box::new(ToolResultCell::new(
+                            (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title)),
+                            item.body.clone(),
+                            Self::failed_dot_prefix(),
+                            Line::from("  "),
+                            Self::tool_text_style(),
+                            false,
+                        )));
+                    }
                 }
                 devo_protocol::SessionHistoryItemKind::TurnSummary => {
-                    self.add_history_entry_without_redraw(Box::new(
-                        history_cell::TurnSummaryCell::new(
+                    let summary = match item.body.as_str() {
+                        "failed" => history_cell::TurnSummaryCell::new_failed(
+                            InputMode::Build,
+                            item.title.clone(),
+                            self.active_accent_color(),
+                        ),
+                        "interrupted" => history_cell::TurnSummaryCell::new_interrupted(
+                            InputMode::Build,
+                            item.title.clone(),
+                            self.active_accent_color(),
+                        ),
+                        _ => history_cell::TurnSummaryCell::new(
                             InputMode::Build,
                             item.title.clone(),
                             item.duration_ms,
                             self.active_accent_color(),
                         ),
-                    ));
+                    };
+                    self.add_history_entry_without_redraw(Box::new(summary));
                 }
             }
         }

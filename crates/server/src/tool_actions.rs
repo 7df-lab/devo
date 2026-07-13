@@ -2,6 +2,37 @@ use std::path::PathBuf;
 
 use devo_protocol::parse_command::ParsedCommand;
 
+pub(crate) fn exploration_actions_from_tool_input(
+    tool_name: &str,
+    command: &str,
+    input: &serde_json::Value,
+) -> Vec<ParsedCommand> {
+    match tool_name {
+        "read" => read_action_from_tool_input(command, input)
+            .into_iter()
+            .collect(),
+        "find" | "glob" => vec![ParsedCommand::ListFiles {
+            cmd: command.to_string(),
+            path: find_display_from_input(input),
+        }],
+        "grep" => vec![ParsedCommand::Search {
+            cmd: command.to_string(),
+            query: input
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+            path: input
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+        }],
+        "code_search" => code_search_action_from_input(command, input)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn read_action_from_tool_input(
     command: &str,
     input: &serde_json::Value,
@@ -79,6 +110,60 @@ fn parse_read_range(suffix: &str) -> (Option<u64>, Option<u64>) {
         }
     }
     (offset, limit)
+}
+
+fn find_display_from_input(input: &serde_json::Value) -> Option<String> {
+    let pattern = input
+        .get("pattern")
+        .and_then(serde_json::Value::as_str)
+        .filter(|pattern| !pattern.is_empty())?;
+    let path = input.get("path").and_then(serde_json::Value::as_str);
+    Some(match path.filter(|path| !path.is_empty()) {
+        Some(path) => format!("{pattern} in {path}"),
+        None => pattern.to_string(),
+    })
+}
+
+fn code_search_action_from_input(
+    command: &str,
+    input: &serde_json::Value,
+) -> Option<ParsedCommand> {
+    match input
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("search")
+    {
+        "find_related" => {
+            let path = input
+                .get("file_path")
+                .and_then(serde_json::Value::as_str)
+                .filter(|path| !path.is_empty())?;
+            let line = input
+                .get("line")
+                .and_then(serde_json::Value::as_u64)
+                .map(|line| line.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            Some(ParsedCommand::Search {
+                cmd: command.to_string(),
+                query: Some(format!("related {path}:{line}")),
+                path: Some(path.to_string()),
+            })
+        }
+        _ => {
+            let query = input
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .filter(|query| !query.is_empty())?;
+            Some(ParsedCommand::Search {
+                cmd: command.to_string(),
+                query: Some(query.to_string()),
+                path: input
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned),
+            })
+        }
+    }
 }
 
 #[cfg(test)]

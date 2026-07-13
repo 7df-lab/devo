@@ -381,9 +381,14 @@ impl ChatWidget {
                     false,
                 )));
             }
-            TranscriptItemKind::Error => self.add_history_entry_without_redraw(Box::new(
-                history_cell::new_error_event_with_hint(item.body, Some(item.title)),
-            )),
+            TranscriptItemKind::Error => {
+                let cell = if item.title.is_empty() {
+                    history_cell::new_error_event(item.body)
+                } else {
+                    history_cell::new_error_event_with_hint(item.body, Some(item.title))
+                };
+                self.add_history_entry_without_redraw(Box::new(cell));
+            }
             TranscriptItemKind::Approval => {}
             TranscriptItemKind::System => {
                 self.add_history_entry_without_redraw(Box::new(history_cell::new_info_event(
@@ -393,14 +398,25 @@ impl ChatWidget {
             }
             TranscriptItemKind::TurnSummary => {
                 // item.title contains model name, item.duration_ms contains seconds
-                self.add_history_entry_without_redraw(Box::new(
-                    history_cell::TurnSummaryCell::new(
+                let summary = match item.body.as_str() {
+                    "failed" => history_cell::TurnSummaryCell::new_failed(
+                        InputMode::Build,
+                        item.title.clone(),
+                        self.active_accent_color(),
+                    ),
+                    "interrupted" => history_cell::TurnSummaryCell::new_interrupted(
+                        InputMode::Build,
+                        item.title.clone(),
+                        self.active_accent_color(),
+                    ),
+                    _ => history_cell::TurnSummaryCell::new(
                         InputMode::Build,
                         item.title.clone(),
                         item.duration_ms,
                         self.active_accent_color(),
                     ),
-                ));
+                };
+                self.add_history_entry_without_redraw(Box::new(summary));
             }
         }
     }
