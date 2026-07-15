@@ -63,6 +63,23 @@ User-level model catalog:
 Project-level overrides can also be placed at `<workspace>/.devo/models.json`.
 Catalog precedence is `<workspace>/.devo/models.json`, then
 `<DEVO_HOME>/models.json`, then the built-in catalog.
+
+Devo keeps untouched built-in entries in the user-level catalog synchronized
+with the catalog bundled in the running binary. Managed entries contain a
+reserved `_devo` object with a content fingerprint. Editing any model field
+turns that entry into an effective user override, so later built-in changes do
+not replace it. To pin an otherwise unchanged entry explicitly, set:
+
+```json
+"_devo": {
+  "update_policy": "pinned"
+}
+```
+
+Custom slugs are never managed, and project-level catalogs are never rewritten.
+Removing the pin and deleting the customized entry lets Devo add the current
+built-in entry again on the next startup.
+
 In `models.json`, `provider` is the default wire API metadata for the model; the
 actual endpoint is still selected by the `provider` field in `config.toml`.
 If `base_instructions` is omitted, Devo falls back to the built-in default base

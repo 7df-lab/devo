@@ -462,6 +462,13 @@ defaults, merged by `slug`. Turn metadata records `model` as the catalog slug
 and `request_model` as the provider request model; these values may be
 identical.
 
+Untouched built-in entries in `<DEVO_HOME>/models.json` are synchronized with
+the catalog bundled in the running binary. Devo records the source fingerprint
+and update policy in a reserved `_devo` object. Editing model fields preserves
+the full entry as a user override. Set `_devo.update_policy` to `"pinned"` to
+prevent an unchanged built-in entry from being refreshed explicitly. Custom
+slugs and workspace-level catalogs are never rewritten by this synchronization.
+
 When reasoning effort resolution selects a model variant catalog slug, the provider
 request model is resolved from enabled bindings for the same provider as the
 selected turn binding. Duplicate `model_slug` values under other providers do

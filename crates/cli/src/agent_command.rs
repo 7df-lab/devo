@@ -39,7 +39,7 @@ pub(crate) async fn run_agent(
         .iter()
         .map(|warning| {
             format!(
-                "Skipped model catalog override {}: {}",
+                "Model catalog warning for {}: {}",
                 warning.path.display(),
                 warning.message
             )
