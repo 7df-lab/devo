@@ -1,6 +1,6 @@
 //! Shared types and limits for long-lived command execution tools.
 //!
-//! The process runner, bounded output buffer, and session store live below this
+//! The process runner, bounded output buffer, and process store live below this
 //! module so tool handlers can enforce one set of limits for exec and stdin
 //! polling without duplicating lifecycle policy.
 
@@ -42,7 +42,7 @@ pub struct ExecCommandArgs {
 }
 
 pub struct WriteStdinArgs {
-    pub session_id: i32,
+    pub process_id: i32,
     pub chars: String,
     pub yield_time_ms: u64,
     pub max_output_tokens: usize,

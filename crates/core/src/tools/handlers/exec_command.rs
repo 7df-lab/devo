@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use devo_protocol::SessionId;
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::apply_patch::exec_apply_patch;
@@ -179,7 +180,7 @@ impl ToolHandler for ExecCommandHandler {
                 ToolContent::Json(json) => (json.to_string(), Some(json)),
                 ToolContent::Mixed { text, json } => (text.unwrap_or_default(), json),
             };
-            let content = format_apply_patch_intercept_response(&text);
+            let content = text;
             return if output.is_error {
                 Ok(ToolResult::error(
                     ToolResultContent::Text(content.clone()),
@@ -202,7 +203,7 @@ impl ToolHandler for ExecCommandHandler {
             };
         }
 
-        let Some(session_id) = self.store.reserve_process_id().await else {
+        let Some(process_id) = self.store.reserve_process_id().await else {
             return Ok(ToolResult::error(
                 ToolResultContent::Text(format!(
                     "max unified exec processes ({}) reached; cannot allocate process",
@@ -217,7 +218,7 @@ impl ToolHandler for ExecCommandHandler {
         };
 
         let spawned_process = UnifiedExecProcess::spawn(
-            session_id,
+            process_id,
             &args.cmd,
             &cwd,
             args.shell.as_deref(),
@@ -228,7 +229,7 @@ impl ToolHandler for ExecCommandHandler {
         let (proc, _broadcast_rx) = match spawned_process {
             Ok(spawned) => spawned,
             Err(error) => {
-                self.store.release_reserved(session_id).await;
+                self.store.release_reserved(process_id).await;
                 return Err(ToolCallError::ExecutionFailed(format!(
                     "failed to spawn process: {error}"
                 )));
@@ -237,7 +238,7 @@ impl ToolHandler for ExecCommandHandler {
 
         let proc = Arc::new(proc);
         self.store
-            .insert_reserved(session_id, Arc::clone(&proc))
+            .insert_reserved(process_id, Arc::clone(&proc))
             .await;
 
         if execution_mode == ExecExecutionMode::Background {
@@ -247,7 +248,7 @@ impl ToolHandler for ExecCommandHandler {
                 })?;
             let task = self
                 .background_tasks
-                .register_command(owner_session_id, session_id, args.cmd, Arc::clone(&proc))
+                .register_command(owner_session_id, process_id, args.cmd, Arc::clone(&proc))
                 .await;
             let task_id = task.task_id.clone();
             let background_tasks = Arc::clone(&self.background_tasks);
@@ -257,12 +258,8 @@ impl ToolHandler for ExecCommandHandler {
                 }
                 let mut rx = proc.subscribe();
                 let output = collect_output(&mut rx, &proc, 100, args.max_output_tokens).await;
-                let response = format_exec_response(
-                    &output,
-                    Some(session_id),
-                    Some(generate_chunk_id()),
-                    /*warning*/ None,
-                );
+                let response =
+                    format_exec_response(&output, Some(process_id), /*warning*/ None);
                 background_tasks
                     .complete_command(&task_id, output.exit_code, response)
                     .await;
@@ -288,7 +285,7 @@ impl ToolHandler for ExecCommandHandler {
         let cancel_task = tokio::spawn(async move {
             cancel_token.cancelled().await;
             proc_for_cancel.terminate();
-            store_for_cancel.remove(session_id).await;
+            store_for_cancel.remove(process_id).await;
         });
 
         let mut rx = proc.subscribe();
@@ -301,26 +298,21 @@ impl ToolHandler for ExecCommandHandler {
             ) => output,
             _ = ctx.cancel_token.cancelled() => {
                 proc.terminate();
-                self.store.remove(session_id).await;
+                self.store.remove(process_id).await;
                 cancel_task.abort();
                 return Err(ToolCallError::Cancelled);
             }
         };
         cancel_task.abort();
         let warning = if output.exit_code.is_some() {
-            self.store.remove(session_id).await;
+            self.store.remove(process_id).await;
             None
         } else {
             let process_count = self.store.len().await;
             (process_count >= WARNING_PROCESSES).then(|| open_process_warning(process_count))
         };
 
-        let response = format_exec_response(
-            &output,
-            Some(session_id),
-            Some(generate_chunk_id()),
-            warning.as_deref(),
-        );
+        let response = format_exec_response(&output, Some(process_id), warning.as_deref());
         Ok(ToolResult::success(
             ToolResultContent::Text(response),
             "Command executed",
@@ -349,15 +341,15 @@ impl WriteStdinHandler {
                 input_schema: JsonSchema::object(
                     std::collections::BTreeMap::from([
                         (
-                            "session_id".to_string(),
-                            JsonSchema::integer(Some("Process session ID")),
+                            "process_id".to_string(),
+                            JsonSchema::integer(Some("Running process ID")),
                         ),
                         (
                             "chars".to_string(),
                             JsonSchema::string(Some("Characters to write to stdin")),
                         ),
                     ]),
-                    Some(vec!["session_id".to_string(), "chars".to_string()]),
+                    Some(vec!["process_id".to_string(), "chars".to_string()]),
                     None,
                 ),
                 output_mode: ToolOutputMode::Mixed,
@@ -386,9 +378,11 @@ impl ToolHandler for WriteStdinHandler {
         _progress: Option<ToolProgressSender>,
     ) -> Result<ToolResult, ToolCallError> {
         let args = WriteStdinArgs {
-            session_id: input["session_id"]
-                .as_i64()
-                .ok_or_else(|| ToolCallError::InvalidInput("missing 'session_id' field".into()))?
+            process_id: input
+                .get("process_id")
+                .or_else(|| input.get("session_id"))
+                .and_then(serde_json::Value::as_i64)
+                .ok_or_else(|| ToolCallError::InvalidInput("missing 'process_id' field".into()))?
                 as i32,
             chars: input["chars"].as_str().unwrap_or("").to_string(),
             yield_time_ms: input["yield_time_ms"]
@@ -400,8 +394,8 @@ impl ToolHandler for WriteStdinHandler {
                 .unwrap_or(crate::unified_exec::MAX_OUTPUT_TOKENS),
         };
 
-        let proc = self.store.get(args.session_id).await.ok_or_else(|| {
-            ToolCallError::ExecutionFailed(format!("Unknown process id {}", args.session_id))
+        let proc = self.store.get(args.process_id).await.ok_or_else(|| {
+            ToolCallError::ExecutionFailed(format!("Unknown process id {}", args.process_id))
         })?;
 
         if !args.chars.is_empty() {
@@ -432,15 +426,10 @@ impl ToolHandler for WriteStdinHandler {
         .await;
 
         if output.exit_code.is_some() {
-            self.store.remove(args.session_id).await;
+            self.store.remove(args.process_id).await;
         }
 
-        let response = format_exec_response(
-            &output,
-            Some(args.session_id),
-            Some(generate_chunk_id()),
-            /*warning*/ None,
-        );
+        let response = format_exec_response(&output, Some(args.process_id), /*warning*/ None);
         Ok(ToolResult::success(
             ToolResultContent::Text(response),
             "Input written",
@@ -450,54 +439,33 @@ impl ToolHandler for WriteStdinHandler {
 
 fn format_exec_response(
     output: &ProcessOutput,
-    session_id: Option<i32>,
-    chunk_id: Option<String>,
+    process_id: Option<i32>,
     warning: Option<&str>,
 ) -> String {
     let mut parts = Vec::new();
 
-    if let Some(chunk_id) = chunk_id
-        && !chunk_id.is_empty()
-    {
-        parts.push(format!("Chunk ID: {chunk_id}"));
-    }
-
-    parts.push(format!("Wall time: {:.4} seconds", output.wall_time_secs));
-
     if let Some(code) = output.exit_code {
         parts.push(format!("Process exited with code {code}"));
     }
-    if let Some(sid) = session_id
+    if let Some(process_id) = process_id
         && output.exit_code.is_none()
     {
-        parts.push(format!("Process running with session ID {sid}"));
+        parts.push(format!("Process running with process ID {process_id}"));
     }
     if let Some(warning) = warning {
         parts.push(warning.to_string());
     }
-
-    parts.push(format!(
-        "Original token count: {}",
-        output.original_token_count
-    ));
-    parts.push("Output:".to_string());
-    parts.push(output.output.clone());
+    if !output.output.is_empty() {
+        parts.push(output.output.clone());
+    }
 
     parts.join("\n")
-}
-
-fn generate_chunk_id() -> String {
-    Uuid::new_v4().to_string().chars().take(6).collect()
 }
 
 fn open_process_warning(process_count: usize) -> String {
     format!(
         "Warning: The maximum number of unified exec processes you can keep open is {WARNING_PROCESSES} and you currently have {process_count} processes open. Reuse older processes or close them to prevent automatic pruning of old processes"
     )
-}
-
-fn format_apply_patch_intercept_response(content: &str) -> String {
-    format!("Wall time: 0.0000 seconds\nOutput:\n{content}")
 }
 
 #[allow(dead_code)]
@@ -663,12 +631,8 @@ mod tests {
             truncated: false,
             original_token_count: 3,
         };
-        let text = format_exec_response(&output, None, None, /*warning*/ None);
-        assert!(text.contains("Wall time: 1.5000"));
-        assert!(text.contains("Process exited with code 0"));
-        assert!(text.contains("hello world"));
-        assert!(!text.contains("session ID"));
-        assert!(text.contains("Original token count: 3"));
+        let text = format_exec_response(&output, None, /*warning*/ None);
+        assert_eq!(text, "Process exited with code 0\nhello world");
     }
 
     #[test]
@@ -680,9 +644,8 @@ mod tests {
             truncated: false,
             original_token_count: 3,
         };
-        let text = format_exec_response(&output, Some(42), None, /*warning*/ None);
-        assert!(text.contains("Process running with session ID 42"));
-        assert!(!text.contains("exit code"));
+        let text = format_exec_response(&output, Some(42), /*warning*/ None);
+        assert_eq!(text, "Process running with process ID 42\nbuilding...");
     }
 
     #[test]
@@ -694,12 +657,12 @@ mod tests {
             truncated: true,
             original_token_count: 3,
         };
-        let text = format_exec_response(&output, Some(1), None, /*warning*/ None);
-        assert!(text.contains("Output:"));
+        let text = format_exec_response(&output, Some(1), /*warning*/ None);
+        assert_eq!(text, "Process running with process ID 1\nlong output...");
     }
 
     #[test]
-    fn format_exec_response_with_both_exit_and_session() {
+    fn format_exec_response_with_both_exit_and_process_id() {
         let output = ProcessOutput {
             output: "done".into(),
             exit_code: Some(0),
@@ -707,10 +670,8 @@ mod tests {
             truncated: false,
             original_token_count: 1,
         };
-        // When exit_code is Some, session_id is not shown even if provided
-        let text = format_exec_response(&output, Some(99), None, /*warning*/ None);
-        assert!(text.contains("Process exited with code 0"));
-        assert!(!text.contains("session ID"));
+        let text = format_exec_response(&output, Some(99), /*warning*/ None);
+        assert_eq!(text, "Process exited with code 0\ndone");
     }
 
     #[test]
@@ -726,12 +687,56 @@ mod tests {
         let text = format_exec_response(
             &output,
             Some(42),
-            None,
             Some(&open_process_warning(WARNING_PROCESSES)),
         );
 
-        assert!(text.contains("currently have 60 processes open"));
-        assert!(text.contains("Reuse older processes"));
+        assert_eq!(
+            text,
+            format!(
+                "Process running with process ID 42\n{}\nbuilding...",
+                open_process_warning(WARNING_PROCESSES)
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn write_stdin_accepts_legacy_session_id() {
+        let handler = WriteStdinHandler::new(Arc::new(ProcessStore::new()));
+        let error = handler
+            .handle(
+                test_ctx(std::env::temp_dir()),
+                serde_json::json!({ "session_id": 42, "chars": "" }),
+                /*_progress*/ None,
+            )
+            .await
+            .expect_err("unknown legacy process id");
+        let ToolCallError::ExecutionFailed(message) = error else {
+            panic!("legacy session_id should be parsed as a process id");
+        };
+
+        assert_eq!(message, "Unknown process id 42");
+    }
+
+    #[tokio::test]
+    async fn write_stdin_prefers_process_id_over_legacy_session_id() {
+        let handler = WriteStdinHandler::new(Arc::new(ProcessStore::new()));
+        let error = handler
+            .handle(
+                test_ctx(std::env::temp_dir()),
+                serde_json::json!({
+                    "process_id": 42,
+                    "session_id": 99,
+                    "chars": ""
+                }),
+                /*_progress*/ None,
+            )
+            .await
+            .expect_err("unknown process id");
+        let ToolCallError::ExecutionFailed(message) = error else {
+            panic!("process_id should take precedence over legacy session_id");
+        };
+
+        assert_eq!(message, "Unknown process id 42");
     }
 
     #[test]
@@ -889,7 +894,7 @@ mod tests {
             .expect("handle exec command");
 
         let (text, metadata) = result_text_and_metadata(&output.content);
-        assert!(text.starts_with("Wall time: 0.0000 seconds\nOutput:\n"));
+        assert!(text.starts_with("Success. Updated the following files:"));
         assert!(text.contains("Success. Updated the following files:"));
         assert!(!text.contains("\"diagnostics\""));
         assert_eq!(
@@ -924,7 +929,7 @@ mod tests {
             .expect("handle exec command");
 
         let (text, metadata) = result_text_and_metadata(&output.content);
-        assert!(text.starts_with("Wall time: 0.0000 seconds\nOutput:\n"));
+        assert!(text.starts_with("Success. Updated the following files:"));
         assert!(text.contains("Success. Updated the following files:"));
         assert!(!text.contains("\"diagnostics\""));
         assert_eq!(

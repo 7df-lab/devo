@@ -307,32 +307,20 @@ fn unified_exec_output_schema(tool_name: &str) -> Option<serde_json::Value> {
     Some(serde_json::json!({
         "type": "object",
         "properties": {
-            "chunk_id": {
-                "type": "string",
-                "description": "Chunk identifier included when the response reports one."
-            },
-            "wall_time_seconds": {
-                "type": "number",
-                "description": "Elapsed wall time spent waiting for output in seconds."
-            },
             "exit_code": {
                 "type": "number",
                 "description": "Process exit code when the command finished during this call."
             },
-            "session_id": {
+            "process_id": {
                 "type": "number",
-                "description": "Session identifier to pass to write_stdin when the process is still running."
-            },
-            "original_token_count": {
-                "type": "number",
-                "description": "Approximate token count before output truncation."
+                "description": "Process identifier to pass to write_stdin when the process is still running."
             },
             "output": {
                 "type": "string",
                 "description": "Command output text, possibly truncated."
             }
         },
-        "required": ["wall_time_seconds", "output"],
+        "required": ["output"],
         "additionalProperties": false
     }))
 }
@@ -777,7 +765,28 @@ mod tests {
         let registry = builder.build();
         let defs = registry.tool_definitions();
 
-        assert!(defs[0].output_schema.is_some());
+        assert_eq!(
+            defs[0].output_schema,
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "exit_code": {
+                        "type": "number",
+                        "description": "Process exit code when the command finished during this call."
+                    },
+                    "process_id": {
+                        "type": "number",
+                        "description": "Process identifier to pass to write_stdin when the process is still running."
+                    },
+                    "output": {
+                        "type": "string",
+                        "description": "Command output text, possibly truncated."
+                    }
+                },
+                "required": ["output"],
+                "additionalProperties": false
+            }))
+        );
     }
 
     #[test]

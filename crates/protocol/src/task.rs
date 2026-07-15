@@ -51,7 +51,8 @@ pub struct AgentTaskMetadata {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct CommandTaskMetadata {
-    pub process_session_id: i32,
+    #[serde(alias = "process_session_id")]
+    pub process_id: i32,
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
@@ -145,5 +146,32 @@ mod tests {
             serde_json::from_value(json).expect("deserialize task result");
 
         assert_eq!(restored, result);
+    }
+
+    #[test]
+    fn command_metadata_reads_legacy_process_session_id_and_writes_process_id() {
+        let restored: CommandTaskMetadata = serde_json::from_value(serde_json::json!({
+            "process_session_id": 42,
+            "command": "cargo test",
+            "exit_code": 0
+        }))
+        .expect("deserialize legacy command metadata");
+
+        assert_eq!(
+            restored,
+            CommandTaskMetadata {
+                process_id: 42,
+                command: "cargo test".to_string(),
+                exit_code: Some(0),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(restored).expect("serialize command metadata"),
+            serde_json::json!({
+                "process_id": 42,
+                "command": "cargo test",
+                "exit_code": 0
+            })
+        );
     }
 }
