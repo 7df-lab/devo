@@ -387,6 +387,9 @@ function sessionStatusChangedFromOriginalEvent(
 function sessionIdFromCompactionPayload(payload: Record<string, unknown>): string | null {
 	const direct = payload.session_id ?? payload.sessionId
 	if (typeof direct === "string" && direct) return direct
+	const context = objectRecord(payload.context)
+	const contextual = context?.session_id ?? context?.sessionId
+	if (typeof contextual === "string" && contextual) return contextual
 	const session = objectRecord(payload.session)
 	const nested = session?.session_id ?? session?.sessionId
 	return typeof nested === "string" && nested ? nested : null
@@ -395,13 +398,38 @@ function sessionIdFromCompactionPayload(payload: Record<string, unknown>): strin
 function sessionCompactionFromOriginalEvent(
 	original: unknown,
 	originalMethod?: string,
-): { sessionId: string; status: "started" | "completed" | "failed"; message?: string } | null {
+): {
+	sessionId: string
+	status: "started" | "completed" | "failed"
+	message?: string
+	itemId?: string
+	turnId?: string
+} | null {
 	const event = objectRecord(original)
 	if (!event) return null
 
 	let status: "started" | "completed" | "failed" | null = null
 	let payload: Record<string, unknown> | undefined
-	if (originalMethod === "session/compaction/started") {
+	let itemId: string | undefined
+	let turnId: string | undefined
+	if (originalMethod === "item/started" || originalMethod === "item/completed") {
+		const item = objectRecord(event.item)
+		if (item?.item_kind !== "context_compaction" && item?.itemKind !== "context_compaction") {
+			return null
+		}
+		const context = objectRecord(event.context)
+		const itemPayload = objectRecord(item.payload)
+		status = originalMethod === "item/started"
+			? "started"
+			: itemPayload?.status === "failed"
+				? "failed"
+				: "completed"
+		payload = event
+		const rawItemId = item.item_id ?? item.itemId
+		const rawTurnId = context?.turn_id ?? context?.turnId
+		itemId = typeof rawItemId === "string" && rawItemId ? rawItemId : undefined
+		turnId = typeof rawTurnId === "string" && rawTurnId ? rawTurnId : undefined
+	} else if (originalMethod === "session/compaction/started") {
 		status = "started"
 		payload = objectRecord(event.SessionCompactionStarted) ?? event
 	} else if (originalMethod === "session/compaction/completed") {
@@ -443,11 +471,14 @@ function sessionCompactionFromOriginalEvent(
 	if (!status || !payload) return null
 	const sessionId = sessionIdFromCompactionPayload(payload)
 	if (!sessionId) return null
-	const message = payload.message
+	const itemPayload = objectRecord(objectRecord(payload.item)?.payload)
+	const message = payload.message ?? itemPayload?.message
 	return {
 		sessionId,
 		status,
 		...(typeof message === "string" && message ? { message } : {}),
+		...(itemId ? { itemId } : {}),
+		...(turnId ? { turnId } : {}),
 	}
 }
 
@@ -1646,6 +1677,21 @@ class AcpClient {
 					...(compaction.message ? { message: compaction.message } : {}),
 				},
 			})
+			if (compaction.status === "started" && compaction.itemId) {
+				const messageId = `compaction-${compaction.itemId}`
+				const markerExists = this.parts
+					.get(partCacheKey(sessionId, messageId))
+					?.some((part) => part.type === "text" && part.text === "Session compaction started.")
+				if (!markerExists) {
+					this.appendText(sessionId, directory, "assistant", "text", {
+						content: { text: "Session compaction started." },
+						messageId,
+						...(compaction.turnId
+							? { _meta: { [DEVO_TURN_ID_META]: compaction.turnId } }
+							: {}),
+					})
+				}
+			}
 			return
 		}
 		const payload = requestUserInputFromOriginalEvent(original)

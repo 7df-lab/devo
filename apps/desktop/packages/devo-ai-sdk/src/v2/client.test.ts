@@ -1844,6 +1844,100 @@ describe("ACP desktop SDK session mapping", () => {
 		})
 	})
 
+	test("bridges turn context-compaction items into lifecycle events and a transcript marker", async () => {
+		Date.now = () => 1_772_000_000_000
+		const transport = new FakeTransport((method) => {
+			if (method === "initialize") return initializeResult
+			if (method === "session/list") return { sessions: [sessionInfo] }
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
+
+		await client.session.list()
+		const context = {
+			session_id: "s1",
+			turn_id: "turn-1",
+			item_id: "compact-1",
+			seq: 9,
+		}
+		const item = {
+			item_id: "compact-1",
+			item_kind: "context_compaction",
+			payload: { title: "Compaction started" },
+		}
+		transport.emitSessionUpdate({
+			sessionId: "s1",
+			update: { sessionUpdate: "session_info_update" },
+			_meta: {
+				"devo/originalMethod": "item/started",
+				"devo/originalEvent": { kind: "item_started", context, item },
+			},
+		} satisfies AcpSessionNotification)
+
+		expect(await nextPayloadOfType(stream, "session.compaction.started", "item started")).toEqual({
+			type: "session.compaction.started",
+			properties: { sessionID: "s1" },
+		})
+		expect(await nextPayloadOfType(stream, "message.part.updated", "compaction marker")).toEqual({
+			type: "message.part.updated",
+			properties: {
+				part: {
+					id: "compaction-compact-1-text",
+					sessionID: "s1",
+					messageID: "compaction-compact-1",
+					type: "text",
+					text: "Session compaction started.",
+					time: { start: 1_772_000_000_000 },
+				},
+			},
+		})
+
+		transport.emitSessionUpdate({
+			sessionId: "s1",
+			update: { sessionUpdate: "session_info_update" },
+			_meta: {
+				"devo/originalMethod": "item/completed",
+				"devo/originalEvent": {
+					kind: "item_completed",
+					context,
+					item: { ...item, payload: { title: "Context compacted" } },
+				},
+			},
+		} satisfies AcpSessionNotification)
+
+		expect(await nextPayloadOfType(stream, "session.compaction.completed", "item completed")).toEqual({
+			type: "session.compaction.completed",
+			properties: { sessionID: "s1" },
+		})
+
+		transport.emitSessionUpdate({
+			sessionId: "s1",
+			update: { sessionUpdate: "session_info_update" },
+			_meta: {
+				"devo/originalMethod": "item/completed",
+				"devo/originalEvent": {
+					kind: "item_completed",
+					context: { ...context, item_id: "compact-2" },
+					item: {
+						...item,
+						item_id: "compact-2",
+						payload: {
+							title: "Compaction failed",
+							status: "failed",
+							message: "summary unavailable",
+						},
+					},
+				},
+			},
+		} satisfies AcpSessionNotification)
+
+		expect(await nextPayloadOfType(stream, "session.compaction.failed", "item failed")).toEqual({
+			type: "session.compaction.failed",
+			properties: { sessionID: "s1", message: "summary unavailable" },
+		})
+	})
+
 	test("refreshes session status from session info update metadata", async () => {
 		const transport = new FakeTransport((method) => {
 			if (method === "initialize") return initializeResult

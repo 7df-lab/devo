@@ -291,7 +291,7 @@ describe("ChatTurnComponent transcript controls", () => {
         compactionDividerSource.includes("BubblesIcon") &&
         compactionDividerSource.includes("PackageCheckIcon"),
       usesRequestedLabels:
-        compactionDividerSource.includes("Compacting context") &&
+        compactionDividerSource.includes("Compaction started") &&
         compactionDividerSource.includes("Context compacted"),
       keepsIconStyleConsistent:
         compactionDividerSource.includes("size-3.5") &&

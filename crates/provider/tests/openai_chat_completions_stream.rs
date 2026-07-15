@@ -51,6 +51,44 @@ async fn chat_stream_reports_error_payload_returned_with_http_200() {
 }
 
 #[tokio::test]
+async fn chat_stream_classifies_http_400_context_length_error() {
+    let message = "This model's maximum context length is 1048565 tokens. However, you request 1058357 tokens (674357 in the messages, 384000 in the completion). Please reduce the length of the messages or completion.";
+    let body = json!({
+        "error": {
+            "message": message,
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded"
+        }
+    })
+    .to_string();
+    let base_url = spawn_http_server("400 Bad Request", "application/json", body).await;
+    let provider = OpenAIProvider::new(base_url);
+
+    let mut stream = provider
+        .completion_stream(minimal_request())
+        .await
+        .expect("openai chat stream");
+    let error = stream
+        .next()
+        .await
+        .expect("provider error stream item")
+        .expect_err("HTTP 400 context limit must be an error");
+    let provider_error = error
+        .downcast_ref::<ProviderError>()
+        .expect("structured provider error");
+
+    assert_eq!(
+        serde_json::to_value(provider_error).expect("serialize provider error"),
+        json!({
+            "error_kind": "context_limit_error",
+            "message": message,
+            "current_tokens": null,
+            "limit": null
+        })
+    );
+}
+
+#[tokio::test]
 async fn chat_stream_buffers_tool_arguments_until_identity_arrives() {
     let chunks = vec![
         sse_data(json!({
@@ -309,17 +347,22 @@ fn message_done_response(events: &[StreamEvent]) -> &devo_protocol::ModelRespons
 }
 
 async fn spawn_sse_server(chunks: Vec<String>) -> String {
+    spawn_http_server("200 OK", "text/event-stream", chunks.concat()).await
+}
+
+async fn spawn_http_server(status: &str, content_type: &str, body: String) -> String {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test server");
     let addr = listener.local_addr().expect("local addr");
+    let status = status.to_string();
+    let content_type = content_type.to_string();
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("accept request");
         read_http_request(&mut socket).await.expect("read request");
-        let body = chunks.concat();
         let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             content-type: text/event-stream\r\n\
+            "HTTP/1.1 {status}\r\n\
+             content-type: {content_type}\r\n\
              cache-control: no-cache\r\n\
              content-length: {}\r\n\
              connection: close\r\n\

@@ -17,7 +17,7 @@ export function CompactionStatusDivider({
 }) {
   const isCompleted = status === "completed";
   const Icon = isCompleted ? PackageCheckIcon : BubblesIcon;
-  const label = isCompleted ? "Context compacted" : "Compacting context";
+  const label = isCompleted ? "Context compacted" : "Compaction started";
 
   return (
     <div

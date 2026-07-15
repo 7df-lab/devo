@@ -4,6 +4,7 @@ use devo_core::{ItemId, SessionId, TurnId};
 
 use super::super::ServerRuntime;
 use super::super::proposed_plan::ProposedPlanParser;
+use super::context_compaction::ContextCompactionLifecycle;
 use super::item_stream::{
     ProposedPlanStreamItem, complete_assistant_item, complete_reasoning_item,
     handle_proposed_plan_segments, push_assistant_text_delta,
@@ -14,8 +15,8 @@ use super::tool_display::{
 use super::tool_results;
 use super::tool_results::complete_pending_tool_call;
 use super::trace::{
-    query_event_trace_delta_len, query_event_trace_kind, query_event_trace_token_preview,
-    stream_trace_elapsed_ms,
+    QueryEventDeliveryPolicy, query_event_delivery_policy, query_event_trace_delta_len,
+    query_event_trace_kind, query_event_trace_token_preview, stream_trace_elapsed_ms,
 };
 use super::types::{PendingToolCall, ToolDisplayKind, TurnEventStreamSummary};
 use crate::runtime::session_actor::state::SessionStreamState;
@@ -26,21 +27,16 @@ pub(crate) const QUERY_EVENT_CHANNEL_CAPACITY: usize = 8192;
 
 /// Enqueue a query event into the turn event stream.
 ///
-/// Visible token events (`TextDelta` / `ReasoningDelta`), retry status, and `TurnComplete`
-/// must not be dropped: when the channel is full we apply backpressure to the
-/// provider reader with `send().await` so the TUI keeps receiving tokens.
-/// Other events may be dropped under pressure so coordination cannot wedge
+/// Token deltas and lifecycle/control events must not be dropped: when the
+/// channel is full they apply backpressure to the producer. High-volume tool
+/// progress and usage updates remain best effort so they cannot wedge the turn
 /// forever on a stalled consumer.
 pub(super) async fn enqueue_query_event(
     event_tx: &mpsc::Sender<devo_core::QueryEvent>,
     event: devo_core::QueryEvent,
 ) {
     let kind = query_event_trace_kind(&event);
-    let must_deliver = matches!(
-        kind,
-        "text_delta" | "reasoning_delta" | "provider_retry_status" | "turn_complete"
-    );
-    if must_deliver {
+    if query_event_delivery_policy(&event) == QueryEventDeliveryPolicy::MustDeliver {
         let _ = event_tx.send(event).await;
         return;
     }
@@ -90,6 +86,7 @@ pub(crate) fn spawn_turn_event_stream(
         let mut turn_usage = None;
         let mut latest_query_usage = None;
         let mut stop_reason = None;
+        let mut context_compaction = ContextCompactionLifecycle::default();
         while let Some(event) = event_rx.recv().await {
             log_dequeued_query_event(&event);
             match event {
@@ -114,6 +111,21 @@ pub(crate) fn spawn_turn_event_stream(
                                 message: status.message,
                             },
                         ))
+                        .await;
+                }
+                devo_core::QueryEvent::ContextCompactionStarted => {
+                    context_compaction
+                        .start(&runtime, session_id, turn_for_events.turn_id)
+                        .await;
+                }
+                devo_core::QueryEvent::ContextCompactionCompleted => {
+                    context_compaction
+                        .complete(&runtime, session_id, turn_for_events.turn_id)
+                        .await;
+                }
+                devo_core::QueryEvent::ContextCompactionFailed { message } => {
+                    context_compaction
+                        .fail(&runtime, session_id, turn_for_events.turn_id, message)
                         .await;
                 }
                 devo_core::QueryEvent::TextDelta(text) => {
@@ -310,6 +322,9 @@ pub(crate) fn spawn_turn_event_stream(
                 }
             }
         }
+        context_compaction
+            .close_if_open(&runtime, session_id, turn_for_events.turn_id)
+            .await;
         finish_proposed_plan_stream(
             &runtime,
             &event_stream,

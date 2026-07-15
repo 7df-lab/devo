@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::error::ProviderError;
+use crate::error::context_limit_error;
 
 #[derive(Debug, Deserialize)]
 struct OpenAIErrorEnvelope {
@@ -31,6 +32,13 @@ pub(super) fn provider_error_from_payload(
         .unwrap_or_else(|| "OpenAI-compatible provider returned an error".to_string());
     let status_code = payload.code.as_ref().and_then(status_code_from_value);
     let provider_name = Some("openai".to_string());
+    if let Some(error) = context_limit_error(
+        message.clone(),
+        payload.kind.as_deref(),
+        payload.code.as_ref().and_then(Value::as_str),
+    ) {
+        return Some(error);
+    }
 
     Some(match status_code {
         Some(401 | 403) => ProviderError::AuthenticationError {
@@ -173,6 +181,46 @@ mod tests {
                     "provider_name": "openai"
                 }),
             ]
+        );
+    }
+
+    #[test]
+    fn classifies_context_length_error_payload() {
+        let request = ModelRequest {
+            model_slug: ModelProfileKey::Generic,
+            model: "provider-model".to_string(),
+            system: None,
+            messages: Vec::new(),
+            max_tokens: 384_000,
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: Default::default(),
+            request_thinking: None,
+            reasoning_effort: None,
+            extra_body: None,
+        };
+        let message = "This model's maximum context length is 1048565 tokens. However, you request 1058357 tokens (674357 in the messages, 384000 in the completion). Please reduce the length of the messages or completion.";
+
+        let error = provider_error_from_payload(
+            &json!({
+                "error": {
+                    "message": message,
+                    "type": "invalid_request_error",
+                    "code": "context_length_exceeded"
+                }
+            }),
+            &request,
+        )
+        .expect("provider error");
+
+        assert_eq!(
+            serde_json::to_value(error).expect("serialize provider error"),
+            json!({
+                "error_kind": "context_limit_error",
+                "message": message,
+                "current_tokens": null,
+                "limit": null
+            })
         );
     }
 }
