@@ -596,15 +596,7 @@ impl ExecCell {
                 layout.output_max_lines
             };
 
-            if raw_output.lines.is_empty() {
-                if !call.is_unified_exec_interaction() {
-                    lines.extend(prefix_lines(
-                        vec![Line::from("(no output)".dim())],
-                        Span::from(layout.output_block.initial_prefix).dim(),
-                        Span::from(layout.output_block.subsequent_prefix),
-                    ));
-                }
-            } else {
+            if !raw_output.lines.is_empty() {
                 // Wrap first so that truncation is applied to on-screen lines
                 // rather than logical lines. This ensures that a small number
                 // of very long lines cannot flood the viewport.
@@ -967,6 +959,36 @@ mod tests {
             normalized.contains(TRANSCRIPT_HINT),
             "expected truncated output to advertise transcript shortcut, got {normalized}"
         );
+    }
+
+    #[test]
+    fn completed_command_with_empty_output_renders_only_the_command() {
+        let call = ExecCall {
+            call_id: "call-id".to_string(),
+            command: vec!["bash".into(), "-lc".into(), "echo hi".into()],
+            parsed: Vec::new(),
+            output: Some(CommandOutput {
+                exit_code: 0,
+                aggregated_output: String::new(),
+                formatted_output: String::new(),
+            }),
+            source: ExecCommandSource::Agent,
+            start_time: None,
+            duration: None,
+            interaction_input: None,
+            tool_name: None,
+            tool_input: None,
+            tool_output: None,
+            tool_display_content: None,
+        };
+        let cell = ExecCell::new(call, /*animations_enabled*/ false);
+        let rendered = cell
+            .command_display_lines(/*width*/ 80)
+            .iter()
+            .map(render_line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered, vec!["▌ Ran echo hi"]);
     }
 
     // #[test]

@@ -364,6 +364,15 @@ enum PromptJsonlEvent<'a> {
         phase: &'static str,
         message: &'a str,
     },
+    #[serde(rename = "session.compaction.started")]
+    ContextCompactionStarted { session_id: &'a str },
+    #[serde(rename = "session.compaction.completed")]
+    ContextCompactionCompleted { session_id: &'a str },
+    #[serde(rename = "session.compaction.failed")]
+    ContextCompactionFailed {
+        session_id: &'a str,
+        message: &'a str,
+    },
     #[serde(rename = "turn.usage_delta")]
     UsageDelta {
         session_id: &'a str,
@@ -471,6 +480,18 @@ fn write_query_event_jsonl(session_id: &str, event: &QueryEvent) -> Result<()> {
                     devo_core::QueryProviderRetryPhase::Resumed => "resumed",
                 },
                 message: status.message.as_str(),
+            })
+        }
+        QueryEvent::ContextCompactionStarted => {
+            write_jsonl(&PromptJsonlEvent::ContextCompactionStarted { session_id })
+        }
+        QueryEvent::ContextCompactionCompleted => {
+            write_jsonl(&PromptJsonlEvent::ContextCompactionCompleted { session_id })
+        }
+        QueryEvent::ContextCompactionFailed { message } => {
+            write_jsonl(&PromptJsonlEvent::ContextCompactionFailed {
+                session_id,
+                message,
             })
         }
         QueryEvent::UsageDelta { usage } => write_jsonl(&PromptJsonlEvent::UsageDelta {
@@ -586,7 +607,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::latest_assistant_text;
-    use super::{PromptResult, PromptUsage};
+    use super::{PromptJsonlEvent, PromptResult, PromptUsage};
     use devo_core::ContentBlock;
     use devo_core::Message;
     use devo_core::Role;
@@ -624,6 +645,42 @@ mod tests {
                     "cache_creation_input_tokens": 0,
                     "cache_read_input_tokens": 2
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn prompt_jsonl_compaction_lifecycle_uses_session_event_shapes() {
+        assert_eq!(
+            serde_json::to_value(PromptJsonlEvent::ContextCompactionStarted {
+                session_id: "session-1",
+            })
+            .expect("serialize compaction started"),
+            serde_json::json!({
+                "type": "session.compaction.started",
+                "session_id": "session-1"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(PromptJsonlEvent::ContextCompactionCompleted {
+                session_id: "session-1",
+            })
+            .expect("serialize compaction completed"),
+            serde_json::json!({
+                "type": "session.compaction.completed",
+                "session_id": "session-1"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(PromptJsonlEvent::ContextCompactionFailed {
+                session_id: "session-1",
+                message: "compaction provider failed",
+            })
+            .expect("serialize compaction failed"),
+            serde_json::json!({
+                "type": "session.compaction.failed",
+                "session_id": "session-1",
+                "message": "compaction provider failed"
             })
         );
     }
