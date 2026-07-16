@@ -95,6 +95,10 @@ impl ChatWidget {
             return;
         }
 
+        if kind == TextItemKind::Reasoning {
+            self.commit_completed_assistant_before_next_reasoning();
+        }
+
         let seq = self.reserve_seq();
         let stream_controller = if kind == TextItemKind::Assistant {
             Some(StreamController::new(None, &self.session.cwd))
@@ -376,6 +380,25 @@ impl ChatWidget {
 
             self.commit_text_item_at(index, DotStatus::Completed);
         }
+    }
+
+    fn commit_completed_assistant_before_next_reasoning(&mut self) {
+        self.commit_completed_text_items();
+        while let Some(assistant_index) = self.active_text_items.iter().position(|item| {
+            item.kind == TextItemKind::Assistant && item.status == DotStatus::Completed
+        }) {
+            let Some(reasoning_index) =
+                self.active_text_items[..assistant_index]
+                    .iter()
+                    .position(|item| {
+                        item.kind == TextItemKind::Reasoning && item.status == DotStatus::Pending
+                    })
+            else {
+                break;
+            };
+            self.commit_text_item_at(reasoning_index, DotStatus::Completed);
+        }
+        self.commit_completed_text_items();
     }
 
     fn active_text_item_log_order(&self) -> Vec<String> {

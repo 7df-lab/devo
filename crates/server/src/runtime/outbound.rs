@@ -8,11 +8,18 @@ use tokio::sync::oneshot;
 use crate::NotificationEnvelope;
 
 pub(crate) const OUTBOUND_CHANNEL_CAPACITY: usize = 4096;
+pub(crate) const OUTBOUND_RELIABLE_RESERVED_CAPACITY: usize = 64;
 pub(crate) const OUTBOUND_BACKPRESSURE_LOG_THRESHOLD: Duration = Duration::from_millis(50);
 /// Max time streaming notifications wait for outbound capacity before being
 /// dropped. Event streams must not park forever on a slow client: parent+child
 /// turns share one connection and can fill the queue quickly.
 pub(crate) const OUTBOUND_NOTIFICATION_MAX_WAIT: Duration = Duration::from_millis(200);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutboundDeliveryPolicy {
+    Reliable,
+    BestEffort,
+}
 
 pub(crate) enum OutboundPayload {
     Notification {
@@ -225,19 +232,49 @@ pub(crate) async fn enqueue_outbound(
     true
 }
 
-/// Enqueue a streaming notification without risking an indefinite stall.
+/// Enqueue a notification according to its delivery policy.
 ///
-/// Unlike [`enqueue_outbound`], this gives up after
-/// [`OUTBOUND_NOTIFICATION_MAX_WAIT`] and drops the frame. Turn event streams
-/// (including child agents) call into `broadcast_event` while the session actor
-/// is awaiting that stream; blocking here recreates the mailbox-style hang on
-/// the outbound path when the client drains stdout slowly.
+/// Best-effort notifications are accepted only when doing so preserves
+/// [`OUTBOUND_RELIABLE_RESERVED_CAPACITY`] slots for lifecycle/control traffic.
+/// Reliable notifications can use that reserved capacity and wait up to
+/// [`OUTBOUND_NOTIFICATION_MAX_WAIT`] if reliable traffic fills the queue. This
+/// keeps high-volume deltas from starving terminal events without allowing a
+/// stalled client to park a turn event stream indefinitely.
 pub(crate) async fn enqueue_outbound_notification(
     tx: &mpsc::Sender<OutboundFrame>,
     frame: OutboundFrame,
+    policy: OutboundDeliveryPolicy,
     queue: &'static str,
 ) -> bool {
     let connection_id = frame.connection_id();
+    if policy == OutboundDeliveryPolicy::BestEffort {
+        let reserved_capacity =
+            OUTBOUND_RELIABLE_RESERVED_CAPACITY.min(tx.max_capacity().saturating_sub(1));
+        let required_capacity = reserved_capacity + 1;
+        return match tx.try_reserve_many(required_capacity) {
+            Ok(mut permits) => {
+                permits
+                    .next()
+                    .expect("reserving positive capacity returns a permit")
+                    .send(frame);
+                true
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                tracing::debug!(connection_id, queue, "outbound queue receiver dropped");
+                false
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
+                tracing::debug!(
+                    connection_id,
+                    queue,
+                    reserved_capacity,
+                    "shedding best-effort outbound notification under backpressure"
+                );
+                false
+            }
+        };
+    }
+
     match tx.try_reserve() {
         Ok(permit) => {
             permit.send(frame);
@@ -391,5 +428,82 @@ mod tests {
         });
         let frame = OutboundFrame::json_rpc_response(1, response.clone());
         assert_eq!(outbound_frame_to_value(&frame), response);
+    }
+
+    #[tokio::test]
+    async fn reliable_notification_uses_capacity_reserved_from_best_effort() {
+        let capacity = OUTBOUND_RELIABLE_RESERVED_CAPACITY + 1;
+        let (tx, mut rx) = mpsc::channel(capacity);
+        let best_effort = serde_json::json!({
+            "context": { "item_id": "delta-item" },
+            "delta": "token",
+        });
+        assert!(
+            enqueue_outbound_notification(
+                &tx,
+                OutboundFrame::notification(
+                    1,
+                    "item/agentMessage/delta".to_string(),
+                    1,
+                    best_effort.clone(),
+                ),
+                OutboundDeliveryPolicy::BestEffort,
+                "test_notifications",
+            )
+            .await
+        );
+        assert!(
+            !enqueue_outbound_notification(
+                &tx,
+                OutboundFrame::notification(
+                    1,
+                    "item/agentMessage/delta".to_string(),
+                    2,
+                    best_effort,
+                ),
+                OutboundDeliveryPolicy::BestEffort,
+                "test_notifications",
+            )
+            .await
+        );
+
+        let completed = serde_json::json!({
+            "context": { "item_id": "compaction-item" },
+            "item": {
+                "item_id": "compaction-item",
+                "item_kind": "context_compaction",
+                "payload": { "title": "Context compacted" },
+            },
+        });
+        assert!(
+            enqueue_outbound_notification(
+                &tx,
+                OutboundFrame::notification(1, "item/completed".to_string(), 3, completed.clone(),),
+                OutboundDeliveryPolicy::Reliable,
+                "test_notifications",
+            )
+            .await
+        );
+
+        let delivered = vec![
+            outbound_frame_to_value(&rx.recv().await.expect("best-effort frame")),
+            outbound_frame_to_value(&rx.recv().await.expect("reliable frame")),
+        ];
+        assert_eq!(
+            delivered,
+            vec![
+                serde_json::json!({
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "context": { "item_id": "delta-item" },
+                        "delta": "token",
+                    },
+                }),
+                serde_json::json!({
+                    "method": "item/completed",
+                    "params": completed,
+                }),
+            ]
+        );
     }
 }

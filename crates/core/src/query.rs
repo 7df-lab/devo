@@ -122,6 +122,15 @@ fn estimate_request_prompt_tokens(request: &ModelRequest) -> usize {
 pub enum QueryEvent {
     /// Provider request retry status.
     ProviderRetryStatus(ProviderRetryStatus),
+    /// Context compaction is about to begin.
+    ContextCompactionStarted,
+    /// Context compaction replaced the current prompt history.
+    ContextCompactionCompleted,
+    /// Context compaction did not replace the current prompt history.
+    ContextCompactionFailed {
+        /// Human-readable reason the compaction did not complete.
+        message: String,
+    },
     /// Incremental text from the assistant.
     TextDelta(String),
     /// Incremental reasoning text from the assistant.
@@ -429,7 +438,15 @@ fn provider_retry_decision(
                 ProviderRetryDecision::CompactAndRetry
             }
         }
-        ErrorClass::RateLimit | ErrorClass::ServerError | ErrorClass::NetworkError => {
+        ErrorClass::RateLimit => {
+            if *retry_count >= MAX_RETRIES {
+                ProviderRetryDecision::Fail
+            } else {
+                *retry_count += 1;
+                ProviderRetryDecision::RetryAfter(RATE_LIMIT_RETRY_DELAY)
+            }
+        }
+        ErrorClass::ServerError | ErrorClass::NetworkError => {
             if *retry_count >= MAX_RETRIES {
                 ProviderRetryDecision::Fail
             } else {
@@ -461,6 +478,7 @@ fn provider_retry_decision(
 ///   `context_too_long`; keeps from the latest user message onward.
 async fn summarize_and_compact(
     session: &mut SessionState,
+    on_event: &Option<EventCallback>,
     provider: &Arc<dyn ModelProviderSDK>,
     model_slug: &str,
     request_model: &str,
@@ -492,6 +510,7 @@ async fn summarize_and_compact(
         max_tokens,
     );
 
+    emit_query_event(on_event, QueryEvent::ContextCompactionStarted).await;
     match compact_history(&items, &token_info, &summarizer, &config).await {
         Ok(CompactAction::Replaced(compacted_items)) => {
             let new_messages: Vec<Message> = compacted_items
@@ -507,12 +526,27 @@ async fn summarize_and_compact(
                 .saturating_sub(new_messages.len());
             info!("LLM compaction removed {removed} messages");
             session.set_prompt_messages(new_messages);
+            emit_query_event(on_event, QueryEvent::ContextCompactionCompleted).await;
         }
         Ok(CompactAction::Skipped) => {
             debug!("LLM compaction skipped, nothing to compact");
+            emit_query_event(
+                on_event,
+                QueryEvent::ContextCompactionFailed {
+                    message: "Context compaction skipped: nothing to compact".to_string(),
+                },
+            )
+            .await;
         }
         Err(e) => {
             warn!("LLM compaction failed: {e}");
+            emit_query_event(
+                on_event,
+                QueryEvent::ContextCompactionFailed {
+                    message: e.to_string(),
+                },
+            )
+            .await;
         }
     }
 }
@@ -813,6 +847,7 @@ fn dsml_text_tool_call_continuation_message(
 
 const MAX_RETRIES: usize = 5;
 const INITIAL_RETRY_BACKOFF_MS: u64 = 250;
+const RATE_LIMIT_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// TODO: The body of `query` is too lengthy, we should move out `stream lop` out, I am
 /// not sure whether we should do this.
@@ -996,6 +1031,7 @@ pub async fn query_with_options(
             // Example: [user1, asst1, user2, asst2, user3] -> [summary, asst2, user3].
             summarize_and_compact(
                 session,
+                &on_event,
                 &provider,
                 &compaction_model_slug,
                 &compaction_request_model,
@@ -1134,6 +1170,7 @@ pub async fn query_with_options(
                         // with the provider; preserve from latest user only.
                         summarize_and_compact(
                             session,
+                            &on_event,
                             &provider,
                             &compaction_model_slug,
                             &compaction_request_model,
@@ -1324,6 +1361,7 @@ pub async fn query_with_options(
                             // with the provider; preserve from latest user only.
                             summarize_and_compact(
                                 session,
+                                &on_event,
                                 &provider,
                                 &compaction_model_slug,
                                 &compaction_request_model,
@@ -1983,6 +2021,10 @@ mod tests {
     use crate::Model;
     use crate::ReasoningEffort;
     use crate::Role;
+    use crate::context::ContextualUserFragment;
+    use crate::context::compaction_summary::CompactionSummary;
+    use crate::history::compaction::CompactionKind;
+    use crate::response_item::ResponseItem;
 
     #[test]
     fn assistant_content_visibility_requires_visible_content() {
@@ -2536,6 +2578,20 @@ mod tests {
         attempts: AtomicUsize,
     }
 
+    struct RateLimitedStreamCreateProvider {
+        attempts: AtomicUsize,
+    }
+
+    enum CompactionProviderOutcome {
+        Summary,
+        Error,
+    }
+
+    struct CompactionProvider {
+        completion_calls: AtomicUsize,
+        outcome: CompactionProviderOutcome,
+    }
+
     #[async_trait]
     impl devo_provider::ModelProviderSDK for CapturingProvider {
         async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
@@ -2831,6 +2887,59 @@ mod tests {
     }
 
     #[async_trait]
+    impl devo_provider::ModelProviderSDK for RateLimitedStreamCreateProvider {
+        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            unreachable!("tests stream responses only")
+        }
+
+        async fn completion_stream(
+            &self,
+            _request: ModelRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < 2 {
+                return Err(anyhow::anyhow!("429 rate limit exceeded"));
+            }
+
+            Ok(final_text_stream("done"))
+        }
+
+        fn name(&self) -> &str {
+            "rate-limited-stream-create-provider"
+        }
+    }
+
+    #[async_trait]
+    impl devo_provider::ModelProviderSDK for CompactionProvider {
+        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            self.completion_calls.fetch_add(1, Ordering::SeqCst);
+            match &self.outcome {
+                CompactionProviderOutcome::Summary => Ok(ModelResponse {
+                    id: "compaction-response".to_string(),
+                    content: vec![ResponseContent::Text("summary".to_string())],
+                    stop_reason: Some(StopReason::EndTurn),
+                    usage: Usage::default(),
+                    metadata: Default::default(),
+                }),
+                CompactionProviderOutcome::Error => {
+                    Err(anyhow::anyhow!("compaction provider failed"))
+                }
+            }
+        }
+
+        async fn completion_stream(
+            &self,
+            _request: ModelRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            unreachable!("tests call the non-streaming compaction path only")
+        }
+
+        fn name(&self) -> &str {
+            "compaction-provider"
+        }
+    }
+
+    #[async_trait]
     impl ToolHandler for MutatingTool {
         fn spec(&self) -> &crate::tools::tool_spec::ToolSpec {
             // Leak a static spec for test purposes
@@ -3033,6 +3142,170 @@ mod tests {
         }
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    enum RecordedCompactionEvent {
+        Started,
+        Completed,
+        Failed { message: String },
+    }
+
+    fn recorded_compaction_events(events: &[QueryEvent]) -> Vec<RecordedCompactionEvent> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                QueryEvent::ContextCompactionStarted => Some(RecordedCompactionEvent::Started),
+                QueryEvent::ContextCompactionCompleted => Some(RecordedCompactionEvent::Completed),
+                QueryEvent::ContextCompactionFailed { message } => {
+                    Some(RecordedCompactionEvent::Failed {
+                        message: message.clone(),
+                    })
+                }
+                QueryEvent::ProviderRetryStatus(_)
+                | QueryEvent::TextDelta(_)
+                | QueryEvent::ReasoningDelta(_)
+                | QueryEvent::ReasoningCompleted
+                | QueryEvent::UsageDelta { .. }
+                | QueryEvent::ToolUseStart { .. }
+                | QueryEvent::ToolExecutionStart { .. }
+                | QueryEvent::ToolProgress { .. }
+                | QueryEvent::ToolResult { .. }
+                | QueryEvent::TurnComplete { .. }
+                | QueryEvent::Usage { .. } => None,
+            })
+            .collect()
+    }
+
+    fn recording_callback(events: &Arc<Mutex<Vec<QueryEvent>>>) -> EventCallback {
+        let captured_events = Arc::clone(events);
+        Arc::new(move |event| {
+            let captured_events = Arc::clone(&captured_events);
+            Box::pin(async move {
+                captured_events.lock().expect("lock events").push(event);
+            })
+        })
+    }
+
+    fn compaction_test_session(total_input_tokens: usize) -> SessionState {
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("x".repeat(80_004)));
+        session.push_message(Message::user("latest"));
+        session.total_input_tokens = total_input_tokens;
+        session
+    }
+
+    #[tokio::test]
+    async fn automatic_compaction_emits_started_then_completed_when_history_is_replaced() {
+        let provider = Arc::new(CompactionProvider {
+            completion_calls: AtomicUsize::new(0),
+            outcome: CompactionProviderOutcome::Summary,
+        });
+        let provider_sdk: Arc<dyn ModelProviderSDK> = provider.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let on_event = Some(recording_callback(&events));
+        let mut session = compaction_test_session(/*total_input_tokens*/ 200_000);
+
+        super::summarize_and_compact(
+            &mut session,
+            &on_event,
+            &provider_sdk,
+            "compaction-model",
+            "compaction-request-model",
+            /*max_tokens*/ 4096,
+            CompactionKind::Auto,
+        )
+        .await;
+
+        assert_eq!(
+            recorded_compaction_events(&events.lock().expect("lock events")),
+            vec![
+                RecordedCompactionEvent::Started,
+                RecordedCompactionEvent::Completed,
+            ]
+        );
+        assert_eq!(provider.completion_calls.load(Ordering::SeqCst), 1);
+        let ResponseItem::Message(expected_summary) =
+            CompactionSummary::new("summary").to_response_item()
+        else {
+            unreachable!("compaction summaries are messages");
+        };
+        assert_eq!(
+            session.prompt_source_messages(),
+            &[expected_summary, Message::user("latest")]
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_compaction_emits_failed_when_compaction_is_skipped() {
+        let provider = Arc::new(CompactionProvider {
+            completion_calls: AtomicUsize::new(0),
+            outcome: CompactionProviderOutcome::Summary,
+        });
+        let provider_sdk: Arc<dyn ModelProviderSDK> = provider.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let on_event = Some(recording_callback(&events));
+        let mut session = compaction_test_session(/*total_input_tokens*/ 0);
+        let original_messages = session.prompt_source_messages().to_vec();
+
+        super::summarize_and_compact(
+            &mut session,
+            &on_event,
+            &provider_sdk,
+            "compaction-model",
+            "compaction-request-model",
+            /*max_tokens*/ 4096,
+            CompactionKind::Auto,
+        )
+        .await;
+
+        assert_eq!(
+            recorded_compaction_events(&events.lock().expect("lock events")),
+            vec![
+                RecordedCompactionEvent::Started,
+                RecordedCompactionEvent::Failed {
+                    message: "Context compaction skipped: nothing to compact".to_string(),
+                },
+            ]
+        );
+        assert_eq!(provider.completion_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(session.prompt_source_messages(), original_messages);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn proactive_compaction_emits_failed_when_compaction_errors() {
+        let provider = Arc::new(CompactionProvider {
+            completion_calls: AtomicUsize::new(0),
+            outcome: CompactionProviderOutcome::Error,
+        });
+        let provider_sdk: Arc<dyn ModelProviderSDK> = provider.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let on_event = Some(recording_callback(&events));
+        let mut session = compaction_test_session(/*total_input_tokens*/ 0);
+        let original_messages = session.prompt_source_messages().to_vec();
+
+        super::summarize_and_compact(
+            &mut session,
+            &on_event,
+            &provider_sdk,
+            "compaction-model",
+            "compaction-request-model",
+            /*max_tokens*/ 4096,
+            CompactionKind::Proactive,
+        )
+        .await;
+
+        assert_eq!(
+            recorded_compaction_events(&events.lock().expect("lock events")),
+            vec![
+                RecordedCompactionEvent::Started,
+                RecordedCompactionEvent::Failed {
+                    message: "summarization failed: compaction provider failed".to_string(),
+                },
+            ]
+        );
+        assert_eq!(provider.completion_calls.load(Ordering::SeqCst), 5);
+        assert_eq!(session.prompt_source_messages(), original_messages);
+    }
+
     #[tokio::test]
     async fn query_retries_transient_stream_creation_errors() {
         let provider = Arc::new(TransientStreamCreateProvider {
@@ -3100,7 +3373,10 @@ mod tests {
             .iter()
             .filter_map(|event| match event {
                 QueryEvent::ProviderRetryStatus(status) => Some(status.clone()),
-                QueryEvent::TextDelta(_)
+                QueryEvent::ContextCompactionStarted
+                | QueryEvent::ContextCompactionCompleted
+                | QueryEvent::ContextCompactionFailed { .. }
+                | QueryEvent::TextDelta(_)
                 | QueryEvent::ReasoningDelta(_)
                 | QueryEvent::ReasoningCompleted
                 | QueryEvent::UsageDelta { .. }
@@ -3141,6 +3417,104 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
         assert_eq!(assistant_messages, vec![Message::assistant_text("done")]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn query_waits_sixty_seconds_for_each_rate_limit_retry() {
+        let provider = Arc::new(RateLimitedStreamCreateProvider {
+            attempts: AtomicUsize::new(0),
+        });
+        let provider_sdk: Arc<dyn ModelProviderSDK> = provider.clone();
+        let registry = Arc::new(ToolRegistry::new());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("hello"));
+        let turn_config = TurnConfig::new(Model::default(), None);
+        let model = turn_config.model.slug.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured_events = Arc::clone(&events);
+        let callback: EventCallback = Arc::new(move |event| {
+            let captured_events = Arc::clone(&captured_events);
+            Box::pin(async move {
+                captured_events.lock().expect("lock events").push(event);
+            })
+        });
+        let started_at = tokio::time::Instant::now();
+
+        query(
+            &mut session,
+            &turn_config,
+            provider_sdk,
+            registry,
+            &runtime,
+            Some(callback),
+        )
+        .await
+        .expect("query should retry and succeed");
+
+        assert_eq!(
+            tokio::time::Instant::now().duration_since(started_at),
+            std::time::Duration::from_secs(120)
+        );
+        let retry_statuses = events
+            .lock()
+            .expect("lock events")
+            .iter()
+            .filter_map(|event| match event {
+                QueryEvent::ProviderRetryStatus(status) => Some(status.clone()),
+                QueryEvent::ContextCompactionStarted
+                | QueryEvent::ContextCompactionCompleted
+                | QueryEvent::ContextCompactionFailed { .. }
+                | QueryEvent::TextDelta(_)
+                | QueryEvent::ReasoningDelta(_)
+                | QueryEvent::ReasoningCompleted
+                | QueryEvent::UsageDelta { .. }
+                | QueryEvent::ToolUseStart { .. }
+                | QueryEvent::ToolExecutionStart { .. }
+                | QueryEvent::ToolProgress { .. }
+                | QueryEvent::ToolResult { .. }
+                | QueryEvent::TurnComplete { .. }
+                | QueryEvent::Usage { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            retry_statuses,
+            vec![
+                ProviderRetryStatus {
+                    provider: "rate-limited-stream-create-provider".to_string(),
+                    model: model.clone(),
+                    attempt: 1,
+                    backoff_ms: 60_000,
+                    phase: QueryProviderRetryPhase::Scheduled,
+                    message: "Retrying provider request in 60.0s".to_string(),
+                },
+                ProviderRetryStatus {
+                    provider: "rate-limited-stream-create-provider".to_string(),
+                    model: model.clone(),
+                    attempt: 1,
+                    backoff_ms: 0,
+                    phase: QueryProviderRetryPhase::Resumed,
+                    message: "Retrying provider request now".to_string(),
+                },
+                ProviderRetryStatus {
+                    provider: "rate-limited-stream-create-provider".to_string(),
+                    model: model.clone(),
+                    attempt: 2,
+                    backoff_ms: 60_000,
+                    phase: QueryProviderRetryPhase::Scheduled,
+                    message: "Retrying provider request in 60.0s".to_string(),
+                },
+                ProviderRetryStatus {
+                    provider: "rate-limited-stream-create-provider".to_string(),
+                    model,
+                    attempt: 2,
+                    backoff_ms: 0,
+                    phase: QueryProviderRetryPhase::Resumed,
+                    message: "Retrying provider request now".to_string(),
+                },
+            ]
+        );
+        assert_eq!(provider.attempts.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test(start_paused = true)]

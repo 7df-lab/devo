@@ -41,7 +41,7 @@ impl BackgroundTaskStore {
     pub(crate) async fn register_command(
         &self,
         owner_session_id: SessionId,
-        process_session_id: i32,
+        process_id: i32,
         command: String,
         process: Arc<UnifiedExecProcess>,
     ) -> TaskInfo {
@@ -52,7 +52,7 @@ impl BackgroundTaskStore {
             state: TaskState::Running,
             agent: None,
             command: Some(CommandTaskMetadata {
-                process_session_id,
+                process_id,
                 command,
                 exit_code: None,
             }),
@@ -94,14 +94,14 @@ impl BackgroundTaskStore {
             command.exit_code = exit_code;
         }
         state.output = Some(output);
-        let process_session_id = state
+        let process_id = state
             .info
             .command
             .as_ref()
-            .map(|command| command.process_session_id);
+            .map(|command| command.process_id);
         drop(state);
-        if let Some(process_session_id) = process_session_id {
-            self.process_store.remove(process_session_id).await;
+        if let Some(process_id) = process_id {
+            self.process_store.remove(process_id).await;
         }
         task.notify.notify_waiters();
     }
@@ -176,13 +176,10 @@ impl BackgroundTaskStore {
         state.info.state = TaskState::Canceled;
         state.output = None;
         let info = state.info.clone();
-        let process_session_id = info
-            .command
-            .as_ref()
-            .map(|command| command.process_session_id);
+        let process_id = info.command.as_ref().map(|command| command.process_id);
         drop(state);
-        if let Some(process_session_id) = process_session_id {
-            self.process_store.remove(process_session_id).await;
+        if let Some(process_id) = process_id {
+            self.process_store.remove(process_id).await;
         }
         task.notify.notify_waiters();
         Some(info)

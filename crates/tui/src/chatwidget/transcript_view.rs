@@ -301,13 +301,17 @@ impl ChatWidget {
                 tool_call.output.clone(),
             )
             .display_lines(width),
-            _ => history_cell::AgentMessageCell::new_with_prefix(
-                tool_call.lines.clone(),
-                Self::pending_dot_prefix(),
-                "  ",
-                false,
-            )
-            .display_lines(width),
+            _ => {
+                let mut lines = vec![Self::running_tool_line(&tool_call.title)];
+                lines.extend(tool_call.lines.clone());
+                history_cell::AgentMessageCell::new_with_prefix(
+                    lines,
+                    Self::pending_dot_prefix(),
+                    "  ",
+                    false,
+                )
+                .display_lines(width)
+            }
         }
     }
 
@@ -329,13 +333,17 @@ impl ChatWidget {
                 tool_call.output.clone(),
             )
             .transcript_lines(width),
-            _ => history_cell::AgentMessageCell::new_with_prefix(
-                tool_call.lines.clone(),
-                Self::pending_dot_prefix(),
-                "  ",
-                false,
-            )
-            .transcript_lines(width),
+            _ => {
+                let mut lines = vec![Self::running_tool_line(&tool_call.title)];
+                lines.extend(tool_call.lines.clone());
+                history_cell::AgentMessageCell::new_with_prefix(
+                    lines,
+                    Self::pending_dot_prefix(),
+                    "  ",
+                    false,
+                )
+                .transcript_lines(width)
+            }
         }
     }
 

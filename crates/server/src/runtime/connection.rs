@@ -24,6 +24,7 @@ use crate::acp_auth_required_response;
 use crate::acp_notification_from_server_event;
 use crate::devo_extension_inner_method;
 
+use super::outbound::OutboundDeliveryPolicy;
 use super::outbound::OutboundFrame;
 use super::outbound::enqueue_outbound;
 use super::outbound::enqueue_outbound_notification;
@@ -634,8 +635,13 @@ impl ServerRuntime {
             ))
         };
         if let Some((outbound_tx, frame)) = notification {
-            let _ = enqueue_outbound_notification(&outbound_tx, frame, "connection_notifications")
-                .await;
+            let _ = enqueue_outbound_notification(
+                &outbound_tx,
+                frame,
+                OutboundDeliveryPolicy::BestEffort,
+                "connection_notifications",
+            )
+            .await;
         }
         self.record_subagent_output_event(event).await;
     }
@@ -653,6 +659,7 @@ impl ServerRuntime {
         event: ServerEvent,
     ) {
         debug_assert!(is_connection_local_notification(method));
+        let delivery_policy = outbound_delivery_policy(&event);
         let notification = {
             let mut connections = self.connections.lock().await;
             let Some(connection) = connections.get_mut(&connection_id) else {
@@ -670,8 +677,13 @@ impl ServerRuntime {
             ))
         };
         if let Some((outbound_tx, frame)) = notification {
-            let _ = enqueue_outbound_notification(&outbound_tx, frame, "connection_notifications")
-                .await;
+            let _ = enqueue_outbound_notification(
+                &outbound_tx,
+                frame,
+                delivery_policy,
+                "connection_notifications",
+            )
+            .await;
         }
     }
 
@@ -687,6 +699,7 @@ impl ServerRuntime {
             return;
         }
         let session_id = event.session_id();
+        let delivery_policy = outbound_delivery_policy(&event);
         let child_parent_by_session = self.child_parent_by_session().await;
         let notification = {
             let mut connections = self.connections.lock().await;
@@ -705,8 +718,13 @@ impl ServerRuntime {
             ))
         };
         if let Some((outbound_tx, frame)) = notification {
-            let _ = enqueue_outbound_notification(&outbound_tx, frame, "connection_notifications")
-                .await;
+            let _ = enqueue_outbound_notification(
+                &outbound_tx,
+                frame,
+                delivery_policy,
+                "connection_notifications",
+            )
+            .await;
         }
     }
 
@@ -721,6 +739,7 @@ impl ServerRuntime {
         // (visible in Burp) keeps flowing into a full event channel.
         let method = event.method_name();
         let session_id = event.session_id();
+        let delivery_policy = outbound_delivery_policy(&event);
         let child_parent_by_session = self.child_parent_by_session().await;
         let active_turn_connections = self.active_turns.connection_map().await;
         let notifications = {
@@ -750,8 +769,13 @@ impl ServerRuntime {
                 .collect::<Vec<_>>()
         };
         for (outbound_tx, frame) in notifications {
-            let _ = enqueue_outbound_notification(&outbound_tx, frame, "connection_notifications")
-                .await;
+            let _ = enqueue_outbound_notification(
+                &outbound_tx,
+                frame,
+                delivery_policy,
+                "connection_notifications",
+            )
+            .await;
         }
         self.record_subagent_output_event(&event).await;
     }
@@ -1060,6 +1084,47 @@ async fn remove_pending_client_request(
     }
 }
 
+fn outbound_delivery_policy(event: &ServerEvent) -> OutboundDeliveryPolicy {
+    match event {
+        ServerEvent::ItemDelta { .. }
+        | ServerEvent::TurnUsageUpdated(_)
+        | ServerEvent::WorkspaceChangesUpdated(_)
+        | ServerEvent::ReferenceSearchUpdated(_)
+        | ServerEvent::CommandExecOutputDelta(_) => OutboundDeliveryPolicy::BestEffort,
+        ServerEvent::SessionStarted(_)
+        | ServerEvent::SessionTitleUpdated(_)
+        | ServerEvent::SessionCompactionStarted(_)
+        | ServerEvent::SessionCompactionCompleted(_)
+        | ServerEvent::SessionCompactionFailed(_)
+        | ServerEvent::SessionStatusChanged(_)
+        | ServerEvent::SessionArchived(_)
+        | ServerEvent::SessionUnarchived(_)
+        | ServerEvent::SessionClosed(_)
+        | ServerEvent::SessionDeleted(_)
+        | ServerEvent::TurnStarted(_)
+        | ServerEvent::TurnCompleted(_)
+        | ServerEvent::TurnInterrupted(_)
+        | ServerEvent::TurnFailed(_)
+        | ServerEvent::TurnPlanUpdated(_)
+        | ServerEvent::TurnDiffUpdated(_)
+        | ServerEvent::TurnProviderRetryStatus(_)
+        | ServerEvent::ToolCallStatusUpdated(_)
+        | ServerEvent::RequestUserInput(_)
+        | ServerEvent::InputQueueUpdated(_)
+        | ServerEvent::SteerAccepted(_)
+        | ServerEvent::MessageEditRecorded(_)
+        | ServerEvent::TurnSuperseded(_)
+        | ServerEvent::WorkspaceRestoreStarted(_)
+        | ServerEvent::WorkspaceRestoreCompleted(_)
+        | ServerEvent::ItemStarted(_)
+        | ServerEvent::ItemCompleted(_)
+        | ServerEvent::ServerRequestResolved(_)
+        | ServerEvent::ReferenceSearchCompleted(_)
+        | ServerEvent::ReferenceSearchFailed(_)
+        | ServerEvent::CommandExecExited(_) => OutboundDeliveryPolicy::Reliable,
+    }
+}
+
 fn session_activity_event_id(event: &ServerEvent) -> Option<SessionId> {
     match event {
         ServerEvent::ToolCallStatusUpdated(payload) => Some(payload.session_id),
@@ -1309,6 +1374,46 @@ mod tests {
                     DEVO_ITEM_ID_META: item_id.to_string(),
                 },
             })
+        );
+    }
+
+    #[test]
+    fn item_lifecycle_is_reliable_while_item_deltas_are_best_effort() {
+        let session_id = SessionId::new();
+        let turn_id = TurnId::new();
+        let item_id = ItemId::new();
+        let context = EventContext {
+            session_id,
+            turn_id: Some(turn_id),
+            item_id: Some(item_id),
+            seq: 0,
+        };
+        let events = [
+            ServerEvent::ItemCompleted(ItemEventPayload {
+                context: context.clone(),
+                item: ItemEnvelope {
+                    item_id,
+                    item_kind: ItemKind::ContextCompaction,
+                    payload: serde_json::json!({ "title": "Context compacted" }),
+                },
+            }),
+            ServerEvent::ItemDelta {
+                delta_kind: ItemDeltaKind::AgentMessageDelta,
+                payload: ItemDeltaPayload {
+                    context,
+                    delta: "token".to_string(),
+                    stream_index: None,
+                    channel: None,
+                },
+            },
+        ];
+
+        assert_eq!(
+            events.map(|event| outbound_delivery_policy(&event)),
+            [
+                OutboundDeliveryPolicy::Reliable,
+                OutboundDeliveryPolicy::BestEffort,
+            ]
         );
     }
 

@@ -139,8 +139,9 @@ pub(super) fn command_display_from_input(tool_name: &str, input: &serde_json::Va
             .unwrap_or_default()
             .to_string(),
         "write_stdin" => {
-            let session_id = input
-                .get("session_id")
+            let process_id = input
+                .get("process_id")
+                .or_else(|| input.get("session_id"))
                 .and_then(serde_json::Value::as_i64)
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "?".to_string());
@@ -149,9 +150,9 @@ pub(super) fn command_display_from_input(tool_name: &str, input: &serde_json::Va
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
             if chars.is_empty() {
-                format!("poll session {session_id}")
+                format!("poll process {process_id}")
             } else {
-                format!("write_stdin session {session_id}")
+                format!("write_stdin process {process_id}")
             }
         }
         "read" => {
@@ -333,7 +334,7 @@ mod tests {
     use devo_protocol::SessionHistoryMetadata;
     use pretty_assertions::assert_eq;
 
-    use super::command_actions_from_tool_input;
+    use super::{command_actions_from_tool_input, command_display_from_input};
     use crate::projection::history_item_from_turn_item;
 
     #[test]
@@ -397,5 +398,27 @@ mod tests {
                 "live and replay actions differ for {tool_name}"
             );
         }
+    }
+
+    #[test]
+    fn write_stdin_display_prefers_process_id_and_reads_legacy_session_id() {
+        assert_eq!(
+            command_display_from_input(
+                "write_stdin",
+                &serde_json::json!({
+                    "process_id": 42,
+                    "session_id": 99,
+                    "chars": "hello"
+                }),
+            ),
+            "write_stdin process 42"
+        );
+        assert_eq!(
+            command_display_from_input(
+                "write_stdin",
+                &serde_json::json!({ "session_id": 99, "chars": "" }),
+            ),
+            "poll process 99"
+        );
     }
 }

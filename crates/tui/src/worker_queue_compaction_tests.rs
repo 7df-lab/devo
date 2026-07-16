@@ -98,7 +98,7 @@ fn context_compaction_worker_event_adds_history_item() {
 
     let history = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
     assert!(
-        history.contains("Context Compaction"),
+        history.contains("Context compacted"),
         "expected completed context compaction to be visible in history:\n{history}"
     );
 }

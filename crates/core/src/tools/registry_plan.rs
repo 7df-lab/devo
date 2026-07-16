@@ -96,7 +96,7 @@ fn shell_command_schema() -> JsonSchema {
             (
                 "command".to_string(),
                 JsonSchema::string(Some(
-                    "The shell command to execute in the selected platform shell",
+                    "The shell command to execute in the selected platform shell. Start with a brief `# ...` purpose comment on the line above the command.",
                 )),
             ),
             (
@@ -592,7 +592,9 @@ fn exec_command_schema() -> JsonSchema {
         BTreeMap::from([
             (
                 "cmd".to_string(),
-                JsonSchema::string(Some("Shell command to execute")),
+                JsonSchema::string(Some(
+                    "Shell command to execute. Start with a brief `# ...` purpose comment on the line above the command.",
+                )),
             ),
             (
                 "command".to_string(),
@@ -623,7 +625,7 @@ fn exec_command_schema() -> JsonSchema {
             (
                 "execution_mode".to_string(),
                 JsonSchema::string(Some(
-                    "attached (default) returns output or a process session; background returns a task id immediately.",
+                    "attached (default) returns output or a process ID; background returns a task id immediately.",
                 )),
             ),
             (
@@ -646,8 +648,8 @@ fn write_stdin_schema() -> JsonSchema {
     JsonSchema::object(
         BTreeMap::from([
             (
-                "session_id".to_string(),
-                JsonSchema::integer(Some("Session ID of the running exec_command process")),
+                "process_id".to_string(),
+                JsonSchema::integer(Some("Process ID of the running exec_command process")),
             ),
             (
                 "chars".to_string(),
@@ -666,7 +668,7 @@ fn write_stdin_schema() -> JsonSchema {
                 JsonSchema::number(Some("Maximum number of tokens of output to return.")),
             ),
         ]),
-        Some(vec!["session_id".to_string()]),
+        Some(vec!["process_id".to_string()]),
         Some(false),
     )
 }
@@ -941,7 +943,7 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
             ToolSpec {
                 name: "exec_command".to_string(),
                 description:
-                    "Run a shell command in attached or background mode. Attached mode returns output or a process session for write_stdin; background mode returns a task id for await_task, list_tasks, and cancel_task."
+                    "Run a shell command in attached or background mode. Start the command string with a brief `# ...` comment on its own line explaining the command's purpose, then put the command on the next line. Attached mode returns output or a process ID for write_stdin; background mode returns a task id for await_task, list_tasks, and cancel_task."
                         .to_string(),
                 input_schema: exec_command_schema(),
                 output_mode: ToolOutputMode::Mixed,
@@ -1042,10 +1044,10 @@ mod tests {
     }
 
     #[test]
-    fn schema_write_stdin_requires_session_id() {
+    fn schema_write_stdin_requires_process_id() {
         let schema = write_stdin_schema();
         let required = schema.required.as_ref().unwrap();
-        assert!(required.contains(&"session_id".to_string()));
+        assert_eq!(required, &vec!["process_id".to_string()]);
     }
 
     #[test]
@@ -1063,6 +1065,36 @@ mod tests {
         assert!(props.contains_key("cmd"));
         assert!(props.contains_key("timeout_ms"));
         assert!(props.contains_key("tty"));
+        assert!(
+            props["command"]
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("purpose comment"))
+        );
+    }
+
+    #[test]
+    fn command_tool_descriptions_request_a_leading_purpose_comment() {
+        let plan = build_tool_registry_plan(&ToolPlanConfig::default());
+        let descriptions = plan
+            .specs
+            .iter()
+            .filter(|spec| matches!(spec.name.as_str(), "shell_command" | "exec_command"))
+            .map(|spec| (spec.name.as_str(), spec.description.as_str()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(descriptions.len(), 2);
+        assert!(
+            descriptions
+                .values()
+                .all(|description| description.contains("brief `# ...` comment"))
+        );
+        assert!(
+            exec_command_schema().properties.as_ref().unwrap()["cmd"]
+                .description
+                .as_deref()
+                .is_some_and(|description| description.contains("purpose comment"))
+        );
     }
 
     #[test]

@@ -587,7 +587,7 @@ pub(crate) enum WorkerEvent {
         /// The new session title.
         title: String,
     },
-    /// The active session started a proactive compaction request.
+    /// The active session or its context-compaction transcript item started compaction.
     SessionCompactionStarted,
     /// The active session completed a proactive compaction request.
     SessionCompacted {
@@ -606,7 +606,7 @@ pub(crate) enum WorkerEvent {
     },
     /// A context-compaction transcript item was completed.
     ContextCompactionCompleted {
-        /// Display title for the compaction item.
+        /// Server-provided title retained for event compatibility.
         title: String,
     },
     /// The active session compaction request failed.

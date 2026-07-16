@@ -1,3 +1,4 @@
+mod context_compaction;
 mod event_stream;
 mod failure;
 mod finalize;

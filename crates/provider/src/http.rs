@@ -13,6 +13,8 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use tracing::warn;
 
+use crate::error::context_limit_error;
+
 #[derive(Clone, Copy)]
 enum HttpClientKind {
     Request,
@@ -151,6 +153,24 @@ pub(crate) async fn invalid_status_error(
         response_body = %response_body,
         "provider request failed"
     );
+    let response_value = serde_json::from_str::<Value>(&response_body).ok();
+    let message = response_value
+        .as_ref()
+        .and_then(|value| value.pointer("/error/message"))
+        .and_then(Value::as_str)
+        .unwrap_or(&response_body)
+        .to_string();
+    let error_kind = response_value
+        .as_ref()
+        .and_then(|value| value.pointer("/error/type"))
+        .and_then(Value::as_str);
+    let error_code = response_value
+        .as_ref()
+        .and_then(|value| value.pointer("/error/code"))
+        .and_then(Value::as_str);
+    if let Some(error) = context_limit_error(message, error_kind, error_code) {
+        return anyhow::Error::new(error);
+    }
     anyhow::anyhow!(
         "{provider} {operation} error for model {model}: Invalid status code: {status}; response body: {response_body}"
     )

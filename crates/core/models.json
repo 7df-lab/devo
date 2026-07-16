@@ -178,8 +178,8 @@
             "high",
             "max"
         ],
-        "context_window": 1000000,
-        "max_tokens": 384000,
+        "context_window": 1048565,
+        "max_tokens": 8096,
         "effective_context_window_percent": 95,
         "truncation_policy": {
             "mode": "tokens",
@@ -201,8 +201,8 @@
             "high",
             "max"
         ],
-        "context_window": 1000000,
-        "max_tokens": 384000,
+        "context_window": 1048565,
+        "max_tokens": 8096,
         "effective_context_window_percent": 95,
         "truncation_policy": {
             "mode": "tokens",

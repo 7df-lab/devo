@@ -89,12 +89,12 @@ impl ModelProviderSDK for InteractiveExecProvider {
                 }),
             ),
             1 => {
-                let session_id = extract_process_session_id(&request)?;
+                let process_id = extract_process_id(&request)?;
                 tool_call_events(
                     "stdin-1",
                     "write_stdin",
                     serde_json::json!({
-                        "session_id": session_id,
+                        "process_id": process_id,
                         "chars": "hello\n",
                         "yield_time_ms": 5000,
                         "max_output_tokens": 1000
@@ -209,7 +209,7 @@ fn interactive_command() -> &'static str {
     "Write-Output 'ready'; $line = Read-Host; Write-Output \"received:$line\"; Start-Sleep -Milliseconds 100; Write-Output 'done'"
 }
 
-fn extract_process_session_id(request: &ModelRequest) -> Result<i64> {
+fn extract_process_id(request: &ModelRequest) -> Result<i64> {
     let content = request
         .messages
         .iter()
@@ -223,12 +223,12 @@ fn extract_process_session_id(request: &ModelRequest) -> Result<i64> {
             _ => None,
         })
         .context("exec_command tool result")?;
-    let marker = "Process running with session ID ";
-    let session_id = content
+    let marker = "Process running with process ID ";
+    let process_id = content
         .lines()
         .find_map(|line| line.strip_prefix(marker))
-        .context("running process session id")?;
-    session_id.parse().context("parse process session id")
+        .context("running process id")?;
+    process_id.parse().context("parse process id")
 }
 
 fn extract_background_task_id(request: &ModelRequest) -> Result<String> {
@@ -303,7 +303,7 @@ async fn long_running_exec_command_accepts_write_stdin_and_exits() -> Result<()>
     let requests = provider.requests();
     assert_eq!(requests.len(), 3);
     let exec_result = tool_result(&requests[1], "exec-1").context("exec result")?;
-    assert!(exec_result.contains("Process running with session ID"));
+    assert!(exec_result.contains("Process running with process ID"));
     assert!(exec_result.contains("ready"));
     let stdin_result = tool_result(&requests[2], "stdin-1").context("stdin result")?;
     assert!(stdin_result.contains("received:hello"));
@@ -323,7 +323,8 @@ async fn background_exec_lists_and_awaits_terminal_command_task() -> Result<()> 
     let listed = tool_result(&requests[2], "list-tasks-1").context("list task result")?;
     assert!(listed.contains("\"kind\":\"command\""));
     assert!(listed.contains("\"state\":\"running\""));
-    assert!(listed.contains("process_session_id"));
+    assert!(listed.contains("process_id"));
+    assert!(!listed.contains("process_session_id"));
     let awaited = tool_result(&requests[3], "await-task-1").context("await task result")?;
     assert!(awaited.contains("\"outcome\":\"terminal\""));
     assert!(awaited.contains("\"state\":\"completed\""));

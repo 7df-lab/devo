@@ -216,7 +216,7 @@ fn terminal_result_metadata(
             }
         ],
         "terminalId": terminal_id,
-        "output": if output_text.is_empty() { "(no output)" } else { output_text.as_str() },
+        "output": output_text,
         "truncated": truncated,
         "exitStatus": exit_status,
         "command": preview(&request.command),
@@ -471,6 +471,40 @@ mod tests {
             ToolResultContent::Json(json) => json,
             content => panic!("expected json result, got {content:?}"),
         }
+    }
+
+    #[test]
+    fn terminal_metadata_preserves_empty_output() {
+        let request = request();
+        let metadata = terminal_result_metadata(
+            "term_1",
+            &request,
+            Some(ClientTerminalOutput {
+                output: String::new(),
+                truncated: false,
+                exit_status: Some(ok_status()),
+            }),
+        );
+
+        assert_eq!(
+            metadata,
+            serde_json::json!({
+                "content": [{
+                    "type": "terminal",
+                    "terminalId": "term_1"
+                }],
+                "terminalId": "term_1",
+                "output": "",
+                "truncated": false,
+                "exitStatus": {
+                    "exitCode": 0,
+                    "signal": null
+                },
+                "command": "echo hi",
+                "description": "test command",
+                "cwd": request.workdir
+            })
+        );
     }
 
     #[tokio::test]

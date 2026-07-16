@@ -151,6 +151,33 @@ impl ProviderError {
     }
 }
 
+pub(crate) fn context_limit_error(
+    message: String,
+    error_kind: Option<&str>,
+    error_code: Option<&str>,
+) -> Option<ProviderError> {
+    let normalized_message = message.to_ascii_lowercase();
+    let message_matches = normalized_message.contains("maximum context length")
+        || normalized_message.contains("context_length_exceeded")
+        || normalized_message.contains("context_too_long")
+        || (normalized_message.contains("context window")
+            && (normalized_message.contains("exceeded")
+                || normalized_message.contains("too long")));
+    let metadata_matches = [error_kind, error_code]
+        .into_iter()
+        .flatten()
+        .map(str::to_ascii_lowercase)
+        .any(|value| {
+            value.contains("context_length_exceeded") || value.contains("context_too_long")
+        });
+
+    (message_matches || metadata_matches).then_some(ProviderError::ContextLimitError {
+        message,
+        current_tokens: None,
+        limit: None,
+    })
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]

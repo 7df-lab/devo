@@ -1,12 +1,15 @@
-﻿use super::tool_display::*;
+use super::tool_display::*;
 use super::types::*;
 use crate::*;
-use devo_core::ItemId;
 use devo_core::tools::tool_spec::ToolPreparationFeedback;
+use devo_core::{ItemId, SessionId, TurnId};
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 
+use super::context_compaction::{completed_event, failed_events, started_event};
 use super::event_stream::enqueue_query_event;
+use super::trace::QueryEventDeliveryPolicy;
+use super::trace::query_event_delivery_policy;
 
 #[test]
 fn command_progress_uses_command_execution_item_id() {
@@ -45,6 +48,83 @@ fn command_progress_uses_command_execution_item_id() {
     assert_eq!(
         command_execution_item_id_for_progress(&pending_tool_calls, "missing"),
         None
+    );
+}
+
+#[test]
+fn context_compaction_events_share_stable_item_lifecycle() {
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let item_id = ItemId::new();
+
+    assert_eq!(
+        vec![
+            started_event(session_id, turn_id, item_id),
+            completed_event(session_id, turn_id, item_id),
+        ],
+        vec![
+            ServerEvent::ItemStarted(ItemEventPayload {
+                context: EventContext {
+                    session_id,
+                    turn_id: Some(turn_id),
+                    item_id: Some(item_id),
+                    seq: 0,
+                },
+                item: ItemEnvelope {
+                    item_id,
+                    item_kind: ItemKind::ContextCompaction,
+                    payload: serde_json::json!({ "title": "Compaction started" }),
+                },
+            }),
+            ServerEvent::ItemCompleted(ItemEventPayload {
+                context: EventContext {
+                    session_id,
+                    turn_id: Some(turn_id),
+                    item_id: Some(item_id),
+                    seq: 0,
+                },
+                item: ItemEnvelope {
+                    item_id,
+                    item_kind: ItemKind::ContextCompaction,
+                    payload: serde_json::json!({ "title": "Context compacted" }),
+                },
+            }),
+        ]
+    );
+}
+
+#[test]
+fn context_compaction_failure_closes_item_and_reports_visible_error() {
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let item_id = ItemId::new();
+    let message = "context limit".to_string();
+
+    assert_eq!(
+        failed_events(session_id, turn_id, item_id, message.clone()),
+        [
+            ServerEvent::ItemCompleted(ItemEventPayload {
+                context: EventContext {
+                    session_id,
+                    turn_id: Some(turn_id),
+                    item_id: Some(item_id),
+                    seq: 0,
+                },
+                item: ItemEnvelope {
+                    item_id,
+                    item_kind: ItemKind::ContextCompaction,
+                    payload: serde_json::json!({
+                        "title": "Compaction failed",
+                        "status": "failed",
+                        "message": message,
+                    }),
+                },
+            }),
+            ServerEvent::SessionCompactionFailed(SessionCompactionFailedPayload {
+                session_id,
+                message,
+            }),
+        ]
     );
 }
 
@@ -407,4 +487,91 @@ async fn provider_retry_status_waits_for_channel_capacity() {
         Some(_) | None => panic!("expected provider retry status"),
     };
     assert_eq!(received_status, retry_status);
+}
+
+#[test]
+fn lifecycle_and_control_query_events_are_must_deliver() {
+    let events = [
+        devo_core::QueryEvent::ContextCompactionStarted,
+        devo_core::QueryEvent::ContextCompactionCompleted,
+        devo_core::QueryEvent::ContextCompactionFailed {
+            message: "context limit".to_string(),
+        },
+        devo_core::QueryEvent::ReasoningCompleted,
+        devo_core::QueryEvent::ToolUseStart {
+            id: "tool-1".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({ "path": "README.md" }),
+        },
+        devo_core::QueryEvent::ToolExecutionStart {
+            id: "tool-1".to_string(),
+        },
+        devo_core::QueryEvent::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            tool_name: "read".to_string(),
+            input: serde_json::json!({ "path": "README.md" }),
+            content: devo_core::tools::ToolContent::Text("contents".to_string()),
+            display_content: None,
+            is_error: false,
+            summary: "read README.md".to_string(),
+        },
+        devo_core::QueryEvent::ToolProgress {
+            tool_use_id: "tool-1".to_string(),
+            progress: devo_core::tools::ToolProgress::Terminal {
+                terminal_id: "terminal-1".to_string(),
+            },
+        },
+        devo_core::QueryEvent::TextDelta("text".to_string()),
+        devo_core::QueryEvent::ReasoningDelta("reasoning".to_string()),
+        devo_core::QueryEvent::TurnComplete {
+            stop_reason: devo_core::StopReason::EndTurn,
+        },
+    ];
+
+    assert_eq!(
+        events
+            .iter()
+            .map(query_event_delivery_policy)
+            .collect::<Vec<_>>(),
+        vec![QueryEventDeliveryPolicy::MustDeliver; events.len()]
+    );
+}
+
+#[test]
+fn high_volume_query_events_are_best_effort() {
+    let events = [
+        devo_core::QueryEvent::ToolProgress {
+            tool_use_id: "tool-1".to_string(),
+            progress: devo_core::tools::ToolProgress::OutputDelta {
+                delta: "output".to_string(),
+            },
+        },
+        devo_core::QueryEvent::ToolProgress {
+            tool_use_id: "tool-1".to_string(),
+            progress: devo_core::tools::ToolProgress::StatusUpdate {
+                message: "working".to_string(),
+                percent: Some(50),
+            },
+        },
+        devo_core::QueryEvent::ToolProgress {
+            tool_use_id: "tool-1".to_string(),
+            progress: devo_core::tools::ToolProgress::Completion {
+                summary: "done".to_string(),
+            },
+        },
+        devo_core::QueryEvent::UsageDelta {
+            usage: devo_protocol::Usage::default(),
+        },
+        devo_core::QueryEvent::Usage {
+            usage: devo_protocol::Usage::default(),
+        },
+    ];
+
+    assert_eq!(
+        events
+            .iter()
+            .map(query_event_delivery_policy)
+            .collect::<Vec<_>>(),
+        vec![QueryEventDeliveryPolicy::BestEffort; events.len()]
+    );
 }

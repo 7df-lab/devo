@@ -5494,6 +5494,72 @@ fn lifecycle_text_items_keep_reasoning_before_assistant_when_events_arrive_out_o
 }
 
 #[test]
+fn completed_assistant_flushes_before_next_reasoning_starts() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let stale_reasoning_id = ItemId::new();
+    let assistant_id = ItemId::new();
+    let next_reasoning_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: stale_reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: stale_reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+        delta: "first thought".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: assistant_id,
+        kind: crate::events::TextItemKind::Assistant,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: assistant_id,
+        kind: crate::events::TextItemKind::Assistant,
+        delta: "first answer".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id: assistant_id,
+        kind: crate::events::TextItemKind::Assistant,
+        final_text: "first answer".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: next_reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: next_reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+        delta: "second thought".to_string(),
+    });
+
+    let committed = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
+    let first_thought_index = committed
+        .find("first thought")
+        .expect("stale reasoning should be reconciled");
+    let first_answer_index = committed
+        .find("first answer")
+        .expect("completed assistant should flush");
+    assert!(
+        first_thought_index < first_answer_index,
+        "reconciled reasoning should remain before its assistant:\n{committed}"
+    );
+    assert_eq!(committed.matches("first thought").count(), 1, "{committed}");
+    assert_eq!(committed.matches("first answer").count(), 1, "{committed}");
+
+    let active = line_texts(widget.active_viewport_lines_for_test(100)).join("\n");
+    assert!(active.contains("Thinking: second thought"), "{active}");
+    assert!(!active.contains("first thought"), "{active}");
+    assert!(!active.contains("first answer"), "{active}");
+}
+
+#[test]
 fn assistant_stream_commit_tick_runs_while_reasoning_is_pending() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
@@ -6171,6 +6237,15 @@ fn session_compaction_live_rows_use_live_prefix_cols() {
 
     widget.handle_worker_event(crate::events::WorkerEvent::SessionCompactionStarted);
 
+    let started_history = scrollback_plain_lines(&widget.drain_scrollback_lines(80));
+    assert!(
+        started_history
+            .iter()
+            .any(|line| line.starts_with(&format!("{live_prefix}Compaction started"))),
+        "context compaction start should be visible in history:\n{}",
+        started_history.join("\n")
+    );
+
     let rows = rendered_rows(&widget, 120, 24);
     assert!(
         rows.iter()
@@ -6192,7 +6267,7 @@ fn session_compaction_live_rows_use_live_prefix_cols() {
     assert!(
         history
             .iter()
-            .any(|line| { line.starts_with(&format!("{live_prefix}Session compaction done")) }),
+            .any(|line| { line.starts_with(&format!("{live_prefix}Context compacted")) }),
         "compaction completion history should align with live prefix:\n{}",
         history.join("\n")
     );
@@ -6204,8 +6279,8 @@ fn session_compaction_live_rows_use_live_prefix_cols() {
     assert!(
         history
             .iter()
-            .any(|line| { line.starts_with(&format!("{live_prefix}Context compacted for turn")) }),
-        "context compaction history should align with live prefix:\n{}",
+            .all(|line| !line.contains("Context compacted")),
+        "paired session/item completion should not duplicate history:\n{}",
         history.join("\n")
     );
 
@@ -6219,6 +6294,80 @@ fn session_compaction_live_rows_use_live_prefix_cols() {
             .any(|line| { line.starts_with(&format!("{live_prefix}■ compaction timed out")) }),
         "compaction failure history should align with live prefix:\n{}",
         history.join("\n")
+    );
+}
+
+#[test]
+fn context_compaction_item_lifecycle_emits_worker_events() {
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let item_id = ItemId::new();
+    let context = devo_server::EventContext {
+        session_id,
+        turn_id: Some(turn_id),
+        item_id: Some(item_id),
+        seq: 1,
+    };
+    let item = devo_server::ItemEnvelope {
+        item_id,
+        item_kind: devo_server::ItemKind::ContextCompaction,
+        payload: serde_json::json!({"title": "Context Compaction"}),
+    };
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+    crate::worker::handle_started_item(
+        devo_server::ItemEventPayload {
+            context: context.clone(),
+            item: item.clone(),
+        },
+        &event_tx,
+    );
+    crate::worker::handle_completed_item(
+        devo_server::ItemEventPayload { context, item },
+        &event_tx,
+    );
+
+    assert_eq!(
+        event_rx.try_recv().expect("compaction start event"),
+        crate::events::WorkerEvent::SessionCompactionStarted
+    );
+    assert_eq!(
+        event_rx.try_recv().expect("compaction completion event"),
+        crate::events::WorkerEvent::ContextCompactionCompleted {
+            title: "Context Compaction".to_string()
+        }
+    );
+}
+
+#[test]
+fn failed_context_compaction_item_emits_failure_event() {
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+    crate::worker::handle_completed_item(
+        devo_server::ItemEventPayload {
+            context: devo_server::EventContext {
+                session_id: SessionId::new(),
+                turn_id: Some(TurnId::new()),
+                item_id: None,
+                seq: 1,
+            },
+            item: devo_server::ItemEnvelope {
+                item_id: ItemId::new(),
+                item_kind: devo_server::ItemKind::ContextCompaction,
+                payload: serde_json::json!({
+                    "title": "Compaction failed",
+                    "message": "summary generation failed"
+                }),
+            },
+        },
+        &event_tx,
+    );
+
+    assert_eq!(
+        event_rx.try_recv().expect("compaction failure event"),
+        crate::events::WorkerEvent::SessionCompactionFailed {
+            message: "summary generation failed".to_string()
+        }
     );
 }
 
@@ -7492,6 +7641,72 @@ fn transcript_overlay_lines_include_running_tool_input_and_output_delta() {
     assert!(
         transcript.contains("Output") && transcript.contains("streamed output line"),
         "transcript should include running tool output deltas: {transcript}"
+    );
+}
+
+#[test]
+fn generic_tool_call_has_one_running_render_owner() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "custom job".to_string(),
+        preparing: false,
+        parsed_commands: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCallDetails {
+        tool_use_id: "tool-1".to_string(),
+        tool_name: "custom_tool".to_string(),
+        input: serde_json::json!({"target": "crate"}),
+    });
+
+    let active = line_texts(widget.active_viewport_lines_for_test(100)).join("\n");
+    assert_eq!(
+        active.matches("Running custom job").count(),
+        1,
+        "one tool_use_id should have one live render owner:\n{active}"
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "custom job".to_string(),
+        preview: "done".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+    let active = line_texts(widget.active_viewport_lines_for_test(100)).join("\n");
+    assert!(!active.contains("Running custom job"), "{active}");
+}
+
+#[test]
+fn duplicate_command_execution_start_is_idempotent() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let started = crate::events::WorkerEvent::CommandExecutionStarted {
+        tool_use_id: "command-1".to_string(),
+        command: "pwd".to_string(),
+        input: None,
+        source: devo_protocol::protocol::ExecCommandSource::Agent,
+        command_actions: Vec::new(),
+    };
+
+    widget.handle_worker_event(started.clone());
+    widget.handle_worker_event(started);
+
+    let transcript = line_texts(widget.transcript_overlay_lines(100)).join("\n");
+    assert_eq!(
+        transcript.matches("pwd").count(),
+        1,
+        "duplicate starts should retain one command cell:\n{transcript}"
     );
 }
 

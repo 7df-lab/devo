@@ -20,6 +20,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::{Model, ModelCatalog, ModelError, ModelPreset};
+use serde_json::Value;
+
+mod user_sync;
 
 const BUILTIN_MODELS_JSON: &str = include_str!("../models.json");
 
@@ -59,25 +62,41 @@ impl PresetModelCatalog {
     /// Implementation loads from fallback to highest precedence so later
     /// layers can replace entries with the same slug.
     ///
-    /// If the user file does not exist it is seeded from the builtin list so
-    /// users can discover and customize the catalog.
+    /// The user file is synchronized with the built-in list while preserving
+    /// pinned, edited, and user-defined entries.
     pub fn load_from_config(
         config_home: &Path,
         workspace_root: Option<&Path>,
     ) -> Result<Self, PresetModelCatalogError> {
-        seed_user_models_file(config_home);
-
         let mut presets = load_builtin_model_presets()?;
-
         let mut warnings = Vec::new();
-        merge_filesystem_model_presets(
-            &mut presets,
-            &mut warnings,
-            &config_home.join("models.json"),
-        );
+        let user_path = config_home.join("models.json");
+        let project_path =
+            workspace_root.map(|workspace_root| workspace_root.join(".devo").join("models.json"));
+        let user_path_is_workspace_owned = project_path
+            .as_ref()
+            .is_some_and(|project_path| catalog_paths_alias(&user_path, project_path));
 
-        if let Some(workspace_root) = workspace_root {
-            let project_path = workspace_root.join(".devo").join("models.json");
+        if !user_path_is_workspace_owned {
+            let builtin_entries: Vec<Value> = serde_json::from_str(BUILTIN_MODELS_JSON)?;
+            let user_sync = user_sync::synchronize_user_catalog(&user_path, &builtin_entries);
+            if let Some(user_presets) = user_sync.presets {
+                presets = merge_model_presets(presets, user_presets);
+            }
+            for message in user_sync.warnings {
+                tracing::warn!(
+                    path = %user_path.display(),
+                    warning = %message,
+                    "model catalog synchronization warning"
+                );
+                warnings.push(ModelCatalogWarning {
+                    path: user_path.clone(),
+                    message,
+                });
+            }
+        }
+
+        if let Some(project_path) = project_path {
             merge_filesystem_model_presets(&mut presets, &mut warnings, &project_path);
         }
 
@@ -159,6 +178,33 @@ fn load_models_from_file(path: &Path) -> Result<Option<Vec<ModelPreset>>, ModelC
         .map_err(ModelCatalogFileError::Parse)
 }
 
+fn catalog_paths_alias(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    if let (Ok(left), Ok(right)) = (std::fs::canonicalize(left), std::fs::canonicalize(right))
+        && left == right
+    {
+        return true;
+    }
+    if left.file_name() != right.file_name() {
+        return false;
+    }
+
+    match (left.parent(), right.parent()) {
+        (Some(left_parent), Some(right_parent)) => {
+            match (
+                std::fs::canonicalize(left_parent),
+                std::fs::canonicalize(right_parent),
+            ) {
+                (Ok(left_parent), Ok(right_parent)) => left_parent == right_parent,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 fn merge_filesystem_model_presets(
     presets: &mut Vec<ModelPreset>,
     warnings: &mut Vec<ModelCatalogWarning>,
@@ -194,19 +240,6 @@ fn merge_model_presets(mut base: Vec<ModelPreset>, overlay: Vec<ModelPreset>) ->
         }
     }
     base
-}
-
-/// Copies the built-in `models.json` to the user config directory if no user
-/// file exists yet.
-fn seed_user_models_file(config_home: &Path) {
-    let user_path = config_home.join("models.json");
-    if user_path.exists() {
-        return;
-    }
-    if let Some(parent) = user_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&user_path, BUILTIN_MODELS_JSON);
 }
 
 /// Errors produced while loading the builtin catalog.
@@ -327,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_config_seeds_user_file_when_missing() {
+    fn load_from_config_creates_managed_user_file_when_missing() {
         let root = unique_temp_dir("catalog-seed");
         let home = root.join("home").join(".devo");
         std::fs::create_dir_all(&home).expect("create home");
@@ -340,13 +373,21 @@ mod tests {
 
         assert!(user_file.exists());
         let contents = std::fs::read_to_string(&user_file).expect("read");
-        assert!(contents.contains("qwen3-coder-next"));
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(&contents).expect("parse managed user catalog");
+        assert!(!entries.is_empty());
+        assert!(entries.iter().all(|entry| {
+            entry["_devo"]["update_policy"] == "managed"
+                && entry["_devo"]["builtin_sha256"]
+                    .as_str()
+                    .is_some_and(|hash| hash.starts_with("sha256:"))
+        }));
 
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn load_from_config_does_not_overwrite_existing_user_file() {
+    fn load_from_config_preserves_custom_models_when_appending_builtins() {
         let root = unique_temp_dir("catalog-no-overwrite");
         let home = root.join("home").join(".devo");
         std::fs::create_dir_all(&home).expect("create home");
@@ -364,6 +405,14 @@ mod tests {
 
         assert!(models.iter().any(|m| m.slug == "custom"));
         assert!(models.iter().any(|m| m.slug == "qwen3-coder-next"));
+        let entries: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(&user_file).expect("read synchronized user catalog"),
+        )
+        .expect("parse synchronized user catalog");
+        assert_eq!(
+            entries[0],
+            serde_json::json!({"slug": "custom", "display_name": "Custom"})
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -457,6 +506,68 @@ mod tests {
     }
 
     #[test]
+    fn load_from_config_does_not_sync_catalog_shared_by_user_and_workspace_paths() {
+        let root = unique_temp_dir("catalog-shared-user-workspace");
+        let workspace = root.join("workspace");
+        let shared_home = workspace.join(".devo");
+        std::fs::create_dir_all(&shared_home).expect("create shared catalog directory");
+        let shared_catalog = shared_home.join("models.json");
+        let contents = r#"[{"slug":"qwen3-coder-next","display_name":"Workspace-owned catalog"}]"#;
+        std::fs::write(&shared_catalog, contents).expect("write shared catalog");
+
+        let catalog =
+            PresetModelCatalog::load_from_config(&shared_home, Some(&workspace)).expect("load");
+
+        assert_eq!(
+            catalog
+                .get("qwen3-coder-next")
+                .expect("workspace model")
+                .display_name,
+            "Workspace-owned catalog"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&shared_catalog).expect("read shared catalog"),
+            contents
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_from_config_does_not_sync_symlinked_workspace_catalog() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("catalog-symlinked-user-workspace");
+        let config_home = root.join("catalog");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&config_home).expect("create catalog directory");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        symlink(&config_home, workspace.join(".devo")).expect("symlink workspace catalog");
+        let shared_catalog = config_home.join("models.json");
+        let contents =
+            r#"[{"slug":"qwen3-coder-next","display_name":"Symlinked workspace catalog"}]"#;
+        std::fs::write(&shared_catalog, contents).expect("write shared catalog");
+
+        let catalog =
+            PresetModelCatalog::load_from_config(&config_home, Some(&workspace)).expect("load");
+
+        assert_eq!(
+            catalog
+                .get("qwen3-coder-next")
+                .expect("workspace model")
+                .display_name,
+            "Symlinked workspace catalog"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&shared_catalog).expect("read shared catalog"),
+            contents
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn load_from_config_uses_workspace_user_builtin_precedence_by_slug() {
         let root = unique_temp_dir("catalog-precedence");
         let home = root.join("home").join(".devo");
@@ -476,6 +587,8 @@ mod tests {
             r#"[{"slug":"qwen3-coder-next","display_name":"Workspace","context_window":333,"effective_context_window_percent":88,"max_tokens":444}]"#,
         )
         .expect("write project models");
+        let workspace_contents =
+            std::fs::read_to_string(&workspace_models).expect("read project models before load");
 
         let catalog = PresetModelCatalog::load_from_config(&home, Some(&workspace)).expect("load");
         let model = model_by_slug(&catalog.into_inner(), "qwen3-coder-next");
@@ -491,6 +604,10 @@ mod tests {
                 max_tokens: Some(444),
                 ..ModelPreset::default()
             })
+        );
+        assert_eq!(
+            std::fs::read_to_string(&workspace_models).expect("read project models after load"),
+            workspace_contents
         );
 
         let _ = std::fs::remove_dir_all(root);

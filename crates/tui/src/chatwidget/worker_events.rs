@@ -30,7 +30,6 @@ use super::ChatWidget;
 use super::DotStatus;
 use super::PendingApprovalRequest;
 use super::SKILLS_TRANSCRIPT_TITLE;
-use super::session_header::is_web_search_title;
 use super::text_stream::ActiveTextItemId;
 
 fn format_retry_status_message(attempt: usize, backoff_ms: u64) -> String {
@@ -52,6 +51,24 @@ impl ChatWidget {
             self.current_turn_has_user_shell_command = true;
             self.current_turn_mode = InputMode::Shell;
         }
+
+        let already_rendered = self
+            .active_cell
+            .as_ref()
+            .and_then(|cell| cell.as_any().downcast_ref::<ExecCell>())
+            .is_some_and(|cell| cell.contains_call(&tool_use_id))
+            || self.history.iter().any(|cell| {
+                cell.as_any()
+                    .downcast_ref::<ExecCell>()
+                    .is_some_and(|cell| cell.contains_call(&tool_use_id))
+            });
+        if already_rendered {
+            return;
+        }
+
+        self.active_tool_calls.remove(&tool_use_id);
+        self.pending_tool_calls
+            .retain(|pending| pending.tool_use_id != tool_use_id);
 
         if let Some(cell) = self
             .active_cell
@@ -328,6 +345,9 @@ impl ChatWidget {
                     start_time: None,
                 };
                 if preparing {
+                    self.active_tool_calls.remove(&tool_use_id);
+                    self.pending_tool_calls
+                        .retain(|pending| pending.tool_use_id != tool_use_id);
                     self.pending_tool_calls.push(ActiveToolCall {
                         lines: Vec::new(),
                         start_time: Some(Instant::now()),
@@ -343,24 +363,6 @@ impl ChatWidget {
                         .retain(|pc| self.active_tool_calls.contains_key(&pc.tool_use_id));
                     self.active_tool_calls
                         .insert(tool_use_id.clone(), tool_call);
-                    let pending_title =
-                        if title.starts_with("Running ") || is_web_search_title(&title) {
-                            title
-                        } else {
-                            format!("Running {title}")
-                        };
-                    let seq = self.reserve_seq();
-                    self.pending_tool_calls.push(ActiveToolCall {
-                        tool_use_id,
-                        seq,
-                        tool_name: None,
-                        input: None,
-                        title: pending_title,
-                        lines: Vec::new(),
-                        output: String::new(),
-                        exec_like: false,
-                        start_time: Some(Instant::now()),
-                    });
                 }
                 self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
                 self.frame_requester.schedule_frame();
@@ -502,13 +504,8 @@ impl ChatWidget {
                 is_error,
                 truncated,
             } => {
-                if let Some(pos) = self
-                    .pending_tool_calls
-                    .iter()
-                    .position(|tc| tc.tool_use_id == tool_use_id)
-                {
-                    self.pending_tool_calls.remove(pos);
-                }
+                self.pending_tool_calls
+                    .retain(|pending| pending.tool_use_id != tool_use_id);
                 let dot_status = if is_error {
                     DotStatus::Failed
                 } else {
@@ -631,13 +628,8 @@ impl ChatWidget {
                 truncated,
             } => {
                 // Remove from pending viewport entries — it will be committed to history below.
-                if let Some(pos) = self
-                    .pending_tool_calls
-                    .iter()
-                    .position(|tc| tc.tool_use_id == tool_use_id)
-                {
-                    self.pending_tool_calls.remove(pos);
-                }
+                self.pending_tool_calls
+                    .retain(|pending| pending.tool_use_id != tool_use_id);
                 let dot_status = if is_error {
                     DotStatus::Failed
                 } else {
@@ -1321,6 +1313,12 @@ impl ChatWidget {
                 self.set_status_message("Session renamed");
             }
             WorkerEvent::SessionCompactionStarted => {
+                if self.status_message != "Session compaction in progress" {
+                    self.add_to_history(history_cell::new_live_aligned_info_event(
+                        "Compaction started".to_string(),
+                        None,
+                    ));
+                }
                 self.busy = true;
                 self.bottom_pane.set_task_running(true);
                 if let Some(status) = self.bottom_pane.status_widget_mut() {
@@ -1343,23 +1341,34 @@ impl ChatWidget {
                 self.last_query_total_tokens = last_query_total_tokens;
                 self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
-                self.add_to_history(history_cell::new_live_aligned_info_event(
-                    "Session compaction done".to_string(),
-                    None,
-                ));
+                if self.status_message != "Context compacted" {
+                    self.add_to_history(history_cell::new_live_aligned_info_event(
+                        "Context compacted".to_string(),
+                        None,
+                    ));
+                }
                 self.set_status_message("Session compacted");
             }
-            WorkerEvent::ContextCompactionCompleted { title } => {
-                self.add_to_history(history_cell::new_live_aligned_info_event(title, None));
+            WorkerEvent::ContextCompactionCompleted { title: _ } => {
+                if self.status_message != "Session compacted"
+                    && self.status_message != "Context compacted"
+                {
+                    self.add_to_history(history_cell::new_live_aligned_info_event(
+                        "Context compacted".to_string(),
+                        None,
+                    ));
+                }
                 self.set_status_message("Context compacted");
             }
             WorkerEvent::SessionCompactionFailed { message } => {
                 self.busy = false;
                 self.bottom_pane.set_task_running(false);
-                self.add_to_history(history_cell::new_live_aligned_error_event_with_hint(
-                    message,
-                    Some("session compaction failed".to_string()),
-                ));
+                if self.status_message != "Session compaction failed" {
+                    self.add_to_history(history_cell::new_live_aligned_error_event_with_hint(
+                        message,
+                        Some("session compaction failed".to_string()),
+                    ));
+                }
                 self.set_status_message("Session compaction failed");
             }
             WorkerEvent::SessionTitleUpdated {

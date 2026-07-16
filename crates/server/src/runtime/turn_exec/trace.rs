@@ -3,6 +3,41 @@ use std::time::Instant;
 
 use devo_core::QueryEvent;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum QueryEventDeliveryPolicy {
+    MustDeliver,
+    BestEffort,
+}
+
+pub(super) fn query_event_delivery_policy(event: &QueryEvent) -> QueryEventDeliveryPolicy {
+    match event {
+        QueryEvent::ToolProgress {
+            progress:
+                devo_core::tools::ToolProgress::OutputDelta { .. }
+                | devo_core::tools::ToolProgress::StatusUpdate { .. }
+                | devo_core::tools::ToolProgress::Completion { .. },
+            ..
+        }
+        | QueryEvent::UsageDelta { .. }
+        | QueryEvent::Usage { .. } => QueryEventDeliveryPolicy::BestEffort,
+        QueryEvent::ProviderRetryStatus(_)
+        | QueryEvent::ContextCompactionStarted
+        | QueryEvent::ContextCompactionCompleted
+        | QueryEvent::ContextCompactionFailed { .. }
+        | QueryEvent::TextDelta(_)
+        | QueryEvent::ReasoningDelta(_)
+        | QueryEvent::ReasoningCompleted
+        | QueryEvent::ToolUseStart { .. }
+        | QueryEvent::ToolExecutionStart { .. }
+        | QueryEvent::ToolResult { .. }
+        | QueryEvent::ToolProgress {
+            progress: devo_core::tools::ToolProgress::Terminal { .. },
+            ..
+        }
+        | QueryEvent::TurnComplete { .. } => QueryEventDeliveryPolicy::MustDeliver,
+    }
+}
+
 pub(super) fn stream_trace_elapsed_ms() -> u128 {
     static STREAM_TRACE_START: OnceLock<Instant> = OnceLock::new();
     STREAM_TRACE_START
@@ -14,6 +49,9 @@ pub(super) fn stream_trace_elapsed_ms() -> u128 {
 pub(super) fn query_event_trace_kind(event: &QueryEvent) -> &'static str {
     match event {
         QueryEvent::ProviderRetryStatus(_) => "provider_retry_status",
+        QueryEvent::ContextCompactionStarted => "context_compaction_started",
+        QueryEvent::ContextCompactionCompleted => "context_compaction_completed",
+        QueryEvent::ContextCompactionFailed { .. } => "context_compaction_failed",
         QueryEvent::TextDelta(_) => "text_delta",
         QueryEvent::ReasoningDelta(_) => "reasoning_delta",
         QueryEvent::ReasoningCompleted => "reasoning_completed",
@@ -42,6 +80,9 @@ pub(super) fn query_event_trace_delta_len(event: &QueryEvent) -> usize {
             ..
         }
         | QueryEvent::ProviderRetryStatus(_)
+        | QueryEvent::ContextCompactionStarted
+        | QueryEvent::ContextCompactionCompleted
+        | QueryEvent::ContextCompactionFailed { .. }
         | QueryEvent::ReasoningCompleted
         | QueryEvent::ToolUseStart { .. }
         | QueryEvent::ToolExecutionStart { .. }
@@ -55,7 +96,19 @@ pub(super) fn query_event_trace_delta_len(event: &QueryEvent) -> usize {
 pub(super) fn query_event_trace_token_preview(event: &QueryEvent) -> Option<String> {
     match event {
         QueryEvent::TextDelta(text) => assistant_token_log_preview(text),
-        _ => None,
+        QueryEvent::ProviderRetryStatus(_)
+        | QueryEvent::ContextCompactionStarted
+        | QueryEvent::ContextCompactionCompleted
+        | QueryEvent::ContextCompactionFailed { .. }
+        | QueryEvent::ReasoningDelta(_)
+        | QueryEvent::ReasoningCompleted
+        | QueryEvent::ToolUseStart { .. }
+        | QueryEvent::ToolExecutionStart { .. }
+        | QueryEvent::ToolProgress { .. }
+        | QueryEvent::ToolResult { .. }
+        | QueryEvent::TurnComplete { .. }
+        | QueryEvent::UsageDelta { .. }
+        | QueryEvent::Usage { .. } => None,
     }
 }
 

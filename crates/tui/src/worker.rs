@@ -2366,68 +2366,7 @@ async fn run_worker_inner(
                             }
                             "item/started" => {
                                 if let ServerEvent::ItemStarted(payload) = event {
-                                    tracing::debug!(
-                                        item_id = %payload.item.item_id,
-                                        item_kind = ?payload.item.item_kind,
-                                        "server item started"
-                                    );
-                                    match payload.item.item_kind {
-                                        ItemKind::AgentMessage => {
-                                            let _ = event_tx.send(WorkerEvent::TextItemStarted {
-                                                item_id: payload.item.item_id,
-                                                kind: TextItemKind::Assistant,
-                                            });
-                                        }
-                                        ItemKind::Reasoning => {
-                                            let _ = event_tx.send(WorkerEvent::TextItemStarted {
-                                                item_id: payload.item.item_id,
-                                                kind: TextItemKind::Reasoning,
-                                            });
-                                        }
-                                        ItemKind::Plan => {
-                                            if is_proposed_plan_payload(&payload.item.payload) {
-                                                let _ = event_tx.send(
-                                                    WorkerEvent::ProposedPlanStarted {
-                                                        item_id: payload.item.item_id,
-                                                    },
-                                                );
-                                            }
-                                        }
-                                        ItemKind::CommandExecution => {
-                                            if let Ok(payload) =
-                                                serde_json::from_value::<CommandExecutionPayload>(
-                                                    payload.item.payload,
-                                                )
-                                            {
-                                                let _ = event_tx.send(
-                                                    WorkerEvent::CommandExecutionStarted {
-                                                        tool_use_id: payload.tool_call_id,
-                                                        command: payload.command,
-                                                        input: payload.input,
-                                                        source: payload.source,
-                                                        command_actions: payload.command_actions,
-                                                    },
-                                                );
-                                            }
-                                        }
-                                        ItemKind::ToolCall => {
-                                            if let Ok(payload) =
-                                                serde_json::from_value::<ToolCallPayload>(
-                                                    payload.item.payload,
-                                                )
-                                            {
-                                                let details = WorkerEvent::ToolCallDetails {
-                                                    tool_use_id: payload.tool_call_id.clone(),
-                                                    tool_name: payload.tool_name.clone(),
-                                                    input: payload.parameters.clone(),
-                                                };
-                                                let _ =
-                                                    event_tx.send(tool_call_started_event(payload));
-                                                let _ = event_tx.send(details);
-                                            }
-                                        }
-                                        _ => {}
-                                    }
+                                    handle_started_item(payload, event_tx);
                                 }
                             }
                             "item/agentMessage/delta" => {
@@ -3291,6 +3230,74 @@ async fn close_btw_agent(
         .await;
 }
 
+pub(crate) fn handle_started_item(
+    payload: ItemEventPayload,
+    event_tx: &mpsc::UnboundedSender<WorkerEvent>,
+) {
+    tracing::debug!(
+        item_id = %payload.item.item_id,
+        item_kind = ?payload.item.item_kind,
+        "server item started"
+    );
+    let ItemEnvelope {
+        item_id,
+        item_kind,
+        payload,
+    } = payload.item;
+    match item_kind {
+        ItemKind::AgentMessage => {
+            let _ = event_tx.send(WorkerEvent::TextItemStarted {
+                item_id,
+                kind: TextItemKind::Assistant,
+            });
+        }
+        ItemKind::Reasoning => {
+            let _ = event_tx.send(WorkerEvent::TextItemStarted {
+                item_id,
+                kind: TextItemKind::Reasoning,
+            });
+        }
+        ItemKind::Plan => {
+            if is_proposed_plan_payload(&payload) {
+                let _ = event_tx.send(WorkerEvent::ProposedPlanStarted { item_id });
+            }
+        }
+        ItemKind::CommandExecution => {
+            if let Ok(payload) = serde_json::from_value::<CommandExecutionPayload>(payload) {
+                let _ = event_tx.send(WorkerEvent::CommandExecutionStarted {
+                    tool_use_id: payload.tool_call_id,
+                    command: payload.command,
+                    input: payload.input,
+                    source: payload.source,
+                    command_actions: payload.command_actions,
+                });
+            }
+        }
+        ItemKind::ToolCall => {
+            if let Ok(payload) = serde_json::from_value::<ToolCallPayload>(payload) {
+                let details = WorkerEvent::ToolCallDetails {
+                    tool_use_id: payload.tool_call_id.clone(),
+                    tool_name: payload.tool_name.clone(),
+                    input: payload.parameters.clone(),
+                };
+                let _ = event_tx.send(tool_call_started_event(payload));
+                let _ = event_tx.send(details);
+            }
+        }
+        ItemKind::ContextCompaction => {
+            let _ = event_tx.send(WorkerEvent::SessionCompactionStarted);
+        }
+        ItemKind::UserMessage
+        | ItemKind::ToolResult
+        | ItemKind::FileChange
+        | ItemKind::McpToolCall
+        | ItemKind::WebSearch
+        | ItemKind::ImageView
+        | ItemKind::ApprovalRequest
+        | ItemKind::ApprovalDecision => {}
+    }
+}
+
 pub(crate) fn handle_completed_item(
     payload: ItemEventPayload,
     event_tx: &mpsc::UnboundedSender<WorkerEvent>,
@@ -3412,6 +3419,42 @@ pub(crate) fn handle_completed_item(
             payload,
             ..
         } => {
+            let error = payload.get("error").filter(|error| !error.is_null());
+            let failed = payload
+                .get("is_error")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                || payload
+                    .get("failed")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                || payload
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|status| {
+                        status.eq_ignore_ascii_case("failed")
+                            || status.eq_ignore_ascii_case("error")
+                    })
+                || payload
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|title| title.eq_ignore_ascii_case("Compaction failed"))
+                || error.is_some();
+            if failed {
+                let message = error
+                    .and_then(|error| {
+                        error
+                            .as_str()
+                            .or_else(|| error.get("message").and_then(serde_json::Value::as_str))
+                    })
+                    .or_else(|| payload.get("message").and_then(serde_json::Value::as_str))
+                    .map(str::trim)
+                    .filter(|message| !message.is_empty())
+                    .unwrap_or("Context compaction failed")
+                    .to_string();
+                let _ = event_tx.send(WorkerEvent::SessionCompactionFailed { message });
+                return;
+            }
             let title = payload
                 .get("title")
                 .and_then(serde_json::Value::as_str)

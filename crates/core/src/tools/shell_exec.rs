@@ -319,11 +319,7 @@ pub(crate) fn merge_streams(stdout: &str, stderr: &str) -> String {
         result.push_str("[stderr]\n");
         result.push_str(stderr);
     }
-    if result.is_empty() {
-        "(no output)".to_string()
-    } else {
-        result
-    }
+    result
 }
 
 fn platform_shell(login: bool) -> ShellSpec {
@@ -791,6 +787,6 @@ mod tests {
 
     #[test]
     fn merge_streams_no_output() {
-        assert_eq!(merge_streams("", ""), "(no output)");
+        assert_eq!(merge_streams("", ""), "");
     }
 }
