@@ -64,6 +64,4 @@ pub struct InteractiveTuiConfig {
     pub show_model_onboarding: bool,
     /// Whether successful onboarding should exit the TUI immediately.
     pub exit_after_onboarding: bool,
-    /// Non-fatal startup warnings to show in the transcript before user input.
-    pub startup_warnings: Vec<String>,
 }

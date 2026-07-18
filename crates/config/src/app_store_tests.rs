@@ -66,7 +66,7 @@ enabled = true
         Some("alt-binding")
     );
     assert_eq!(document["model_provider"].as_str(), Some("openai"));
-    assert_eq!(document["model"].as_str(), Some("alt-model"));
+    assert_eq!(document["model"].as_str(), Some("test-model"));
     assert_eq!(
         store
             .effective_config()

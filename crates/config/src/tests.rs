@@ -20,6 +20,7 @@ use super::HooksConfig;
 use super::LogRotation;
 use super::LoggingConfig;
 use super::ModelBindingConfig;
+use super::ModelOverrideConfig;
 use super::OAuthCredentialsStoreMode;
 use super::ProjectConfig;
 use super::ProviderConfigSection;
@@ -34,6 +35,8 @@ use crate::SkillsConfig;
 use devo_protocol::ProviderModelBinding;
 use devo_protocol::ProviderVendor;
 use devo_protocol::ProviderWireApi;
+use devo_protocol::ReasoningEffort;
+use devo_protocol::TruncationPolicyConfig;
 
 fn unique_temp_dir(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -560,6 +563,84 @@ request_model = "project/model"
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[test]
+fn loader_merges_model_overrides_field_by_field_across_layers() {
+    let root = unique_temp_dir("config-model-overrides-overlay");
+    let home = root.join("home").join(".devo");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::create_dir_all(workspace.join(".devo")).expect("workspace config dir");
+
+    std::fs::write(
+        home.join("config.toml"),
+        r#"
+[model.grok-4]
+display_name = "User Grok"
+description = "User description"
+context_window = 128000
+temperature = 0.4
+provider = "openai_chat_completions"
+default_reasoning_effort = "medium"
+truncation_policy = { mode = "tokens", limit = 8000 }
+"#,
+    )
+    .expect("write user config");
+    std::fs::write(
+        workspace.join(".devo").join("config.toml"),
+        r#"
+[model.grok-4]
+description = "Workspace description"
+context_window = 192000
+top_p = 0.9
+"#,
+    )
+    .expect("write workspace config");
+    let cli_overrides: toml::Value = r#"
+[model.grok-4]
+display_name = "CLI Grok"
+temperature = 0.2
+
+[model.grok-4-mini]
+display_name = "Grok 4 Mini"
+max_tokens = 4096
+"#
+    .parse()
+    .expect("parse cli overrides");
+
+    let loader = FileSystemAppConfigLoader::new(home).with_cli_overrides(cli_overrides);
+    let config = loader.load(Some(&workspace)).expect("load config");
+
+    assert_eq!(
+        config.provider.model_overrides,
+        BTreeMap::from([
+            (
+                "grok-4".to_string(),
+                ModelOverrideConfig {
+                    display_name: Some("CLI Grok".to_string()),
+                    description: Some("Workspace description".to_string()),
+                    context_window: Some(192_000),
+                    temperature: Some(0.2),
+                    top_p: Some(0.9),
+                    provider: Some(ProviderWireApi::OpenAIChatCompletions),
+                    default_reasoning_effort: Some(ReasoningEffort::Medium),
+                    truncation_policy: Some(TruncationPolicyConfig::tokens(8_000)),
+                    ..ModelOverrideConfig::default()
+                },
+            ),
+            (
+                "grok-4-mini".to_string(),
+                ModelOverrideConfig {
+                    display_name: Some("Grok 4 Mini".to_string()),
+                    max_tokens: Some(4_096),
+                    ..ModelOverrideConfig::default()
+                },
+            ),
+        ])
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Trace: L2-DES-APP-005
 /// Verifies: CLI provider overrides participate in the same provider merge precedence as other CLI config.
 #[test]
@@ -687,6 +768,7 @@ fn provider_upsert_writes_user_config_when_workspace_is_active() {
     assert!(user_config.contains("[providers.openrouter]"));
     assert!(user_config.contains("[model_bindings.qwen-openrouter]"));
     assert!(user_config.contains("model_binding = \"qwen-openrouter\""));
+    assert!(document.get("model").is_none());
     assert_eq!(
         document["providers"]["openrouter"]["headers"].as_str(),
         Some(r#"{"X-Devo":"yes"}"#)

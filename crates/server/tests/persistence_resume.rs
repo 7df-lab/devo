@@ -1534,38 +1534,17 @@ async fn configured_request_model_is_used_for_turn_metadata_and_provider_request
     let data_root = TempDir::new()?;
     std::fs::create_dir_all(data_root.path().join(".devo"))?;
     std::fs::write(
-        data_root.path().join(".devo").join("models.json"),
+        data_root.path().join(".devo").join("config.toml"),
         r#"
-[
-  {
-    "slug": "test-model",
-    "display_name": "test-model",
-    "provider": "openai_chat_completions",
-    "reasoning_capability": "toggle",
-    "reasoning_implementation": {
-      "model_variant": {
-        "variants": [
-          {
-            "selection_value": "disabled",
-            "model_slug": "test-model",
-            "reasoning_effort": null,
-            "label": "Off",
-            "description": "Disable reasoning effort"
-          },
-          {
-            "selection_value": "enabled",
-            "model_slug": "vendor/test-model",
-            "reasoning_effort": "medium",
-            "label": "On",
-            "description": "Enable reasoning effort"
-          }
-        ]
-      }
-    },
-    "base_instructions": "Test model",
-    "priority": 999
-  }
-]
+[model.test-model]
+display_name = "test-model"
+provider = "openai_chat_completions"
+reasoning_capability = "toggle"
+reasoning_implementation = { model_variant = { variants = [
+  { selection_value = "disabled", model_slug = "test-model", label = "Off", description = "Disable reasoning effort" },
+  { selection_value = "enabled", model_slug = "vendor/test-model", reasoning_effort = "medium", label = "On", description = "Enable reasoning effort" },
+] } }
+base_instructions = "Test model"
 "#,
     )?;
     let provider = Arc::new(CapturingProvider::default());

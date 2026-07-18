@@ -453,21 +453,84 @@ The resolved runtime settings contain the provider id, wire API, final model
 name, optional base URL, optional API key, model limits, reasoning effort selection,
 response-storage flag, and preferred auth method.
 
-`model_slug` is the local catalog key matching a `slug` in the effective
-`models.json` catalog. `request_model` is the provider-specific model name used for
-the API request. The legacy `model_name` key is accepted when reading existing
-configuration, while subsequent writes use `request_model`. The effective catalog precedence is
-`<workspace>/.devo/models.json`, then `<DEVO_HOME>/models.json`, then built-in
-defaults, merged by `slug`. Turn metadata records `model` as the catalog slug
-and `request_model` as the provider request model; these values may be
-identical.
+`model_slug` is the local catalog key. Model metadata starts from the built-in
+catalog and is overlaid field-by-field from user and workspace `config.toml`
+`[model.<slug>]` sections. Existing slugs are partial overrides; new slugs create
+custom models with safe defaults. `request_model` is the provider-facing model id
+used for the API request. The legacy `model_name` key is accepted when reading
+existing configuration, while subsequent writes use `request_model`. Turn
+metadata records `model` as the catalog slug and `request_model` as the provider
+request model; these values may be identical.
 
-Untouched built-in entries in `<DEVO_HOME>/models.json` are synchronized with
-the catalog bundled in the running binary. Devo records the source fingerprint
-and update policy in a reserved `_devo` object. Editing model fields preserves
-the full entry as a user override. Set `_devo.update_policy` to `"pinned"` to
-prevent an unchanged built-in entry from being refreshed explicitly. Custom
-slugs and workspace-level catalogs are never rewritten by this synchronization.
+Model metadata `provider` describes the wire API and accepts
+`openai_chat_completions`, `openai_responses`, or `anthropic_messages`. The
+binding's `invocation_method` is the operational connection choice and should
+match that metadata. A usable custom model therefore needs a
+`[providers.<id>]` connection and `[model_bindings.<id>]` binding; the provider's
+optional `credential` points to an API key stored in `auth.json`.
+
+A built-in partial override can be as small as:
+
+```toml
+[model.qwen3-coder-next]
+context_window = 262144
+effective_context_window_percent = 90
+```
+
+A custom model must also be selected through connection wiring:
+
+```toml
+[defaults]
+model_binding = "custom-example"
+
+[model.custom]
+display_name = "Custom"
+provider = "openai_responses"
+context_window = 128000
+reasoning_capability = { levels = ["low", "medium", "high"] }
+reasoning_implementation = "request_parameter"
+default_reasoning_effort = "medium"
+
+[providers.example]
+enabled = true
+name = "Example"
+base_url = "https://api.example.com/v1"
+credential = "example_api_key"
+wire_apis = ["openai_responses"]
+
+[model_bindings.custom-example]
+enabled = true
+model_slug = "custom"
+provider = "example"
+request_model = "provider-facing-model-id"
+invocation_method = "openai_responses"
+```
+
+`ModelOverrideConfig` exposes `display_name`, `description`, `channel`,
+`context_window`, `effective_context_window_percent`, `max_tokens`, `temperature`,
+`top_p`, `top_k`, `provider`, `reasoning_capability`,
+`reasoning_implementation`, `default_reasoning_effort`, `base_instructions`,
+`input_modalities`, `truncation_policy`, and `supports_image_detail_original`.
+`display_name` is the picker label, `description` is its explanatory text, and
+`channel` groups related models. The effective context is
+`context_window * effective_context_window_percent / 100` and is also the
+automatic-compaction boundary; `max_tokens` is the default response-output
+limit. `temperature`, `top_p`, and `top_k` are request sampling defaults.
+`reasoning_capability` defines the choices shown to users, while
+`reasoning_implementation` says whether a choice is disabled, sent as a request
+parameter, or mapped to a configured wire-model variant;
+`default_reasoning_effort` selects the initial effort. `input_modalities`
+declares text/image input support, `truncation_policy` selects a byte- or
+token-based request-content limit, and `supports_image_detail_original`
+enables original-resolution image detail. Omitted built-in fields are
+preserved. Omitted custom-model `base_instructions` use the default
+instructions, while an explicit empty string means no base instructions.
+
+Old `<DEVO_HOME>/models.json` and `<workspace>/.devo/models.json` files are
+ignored. Migration is manual: copy desired fields into the corresponding user or
+workspace `config.toml` `[model.<slug>]` sections. The legacy top-level scalar
+`model = "slug"` remains readable, but it collides with the new `model` table
+namespace, so new configuration must select with `[defaults].model_binding`.
 
 When reasoning effort resolution selects a model variant catalog slug, the provider
 request model is resolved from enabled bindings for the same provider as the

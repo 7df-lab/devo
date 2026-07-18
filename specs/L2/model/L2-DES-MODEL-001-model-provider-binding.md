@@ -23,6 +23,8 @@ The same supported model may be exposed by different providers under different m
 
 User providers and model-provider bindings are persisted through application configuration. Effective values are resolved from user-scoped and workspace-scoped `config.toml` files. Workspace fields override user fields only when the same field is present; user-only fields remain effective.
 
+The effective supported-model catalog starts from model definitions embedded in the program. User-scoped and workspace-scoped `[model.<slug>]` sections then overlay metadata field by field, with workspace fields taking precedence over overlapping user fields. A section for an embedded slug is a partial override; a new slug adds a custom supported model definition with safe defaults.
+
 The concrete `config.toml` field shape for persisted providers, model bindings, and defaults is defined by `L2-DES-APP-005`. Credential material is stored only in user-scoped `auth.json` and referenced from provider records by credential id.
 
 ## Source Requirements
@@ -113,7 +115,7 @@ Legacy configuration may provide `model_name` as a read alias for `request_model
 
 The binding must be valid only when:
 
-- The supported model slug exists in the effective model catalog, whose precedence is workspace `models.json`, user `models.json`, then built-in defaults.
+- The supported model slug exists in the effective model catalog produced from embedded definitions plus the field-wise merged user and workspace `[model.<slug>]` configuration.
 - The provider exists and has sufficient connection details.
 - The invocation method is supported by the program.
 - The reasoning effort is allowed by the selected supported model.
@@ -130,11 +132,13 @@ Persistent model configuration conceptually stores:
 - Default selected binding where supported.
 - Default reasoning effort where supported.
 
-Persistent model configuration should store references to supported model slugs rather than copying the full supported model definition into user or workspace configuration.
+Persistent model bindings should store references to supported model slugs rather than copying full supported model definitions. User or workspace configuration may separately persist only the model metadata fields intentionally added or overridden under `[model.<slug>]`.
 
 Current-session model and reasoning selection is not itself a `ModelProviderBinding`. A session may select a configured binding and use a session-local reasoning effort without rewriting the binding record. Configuration writes should occur only when a provider, binding, or persisted default selection is created or changed by the relevant workflow.
 
-The TOML schema stores global provider HTTP settings under `[provider_http]`, providers under `[providers.<provider_id>]`, invocable bindings under `[model_bindings.<binding_id>]`, and durable default selection under `[defaults]`. Provider records reference credentials by id and may contain raw custom HTTP header configuration. Runtime-only `ResolvedModelProfile` values are not persisted in `config.toml`.
+The TOML schema stores model metadata additions and partial overrides under `[model.<slug>]`, global provider HTTP settings under `[provider_http]`, providers under `[providers.<provider_id>]`, invocable bindings under `[model_bindings.<binding_id>]`, and durable default selection under `[defaults]`. Provider records reference credentials by id and may contain raw custom HTTP header configuration. Runtime-only `ResolvedModelProfile` values are not persisted in `config.toml`.
+
+Legacy user `~/.devo/models.json` and workspace `<workspace>/.devo/models.json` files are ignored. Migration is manual: users copy desired model metadata fields into the corresponding user or workspace `config.toml` `[model.<slug>]` section and retain or add the provider and binding records required for invocation.
 
 The effective provider and binding set is resolved through configuration precedence:
 

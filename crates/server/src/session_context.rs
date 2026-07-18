@@ -145,7 +145,9 @@ impl SessionRuntimeContext {
             .expect("inherited app config store mutex should not be poisoned")
             .effective_config()
             .clone();
-        let provider_runtime_config_changed = config.provider != inherited_config.provider
+        let provider_runtime_config_changed = !config
+            .provider
+            .is_operationally_equivalent_to(&inherited_config.provider)
             || config.provider_http != inherited_config.provider_http;
         let registry = if !has_provider_configuration && config.mcp.servers.is_empty() {
             Arc::clone(&inherited_context.registry)
@@ -158,8 +160,7 @@ impl SessionRuntimeContext {
             Arc::new(handlers::build_registry_from_plan_with_mcp(&tool_plan, mcp_manager).await)
         };
         let model_catalog: Arc<dyn ModelCatalog> = Arc::new(PresetModelCatalog::load_from_config(
-            &user_config_dir,
-            workspace_root,
+            &config.provider.model_overrides,
         )?);
         let default_model = model_catalog.resolve_for_turn(None)?.slug.clone();
         let (provider, provider_router, provider_default_model) =

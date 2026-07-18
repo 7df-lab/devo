@@ -15,6 +15,7 @@
 //! - turn execution should consume `Model`, not `ModelPreset`
 //! - loading policy and catalog access live in `model_catalog.rs`; this file only defines the raw shape
 //!
+use devo_config::ModelOverrideConfig;
 use devo_protocol::InputModality;
 use devo_protocol::Model;
 use devo_protocol::ProviderWireApi;
@@ -129,6 +130,75 @@ impl Default for ModelPreset {
             max_tokens: None,
             priority: 0,
         }
+    }
+}
+
+impl ModelPreset {
+    /// Applies configured metadata overrides while preserving fields that were omitted.
+    pub fn apply_overrides(&mut self, overrides: &ModelOverrideConfig) {
+        if let Some(display_name) = &overrides.display_name {
+            self.display_name.clone_from(display_name);
+        }
+        if let Some(description) = &overrides.description {
+            self.description = Some(description.clone());
+        }
+        if let Some(context_window) = overrides.context_window {
+            self.context_window = context_window;
+        }
+        if let Some(effective_context_window_percent) = overrides.effective_context_window_percent {
+            self.effective_context_window_percent = Some(effective_context_window_percent);
+        }
+        if let Some(max_tokens) = overrides.max_tokens {
+            self.max_tokens = Some(max_tokens);
+        }
+        if let Some(temperature) = overrides.temperature {
+            self.temperature = Some(temperature);
+        }
+        if let Some(top_p) = overrides.top_p {
+            self.top_p = Some(top_p);
+        }
+        if let Some(top_k) = overrides.top_k {
+            self.top_k = Some(top_k);
+        }
+        if let Some(provider) = overrides.provider {
+            self.provider = provider;
+        }
+        if let Some(reasoning_capability) = &overrides.reasoning_capability {
+            self.reasoning_capability = reasoning_capability.clone();
+            self.supported_reasoning_levels.clear();
+        }
+        if let Some(reasoning_implementation) = &overrides.reasoning_implementation {
+            self.reasoning_implementation = Some(reasoning_implementation.clone());
+        }
+        if let Some(default_reasoning_effort) = overrides.default_reasoning_effort {
+            self.default_reasoning_effort = Some(default_reasoning_effort);
+        }
+        if let Some(base_instructions) = &overrides.base_instructions {
+            self.base_instructions = Some(base_instructions.clone());
+        }
+        if let Some(input_modalities) = &overrides.input_modalities {
+            self.input_modalities.clone_from(input_modalities);
+        }
+        if let Some(channel) = &overrides.channel {
+            self.channel = Some(channel.clone());
+        }
+        if let Some(truncation_policy) = overrides.truncation_policy {
+            self.truncation_policy = truncation_policy;
+        }
+        if let Some(supports_image_detail_original) = overrides.supports_image_detail_original {
+            self.supports_image_detail_original = supports_image_detail_original;
+        }
+    }
+
+    /// Creates a safe custom preset and applies its configured metadata overrides.
+    pub fn from_overrides(slug: &str, overrides: &ModelOverrideConfig) -> Self {
+        let mut preset = Self {
+            slug: slug.to_string(),
+            display_name: slug.to_string(),
+            ..Self::default()
+        };
+        preset.apply_overrides(overrides);
+        preset
     }
 }
 

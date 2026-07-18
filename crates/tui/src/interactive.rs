@@ -29,7 +29,6 @@ use crate::chatwidget::MCP_SERVERS_TRANSCRIPT_TITLE;
 use crate::chatwidget::TuiSessionState;
 use crate::chatwidget::UserMessage;
 use crate::events::WorkerEvent;
-use crate::history_cell;
 use crate::host_overlay::OverlayState;
 use crate::onboarding::OnboardingModelBinding;
 use crate::onboarding::onboarding_provider_model_binding;
@@ -313,10 +312,6 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
 
     if initial_session.session_id.is_some() && !config.show_model_onboarding {
         chat_widget.begin_session_resume();
-    }
-
-    for warning in &config.startup_warnings {
-        chat_widget.add_to_history(history_cell::new_warning_event(warning.clone()));
     }
 
     // tui events, such as `[TuiEvent::Draw]`, `[TuiEvent::Key]`, `TuiEvent::Paste`

@@ -43,7 +43,7 @@ use crate::write_atomic;
 use crate::write_provider_config;
 
 /// Stores the fully normalized runtime configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
     /// The policy that selects which model should generate context summaries.
     pub summary_model: SummaryModelSelection,
@@ -303,10 +303,6 @@ impl AppConfigStore {
             if !config.model_bindings.contains_key(&binding_id) {
                 anyhow::bail!("default model binding `{binding_id}` does not exist");
             }
-            if let Some(binding) = config.model_bindings.get(&binding_id) {
-                config.model_provider = Some(binding.provider.clone());
-                config.model = Some(binding.model_slug.clone());
-            }
             config.defaults.model_binding = Some(binding_id);
         }
 
@@ -350,8 +346,6 @@ impl AppConfigStore {
                     anyhow::bail!("model binding `{value}` is disabled");
                 }
                 config.defaults.model_binding = Some(value.to_string());
-                config.model_provider = Some(binding.provider.clone());
-                config.model = Some(binding.model_slug.clone());
             }
             "thought_level" => {
                 config.model_reasoning_effort_selection = Some(value.to_string());

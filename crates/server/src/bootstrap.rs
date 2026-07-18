@@ -201,8 +201,7 @@ pub async fn run_server_process(
     let tool_plan = ToolPlanConfig::from_app_config(&config);
     let registry = handlers::build_registry_from_plan_with_mcp(&tool_plan, mcp_manager).await;
     let model_catalog: Arc<dyn ModelCatalog> = Arc::new(PresetModelCatalog::load_from_config(
-        &resolver.user_config_dir(),
-        /*workspace_root*/ None,
+        &config.provider.model_overrides,
     )?);
     let default_model = model_catalog.resolve_for_turn(None)?.slug.clone();
     if !config.has_provider_configuration() {

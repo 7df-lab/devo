@@ -33,19 +33,8 @@ pub(crate) async fn run_agent(
 ) -> Result<devo_tui::AppExit> {
     let cwd = std::env::current_dir()?;
     let config_home = find_devo_home().context("could not determine devo home directory")?;
-    let model_catalog = PresetModelCatalog::load_from_config(&config_home, Some(&cwd))?;
-    let startup_warnings = model_catalog
-        .warnings()
-        .iter()
-        .map(|warning| {
-            format!(
-                "Model catalog warning for {}: {}",
-                warning.path.display(),
-                warning.message
-            )
-        })
-        .collect();
     let app_config = FileSystemAppConfigLoader::new(config_home.clone()).load(Some(&cwd))?;
+    let model_catalog = PresetModelCatalog::load_from_config(&app_config.provider.model_overrides)?;
     let project_key = project_config_key(&cwd);
     let permission_preset =
         initial_permission_preset(&app_config, &project_key, dangerously_skip_permissions);
@@ -108,7 +97,6 @@ pub(crate) async fn run_agent(
         saved_models,
         show_model_onboarding: onboarding_mode,
         exit_after_onboarding,
-        startup_warnings,
     })
     .await?;
     tracing::info!("interactive tui returned to cli agent command");

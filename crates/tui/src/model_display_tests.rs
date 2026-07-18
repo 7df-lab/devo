@@ -125,7 +125,6 @@ fn saved_model_metadata_overlays_catalog_display_for_picker() {
         }],
         show_model_onboarding: false,
         exit_after_onboarding: false,
-        startup_warnings: Vec::new(),
     };
 
     let available_models = crate::interactive::available_models_with_saved_metadata(&config);

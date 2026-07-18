@@ -55,7 +55,7 @@ pub(crate) async fn run_prompt(
         .unwrap_or_else(|_| AppConfig::default());
     let resolved_provider =
         devo_server::load_server_provider(&app_config, model_override, &home_dir)?;
-    let model_catalog = PresetModelCatalog::load_from_config(&home_dir, Some(&cwd))?;
+    let model_catalog = PresetModelCatalog::load_from_config(&app_config.provider.model_overrides)?;
     let turn_config = prompt_turn_config(
         &app_config,
         &model_catalog,
