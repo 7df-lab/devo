@@ -1619,9 +1619,8 @@ fn permissions_command_opens_bottom_pane_picker_and_updates_default() {
     });
 
     let rendered = rendered_rows(&widget, 100, 18).join("\n");
-    assert!(rendered.contains("Update Model Permissions"));
-    assert!(rendered.contains("Read Only"));
-    assert!(rendered.contains("● 2. Default"));
+    assert!(rendered.contains("Update Permissions"));
+    assert!(rendered.contains("● 1. Default"));
     assert!(rendered.contains("Auto-review"));
     assert!(rendered.contains("Full Access"));
 
@@ -1631,7 +1630,7 @@ fn permissions_command_opens_bottom_pane_picker_and_updates_default() {
     assert_eq!(
         event,
         AppEvent::Command(AppCommand::UpdatePermissions {
-            preset: devo_protocol::PermissionPreset::ReadOnly,
+            preset: devo_protocol::PermissionPreset::Default,
         })
     );
 }
@@ -1666,7 +1665,7 @@ fn permissions_command_marks_initial_project_preset_current() {
     });
 
     let rendered = rendered_rows(&widget, 100, 18).join("\n");
-    assert!(rendered.contains("● 4. Full Access"));
+    assert!(rendered.contains("● 3. Full Access"));
 }
 
 #[test]

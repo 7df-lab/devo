@@ -22,12 +22,18 @@ use super::LoggingConfig;
 use super::ModelBindingConfig;
 use super::ModelOverrideConfig;
 use super::OAuthCredentialsStoreMode;
+use super::PatternMode;
+use super::PermissionConfig;
+use super::PermissionRule;
 use super::ProjectConfig;
+use super::PromptPolicy;
 use super::ProviderConfigSection;
 use super::ProviderDefaultsConfig;
 use super::ProviderHttpConfig;
 use super::ProviderVendorConfig;
+use super::RuleAction;
 use super::SummaryModelSelection;
+use super::ToolFilter;
 use super::ToolsConfig;
 use super::UpdatesConfig;
 use crate::BundledSkillsConfig;
@@ -133,6 +139,7 @@ check_interval_hours = 48
             mcp: super::McpConfig::default(),
             tools: ToolsConfig::default(),
             hooks: HooksConfig::default(),
+            permission: PermissionConfig::default(),
             provider: ProviderConfigSection::default(),
             provider_http: super::ProviderHttpConfig::default(),
             updates: UpdatesConfig {
@@ -142,6 +149,284 @@ check_interval_hours = 48
             },
             project_root_markers: vec![".workspace".into()],
             projects: BTreeMap::new(),
+        }
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_defaults_permission_config_when_section_is_absent() {
+    let root = unique_temp_dir("permission-default");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+
+    let config = FileSystemAppConfigLoader::new(home)
+        .load(None)
+        .expect("load config");
+
+    assert_eq!(config.permission, PermissionConfig::default());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_reads_permission_rules_and_auto_default_mode() {
+    let root = unique_temp_dir("permission-rules");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        r#"
+[permission]
+default_mode = "auto"
+
+[[permission.rules]]
+action = "allow"
+tool = "bash"
+pattern = "git *"
+
+[[permission.rules]]
+action = "deny"
+tool = "edit"
+pattern = "**/.env"
+
+[[permission.rules]]
+action = "ask"
+tool = "web_fetch"
+pattern = "example.com"
+pattern_mode = "domain"
+
+[[permission.rules]]
+tool = "read"
+"#,
+    )
+    .expect("write user config");
+
+    let config = FileSystemAppConfigLoader::new(home)
+        .load(None)
+        .expect("load config");
+
+    assert_eq!(
+        config.permission,
+        PermissionConfig {
+            rules: vec![
+                PermissionRule {
+                    action: RuleAction::Allow,
+                    tool: ToolFilter::Bash,
+                    pattern: Some("git *".to_string()),
+                    pattern_mode: PatternMode::Glob,
+                },
+                PermissionRule {
+                    action: RuleAction::Deny,
+                    tool: ToolFilter::Edit,
+                    pattern: Some("**/.env".to_string()),
+                    pattern_mode: PatternMode::Glob,
+                },
+                PermissionRule {
+                    action: RuleAction::Ask,
+                    tool: ToolFilter::WebFetch,
+                    pattern: Some("example.com".to_string()),
+                    pattern_mode: PatternMode::Domain,
+                },
+                PermissionRule {
+                    action: RuleAction::Deny,
+                    tool: ToolFilter::Read,
+                    pattern: None,
+                    pattern_mode: PatternMode::Glob,
+                },
+            ],
+            prompt_policy: PromptPolicy::Auto,
+        }
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn default_app_config_serializes_permission_default_mode() {
+    let serialized = toml::Value::try_from(AppConfig::default()).expect("serialize config");
+
+    assert_eq!(
+        serialized
+            .get("permission")
+            .and_then(toml::Value::as_table)
+            .and_then(|permission| permission.get("default_mode"))
+            .and_then(toml::Value::as_str),
+        Some("ask")
+    );
+}
+
+#[test]
+fn loader_rejects_invalid_permission_rule_action() {
+    let root = unique_temp_dir("permission-invalid-action");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        "[[permission.rules]]\naction = 'approve'\n",
+    )
+    .expect("write user config");
+
+    let result = FileSystemAppConfigLoader::new(home).load(None);
+
+    assert!(matches!(result, Err(super::AppConfigError::Parse { .. })));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_preserves_lower_permission_section_when_higher_layer_omits_it() {
+    let root = unique_temp_dir("permission-preserve-overlay");
+    let home = root.join("home").join(".devo");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::create_dir_all(workspace.join(".devo")).expect("workspace config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        "[permission]\ndefault_mode = 'deny'\n[[permission.rules]]\naction = 'allow'\ntool = 'web_search'\n",
+    )
+    .expect("write user config");
+    std::fs::write(
+        workspace.join(".devo").join("config.toml"),
+        "[logging]\nlevel = 'debug'\n",
+    )
+    .expect("write project config");
+
+    let config = FileSystemAppConfigLoader::new(home)
+        .load(Some(&workspace))
+        .expect("load config");
+
+    assert_eq!(
+        config.permission,
+        PermissionConfig {
+            rules: vec![PermissionRule {
+                action: RuleAction::Allow,
+                tool: ToolFilter::WebSearch,
+                pattern: None,
+                pattern_mode: PatternMode::Glob,
+            }],
+            prompt_policy: PromptPolicy::Deny,
+        }
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_replaces_lower_permission_section_when_higher_layer_supplies_it() {
+    let root = unique_temp_dir("permission-replace-overlay");
+    let home = root.join("home").join(".devo");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::create_dir_all(workspace.join(".devo")).expect("workspace config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        "[permission]\ndefault_mode = 'auto'\n[[permission.rules]]\naction = 'allow'\ntool = 'bash'\n",
+    )
+    .expect("write user config");
+    std::fs::write(
+        workspace.join(".devo").join("config.toml"),
+        "[permission]\ndefault_mode = 'deny'\n[[permission.rules]]\naction = 'ask'\ntool = 'mcp'\n",
+    )
+    .expect("write project config");
+
+    let config = FileSystemAppConfigLoader::new(home)
+        .load(Some(&workspace))
+        .expect("load config");
+
+    assert_eq!(
+        config.permission,
+        PermissionConfig {
+            rules: vec![PermissionRule {
+                action: RuleAction::Ask,
+                tool: ToolFilter::Mcp,
+                pattern: None,
+                pattern_mode: PatternMode::Glob,
+            }],
+            prompt_policy: PromptPolicy::Deny,
+        }
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_cli_overlay_preserves_workspace_permission_when_omitted() {
+    let root = unique_temp_dir("permission-cli-preserve-overlay");
+    let home = root.join("home").join(".devo");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::create_dir_all(workspace.join(".devo")).expect("workspace config dir");
+    std::fs::write(
+        workspace.join(".devo").join("config.toml"),
+        "[permission]\ndefault_mode = 'auto'\n[[permission.rules]]\naction = 'allow'\ntool = 'bash'\npattern = 'git *'\n",
+    )
+    .expect("write project config");
+    let cli_overrides: toml::Value = "[logging]\nlevel = 'trace'\n"
+        .parse()
+        .expect("parse cli overrides");
+
+    let config = FileSystemAppConfigLoader::new(home)
+        .with_cli_overrides(cli_overrides)
+        .load(Some(&workspace))
+        .expect("load config");
+
+    assert_eq!(
+        config.permission,
+        PermissionConfig {
+            rules: vec![PermissionRule {
+                action: RuleAction::Allow,
+                tool: ToolFilter::Bash,
+                pattern: Some("git *".to_string()),
+                pattern_mode: PatternMode::Glob,
+            }],
+            prompt_policy: PromptPolicy::Auto,
+        }
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_cli_overlay_replaces_workspace_permission_section() {
+    let root = unique_temp_dir("permission-cli-replace-overlay");
+    let home = root.join("home").join(".devo");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::create_dir_all(workspace.join(".devo")).expect("workspace config dir");
+    std::fs::write(
+        workspace.join(".devo").join("config.toml"),
+        "[permission]\ndefault_mode = 'auto'\n[[permission.rules]]\naction = 'allow'\ntool = 'bash'\npattern = 'git *'\n",
+    )
+    .expect("write project config");
+    let cli_overrides: toml::Value = r#"
+[permission]
+default_mode = "deny"
+
+[[permission.rules]]
+action = "ask"
+tool = "mcp"
+pattern = "deploy"
+"#
+    .parse()
+    .expect("parse cli overrides");
+
+    let config = FileSystemAppConfigLoader::new(home)
+        .with_cli_overrides(cli_overrides)
+        .load(Some(&workspace))
+        .expect("load config");
+
+    assert_eq!(
+        config.permission,
+        PermissionConfig {
+            rules: vec![PermissionRule {
+                action: RuleAction::Ask,
+                tool: ToolFilter::Mcp,
+                pattern: Some("deploy".to_string()),
+                pattern_mode: PatternMode::Glob,
+            }],
+            prompt_policy: PromptPolicy::Deny,
         }
     );
 

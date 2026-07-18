@@ -25,6 +25,7 @@ use crate::LoggingFileConfig;
 use crate::McpConfig;
 use crate::ModelBindingConfig;
 use crate::OAuthCredentialsStoreMode;
+use crate::PermissionConfig;
 use crate::ProviderConfigError;
 use crate::ProviderConfigSection;
 use crate::ProviderHttpConfig;
@@ -71,6 +72,9 @@ pub struct AppConfig {
     /// External lifecycle hooks keyed by event name.
     #[serde(default, skip_serializing_if = "HooksConfig::is_empty")]
     pub hooks: HooksConfig,
+    /// Configured rules and default behavior for tool permission requests.
+    #[serde(default)]
+    pub permission: PermissionConfig,
     /// Provider, model, and active model defaults.
     #[serde(flatten)]
     pub provider: ProviderConfigSection,
@@ -162,6 +166,7 @@ impl Default for AppConfig {
             mcp: McpConfig::default(),
             tools: ToolsConfig::default(),
             hooks: HooksConfig::default(),
+            permission: PermissionConfig::default(),
             provider: ProviderConfigSection::default(),
             provider_http: ProviderHttpConfig::default(),
             updates: UpdatesConfig {
@@ -618,7 +623,7 @@ impl AppConfigLoader for FileSystemAppConfigLoader {
                 provider_section_from_value(&user_path, &user_config)?,
                 &user_config,
             );
-            merge_toml_values(&mut merged, user_config);
+            merge_app_config_values(&mut merged, user_config);
         }
 
         if let Some(workspace_root) = workspace_root {
@@ -629,7 +634,7 @@ impl AppConfigLoader for FileSystemAppConfigLoader {
                     provider_section_from_value(&project_path, &project_config)?,
                     &project_config,
                 );
-                merge_toml_values(&mut merged, project_config);
+                merge_app_config_values(&mut merged, project_config);
             }
         }
 
@@ -637,7 +642,7 @@ impl AppConfigLoader for FileSystemAppConfigLoader {
             provider_section_from_value(Path::new("<cli overrides>"), &self.cli_overrides)?,
             &self.cli_overrides,
         );
-        merge_toml_values_ref(&mut merged, &self.cli_overrides);
+        merge_app_config_values_ref(&mut merged, &self.cli_overrides);
 
         let mut config: AppConfig =
             merged
@@ -649,6 +654,28 @@ impl AppConfigLoader for FileSystemAppConfigLoader {
         config.provider = provider_config;
         validate_app_config(&config)?;
         Ok(config)
+    }
+}
+
+fn merge_app_config_values(base: &mut toml::Value, overlay: toml::Value) {
+    replace_permission_section_if_present(base, &overlay);
+    merge_toml_values(base, overlay);
+}
+
+fn merge_app_config_values_ref(base: &mut toml::Value, overlay: &toml::Value) {
+    replace_permission_section_if_present(base, overlay);
+    merge_toml_values_ref(base, overlay);
+}
+
+/// Replaces permission configuration as a unit when a higher-priority source
+/// explicitly supplies its `[permission]` section.
+fn replace_permission_section_if_present(base: &mut toml::Value, overlay: &toml::Value) {
+    let Some(permission) = overlay.as_table().and_then(|table| table.get("permission")) else {
+        return;
+    };
+
+    if let Some(base_table) = base.as_table_mut() {
+        base_table.insert("permission".to_string(), permission.clone());
     }
 }
 

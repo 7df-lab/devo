@@ -12,24 +12,19 @@ use crate::bottom_pane::list_selection_view::SelectionItem;
 pub(super) fn permission_preset_items(current: PermissionPreset) -> Vec<SelectionItem> {
     [
         (
-            PermissionPreset::ReadOnly,
-            "Read Only",
-            "Devo can read files in the current workspace. Approval is required to edit files, run commands, or access the internet.",
-        ),
-        (
             PermissionPreset::Default,
             "Default",
-            "Devo can read and edit files in the current workspace, and run commands. Approval is required to access the internet or edit other files.",
+            "Read, write, and run commands in workspace; network blocked.",
         ),
         (
             PermissionPreset::AutoReview,
             "Auto-review",
-            "Same workspace-write permissions as Default, but eligible approvals are routed through the auto-reviewer before interrupting you.",
+            "Same as Default, but auto-reviewer handles approvals first.",
         ),
         (
             PermissionPreset::FullAccess,
             "Full Access",
-            "Devo can edit files outside this workspace and access the internet without asking for approval. Exercise caution when using.",
+            "Full access — no approval needed; use with cautio.",
         ),
     ]
     .into_iter()
@@ -39,9 +34,7 @@ pub(super) fn permission_preset_items(current: PermissionPreset) -> Vec<Selectio
         is_current: preset == current,
         dismiss_on_select: true,
         actions: vec![Box::new(move |app_event_tx| {
-            app_event_tx.send(AppEvent::Command(AppCommand::UpdatePermissions {
-                preset,
-            }));
+            app_event_tx.send(AppEvent::Command(AppCommand::UpdatePermissions { preset }));
         })],
         ..Default::default()
     })
@@ -66,16 +59,12 @@ mod tests {
     #[test]
     fn permission_preset_labels_are_stable() {
         let actual = [
-            permission_preset_label(PermissionPreset::ReadOnly),
             permission_preset_label(PermissionPreset::Default),
             permission_preset_label(PermissionPreset::AutoReview),
             permission_preset_label(PermissionPreset::FullAccess),
         ];
 
-        assert_eq!(
-            actual,
-            ["Read Only", "Default", "Auto-review", "Full Access"]
-        );
+        assert_eq!(actual, ["Default", "Auto-review", "Full Access"]);
     }
 
     #[test]
@@ -97,7 +86,6 @@ mod tests {
         assert_eq!(
             actual,
             vec![
-                ("Read Only", true, false, true, 1),
                 ("Default", true, false, true, 1),
                 ("Auto-review", true, true, true, 1),
                 ("Full Access", true, false, true, 1),

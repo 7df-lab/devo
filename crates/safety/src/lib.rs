@@ -1,3 +1,4 @@
+pub mod permission;
 pub mod sandbox;
 
 use std::collections::BTreeSet;

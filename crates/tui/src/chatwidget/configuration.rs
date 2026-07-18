@@ -419,7 +419,7 @@ impl ChatWidget {
         self.bottom_pane
             .open_popup_view(Box::new(ListSelectionView::new(
                 SelectionViewParams {
-                    title: Some("Update Model Permissions".to_string()),
+                    title: Some("Update Permissions".to_string()),
                     footer_hint: Some(Line::from("Press enter to confirm or esc to go back")),
                     items: permission_preset_items(current),
                     ..SelectionViewParams::default()

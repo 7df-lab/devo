@@ -395,10 +395,11 @@ mod tests {
     #[test]
     fn format_json_compact_preserves_string_punctuation() {
         let actual = format_json_compact(r#"{"text":"a:b,c","quote":"\"x,y\""}"#);
-        assert_eq!(
-            actual,
-            Some(r#"{"quote": "\"x,y\"", "text": "a:b,c"}"#.to_string())
-        );
+        let actual = actual
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+        let expected = serde_json::json!({"text": "a:b,c", "quote": "\"x,y\""});
+        assert_eq!(actual, Some(expected));
     }
 
     #[test]

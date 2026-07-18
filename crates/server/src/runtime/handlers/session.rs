@@ -403,15 +403,8 @@ impl ServerRuntime {
         }
 
         // Persist updated session metadata to SQLite
-        if !summary.ephemeral
-            && let Err(err) = self.deps.db.upsert_session(&summary, None)
-        {
-            tracing::warn!(
-                session_id = %params.session_id,
-                error = %err,
-                "failed to update session title in database"
-            );
-        }
+        self.persist_session_summary_if_persistent(params.session_id, &summary)
+            .await;
 
         self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
             session: summary.clone(),

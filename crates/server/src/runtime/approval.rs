@@ -240,12 +240,12 @@ impl ServerRuntime {
             ItemKind::ApprovalDecision,
             TurnItem::ApprovalDecision(ApprovalDecisionItem {
                 approval_id: approval_id.clone(),
-                decision: format!("auto_review_{decision}"),
+                decision: decision.to_string(),
                 scope: "auto_review".to_string(),
             }),
             serde_json::json!({
                 "approval_id": approval_id,
-                "decision": format!("auto_review_{decision}"),
+                "decision": decision,
                 "scope": "auto_review",
                 "rationale": rationale,
                 "tool_name": request.tool_name,

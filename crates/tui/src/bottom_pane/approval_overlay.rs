@@ -170,10 +170,8 @@ fn build_header(request: &ApprovalOverlayRequest) -> ColumnRenderable<'static> {
     header.push(Line::from(request.action_summary.clone()).bold());
     header.push(Line::from(""));
     push_field(&mut header, "reason", Some(&request.justification));
-    push_field(&mut header, "resource", request.resource.as_ref());
     push_field(&mut header, "path", request.path.as_ref());
     push_field(&mut header, "host", request.host.as_ref());
-    push_field(&mut header, "target", request.target.as_ref());
     header
 }
 
