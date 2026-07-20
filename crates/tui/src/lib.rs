@@ -50,6 +50,7 @@ mod onboarding_widget_tests;
 mod pager_overlay;
 mod read_display;
 mod render;
+mod shell_output;
 mod shimmer;
 mod slash_command;
 mod startup_header;

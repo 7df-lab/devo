@@ -191,6 +191,18 @@ pub(crate) fn save_project_permission_preset(
     project_key: &str,
     preset: PermissionPreset,
 ) -> Result<()> {
+    save_project_config_value(
+        project_key,
+        "permission_preset",
+        permission_preset_to_config_value(preset),
+    )
+}
+
+pub(crate) fn save_project_sandbox_profile(project_key: &str, profile: &str) -> Result<()> {
+    save_project_config_value(project_key, "sandbox_profile", profile)
+}
+
+fn save_project_config_value(project_key: &str, key: &str, value: &str) -> Result<()> {
     let path = find_devo_home()
         .context("could not determine user config path")?
         .join("config.toml");
@@ -202,7 +214,7 @@ pub(crate) fn save_project_permission_preset(
     } else {
         Value::Table(Default::default())
     };
-    root = merge_project_permission_preset(root, project_key, preset)?;
+    root = merge_project_config_value(root, project_key, key, value)?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -224,10 +236,11 @@ pub(crate) fn load_theme_selection() -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn merge_project_permission_preset(
+fn merge_project_config_value(
     mut root: Value,
     project_key: &str,
-    preset: PermissionPreset,
+    key: &str,
+    value: &str,
 ) -> Result<Value> {
     let table = root
         .as_table_mut()
@@ -244,10 +257,7 @@ fn merge_project_permission_preset(
     let project_table = project
         .as_table_mut()
         .context("project permission entry must be a TOML table")?;
-    project_table.insert(
-        "permission_preset".to_string(),
-        Value::String(permission_preset_to_config_value(preset).to_string()),
-    );
+    project_table.insert(key.to_string(), Value::String(value.to_string()));
     Ok(root)
 }
 
@@ -261,7 +271,6 @@ fn merge_theme_selection(mut root: Value, name: &str) -> Result<Value> {
 
 fn permission_preset_to_config_value(preset: PermissionPreset) -> &'static str {
     match preset {
-        PermissionPreset::ReadOnly => "read-only",
         PermissionPreset::Default => "default",
         PermissionPreset::AutoReview => "auto-review",
         PermissionPreset::FullAccess => "full-access",
@@ -1245,7 +1254,7 @@ custom = "keep"
         .expect("parse");
 
         let merged =
-            merge_project_permission_preset(root, "C:\\repo", PermissionPreset::FullAccess)
+            merge_project_config_value(root, "C:\\repo", "permission_preset", "full-access")
                 .expect("merge");
 
         assert_eq!(
@@ -1287,6 +1296,43 @@ custom = "keep"
                 .and_then(|project| project.get("permission_preset"))
                 .and_then(Value::as_str),
             Some("full-access")
+        );
+    }
+
+    #[test]
+    fn merge_project_sandbox_profile_preserves_other_project_keys() {
+        let root: Value = r#"
+[projects.old]
+permission_preset = "default"
+sandbox_profile = "strict"
+"#
+        .parse()
+        .expect("parse");
+
+        let merged = merge_project_config_value(root, "C:\\repo", "sandbox_profile", "read-only")
+            .expect("merge");
+
+        assert_eq!(
+            merged
+                .as_table()
+                .and_then(|table| table.get("projects"))
+                .and_then(Value::as_table)
+                .and_then(|projects| projects.get("old"))
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("sandbox_profile"))
+                .and_then(Value::as_str),
+            Some("strict")
+        );
+        assert_eq!(
+            merged
+                .as_table()
+                .and_then(|table| table.get("projects"))
+                .and_then(Value::as_table)
+                .and_then(|projects| projects.get("C:\\repo"))
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("sandbox_profile"))
+                .and_then(Value::as_str),
+            Some("read-only")
         );
     }
 }

@@ -36,7 +36,13 @@ pub mod tool_summary {
 pub mod unified_exec;
 
 pub(crate) mod apply_patch;
+pub mod exec_policy_amend;
 pub(crate) mod read;
+pub use exec_policy_amend::is_banned_prefix_suggestion;
+pub(crate) mod exec_policy_loader;
+pub use exec_policy_loader::{
+    ExecPolicyLoadError, load_exec_policy_from_devo_home, load_exec_policy_from_dir,
+};
 pub(crate) mod shell_exec;
 pub(crate) mod websearch_prompt;
 

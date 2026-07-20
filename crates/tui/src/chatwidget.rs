@@ -69,6 +69,8 @@ mod permission_presets;
 
 mod resume_browser;
 
+mod sandbox_profiles;
+
 mod text_stream;
 
 mod transcript_view;
@@ -80,6 +82,7 @@ mod worker_events;
 use self::permission_presets::permission_preset_items;
 use self::permission_presets::permission_preset_label;
 use self::resume_browser::ResumeBrowserState;
+use self::sandbox_profiles::sandbox_profile_label;
 use self::session_header::SessionHeaderParams;
 use self::subagent_monitor::SubagentMonitorState;
 
@@ -100,6 +103,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) initial_session: TuiSessionState,
     pub(crate) initial_reasoning_effort_selection: Option<String>,
     pub(crate) initial_permission_preset: devo_protocol::PermissionPreset,
+    pub(crate) initial_sandbox_profile: Option<String>,
     pub(crate) initial_user_message: Option<UserMessage>,
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) is_first_run: bool,
@@ -300,6 +304,7 @@ pub(crate) struct ChatWidget {
     active_proposed_plan: Option<ActiveProposedPlan>,
     pending_proposed_plan_actions: bool,
     permission_preset: devo_protocol::PermissionPreset,
+    sandbox_profile: Option<String>,
     busy: bool,
     selection_mode: bool,
     selected_user_cell_index: Option<usize>,
@@ -392,6 +397,7 @@ impl ChatWidget {
             initial_session,
             initial_reasoning_effort_selection,
             initial_permission_preset,
+            initial_sandbox_profile,
             initial_user_message,
             enhanced_keys_supported,
             is_first_run,
@@ -522,6 +528,7 @@ impl ChatWidget {
             active_proposed_plan: None,
             pending_proposed_plan_actions: false,
             permission_preset: initial_permission_preset,
+            sandbox_profile: initial_sandbox_profile,
             busy: false,
             selection_mode: false,
             selected_user_cell_index: None,

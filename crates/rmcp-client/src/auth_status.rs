@@ -267,7 +267,7 @@ mod tests {
         let status = determine_streamable_http_auth_status(
             "server",
             "not-a-url",
-            Some("CODEX_RMCP_CLIENT_AUTH_STATUS_TEST_TOKEN"),
+            Some("DEVO_RMCP_CLIENT_AUTH_STATUS_TEST_TOKEN"),
             /*http_headers*/ None,
             /*env_http_headers*/ None,
             OAuthCredentialsStoreMode::Keyring,

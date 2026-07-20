@@ -33,7 +33,9 @@ impl SlashCommand {
             SlashCommand::Resume => "resume a saved chat",
             SlashCommand::New => "start a new chat",
             SlashCommand::Status => "show current session configuration and token usage",
-            SlashCommand::Permissions => "choose what Devo is allowed to do",
+            SlashCommand::Permissions => {
+                "choose what Devo is allowed to do (also sets the OS sandbox)"
+            }
             SlashCommand::Clear => "clear the current transcript",
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Btw => {

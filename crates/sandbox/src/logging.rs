@@ -30,7 +30,9 @@ impl SandboxLogger {
             SandboxEventType::NetViolation => self.metrics.inc_net_violation(),
             SandboxEventType::BypassGranted => self.metrics.inc_bypass_granted(),
             SandboxEventType::BypassDenied => self.metrics.inc_bypass_denied(),
-            SandboxEventType::ProfileApplied | SandboxEventType::ApplyFailed => {}
+            SandboxEventType::ProfileApplied
+            | SandboxEventType::ApplyFailed
+            | SandboxEventType::NotEnforced => {}
         }
 
         tracing::debug!(

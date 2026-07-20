@@ -219,13 +219,14 @@ impl ToolHandler for ExecCommandHandler {
             ));
         };
 
-        let spawned_process = UnifiedExecProcess::spawn(
+        let spawned_process = UnifiedExecProcess::spawn_with_sandbox(
             process_id,
             &args.cmd,
             &cwd,
             args.shell.as_deref(),
             args.login,
             args.tty,
+            ctx.sandbox_profile.clone(),
         )
         .await;
         let (proc, _broadcast_rx) = match spawned_process {
@@ -621,6 +622,7 @@ mod tests {
             file_read_ledger: None,
             network_proxy: None,
             network_no_proxy: None,
+            sandbox_profile: None,
         }
     }
 

@@ -22,7 +22,7 @@ use crate::git_op::operations::run_git_for_stdout;
 use crate::git_op::operations::run_git_for_stdout_all;
 
 /// Default commit message used for ghost commits when none is provided.
-const DEFAULT_COMMIT_MESSAGE: &str = "codex snapshot";
+const DEFAULT_COMMIT_MESSAGE: &str = "devo snapshot";
 /// Default threshold for ignoring large untracked directories.
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 /// Default threshold (10 MiB) for excluding large untracked files from ghost snapshots.
@@ -333,7 +333,7 @@ pub fn create_ghost_commit_with_report(
             file_count: dir.file_count,
         })
         .collect::<Vec<_>>();
-    let index_tempdir = Builder::new().prefix("codex-git-index-").tempdir()?;
+    let index_tempdir = Builder::new().prefix("devo-git-index-").tempdir()?;
     let index_path = index_tempdir.path().join("index");
     let base_env = vec![(
         OsString::from("GIT_INDEX_FILE"),
@@ -344,7 +344,7 @@ pub fn create_ghost_commit_with_report(
     //   GIT_INDEX_FILE=/tmp/index git read-tree HEAD
     //   GIT_INDEX_FILE=/tmp/index git add --all -- <paths>
     //   GIT_INDEX_FILE=/tmp/index git write-tree
-    //   GIT_INDEX_FILE=/tmp/index git commit-tree <tree> -p <parent> -m "codex snapshot"
+    //   GIT_INDEX_FILE=/tmp/index git commit-tree <tree> -p <parent> -m "devo snapshot"
 
     // Pre-populate the temporary index with HEAD so unchanged tracked files
     // are included in the snapshot tree.
@@ -494,7 +494,7 @@ fn restore_to_commit_inner(
 ) -> Result<(), GitToolingError> {
     // `git restore` resets the working tree to the snapshot commit.
     // We intentionally avoid --staged to preserve user's staged changes.
-    // While this might leave some Codex-staged changes in the index (if Codex ran `git add`),
+    // While this might leave some agent-staged changes in the index (if the agent ran `git add`),
     // it prevents data loss for users who use the index as a save point.
     // Data safety > cleanliness.
     // Example:
@@ -913,19 +913,19 @@ fn default_commit_identity() -> Vec<(OsString, OsString)> {
     vec![
         (
             OsString::from("GIT_AUTHOR_NAME"),
-            OsString::from("Codex Snapshot"),
+            OsString::from("Devo Snapshot"),
         ),
         (
             OsString::from("GIT_AUTHOR_EMAIL"),
-            OsString::from("snapshot@codex.local"),
+            OsString::from("snapshot@devo.local"),
         ),
         (
             OsString::from("GIT_COMMITTER_NAME"),
-            OsString::from("Codex Snapshot"),
+            OsString::from("Devo Snapshot"),
         ),
         (
             OsString::from("GIT_COMMITTER_EMAIL"),
-            OsString::from("snapshot@codex.local"),
+            OsString::from("snapshot@devo.local"),
         ),
     ]
 }
@@ -1560,7 +1560,7 @@ mod tests {
         assert_eq!(root_after, "root after\n");
         let nested_after = std::fs::read_to_string(workspace.join("nested.txt"))?;
         assert_eq!(nested_after, "nested modified\n");
-        assert!(!workspace.join("codex-rs").exists());
+        assert!(!workspace.join("devo-workspace").exists());
 
         Ok(())
     }
@@ -1572,7 +1572,7 @@ mod tests {
         let repo = temp.path();
         init_test_repo(repo);
 
-        let workspace = repo.join("codex-rs");
+        let workspace = repo.join("devo-workspace");
         std::fs::create_dir_all(&workspace)?;
         std::fs::write(repo.join(".gitignore"), ".vscode/\n")?;
         std::fs::write(workspace.join("tracked.txt"), "snapshot version\n")?;

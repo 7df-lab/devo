@@ -1,0 +1,25 @@
+[package]
+description = "Localhost HTTP CONNECT proxy for restricted sandbox network access"
+edition.workspace = true
+license.workspace = true
+name = "devo-sandbox-network-proxy"
+version.workspace = true
+
+[lib]
+name = "devo_sandbox_network_proxy"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+devo-sandbox = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "sync"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

@@ -166,12 +166,12 @@ async fn title_generation_uses_resolved_provider_request_model() -> Result<()> {
     std::fs::write(
         data_root.path().join(".devo").join("config.toml"),
         r#"
-[model.qwen3-coder-next]
+[model.kimi-k3]
 display_name = "Catalog Title Model"
 provider = "openai_chat_completions"
 reasoning_capability = "toggle"
 reasoning_implementation = { model_variant = { variants = [
-  { selection_value = "disabled", model_slug = "qwen3-coder-next", label = "Off", description = "Disable reasoning effort" },
+  { selection_value = "disabled", model_slug = "kimi-k3", label = "Off", description = "Disable reasoning effort" },
   { selection_value = "enabled", model_slug = "vendor/title-model", reasoning_effort = "medium", label = "On", description = "Enable reasoning effort" },
 ] } }
 base_instructions = "Test title model"

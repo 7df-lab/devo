@@ -18,6 +18,48 @@ const DEFAULT_YIELD_TIME_MS: u64 = 1_000;
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 16_000;
 const TRUNCATED_SUFFIX: &str = "\n\n... [truncated]";
 
+#[cfg(not(unix))]
+fn try_windows_sandbox_launch(
+    sandbox_profile: Option<&str>,
+    workdir: &std::path::Path,
+    shell: &ShellSpec,
+    command: &str,
+) -> anyhow::Result<Option<devo_windows_sandbox::WindowsSandboxLaunch>> {
+    use std::sync::Once;
+    if !devo_windows_sandbox::should_wrap_profile(sandbox_profile) {
+        return Ok(None);
+    }
+    let profile = sandbox_profile.expect("checked by should_wrap_profile");
+    let profile_name = profile
+        .parse::<devo_sandbox::ProfileName>()
+        .map_err(|error| anyhow::anyhow!("invalid sandbox profile '{profile}': {error}"))?;
+    let config = devo_sandbox::load_sandbox_config(workdir)?;
+    let resolved = profile_name.resolve_profile(workdir, &config)?;
+    let request = devo_windows_sandbox::WindowsSandboxRequest {
+        command: command.to_string(),
+        shell_program: shell.program.to_string(),
+        shell_args: shell.args.iter().map(|arg| arg.to_string()).collect(),
+        cwd: workdir.to_path_buf(),
+        readable_roots: resolved.read_only,
+        writable_roots: resolved.read_write,
+        deny_read: resolved.deny,
+        restrict_network: resolved.restrict_network,
+    };
+    match devo_windows_sandbox::prepare_windows_sandbox_launch(&request)? {
+        Some(launch) => Ok(Some(launch)),
+        None => {
+            static WARNED: Once = Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "Windows sandbox profile is active but launch preparation is not wired yet; \
+                     commands run unwrapped"
+                );
+            });
+            Ok(None)
+        }
+    }
+}
+
 pub(crate) struct ShellExecRequest {
     pub command: String,
     pub workdir: PathBuf,
@@ -28,6 +70,7 @@ pub(crate) struct ShellExecRequest {
     pub timeout_ms: u64,
     pub yield_time_ms: u64,
     pub max_output_tokens: usize,
+    pub sandbox_profile: Option<String>,
 }
 
 struct PtyRunConfig {
@@ -38,6 +81,7 @@ struct PtyRunConfig {
     timeout_ms: u64,
     yield_time_ms: u64,
     max_output_tokens: usize,
+    sandbox_profile: Option<String>,
 }
 
 struct PtyChildGuard {
@@ -133,6 +177,7 @@ pub(crate) async fn execute_shell_command(
         timeout_ms,
         yield_time_ms,
         max_output_tokens,
+        sandbox_profile,
     } = request;
 
     if !workdir.exists() {
@@ -168,6 +213,7 @@ pub(crate) async fn execute_shell_command(
                 timeout_ms,
                 yield_time_ms,
                 max_output_tokens,
+                sandbox_profile,
             },
             progress,
             cancel_token,
@@ -177,22 +223,139 @@ pub(crate) async fn execute_shell_command(
 
     info!(command = %command_to_run, shell = shell.program, "executing shell command");
     let command_preview = preview(&command_to_run);
-    let mut child = Command::new(shell.program);
+
+    // Linux pipe spawns compose a bwrap wrapper with the pre_exec sandbox when
+    // the profile needs enforcement Landlock cannot express (deny paths,
+    // network restriction); everything else runs unwrapped.
+    #[cfg(unix)]
+    let sandbox_wrap = match devo_sandbox::wrap_command_for_profile(
+        sandbox_profile.as_deref(),
+        &workdir,
+        devo_sandbox::WrapMode::PipeComposed,
+        &devo_sandbox::SandboxLogger::new(),
+    ) {
+        Ok(wrap) => wrap,
+        Err(error) => {
+            return Ok(FunctionToolOutput::error(format!(
+                "failed to set up sandbox: {error}"
+            )));
+        }
+    };
+    #[cfg(not(unix))]
+    let sandbox_wrap = devo_sandbox::SandboxWrap::None;
+    #[cfg(not(unix))]
+    let windows_launch = match try_windows_sandbox_launch(
+        sandbox_profile.as_deref(),
+        &workdir,
+        &shell,
+        &command_to_run,
+    ) {
+        Ok(launch) => launch,
+        Err(error) => {
+            return Ok(FunctionToolOutput::error(format!(
+                "failed to set up Windows sandbox: {error}"
+            )));
+        }
+    };
+
+    let mut child = match &sandbox_wrap {
+        devo_sandbox::SandboxWrap::Wrapped(wrapped) => {
+            let mut child = Command::new(&wrapped.program);
+            child
+                .args(&wrapped.prefix_args)
+                .arg(shell.program)
+                .args(shell.args)
+                .arg(&command_to_run);
+            child
+        }
+        devo_sandbox::SandboxWrap::None => {
+            #[cfg(not(unix))]
+            if let Some(launch) = &windows_launch {
+                let mut child = Command::new(&launch.program);
+                child.args(&launch.args);
+                for (key, value) in &launch.env {
+                    child.env(key, value);
+                }
+                child
+            } else {
+                let mut child = Command::new(shell.program);
+                child.args(shell.args).arg(&command_to_run);
+                child
+            }
+            #[cfg(unix)]
+            {
+                let mut child = Command::new(shell.program);
+                child.args(shell.args).arg(&command_to_run);
+                child
+            }
+        }
+    };
     child
-        .args(shell.args)
-        .arg(&command_to_run)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(&workdir)
         .kill_on_drop(true);
 
+    #[cfg(unix)]
+    {
+        let sandbox_workspace = workdir.clone();
+        let helper_enforces = matches!(
+            &sandbox_wrap,
+            devo_sandbox::SandboxWrap::Wrapped(wrapped) if wrapped.helper_enforces
+        );
+        let sandbox_plan = if helper_enforces {
+            None
+        } else {
+            match devo_util_process::sandbox::resolve_profile_for_spawn(
+                sandbox_profile.as_deref(),
+                &sandbox_workspace,
+            ) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    return Ok(FunctionToolOutput::error(format!(
+                        "failed to resolve sandbox profile: {error}"
+                    )));
+                }
+            }
+        };
+        unsafe {
+            child.pre_exec(move || {
+                devo_util_process::sandbox::apply_resolved_in_child(sandbox_plan.as_ref())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = &sandbox_profile;
+
     if cfg!(windows) {
         child.env("PYTHONUTF8", "1");
     }
 
+    apply_sandbox_proxy_env(&mut child, sandbox_profile.as_deref(), &workdir);
+
+    let spawned = match child.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return Ok(FunctionToolOutput::error(format!(
+                "failed to spawn process: {error}"
+            )));
+        }
+    };
+    // bwrap mounts are not up when spawn returns, so the placeholder directory
+    // must outlive the launch; remove it after a delay instead.
+    if let devo_sandbox::SandboxWrap::Wrapped(wrapped) = &sandbox_wrap
+        && let Some(directory) = &wrapped.placeholder_dir
+    {
+        let directory = directory.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(devo_sandbox::PLACEHOLDER_CLEANUP_DELAY).await;
+            devo_sandbox::remove_placeholder_dir(&directory);
+        });
+    }
+
     let result = tokio::select! {
-        result = timeout(Duration::from_millis(timeout_ms), child.output()) => result,
+        result = timeout(Duration::from_millis(timeout_ms), spawned.wait_with_output()) => result,
         _ = cancel_token.cancelled() => {
             return Ok(FunctionToolOutput::error("command cancelled"));
         }
@@ -221,10 +384,22 @@ pub(crate) async fn execute_shell_command(
                     }),
                 ))
             } else {
-                let code = output.status.code().unwrap_or(-1);
-                Ok(FunctionToolOutput::error(format!(
-                    "exit code {code}\n{result_text}"
-                )))
+                #[cfg(unix)]
+                let unix_signal = {
+                    use std::os::unix::process::ExitStatusExt;
+                    output.status.signal()
+                };
+                #[cfg(not(unix))]
+                let unix_signal: Option<i32> = None;
+                let error_message = devo_sandbox::shell_error_message_with_signal(
+                    sandbox_profile.as_deref(),
+                    output.status.code(),
+                    unix_signal,
+                    &stdout,
+                    &stderr,
+                    &result_text,
+                );
+                Ok(FunctionToolOutput::error(error_message))
             }
         }
         Ok(Err(error)) => Ok(FunctionToolOutput::error(format!(
@@ -336,6 +511,16 @@ fn platform_shell(login: bool) -> ShellSpec {
     }
 }
 
+fn apply_sandbox_proxy_env(
+    child: &mut Command,
+    sandbox_profile: Option<&str>,
+    workdir: &std::path::Path,
+) {
+    for (key, value) in devo_sandbox::proxy_env_for_sandbox_profile(sandbox_profile, workdir) {
+        child.env(key, value);
+    }
+}
+
 async fn run_with_pty(
     config: PtyRunConfig,
     progress: Option<ToolProgressSender>,
@@ -349,6 +534,7 @@ async fn run_with_pty(
         timeout_ms,
         yield_time_ms,
         max_output_tokens,
+        sandbox_profile,
     } = config;
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -360,20 +546,108 @@ async fn run_with_pty(
         })
         .map_err(|error| anyhow::anyhow!("failed to open PTY: {error}"))?;
 
-    let mut builder = CommandBuilder::new(shell.program);
-    builder.args(shell.args);
-    builder.arg(&command_to_run);
+    // PTY spawns have no pre_exec hook: enforce the profile by wrapping the
+    // command in the OS sandbox launcher (macOS sandbox-exec, Linux bwrap).
+    // The wrapped child must NOT also apply the profile (no nested sandboxes).
+    #[cfg(unix)]
+    let sandbox_wrap = match devo_sandbox::wrap_command_for_profile(
+        sandbox_profile.as_deref(),
+        &workdir,
+        devo_sandbox::WrapMode::PtyOnly,
+        &devo_sandbox::SandboxLogger::new(),
+    ) {
+        Ok(wrap) => wrap,
+        Err(error) => {
+            return Ok(FunctionToolOutput::error(format!(
+                "failed to set up sandbox: {error}"
+            )));
+        }
+    };
+    #[cfg(not(unix))]
+    let sandbox_wrap = devo_sandbox::SandboxWrap::None;
+    #[cfg(not(unix))]
+    let windows_launch = match try_windows_sandbox_launch(
+        sandbox_profile.as_deref(),
+        &workdir,
+        &shell,
+        &command_to_run,
+    ) {
+        Ok(launch) => launch,
+        Err(error) => {
+            return Ok(FunctionToolOutput::error(format!(
+                "failed to set up Windows sandbox: {error}"
+            )));
+        }
+    };
+    #[cfg(not(unix))]
+    let _ = sandbox_profile;
+
+    let mut builder = match &sandbox_wrap {
+        devo_sandbox::SandboxWrap::Wrapped(wrapped) => {
+            let mut builder = CommandBuilder::new(&wrapped.program);
+            builder.args(&wrapped.prefix_args);
+            builder.arg(shell.program);
+            builder
+        }
+        devo_sandbox::SandboxWrap::None => {
+            #[cfg(not(unix))]
+            if let Some(launch) = &windows_launch {
+                let mut builder = CommandBuilder::new(launch.program.to_string_lossy());
+                builder.args(
+                    launch
+                        .args
+                        .iter()
+                        .map(|arg| arg.as_str())
+                        .collect::<Vec<_>>(),
+                );
+                for (key, value) in &launch.env {
+                    builder.env(key, value);
+                }
+                builder
+            } else {
+                CommandBuilder::new(shell.program)
+            }
+            #[cfg(unix)]
+            CommandBuilder::new(shell.program)
+        }
+    };
+    #[cfg(not(unix))]
+    if windows_launch.is_none() {
+        builder.args(shell.args);
+        builder.arg(&command_to_run);
+    }
+    #[cfg(unix)]
+    {
+        builder.args(shell.args);
+        builder.arg(&command_to_run);
+    }
     builder.cwd(&workdir);
     if cfg!(windows) {
         builder.env("PYTHONUTF8", "1");
         builder.env("TERM", "xterm-256color");
         builder.env("COLORTERM", "truecolor");
     }
+    for (key, value) in
+        devo_sandbox::proxy_env_for_sandbox_profile(sandbox_profile.as_deref(), &workdir)
+    {
+        builder.env(key, value);
+    }
 
     let child = pair
         .slave
         .spawn_command(builder)
         .map_err(|error| anyhow::anyhow!("failed to spawn PTY command: {error}"))?;
+    // bwrap mounts are not up when spawn returns, so the placeholder directory
+    // must outlive the launch; remove it after a delay instead.
+    if let devo_sandbox::SandboxWrap::Wrapped(wrapped) = &sandbox_wrap
+        && let Some(directory) = &wrapped.placeholder_dir
+    {
+        let directory = directory.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(devo_sandbox::PLACEHOLDER_CLEANUP_DELAY).await;
+            devo_sandbox::remove_placeholder_dir(&directory);
+        });
+    }
     let mut child = PtyChildGuard::new(child);
     drop(pair.slave);
 
@@ -459,7 +733,8 @@ async fn run_with_pty(
 
     let is_error = exit_code.unwrap_or(1) != 0;
     let content = if is_error {
-        format!("exit code {}\n{}", exit_code.unwrap_or(-1), text)
+        let code = exit_code.unwrap_or(-1);
+        devo_sandbox::shell_error_message(sandbox_profile.as_deref(), code, &text, "", &text)
     } else {
         text.clone()
     };
@@ -505,6 +780,7 @@ mod tests {
                 timeout_ms: 5000,
                 yield_time_ms: 100,
                 max_output_tokens: 100,
+                sandbox_profile: None,
             },
             Some(tx),
             CancellationToken::new(),
@@ -532,6 +808,7 @@ mod tests {
                 timeout_ms: 5000,
                 yield_time_ms: 100,
                 max_output_tokens: 100,
+                sandbox_profile: None,
             },
             None,
             CancellationToken::new(),
@@ -561,6 +838,7 @@ mod tests {
                 timeout_ms: 10_000,
                 yield_time_ms: 100,
                 max_output_tokens: 100,
+                sandbox_profile: None,
             },
             None,
             cancel_token,
@@ -599,6 +877,7 @@ mod tests {
                 timeout_ms: 10_000,
                 yield_time_ms: 100,
                 max_output_tokens: 100,
+                sandbox_profile: None,
             },
             None,
             task_cancel_token,
@@ -635,6 +914,7 @@ mod tests {
                 timeout_ms: 5000,
                 yield_time_ms: 100,
                 max_output_tokens: 100,
+                sandbox_profile: None,
             },
             None,
             CancellationToken::new(),
@@ -668,6 +948,7 @@ mod tests {
                 timeout_ms: 5000,
                 yield_time_ms: 100,
                 max_output_tokens: 100,
+                sandbox_profile: None,
             },
             None,
             CancellationToken::new(),

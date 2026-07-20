@@ -1,4 +1,4 @@
-/// The implementation refernce to codex: `codex-rs\protocol\src\user_input.rs`.
+/// User input wire types for the Devo protocol.
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;

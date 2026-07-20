@@ -8,7 +8,7 @@ use std::time::Instant;
 use devo_util_process::SpawnedProcess;
 pub use devo_util_process::TerminalSize;
 use devo_util_process::combine_output_receivers;
-use devo_util_process::spawn_pipe_process_no_stdin;
+use devo_util_process::spawn_pipe_process_no_stdin_sandboxed;
 use devo_util_process::spawn_pty_process;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::broadcast;
@@ -33,7 +33,7 @@ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
     ("PAGER", "cat"),
     ("GIT_PAGER", "cat"),
     ("GH_PAGER", "cat"),
-    ("CODEX_CI", "1"),
+    ("DEVO_CI", "1"),
 ];
 
 /// Max time (in seconds) a PTY process can live without any write_stdin interaction.
@@ -160,30 +160,49 @@ impl UnifiedExecProcess {
         login: bool,
         tty: bool,
     ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
+        Self::spawn_with_sandbox(process_id, cmd, cwd, shell, login, tty, None).await
+    }
+
+    pub async fn spawn_with_sandbox(
+        process_id: i32,
+        cmd: &str,
+        cwd: &Path,
+        shell: Option<&str>,
+        login: bool,
+        tty: bool,
+        sandbox_profile: Option<String>,
+    ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
         let shell_spec = resolve_shell(shell, login);
         let command = command_for_shell(cmd, &shell_spec);
         let mut args = shell_spec.args.clone();
         args.push(command);
-        let env = unified_exec_env();
+        let env = unified_exec_env(cwd, sandbox_profile.as_deref());
 
         let spawned = if tty {
-            spawn_pty_process(
+            spawn_pty_with_sandbox_wrap(
+                &shell_spec.program,
+                &args,
+                cwd,
+                &env,
+                TerminalSize {
+                    rows: PTY_ROWS,
+                    cols: PTY_COLS,
+                },
+                sandbox_profile.as_deref(),
+            )
+            .await?
+        } else {
+            spawn_pipe_process_no_stdin_sandboxed(
                 &shell_spec.program,
                 &args,
                 cwd,
                 &env,
                 /*arg0*/ &None,
-                TerminalSize {
-                    rows: PTY_ROWS,
-                    cols: PTY_COLS,
-                },
+                &[],
+                sandbox_profile,
             )
             .await
-            .map_err(|error| format!("failed to spawn PTY command: {error}"))?
-        } else {
-            spawn_pipe_process_no_stdin(&shell_spec.program, &args, cwd, &env, /*arg0*/ &None)
-                .await
-                .map_err(|error| format!("failed to spawn command: {error}"))?
+            .map_err(|error| format!("failed to spawn command: {error}"))?
         };
 
         Ok(Self::from_spawned_process(process_id, tty, spawned))
@@ -195,24 +214,24 @@ impl UnifiedExecProcess {
         shell: Option<&str>,
         login: bool,
         size: Option<TerminalSize>,
+        sandbox_profile: Option<String>,
     ) -> Result<(Self, broadcast::Receiver<Vec<u8>>), String> {
         let shell_spec = resolve_shell(shell, login);
         let args = interactive_shell_args(&shell_spec.program, login);
-        let env = unified_exec_env();
+        let env = unified_exec_env(cwd, sandbox_profile.as_deref());
 
-        let spawned = spawn_pty_process(
+        let spawned = spawn_pty_with_sandbox_wrap(
             &shell_spec.program,
             &args,
             cwd,
             &env,
-            /*arg0*/ &None,
             size.unwrap_or(TerminalSize {
                 rows: PTY_ROWS,
                 cols: PTY_COLS,
             }),
+            sandbox_profile.as_deref(),
         )
-        .await
-        .map_err(|error| format!("failed to spawn interactive shell: {error}"))?;
+        .await?;
 
         Ok(Self::from_spawned_process(
             process_id, /*tty*/ true, spawned,
@@ -326,7 +345,52 @@ impl UnifiedExecProcess {
     }
 }
 
-fn unified_exec_env() -> HashMap<String, String> {
+/// Spawn a PTY process, enforcing `sandbox_profile` by wrapping the command
+/// in the OS sandbox launcher (macOS `sandbox-exec`, Linux `bwrap`). PTY
+/// spawns have no `pre_exec` hook, so the wrapper carries the full profile
+/// policy and the wrapped child must NOT also apply it (no nested sandboxes).
+async fn spawn_pty_with_sandbox_wrap(
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    size: TerminalSize,
+    sandbox_profile: Option<&str>,
+) -> Result<SpawnedProcess, String> {
+    let wrap = devo_sandbox::wrap_command_for_profile(
+        sandbox_profile,
+        cwd,
+        devo_sandbox::WrapMode::PtyOnly,
+        &devo_sandbox::SandboxLogger::new(),
+    )
+    .map_err(|error| format!("failed to set up sandbox: {error}"))?;
+    let (program, args) = match &wrap {
+        devo_sandbox::SandboxWrap::Wrapped(wrapped) => {
+            let mut wrapped_args = wrapped.prefix_args.clone();
+            wrapped_args.push(program.to_string());
+            wrapped_args.extend(args.iter().cloned());
+            (wrapped.program.clone(), wrapped_args)
+        }
+        devo_sandbox::SandboxWrap::None => (program.to_string(), args.to_vec()),
+    };
+    let spawned = spawn_pty_process(&program, &args, cwd, env, /*arg0*/ &None, size)
+        .await
+        .map_err(|error| format!("failed to spawn PTY command: {error}"))?;
+    // bwrap mounts are not up when spawn returns, so the placeholder directory
+    // must outlive the launch; remove it after a delay instead.
+    if let devo_sandbox::SandboxWrap::Wrapped(wrapped) = &wrap
+        && let Some(directory) = &wrapped.placeholder_dir
+    {
+        let directory = directory.clone();
+        tokio::spawn(async move {
+            sleep(devo_sandbox::PLACEHOLDER_CLEANUP_DELAY).await;
+            devo_sandbox::remove_placeholder_dir(&directory);
+        });
+    }
+    Ok(spawned)
+}
+
+fn unified_exec_env(cwd: &Path, sandbox_profile: Option<&str>) -> HashMap<String, String> {
     let mut env = std::env::vars().collect::<HashMap<_, _>>();
     for (key, value) in UNIFIED_EXEC_ENV {
         env.insert(key.to_string(), value.to_string());
@@ -334,6 +398,12 @@ fn unified_exec_env() -> HashMap<String, String> {
     if cfg!(windows) {
         env.insert("PYTHONUTF8".to_string(), "1".to_string());
     }
+    #[cfg(unix)]
+    for (key, value) in devo_sandbox::proxy_env_for_sandbox_profile(sandbox_profile, cwd) {
+        env.insert(key, value);
+    }
+    #[cfg(not(unix))]
+    let _ = (cwd, sandbox_profile);
     env
 }
 
@@ -627,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn process_non_tty_applies_codex_unified_exec_env() {
+    async fn process_non_tty_applies_devo_unified_exec_env() {
         let (proc, mut rx) = UnifiedExecProcess::spawn(
             6,
             "printf '%s|%s|%s' \"$NO_COLOR\" \"$TERM\" \"$PAGER\"",
@@ -668,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_shell_uses_user_shell_default_and_codex_style_args() {
+    fn resolve_shell_uses_user_shell_default_and_login_args() {
         assert_eq!(
             resolve_shell_with_default(
                 /*shell_override*/ None, /*login*/ true, "/bin/zsh"

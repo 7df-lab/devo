@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+devo-sandbox = { workspace = true }
 portable-pty = "0.9"
 tokio = { workspace = true, features = [
     "io-util",

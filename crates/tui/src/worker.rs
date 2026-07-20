@@ -235,6 +235,8 @@ pub(crate) struct QueryWorkerConfig {
     pub(crate) reasoning_effort_selection: Option<String>,
     /// Permission preset to apply to the server session when it exists.
     pub(crate) permission_preset: PermissionPreset,
+    /// Initial OS sandbox profile from project config (or permission-implied).
+    pub(crate) initial_sandbox_profile: Option<String>,
     /// Agent client capabilities to advertise to the server session.
     pub(crate) client_capabilities: devo_protocol::AcpClientCapabilities,
 }
@@ -362,6 +364,9 @@ enum OperationCommand {
     },
     UpdatePermissions {
         preset: devo_protocol::PermissionPreset,
+    },
+    UpdateSandboxProfile {
+        profile: String,
     },
     /// Browse persisted input history via the server/runtime session state.
     BrowseInputHistory(InputHistoryDirection),
@@ -759,6 +764,12 @@ impl QueryWorkerHandle {
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
+    pub(crate) fn update_sandbox_profile(&self, profile: String) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::UpdateSandboxProfile { profile })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
     pub(crate) fn browse_input_history(&self, direction: InputHistoryDirection) -> Result<()> {
         self.command_tx
             .send(OperationCommand::BrowseInputHistory(direction))
@@ -841,6 +852,7 @@ async fn run_worker_inner(
     let mut model_binding_id = config.model_binding_id;
     let mut reasoning_effort_selection = config.reasoning_effort_selection;
     let mut permission_preset = config.permission_preset;
+    let initial_sandbox_profile = config.initial_sandbox_profile.clone();
     let mut active_turn_id: Option<TurnId> = None;
     let mut turn_count = 0usize;
     let mut total_input_tokens = 0usize;
@@ -945,6 +957,7 @@ async fn run_worker_inner(
                             &mut reasoning_effort_selection,
                             &mut session_id,
                             permission_preset,
+                            initial_sandbox_profile.as_deref(),
                             event_tx,
                         )
                         .await?;
@@ -1393,6 +1406,7 @@ async fn run_worker_inner(
                             &mut reasoning_effort_selection,
                             &mut session_id,
                             permission_preset,
+                            initial_sandbox_profile.as_deref(),
                             event_tx,
                         )
                         .await?;
@@ -2098,6 +2112,24 @@ async fn run_worker_inner(
                                 total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
                                 last_query_input_tokens,
+                            });
+                        }
+                    }
+                    Some(OperationCommand::UpdateSandboxProfile { profile }) => {
+                        let Some(active_session_id) = session_id else {
+                            continue;
+                        };
+                        if let Err(error) = client
+                            .session_sandbox_profile_update(
+                                devo_server::SessionSandboxProfileUpdateParams {
+                                    session_id: active_session_id,
+                                    profile,
+                                },
+                            )
+                            .await
+                        {
+                            let _ = event_tx.send(WorkerEvent::InterruptFailed {
+                                message: format!("Failed to update sandbox profile: {error}"),
                             });
                         }
                     }
@@ -2892,6 +2924,7 @@ async fn prepare_session_for_command(
     reasoning_effort_selection: &mut Option<String>,
     session_id: &mut Option<SessionId>,
     permission_preset: PermissionPreset,
+    initial_sandbox_profile: Option<&str>,
     event_tx: &mpsc::UnboundedSender<WorkerEvent>,
 ) -> Result<SessionId> {
     let session_start =
@@ -2913,6 +2946,14 @@ async fn prepare_session_for_command(
             session_id: active_session_id,
         });
         apply_session_permissions(client, active_session_id, permission_preset).await?;
+        if let Some(profile) = initial_sandbox_profile {
+            client
+                .session_sandbox_profile_update(devo_server::SessionSandboxProfileUpdateParams {
+                    session_id: active_session_id,
+                    profile: profile.to_string(),
+                })
+                .await?;
+        }
     }
     Ok(active_session_id)
 }
@@ -3552,6 +3593,8 @@ pub(crate) fn handle_completed_item(
                 path: payload.path,
                 host: payload.host,
                 target: payload.target,
+                command_pattern: payload.command_pattern,
+                command_prefix: payload.command_prefix,
             });
         }
         ItemEnvelope {
@@ -3559,6 +3602,14 @@ pub(crate) fn handle_completed_item(
             payload,
             ..
         } => {
+            let tool_name = payload
+                .get("tool_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let rationale = payload
+                .get("rationale")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             let Ok(payload) = serde_json::from_value::<ApprovalDecisionPayload>(payload) else {
                 return;
             };
@@ -3566,6 +3617,8 @@ pub(crate) fn handle_completed_item(
                 approval_id: payload.approval_id.to_string(),
                 decision: payload.decision,
                 scope: payload.scope,
+                tool_name,
+                rationale,
             });
         }
         _ => {}
@@ -4804,7 +4857,7 @@ mod tests {
         let body = render_skill_list_body(&[SkillRecord {
             id: skill_path.display().to_string(),
             name: "skill-installer".to_string(),
-            description: "Install Codex skills".to_string(),
+            description: "Install Devo skills".to_string(),
             short_description: None,
             interface: None,
             dependencies: None,
@@ -4829,7 +4882,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "- skill-installer - Install Codex skills".to_string(),
+                "- skill-installer - Install Devo skills".to_string(),
                 "  enabled: yes".to_string(),
                 "  source: system".to_string(),
                 r"  path: C:\Users\lenovo\.devo\skills\.system\skill-installer\SKILL.md"

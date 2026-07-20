@@ -11,7 +11,7 @@ pub struct SandboxEvent {
     pub event_type: SandboxEventType,
     pub profile: String,
 
-    // Context fields — present on ProfileApplied/ApplyFailed
+    // Context fields — present on ProfileApplied/ApplyFailed/NotEnforced
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -27,6 +27,12 @@ pub struct SandboxEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deny_paths: Option<Vec<String>>,
 
+    // Wrap-path fields — how the spawn was (or was not) sandboxed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launcher: Option<String>,
+
     // Violation/error fields
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
@@ -38,6 +44,16 @@ pub struct SandboxEvent {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+fn enforcement_platform() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "linux/landlock"
+    } else if cfg!(target_os = "macos") {
+        "macos/seatbelt"
+    } else {
+        "unknown"
+    }
 }
 
 impl SandboxEvent {
@@ -53,6 +69,8 @@ impl SandboxEvent {
             read_write_paths: None,
             read_only_paths: None,
             deny_paths: None,
+            mode: None,
+            launcher: None,
             operation: None,
             target: None,
             command: None,
@@ -67,17 +85,9 @@ impl SandboxEvent {
         workspace: &std::path::Path,
         resolved: &crate::profiles::SandboxProfile,
     ) -> Self {
-        let platform = if cfg!(target_os = "linux") {
-            "linux/landlock"
-        } else if cfg!(target_os = "macos") {
-            "macos/seatbelt"
-        } else {
-            "unknown"
-        };
-
         let mut event = Self::base(SandboxEventType::ProfileApplied, profile);
         event.workspace = Some(workspace.display().to_string());
-        event.platform = Some(platform.to_string());
+        event.platform = Some(enforcement_platform().to_string());
         event.enforced = Some(true);
         event.restrict_network = Some(resolved.restrict_network);
         event.read_write_paths = Some(
@@ -108,25 +118,30 @@ impl SandboxEvent {
         event
     }
 
-    /// Create an "apply failed" event with context.
+    /// Create an "apply failed" event: enforcement was attempted but could not
+    /// be constructed or validated, so the spawn proceeds without it.
     pub fn apply_failed(
         profile: &str,
         workspace: &std::path::Path,
         error: &dyn std::fmt::Display,
     ) -> Self {
-        let platform = if cfg!(target_os = "linux") {
-            "linux/landlock"
-        } else if cfg!(target_os = "macos") {
-            "macos/seatbelt"
-        } else {
-            "unknown"
-        };
-
         let mut event = Self::base(SandboxEventType::ApplyFailed, profile);
         event.workspace = Some(workspace.display().to_string());
-        event.platform = Some(platform.to_string());
+        event.platform = Some(enforcement_platform().to_string());
         event.enforced = Some(false);
         event.error = Some(error.to_string());
+        event
+    }
+
+    /// Create a "not enforced" event: the environment cannot provide
+    /// enforcement (missing launcher, feature disabled), so the spawn
+    /// proceeds without it — nothing was attempted.
+    pub fn not_enforced(profile: &str, workspace: &std::path::Path, reason: &str) -> Self {
+        let mut event = Self::base(SandboxEventType::NotEnforced, profile);
+        event.workspace = Some(workspace.display().to_string());
+        event.platform = Some(enforcement_platform().to_string());
+        event.enforced = Some(false);
+        event.error = Some(reason.to_string());
         event
     }
 
@@ -151,6 +166,7 @@ impl SandboxEvent {
 pub enum SandboxEventType {
     ProfileApplied,
     ApplyFailed,
+    NotEnforced,
     FsViolation,
     NetViolation,
     BypassGranted,
@@ -189,5 +205,23 @@ impl SandboxMetrics {
 
     pub fn net_violation_count(&self) -> u64 {
         self.net_violations.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn not_enforced_event_records_reason_without_enforcement() {
+        let event =
+            SandboxEvent::not_enforced("workspace", std::path::Path::new("/ws"), "no launcher");
+
+        assert!(matches!(event.event_type, SandboxEventType::NotEnforced));
+        assert_eq!(event.profile, "workspace");
+        assert_eq!(event.workspace.as_deref(), Some("/ws"));
+        assert_eq!(event.enforced, Some(false));
+        assert_eq!(event.error.as_deref(), Some("no launcher"));
     }
 }

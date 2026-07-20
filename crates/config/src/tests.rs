@@ -1193,6 +1193,62 @@ fn loader_reads_project_configs() {
     std::fs::create_dir_all(&home).expect("home config dir");
     std::fs::write(
         home.join("config.toml"),
+        "[projects.\"C:\\\\repo\"]\npermission_preset = 'auto-review'\n",
+    )
+    .expect("write user config");
+
+    let loader = FileSystemAppConfigLoader::new(home);
+    let config = loader.load(None).expect("load config");
+
+    assert_eq!(
+        config.projects,
+        BTreeMap::from([(
+            "C:\\repo".to_string(),
+            ProjectConfig {
+                permission_preset: Some(PermissionPreset::AutoReview),
+                sandbox_profile: None,
+            },
+        )])
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_reads_project_sandbox_profile() {
+    let root = unique_temp_dir("config-projects-sandbox");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        "[projects.\"C:\\\\repo\"]\nsandbox_profile = 'strict'\n",
+    )
+    .expect("write user config");
+
+    let loader = FileSystemAppConfigLoader::new(home);
+    let config = loader.load(None).expect("load config");
+
+    assert_eq!(
+        config.projects,
+        BTreeMap::from([(
+            "C:\\repo".to_string(),
+            ProjectConfig {
+                permission_preset: None,
+                sandbox_profile: Some("strict".to_string()),
+            },
+        )])
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_maps_legacy_read_only_preset_to_default() {
+    let root = unique_temp_dir("config-legacy-read-only");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
         "[projects.\"C:\\\\repo\"]\npermission_preset = 'read-only'\n",
     )
     .expect("write user config");
@@ -1205,7 +1261,8 @@ fn loader_reads_project_configs() {
         BTreeMap::from([(
             "C:\\repo".to_string(),
             ProjectConfig {
-                permission_preset: Some(PermissionPreset::ReadOnly),
+                permission_preset: Some(PermissionPreset::Default),
+                sandbox_profile: None,
             },
         )])
     );

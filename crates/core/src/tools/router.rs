@@ -32,7 +32,7 @@ type CompletionCallback = dyn Fn(ToolCallResult) -> BoxFuture<'static, ()> + Sen
 type CompletionCallbackArc = Arc<CompletionCallback>;
 type ExecutionStartCallback = dyn Fn(ToolCall) -> BoxFuture<'static, ()> + Send + Sync;
 type ExecutionStartCallbackArc = Arc<ExecutionStartCallback>;
-type PermissionFuture = futures::future::BoxFuture<'static, Result<(), String>>;
+type PermissionFuture = futures::future::BoxFuture<'static, Result<PermissionGrant, String>>;
 type PermissionCheckFn = dyn Fn(ToolPermissionRequest) -> PermissionFuture + Send + Sync;
 const PROGRESS_DRAIN_GRACE_MS: u64 = 50;
 /// Content written into a tool-result item when a tool is cancelled mid-execution.
@@ -275,9 +275,34 @@ impl ToolRuntime {
             }
         };
 
+        let mut sandbox_profile = self.context.sandbox_profile.clone();
+        let mut already_bypassed_sandbox = sandbox_profile_is_inactive(sandbox_profile.as_deref());
+        // `already_approved`: only user/session/auto-review approvals unlock
+        // a silent unsandbox retry after SANDBOX_DENIED (UnlessTrusted). Policy
+        // Allow without asking stays false so denial surfaces for require_escalated.
+        let mut already_approved = false;
         if let Some(request) = self.permission_request_for_call(call, tool_name) {
             match self.permission.check(request).await {
-                Ok(()) => {}
+                Ok(grant) => {
+                    already_approved = grant.already_approved;
+                    if grant.bypass_sandbox {
+                        // `unsandboxed_execution_allowed`: deny-read policies
+                        // must stay sandboxed even after escalation approval.
+                        if devo_sandbox::unsandboxed_execution_allowed(
+                            sandbox_profile.as_deref(),
+                            &self.context.cwd,
+                        ) {
+                            sandbox_profile = Some("off".to_string());
+                            already_bypassed_sandbox = true;
+                        } else {
+                            info!(
+                                tool = %tool_name,
+                                id = %call.id,
+                                "keeping sandbox after escalation because profile has deny-read paths"
+                            );
+                        }
+                    }
+                }
                 Err(reason) => {
                     let message = format!("permission denied: {reason}");
                     super::hook_events::post_tool_use_failure(
@@ -297,7 +322,7 @@ impl ToolRuntime {
         }
         info!(tool = %tool_name, id = %call.id, "executing tool");
 
-        let ctx = crate::contracts::ToolContext {
+        let build_ctx = |sandbox_profile: Option<String>| crate::contracts::ToolContext {
             tool_call_id: crate::invocation::ToolCallId(call.id.clone()),
             session_id: self.context.session_id.clone(),
             turn_id: self.context.turn_id.clone(),
@@ -312,6 +337,7 @@ impl ToolRuntime {
             file_read_ledger: Some(Arc::clone(&self.context.file_read_ledger)),
             network_proxy: self.context.network_proxy.clone(),
             network_no_proxy: self.context.network_no_proxy.clone(),
+            sandbox_profile,
         };
 
         let (progress_sender, progress_task) = match on_progress {
@@ -334,8 +360,53 @@ impl ToolRuntime {
         let result = tokio::select! {
             biased;
             () = cancel_token.cancelled() => Err(crate::contracts::ToolCallError::Cancelled),
-            result = tool.handle(ctx, input, progress_sender) => result,
+            result = tool.handle(build_ctx(sandbox_profile.clone()), input.clone(), progress_sender) => result,
         };
+
+        // UnlessTrusted-style failure upgrade (tool orchestrator):
+        // only silently retry sandbox-off once when this call was already
+        // user-/session-/auto-review-approved. Otherwise return the denial so
+        // the model can re-call with `sandbox_permissions: require_escalated`.
+        // Deny-read profiles never silent-unsandbox (`unsandboxed_execution_allowed`).
+        let result = match result {
+            Ok(output)
+                if !already_bypassed_sandbox
+                    && already_approved
+                    && is_shell_family_tool(tool_name)
+                    && tool_result_is_sandbox_denied(&output) =>
+            {
+                if !devo_sandbox::unsandboxed_execution_allowed(
+                    sandbox_profile.as_deref(),
+                    &self.context.cwd,
+                ) {
+                    info!(
+                        tool = %tool_name,
+                        id = %call.id,
+                        "skipping unsandbox retry after SANDBOX_DENIED because profile has deny-read paths"
+                    );
+                    Ok(output)
+                } else {
+                    info!(
+                        tool = %tool_name,
+                        id = %call.id,
+                        "retrying tool without sandbox after SANDBOX_DENIED (already approved)"
+                    );
+                    tokio::select! {
+                        biased;
+                        () = cancel_token.cancelled() => {
+                            Err(crate::contracts::ToolCallError::Cancelled)
+                        }
+                        result = tool.handle(
+                            build_ctx(Some("off".to_string())),
+                            input,
+                            None,
+                        ) => result,
+                    }
+                }
+            }
+            other => other,
+        };
+
         if let Some(progress_task) = progress_task
             && tokio::time::timeout(
                 Duration::from_millis(PROGRESS_DRAIN_GRACE_MS),
@@ -447,6 +518,10 @@ impl ToolRuntime {
         let host = host_for_tool_input(tool_name, &call.input);
         let target = target_for_tool_input(tool_name, &call.input);
         let command_prefix = command_prefix_for_tool_input(tool_name, &call.input);
+        let command_argv =
+            command_str_for_tool_input(tool_name, &call.input).and_then(safe_shell_argv);
+        let command_pattern = command_str_for_tool_input(tool_name, &call.input)
+            .and_then(|command| generalize_command_pattern(command, &self.context.cwd));
         Some(ToolPermissionRequest {
             tool_call_id: call.id.clone(),
             tool_name: tool_name.to_string(),
@@ -465,6 +540,8 @@ impl ToolRuntime {
             host,
             target,
             command_prefix,
+            command_argv,
+            command_pattern,
             requests_escalation: requests_explicit_escalation(&call.input),
         })
     }
@@ -484,6 +561,26 @@ fn canonical_tool_name<'a>(registry: &ToolRegistry, tool_name: &'a str) -> &'a s
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermissionGrant {
+    /// When true, this invocation must run with sandbox profile off/None.
+    pub bypass_sandbox: bool,
+    /// When true, a user (or session-cache / auto-review) approval already
+    /// covered this call — `already_approved`. Policy Allow without
+    /// asking leaves this false.
+    pub already_approved: bool,
+}
+
+impl PermissionGrant {
+    /// Grant from an interactive (or session-cache / auto-review) approval.
+    pub fn from_approval(bypass_sandbox: bool) -> Self {
+        Self {
+            bypass_sandbox,
+            already_approved: true,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PermissionChecker {
     inner: Arc<PermissionCheckFn>,
@@ -500,10 +597,10 @@ impl PermissionChecker {
     }
 
     pub fn always_allow() -> Self {
-        PermissionChecker::new(|_| Box::pin(async { Ok(()) }))
+        PermissionChecker::new(|_| Box::pin(async { Ok(PermissionGrant::default()) }))
     }
 
-    pub async fn check(&self, request: ToolPermissionRequest) -> Result<(), String> {
+    pub async fn check(&self, request: ToolPermissionRequest) -> Result<PermissionGrant, String> {
         (self.inner)(request).await
     }
 }
@@ -523,6 +620,8 @@ pub struct ToolRuntimeContext {
     pub hooks: Option<crate::hooks::HookRuntimeContext>,
     pub network_proxy: Option<String>,
     pub network_no_proxy: Option<String>,
+    /// Active sandbox profile name for child processes spawned by tools.
+    pub sandbox_profile: Option<String>,
 }
 
 impl Default for ToolRuntimeContext {
@@ -541,6 +640,7 @@ impl Default for ToolRuntimeContext {
             hooks: None,
             network_proxy: None,
             network_no_proxy: None,
+            sandbox_profile: None,
         }
     }
 }
@@ -637,6 +737,12 @@ pub struct ToolPermissionRequest {
     pub host: Option<String>,
     pub target: Option<String>,
     pub command_prefix: Option<Vec<String>>,
+    /// Shell argv for the command after safety screening (no metacharacters,
+    /// no leading env assignment); used to match session command patterns.
+    pub command_argv: Option<Vec<String>>,
+    /// Generalized command pattern (e.g. `git add *`) offered as the
+    /// session-scoped approval grant for shell tools.
+    pub command_pattern: Option<Vec<String>>,
     pub requests_escalation: bool,
 }
 
@@ -763,10 +869,21 @@ fn command_prefix_for_tool_input(
     if tool_name == "exec_command"
         && let Some(prefix_rule) = input.get("prefix_rule").and_then(prefix_rule_from_value)
     {
+        if crate::tools::exec_policy_amend::is_banned_prefix_suggestion(&prefix_rule) {
+            return None;
+        }
         return Some(prefix_rule);
     }
 
-    let command = match tool_name {
+    let command = command_str_for_tool_input(tool_name, input)?;
+    command_prefix(command)
+}
+
+fn command_str_for_tool_input<'a>(
+    tool_name: &str,
+    input: &'a serde_json::Value,
+) -> Option<&'a str> {
+    match tool_name {
         "bash" | "shell_command" => input
             .get("command")
             .or_else(|| input.get("cmd"))
@@ -776,8 +893,7 @@ fn command_prefix_for_tool_input(
             .or_else(|| input.get("command"))
             .and_then(serde_json::Value::as_str),
         _ => None,
-    }?;
-    command_prefix(command)
+    }
 }
 
 fn prefix_rule_from_value(value: &serde_json::Value) -> Option<Vec<String>> {
@@ -789,16 +905,73 @@ fn prefix_rule_from_value(value: &serde_json::Value) -> Option<Vec<String>> {
     (!prefix.is_empty()).then(|| prefix.into_iter().map(str::to_string).collect())
 }
 
+pub fn sandbox_permissions_from_input(input: &serde_json::Value) -> String {
+    input
+        .get("sandbox_permissions")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
 fn requests_explicit_escalation(input: &serde_json::Value) -> bool {
     matches!(
-        input
-            .get("sandbox_permissions")
-            .and_then(serde_json::Value::as_str),
-        Some("require_escalated" | "with_additional_permissions")
+        sandbox_permissions_from_input(input).as_str(),
+        "require_escalated" | "with_additional_permissions"
     ) || input.get("additional_permissions").is_some()
 }
 
+fn sandbox_profile_is_inactive(profile: Option<&str>) -> bool {
+    matches!(
+        profile.map(str::trim),
+        None | Some("") | Some("off") | Some("none")
+    )
+}
+
+fn is_shell_family_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "bash" | "shell_command" | "exec_command" | "write_stdin"
+    )
+}
+
+fn tool_result_is_sandbox_denied(output: &crate::contracts::ToolResult) -> bool {
+    let text = match &output.content {
+        crate::contracts::ToolResultContent::Text(text) => text.as_str(),
+        crate::contracts::ToolResultContent::Mixed {
+            text: Some(text), ..
+        } => text.as_str(),
+        crate::contracts::ToolResultContent::Json(_)
+        | crate::contracts::ToolResultContent::Mixed { text: None, .. } => "",
+    };
+    // Only the structured prefix triggers router unsandbox retry. Free-form
+    // keyword heuristics (`is_likely_sandbox_denied`) stay in
+    // `devo_sandbox` where exit codes can exclude 2/126/127 false positives.
+    text.starts_with("SANDBOX_DENIED:") || output.result_summary.starts_with("SANDBOX_DENIED:")
+}
+
+pub fn command_str_for_permission_request(request: &ToolPermissionRequest) -> Option<String> {
+    request
+        .target
+        .clone()
+        .or_else(|| {
+            command_str_for_tool_input(&request.tool_name, &request.input).map(str::to_string)
+        })
+        .filter(|command| !command.is_empty())
+}
+
 fn command_prefix(command: &str) -> Option<Vec<String>> {
+    let argv = safe_shell_argv(command)?;
+    prefix_from_argv(&argv)
+}
+
+/// Splits a shell command string into argv, rejecting anything that makes
+/// token-based matching unsafe: compound commands, expansions, redirects,
+/// and leading env assignments. Returns `None` unless the command is a
+/// single plain invocation.
+fn safe_shell_argv(command: &str) -> Option<Vec<String>> {
+    if command_contains_line_separators(command) {
+        return None;
+    }
     let argv = shlex::split(command)?;
     if argv
         .iter()
@@ -809,7 +982,14 @@ fn command_prefix(command: &str) -> Option<Vec<String>> {
     {
         return None;
     }
-    prefix_from_argv(&argv)
+    Some(argv)
+}
+
+fn command_contains_line_separators(command: &str) -> bool {
+    command
+        .as_bytes()
+        .iter()
+        .any(|b| matches!(b, b'\n' | b'\r' | 0x0b | 0x0c))
 }
 
 fn shell_token_requires_user_scope(command: &str, token: &str) -> bool {
@@ -819,6 +999,26 @@ fn shell_token_requires_user_scope(command: &str, token: &str) -> bool {
         || command.contains("||")
         || command.contains("$(")
         || command.contains('`')
+        || command_contains_standalone_ampersand(command)
+}
+
+/// True when `command` has a background `&` (not `&&`).
+///
+/// Uses shlex tokenization so `&` inside quoted strings (e.g. URL query
+/// strings) does not count. Also treats a token that *ends* with `&`
+/// (`sleep 1& rm x` → `1&`) as a background operator — shells parse that
+/// the same way as a spaced `&`.
+fn command_contains_standalone_ampersand(command: &str) -> bool {
+    shlex::split(command).is_some_and(|argv| {
+        argv.iter()
+            .any(|token| token_is_background_ampersand(token))
+    })
+}
+
+fn token_is_background_ampersand(token: &str) -> bool {
+    // `&&` is AND-list, not background. A lone `&`, or any other token that
+    // ends with `&` (`1&`, `cmd&`), is background.
+    token != "&&" && (token == "&" || token.ends_with('&'))
 }
 
 fn looks_like_env_assignment(token: &str) -> bool {
@@ -848,6 +1048,130 @@ fn prefix_from_argv(argv: &[String]) -> Option<Vec<String>> {
             .map(|token| vec![executable.clone(), token])
             .unwrap_or_else(|| vec![executable]),
     )
+}
+
+/// Upper bounds for generalized command patterns; commands beyond them fall
+/// back to per-call approval instead of a session grant.
+const COMMAND_PATTERN_MAX_TOKENS: usize = 16;
+const COMMAND_PATTERN_MAX_WILDCARDS: usize = 8;
+
+/// Programs whose arguments must never be generalized into a session approval
+/// pattern: privilege escalation, shell re-entry, and argument-driven command
+/// execution can each turn a broad pattern into an arbitrary command grant.
+const COMMAND_PATTERN_PROGRAM_BLOCKLIST: &[&str] = &[
+    "sudo",
+    "doas",
+    "run0",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "env",
+    "xargs",
+    "find",
+    "eval",
+    // Destructive / irreversible programs must never generalize to wildcards
+    // (e.g. `rm foo` → `rm *` would auto-approve any rm for the session).
+    "rm",
+    "rmdir",
+    "dd",
+    "mkfs",
+    "shred",
+    "wipe",
+    "chmod",
+    "chown",
+    "chgrp",
+    "mv",
+    "python",
+    "python3",
+    "perl",
+    "ruby",
+    "node",
+    "php",
+    "lua",
+    "osascript",
+];
+
+/// Derives a generalized command pattern (e.g. `git add file.txt` ->
+/// `["git", "add", "*"]`) used as a session-scoped approval grant. The
+/// program, flags, and leading subcommand words stay verbatim; the first
+/// value-like token and every later non-flag token become `*`. Returns
+/// `None` when the command cannot be generalized safely (compound commands,
+/// expansions, env assignments, blocklisted programs such as `sudo` or
+/// `sh -c`, or patterns beyond the token/wildcard limits).
+pub fn generalize_command_pattern(command: &str, cwd: &Path) -> Option<Vec<String>> {
+    let argv = safe_shell_argv(command)?;
+    command_pattern_from_argv(&argv, cwd)
+}
+
+fn command_pattern_from_argv(argv: &[String], _cwd: &Path) -> Option<Vec<String>> {
+    if argv.is_empty() || argv.len() > COMMAND_PATTERN_MAX_TOKENS {
+        return None;
+    }
+    let program = argv.first()?;
+    if COMMAND_PATTERN_PROGRAM_BLOCKLIST.contains(&program_basename(program)) {
+        return None;
+    }
+    let mut pattern = Vec::with_capacity(argv.len());
+    pattern.push(program.clone());
+    let mut wildcards = 0;
+    let mut values_started = false;
+    for token in &argv[1..] {
+        // Flags stay verbatim in any position; subcommand words stay
+        // verbatim only until the first value-like token appears.
+        if token.starts_with('-') || (!values_started && is_subcommand_word(token)) {
+            pattern.push(token.clone());
+            continue;
+        }
+        values_started = true;
+        wildcards += 1;
+        if wildcards > COMMAND_PATTERN_MAX_WILDCARDS {
+            return None;
+        }
+        pattern.push("*".to_string());
+    }
+    Some(pattern)
+}
+
+/// Matches a generalized command pattern against a concrete argv. An inner
+/// `*` matches exactly one token; a trailing `*` matches one or more tokens.
+/// Patterns without `*` require a full verbatim match.
+pub fn command_pattern_matches(pattern: &[String], argv: &[String]) -> bool {
+    let mut args = argv.iter();
+    let mut tokens = pattern.iter().peekable();
+    while let Some(token) = tokens.next() {
+        if token.as_str() == "*" {
+            if tokens.peek().is_none() {
+                return args.next().is_some();
+            }
+            if args.next().is_none() {
+                return false;
+            }
+            continue;
+        }
+        if args.next() != Some(token) {
+            return false;
+        }
+    }
+    args.next().is_none()
+}
+
+fn program_basename(program: &str) -> &str {
+    program.rsplit(['/', '\\']).next().unwrap_or(program)
+}
+
+fn is_subcommand_word(token: &str) -> bool {
+    // Subcommand words are short lowercase identifiers (`^[a-z][a-z0-9_-]{0,31}$`,
+    // e.g. `add` in `git add`); the charset already excludes path and
+    // assignment punctuation such as `.`, `/`, `=`, `:`, `~`.
+    // Do not probe the filesystem: cwd existence would make patterns drift.
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_lowercase()
+        && token.len() <= 32
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_')
 }
 
 fn justification_for_tool_input(input: &serde_json::Value) -> Option<String> {
@@ -1177,7 +1501,7 @@ mod tests {
                 if n == "blocked" {
                     Err("blocked".into())
                 } else {
-                    Ok(())
+                    Ok(PermissionGrant::default())
                 }
             })
         });
@@ -1285,7 +1609,7 @@ mod tests {
                 .expect("send once")
                 .send(request)
                 .expect("receiver still alive");
-            Box::pin(async { Ok(()) })
+            Box::pin(async { Ok(PermissionGrant::default()) })
         });
         let runtime = ToolRuntime::new_with_context(
             registry,
@@ -1304,6 +1628,7 @@ mod tests {
                 hooks: None,
                 network_proxy: None,
                 network_no_proxy: None,
+                sandbox_profile: None,
             },
         );
         let call = ToolCall {
@@ -1531,6 +1856,194 @@ mod tests {
     }
 
     #[test]
+    fn exec_command_banned_prefix_rule_is_not_offered() {
+        assert_eq!(
+            command_prefix_for_tool_input(
+                "exec_command",
+                &serde_json::json!({
+                    "cmd": "git status",
+                    "prefix_rule": ["git"]
+                })
+            ),
+            None
+        );
+    }
+
+    fn strs(tokens: &[&str]) -> Vec<String> {
+        tokens.iter().map(|token| token.to_string()).collect()
+    }
+
+    #[test]
+    fn command_pattern_generalizes_value_arguments() {
+        let cwd = std::path::Path::new("/nonexistent-cwd-for-pattern-tests");
+        assert_eq!(
+            generalize_command_pattern("git add file.txt", cwd),
+            Some(strs(&["git", "add", "*"]))
+        );
+        // Interpreters are blocklisted and must not generalize.
+        assert_eq!(generalize_command_pattern("node -e 'foo.bar'", cwd), None);
+        assert_eq!(
+            generalize_command_pattern("git commit -m 'initial commit'", cwd),
+            Some(strs(&["git", "commit", "-m", "*"]))
+        );
+        assert_eq!(
+            generalize_command_pattern("git add a.txt b.txt", cwd),
+            Some(strs(&["git", "add", "*", "*"]))
+        );
+        // Words after the first value are values too, even if they look like subcommands.
+        assert_eq!(
+            generalize_command_pattern("git add file.txt docs", cwd),
+            Some(strs(&["git", "add", "*", "*"]))
+        );
+    }
+
+    #[test]
+    fn command_pattern_allows_verbatim_patterns_without_wildcards() {
+        let cwd = std::path::Path::new("/nonexistent-cwd-for-pattern-tests");
+        assert_eq!(
+            generalize_command_pattern("cargo build --release", cwd),
+            Some(strs(&["cargo", "build", "--release"]))
+        );
+        assert_eq!(
+            generalize_command_pattern("git status", cwd),
+            Some(strs(&["git", "status"]))
+        );
+    }
+
+    #[test]
+    fn command_pattern_rejects_unsafe_commands() {
+        let cwd = std::path::Path::new("/nonexistent-cwd-for-pattern-tests");
+        // Blocklisted programs, including via path basename.
+        assert_eq!(generalize_command_pattern("sudo rm -rf /tmp/x", cwd), None);
+        assert_eq!(generalize_command_pattern("rm /tmp/x", cwd), None);
+        assert_eq!(
+            generalize_command_pattern("dd if=/dev/zero of=x", cwd),
+            None
+        );
+        assert_eq!(generalize_command_pattern("/usr/bin/sudo ls", cwd), None);
+        assert_eq!(generalize_command_pattern("sh -c 'ls'", cwd), None);
+        assert_eq!(generalize_command_pattern("bash -c 'ls'", cwd), None);
+        assert_eq!(generalize_command_pattern("find . -name foo", cwd), None);
+        assert_eq!(generalize_command_pattern("xargs rm", cwd), None);
+        assert_eq!(generalize_command_pattern("env ls", cwd), None);
+        assert_eq!(generalize_command_pattern("eval ls", cwd), None);
+        // Compound commands, expansions, redirects, env assignments.
+        assert_eq!(
+            generalize_command_pattern("git add a && git commit", cwd),
+            None
+        );
+        assert_eq!(generalize_command_pattern("cat x | grep y", cwd), None);
+        assert_eq!(generalize_command_pattern("echo hi > out.txt", cwd), None);
+        assert_eq!(generalize_command_pattern("echo $(pwd)", cwd), None);
+        assert_eq!(generalize_command_pattern("FOO=bar cargo test", cwd), None);
+        // Background `&` (not `&&`) must not be treated as a safe prefix.
+        assert_eq!(
+            generalize_command_pattern("sleep 1 & touch /tmp/x", cwd),
+            None
+        );
+        // Quoted URL query `&` is not a background operator.
+        assert!(!command_contains_standalone_ampersand(
+            r#"curl "http://example.com/?a=1&b=2""#
+        ));
+        assert!(command_contains_standalone_ampersand("sleep 1 & touch x"));
+        assert!(command_contains_standalone_ampersand("sleep 1& rm x"));
+        assert!(!command_contains_standalone_ampersand("true && false"));
+        assert!(!token_is_background_ampersand("&&"));
+        assert!(token_is_background_ampersand("1&"));
+        assert!(token_is_background_ampersand("&"));
+        // Unparseable quoting.
+        assert_eq!(
+            generalize_command_pattern("git add 'unterminated", cwd),
+            None
+        );
+    }
+
+    #[test]
+    fn command_pattern_enforces_token_and_wildcard_limits() {
+        let cwd = std::path::Path::new("/nonexistent-cwd-for-pattern-tests");
+        // 17 tokens exceeds the 16-token cap.
+        assert_eq!(
+            generalize_command_pattern("git a b c d e f g h i j k l m n o p", cwd),
+            None
+        );
+        // 9 wildcards exceeds the 8-wildcard cap.
+        assert_eq!(
+            generalize_command_pattern("git add A B C D E F G H I", cwd),
+            None
+        );
+        // 8 wildcards is still allowed.
+        assert_eq!(
+            generalize_command_pattern("git add A B C D E F G H", cwd),
+            Some(strs(&[
+                "git", "add", "*", "*", "*", "*", "*", "*", "*", "*"
+            ]))
+        );
+    }
+
+    #[test]
+    fn command_pattern_keeps_subcommand_words_without_cwd_stat() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let cwd = tempdir.path();
+        std::fs::write(cwd.join("add"), "placeholder").expect("write placeholder");
+
+        // Existing cwd path must not turn a subcommand word into a wildcard.
+        assert_eq!(
+            generalize_command_pattern("git add", cwd),
+            Some(strs(&["git", "add"]))
+        );
+    }
+
+    #[test]
+    fn command_pattern_matches_trailing_wildcard_one_or_more() {
+        let pattern = strs(&["git", "add", "*"]);
+        assert!(command_pattern_matches(
+            &pattern,
+            &strs(&["git", "add", "file.txt"])
+        ));
+        assert!(command_pattern_matches(
+            &pattern,
+            &strs(&["git", "add", "a", "b"])
+        ));
+        assert!(!command_pattern_matches(&pattern, &strs(&["git", "add"])));
+        assert!(!command_pattern_matches(
+            &pattern,
+            &strs(&["git", "commit", "x"])
+        ));
+        assert!(!command_pattern_matches(
+            &pattern,
+            &strs(&["sudo", "git", "add", "x"])
+        ));
+    }
+
+    #[test]
+    fn command_pattern_matches_inner_wildcard_exactly_one() {
+        let pattern = strs(&["git", "commit", "-m", "*", "--amend"]);
+        assert!(command_pattern_matches(
+            &pattern,
+            &strs(&["git", "commit", "-m", "msg", "--amend"])
+        ));
+        assert!(!command_pattern_matches(
+            &pattern,
+            &strs(&["git", "commit", "-m", "a", "b", "--amend"])
+        ));
+        assert!(!command_pattern_matches(
+            &pattern,
+            &strs(&["git", "commit", "-m", "--amend"])
+        ));
+    }
+
+    #[test]
+    fn command_pattern_matches_verbatim_requires_exact_argv() {
+        let pattern = strs(&["git", "status"]);
+        assert!(command_pattern_matches(&pattern, &strs(&["git", "status"])));
+        assert!(!command_pattern_matches(
+            &pattern,
+            &strs(&["git", "status", "-s"])
+        ));
+        assert!(!command_pattern_matches(&pattern, &strs(&["git"])));
+    }
+
+    #[test]
     fn explicit_sandbox_permissions_request_escalation() {
         assert!(requests_explicit_escalation(&serde_json::json!({
             "sandbox_permissions": "require_escalated"
@@ -1541,6 +2054,343 @@ mod tests {
         assert!(!requests_explicit_escalation(&serde_json::json!({
             "sandbox_permissions": "use_default"
         })));
+    }
+
+    #[test]
+    fn sandbox_profile_inactive_detection() {
+        assert!(sandbox_profile_is_inactive(None));
+        assert!(sandbox_profile_is_inactive(Some("")));
+        assert!(sandbox_profile_is_inactive(Some("off")));
+        assert!(sandbox_profile_is_inactive(Some("none")));
+        assert!(!sandbox_profile_is_inactive(Some("workspace")));
+    }
+
+    #[test]
+    fn tool_result_detects_sandbox_denied_prefix() {
+        let denied = ToolResult::error(
+            ToolResultContent::Text("SANDBOX_DENIED: blocked".into()),
+            "failed",
+            ToolCallError::ExecutionFailed("SANDBOX_DENIED: blocked".into()),
+        );
+        assert!(tool_result_is_sandbox_denied(&denied));
+
+        let other = ToolResult::error(
+            ToolResultContent::Text("exit code 1".into()),
+            "failed",
+            ToolCallError::ExecutionFailed("exit code 1".into()),
+        );
+        assert!(!tool_result_is_sandbox_denied(&other));
+    }
+
+    #[tokio::test]
+    async fn execute_single_retries_without_sandbox_when_already_approved() {
+        struct SandboxAwareTool {
+            spec: ToolSpec,
+            attempts: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        }
+
+        #[async_trait]
+        impl ToolHandler for SandboxAwareTool {
+            fn spec(&self) -> &ToolSpec {
+                &self.spec
+            }
+
+            async fn handle(
+                &self,
+                ctx: ToolContext,
+                _input: serde_json::Value,
+                _progress: Option<ToolProgressSender>,
+            ) -> Result<ToolResult, ToolCallError> {
+                self.attempts
+                    .lock()
+                    .expect("attempts lock")
+                    .push(ctx.sandbox_profile.clone());
+                if ctx.sandbox_profile.as_deref() == Some("workspace") {
+                    return Ok(ToolResult::error(
+                        ToolResultContent::Text(
+                            "SANDBOX_DENIED: The command was blocked by the OS sandbox.".into(),
+                        ),
+                        "denied",
+                        ToolCallError::ExecutionFailed("SANDBOX_DENIED".into()),
+                    ));
+                }
+                Ok(ToolResult::success(
+                    ToolResultContent::Text("ok outside sandbox".into()),
+                    "ok",
+                ))
+            }
+        }
+
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut builder = ToolRegistryBuilder::new();
+        builder.register_handler(
+            "shell_command",
+            Arc::new(SandboxAwareTool {
+                spec: ToolSpec {
+                    name: "shell_command".into(),
+                    description: String::new(),
+                    input_schema: JsonSchema::object(Default::default(), None, None),
+                    output_mode: ToolOutputMode::Text,
+                    execution_mode: ToolExecutionMode::Mutating,
+                    capability_tags: vec![ToolCapabilityTag::ExecuteProcess],
+                    supports_parallel: false,
+                    preparation_feedback: ToolPreparationFeedback::None,
+                    display_name: None,
+                    supports_cancellation: None,
+                    supports_streaming: None,
+                },
+                attempts: Arc::clone(&attempts),
+            }),
+        );
+        builder.push_spec(ToolSpec {
+            name: "shell_command".into(),
+            description: String::new(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Text,
+            execution_mode: ToolExecutionMode::Mutating,
+            capability_tags: vec![ToolCapabilityTag::ExecuteProcess],
+            supports_parallel: false,
+            preparation_feedback: ToolPreparationFeedback::None,
+            display_name: None,
+            supports_cancellation: None,
+            supports_streaming: None,
+        });
+        let registry = Arc::new(builder.build());
+
+        let permission_checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let permission_checks_for_checker = Arc::clone(&permission_checks);
+        let checker = PermissionChecker::new(move |_request| {
+            permission_checks_for_checker.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                Ok(PermissionGrant::from_approval(
+                    /*bypass_sandbox*/ false,
+                ))
+            })
+        });
+
+        let mut runtime = ToolRuntime::new(registry, checker);
+        runtime.context.sandbox_profile = Some("workspace".to_string());
+
+        let call = ToolCall {
+            id: "deny1".into(),
+            name: "shell_command".into(),
+            input: serde_json::json!({ "command": "touch /tmp/x" }),
+        };
+        let result = runtime.execute_single(&call, &None).await;
+        assert!(!result.is_error);
+        assert_eq!(result.content.into_string(), "ok outside sandbox");
+        assert_eq!(
+            permission_checks.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "SANDBOX_DENIED retry must not request a second permission check"
+        );
+        assert_eq!(
+            *attempts.lock().expect("attempts lock"),
+            vec![Some("workspace".to_string()), Some("off".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_single_does_not_silent_unsandbox_without_approval() {
+        struct SandboxAwareTool {
+            spec: ToolSpec,
+            attempts: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        }
+
+        #[async_trait]
+        impl ToolHandler for SandboxAwareTool {
+            fn spec(&self) -> &ToolSpec {
+                &self.spec
+            }
+
+            async fn handle(
+                &self,
+                ctx: ToolContext,
+                _input: serde_json::Value,
+                _progress: Option<ToolProgressSender>,
+            ) -> Result<ToolResult, ToolCallError> {
+                self.attempts
+                    .lock()
+                    .expect("attempts lock")
+                    .push(ctx.sandbox_profile.clone());
+                Ok(ToolResult::error(
+                    ToolResultContent::Text(
+                        "SANDBOX_DENIED: The command was blocked by the OS sandbox.".into(),
+                    ),
+                    "denied",
+                    ToolCallError::ExecutionFailed("SANDBOX_DENIED".into()),
+                ))
+            }
+        }
+
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut builder = ToolRegistryBuilder::new();
+        builder.register_handler(
+            "shell_command",
+            Arc::new(SandboxAwareTool {
+                spec: ToolSpec {
+                    name: "shell_command".into(),
+                    description: String::new(),
+                    input_schema: JsonSchema::object(Default::default(), None, None),
+                    output_mode: ToolOutputMode::Text,
+                    execution_mode: ToolExecutionMode::Mutating,
+                    capability_tags: vec![ToolCapabilityTag::ExecuteProcess],
+                    supports_parallel: false,
+                    preparation_feedback: ToolPreparationFeedback::None,
+                    display_name: None,
+                    supports_cancellation: None,
+                    supports_streaming: None,
+                },
+                attempts: Arc::clone(&attempts),
+            }),
+        );
+        builder.push_spec(ToolSpec {
+            name: "shell_command".into(),
+            description: String::new(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Text,
+            execution_mode: ToolExecutionMode::Mutating,
+            capability_tags: vec![ToolCapabilityTag::ExecuteProcess],
+            supports_parallel: false,
+            preparation_feedback: ToolPreparationFeedback::None,
+            display_name: None,
+            supports_cancellation: None,
+            supports_streaming: None,
+        });
+        let registry = Arc::new(builder.build());
+
+        // Policy Allow: already_approved stays false (PermissionGrant::default).
+        let checker =
+            PermissionChecker::new(|_| Box::pin(async { Ok(PermissionGrant::default()) }));
+
+        let mut runtime = ToolRuntime::new(registry, checker);
+        runtime.context.sandbox_profile = Some("workspace".to_string());
+
+        let call = ToolCall {
+            id: "deny2".into(),
+            name: "shell_command".into(),
+            input: serde_json::json!({ "command": "touch /tmp/x" }),
+        };
+        let result = runtime.execute_single(&call, &None).await;
+        assert!(result.is_error);
+        assert!(
+            result.content.into_string().starts_with("SANDBOX_DENIED:"),
+            "denial must surface for require_escalated"
+        );
+        assert_eq!(
+            *attempts.lock().expect("attempts lock"),
+            vec![Some("workspace".to_string())],
+            "must not silent unsandbox without already_approved"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_single_skips_unsandbox_retry_when_profile_has_deny_read() {
+        struct SandboxAwareTool {
+            spec: ToolSpec,
+            attempts: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        }
+
+        #[async_trait]
+        impl ToolHandler for SandboxAwareTool {
+            fn spec(&self) -> &ToolSpec {
+                &self.spec
+            }
+
+            async fn handle(
+                &self,
+                ctx: ToolContext,
+                _input: serde_json::Value,
+                _progress: Option<ToolProgressSender>,
+            ) -> Result<ToolResult, ToolCallError> {
+                self.attempts
+                    .lock()
+                    .expect("attempts lock")
+                    .push(ctx.sandbox_profile.clone());
+                Ok(ToolResult::error(
+                    ToolResultContent::Text(
+                        "SANDBOX_DENIED: The command was blocked by the OS sandbox.".into(),
+                    ),
+                    "denied",
+                    ToolCallError::ExecutionFailed("SANDBOX_DENIED".into()),
+                ))
+            }
+        }
+
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut builder = ToolRegistryBuilder::new();
+        builder.register_handler(
+            "shell_command",
+            Arc::new(SandboxAwareTool {
+                spec: ToolSpec {
+                    name: "shell_command".into(),
+                    description: String::new(),
+                    input_schema: JsonSchema::object(Default::default(), None, None),
+                    output_mode: ToolOutputMode::Text,
+                    execution_mode: ToolExecutionMode::Mutating,
+                    capability_tags: vec![ToolCapabilityTag::ExecuteProcess],
+                    supports_parallel: false,
+                    preparation_feedback: ToolPreparationFeedback::None,
+                    display_name: None,
+                    supports_cancellation: None,
+                    supports_streaming: None,
+                },
+                attempts: Arc::clone(&attempts),
+            }),
+        );
+        builder.push_spec(ToolSpec {
+            name: "shell_command".into(),
+            description: String::new(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Text,
+            execution_mode: ToolExecutionMode::Mutating,
+            capability_tags: vec![ToolCapabilityTag::ExecuteProcess],
+            supports_parallel: false,
+            preparation_feedback: ToolPreparationFeedback::None,
+            display_name: None,
+            supports_cancellation: None,
+            supports_streaming: None,
+        });
+        let registry = Arc::new(builder.build());
+
+        let checker = PermissionChecker::new(|_| {
+            Box::pin(async {
+                Ok(PermissionGrant::from_approval(
+                    /*bypass_sandbox*/ false,
+                ))
+            })
+        });
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path();
+        let config_dir = workspace.join(".devo");
+        std::fs::create_dir_all(&config_dir).expect("mkdir");
+        std::fs::write(
+            config_dir.join("sandbox.toml"),
+            r#"
+[profiles.locked]
+extends = "workspace"
+deny = ["/etc/passwd"]
+"#,
+        )
+        .expect("write config");
+
+        let mut runtime = ToolRuntime::new(registry, checker);
+        runtime.context.cwd = workspace.to_path_buf();
+        runtime.context.sandbox_profile = Some("locked".to_string());
+
+        let call = ToolCall {
+            id: "deny3".into(),
+            name: "shell_command".into(),
+            input: serde_json::json!({ "command": "cat /etc/passwd" }),
+        };
+        let result = runtime.execute_single(&call, &None).await;
+        assert!(result.is_error);
+        assert_eq!(
+            *attempts.lock().expect("attempts lock"),
+            vec![Some("locked".to_string())],
+            "deny-read profiles must not silent-unsandbox after SANDBOX_DENIED"
+        );
     }
 
     fn test_permission_request(tool_name: &str) -> ToolPermissionRequest {
@@ -1558,6 +2408,8 @@ mod tests {
             host: None,
             target: None,
             command_prefix: None,
+            command_argv: None,
+            command_pattern: None,
             requests_escalation: false,
         }
     }

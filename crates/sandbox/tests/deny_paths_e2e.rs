@@ -206,7 +206,7 @@ fn subprocess_entry() {
 
     match scenario.as_str() {
         "block_deny" => {
-            let mut sandbox = devo_sandbox::SandboxManager::new(profile_from_env(), workspace);
+            let mut sandbox = devo_sandbox::SandboxManager::new(profile_from_env());
             if let Err(e) = sandbox.apply(workspace) {
                 eprintln!("sandbox apply failed: {e}");
                 std::process::exit(3);
@@ -303,7 +303,7 @@ fn run_deny_case(
     // CI lane can guarantee the deny enforcement is actually exercised.
     let require = std::env::var("SANDBOX_E2E_REQUIRE_ENFORCEMENT").is_ok();
 
-    let support = devo_sandbox::SandboxManager::support_info();
+    let support = nono::Sandbox::support_info();
     if !support.is_supported {
         if require {
             panic!(

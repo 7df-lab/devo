@@ -139,7 +139,7 @@ describe("ChatTurnComponent transcript controls", () => {
 
     expect({
       definesWorkingStrip: source.includes("function WorkingTurnStatusStrip"),
-      usesWorkingForCopy: source.includes('Working for "'),
+      usesWorkingForCopy: source.includes("Working for {display}"),
       reusesTurnDuration: source.includes(
         "computeTurnWorkTime(turn, { active: true })",
       ),

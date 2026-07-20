@@ -21,6 +21,7 @@ devo-core = { workspace = true }
 devo-client = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }
+devo-sandbox = { workspace = true }
 devo-server = { workspace = true }
 devo-util-fuzzy = { workspace = true }
 devo-util-git = { workspace = true }

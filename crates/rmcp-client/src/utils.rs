@@ -290,7 +290,7 @@ mod tests {
     fn create_env_preserves_path_when_it_is_not_utf8() {
         use std::os::unix::ffi::OsStrExt;
 
-        let raw_path = std::ffi::OsStr::from_bytes(b"/tmp/codex-\xFF/bin");
+        let raw_path = std::ffi::OsStr::from_bytes(b"/tmp/devo-\xFF/bin");
         let expected = raw_path.to_os_string();
 
         let env = create_env_for_mcp_server_with_env(/*extra_env*/ None, &[], |name| {

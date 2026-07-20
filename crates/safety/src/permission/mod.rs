@@ -9,5 +9,6 @@ mod types;
 
 pub use policy::CompiledPolicy;
 pub use rules::PolicyCompileError;
+pub use shell_access::evaluate_shell_access_with_roots;
 pub use types::PermissionAccess;
 pub use types::PolicyDecision;

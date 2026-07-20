@@ -339,6 +339,11 @@ pub struct ApprovalRequestPayload {
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_pattern: Option<Vec<String>>,
+    /// Suggested command prefix for "always allow commands that start with …".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_prefix: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -68,12 +68,6 @@ pub enum ProfileName {
     Custom(String),
 }
 
-impl ProfileName {
-    pub(crate) fn restricts_network(&self) -> bool {
-        matches!(self, Self::ReadOnly | Self::Strict)
-    }
-}
-
 impl std::fmt::Display for ProfileName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -139,6 +133,45 @@ pub fn sandbox_profile_conflicts(workspace: &Path) -> anyhow::Result<Vec<String>
         .unwrap_or_default();
 
     Ok(mismatched_profile_names(&global, &project))
+}
+
+/// Whether running without a filesystem sandbox would silently grant reads that
+/// the active profile denies (`unsandboxed_execution_allowed`).
+///
+/// Denied reads only exist inside the sandbox. If the resolved profile has any
+/// `deny` paths, bypassing the sandbox would drop that restriction, so silent
+/// unsandbox / `bypass_sandbox` must keep the command sandboxed.
+pub fn unsandboxed_execution_allowed(profile: Option<&str>, workspace: &Path) -> bool {
+    match profile_has_denied_reads(profile, workspace) {
+        Ok(has_denied_reads) => !has_denied_reads,
+        // Fail closed: if we cannot resolve the profile, do not drop the sandbox.
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                profile = ?profile,
+                "could not resolve sandbox profile for unsandbox check; keeping sandbox"
+            );
+            false
+        }
+    }
+}
+
+fn profile_has_denied_reads(profile: Option<&str>, workspace: &Path) -> anyhow::Result<bool> {
+    let Some(profile_name) = profile else {
+        return Ok(false);
+    };
+    if matches!(profile_name.trim(), "" | "off" | "none") {
+        return Ok(false);
+    }
+    let parsed = profile_name
+        .parse::<ProfileName>()
+        .map_err(|error| anyhow::anyhow!("invalid sandbox profile '{profile_name}': {error}"))?;
+    if parsed == ProfileName::Off {
+        return Ok(false);
+    }
+    let config = load_sandbox_config(workspace)?;
+    let resolved = parsed.resolve_profile(workspace, &config)?;
+    Ok(!resolved.deny.is_empty())
 }
 
 fn load_sandbox_config_from_paths(
@@ -232,7 +265,7 @@ impl ProfileName {
     }
 
     #[cfg(all(feature = "enforce", unix))]
-    pub(crate) fn capability_set_from_profile(
+    pub fn capability_set_from_profile(
         workspace: &Path,
         profile: &SandboxProfile,
     ) -> anyhow::Result<CapabilitySet> {
@@ -305,6 +338,15 @@ impl ProfileName {
         }
         if !glob_deny.is_empty() {
             apply_deny_globs_to_capability_set(&mut caps, workspace, &glob_deny)?;
+        }
+
+        // Network restriction, enforced by nono: Landlock `AccessNet` with a
+        // seccomp fallback on Linux, Seatbelt `(deny network*)` on macOS.
+        // bwrap-wrapped launches add `--unshare-net` on top (see `wrap`).
+        if profile.restrict_network {
+            caps = caps.block_network();
+            let managed_network = crate::managed_network::managed_network_context_from_env();
+            caps = crate::managed_network::apply_managed_network_context(caps, &managed_network);
         }
 
         Ok(caps)
@@ -741,6 +783,28 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "enforce", unix))]
+    fn restrict_network_blocks_network_in_capability_set() {
+        let workspace = std::env::current_dir().unwrap();
+        let config = SandboxConfig::default();
+        for (name, expected_blocked) in [
+            (ProfileName::ReadOnly, true),
+            (ProfileName::Strict, true),
+            (ProfileName::Workspace, false),
+            (ProfileName::Devbox, false),
+        ] {
+            let caps = name
+                .to_capability_set_with_config(&workspace, &config)
+                .expect("capability set builds");
+            assert_eq!(
+                matches!(caps.network_mode(), nono::NetworkMode::Blocked),
+                expected_blocked,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "enforce", unix))]
     fn strict_allowlist_includes_run_and_var_when_present() {
         // Regression: /run (resolv realpath) + /var (NSS/SSSD) when present.
         let workspace = std::env::temp_dir();
@@ -977,5 +1041,30 @@ read_write = ["/tmp/ci-artifacts"]
             .resolve_profile(&workspace, &SandboxConfig::default())
             .expect_err("Off.resolve must Err");
         assert!(err.to_string().contains("off"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn unsandboxed_execution_allowed_for_inactive_and_builtin_profiles() {
+        let workspace = std::env::temp_dir();
+        assert!(unsandboxed_execution_allowed(None, &workspace));
+        assert!(unsandboxed_execution_allowed(Some("off"), &workspace));
+        assert!(unsandboxed_execution_allowed(Some("workspace"), &workspace));
+    }
+
+    #[test]
+    fn unsandboxed_execution_blocked_when_custom_profile_has_deny() {
+        let dir = TestConfigDir::new();
+        let workspace = dir.path.clone();
+        let config_dir = workspace.join(".devo");
+        std::fs::create_dir_all(&config_dir).expect("mkdir .devo");
+        write_config(
+            &config_dir.join("sandbox.toml"),
+            r#"
+[profiles.locked]
+extends = "workspace"
+deny = ["/etc/passwd"]
+"#,
+        );
+        assert!(!unsandboxed_execution_allowed(Some("locked"), &workspace));
     }
 }

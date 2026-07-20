@@ -26,6 +26,7 @@ use crate::events::PlanStepStatus;
 use crate::events::SubagentMonitorEvent;
 use crate::events::TextItemKind;
 use crate::events::WorkerEvent;
+use crate::shell_output::strip_shell_envelope;
 
 struct AcpToolCallEventData {
     tool_call_id: String,
@@ -742,7 +743,9 @@ fn worker_events_from_acp_tool_content(
             });
         }
     }
-    let text = text_parts.join("\n");
+    // Shell tools append a JSON envelope ({command, exit, ...}) to the result
+    // text; strip it so only the real command output is displayed.
+    let text = strip_shell_envelope(&text_parts.join("\n"));
     if !text.is_empty() {
         if matches!(
             tool_call.status,
@@ -867,7 +870,9 @@ fn subagent_events_from_acp_tool_content(
         }
     }
 
-    let text = text_parts.join("\n");
+    // Shell tools append a JSON envelope ({command, exit, ...}) to the result
+    // text; strip it so only the real command output is displayed.
+    let text = strip_shell_envelope(&text_parts.join("\n"));
     if !text.is_empty() {
         if matches!(
             tool_call.status,

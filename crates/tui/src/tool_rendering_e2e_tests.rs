@@ -23,6 +23,7 @@ fn widget_with_model(
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,

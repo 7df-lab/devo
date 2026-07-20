@@ -427,10 +427,7 @@ base_instructions = "Catalog-only model instructions"
     assert_eq!(mode_option["name"], serde_json::json!("Session Mode"));
     assert_eq!(mode_option["category"], serde_json::json!("mode"));
     assert_eq!(mode_option["currentValue"], serde_json::json!("default"));
-    assert_config_option_values(
-        mode_option,
-        &["read-only", "default", "auto-review", "full-access"],
-    )?;
+    assert_config_option_values(mode_option, &["default", "auto-review", "full-access"])?;
 
     write_stdio_json(
         &mut stdin,

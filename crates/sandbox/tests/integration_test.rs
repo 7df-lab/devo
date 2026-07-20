@@ -7,13 +7,13 @@
 
 use pretty_assertions::assert_eq;
 
-// `support_info` is only available with the `enforce` feature (it returns a
-// nono type), so gate this test the same way.
+// `Sandbox::support_info` returns a nono type, so gate this test on the
+// platforms where nono compiles with enforcement enabled.
 #[test]
 #[cfg(all(feature = "enforce", unix))]
 fn test_support_info() {
     // Verify that nono can report platform support status without applying
-    let support = devo_sandbox::SandboxManager::support_info();
+    let support = nono::Sandbox::support_info();
     // On macOS and Linux 5.13+, this should be supported
     // On other platforms, it gracefully reports unsupported
     println!(
@@ -56,9 +56,8 @@ fn test_sandbox_manager_lifecycle() {
     let workspace = std::env::current_dir().expect("cwd");
 
     // Off profile: apply should succeed without actually sandboxing
-    let mut manager = SandboxManager::new(ProfileName::Off, &workspace);
+    let mut manager = SandboxManager::new(ProfileName::Off);
     assert!(!manager.is_applied());
-    assert!(!manager.restrict_child_network());
 
     let result = manager.apply(&workspace);
     assert!(result.is_ok());
@@ -92,16 +91,4 @@ fn test_sandbox_logger() {
     // Buffer is now empty
     let events2 = logger.take_events();
     assert!(events2.is_empty());
-}
-
-#[test]
-fn test_should_restrict_child_network_default() {
-    // Before any sandbox is applied, child network should not be restricted
-    // Note: this test may interfere with other tests if they set the global.
-    // In practice, the global is set once at process startup and never unset.
-    // For testing, we just verify the default state.
-    //
-    // We can't meaningfully test the "set" path without applying a sandbox
-    // (which is irreversible), so we verify the default is false.
-    assert!(!devo_sandbox::should_restrict_child_network());
 }

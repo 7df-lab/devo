@@ -323,6 +323,8 @@ pub(crate) enum WorkerEvent {
         path: Option<String>,
         host: Option<String>,
         target: Option<String>,
+        command_pattern: Option<Vec<String>>,
+        command_prefix: Option<Vec<String>>,
     },
     RequestUserInput {
         session_id: SessionId,
@@ -334,6 +336,8 @@ pub(crate) enum WorkerEvent {
         approval_id: String,
         decision: String,
         scope: String,
+        tool_name: Option<String>,
+        rationale: Option<String>,
     },
     /// Live usage update for the active turn.
     UsageUpdated {

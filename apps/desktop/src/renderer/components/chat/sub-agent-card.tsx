@@ -20,7 +20,7 @@ import { appStore } from "../../atoms/store"
 import { getStreamingPartsForSession, streamingVersionFamily } from "../../atoms/streaming"
 import { useToolElapsedTime } from "../../hooks/use-elapsed-time"
 import type { ToolPart, ToolState } from "../../lib/types"
-import { getToolDuration, getToolInfo, getToolSubtitle } from "./chat-tool-call"
+import { getToolInfo, getToolSubtitle } from "./chat-tool-call"
 
 // ============================================================
 // Collapse state for three-tier agent card
@@ -180,8 +180,7 @@ export const SubAgentCard = memo(function SubAgentCard({ part: propPart }: SubAg
 		setCollapseState("summary")
 	}, [])
 
-	// ── Duration ───────────────────────────────────────────────
-	const duration = getToolDuration(part)
+	// ── Elapsed time (live, while running) ─────────────────────
 	const elapsedTime = useToolElapsedTime(part)
 
 	// Access child session data from the store.
@@ -297,15 +296,16 @@ export const SubAgentCard = memo(function SubAgentCard({ part: propPart }: SubAg
 
 	return (
 		<div className="not-prose space-y-0">
-			<div className="flex w-fit max-w-full items-center gap-2">
+			<div className="flex w-full max-w-full items-center gap-1.5">
 				<button
 					type="button"
 					onClick={handleHeaderToggle}
-					className="flex w-fit max-w-full items-center gap-1.5 text-left text-sm text-muted-foreground/70 transition-colors hover:text-foreground"
+					className="-mx-1.5 flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-0.5 text-left text-sm text-muted-foreground/70 transition-colors hover:bg-muted/40 hover:text-foreground"
 				>
+					<ChevronIcon aria-hidden="true" className="size-3.5 shrink-0 transition-transform" />
 					<ZapIcon
 						className={cn(
-							"size-4 shrink-0",
+							"size-3.5 shrink-0 stroke-[1.5]",
 							isRunning ? "animate-pulse text-violet-400" : "text-muted-foreground/50",
 						)}
 					/>
@@ -314,9 +314,8 @@ export const SubAgentCard = memo(function SubAgentCard({ part: propPart }: SubAg
 						<span className="text-muted-foreground/60"> ({agentType})</span>
 						<span className="text-muted-foreground/60"> · {taskTitle}</span>
 					</span>
-					<ChevronIcon aria-hidden="true" className="size-4 shrink-0 transition-transform" />
 				</button>
-				<div className="flex shrink-0 items-center gap-2 pb-1">
+				<div className="ml-auto flex shrink-0 items-center gap-2">
 				{/* Waiting indicator: shown when sub-agent has a pending permission or question */}
 				{childIsWaiting && childHasPendingPermission && (
 					<span className="flex items-center gap-1 text-[11px] font-medium text-amber-400">
@@ -340,9 +339,6 @@ export const SubAgentCard = memo(function SubAgentCard({ part: propPart }: SubAg
 				)}
 				{isRunning && !childIsWaiting && <Loader2Icon className="size-3 animate-spin text-muted-foreground/40" />}
 				{childIsWaiting && <Loader2Icon className="size-3 animate-spin text-amber-400/60" />}
-					{!isRunning && duration && (
-						<span className="text-[11px] text-muted-foreground/40">{duration}</span>
-					)}
 					{sessionId && (
 						<button
 							type="button"
@@ -357,9 +353,9 @@ export const SubAgentCard = memo(function SubAgentCard({ part: propPart }: SubAg
 			</div>
 
 			{showSummary && (
-				<div className="mt-1.5 mb-4 overflow-hidden rounded-md border border-border/50">
+				<div className="ml-[7px] mt-1.5 mb-2 border-l border-border/40 pl-3">
 					{!showExpanded && firstLine && (
-						<div className="flex items-baseline gap-2 px-3.5 py-2">
+						<div className="flex items-baseline gap-2 py-2 pr-1">
 							<p className="min-w-0 flex-1 truncate text-[11px] leading-relaxed text-muted-foreground/70 italic">
 								{firstLine}
 							</p>
@@ -380,7 +376,7 @@ export const SubAgentCard = memo(function SubAgentCard({ part: propPart }: SubAg
 						<>
 					{/* Live activity: latest tool calls */}
 					{latestToolParts.length > 0 && (
-						<div className="border-t border-border/30 px-3.5 py-2">
+						<div className="py-2 pr-1">
 							<div className="space-y-1">
 								{latestToolParts.map((tp) => {
 									const { icon: TpIcon, title } = getToolInfo(tp.tool)
@@ -392,12 +388,12 @@ export const SubAgentCard = memo(function SubAgentCard({ part: propPart }: SubAg
 										<div
 											key={tp.id}
 											className={cn(
-												"flex items-center gap-2 rounded px-2.5 py-1 text-[11px]",
+												"flex items-center gap-2 py-1 text-[11px]",
 											)}
 										>
 											<TpIcon
 												className={cn(
-													"size-3 shrink-0",
+													"size-3.5 shrink-0 stroke-[1.5]",
 													tpError
 														? "text-red-400"
 														: tpRunning
@@ -427,7 +423,7 @@ export const SubAgentCard = memo(function SubAgentCard({ part: propPart }: SubAg
 
 					{/* Full agent response rendered as markdown */}
 					{latestText && (
-						<div className="border-t border-border/30 px-3.5 py-2.5">
+						<div className="py-2 pr-1">
 							<div className="max-h-96 overflow-y-auto text-xs text-muted-foreground">
 								<MessageResponse
 									animated={isRunning}
@@ -451,12 +447,12 @@ export const SubAgentCard = memo(function SubAgentCard({ part: propPart }: SubAg
 
 					{/* Completion / error state */}
 					{isCompleted && !latestToolParts.length && !latestText && (
-						<div className="border-t border-border/30 px-3.5 py-2">
+						<div className="py-2 pr-1">
 							<span className="text-[11px] text-muted-foreground/50">Completed</span>
 						</div>
 					)}
 					{isError && (
-						<div className="border-t border-red-500/20 bg-red-500/5 px-3.5 py-2">
+						<div className="mt-1 rounded bg-red-500/5 px-2.5 py-2">
 							<span className="text-[11px] text-red-400">
 								{part.state.status === "error" ? part.state.error : "Sub-agent failed"}
 							</span>
@@ -466,7 +462,7 @@ export const SubAgentCard = memo(function SubAgentCard({ part: propPart }: SubAg
 					)}
 
 					{!showExpanded && isError && (
-						<div className="border-t border-red-500/20 bg-red-500/5 px-3.5 py-2">
+						<div className="mt-1 rounded bg-red-500/5 px-2.5 py-2">
 							<span className="text-[11px] text-red-400">
 								{part.state.status === "error" ? part.state.error : "Sub-agent failed"}
 							</span>

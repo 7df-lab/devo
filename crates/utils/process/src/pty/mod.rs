@@ -13,6 +13,12 @@ pub const DEFAULT_OUTPUT_BYTES_CAP: usize = 1024 * 1024;
 pub use pipe::spawn_process as spawn_pipe_process;
 /// Spawn a non-interactive process using regular pipes, but close stdin immediately.
 pub use pipe::spawn_process_no_stdin as spawn_pipe_process_no_stdin;
+/// Spawn a non-interactive process using regular pipes, close stdin immediately,
+/// and apply the named sandbox profile in the child before `exec`.
+pub use pipe::spawn_process_no_stdin_sandboxed as spawn_pipe_process_no_stdin_sandboxed;
+/// Spawn a non-interactive process using regular pipes for stdin/stdout/stderr,
+/// applying the named sandbox profile in the child before `exec`.
+pub use pipe::spawn_process_sandboxed as spawn_pipe_process_sandboxed;
 /// Driver-backed process adapter used by integrations with their own process transport.
 pub use process::ProcessDriver;
 /// Handle for interacting with a spawned process (PTY or pipe).

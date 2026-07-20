@@ -19,7 +19,7 @@ pub fn extract_shell_command(command: &[String]) -> Option<(&str, &str)> {
 
 /// DO NOT REVIEW THIS CODE BY HAND
 /// This parsing code is quite complex and not easy to hand-modify.
-/// The easiest way to iterate is to add unit tests and have Codex fix the implementation.
+/// The easiest way to iterate is to add unit tests and iterate on the implementation with tests.
 /// To encourage this, the tests have been put directly below this function rather than at the bottom of the
 ///
 /// Parses metadata out of an arbitrary command.
@@ -61,7 +61,7 @@ fn single_unknown_for_command(command: &[String]) -> ParsedCommand {
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
-/// Tests are at the top to encourage using TDD + Codex to fix the implementation.
+/// Tests are at the top to encourage using TDD to fix the implementation.
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
@@ -569,10 +569,10 @@ mod tests {
     #[test]
     fn supports_grep_recursive_current_dir() {
         assert_parsed(
-            &vec_str(&["grep", "-R", "CODEX_SANDBOX_ENV_VAR", "-n", "."]),
+            &vec_str(&["grep", "-R", "DEVO_SANDBOX_ENV_VAR", "-n", "."]),
             vec![ParsedCommand::Search {
-                cmd: "grep -R CODEX_SANDBOX_ENV_VAR -n .".to_string(),
-                query: Some("CODEX_SANDBOX_ENV_VAR".to_string()),
+                cmd: "grep -R DEVO_SANDBOX_ENV_VAR -n .".to_string(),
+                query: Some("DEVO_SANDBOX_ENV_VAR".to_string()),
                 path: Some(".".to_string()),
             }],
         );
@@ -584,13 +584,13 @@ mod tests {
             &vec_str(&[
                 "grep",
                 "-R",
-                "CODEX_SANDBOX_ENV_VAR",
+                "DEVO_SANDBOX_ENV_VAR",
                 "-n",
                 "core/src/spawn.rs",
             ]),
             vec![ParsedCommand::Search {
-                cmd: "grep -R CODEX_SANDBOX_ENV_VAR -n core/src/spawn.rs".to_string(),
-                query: Some("CODEX_SANDBOX_ENV_VAR".to_string()),
+                cmd: "grep -R DEVO_SANDBOX_ENV_VAR -n core/src/spawn.rs".to_string(),
+                query: Some("DEVO_SANDBOX_ENV_VAR".to_string()),
                 path: Some("spawn.rs".to_string()),
             }],
         );
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn supports_cd_and_rg_files() {
         assert_parsed(
-            &shlex_split_safe("cd codex-rs && rg --files"),
+            &shlex_split_safe("cd devo && rg --files"),
             vec![ParsedCommand::ListFiles {
                 cmd: "rg --files".to_string(),
                 path: None,
@@ -691,13 +691,13 @@ mod tests {
 
     #[test]
     fn supports_single_string_script_with_cd_and_pipe() {
-        let inner = r#"cd /Users/pakrym/code/codex && rg -n "codex_api" codex-rs -S | head -n 50"#;
+        let inner = r#"cd /Users/pakrym/code/devo && rg -n "devo_api" devo -S | head -n 50"#;
         assert_parsed(
             &vec_str(&["bash", "-lc", inner]),
             vec![ParsedCommand::Search {
-                cmd: "rg -n codex_api codex-rs -S".to_string(),
-                query: Some("codex_api".to_string()),
-                path: Some("codex-rs".to_string()),
+                cmd: "rg -n devo_api devo -S".to_string(),
+                query: Some("devo_api".to_string()),
+                path: Some("devo".to_string()),
             }],
         );
     }

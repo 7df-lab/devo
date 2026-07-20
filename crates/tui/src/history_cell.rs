@@ -922,24 +922,24 @@ pub fn new_guardian_denied_patch_request(files: Vec<String>) -> Box<dyn HistoryC
     ))
 }
 
-pub fn new_guardian_denied_action_request(summary: String) -> Box<dyn HistoryCell> {
+pub(crate) fn new_guardian_denied_action_request(summary: String) -> PrefixedWrappedHistoryCell {
     let line = Line::from(vec![
         "Request ".into(),
         "denied".bold(),
         " for ".into(),
         Span::from(summary).dim(),
     ]);
-    Box::new(PrefixedWrappedHistoryCell::new(line, "✗ ".red(), "  "))
+    PrefixedWrappedHistoryCell::new(line, "✗ ".red(), "  ")
 }
 
-pub fn new_guardian_approved_action_request(summary: String) -> Box<dyn HistoryCell> {
+pub(crate) fn new_guardian_approved_action_request(summary: String) -> PrefixedWrappedHistoryCell {
     let line = Line::from(vec![
         "Request ".into(),
         "approved".bold(),
         " for ".into(),
         Span::from(summary).dim(),
     ]);
-    Box::new(PrefixedWrappedHistoryCell::new(line, "✔ ".green(), "  "))
+    PrefixedWrappedHistoryCell::new(line, "✔ ".green(), "  ")
 }
 
 pub fn new_permission_request_cell(title: String, body: String) -> Box<dyn HistoryCell> {

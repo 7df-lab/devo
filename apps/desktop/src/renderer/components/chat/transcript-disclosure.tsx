@@ -89,7 +89,7 @@ export const TranscriptDisclosure = memo(function TranscriptDisclosure({
 })
 
 const triggerClassName =
-	"flex w-fit max-w-full items-center gap-1.5 border-0 bg-transparent p-0 m-0 text-sm text-muted-foreground/70 transition-colors hover:text-foreground"
+	"flex w-full max-w-full items-center gap-1.5 -mx-1.5 rounded border-0 bg-transparent px-1.5 py-0.5 m-0 text-left text-sm text-muted-foreground/70 transition-colors hover:text-foreground"
 
 export interface TranscriptDisclosureTriggerProps {
 	label: ReactNode
@@ -109,22 +109,37 @@ export const TranscriptDisclosureTrigger = memo(function TranscriptDisclosureTri
 	const { isOpen, expandable } = useTranscriptDisclosure()
 	const ChevronIcon = isOpen ? ChevronDownIcon : ChevronRightIcon
 
+	// Leading chevron keeps the disclosure affordance at a fixed position;
+	// non-expandable rows render a same-width spacer so icons stay aligned.
+	const chevron = expandable ? (
+		<ChevronIcon aria-hidden="true" className="size-3.5 shrink-0 transition-transform" />
+	) : (
+		<span aria-hidden="true" className="size-3.5 shrink-0" />
+	)
+	const trailingSlot = trailing ? (
+		<span className="ml-auto flex shrink-0 items-center">{trailing}</span>
+	) : null
+
 	if (!expandable) {
 		return (
 			<div className={cn(triggerClassName, className)} aria-label={ariaLabel}>
+				{chevron}
 				{leading}
 				<span className="min-w-0 truncate">{label}</span>
-				{trailing}
+				{trailingSlot}
 			</div>
 		)
 	}
 
 	return (
-		<CollapsibleTrigger className={cn(triggerClassName, className)} aria-label={ariaLabel}>
+		<CollapsibleTrigger
+			className={cn(triggerClassName, "hover:bg-muted/40", className)}
+			aria-label={ariaLabel}
+		>
+			{chevron}
 			{leading}
 			<span className="min-w-0 truncate">{label}</span>
-			<ChevronIcon aria-hidden="true" className="size-4 shrink-0 transition-transform" />
-			{trailing}
+			{trailingSlot}
 		</CollapsibleTrigger>
 	)
 })
@@ -132,16 +147,20 @@ export const TranscriptDisclosureTrigger = memo(function TranscriptDisclosureTri
 export interface TranscriptDisclosureContentProps {
 	children: ReactNode
 	className?: string
+	/** Indent content under a left guide line (aligned with the chevron) instead of a bordered box. */
+	rail?: boolean
 }
 
 export const TranscriptDisclosureContent = memo(function TranscriptDisclosureContent({
 	children,
 	className,
+	rail = false,
 }: TranscriptDisclosureContentProps) {
 	return (
 		<CollapsibleContent
 			className={cn(
 				"outline-none data-closed:mt-0 data-closed:mb-0 data-closed:h-0 data-closed:overflow-hidden data-open:mt-1.5",
+				rail && "ml-[7px] border-l border-border/40 pl-3",
 				className,
 			)}
 			keepMounted={false}

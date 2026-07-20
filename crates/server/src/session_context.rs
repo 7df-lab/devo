@@ -237,11 +237,34 @@ impl SessionRuntimeContext {
         cwd: PathBuf,
         additional_directories: Vec<PathBuf>,
     ) -> SessionState {
-        let permission_profile = devo_safety::RuntimePermissionProfile::from_preset(
-            devo_safety::PermissionPreset::Default,
-            cwd.clone(),
-        )
-        .with_additional_roots(additional_directories);
+        let (permission_preset, sandbox_from_project) = {
+            let config_store = self
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned");
+            let project = config_store
+                .effective_config()
+                .projects
+                .get(&devo_core::project_config_key(&cwd));
+            let preset = match project.and_then(|project| project.permission_preset) {
+                Some(devo_protocol::PermissionPreset::AutoReview) => {
+                    devo_safety::PermissionPreset::AutoReview
+                }
+                Some(devo_protocol::PermissionPreset::FullAccess) => {
+                    devo_safety::PermissionPreset::FullAccess
+                }
+                Some(devo_protocol::PermissionPreset::Default) | None => {
+                    devo_safety::PermissionPreset::Default
+                }
+            };
+            let sandbox_from_project = project.and_then(|project| project.sandbox_profile.clone());
+            (preset, sandbox_from_project)
+        };
+        let permission_profile =
+            devo_safety::RuntimePermissionProfile::from_preset(permission_preset, cwd.clone())
+                .with_additional_roots(additional_directories);
+        let sandbox_profile = sandbox_from_project
+            .unwrap_or_else(|| permission_profile.implied_sandbox_profile().to_string());
         let available_skills_instructions = {
             let mut skill_catalog = self
                 .skill_catalog
@@ -263,16 +286,15 @@ impl SessionRuntimeContext {
                 }
             }
         };
-        let mut state = SessionState::new(
-            SessionConfig {
-                permission_mode: permission_profile.permission_mode(),
-                permission_profile,
-                agents_md: self.agents_md.clone(),
-                available_skills_instructions,
-                ..SessionConfig::default()
-            },
-            cwd,
-        );
+        let session_config = SessionConfig {
+            permission_mode: permission_profile.permission_mode(),
+            permission_profile,
+            agents_md: self.agents_md.clone(),
+            available_skills_instructions,
+            sandbox_profile: Some(sandbox_profile),
+            ..SessionConfig::default()
+        };
+        let mut state = SessionState::new(session_config, cwd);
         state.id = session_id.to_string();
         state
     }

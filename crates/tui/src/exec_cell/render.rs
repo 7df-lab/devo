@@ -562,10 +562,8 @@ impl ExecCell {
 
         let mut lines: Vec<Line<'static>> = vec![header_line];
 
-        let continuation_lines = Self::limit_lines_from_start(
-            &continuation_lines,
-            layout.command_continuation_max_lines,
-        );
+        // Show the full command (all wrapped continuation lines). Only tool
+        // output below is truncated to keep the live transcript readable.
         if !continuation_lines.is_empty() {
             lines.extend(prefix_lines(
                 continuation_lines,
@@ -810,7 +808,6 @@ impl PrefixedBlock {
 #[derive(Clone, Copy)]
 struct ExecDisplayLayout {
     command_continuation: PrefixedBlock,
-    command_continuation_max_lines: usize,
     output_block: PrefixedBlock,
     output_max_lines: usize,
 }
@@ -818,13 +815,11 @@ struct ExecDisplayLayout {
 impl ExecDisplayLayout {
     const fn new(
         command_continuation: PrefixedBlock,
-        command_continuation_max_lines: usize,
         output_block: PrefixedBlock,
         output_max_lines: usize,
     ) -> Self {
         Self {
             command_continuation,
-            command_continuation_max_lines,
             output_block,
             output_max_lines,
         }
@@ -833,7 +828,6 @@ impl ExecDisplayLayout {
 
 const EXEC_DISPLAY_LAYOUT: ExecDisplayLayout = ExecDisplayLayout::new(
     PrefixedBlock::new("  │ ", "  │ "),
-    /*command_continuation_max_lines*/ 2,
     PrefixedBlock::new("  └ ", "    "),
     /*output_max_lines*/ 5,
 );
@@ -989,6 +983,48 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(rendered, vec!["▌ Ran echo hi"]);
+    }
+
+    #[test]
+    fn multiline_command_is_shown_in_full() {
+        let script = "cat <<'EOF'\nline-one\nline-two\nline-three\nline-four\nEOF";
+        let call = ExecCall {
+            call_id: "call-id".to_string(),
+            command: vec!["bash".into(), "-lc".into(), script.into()],
+            parsed: Vec::new(),
+            output: Some(CommandOutput {
+                exit_code: 0,
+                aggregated_output: String::new(),
+                formatted_output: String::new(),
+            }),
+            source: ExecCommandSource::Agent,
+            start_time: None,
+            duration: None,
+            interaction_input: None,
+            tool_name: None,
+            tool_input: None,
+            tool_output: None,
+            tool_display_content: None,
+        };
+        let cell = ExecCell::new(call, /*animations_enabled*/ false);
+        let rendered = cell
+            .command_display_lines(/*width*/ 80)
+            .iter()
+            .map(render_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("line-one")
+                && rendered.contains("line-two")
+                && rendered.contains("line-three")
+                && rendered.contains("line-four"),
+            "expected full multiline command, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("… +"),
+            "command body must not be truncated with ellipsis, got:\n{rendered}"
+        );
     }
 
     // #[test]

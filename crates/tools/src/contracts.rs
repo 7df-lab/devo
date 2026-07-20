@@ -57,6 +57,10 @@ pub struct ToolContext {
     pub file_read_ledger: Option<Arc<FileReadLedger>>,
     pub network_proxy: Option<String>,
     pub network_no_proxy: Option<String>,
+    /// Active sandbox profile name for child processes spawned by this tool.
+    /// `None` means no sandboxing; otherwise the value is a profile name such
+    /// as `"workspace"`, `"strict"`, or `"off"`.
+    pub sandbox_profile: Option<String>,
 }
 
 impl std::fmt::Debug for ToolContext {

@@ -23,7 +23,7 @@ pub(crate) use glob::{apply_deny_globs_to_capability_set, partition_deny_entries
 /// Escape a path for use inside a Seatbelt `(literal "...")` / `(subpath "...")`
 /// filter (used for both forms, hence the generic name).
 #[cfg(all(feature = "enforce", target_os = "macos"))]
-fn escape_seatbelt_path(path: &Path) -> Option<String> {
+pub(crate) fn escape_seatbelt_path(path: &Path) -> Option<String> {
     let s = path.to_str()?;
     // Reject all control chars (matching nono's escape_path); silently passing
     // one through would target a different path than intended.
@@ -95,19 +95,33 @@ const SEATBELT_WRITE_DENY_ACTIONS: &[&str] = &[
     "file-write-setugid",
 ];
 
-/// Emit the full read+write deny rule set for a single Seatbelt `filter`
-/// (`(literal ...)` or `(subpath ...)`). See [`SEATBELT_WRITE_DENY_ACTIONS`] for
-/// why the specific write sub-actions are required in addition to `file-write*`.
+/// The full read+write deny rule set for a single Seatbelt `filter`
+/// (`(literal ...)` or `(subpath ...)`), in emission order: read-deny first,
+/// then the catch-all write-deny, then the action-specific write denies. See
+/// [`SEATBELT_WRITE_DENY_ACTIONS`] for why the specific write sub-actions are
+/// required in addition to `file-write*`.
 #[cfg(all(feature = "enforce", target_os = "macos"))]
-fn emit_seatbelt_deny(caps: &mut CapabilitySet, filter: &str) -> anyhow::Result<()> {
+pub(crate) fn seatbelt_deny_rules(filter: &str) -> Vec<String> {
+    let mut rules = Vec::with_capacity(SEATBELT_WRITE_DENY_ACTIONS.len() + 2);
     // Read-deny wins via last-match (platform rules are emitted after read-allows).
-    caps.add_platform_rule(format!("(deny file-read* {filter})"))?;
+    rules.push(format!("(deny file-read* {filter})"));
     // Catch-all write-deny (wins for out-of-workspace paths with no competing
     // write grant, e.g. ~/.ssh) ...
-    caps.add_platform_rule(format!("(deny file-write* {filter})"))?;
+    rules.push(format!("(deny file-write* {filter})"));
     // ... plus action-specific write denies that also win inside the workspace.
     for action in SEATBELT_WRITE_DENY_ACTIONS {
-        caps.add_platform_rule(format!("(deny {action} {filter})"))?;
+        rules.push(format!("(deny {action} {filter})"));
+    }
+    rules
+}
+
+/// Emit the full read+write deny rule set for a single Seatbelt `filter`
+/// (`(literal ...)` or `(subpath ...)`) as platform rules. Thin wrapper over
+/// [`seatbelt_deny_rules`], which the sbpl emitter (seatbelt.rs) uses directly.
+#[cfg(all(feature = "enforce", target_os = "macos"))]
+fn emit_seatbelt_deny(caps: &mut CapabilitySet, filter: &str) -> anyhow::Result<()> {
+    for rule in seatbelt_deny_rules(filter) {
+        caps.add_platform_rule(rule)?;
     }
     Ok(())
 }

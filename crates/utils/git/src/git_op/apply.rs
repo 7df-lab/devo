@@ -59,7 +59,7 @@ pub fn apply_git_patch(req: &ApplyGitRequest) -> io::Result<ApplyGitResult> {
 
     // Optional: additional git config via env knob (defaults OFF)
     let mut cfg_parts: Vec<String> = Vec::new();
-    if let Ok(cfg) = std::env::var("CODEX_APPLY_GIT_CFG") {
+    if let Ok(cfg) = std::env::var("DEVO_APPLY_GIT_CFG") {
         for pair in cfg.split(',') {
             let p = pair.trim();
             if p.is_empty() || !p.contains('=') {
@@ -622,8 +622,8 @@ mod tests {
         let root = dir.path();
         // git init and minimal identity
         let _ = run(root, &["git", "init"]);
-        let _ = run(root, &["git", "config", "user.email", "codex@example.com"]);
-        let _ = run(root, &["git", "config", "user.name", "Codex"]);
+        let _ = run(root, &["git", "config", "user.email", "devo@example.com"]);
+        let _ = run(root, &["git", "config", "user.name", "Devo"]);
         dir
     }
 

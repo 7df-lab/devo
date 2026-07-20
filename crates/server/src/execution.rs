@@ -46,12 +46,36 @@ pub(crate) struct PersistedTurnItem {
     pub(crate) turn_item: devo_core::TurnItem,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SandboxBypassKey {
+    pub(crate) command: String,
+    pub(crate) cwd: PathBuf,
+    pub(crate) sandbox_permissions: String,
+}
+
+pub(crate) fn sandbox_bypass_key_from_pending(
+    pending: &PendingApproval,
+) -> Option<SandboxBypassKey> {
+    let command = pending.command.clone()?;
+    Some(SandboxBypassKey {
+        command,
+        cwd: pending.cwd.clone(),
+        sandbox_permissions: pending.sandbox_permissions.clone(),
+    })
+}
+
 pub(crate) struct PendingApproval {
     pub(crate) owner_session_id: devo_protocol::SessionId,
     pub(crate) tool_name: String,
+    pub(crate) resource: Option<devo_safety::ResourceKind>,
     pub(crate) path: Option<PathBuf>,
     pub(crate) host: Option<String>,
     pub(crate) command_prefix: Option<Vec<String>>,
+    pub(crate) command_pattern: Option<Vec<String>>,
+    pub(crate) requests_escalation: bool,
+    pub(crate) command: Option<String>,
+    pub(crate) cwd: PathBuf,
+    pub(crate) sandbox_permissions: String,
     pub(crate) tx: oneshot::Sender<ApprovalDecisionValue>,
 }
 
@@ -60,12 +84,17 @@ pub(crate) struct PendingUserInput {
     pub(crate) tx: oneshot::Sender<RequestUserInputResponse>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ApprovalGrantCache {
     pub(crate) tools: HashSet<String>,
     pub(crate) hosts: HashSet<String>,
-    pub(crate) path_prefixes: HashSet<PathBuf>,
+    pub(crate) read_path_prefixes: HashSet<PathBuf>,
+    pub(crate) write_path_prefixes: HashSet<PathBuf>,
     pub(crate) command_prefixes: HashSet<Vec<String>>,
+    pub(crate) command_patterns: HashSet<Vec<String>>,
+    /// Exact shell command + cwd grants (session-scoped; no wildcards).
+    pub(crate) exact_commands: HashSet<(String, PathBuf)>,
+    pub(crate) sandbox_bypass_commands: HashSet<SandboxBypassKey>,
 }
 
 /// Shared server-owned runtime dependencies used by live turn execution.

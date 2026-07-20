@@ -789,6 +789,8 @@ impl ChatWidget {
                 path,
                 host,
                 target,
+                command_pattern,
+                command_prefix,
             } => {
                 self.commit_active_streams(DotStatus::Completed);
                 self.pending_approval = Some(PendingApprovalRequest {
@@ -810,6 +812,8 @@ impl ChatWidget {
                             path,
                             host,
                             target,
+                            command_pattern,
+                            command_prefix,
                         },
                         self.app_event_tx.clone(),
                         self.active_accent_color(),
@@ -835,13 +839,31 @@ impl ChatWidget {
                 approval_id: _,
                 decision,
                 scope,
+                tool_name,
+                rationale,
             } => {
                 self.pending_approval = None;
-                let symbol = if decision == "approve" { "✔" } else { "✗" };
-                self.add_to_history(history_cell::new_info_event(
-                    format!("{symbol} Permission request {decision} ({scope})"),
-                    None,
-                ));
+                if scope == "auto_review" {
+                    let summary = tool_name.unwrap_or_else(|| "tool request".to_string());
+                    let cell = if decision == "approve" {
+                        history_cell::new_guardian_approved_action_request(summary)
+                    } else {
+                        history_cell::new_guardian_denied_action_request(summary)
+                    };
+                    self.add_to_history(cell);
+                    if let Some(rationale) = rationale {
+                        self.add_to_history(history_cell::new_info_event(
+                            format!("Auto-reviewer rationale: {rationale}"),
+                            None,
+                        ));
+                    }
+                } else {
+                    let symbol = if decision == "approve" { "✔" } else { "✗" };
+                    self.add_to_history(history_cell::new_info_event(
+                        format!("{symbol} Permission request {decision} ({scope})"),
+                        None,
+                    ));
+                }
                 self.bottom_pane.set_task_running(self.busy);
             }
             WorkerEvent::UsageUpdated {

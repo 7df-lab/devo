@@ -63,6 +63,7 @@ fn widget_with_model_and_reasoning_effort(
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_reasoning_effort_selection,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -101,6 +102,7 @@ fn onboarding_widget_with_model(
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -135,6 +137,7 @@ fn onboarding_widget_with_available_model_and_exit_after_onboarding(
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -969,6 +972,8 @@ fn approval_request_renders_bottom_pane_menu_and_accepts_once() {
         path: Some("src/main.rs".to_string()),
         host: None,
         target: None,
+        command_pattern: None,
+        command_prefix: None,
     });
 
     let scrollback = widget.drain_scrollback_lines(80);
@@ -977,11 +982,11 @@ fn approval_request_renders_bottom_pane_menu_and_accepts_once() {
         "Permission required"
     ));
 
-    let rendered = rendered_rows(&widget, 80, 16).join("\n");
+    let rendered = rendered_rows(&widget, 80, 24).join("\n");
     assert!(rendered.contains("Permission approval required"));
-    assert!(rendered.contains("Approve once"));
-    assert!(rendered.contains("Approve for session"));
-    assert!(rendered.contains("Deny"));
+    assert!(rendered.contains("Yes, proceed"));
+    assert!(rendered.contains("don't ask again"));
+    assert!(rendered.contains("No, continue without running it"));
 
     widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -1040,6 +1045,8 @@ fn approval_request_does_not_duplicate_already_committed_assistant_text() {
         path: Some("src/main.rs".to_string()),
         host: None,
         target: None,
+        command_pattern: None,
+        command_prefix: None,
     });
 
     let transcript = widget.transcript_overlay_lines(100);
@@ -1082,12 +1089,14 @@ fn approval_request_bottom_pane_menu_denies_with_n_shortcut() {
         path: None,
         host: None,
         target: Some("cargo test".to_string()),
+        command_pattern: None,
+        command_prefix: None,
     });
 
-    let rendered = rendered_rows(&widget, 80, 16).join("\n");
+    let rendered = rendered_rows(&widget, 80, 24).join("\n");
     assert!(rendered.contains("Permission approval required"));
     assert!(rendered.contains("run shell command"));
-    assert!(rendered.contains("Deny"));
+    assert!(rendered.contains("No, continue without running it"));
 
     widget.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
 
@@ -1649,6 +1658,7 @@ fn permissions_command_marks_initial_project_preset_current() {
         initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: PermissionPreset::FullAccess,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -1666,6 +1676,25 @@ fn permissions_command_marks_initial_project_preset_current() {
 
     let rendered = rendered_rows(&widget, 100, 18).join("\n");
     assert!(rendered.contains("● 3. Full Access"));
+}
+
+#[test]
+fn sandbox_slash_command_is_removed() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_app_event(AppEvent::RunSlashCommand {
+        command: "sandbox".to_string(),
+    });
+
+    assert!(
+        app_event_rx.try_recv().is_err(),
+        "/sandbox should no longer open a picker or emit update commands"
+    );
 }
 
 #[test]
@@ -5653,6 +5682,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -7132,6 +7162,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -7208,6 +7239,7 @@ fn model_selection_with_reasoning_effort_support_waits_for_second_step() {
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -7263,6 +7295,7 @@ fn model_selection_without_reasoning_effort_support_finishes_immediately() {
         initial_session: TuiSessionState::new(cwd, Some(base_model)),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,

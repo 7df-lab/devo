@@ -14,17 +14,17 @@ pub(super) fn permission_preset_items(current: PermissionPreset) -> Vec<Selectio
         (
             PermissionPreset::Default,
             "Default",
-            "Read, write, and run commands in workspace; network blocked.",
+            "Workspace sandbox; read, write, and run commands in workspace; network blocked.",
         ),
         (
             PermissionPreset::AutoReview,
             "Auto-review",
-            "Same as Default, but auto-reviewer handles approvals first.",
+            "Workspace sandbox; same as Default, but auto-reviewer handles approvals first.",
         ),
         (
             PermissionPreset::FullAccess,
             "Full Access",
-            "Full access — no approval needed; use with cautio.",
+            "No OS sandbox and no approval prompts; use with caution.",
         ),
     ]
     .into_iter()
@@ -43,7 +43,6 @@ pub(super) fn permission_preset_items(current: PermissionPreset) -> Vec<Selectio
 
 pub(super) fn permission_preset_label(preset: PermissionPreset) -> &'static str {
     match preset {
-        PermissionPreset::ReadOnly => "Read Only",
         PermissionPreset::Default => "Default",
         PermissionPreset::AutoReview => "Auto-review",
         PermissionPreset::FullAccess => "Full Access",

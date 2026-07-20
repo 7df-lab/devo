@@ -39,6 +39,7 @@ use devo_core::history::summarizer::DefaultHistorySummarizer;
 use devo_core::message_to_response_items;
 use devo_core::tools::AgentToolCoordinator;
 use devo_core::tools::PermissionChecker;
+use devo_core::tools::PermissionGrant;
 use devo_core::tools::ToolCallError;
 use devo_core::tools::ToolPermissionRequest;
 use devo_protocol::{
@@ -87,6 +88,8 @@ use crate::SessionRollbackMode;
 use crate::SessionRollbackParams;
 use crate::SessionRollbackResult;
 use crate::SessionRuntimeStatus;
+use crate::SessionSandboxProfileUpdateParams;
+use crate::SessionSandboxProfileUpdateResult;
 use crate::SessionStartParams;
 use crate::SessionStartResult;
 use crate::SessionStatusChangedPayload;
@@ -223,6 +226,12 @@ pub struct ServerRuntime {
     session_lru: Mutex<session_cache::ParentSessionLru>,
     /// Per-session gate that serializes lazy parent session hydration.
     parent_session_load_gate: Arc<session_cache::SessionLoadGate>,
+    /// User exec-policy rules loaded from `$DEVO_HOME/rules/*.rules`.
+    user_exec_policy: std::sync::Mutex<Option<devo_execpolicy::Policy>>,
+    /// Localhost HTTP CONNECT proxy for restricted sandbox profiles.
+    sandbox_network_proxy: std::sync::Arc<
+        std::sync::Mutex<Option<devo_sandbox_network_proxy::SharedSandboxNetworkProxyHandle>>,
+    >,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,6 +305,34 @@ impl ServerRuntime {
     pub fn new(server_home: PathBuf, deps: ServerRuntimeDependencies) -> Arc<Self> {
         let rollout_store = RolloutStore::new(server_home.clone());
         let goal_durable_store = GoalDurableStore::new(server_home.clone());
+        let sandbox_network_proxy = std::sync::Arc::new(std::sync::Mutex::new(None));
+        // Proxy startup is async; ports are published via the thread-safe
+        // `set_sandbox_proxy_ports` store (not process-wide `env::set_var`).
+        if let Ok(runtime_handle) = tokio::runtime::Handle::try_current() {
+            let proxy_slot = sandbox_network_proxy.clone();
+            runtime_handle.spawn(async move {
+                match devo_sandbox_network_proxy::start_sandbox_network_proxy().await {
+                    Ok(handle) => {
+                        tracing::info!(
+                            http_port = handle.http_port(),
+                            "started sandbox network proxy"
+                        );
+                        *proxy_slot.lock().expect("proxy slot mutex") =
+                            Some(std::sync::Arc::new(handle));
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "failed to start sandbox network proxy; restricted profiles keep network isolation without managed proxy egress"
+                        );
+                    }
+                }
+            });
+        } else {
+            tracing::warn!(
+                "no tokio runtime available at ServerRuntime::new; sandbox network proxy not started"
+            );
+        }
         Arc::new_cyclic(|self_weak| Self {
             metadata: InitializeResult {
                 server_name: "devo-server".into(),
@@ -332,7 +369,20 @@ impl ServerRuntime {
                 session_cache::PARENT_SESSION_LRU_CAPACITY,
             )),
             parent_session_load_gate: Arc::new(session_cache::SessionLoadGate::default()),
+            user_exec_policy: std::sync::Mutex::new(
+                crate::exec_policy_store::load_user_exec_policy(),
+            ),
+            sandbox_network_proxy,
         })
+    }
+
+    pub fn sandbox_network_proxy(
+        &self,
+    ) -> Option<devo_sandbox_network_proxy::SharedSandboxNetworkProxyHandle> {
+        self.sandbox_network_proxy
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 }
 
@@ -351,7 +401,6 @@ fn safety_profile_from_protocol(
     additional_directories: Vec<std::path::PathBuf>,
 ) -> devo_safety::RuntimePermissionProfile {
     let preset = match preset {
-        devo_protocol::PermissionPreset::ReadOnly => devo_safety::PermissionPreset::ReadOnly,
         devo_protocol::PermissionPreset::Default => devo_safety::PermissionPreset::Default,
         devo_protocol::PermissionPreset::AutoReview => devo_safety::PermissionPreset::AutoReview,
         devo_protocol::PermissionPreset::FullAccess => devo_safety::PermissionPreset::FullAccess,

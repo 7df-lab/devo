@@ -20,7 +20,7 @@ use rmcp::model::ReadResourceRequestParams;
 use rmcp::model::ResourceContents;
 use serde_json::json;
 
-const RESOURCE_URI: &str = "memo://codex/example-note";
+const RESOURCE_URI: &str = "memo://devo/example-note";
 
 fn stdio_server_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_test_stdio_server"))
@@ -43,9 +43,9 @@ fn init_params() -> InitializeRequestParams {
             tasks: None,
         },
         client_info: Implementation {
-            name: "codex-test".into(),
+            name: "devo-test".into(),
             version: "0.0.0-test".into(),
-            title: Some("Codex rmcp resource test".into()),
+            title: Some("Devo rmcp resource test".into()),
             description: None,
             icons: None,
             website_url: None,
@@ -115,11 +115,11 @@ async fn rmcp_client_can_list_and_read_resources() -> anyhow::Result<()> {
             next_cursor: None,
             resource_templates: vec![
                 rmcp::model::RawResourceTemplate {
-                    uri_template: "memo://codex/{slug}".to_string(),
-                    name: "codex-memo".to_string(),
-                    title: Some("Codex Memo".to_string()),
+                    uri_template: "memo://devo/{slug}".to_string(),
+                    name: "devo-memo".to_string(),
+                    title: Some("Devo Memo".to_string()),
                     description: Some(
-                        "Template for memo://codex/{slug} resources used in tests.".to_string(),
+                        "Template for memo://devo/{slug} resources used in tests.".to_string(),
                     ),
                     mime_type: Some("text/plain".to_string()),
                     icons: None,

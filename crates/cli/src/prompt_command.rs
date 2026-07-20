@@ -65,12 +65,22 @@ pub(crate) async fn run_prompt(
     let selected_model = turn_config.model.slug.clone();
 
     let mut session_state = SessionState::new(
-        SessionConfig {
-            agents_md: AgentsMdConfig {
-                project_root_markers: app_config.project_root_markers.clone(),
-                ..AgentsMdConfig::default()
-            },
-            ..SessionConfig::default()
+        {
+            let mut session_config = SessionConfig {
+                agents_md: AgentsMdConfig {
+                    project_root_markers: app_config.project_root_markers.clone(),
+                    ..AgentsMdConfig::default()
+                },
+                ..SessionConfig::default()
+            };
+            if let Some(sandbox_profile) = app_config
+                .projects
+                .get(&devo_core::project_config_key(&cwd))
+                .and_then(|project| project.sandbox_profile.clone())
+            {
+                session_config.sandbox_profile = Some(sandbox_profile);
+            }
+            session_config
         },
         cwd.clone(),
     );
@@ -112,6 +122,7 @@ pub(crate) async fn run_prompt(
             }),
             network_proxy: None,
             network_no_proxy: None,
+            sandbox_profile: session_state.config.sandbox_profile.clone(),
         },
     );
     let provider = Arc::new(RoutedPromptProvider::new(

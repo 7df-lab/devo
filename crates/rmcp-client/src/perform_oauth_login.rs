@@ -612,7 +612,7 @@ async fn start_authorization(
     else {
         let mut oauth_state = OAuthState::new(server_url, Some(http_client)).await?;
         oauth_state
-            .start_authorization(scopes, redirect_uri, Some("Codex"))
+            .start_authorization(scopes, redirect_uri, Some("Devo"))
             .await?;
         return Ok(oauth_state);
     };

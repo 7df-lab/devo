@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn exposure_uses_codex_threshold() {
+    fn exposure_uses_direct_mcp_tool_threshold() {
         let tools = (0..DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD)
             .map(|idx| {
                 let mut tool = tool_with_meta(None);

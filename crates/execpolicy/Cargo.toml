@@ -1,0 +1,33 @@
+[package]
+description = "Devo exec policy: prefix-based Starlark rules for command decisions."
+edition.workspace = true
+license.workspace = true
+name = "devo-execpolicy"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "devo_execpolicy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "devo-execpolicy"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+devo-util-paths = { workspace = true }
+multimap = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+shlex = { workspace = true }
+starlark = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

@@ -95,6 +95,10 @@ pub struct AppConfig {
 pub struct ProjectConfig {
     /// Permission preset to use when starting new sessions for this project.
     pub permission_preset: Option<PermissionPreset>,
+    /// Sandbox profile to use when starting new sessions for this project.
+    /// Built-in values are `workspace`, `devbox`, `read-only`, `strict`, and
+    /// `off`; any other value names a custom profile from `sandbox.toml`.
+    pub sandbox_profile: Option<String>,
 }
 
 /// Controls how the CLI checks for new releases at startup.

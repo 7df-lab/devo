@@ -14,6 +14,7 @@ use crate::history_cell;
 use crate::history_cell::PlainHistoryCell;
 use crate::slash_command::SlashCommand;
 use devo_protocol::MAX_THREAD_GOAL_OBJECTIVE_CHARS;
+use devo_protocol::PermissionPreset;
 use devo_protocol::ThreadGoalStatus;
 
 use super::ChatWidget;
@@ -87,6 +88,18 @@ impl ChatWidget {
                         "  reasoning_effort_selection:    {reasoning_effort_selection}"
                     )),
                     Line::from(format!("  cwd:         {cwd}")),
+                    Line::from(format!(
+                        "  permissions: {}",
+                        match self.permission_preset {
+                            PermissionPreset::Default => "default",
+                            PermissionPreset::AutoReview => "auto-review",
+                            PermissionPreset::FullAccess => "full-access",
+                        }
+                    )),
+                    Line::from(format!(
+                        "  sandbox:     {}",
+                        self.sandbox_profile.as_deref().unwrap_or("workspace")
+                    )),
                     Line::from(format!("  turns:       {turns}")),
                     Line::from(format!(
                         "  tokens:      \u{2191}{tokens_in} \u{2193}{tokens_out}",
