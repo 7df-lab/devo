@@ -21,7 +21,7 @@ A normal chat turn is request-response: the user submits input, the program work
 
 The goal feature must remain user-owned. The model may work toward the objective and report completion or blockers, but it must not silently rewrite the objective, expand the budget, or hide why the loop is continuing.
 
-The first implementation milestone follows the Codex-style runtime loop: persistent goal state, hidden continuation turns, and same-model completion self-reporting. It does not add a separate evaluator or adversarial judge model.
+The first implementation milestone follows the Devo runtime loop: persistent goal state, hidden continuation turns, and same-model completion self-reporting. It does not add a separate evaluator or adversarial judge model.
 
 ## Source Requirements
 
@@ -436,5 +436,5 @@ After restart, the server must not blindly continue just because the last durabl
 | 1 | 2026-05-23 | Assistant | Initial | Initial Ralph Loop goal architecture with JSONL source of truth, optional SQLite projection, bounded continuation loop, budget accounting, model-tool limits, and `/goal` integration. |
 | 1 | 2026-05-25 | Human | Refinement | Set first-milestone `/goal <objective>` creation to default to no explicit budget. |
 | 1 | 2026-05-25 | Assistant | Refinement | Clarified that budget fields are optional, usage accounting still occurs without a configured budget, and hidden context must not fabricate a default budget. |
-| 1 | 2026-06-10 | Assistant | Refinement | Aligned v1 with Codex-style goal continuation: no evaluator LLM, no public blocked wire state, JSONL-only durable goal source, model tool accepts only `complete`, hidden context preserves tool-call adjacency, and unrecoverable provider/protocol errors suppress continuation. |
+| 1 | 2026-06-10 | Assistant | Refinement | Aligned v1 with Devo goal continuation: no evaluator LLM, no public blocked wire state, JSONL-only durable goal source, model tool accepts only `complete`, hidden context preserves tool-call adjacency, and unrecoverable provider/protocol errors suppress continuation. |
 | 1 | 2026-06-23 | Assistant | Refinement | Clarified conservative token accounting: goal usage remains non-cached input plus output, and reasoning breakdowns are never added separately. |

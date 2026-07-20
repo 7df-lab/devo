@@ -128,7 +128,7 @@ mod tests {
     fn builtin_models_load_from_bundled_json() {
         let models = load_builtin_models().expect("load builtin models");
         assert!(!models.is_empty());
-        assert_eq!(models[0].slug, "qwen3-coder-next");
+        assert_eq!(models[0].slug, "kimi-k3");
     }
 
     #[test]
@@ -158,21 +158,21 @@ mod tests {
         let builtin = load_builtin_models()
             .expect("load builtins")
             .into_iter()
-            .find(|model| model.slug == "qwen3-coder-next")
-            .expect("qwen model");
+            .find(|model| model.slug == "kimi-k3")
+            .expect("kimi model");
         let catalog = PresetModelCatalog::load_from_config(&BTreeMap::from([(
-            "qwen3-coder-next".to_string(),
+            "kimi-k3".to_string(),
             ModelOverrideConfig {
-                display_name: Some("Configured Qwen".to_string()),
+                display_name: Some("Configured Kimi".to_string()),
                 ..ModelOverrideConfig::default()
             },
         )]))
         .expect("load catalog");
 
         assert_eq!(
-            catalog.get("qwen3-coder-next").expect("configured qwen"),
+            catalog.get("kimi-k3").expect("configured kimi"),
             &Model {
-                display_name: "Configured Qwen".to_string(),
+                display_name: "Configured Kimi".to_string(),
                 ..builtin
             }
         );

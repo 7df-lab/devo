@@ -135,6 +135,7 @@ impl ToolHandler for BashHandler {
                 timeout_ms,
                 yield_time_ms,
                 max_output_tokens,
+                sandbox_profile: ctx.sandbox_profile.clone(),
             },
             None,
             ctx.cancel_token.clone(),

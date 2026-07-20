@@ -68,6 +68,7 @@ impl CommandExecManager {
         connection_id: u64,
         params: CommandExecParams,
         cwd: PathBuf,
+        sandbox_profile: Option<String>,
     ) -> CommandExecRuntimeResult<CommandExecResult> {
         if params.process_id.trim().is_empty() {
             return Err((
@@ -107,8 +108,14 @@ impl CommandExecManager {
             ));
         }
 
-        let spawn_result =
-            spawn_command_exec_process(store_process_id, params.program, cwd, params.size).await;
+        let spawn_result = spawn_command_exec_process(
+            store_process_id,
+            params.program,
+            cwd,
+            params.size,
+            sandbox_profile,
+        )
+        .await;
         let (process, output_rx) = match spawn_result {
             Ok(spawned) => spawned,
             Err(error) => {
@@ -343,6 +350,9 @@ impl ServerRuntime {
             Ok(cwd) => cwd,
             Err((code, message)) => return self.error_response(request_id, code, message),
         };
+        let sandbox_profile = self
+            .command_exec_sandbox_profile(params.session_id, &cwd)
+            .await;
         let command_exec_event_types = HashSet::from([
             "command/exec/outputDelta".to_string(),
             "command/exec/exited".to_string(),
@@ -362,12 +372,33 @@ impl ServerRuntime {
         }
         match self
             .command_exec_manager
-            .start(Arc::clone(self), connection_id, params, cwd)
+            .start(
+                Arc::clone(self),
+                connection_id,
+                params,
+                cwd,
+                sandbox_profile,
+            )
             .await
         {
             Ok(result) => success_response(request_id, result),
             Err((code, message)) => self.error_response(request_id, code, message),
         }
+    }
+
+    /// The session's sandbox profile for a command/exec spawn, or `None` for
+    /// sessionless execs and sessions without a profile. Resolved through the
+    /// session actor so PTY spawns enforce the same profile as tool-run shells.
+    async fn command_exec_sandbox_profile(
+        &self,
+        session_id: Option<SessionId>,
+        cwd: &std::path::Path,
+    ) -> Option<String> {
+        let session = self.sessions.lock().await.get(&session_id?).cloned()?;
+        session
+            .shell_exec_context(cwd.to_path_buf())
+            .await
+            .and_then(|context| context.sandbox_profile)
     }
 
     pub(crate) async fn handle_command_exec_write(
@@ -485,19 +516,21 @@ async fn spawn_command_exec_process(
     program: CommandExecProgram,
     cwd: PathBuf,
     size: Option<CommandExecTerminalSize>,
+    sandbox_profile: Option<String>,
 ) -> Result<(UnifiedExecProcess, broadcast::Receiver<Vec<u8>>), String> {
     match program {
         CommandExecProgram::OneShot { command } => {
             if command.trim().is_empty() {
                 return Err("command/exec one-shot command must not be empty".to_string());
             }
-            UnifiedExecProcess::spawn(
+            UnifiedExecProcess::spawn_with_sandbox(
                 store_process_id,
                 &command,
                 &cwd,
                 /*shell*/ None,
                 /*login*/ true,
                 /*tty*/ true,
+                sandbox_profile,
             )
             .await
         }
@@ -508,6 +541,7 @@ async fn spawn_command_exec_process(
                 /*shell*/ None,
                 /*login*/ true,
                 size.map(protocol_terminal_size),
+                sandbox_profile,
             )
             .await
         }

@@ -19,6 +19,7 @@ devo-server = { workspace = true }
 devo-tasks = { workspace = true }
 devo-tui = { workspace = true }
 devo-util-paths = { workspace = true }
+devo-windows-sandbox = { workspace = true }
 devo-arg0 = { workspace = true }
 
 anyhow = { workspace = true }

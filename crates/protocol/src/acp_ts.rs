@@ -253,6 +253,8 @@ pub fn generate_protocol_typescript() -> String {
     push_decl::<ApprovalsReviewer>(&cfg, &mut output);
     push_decl::<SessionPermissionsUpdateParams>(&cfg, &mut output);
     push_decl::<SessionPermissionsUpdateResult>(&cfg, &mut output);
+    push_decl::<SessionSandboxProfileUpdateParams>(&cfg, &mut output);
+    push_decl::<SessionSandboxProfileUpdateResult>(&cfg, &mut output);
 
     push_decl::<ThreadGoalStatus>(&cfg, &mut output);
     push_decl::<ThreadGoal>(&cfg, &mut output);
@@ -674,6 +676,8 @@ fn register_devo_protocol_schemas(
     schema::<SessionMetadataUpdateResult>(schemas);
     schema::<SessionPermissionsUpdateParams>(schemas);
     schema::<SessionPermissionsUpdateResult>(schemas);
+    schema::<SessionSandboxProfileUpdateParams>(schemas);
+    schema::<SessionSandboxProfileUpdateResult>(schemas);
     schema::<SessionTitleUpdateParams>(schemas);
     schema::<SessionTitleUpdateResult>(schemas);
     schema::<SessionResumeParams>(schemas);
@@ -789,6 +793,10 @@ fn register_devo_protocol_schemas(
     devo_method::<SessionPermissionsUpdateParams, SessionPermissionsUpdateResult>(
         methods,
         ClientMethod::SessionPermissionsUpdate,
+    );
+    devo_method::<SessionSandboxProfileUpdateParams, SessionSandboxProfileUpdateResult>(
+        methods,
+        ClientMethod::SessionSandboxProfileUpdate,
     );
     devo_method::<SessionTitleUpdateParams, SessionTitleUpdateResult>(
         methods,

@@ -78,8 +78,9 @@ pub(crate) enum StatusLineItem {
     /// Remaining usage on the weekly rate limit.
     WeeklyLimit,
 
-    /// Codex application version.
-    CodexVersion,
+    /// Devo application version.
+    #[strum(serialize = "codex-version")]
+    DevoVersion,
 
     /// Total context window size in tokens.
     ContextWindowSize,
@@ -118,7 +119,7 @@ impl StatusLineItem {
             StatusLineItem::WeeklyLimit => {
                 "Remaining usage on weekly usage limit (omitted when unavailable)"
             }
-            StatusLineItem::CodexVersion => "Codex application version",
+            StatusLineItem::DevoVersion => "Devo application version",
             StatusLineItem::ContextWindowSize => {
                 "Total context window size in tokens (omitted when unknown)"
             }
@@ -142,7 +143,7 @@ const SELECTABLE_STATUS_LINE_ITEMS: &[StatusLineItem] = &[
     StatusLineItem::ContextUsage,
     StatusLineItem::FiveHourLimit,
     StatusLineItem::WeeklyLimit,
-    StatusLineItem::CodexVersion,
+    StatusLineItem::DevoVersion,
     StatusLineItem::ContextWindowSize,
     StatusLineItem::UsedTokens,
     StatusLineItem::TotalInputTokens,
@@ -391,7 +392,7 @@ mod tests {
             ]),
             StatusLinePreviewData::from_iter([
                 (StatusLineItem::ModelName, "gpt-5-codex".to_string()),
-                (StatusLineItem::CurrentDir, "~/codex-rs".to_string()),
+                (StatusLineItem::CurrentDir, "~/devo".to_string()),
                 (
                     StatusLineItem::GitBranch,
                     "jif/statusline-preview".to_string(),

@@ -28,6 +28,8 @@ use anyhow::Result;
 
 /// Alias name for the server sub‑binary.
 const SERVER_ALIAS: &str = "devo-server";
+/// Alias argv0 name for the Linux sandbox helper binary.
+const LINUX_SANDBOX_ALIAS: &str = "devo-linux-sandbox";
 const ALIAS_SENTINEL_PREFIX: &str = "--devo-alias=";
 
 /// Directory (under DEVO_HOME/tmp/arg0) where alias entries are created.
@@ -110,6 +112,10 @@ where
                 // Never returns normally; the server stays up until signaled.
                 std::process::exit(0);
             }
+            LINUX_SANDBOX_ALIAS => {
+                // Called as `devo-linux-sandbox` — apply sandbox then exec.
+                devo_linux_sandbox::run_main();
+            }
             other => {
                 eprintln!("unknown argv[0] alias: {other}");
                 std::process::exit(1);
@@ -161,14 +167,22 @@ where
         .and_then(|s| s.to_str())
         .unwrap_or("");
 
-    // Direct alias hit: `devo-server` symlink or bare name.
+    // Direct alias hit: `devo-server` / `devo-linux-sandbox` symlink or bare name.
     if file_name == SERVER_ALIAS {
         return Some(SERVER_ALIAS);
     }
+    if file_name == LINUX_SANDBOX_ALIAS {
+        return Some(LINUX_SANDBOX_ALIAS);
+    }
 
     // Windows batch scripts pass the intended alias via a sentinel arg.
-    if args.next().as_deref().is_some_and(is_server_alias_sentinel) {
-        return Some(SERVER_ALIAS);
+    if let Some(sentinel) = args.next() {
+        if is_server_alias_sentinel(&sentinel) {
+            return Some(SERVER_ALIAS);
+        }
+        if is_linux_sandbox_alias_sentinel(&sentinel) {
+            return Some(LINUX_SANDBOX_ALIAS);
+        }
     }
 
     None
@@ -178,6 +192,12 @@ fn is_server_alias_sentinel(arg: &std::ffi::OsStr) -> bool {
     arg.to_str()
         .and_then(|s| s.strip_prefix(ALIAS_SENTINEL_PREFIX))
         .is_some_and(|rest| rest == SERVER_ALIAS)
+}
+
+fn is_linux_sandbox_alias_sentinel(arg: &std::ffi::OsStr) -> bool {
+    arg.to_str()
+        .and_then(|s| s.strip_prefix(ALIAS_SENTINEL_PREFIX))
+        .is_some_and(|rest| rest == LINUX_SANDBOX_ALIAS)
 }
 
 fn server_dispatch_args() -> Vec<OsString> {
@@ -346,21 +366,25 @@ fn prepend_path_for_aliases() -> std::io::Result<Option<PathGuard>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
-        let link = path.join(SERVER_ALIAS);
-        symlink(&exe, &link)?;
+        for alias in [SERVER_ALIAS, LINUX_SANDBOX_ALIAS] {
+            let link = path.join(alias);
+            symlink(&exe, &link)?;
+        }
     }
     #[cfg(windows)]
     {
         // Each alias gets a .bat script that passes the alias name via a
         // sentinel argument.
-        let batch = path.join(format!("{SERVER_ALIAS}.bat"));
-        std::fs::write(
-            &batch,
-            format!(
-                "@echo off\r\n\"{}\" --devo-alias={SERVER_ALIAS} %*\r\n",
-                exe.display()
-            ),
-        )?;
+        for alias in [SERVER_ALIAS, LINUX_SANDBOX_ALIAS] {
+            let batch = path.join(format!("{alias}.bat"));
+            std::fs::write(
+                &batch,
+                format!(
+                    "@echo off\r\n\"{}\" --devo-alias={alias} %*\r\n",
+                    exe.display()
+                ),
+            )?;
+        }
     }
 
     // ── Prepend to PATH ──
@@ -514,6 +538,30 @@ mod tests {
         assert_eq!(
             super::argv0_alias_from_args(args),
             Some(super::SERVER_ALIAS)
+        );
+    }
+
+    #[test]
+    fn argv0_alias_detects_linux_sandbox_batch_sentinel() {
+        let args = vec![
+            OsString::from("devo.exe"),
+            OsString::from("--devo-alias=devo-linux-sandbox"),
+            OsString::from("--permission-profile"),
+            OsString::from("{}"),
+        ];
+
+        assert_eq!(
+            super::argv0_alias_from_args(args),
+            Some(super::LINUX_SANDBOX_ALIAS)
+        );
+    }
+
+    #[test]
+    fn argv0_alias_detects_linux_sandbox_symlink_name() {
+        let args = vec![OsString::from("/tmp/devo-arg0/devo-linux-sandbox")];
+        assert_eq!(
+            super::argv0_alias_from_args(args),
+            Some(super::LINUX_SANDBOX_ALIAS)
         );
     }
 

@@ -20,6 +20,7 @@ use devo_protocol::SessionId;
 const ACP_MODE_CONFIG_ID: &str = "mode";
 pub(crate) const ACP_MODEL_CONFIG_ID: &str = "model";
 pub(crate) const ACP_REASONING_EFFORT_CONFIG_ID: &str = "thought_level";
+pub(crate) const ACP_SANDBOX_PROFILE_CONFIG_ID: &str = "sandbox_profile";
 
 impl ServerRuntime {
     pub(super) async fn acp_session_config_options(
@@ -240,6 +241,45 @@ impl ServerRuntime {
                     ),
                 )
             }
+            ACP_SANDBOX_PROFILE_CONFIG_ID => {
+                match session_arc
+                    .apply_sandbox_profile(params.value.clone())
+                    .await
+                {
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        return Err((
+                            AcpErrorCode::InvalidParams,
+                            format!(
+                                "invalid value '{}' for session config option '{}': {error}",
+                                params.value, params.config_id
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err((
+                            AcpErrorCode::ServerError,
+                            "failed to apply sandbox profile".to_string(),
+                        ));
+                    }
+                }
+
+                let updated_snapshot =
+                    session_arc.hook_context_snapshot().await.ok_or_else(|| {
+                        (
+                            AcpErrorCode::ServerError,
+                            "session actor unavailable".to_string(),
+                        )
+                    })?;
+                (
+                    None,
+                    acp_config_options_for_session(
+                        &updated_snapshot.runtime_context,
+                        &updated_snapshot.summary,
+                        &updated_snapshot.config,
+                    ),
+                )
+            }
             _ => {
                 return Err((
                     AcpErrorCode::InvalidParams,
@@ -316,24 +356,19 @@ fn acp_mode_config_option_for_session(config: &SessionConfig) -> AcpSessionConfi
         options: AcpSessionConfigSelectOptions::Ungrouped(
             [
                 (
-                    PermissionPreset::ReadOnly,
-                    "Read Only",
-                    "Read workspace files without approval. Ask before edits, commands, or network access.",
-                ),
-                (
                     PermissionPreset::Default,
                     "Default",
-                    "Read, edit workspace files, and run commands. Ask before network access or outside-workspace edits.",
+                    "Workspace sandbox; read/edit/run in workspace. Ask before network or outside-workspace edits.",
                 ),
                 (
                     PermissionPreset::AutoReview,
                     "Auto-review",
-                    "Use default workspace permissions and route eligible approvals through auto-review.",
+                    "Workspace sandbox with default permissions; eligible approvals go through auto-review first.",
                 ),
                 (
                     PermissionPreset::FullAccess,
                     "Full Access",
-                    "Allow all tool requests without approval.",
+                    "No OS sandbox and no approval prompts; use with caution.",
                 ),
             ]
             .into_iter()
@@ -537,7 +572,6 @@ fn non_empty_str(value: &str) -> Option<&str> {
 
 fn permission_preset_value(preset: PermissionPreset) -> &'static str {
     match preset {
-        PermissionPreset::ReadOnly => "read-only",
         PermissionPreset::Default => "default",
         PermissionPreset::AutoReview => "auto-review",
         PermissionPreset::FullAccess => "full-access",
@@ -546,8 +580,15 @@ fn permission_preset_value(preset: PermissionPreset) -> &'static str {
 
 fn permission_preset_from_value(value: &str) -> Option<PermissionPreset> {
     match value {
-        "read-only" => Some(PermissionPreset::ReadOnly),
         "default" => Some(PermissionPreset::Default),
+        "read-only" => {
+            tracing::warn!(
+                "permission_preset \"read-only\" is deprecated and maps to Default \
+                 (shell allowed); set sandbox_profile = \"read-only\" for a \
+                 read-only OS sandbox instead"
+            );
+            Some(PermissionPreset::Default)
+        }
         "auto-review" => Some(PermissionPreset::AutoReview),
         "full-access" => Some(PermissionPreset::FullAccess),
         _ => None,
@@ -556,7 +597,6 @@ fn permission_preset_from_value(value: &str) -> Option<PermissionPreset> {
 
 fn permission_preset_from_safety(preset: devo_safety::PermissionPreset) -> PermissionPreset {
     match preset {
-        devo_safety::PermissionPreset::ReadOnly => PermissionPreset::ReadOnly,
         devo_safety::PermissionPreset::Default => PermissionPreset::Default,
         devo_safety::PermissionPreset::AutoReview => PermissionPreset::AutoReview,
         devo_safety::PermissionPreset::FullAccess => PermissionPreset::FullAccess,

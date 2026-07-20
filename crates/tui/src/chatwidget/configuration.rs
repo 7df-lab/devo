@@ -25,6 +25,7 @@ use super::permission_preset_items;
 use super::permission_preset_label;
 use super::reasoning_effort;
 use super::reasoning_effort::ReasoningEffortListEntry;
+use super::sandbox_profile_label;
 
 impl ChatWidget {
     pub(crate) fn set_model(&mut self, model: Model) {
@@ -432,12 +433,30 @@ impl ChatWidget {
 
     pub(crate) fn note_permissions_updated(&mut self, preset: devo_protocol::PermissionPreset) {
         self.permission_preset = preset;
+        self.sandbox_profile = Some(
+            match preset {
+                devo_protocol::PermissionPreset::FullAccess => "off",
+                devo_protocol::PermissionPreset::Default
+                | devo_protocol::PermissionPreset::AutoReview => "workspace",
+            }
+            .to_string(),
+        );
         let label = permission_preset_label(preset);
         self.add_to_history(history_cell::new_info_event(
             format!("Permissions updated to {label}"),
             None,
         ));
         self.set_status_message(format!("Permissions updated to {label}"));
+    }
+
+    pub(crate) fn note_sandbox_profile_updated(&mut self, profile: String) {
+        let label = sandbox_profile_label(&profile).to_string();
+        self.sandbox_profile = Some(profile);
+        self.add_to_history(history_cell::new_info_event(
+            format!("Sandbox profile updated to {label}"),
+            None,
+        ));
+        self.set_status_message(format!("Sandbox profile updated to {label}"));
     }
 
     pub(super) fn apply_theme_selection(&mut self, name: String) {

@@ -5,6 +5,7 @@
 //! higher-level crates can work with a single `ProcessHandle` abstraction.
 
 mod pty;
+pub mod sandbox;
 
 pub use pty::process_group;
 pub use pty::*;

@@ -480,7 +480,9 @@ fn render_change(
     let style_context = current_diff_render_style_context();
     match change {
         FileChange::Add { content } => {
-            // Pre-highlight the entire file content as a whole.
+            // A newly written file is shown as plain code lines (line numbers +
+            // syntax highlighting), not as an all-insertion diff — the header
+            // already marks the file as added.
             let syntax_lines = lang.and_then(|l| highlight_code_to_styled_spans(content, l));
             let line_number_width = line_number_width(content.lines().count());
             for (i, raw) in content.lines().enumerate() {
@@ -488,7 +490,7 @@ fn render_change(
                 if let Some(spans) = syn {
                     out.extend(push_wrapped_diff_line_inner_with_theme_and_color_level(
                         i + 1,
-                        DiffLineType::Insert,
+                        DiffLineType::Context,
                         raw,
                         width,
                         line_number_width,
@@ -500,7 +502,7 @@ fn render_change(
                 } else {
                     out.extend(push_wrapped_diff_line_inner_with_theme_and_color_level(
                         i + 1,
-                        DiffLineType::Insert,
+                        DiffLineType::Context,
                         raw,
                         width,
                         line_number_width,

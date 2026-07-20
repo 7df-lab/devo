@@ -16,10 +16,13 @@ code-search = ["dep:devo-code-search"]
 [dependencies]
 devo-config = { workspace = true }
 devo-code-search = { workspace = true, optional = true }
+devo-execpolicy = { workspace = true }
 devo-network-proxy = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }
 devo-safety = { workspace = true }
+devo-sandbox = { workspace = true }
+devo-windows-sandbox = { workspace = true }
 devo-skills = { workspace = true }
 devo-tools = { workspace = true }
 devo-util-process = { workspace = true }

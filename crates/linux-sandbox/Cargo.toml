@@ -1,0 +1,25 @@
+[package]
+description = "Linux sandbox helper: bwrap filesystem isolation then seccomp/Landlock apply-then-exec"
+edition.workspace = true
+license.workspace = true
+name = "devo-linux-sandbox"
+version.workspace = true
+
+[[bin]]
+name = "devo-linux-sandbox"
+path = "src/main.rs"
+
+[lib]
+name = "devo_linux_sandbox"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+devo-sandbox = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

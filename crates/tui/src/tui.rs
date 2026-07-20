@@ -201,9 +201,9 @@ fn restore_common(should_disable_raw_mode: bool) -> Result<()> {
     //          v
     //   shell resumes and prints its own prompt
     //
-    // This matches Codex more closely than the older "restore everything again on
-    // drop" approach, which was sending extra terminal control sequences and could
-    // shift the shell prompt in Terminal.app.
+    // This sequence avoids the older "restore everything again on drop" approach,
+    // which was sending extra terminal control sequences and could shift the shell
+    // prompt in Terminal.app.
     // Pop may fail on platforms that didn't support the push; ignore errors.
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     execute!(stdout(), DisableBracketedPaste)?;
@@ -517,7 +517,7 @@ impl Tui {
         self.pending_history_lines.clear();
     }
 
-    /// Tear down the inline TUI using a terminal-safe sequence modeled after Codex.
+    /// Tear down the inline TUI using a terminal-safe exit sequence.
     ///
     /// We deliberately do less work here than the older precise-exit implementation:
     ///
@@ -616,7 +616,7 @@ impl Tui {
     /// Grow the live inline viewport by appending rows at the bottom of the terminal instead of
     /// scrolling only the region above the viewport.
     ///
-    /// This matches the append-only behavior used by Codex's inline TUI: when the live area needs
+    /// This matches append-only inline TUI behavior: when the live area needs
     /// more height, we advance the terminal buffer downward so users who are currently viewing
     /// scrollback do not see previously rendered rows get rewritten in place.
     fn append_expanded_viewport(
@@ -759,7 +759,7 @@ mod tests {
     use crate::test_backend::VT100Backend;
 
     #[test]
-    fn keyboard_enhancement_flags_match_codex_rs() {
+    fn keyboard_enhancement_flags_match_expected_set() {
         let flags = keyboard_enhancement_flags();
 
         assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));

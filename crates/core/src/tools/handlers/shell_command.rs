@@ -37,7 +37,7 @@ impl ShellCommandHandler {
                         (
                             "command".to_string(),
                             JsonSchema::string(Some(
-                                "The command to execute. Start with a brief `# ...` purpose comment on the line above the command.",
+                                "The command to execute.",
                             )),
                         ),
                         (
@@ -127,6 +127,7 @@ impl ToolHandler for ShellCommandHandler {
                 timeout_ms,
                 yield_time_ms: default_yield_time_ms(),
                 max_output_tokens: default_max_output_tokens(),
+                sandbox_profile: ctx.sandbox_profile.clone(),
             },
             None,
             ctx.cancel_token.clone(),

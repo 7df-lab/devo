@@ -33,6 +33,10 @@ pub struct SessionConfig {
     pub permission_profile: RuntimePermissionProfile,
     pub agents_md: AgentsMdConfig,
     pub available_skills_instructions: Option<String>,
+    /// Active sandbox profile name for child processes spawned by tools.
+    /// `None` means no sandboxing; otherwise the value is a profile name such
+    /// as `"workspace"`, `"strict"`, or `"off"`.
+    pub sandbox_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +65,7 @@ impl Default for SessionConfig {
             permission_profile,
             agents_md: AgentsMdConfig::default(),
             available_skills_instructions: None,
+            sandbox_profile: Some("workspace".to_string()),
         }
     }
 }

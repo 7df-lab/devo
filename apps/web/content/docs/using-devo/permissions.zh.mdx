@@ -44,11 +44,17 @@ Prompt 包含 action summary，可能还包括：
 
 | Option | Shortcut | Effect |
 | --- | --- | --- |
-| Approve once | `y` | 只允许当前 pending tool execution。 |
-| Approve for session | `s` | 当请求支持 session scope 时，允许本 session 后续匹配请求。 |
-| Deny | `n` | 拒绝当前 tool execution。 |
+| Yes, proceed | `y` | 只允许当前 pending tool execution。 |
+| Don't ask again for this command in this session | `s` | 当请求支持 session scope 时，允许本 session 后续匹配请求。 |
+| Don't ask again for commands that start with a prefix | `p` | 当提供该选项时，为该 command prefix 保存持久化 allow rule。 |
+| Don't ask again for files under a path | `f` | 当提供该选项时，允许本 session 后续匹配的 path prefixes。 |
+| Allow this host for this session | `h` | 当提供该选项时，允许本 session 后续访问该 network host。 |
+| No, continue without running it | `n` | 拒绝当前 tool execution，并让 agent 继续。 |
 
-`Esc` 取消 approval request。
+`Esc` 取消 approval request 并打断当前 turn。
+
+如果沙箱拒绝了某次 shell 命令，且你已经批准过该调用（once / session / prefix / auto-review），Devo 可能在不二次询问的情况下，以关闭沙箱重试一次。若该调用从未经过交互批准（例如 Default 策略自动放行），则会把拒绝结果返回给模型，由其带着
+`sandbox_permissions: "require_escalated"` 和 justification 再调一次。
 
 ## Auto-review
 

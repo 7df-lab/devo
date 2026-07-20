@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { MenuItemConstructorOptions } from "electron"
-import { buildCodexStyleTrayMenuTemplate } from "./tray-menu"
+import { buildDevoTrayMenuTemplate } from "./tray-menu"
 
 function menuShape(items: MenuItemConstructorOptions[]): unknown[] {
 	return items.map((item) => ({
@@ -13,8 +13,8 @@ function menuShape(items: MenuItemConstructorOptions[]): unknown[] {
 	}))
 }
 
-describe("buildCodexStyleTrayMenuTemplate", () => {
-	test("builds a Codex-style tray menu with running, recent, usage, and actions", () => {
+describe("buildDevoTrayMenuTemplate", () => {
+	test("builds a Devo tray menu with running, recent, usage, and actions", () => {
 		const liveSessions = new Map([
 			[
 				"s1",
@@ -74,7 +74,7 @@ describe("buildCodexStyleTrayMenuTemplate", () => {
 			},
 		]
 
-		const template = buildCodexStyleTrayMenuTemplate({
+		const template = buildDevoTrayMenuTemplate({
 			liveSessions,
 			discovery: {
 				projects: [],

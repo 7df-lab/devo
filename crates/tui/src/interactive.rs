@@ -8,6 +8,7 @@ use devo_core::AppConfigLoader;
 use devo_core::FileSystemAppConfigLoader;
 use devo_protocol::Model;
 use devo_protocol::ModelCatalog;
+use devo_protocol::PermissionPreset;
 use devo_protocol::ProviderWireApi;
 use devo_util_paths::find_devo_home;
 use futures::StreamExt;
@@ -35,6 +36,7 @@ use crate::onboarding::onboarding_provider_model_binding;
 use crate::onboarding::onboarding_provider_vendor;
 use crate::onboarding::save_last_used_model;
 use crate::onboarding::save_project_permission_preset;
+use crate::onboarding::save_project_sandbox_profile;
 use crate::onboarding::save_reasoning_effort_selection;
 use crate::pager_overlay::TranscriptOverlay;
 use crate::render::renderable::Renderable;
@@ -242,6 +244,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         server_log_level: config.server_log_level.clone(),
         reasoning_effort_selection: initial_session.reasoning_effort_selection.clone(),
         permission_preset: initial_session.permission_preset,
+        initial_sandbox_profile: initial_session.sandbox_profile.clone(),
         client_capabilities: devo_protocol::AcpClientCapabilities {
             fs: devo_protocol::AcpFileSystemCapabilities {
                 read_text_file: false,
@@ -299,6 +302,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         },
         initial_reasoning_effort_selection: initial_session.reasoning_effort_selection.clone(),
         initial_permission_preset: initial_session.permission_preset,
+        initial_sandbox_profile: initial_session.sandbox_profile.clone(),
         initial_user_message: None,
         enhanced_keys_supported: tui.enhanced_keys_supported(),
         is_first_run: config.saved_models.is_empty(),
@@ -1063,7 +1067,19 @@ fn handle_app_command(
         AppCommand::UpdatePermissions { preset } => {
             worker.update_permissions(*preset)?;
             save_project_permission_preset(context.project_config_key, *preset)?;
+            let implied_sandbox = match preset {
+                PermissionPreset::FullAccess => "off",
+                PermissionPreset::Default | PermissionPreset::AutoReview => "workspace",
+            };
+            save_project_sandbox_profile(context.project_config_key, implied_sandbox)?;
+            worker.update_sandbox_profile(implied_sandbox.to_string())?;
             chat_widget.note_permissions_updated(*preset);
+            chat_widget.note_sandbox_profile_updated(implied_sandbox.to_string());
+        }
+        AppCommand::UpdateSandboxProfile { profile } => {
+            worker.update_sandbox_profile(profile.clone())?;
+            save_project_sandbox_profile(context.project_config_key, profile)?;
+            chat_widget.note_sandbox_profile_updated(profile.clone());
         }
         AppCommand::OverrideTurnContext {
             model,

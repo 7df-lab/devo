@@ -130,6 +130,7 @@ impl ServerRuntime {
                 hooks: hook_context,
                 network_proxy: provider_http.proxy_url,
                 network_no_proxy: provider_http.no_proxy,
+                sandbox_profile: state.core.config.sandbox_profile.clone(),
             },
             ToolExecutionOptions {
                 cancel_token: turn_cancel_token,

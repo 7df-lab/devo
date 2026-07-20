@@ -260,6 +260,7 @@ mod tests {
                     file_read_ledger: None,
                     network_proxy: None,
                     network_no_proxy: None,
+                    sandbox_profile: None,
                 },
                 serde_json::json!({
                     "filePath": "sample.txt",

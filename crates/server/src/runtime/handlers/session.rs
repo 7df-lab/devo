@@ -341,6 +341,62 @@ impl ServerRuntime {
         .expect("serialize session/permissions/update response")
     }
 
+    pub(crate) async fn handle_session_sandbox_profile_update(
+        &self,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let params: SessionSandboxProfileUpdateParams = match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    format!("invalid session/sandbox_profile/update params: {error}"),
+                );
+            }
+        };
+        let Some(session_handle) = self.session(params.session_id).await else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+        let applied = match session_handle
+            .apply_sandbox_profile(params.profile.clone())
+            .await
+        {
+            Some(applied) => applied,
+            None => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::SessionNotFound,
+                    "session does not exist",
+                );
+            }
+        };
+        let profile = match applied {
+            Ok(profile) => profile,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    format!("invalid sandbox profile '{}': {error}", params.profile),
+                );
+            }
+        };
+
+        serde_json::to_value(SuccessResponse {
+            id: request_id,
+            result: SessionSandboxProfileUpdateResult {
+                session_id: params.session_id,
+                profile,
+            },
+        })
+        .expect("serialize session/sandbox_profile/update response")
+    }
+
     pub(crate) async fn handle_session_title_update(
         &self,
         request_id: serde_json::Value,

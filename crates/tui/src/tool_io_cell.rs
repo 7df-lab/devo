@@ -72,9 +72,12 @@ impl ToolIoCell {
     }
 
     fn display_output_text(&self) -> String {
+        // Shell-family output may carry a trailing JSON envelope; show only the
+        // real command output (covers restored sessions and raw-output paths).
         self.display_content
             .clone()
             .or_else(|| self.output.as_ref().map(value_text))
+            .map(|text| crate::shell_output::strip_shell_envelope(&text))
             .unwrap_or_default()
     }
 

@@ -5174,12 +5174,13 @@ mod tests {
         .await
         .expect("first query should succeed");
 
-        let events = seen_events.lock().expect("lock events");
-        assert!(events.iter().any(|event| matches!(
-            event,
-            QueryEvent::ReasoningDelta(text) if text == "plan"
-        )));
-        drop(events);
+        {
+            let events = seen_events.lock().expect("lock events");
+            assert!(events.iter().any(|event| matches!(
+                event,
+                QueryEvent::ReasoningDelta(text) if text == "plan"
+            )));
+        }
 
         let assistant_message = session
             .messages

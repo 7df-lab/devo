@@ -1,6 +1,6 @@
 import { Loader2Icon } from "lucide-react"
 import { memo, useCallback, type ReactNode } from "react"
-import type { ReasoningPart, ToolPart } from "../../lib/types"
+import type { ToolPart } from "../../lib/types"
 import { ChatToolCall, describeToolGroup, getToolInfo, isGroupRunning } from "./chat-tool-call"
 import {
 	buildProcessTimeline,
@@ -10,7 +10,7 @@ import {
 	type ProcessTimelineItem,
 } from "./process-timeline"
 import { ThoughtRow } from "./thought-row"
-import type { ToolCategory } from "./tool-card"
+import type { ToolCategory } from "./tool-category"
 import {
 	TranscriptDisclosure,
 	TranscriptDisclosureContent,
@@ -22,7 +22,6 @@ export { buildProcessTimeline, isReasoningPartActivelyStreaming }
 const TranscriptToolGroupRow = memo(function TranscriptToolGroupRow({
 	category,
 	tools,
-	isActiveTurn,
 	projectRoot,
 	defaultOpen = false,
 	open,
@@ -30,7 +29,6 @@ const TranscriptToolGroupRow = memo(function TranscriptToolGroupRow({
 }: {
 	category: ToolCategory
 	tools: ToolPart[]
-	isActiveTurn: boolean
 	projectRoot?: string | null
 	defaultOpen?: boolean
 	open?: boolean
@@ -41,16 +39,11 @@ const TranscriptToolGroupRow = memo(function TranscriptToolGroupRow({
 	const { icon: GroupIcon } = getToolInfo(tools[0].tool)
 
 	return (
-		<TranscriptDisclosure
-			className="mb-0"
-			defaultOpen={defaultOpen}
-			open={open}
-			onOpenChange={onOpenChange}
-		>
+		<TranscriptDisclosure defaultOpen={defaultOpen} open={open} onOpenChange={onOpenChange}>
 			<TranscriptDisclosureTrigger
 				leading={
 					<GroupIcon
-						className={`size-4 shrink-0 ${
+						className={`size-3.5 shrink-0 stroke-[1.5] ${
 							running
 								? "animate-pulse text-muted-foreground"
 								: "text-muted-foreground/50"
@@ -64,11 +57,10 @@ const TranscriptToolGroupRow = memo(function TranscriptToolGroupRow({
 					) : undefined
 				}
 			/>
-			<TranscriptDisclosureContent className="space-y-2">
+			<TranscriptDisclosureContent rail className="space-y-0.5">
 				{tools.map((tool) => (
 					<ChatToolCall
 						key={tool.id}
-						isActiveTurn={isActiveTurn}
 						part={tool}
 						projectRoot={projectRoot}
 					/>
@@ -82,7 +74,6 @@ export interface ProcessTimelineViewProps {
 	items: ProcessTimelineItem[]
 	orderedParts: ProcessTimelineInput[]
 	working: boolean
-	isActiveTurn: boolean
 	projectRoot?: string | null
 	defaultExpandAll?: boolean
 	expandedRowIds?: Set<string>
@@ -96,7 +87,6 @@ export const ProcessTimelineView = memo(function ProcessTimelineView({
 	items,
 	orderedParts,
 	working,
-	isActiveTurn,
 	projectRoot,
 	defaultExpandAll = false,
 	expandedRowIds,
@@ -144,7 +134,6 @@ export const ProcessTimelineView = memo(function ProcessTimelineView({
 						<ChatToolCall
 							key={rowId}
 							defaultOpen={defaultExpandAll}
-							isActiveTurn={isActiveTurn}
 							onDelete={onDeleteToolPart}
 							open={expandedRowIds ? expandedRowIds.has(rowId) : undefined}
 							onOpenChange={
@@ -162,7 +151,6 @@ export const ProcessTimelineView = memo(function ProcessTimelineView({
 						key={rowId}
 						category={item.category}
 						defaultOpen={resolveOpen(rowId, defaultExpandAll)}
-						isActiveTurn={isActiveTurn}
 						onOpenChange={onToggleRow ? (open) => onToggleRow(rowId, open) : undefined}
 						open={expandedRowIds ? expandedRowIds.has(rowId) : undefined}
 						projectRoot={projectRoot}

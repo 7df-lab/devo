@@ -20,7 +20,7 @@ mod support;
 
 use support::{
     build_runtime, initialize_connection, start_parent_session, start_turn,
-    wait_for_parent_turn_completed,
+    start_turn_with_approval_policy, wait_for_parent_turn_completed,
 };
 
 #[derive(Default)]
@@ -291,11 +291,15 @@ async fn long_running_exec_command_accepts_write_stdin_and_exits() -> Result<()>
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
 
-    start_turn(
+    // The default preset asks approval for the compound interactive command
+    // (and for write_stdin, which carries no analyzable command). This test
+    // exercises PTY stdin/stdout, not the approval flow, so auto-approve.
+    start_turn_with_approval_policy(
         &runtime,
         connection_id,
         session_id,
         "run the interactive command",
+        Some("never"),
     )
     .await?;
     wait_for_parent_turn_completed(&mut notifications_rx, session_id).await?;

@@ -167,7 +167,8 @@ check_on_startup = true
 check_interval_hours = 24
 
 [projects."/path/to/project"]
-permission_preset = "default" # read-only, default, auto-review, or full-access
+permission_preset = "default" # default, auto-review, or full-access
+sandbox_profile = "workspace" # workspace, devbox, read-only, strict, off, or a custom profile from sandbox.toml
 
 [[hooks.PreToolUse]]
 matcher = "exec_command"

@@ -592,6 +592,27 @@ impl SessionHandle {
         reply_rx.await.is_ok()
     }
 
+    /// Applies a new sandbox profile to the session. Returns `None` when the
+    /// session actor is gone, `Some(Err(..))` when the profile name is invalid
+    /// (state is left unchanged), and `Some(Ok(name))` with the canonical
+    /// profile name on success.
+    pub(crate) async fn apply_sandbox_profile(
+        &self,
+        profile: String,
+    ) -> Option<Result<String, String>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if !self
+            .send(SessionCommand::ApplySandboxProfile {
+                profile,
+                reply: reply_tx,
+            })
+            .await
+        {
+            return None;
+        }
+        reply_rx.await.ok()
+    }
+
     pub(crate) async fn set_session_title_user_rename(
         &self,
         title: String,

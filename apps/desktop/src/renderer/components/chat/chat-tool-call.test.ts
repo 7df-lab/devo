@@ -1,48 +1,67 @@
 import { readFileSync } from "node:fs"
 import { describe, expect, test } from "bun:test"
-import { getToolDuration, getToolSubtitle, shouldDefaultOpen } from "./chat-tool-call"
+import { buildBashTerminalOutput, getToolSubtitle, stripShellEnvelope } from "./chat-tool-call"
 
 const elapsedHookSource = readFileSync(new URL("../../hooks/use-elapsed-time.ts", import.meta.url), "utf8")
 const chatToolCallSource = readFileSync(new URL("./chat-tool-call.tsx", import.meta.url), "utf8")
 const rendererCssSource = readFileSync(new URL("../../index.css", import.meta.url), "utf8")
 
-describe("shouldDefaultOpen", () => {
-	test("keeps all tool output collapsed by default", () => {
+describe("buildBashTerminalOutput", () => {
+	test("joins command and output into a single terminal block", () => {
 		expect({
-			bash: shouldDefaultOpen("bash", "completed"),
-			read: shouldDefaultOpen("read", "completed"),
-			bashError: shouldDefaultOpen("bash", "error"),
-			readError: shouldDefaultOpen("read", "error"),
-			unknown: shouldDefaultOpen("unknown", "error"),
+			plain: buildBashTerminalOutput("bun test", "ok\nDone", undefined),
+			echoed: buildBashTerminalOutput("bun test", "$ bun test\nok", undefined),
+			errorPreferred: buildBashTerminalOutput("bun test", "partial", "boom"),
+			pending: buildBashTerminalOutput("bun test", undefined, undefined),
+			noCommand: buildBashTerminalOutput(undefined, "plain output", undefined),
 		}).toEqual({
-			bash: false,
-			read: false,
-			bashError: false,
-			readError: false,
-			unknown: false,
+			plain: "$ bun test\nok\nDone",
+			echoed: "$ bun test\nok",
+			errorPreferred: "$ bun test\nboom",
+			pending: "$ bun test",
+			noCommand: "plain output",
+		})
+	})
+
+	test("truncates very long output", () => {
+		const truncated = buildBashTerminalOutput(undefined, "x".repeat(6000), undefined)
+		expect({
+			endsWithMarker: truncated.endsWith("... (truncated)"),
+			length: truncated.length,
+		}).toEqual({
+			endsWithMarker: true,
+			length: 5000 + "\n... (truncated)".length,
 		})
 	})
 })
 
-describe("getToolDuration", () => {
-	test("uses SDK tool state start and end timestamps", () => {
-		expect(
-			getToolDuration({
-				id: "tool-1",
-				type: "tool",
-				state: { status: "completed", time: { start: 1_000, end: 3_500 } },
-			} as any),
-		).toBe("2s")
-	})
-
-	test("clamps reversed timestamps instead of showing negative durations", () => {
-		expect(
-			getToolDuration({
-				id: "tool-1",
-				type: "tool",
-				state: { status: "completed", time: { start: 3_500, end: 1_000 } },
-			} as any),
-		).toBe("0ms")
+describe("stripShellEnvelope", () => {
+	test("strips the shell result envelope from tool output", () => {
+		const envelope = JSON.stringify({
+			output: "",
+			command: "ls",
+			exit: 0,
+			description: "List files",
+			cwd: "/repo",
+			yield_time_ms: 1000,
+		})
+		expect({
+			envelopeOnly: stripShellEnvelope(envelope),
+			stdoutPlusEnvelope: stripShellEnvelope(`hello\nworld\n${envelope}`),
+			plainOutput: stripShellEnvelope("just text"),
+			otherJson: stripShellEnvelope('{"foo": 1}'),
+			envelopeWithOutput: stripShellEnvelope(
+				JSON.stringify({ output: "files", command: "ls", exit: 0 }),
+			),
+			cmdEnvelope: stripShellEnvelope(JSON.stringify({ output: "ok", cmd: "ls", exit: 0 })),
+		}).toEqual({
+			envelopeOnly: "",
+			stdoutPlusEnvelope: "hello\nworld",
+			plainOutput: "just text",
+			otherJson: '{"foo": 1}',
+			envelopeWithOutput: "files",
+			cmdEnvelope: "ok",
+		})
 	})
 })
 
@@ -137,6 +156,19 @@ describe("useToolElapsedTime source", () => {
 		}).toEqual({
 			usesStateStart: true,
 			usesFirstSeen: false,
+		})
+	})
+})
+
+
+describe("ChatToolCall memo comparison", () => {
+	test("re-renders when the controlled open state changes so rows can expand", () => {
+		expect({
+			comparesOpen: chatToolCallSource.includes("prev.open !== next.open"),
+			comparesTurnError: chatToolCallSource.includes("prev.turnHasError !== next.turnHasError"),
+		}).toEqual({
+			comparesOpen: true,
+			comparesTurnError: true,
 		})
 	})
 })

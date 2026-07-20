@@ -170,6 +170,10 @@ pub(crate) enum SessionCommand {
         profile: devo_safety::RuntimePermissionProfile,
         reply: oneshot::Sender<()>,
     },
+    ApplySandboxProfile {
+        profile: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     SetSessionTitleUserRename {
         title: String,
         reply: oneshot::Sender<SessionMetadata>,

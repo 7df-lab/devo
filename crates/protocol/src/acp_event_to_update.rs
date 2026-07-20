@@ -331,11 +331,7 @@ fn acp_update_from_item_completed(payload: &ItemEventPayload) -> Option<AcpSessi
                 .output
                 .as_ref()
                 .and_then(serde_json::Value::as_str)
-                .map(|text| {
-                    vec![AcpToolCallContent::Content {
-                        content: AcpContentBlock::text(text),
-                    }]
-                })
+                .map(|text| vec![AcpToolCallContent::content(AcpContentBlock::text(text))])
                 .unwrap_or_default();
             Some(AcpSessionUpdate::ToolCallUpdate {
                 tool_call_id: command.tool_call_id,
@@ -477,9 +473,7 @@ pub(crate) fn file_change_tool_content(change: &FileChangePayload) -> Vec<AcpToo
                         new_text: new_text.clone(),
                     }
                 } else {
-                    AcpToolCallContent::Content {
-                        content: AcpContentBlock::text(unified_diff.clone()),
-                    }
+                    AcpToolCallContent::content(AcpContentBlock::text(unified_diff.clone()))
                 }
             }
         })
@@ -546,9 +540,9 @@ pub(crate) fn tool_result_content(
     content: serde_json::Value,
 ) -> Vec<AcpToolCallContent> {
     if let Some(display_content) = display_content {
-        return vec![AcpToolCallContent::Content {
-            content: AcpContentBlock::text(display_content),
-        }];
+        return vec![AcpToolCallContent::content(AcpContentBlock::text(
+            display_content,
+        ))];
     }
 
     if let Some(content) = acp_tool_content_from_value(&content) {
@@ -559,9 +553,7 @@ pub(crate) fn tool_result_content(
         serde_json::Value::String(text) => text,
         other => other.to_string(),
     };
-    vec![AcpToolCallContent::Content {
-        content: AcpContentBlock::text(text),
-    }]
+    vec![AcpToolCallContent::content(AcpContentBlock::text(text))]
 }
 
 fn acp_tool_content_from_value(value: &serde_json::Value) -> Option<Vec<AcpToolCallContent>> {
@@ -574,14 +566,14 @@ fn acp_tool_content_from_value(value: &serde_json::Value) -> Option<Vec<AcpToolC
     }
 
     if let Ok(content) = serde_json::from_value::<AcpContentBlock>(value.clone()) {
-        return Some(vec![AcpToolCallContent::Content { content }]);
+        return Some(vec![AcpToolCallContent::content(content)]);
     }
 
     if let Ok(contents) = serde_json::from_value::<Vec<AcpContentBlock>>(value.clone()) {
         return Some(
             contents
                 .into_iter()
-                .map(|content| AcpToolCallContent::Content { content })
+                .map(AcpToolCallContent::content)
                 .collect(),
         );
     }
@@ -594,7 +586,7 @@ fn acp_tool_content_from_value(value: &serde_json::Value) -> Option<Vec<AcpToolC
     Some(
         contents
             .into_iter()
-            .map(|content| AcpToolCallContent::Content { content })
+            .map(AcpToolCallContent::content)
             .collect(),
     )
 }

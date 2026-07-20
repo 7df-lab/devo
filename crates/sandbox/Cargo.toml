@@ -44,6 +44,9 @@ globset = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 ignore = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+devo-windows-sandbox = { workspace = true }
+
 [features]
 default = ["enforce"]
 ## Enable kernel-enforced sandboxing via nono (Landlock/Seatbelt). Marker feature

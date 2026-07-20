@@ -99,9 +99,7 @@ pub(super) fn acp_update_from_history_item(
                     .tool_io
                     .as_ref()
                     .and_then(|tool_io| tool_io.output.clone()),
-                content: vec![AcpToolCallContent::Content {
-                    content: AcpContentBlock::text(text),
-                }],
+                content: vec![AcpToolCallContent::content(AcpContentBlock::text(text))],
                 locations: Vec::new(),
                 meta: Some(meta),
             })

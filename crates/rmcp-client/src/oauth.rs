@@ -50,7 +50,7 @@ use tokio::sync::Mutex;
 
 use devo_util_paths::find_devo_home;
 
-const KEYRING_SERVICE: &str = "Codex MCP Credentials";
+const KEYRING_SERVICE: &str = "Devo MCP Credentials";
 const REFRESH_SKEW_MILLIS: u64 = 30_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -219,7 +219,7 @@ async fn wait_for_python_repl_ready_via_probe(
     newline: &str,
 ) -> anyhow::Result<Vec<u8>> {
     let mut collected = Vec::new();
-    let marker = "__codex_pty_ready__";
+    let marker = "__devo_pty_ready__";
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
     let probe_window = tokio::time::Duration::from_millis(if cfg!(windows) { 750 } else { 250 });
 
@@ -347,7 +347,7 @@ async fn pty_python_repl_emits_output_and_exits() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let ready_marker = "__codex_pty_ready__";
+    let ready_marker = "__devo_pty_ready__";
     let args = vec![
         "-i".to_string(),
         "-q".to_string(),
@@ -774,7 +774,7 @@ async fn pipe_terminate_aborts_detached_readers() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pty_terminate_kills_background_children_in_same_process_group() -> anyhow::Result<()> {
     let env_map: HashMap<String, String> = std::env::vars().collect();
-    let marker = "__codex_bg_pid:";
+    let marker = "__devo_bg_pid:";
     let script = format!("sleep 1000 & bg=$!; echo {marker}$bg; wait");
     let (program, args) = shell_command(&script);
     let spawned = spawn_pty_process(
@@ -913,7 +913,7 @@ async fn pty_preserving_inherited_fds_keeps_python_repl_running() -> anyhow::Res
         newline,
     )
     .await?;
-    let marker = "__codex_preserved_py_pid:";
+    let marker = "__devo_preserved_py_pid:";
     writer
         .send(format!("import os; print('{marker}' + str(os.getpid())){newline}").into_bytes())
         .await?;

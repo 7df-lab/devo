@@ -23,7 +23,7 @@ import {
 	type SessionState,
 } from "./notification-watcher"
 import { getAcpTransport, getServerUrl, onServerReady } from "./devo-manager"
-import { buildCodexStyleTrayMenuTemplate, type DiscoveryCache } from "./tray-menu"
+import { buildDevoTrayMenuTemplate, type DiscoveryCache } from "./tray-menu"
 
 const log = createLogger("tray")
 
@@ -182,7 +182,7 @@ function rebuildMenu(): void {
 	const liveSessions = getSessionStates()
 	const pendingCount = getPendingCount()
 
-	const template = buildCodexStyleTrayMenuTemplate({
+	const template = buildDevoTrayMenuTemplate({
 		liveSessions,
 		discovery: discoveryCache,
 		pendingCount,

@@ -1,5 +1,6 @@
 //! Detect file reads and writes embedded in shell commands.
 
+use std::collections::BTreeSet;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -101,6 +102,161 @@ pub(super) fn evaluate_shell_file_access(
     cwd: &Path,
 ) -> PolicyDecision {
     evaluate_shell_file_access_at_depth(policy, command, cwd, 0)
+}
+
+/// Evaluate a shell command against explicit readable/writable root sets,
+/// without using the rule engine. Returns `Ask` when the command cannot be
+/// fully analyzed or touches a path outside the allowed roots, and `NoMatch`
+/// when every detected file access stays within the roots.
+pub fn evaluate_shell_access_with_roots(
+    command: &str,
+    cwd: &Path,
+    readable_roots: &BTreeSet<PathBuf>,
+    writable_roots: &BTreeSet<PathBuf>,
+) -> PolicyDecision {
+    evaluate_shell_access_with_roots_at_depth(command, cwd, readable_roots, writable_roots, 0)
+}
+
+fn evaluate_shell_access_with_roots_at_depth(
+    command: &str,
+    cwd: &Path,
+    readable_roots: &BTreeSet<PathBuf>,
+    writable_roots: &BTreeSet<PathBuf>,
+    depth: usize,
+) -> PolicyDecision {
+    const MAX_NESTING: usize = 8;
+    if depth >= MAX_NESTING {
+        return PolicyDecision::Ask;
+    }
+    let Some(commands) = all_commands_from_script(command) else {
+        return PolicyDecision::Ask;
+    };
+    let Some(tree) = devo_util_shell_command::bash::try_parse_shell(command) else {
+        return PolicyDecision::Ask;
+    };
+    if tree.root_node().has_error() {
+        return PolicyDecision::Ask;
+    }
+
+    let mut events = Vec::new();
+    for parsed in &commands {
+        events.push((parsed.start_byte(), 0, ShellEvent::Command(parsed)));
+        if command_changes_cwd(parsed.words()) {
+            events.push((parsed.end_byte(), 2, ShellEvent::CwdChange(parsed)));
+        }
+    }
+    for (position, redirect) in redirect_accesses(tree.root_node(), command) {
+        events.push((position, 1, ShellEvent::Redirect(redirect)));
+    }
+    events.sort_by_key(|(position, priority, _)| (*position, *priority));
+
+    let mut decision = PolicyDecision::NoMatch;
+    let mut effective_cwd = Some(cwd.to_path_buf());
+    for (_, _, event) in events {
+        match event {
+            ShellEvent::Command(parsed) => {
+                let raw = parsed.words();
+                let words = unwrap_wrappers(raw);
+                if wrapper_changes_cwd(raw) {
+                    decision = decision.combine(PolicyDecision::Ask);
+                }
+                if !command_changes_cwd(raw) {
+                    for access in command_file_accesses(words) {
+                        decision = decision.combine(evaluate_access_with_roots(
+                            access,
+                            effective_cwd.as_deref(),
+                            readable_roots,
+                            writable_roots,
+                            AccessSource::Command,
+                        ));
+                    }
+                }
+                if let Some(script) = shell_dash_c_script(words) {
+                    decision = decision.combine(match effective_cwd.as_deref() {
+                        Some(current_cwd) => evaluate_shell_access_with_roots_at_depth(
+                            script,
+                            current_cwd,
+                            readable_roots,
+                            writable_roots,
+                            depth + 1,
+                        ),
+                        None => PolicyDecision::Ask,
+                    });
+                }
+            }
+            ShellEvent::Redirect(access) => {
+                decision = decision.combine(evaluate_access_with_roots(
+                    access,
+                    effective_cwd.as_deref(),
+                    readable_roots,
+                    writable_roots,
+                    AccessSource::Redirect,
+                ));
+            }
+            ShellEvent::CwdChange(parsed) => {
+                effective_cwd = apply_cwd_change(parsed.words(), effective_cwd.as_deref());
+                if effective_cwd.is_none() {
+                    decision = decision.combine(PolicyDecision::Ask);
+                }
+            }
+        }
+    }
+    decision
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AccessSource {
+    Command,
+    Redirect,
+}
+
+fn evaluate_access_with_roots(
+    access: ExtractedAccess,
+    cwd: Option<&Path>,
+    readable_roots: &BTreeSet<PathBuf>,
+    writable_roots: &BTreeSet<PathBuf>,
+    source: AccessSource,
+) -> PolicyDecision {
+    match access {
+        ExtractedAccess::Path { mode, path } => {
+            let path = Path::new(&path);
+            let Some(cwd) = cwd.or_else(|| path.is_absolute().then(|| Path::new("/"))) else {
+                return PolicyDecision::Ask;
+            };
+            let absolute = if path.is_absolute() {
+                lexical_normalize(path)
+            } else {
+                lexical_normalize(&cwd.join(path))
+            };
+            // Prefer the symlink-resolved path so a workspace symlink to /etc
+            // cannot match writable_roots via lexical prefix alone.
+            let absolute = resolve_following_symlinks(&absolute, 0).unwrap_or(absolute);
+            let allowed = match mode {
+                FileMode::Read | FileMode::Grep { .. } => {
+                    path_matches_roots(&absolute, readable_roots)
+                        || path_matches_roots(&absolute, writable_roots)
+                }
+                FileMode::Edit => path_matches_roots(&absolute, writable_roots),
+            };
+            if allowed {
+                PolicyDecision::NoMatch
+            } else {
+                PolicyDecision::Ask
+            }
+        }
+        ExtractedAccess::Ambiguous => match source {
+            // Ambiguous commands might not touch files at all; do not force
+            // approval merely because the analyzer is unsure.
+            AccessSource::Command => PolicyDecision::NoMatch,
+            // An ambiguous redirect target is definitely a file access we
+            // cannot check, so it must ask.
+            AccessSource::Redirect => PolicyDecision::Ask,
+        },
+    }
+}
+
+fn path_matches_roots(path: &Path, roots: &BTreeSet<PathBuf>) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
 }
 
 fn evaluate_shell_file_access_at_depth(
