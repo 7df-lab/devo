@@ -152,6 +152,7 @@ pub fn wrap_command_for_profile(
 }
 
 /// Tag a wrap-path sandbox event with the wrap mode and launcher, then log it.
+#[allow(unused)]
 fn log_wrap_event(logger: &SandboxLogger, mut event: SandboxEvent, mode: WrapMode, launcher: &str) {
     event.mode = Some(format!("{mode:?}"));
     event.launcher = Some(launcher.to_string());

@@ -332,6 +332,7 @@ pub(crate) async fn execute_shell_command(
         child.env("PYTHONUTF8", "1");
     }
 
+    #[cfg(unix)]
     apply_sandbox_proxy_env(&mut child, sandbox_profile.as_deref(), &workdir);
 
     let spawned = match child.spawn() {
@@ -511,6 +512,7 @@ fn platform_shell(login: bool) -> ShellSpec {
     }
 }
 
+#[cfg(unix)]
 fn apply_sandbox_proxy_env(
     child: &mut Command,
     sandbox_profile: Option<&str>,
@@ -592,7 +594,7 @@ async fn run_with_pty(
         devo_sandbox::SandboxWrap::None => {
             #[cfg(not(unix))]
             if let Some(launch) = &windows_launch {
-                let mut builder = CommandBuilder::new(launch.program.to_string_lossy());
+                let mut builder = CommandBuilder::new(&launch.program);
                 builder.args(
                     launch
                         .args
@@ -627,6 +629,7 @@ async fn run_with_pty(
         builder.env("TERM", "xterm-256color");
         builder.env("COLORTERM", "truecolor");
     }
+    #[cfg(unix)]
     for (key, value) in
         devo_sandbox::proxy_env_for_sandbox_profile(sandbox_profile.as_deref(), &workdir)
     {
