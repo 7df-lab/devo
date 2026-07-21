@@ -100,6 +100,7 @@ impl SlashCommand {
                 | SlashCommand::Diff
                 | SlashCommand::New
                 | SlashCommand::Resume
+                | SlashCommand::Permissions
         )
     }
 
@@ -231,5 +232,14 @@ mod tests {
         assert!(!SlashCommand::Model.available_over_acp());
         assert!(!SlashCommand::Btw.available_over_acp());
         assert!(!SlashCommand::Exit.available_over_acp());
+    }
+
+    #[test]
+    fn configuration_slash_commands_are_unavailable_during_task() {
+        assert!(!SlashCommand::Model.available_during_task());
+        assert!(!SlashCommand::Permissions.available_during_task());
+        assert!(!SlashCommand::Theme.available_during_task());
+        assert!(SlashCommand::Status.available_during_task());
+        assert!(SlashCommand::Goal.available_during_task());
     }
 }

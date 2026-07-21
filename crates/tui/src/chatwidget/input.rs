@@ -301,7 +301,8 @@ impl ChatWidget {
             | AppEvent::StatusLineSetupCancelled
             | AppEvent::TerminalTitleSetup { .. }
             | AppEvent::TerminalTitleSetupPreview { .. }
-            | AppEvent::TerminalTitleSetupCancelled => {
+            | AppEvent::TerminalTitleSetupCancelled
+            | AppEvent::ReloadInlineTranscript => {
                 self.frame_requester.schedule_frame();
             }
             AppEvent::ReferenceSearchResults { snapshot } => {

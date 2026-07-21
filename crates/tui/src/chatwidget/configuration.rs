@@ -464,8 +464,25 @@ impl ChatWidget {
             self.active_theme_name = name.clone();
             self.bottom_pane.set_accent_color(theme.accent_color);
             let _ = crate::onboarding::save_theme_selection(&name);
+            self.refresh_header_box();
+            if self.history.first().is_some_and(|cell| {
+                cell.as_any()
+                    .is::<crate::startup_logo_cell::StartupLogoCell>()
+            }) {
+                self.history[0] = Box::new(crate::startup_logo_cell::StartupLogoCell::new(
+                    self.active_accent_color(),
+                ));
+            }
             self.set_status_message(format!("Theme set to {name}"));
-            self.frame_requester.schedule_frame();
+            // Header/logo are flushed into terminal scrollback. Reset the flush
+            // cursor and ask the host to clear the managed inline area so the
+            // next draw re-emits transcript lines with the new accent.
+            if self.next_history_flush_index > 0 {
+                self.next_history_flush_index = 0;
+                self.app_event_tx.send(AppEvent::ReloadInlineTranscript);
+            } else {
+                self.frame_requester.schedule_frame();
+            }
         }
     }
 

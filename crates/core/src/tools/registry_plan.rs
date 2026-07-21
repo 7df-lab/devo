@@ -592,9 +592,7 @@ fn exec_command_schema() -> JsonSchema {
         BTreeMap::from([
             (
                 "cmd".to_string(),
-                JsonSchema::string(Some(
-                    "Shell command to execute.",
-                )),
+                JsonSchema::string(Some("Shell command to execute.")),
             ),
             (
                 "command".to_string(),

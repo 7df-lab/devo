@@ -1220,178 +1220,194 @@ pub async fn query_with_options(
         let mut final_response = None;
         let mut stop_reason = None;
 
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(StreamEvent::TextStart { .. }) => {}
-                Ok(StreamEvent::TextDelta { text, .. }) => {
-                    assistant_text.push_str(&text);
-                    emit_query_event(&on_event, QueryEvent::TextDelta(text)).await;
-                }
-                Ok(StreamEvent::ReasoningStart { .. }) => {}
-                Ok(StreamEvent::ReasoningDelta { text, .. }) => {
-                    reasoning_text.push_str(&text);
-                    emit_query_event(&on_event, QueryEvent::ReasoningDelta(text)).await;
-                }
-                Ok(StreamEvent::ReasoningDone { .. }) => {
-                    emit_query_event(&on_event, QueryEvent::ReasoningCompleted).await;
-                }
-                Ok(StreamEvent::ToolCallStart {
-                    index,
-                    id,
-                    name,
-                    input,
-                }) => {
-                    tool_uses.push((index, id, name, input, String::new(), false));
-                }
-                Ok(StreamEvent::HostedToolCallStart {
-                    index,
-                    id,
-                    name,
-                    input,
-                }) => {
-                    let id = normalize_hosted_tool_id(index, id, &name);
-                    let name = normalize_hosted_tool_name(name);
-                    hosted_tool_inputs.insert(id.clone(), (index, name.clone(), input.clone()));
-                    emit_hosted_tool_start(
-                        &on_event,
-                        &mut emitted_hosted_tool_starts,
-                        &id,
-                        &name,
-                        &input,
-                    )
-                    .await;
-                }
-                Ok(StreamEvent::HostedToolCallDone {
-                    index,
-                    id,
-                    name,
-                    input,
-                    output,
-                    status,
-                }) => {
-                    let id = normalize_hosted_tool_id(index, id, &name);
-                    let name = normalize_hosted_tool_name(name);
-                    let previous_input = hosted_tool_inputs
-                        .get(&id)
-                        .map(|(_, _, previous_input)| previous_input);
-                    let input = hosted_tool_input_or_previous(input, previous_input);
-                    hosted_tool_inputs.insert(id.clone(), (index, name.clone(), input.clone()));
-                    emit_hosted_tool_start(
-                        &on_event,
-                        &mut emitted_hosted_tool_starts,
-                        &id,
-                        &name,
-                        &input,
-                    )
-                    .await;
-                    emit_hosted_tool_result(
-                        &on_event,
-                        &mut emitted_hosted_tool_results,
-                        &session.cwd,
-                        HostedToolResultEvent {
-                            id: &id,
-                            name: &name,
-                            input: &input,
-                            output,
-                            status,
-                        },
-                    )
-                    .await;
-                }
-                Ok(StreamEvent::ToolCallInputDelta {
-                    index,
-                    partial_json,
-                }) => {
-                    if let Some(tool_use) = tool_uses
-                        .iter_mut()
-                        .rev()
-                        .find(|(tool_index, ..)| *tool_index == index)
-                    {
-                        tool_use.4.push_str(&partial_json);
-                        tool_use.5 = true;
+        loop {
+            tokio::select! {
+                biased;
+                _ = async {
+                    if let Some(ct) = options.cancel_token.as_ref() {
+                        ct.cancelled().await
+                    } else {
+                        std::future::pending::<()>().await
                     }
+                } =>
+                {
+                    break;
                 }
-                Ok(StreamEvent::MessageDone { response }) => {
-                    stop_reason = response.stop_reason.clone();
-                    final_response = Some(response.clone());
-
-                    // Accumulate all usage counters at completion time.
-                    session.total_input_tokens += response.usage.input_tokens;
-                    session.total_output_tokens += response.usage.output_tokens;
-                    session.total_tokens += response.usage.display_total_tokens();
-                    session.total_cache_creation_tokens +=
-                        response.usage.cache_creation_input_tokens.unwrap_or(0);
-                    session.total_cache_read_tokens +=
-                        response.usage.cache_read_input_tokens.unwrap_or(0);
-                    session.last_input_tokens = response.usage.input_tokens;
-                    session.last_turn_tokens = response.usage.display_total_tokens();
-
-                    emit_query_event(
-                        &on_event,
-                        QueryEvent::Usage {
-                            usage: response.usage.clone(),
-                        },
-                    )
-                    .await;
-                }
-                Ok(StreamEvent::UsageDelta(usage)) => {
-                    emit_query_event(&on_event, QueryEvent::UsageDelta { usage }).await;
-                }
-                Err(e) => {
-                    warn!(
-                        provider = provider.name(),
-                        model = %turn_config.model.slug,
-                        turn = session.turn_count,
-                        error = ?e,
-                        "stream error"
-                    );
-                    if !assistant_text.is_empty()
-                        || !reasoning_text.is_empty()
-                        || !tool_uses.is_empty()
-                        || !hosted_tool_inputs.is_empty()
-                        || final_response.is_some()
-                    {
-                        return Err(AgentError::Provider(e));
-                    }
-
-                    match provider_retry_decision(&e, &mut retry_count, &mut context_compacted) {
-                        ProviderRetryDecision::CompactAndRetry => {
-                            warn!("context_too_long - compacting and retrying");
-                            // Proactive: must compact even if token estimates disagree
-                            // with the provider; preserve from latest user only.
-                            summarize_and_compact(
-                                session,
+                event = stream.next() => {
+                    let Some(event) = event else { break; };
+                    match event {
+                        Ok(StreamEvent::TextStart { .. }) => {}
+                        Ok(StreamEvent::TextDelta { text, .. }) => {
+                            assistant_text.push_str(&text);
+                            emit_query_event(&on_event, QueryEvent::TextDelta(text)).await;
+                        }
+                        Ok(StreamEvent::ReasoningStart { .. }) => {}
+                        Ok(StreamEvent::ReasoningDelta { text, .. }) => {
+                            reasoning_text.push_str(&text);
+                            emit_query_event(&on_event, QueryEvent::ReasoningDelta(text)).await;
+                        }
+                        Ok(StreamEvent::ReasoningDone { .. }) => {
+                            emit_query_event(&on_event, QueryEvent::ReasoningCompleted).await;
+                        }
+                        Ok(StreamEvent::ToolCallStart {
+                            index,
+                            id,
+                            name,
+                            input,
+                        }) => {
+                            tool_uses.push((index, id, name, input, String::new(), false));
+                        }
+                        Ok(StreamEvent::HostedToolCallStart {
+                            index,
+                            id,
+                            name,
+                            input,
+                        }) => {
+                            let id = normalize_hosted_tool_id(index, id, &name);
+                            let name = normalize_hosted_tool_name(name);
+                            hosted_tool_inputs.insert(id.clone(), (index, name.clone(), input.clone()));
+                            emit_hosted_tool_start(
                                 &on_event,
-                                &provider,
-                                &compaction_model_slug,
-                                &compaction_request_model,
-                                turn_config.model.max_tokens.unwrap_or(4096) as usize,
-                                CompactionKind::Proactive,
+                                &mut emitted_hosted_tool_starts,
+                                &id,
+                                &name,
+                                &input,
                             )
                             .await;
-                            session.turn_count -= 1;
-                            continue 'query_loop;
                         }
-                        ProviderRetryDecision::RetryAfter(backoff) => {
-                            warn!(
-                                attempt = retry_count,
-                                backoff_ms = backoff.as_millis(),
-                                "transient provider stream error - retrying with exponential backoff"
-                            );
-                            wait_for_provider_retry(
+                        Ok(StreamEvent::HostedToolCallDone {
+                            index,
+                            id,
+                            name,
+                            input,
+                            output,
+                            status,
+                        }) => {
+                            let id = normalize_hosted_tool_id(index, id, &name);
+                            let name = normalize_hosted_tool_name(name);
+                            let previous_input = hosted_tool_inputs
+                                .get(&id)
+                                .map(|(_, _, previous_input)| previous_input);
+                            let input = hosted_tool_input_or_previous(input, previous_input);
+                            hosted_tool_inputs.insert(id.clone(), (index, name.clone(), input.clone()));
+                            emit_hosted_tool_start(
                                 &on_event,
-                                options.cancel_token.as_ref(),
-                                provider.name(),
-                                &turn_config.model.slug,
-                                retry_count,
-                                backoff,
+                                &mut emitted_hosted_tool_starts,
+                                &id,
+                                &name,
+                                &input,
                             )
-                            .await?;
-                            session.turn_count -= 1;
-                            continue 'query_loop;
+                            .await;
+                            emit_hosted_tool_result(
+                                &on_event,
+                                &mut emitted_hosted_tool_results,
+                                &session.cwd,
+                                HostedToolResultEvent {
+                                    id: &id,
+                                    name: &name,
+                                    input: &input,
+                                    output,
+                                    status,
+                                },
+                            )
+                            .await;
                         }
-                        ProviderRetryDecision::Fail => {
-                            return Err(AgentError::Provider(e));
+                        Ok(StreamEvent::ToolCallInputDelta {
+                            index,
+                            partial_json,
+                        }) => {
+                            if let Some(tool_use) = tool_uses
+                                .iter_mut()
+                                .rev()
+                                .find(|(tool_index, ..)| *tool_index == index)
+                            {
+                                tool_use.4.push_str(&partial_json);
+                                tool_use.5 = true;
+                            }
+                        }
+                        Ok(StreamEvent::MessageDone { response }) => {
+                            stop_reason = response.stop_reason.clone();
+                            final_response = Some(response.clone());
+
+                            // Accumulate all usage counters at completion time.
+                            session.total_input_tokens += response.usage.input_tokens;
+                            session.total_output_tokens += response.usage.output_tokens;
+                            session.total_tokens += response.usage.display_total_tokens();
+                            session.total_cache_creation_tokens +=
+                                response.usage.cache_creation_input_tokens.unwrap_or(0);
+                            session.total_cache_read_tokens +=
+                                response.usage.cache_read_input_tokens.unwrap_or(0);
+                            session.last_input_tokens = response.usage.input_tokens;
+                            session.last_turn_tokens = response.usage.display_total_tokens();
+
+                            emit_query_event(
+                                &on_event,
+                                QueryEvent::Usage {
+                                    usage: response.usage.clone(),
+                                },
+                            )
+                            .await;
+                        }
+                        Ok(StreamEvent::UsageDelta(usage)) => {
+                            emit_query_event(&on_event, QueryEvent::UsageDelta { usage }).await;
+                        }
+                        Err(e) => {
+                            warn!(
+                                provider = provider.name(),
+                                model = %turn_config.model.slug,
+                                turn = session.turn_count,
+                                error = ?e,
+                                "stream error"
+                            );
+                            if !assistant_text.is_empty()
+                                || !reasoning_text.is_empty()
+                                || !tool_uses.is_empty()
+                                || !hosted_tool_inputs.is_empty()
+                                || final_response.is_some()
+                            {
+                                return Err(AgentError::Provider(e));
+                            }
+
+                            match provider_retry_decision(&e, &mut retry_count, &mut context_compacted) {
+                                ProviderRetryDecision::CompactAndRetry => {
+                                    warn!("context_too_long - compacting and retrying");
+                                    // Proactive: must compact even if token estimates disagree
+                                    // with the provider; preserve from latest user only.
+                                    summarize_and_compact(
+                                        session,
+                                        &on_event,
+                                        &provider,
+                                        &compaction_model_slug,
+                                        &compaction_request_model,
+                                        turn_config.model.max_tokens.unwrap_or(4096) as usize,
+                                        CompactionKind::Proactive,
+                                    )
+                                    .await;
+                                    session.turn_count -= 1;
+                                    continue 'query_loop;
+                                }
+                                ProviderRetryDecision::RetryAfter(backoff) => {
+                                    warn!(
+                                        attempt = retry_count,
+                                        backoff_ms = backoff.as_millis(),
+                                        "transient provider stream error - retrying with exponential backoff"
+                                    );
+                                    wait_for_provider_retry(
+                                        &on_event,
+                                        options.cancel_token.as_ref(),
+                                        provider.name(),
+                                        &turn_config.model.slug,
+                                        retry_count,
+                                        backoff,
+                                    )
+                                    .await?;
+                                    session.turn_count -= 1;
+                                    continue 'query_loop;
+                                }
+                                ProviderRetryDecision::Fail => {
+                                    return Err(AgentError::Provider(e));
+                                }
+                            }
                         }
                     }
                 }
@@ -1718,6 +1734,25 @@ pub async fn query_with_options(
                 emit_query_event(&on_event, QueryEvent::TurnComplete { stop_reason: sr }).await;
             }
             debug!("no tool calls, ending query loop");
+            session.end_turn();
+            if options
+                .cancel_token
+                .as_ref()
+                .is_some_and(|ct| ct.is_cancelled())
+            {
+                return Err(AgentError::Aborted);
+            }
+            return Ok(());
+        }
+
+        // If the turn was cancelled (e.g. mid-stream interrupt with partial
+        // tool calls), save whatever partial assistant content was already
+        // committed above, skip tool execution, and end the turn.
+        if options
+            .cancel_token
+            .as_ref()
+            .is_some_and(|ct| ct.is_cancelled())
+        {
             session.end_turn();
             return Ok(());
         }

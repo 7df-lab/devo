@@ -170,6 +170,12 @@ fn rendered_rows(widget: &ChatWidget, width: u16, height: u16) -> Vec<String> {
         .collect()
 }
 
+fn lines_contain_fg(lines: &[Line<'static>], color: Color) -> bool {
+    lines
+        .iter()
+        .any(|line| line.spans.iter().any(|span| span.style.fg == Some(color)))
+}
+
 fn press_key(code: KeyCode) -> KeyEvent {
     KeyEvent {
         code,
@@ -1615,13 +1621,6 @@ fn permissions_command_opens_bottom_pane_picker_and_updates_default() {
         ..Model::default()
     };
     let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
-    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
-        model: "test-model".to_string(),
-        model_binding_id: None,
-        reasoning_effort_selection: None,
-        reasoning_effort: None,
-        turn_id: TurnId::new(),
-    });
 
     widget.handle_app_event(AppEvent::RunSlashCommand {
         command: "permissions".to_string(),
@@ -1642,6 +1641,43 @@ fn permissions_command_opens_bottom_pane_picker_and_updates_default() {
             preset: devo_protocol::PermissionPreset::Default,
         })
     );
+}
+
+#[test]
+fn busy_widget_blocks_permissions_change_with_transcript_message() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+    widget.handle_app_event(AppEvent::RunSlashCommand {
+        command: "permissions".to_string(),
+    });
+
+    assert!(app_event_rx.try_recv().is_err());
+
+    let scrollback = widget
+        .drain_scrollback_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(scrollback.contains("Cannot change permissions while generating"));
 }
 
 #[test]
@@ -2096,6 +2132,39 @@ fn busy_widget_blocks_model_change_with_transcript_message() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(scrollback.contains("Cannot change model while generating"));
+}
+
+#[test]
+fn theme_selection_applies_header_accent_immediately() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let aurora_accent = Color::Rgb(0x78, 0xD0, 0xA8);
+
+    // Flush the startup header into scrollback, matching the live TUI path.
+    let _ = widget.drain_scrollback_lines(100);
+
+    widget.handle_app_event(AppEvent::ThemeSelected {
+        name: "aurora".to_string(),
+    });
+
+    let reload = app_event_rx
+        .try_recv()
+        .expect("theme apply should request an inline transcript reload");
+    assert_eq!(reload, AppEvent::ReloadInlineTranscript);
+
+    let reloaded = widget.drain_scrollback_lines(100);
+    let reloaded_lines = reloaded
+        .iter()
+        .map(|line| line.line.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        lines_contain_fg(&reloaded_lines, aurora_accent),
+        "header should re-emit with aurora accent after theme selection"
+    );
 }
 
 #[test]

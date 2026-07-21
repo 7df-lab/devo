@@ -1280,9 +1280,7 @@ mod tests {
             );
         }
         assert!(
-            !rendered.contains(
-                "L:93-132 crates/core/src/tools/registry_plan.rs L:588-627"
-            ),
+            !rendered.contains("L:93-132 crates/core/src/tools/registry_plan.rs L:588-627"),
             "reads must not be space-joined on one Read line:\n{rendered}"
         );
     }

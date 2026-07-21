@@ -154,10 +154,12 @@ impl ServerRuntime {
         // turn's cancellation token so interrupting a turn actually unblocks the
         // actor's mailbox instead of hanging it forever.
         //
-        // Important: do not drop `query_with_options` immediately on cancel.
-        // Tool handlers observe the same cancel token and still need a chance to
-        // return interrupted tool results that keep tool-use / tool-result pairs
-        // intact in session history.
+        // The stream-loop's biased select! checks the cancel token before every
+        // chunk.  On interrupt it breaks immediately, the post-processing stage
+        // commits partial assistant/reasoning text to session, then the cancel
+        // guard before tool execution skips incomplete tool calls and ends the
+        // turn cleanly.  The tool-execution cancel guard already handles the
+        // "cancel during tools" case (line ~1827).
         let result = {
             let mut query_future = std::pin::pin!(query_with_options(
                 &mut state.core,
@@ -173,11 +175,12 @@ impl ServerRuntime {
             tokio::select! {
                 biased;
                 () = query_cancel_token.cancelled() => {
-                    // Give the query loop a short window to drain cancelled tool
-                    // results into session messages / event stream, then map any
-                    // non-abort completion to Interrupted as well.
+                    // Give the query a brief window so the stream-loop cancel
+                    // check and post-processing commit can complete, then map
+                    // any completion (including Aborted from the tool-execution
+                    // guard) to the Interrupted status.
                     match tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
+                        std::time::Duration::from_millis(100),
                         &mut query_future,
                     )
                     .await

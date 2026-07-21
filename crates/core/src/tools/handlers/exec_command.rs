@@ -53,9 +53,7 @@ impl ExecCommandHandler {
                     std::collections::BTreeMap::from([
                         (
                             "cmd".to_string(),
-                            JsonSchema::string(Some(
-                                "The command to execute.",
-                            )),
+                            JsonSchema::string(Some("The command to execute.")),
                         ),
                         (
                             "workdir".to_string(),

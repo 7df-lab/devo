@@ -772,6 +772,11 @@ fn handle_app_event(
                 .open_subagent_transcript(tui, chat_widget, *session_id)?;
             return Ok(LoopAction::Continue);
         }
+        AppEvent::ReloadInlineTranscript => {
+            tui.replace_inline_session_ui()?;
+            chat_widget.handle_app_event(app_event);
+            return Ok(LoopAction::Continue);
+        }
         _ => {}
     }
     if let AppEvent::Command(command) = &app_event {
