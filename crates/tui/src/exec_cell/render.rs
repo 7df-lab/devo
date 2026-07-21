@@ -20,7 +20,6 @@ use crate::wrapping::adaptive_wrap_lines;
 use devo_protocol::parse_command::ParsedCommand;
 use devo_protocol::protocol::ExecCommandSource;
 use devo_util_shell_command::bash::extract_bash_command;
-use itertools::Itertools;
 use ratatui::prelude::*;
 use ratatui::style::Modifier;
 use ratatui::style::Stylize;
@@ -428,20 +427,18 @@ impl ExecCell {
                 .all(|parsed| matches!(parsed, ParsedCommand::Read { .. }));
 
             let call_lines: Vec<(&str, Vec<Span<'static>>)> = if reads_only {
-                let names = call
-                    .parsed
-                    .iter()
-                    .map(|parsed| match parsed {
-                        ParsedCommand::Read { cmd, name, path } => {
-                            read_display_name(name, path, cmd)
-                        }
-                        _ => unreachable!(),
-                    })
-                    .unique();
-                vec![(
-                    "Read",
-                    Itertools::intersperse(names.into_iter().map(Into::into), " ".dim()).collect(),
-                )]
+                let mut lines = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                for parsed in &call.parsed {
+                    let ParsedCommand::Read { cmd, name, path } = parsed else {
+                        unreachable!();
+                    };
+                    let display = read_display_name(name, path, cmd);
+                    if seen.insert(display.clone()) {
+                        lines.push(("Read", vec![display.into()]));
+                    }
+                }
+                lines
             } else {
                 let mut lines = Vec::new();
                 for parsed in &call.parsed {
@@ -836,6 +833,7 @@ const EXEC_DISPLAY_LAYOUT: ExecDisplayLayout = ExecDisplayLayout::new(
 mod tests {
     use super::*;
     use devo_protocol::protocol::ExecCommandSource;
+    use itertools::Itertools;
     use pretty_assertions::assert_eq;
 
     fn render_line_text(line: &Line<'static>) -> String {
@@ -1203,6 +1201,89 @@ mod tests {
                 .count(),
             1,
             "expected full URL-like query in one rendered line, got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn exploring_display_shows_each_read_on_its_own_line() {
+        let path = std::path::PathBuf::from("crates/core/src/tools/registry_plan.rs");
+        let names = [
+            "crates/core/src/tools/registry_plan.rs L:93-132",
+            "crates/core/src/tools/registry_plan.rs L:588-627",
+            "crates/core/src/tools/registry_plan.rs L:938-967",
+        ];
+        let mut cell = ExecCell::new(
+            ExecCall {
+                call_id: "call-0".into(),
+                command: vec!["read".into()],
+                parsed: vec![ParsedCommand::Read {
+                    cmd: "read".to_string(),
+                    name: names[0].to_string(),
+                    path: path.clone(),
+                }],
+                output: Some(CommandOutput {
+                    exit_code: 0,
+                    aggregated_output: String::new(),
+                    formatted_output: String::new(),
+                }),
+                source: ExecCommandSource::Agent,
+                start_time: None,
+                duration: None,
+                interaction_input: None,
+                tool_name: Some("read".to_string()),
+                tool_input: None,
+                tool_output: None,
+                tool_display_content: None,
+            },
+            /*animations_enabled*/ false,
+        );
+        for (index, name) in names.iter().enumerate().skip(1) {
+            cell = cell
+                .with_added_call(
+                    format!("call-{index}"),
+                    vec!["read".into()],
+                    vec![ParsedCommand::Read {
+                        cmd: "read".to_string(),
+                        name: (*name).to_string(),
+                        path: path.clone(),
+                    }],
+                    ExecCommandSource::Agent,
+                    /*interaction_input*/ None,
+                )
+                .expect("append exploring read");
+            cell.complete_call(
+                &format!("call-{index}"),
+                CommandOutput {
+                    exit_code: 0,
+                    aggregated_output: String::new(),
+                    formatted_output: String::new(),
+                },
+                std::time::Duration::from_millis(1),
+            );
+        }
+
+        let rendered = cell
+            .display_lines(/*width*/ 120)
+            .iter()
+            .map(render_line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            rendered.contains("Explored"),
+            "expected Explored header, got:\n{rendered}"
+        );
+        for name in names {
+            assert!(
+                rendered.contains(&format!("Read {name}")),
+                "expected dedicated Read line for {name}, got:\n{rendered}"
+            );
+        }
+        assert!(
+            !rendered.contains(
+                "L:93-132 crates/core/src/tools/registry_plan.rs L:588-627"
+            ),
+            "reads must not be space-joined on one Read line:\n{rendered}"
         );
     }
 
