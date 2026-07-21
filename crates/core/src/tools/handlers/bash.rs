@@ -29,10 +29,10 @@ impl BashHandler {
         Self {
             spec: ToolSpec {
                 name: "shell_command".into(),
-                description: "Executes a shell command in the selected platform shell with optional timeout and output limits. Start the command string with a brief `# ...` comment on its own line explaining the command's purpose, then put the command on the next line.".into(),
+                description: "Executes a shell command in the selected platform shell with optional timeout and output limits.".into(),
                 input_schema: JsonSchema::object(
                     std::collections::BTreeMap::from([
-                        ("command".to_string(), JsonSchema::string(Some("The command to execute. Start with a brief `# ...` purpose comment on the line above the command."))),
+                        ("command".to_string(), JsonSchema::string(Some("The command to execute."))),
                         ("cmd".to_string(), JsonSchema::string(Some("Alias for command"))),
                         ("timeout".to_string(), JsonSchema::integer(Some("Optional timeout in milliseconds"))),
                         ("timeout_ms".to_string(), JsonSchema::integer(Some("Alias for timeout"))),

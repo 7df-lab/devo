@@ -48,13 +48,13 @@ impl ExecCommandHandler {
             background_tasks,
             spec: ToolSpec {
                 name: "exec_command".into(),
-                description: "Execute a command with PTY support and process management. Start the command string with a brief `# ...` comment on its own line explaining the command's purpose, then put the command on the next line.".into(),
+                description: "Execute a command with PTY support and process management.".into(),
                 input_schema: JsonSchema::object(
                     std::collections::BTreeMap::from([
                         (
                             "cmd".to_string(),
                             JsonSchema::string(Some(
-                                "The command to execute. Start with a brief `# ...` purpose comment on the line above the command.",
+                                "The command to execute.",
                             )),
                         ),
                         (

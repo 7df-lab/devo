@@ -31,7 +31,7 @@ impl ShellCommandHandler {
         Self {
             spec: ToolSpec {
                 name: "shell_command".into(),
-                description: "Executes a shell command with optional timeout. Start the command string with a brief `# ...` comment on its own line explaining the command's purpose, then put the command on the next line.".into(),
+                description: "Executes a shell command with optional timeout.".into(),
                 input_schema: JsonSchema::object(
                     std::collections::BTreeMap::from([
                         (
