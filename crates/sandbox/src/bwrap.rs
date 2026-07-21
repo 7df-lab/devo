@@ -933,7 +933,11 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "enforce", target_os = "linux"))]
+    #[serial_test::serial(sandbox_proxy_ports)]
     fn bwrap_wrap_argv_pipe_mode_uses_identity_fs_plan() {
+        // PipeComposed skips --unshare-net when managed proxy ports are published;
+        // clear the process-global store so this assertion is order-independent.
+        crate::managed_network::set_sandbox_proxy_ports(&[]);
         let workspace = std::env::current_dir().expect("cwd");
         let config = SandboxConfig::default();
         let resolved = ProfileName::ReadOnly
@@ -955,13 +959,14 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "enforce", target_os = "linux"))]
+    #[serial_test::serial(sandbox_proxy_ports)]
     fn bwrap_wrap_argv_pty_unshares_net_even_with_proxy_ports() {
         let workspace = std::env::current_dir().expect("cwd");
         let config = SandboxConfig::default();
         let restricted = ProfileName::ReadOnly
             .resolve_profile(&workspace, &config)
             .expect("resolve read-only");
-        crate::managed_network::set_sandbox_proxy_ports_env(&[18080]);
+        crate::managed_network::set_sandbox_proxy_ports(&[18080]);
         let (argv, _) = bwrap_wrap_argv(
             &workspace,
             &restricted,
@@ -969,13 +974,12 @@ mod tests {
             WrapMode::PtyOnly,
         )
         .expect("build pty wrap argv");
-        crate::managed_network::set_sandbox_proxy_ports_env(&[]);
         assert!(
             argv.iter().any(|arg| arg == "--unshare-net"),
             "PTY must unshare net even when proxy ports are published: {argv:?}"
         );
 
-        crate::managed_network::set_sandbox_proxy_ports_env(&[18080]);
+        crate::managed_network::set_sandbox_proxy_ports(&[18080]);
         let (pipe_argv, _) = bwrap_wrap_argv(
             &workspace,
             &restricted,
@@ -983,10 +987,10 @@ mod tests {
             WrapMode::PipeComposed,
         )
         .expect("build pipe wrap argv");
-        crate::managed_network::set_sandbox_proxy_ports_env(&[]);
         assert!(
             !pipe_argv.iter().any(|arg| arg == "--unshare-net"),
             "PipeComposed may skip unshare when proxy ports are set: {pipe_argv:?}"
         );
+        crate::managed_network::set_sandbox_proxy_ports(&[]);
     }
 }

@@ -8566,7 +8566,7 @@ fn read_tool_call_updates_placeholder_from_completed_tool_call_metadata() {
 }
 
 #[test]
-fn consecutive_read_tool_calls_render_on_one_line_with_spaces() {
+fn consecutive_read_tool_calls_render_each_on_its_own_line() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
@@ -8574,7 +8574,14 @@ fn consecutive_read_tool_calls_render_on_one_line_with_spaces() {
     };
     let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
 
-    for name in ["mod.rs", "lib.rs", "file1.rs", "file2.rs"] {
+    let paths = [
+        "crates/tui/src/mod.rs",
+        "crates/tui/src/lib.rs",
+        "crates/tui/src/file1.rs",
+        "crates/tui/src/file2.rs",
+    ];
+    for path in paths {
+        let name = path.rsplit('/').next().expect("basename");
         let tool_use_id = format!("tool-{name}");
         widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
             tool_use_id: tool_use_id.clone(),
@@ -8588,16 +8595,16 @@ fn consecutive_read_tool_calls_render_on_one_line_with_spaces() {
         });
         widget.handle_worker_event(crate::events::WorkerEvent::ToolCallUpdated {
             tool_use_id: tool_use_id.clone(),
-            summary: format!("read crates/tui/src/{name}"),
+            summary: format!("read {path}"),
             parsed_commands: vec![devo_protocol::parse_command::ParsedCommand::Read {
-                cmd: format!("read crates/tui/src/{name}"),
+                cmd: format!("read {path}"),
                 name: name.to_string(),
-                path: PathBuf::from(format!("crates/tui/src/{name}")),
+                path: PathBuf::from(path),
             }],
         });
         widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
             tool_use_id,
-            title: format!("read crates/tui/src/{name}"),
+            title: format!("read {path}"),
             preview: String::new(),
             is_error: false,
             truncated: false,
@@ -8616,11 +8623,15 @@ fn consecutive_read_tool_calls_render_on_one_line_with_spaces() {
         .collect::<Vec<_>>()
         .join("\n");
 
+    for path in paths {
+        assert!(
+            display.contains(&format!("Read {path}")),
+            "expected dedicated Read line for {path}: {display}"
+        );
+    }
     assert!(
-        display.contains(
-            "Read crates/tui/src/mod.rs crates/tui/src/lib.rs crates/tui/src/file1.rs crates/tui/src/file2.rs"
-        ),
-        "expected consecutive reads to render space-separated: {display}"
+        !display.contains("Read crates/tui/src/mod.rs crates/tui/src/lib.rs"),
+        "reads must not be space-joined on one Read line: {display}"
     );
 }
 

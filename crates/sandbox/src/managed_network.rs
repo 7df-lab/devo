@@ -176,6 +176,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(sandbox_proxy_ports)]
     fn set_sandbox_proxy_ports_is_visible_to_context_lookup() {
         set_sandbox_proxy_ports(&[9, 1, 9]);
         assert_eq!(
@@ -184,7 +185,14 @@ mod tests {
         );
         assert!(sandbox_proxy_available());
         set_sandbox_proxy_ports(&[]);
-        let _ = managed_network_context_from_env();
+        // Do not assert via `sandbox_proxy_available()`: that also inspects
+        // HTTP(S)_PROXY / ALL_PROXY, which may be set in the ambient process.
+        assert!(
+            PUBLISHED_PROXY_PORTS
+                .lock()
+                .expect("proxy ports mutex")
+                .is_empty()
+        );
     }
 
     #[test]
