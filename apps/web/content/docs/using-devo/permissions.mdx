@@ -48,11 +48,21 @@ Use the shown options to respond:
 
 | Option | Shortcut | Effect |
 | --- | --- | --- |
-| Approve once | `y` | Allow only this pending tool execution. |
-| Approve for session | `s` | Allow matching requests for the rest of this session, when the request supports session scope. |
-| Deny | `n` | Reject this tool execution. |
+| Yes, proceed | `y` | Allow only this pending tool execution. |
+| Don't ask again for this command in this session | `s` | Allow matching requests for the rest of this session, when the request supports session scope. |
+| Don't ask again for commands that start with a prefix | `p` | Save a persistent allow rule for that command prefix, when offered. |
+| Don't ask again for files under a path | `f` | Allow matching path prefixes for the rest of this session, when offered. |
+| Allow this host for this session | `h` | Allow the requested network host for the rest of this session, when offered. |
+| No, continue without running it | `n` | Reject this tool execution and let the agent continue. |
 
-`Esc` cancels the approval request.
+`Esc` cancels the approval request and interrupts the turn.
+
+If a sandboxed shell command is denied by the OS sandbox after you already
+approved that call (once, session, prefix, or auto-review), Devo may retry it
+once with the sandbox off without asking again. If the call was never approved
+interactively (for example Default policy allowed it automatically), the denial
+is returned to the model so it can re-call with
+`sandbox_permissions: "require_escalated"` and a justification.
 
 ## Auto-review
 

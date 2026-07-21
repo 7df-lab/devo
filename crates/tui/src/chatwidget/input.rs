@@ -245,6 +245,9 @@ impl ChatWidget {
             AppEvent::ThemeSelected { name } => {
                 self.apply_theme_selection(name);
             }
+            AppEvent::CollapseReasoningSelected { collapsed } => {
+                self.apply_collapse_reasoning(collapsed);
+            }
             AppEvent::ReasoningEffortSelected { value } => {
                 self.set_reasoning_effort_selection(value)
             }
@@ -301,7 +304,8 @@ impl ChatWidget {
             | AppEvent::StatusLineSetupCancelled
             | AppEvent::TerminalTitleSetup { .. }
             | AppEvent::TerminalTitleSetupPreview { .. }
-            | AppEvent::TerminalTitleSetupCancelled => {
+            | AppEvent::TerminalTitleSetupCancelled
+            | AppEvent::ReloadInlineTranscript => {
                 self.frame_requester.schedule_frame();
             }
             AppEvent::ReferenceSearchResults { snapshot } => {

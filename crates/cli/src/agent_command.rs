@@ -33,22 +33,13 @@ pub(crate) async fn run_agent(
 ) -> Result<devo_tui::AppExit> {
     let cwd = std::env::current_dir()?;
     let config_home = find_devo_home().context("could not determine devo home directory")?;
-    let model_catalog = PresetModelCatalog::load_from_config(&config_home, Some(&cwd))?;
-    let startup_warnings = model_catalog
-        .warnings()
-        .iter()
-        .map(|warning| {
-            format!(
-                "Model catalog warning for {}: {}",
-                warning.path.display(),
-                warning.message
-            )
-        })
-        .collect();
     let app_config = FileSystemAppConfigLoader::new(config_home.clone()).load(Some(&cwd))?;
+    let model_catalog = PresetModelCatalog::load_from_config(&app_config.provider.model_overrides)?;
     let project_key = project_config_key(&cwd);
     let permission_preset =
         initial_permission_preset(&app_config, &project_key, dangerously_skip_permissions);
+    let sandbox_profile =
+        initial_sandbox_profile(&app_config, &project_key, dangerously_skip_permissions);
     let (onboarding_mode, resolved) = resolve_initial_provider_settings(
         force_onboarding,
         &app_config,
@@ -100,6 +91,7 @@ pub(crate) async fn run_agent(
             provider: wire_api,
             reasoning_effort_selection: model_reasoning_effort_selection,
             permission_preset,
+            sandbox_profile,
             // TODO: why do we need cwd here, maybe remove it ?
             cwd,
         },
@@ -108,7 +100,6 @@ pub(crate) async fn run_agent(
         saved_models,
         show_model_onboarding: onboarding_mode,
         exit_after_onboarding,
-        startup_warnings,
     })
     .await?;
     tracing::info!("interactive tui returned to cli agent command");
@@ -131,6 +122,33 @@ fn initial_permission_preset(
     }
 
     permission_preset
+}
+
+/// Sandbox profile shown as current when the TUI starts. Prefer the project
+/// `sandbox_profile` when set; otherwise derive it from the permission preset
+/// (Full Access → off, otherwise workspace).
+fn initial_sandbox_profile(
+    app_config: &AppConfig,
+    project_key: &str,
+    dangerously_skip_permissions: bool,
+) -> Option<String> {
+    if dangerously_skip_permissions {
+        return Some("off".to_string());
+    }
+    let project = app_config.projects.get(project_key);
+    if let Some(profile) = project.and_then(|config| config.sandbox_profile.clone()) {
+        return Some(profile);
+    }
+    let preset = project
+        .and_then(|config| config.permission_preset)
+        .unwrap_or(PermissionPreset::Default);
+    Some(
+        match preset {
+            PermissionPreset::FullAccess => "off",
+            PermissionPreset::Default | PermissionPreset::AutoReview => "workspace",
+        }
+        .to_string(),
+    )
 }
 
 /// Resolves the initial provider settings and whether onboarding should be shown.
@@ -261,6 +279,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::initial_permission_preset;
+    use super::initial_sandbox_profile;
     use super::resolve_initial_provider_settings;
     use super::saved_model_entries;
     use devo_core::AppConfig;
@@ -309,7 +328,8 @@ mod tests {
         app_config.projects.insert(
             "project-key".to_string(),
             ProjectConfig {
-                permission_preset: Some(PermissionPreset::ReadOnly),
+                permission_preset: Some(PermissionPreset::AutoReview),
+                sandbox_profile: None,
             },
         );
 
@@ -319,7 +339,7 @@ mod tests {
                 "project-key",
                 /*dangerously_skip_permissions*/ false,
             ),
-            PermissionPreset::ReadOnly,
+            PermissionPreset::AutoReview,
         );
     }
 
@@ -329,7 +349,8 @@ mod tests {
         app_config.projects.insert(
             "project-key".to_string(),
             ProjectConfig {
-                permission_preset: Some(PermissionPreset::ReadOnly),
+                permission_preset: Some(PermissionPreset::AutoReview),
+                sandbox_profile: None,
             },
         );
 
@@ -340,6 +361,69 @@ mod tests {
                 /*dangerously_skip_permissions*/ true,
             ),
             PermissionPreset::FullAccess,
+        );
+    }
+
+    #[test]
+    fn initial_sandbox_profile_uses_project_config_when_set() {
+        let mut app_config = AppConfig::default();
+        app_config.projects.insert(
+            "project-key".to_string(),
+            ProjectConfig {
+                permission_preset: None,
+                sandbox_profile: Some("strict".to_string()),
+            },
+        );
+
+        assert_eq!(
+            initial_sandbox_profile(
+                &app_config,
+                "project-key",
+                /*dangerously_skip_permissions*/ false,
+            ),
+            Some("strict".to_string()),
+        );
+    }
+
+    #[test]
+    fn initial_sandbox_profile_falls_back_to_permission_implied() {
+        let mut app_config = AppConfig::default();
+        app_config.projects.insert(
+            "full-access-project".to_string(),
+            ProjectConfig {
+                permission_preset: Some(PermissionPreset::FullAccess),
+                sandbox_profile: None,
+            },
+        );
+
+        assert_eq!(
+            initial_sandbox_profile(
+                &app_config,
+                "missing-project-key",
+                /*dangerously_skip_permissions*/ false,
+            ),
+            Some("workspace".to_string()),
+        );
+        assert_eq!(
+            initial_sandbox_profile(
+                &app_config,
+                "full-access-project",
+                /*dangerously_skip_permissions*/ false,
+            ),
+            Some("off".to_string()),
+        );
+    }
+
+    #[test]
+    fn initial_sandbox_profile_respects_dangerously_skip_permissions() {
+        let app_config = AppConfig::default();
+        assert_eq!(
+            initial_sandbox_profile(
+                &app_config,
+                "any",
+                /*dangerously_skip_permissions*/ true,
+            ),
+            Some("off".to_string()),
         );
     }
 

@@ -86,7 +86,61 @@ fn update_provider_config_document(
         .expect("provider config must serialize to a TOML table");
 
     overlay_optional_key(document, replacement, "model_provider");
-    overlay_optional_key(document, replacement, "model");
+    if config.model_overrides.is_empty() {
+        overlay_optional_key(document, replacement, "model");
+    } else {
+        let model_overrides = document
+            .entry("model".to_string())
+            .or_insert_with(|| Value::Table(Default::default()));
+        let model_overrides = ensure_table(model_overrides);
+        let replacement_overrides = replacement.get("model").and_then(Value::as_table);
+
+        for model_slug in config.model_overrides.keys() {
+            let model_override = model_overrides
+                .entry(model_slug.clone())
+                .or_insert_with(|| Value::Table(Default::default()));
+            let model_override = ensure_table(model_override);
+            let replacement_override = replacement_overrides
+                .and_then(|overrides| overrides.get(model_slug))
+                .and_then(Value::as_table);
+
+            if let Some(replacement_override) = replacement_override {
+                overlay_optional_key(model_override, replacement_override, "display_name");
+                overlay_optional_key(model_override, replacement_override, "description");
+                overlay_optional_key(model_override, replacement_override, "context_window");
+                overlay_optional_key(
+                    model_override,
+                    replacement_override,
+                    "effective_context_window_percent",
+                );
+                overlay_optional_key(model_override, replacement_override, "max_tokens");
+                overlay_optional_key(model_override, replacement_override, "temperature");
+                overlay_optional_key(model_override, replacement_override, "top_p");
+                overlay_optional_key(model_override, replacement_override, "top_k");
+                overlay_optional_key(model_override, replacement_override, "provider");
+                overlay_optional_key(model_override, replacement_override, "reasoning_capability");
+                overlay_optional_key(
+                    model_override,
+                    replacement_override,
+                    "reasoning_implementation",
+                );
+                overlay_optional_key(
+                    model_override,
+                    replacement_override,
+                    "default_reasoning_effort",
+                );
+                overlay_optional_key(model_override, replacement_override, "base_instructions");
+                overlay_optional_key(model_override, replacement_override, "input_modalities");
+                overlay_optional_key(model_override, replacement_override, "channel");
+                overlay_optional_key(model_override, replacement_override, "truncation_policy");
+                overlay_optional_key(
+                    model_override,
+                    replacement_override,
+                    "supports_image_detail_original",
+                );
+            }
+        }
+    }
     overlay_optional_key(document, replacement, "model_reasoning_effort_selection");
     document.remove("model_thinking_selection");
     document.remove("model_thinking");

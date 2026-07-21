@@ -1,5 +1,5 @@
 import type { ReasoningPart, ToolPart } from "../../lib/types"
-import { getToolCategory, type ToolCategory } from "./tool-card"
+import { getToolCategory, type ToolCategory } from "./tool-category"
 
 export type ProcessTimelineInput =
 	| { kind: "tool"; part: ToolPart }

@@ -524,15 +524,13 @@ mod tests {
                     ]
                 })
             ),
-            vec![AcpToolCallContent::Content {
-                content: AcpContentBlock::Image {
-                    annotations: None,
-                    data: "iVBORw0KGgo=".to_string(),
-                    mime_type: "image/png".to_string(),
-                    uri: None,
-                    meta: None,
-                }
-            }]
+            vec![AcpToolCallContent::content(AcpContentBlock::Image {
+                annotations: None,
+                data: "iVBORw0KGgo=".to_string(),
+                mime_type: "image/png".to_string(),
+                uri: None,
+                meta: None,
+            })]
         );
     }
 
@@ -547,9 +545,9 @@ mod tests {
             status: AcpToolCallStatus::Pending,
             raw_input: Some(serde_json::json!({ "path": path_json.clone() })),
             raw_output: Some(serde_json::json!({ "ok": true })),
-            content: vec![AcpToolCallContent::Content {
-                content: AcpContentBlock::text("reading"),
-            }],
+            content: vec![AcpToolCallContent::content(AcpContentBlock::text(
+                "reading",
+            ))],
             locations: vec![AcpToolCallLocation {
                 path: path.clone(),
                 line: Some(7),
@@ -837,9 +835,9 @@ mod tests {
 
         assert_eq!(
             file_change_tool_content(&change),
-            vec![AcpToolCallContent::Content {
-                content: AcpContentBlock::text(unified_diff)
-            }]
+            vec![AcpToolCallContent::content(AcpContentBlock::text(
+                unified_diff
+            ))]
         );
     }
 
@@ -976,9 +974,9 @@ mod tests {
                 status: Some(AcpToolCallStatus::Completed),
                 raw_input: Some(serde_json::json!({"cmd": "cargo test"})),
                 raw_output: Some(serde_json::Value::String("tests passed\n".to_string())),
-                content: vec![AcpToolCallContent::Content {
-                    content: AcpContentBlock::text("tests passed\n"),
-                }],
+                content: vec![AcpToolCallContent::content(AcpContentBlock::text(
+                    "tests passed\n"
+                ))],
                 locations: Vec::new(),
                 meta: Some(turn_item_meta(&turn_id, &item_id)),
             })

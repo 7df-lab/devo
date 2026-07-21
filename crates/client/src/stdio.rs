@@ -185,6 +185,13 @@ impl StdioServerClient {
         self.core.session_permissions_update(params).await
     }
 
+    pub async fn session_sandbox_profile_update(
+        &mut self,
+        params: SessionSandboxProfileUpdateParams,
+    ) -> Result<SessionSandboxProfileUpdateResult> {
+        self.core.session_sandbox_profile_update(params).await
+    }
+
     pub async fn session_compact(
         &mut self,
         params: SessionCompactParams,

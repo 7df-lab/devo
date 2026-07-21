@@ -46,12 +46,36 @@ pub(crate) struct PersistedTurnItem {
     pub(crate) turn_item: devo_core::TurnItem,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SandboxBypassKey {
+    pub(crate) command: String,
+    pub(crate) cwd: PathBuf,
+    pub(crate) sandbox_permissions: String,
+}
+
+pub(crate) fn sandbox_bypass_key_from_pending(
+    pending: &PendingApproval,
+) -> Option<SandboxBypassKey> {
+    let command = pending.command.clone()?;
+    Some(SandboxBypassKey {
+        command,
+        cwd: pending.cwd.clone(),
+        sandbox_permissions: pending.sandbox_permissions.clone(),
+    })
+}
+
 pub(crate) struct PendingApproval {
     pub(crate) owner_session_id: devo_protocol::SessionId,
     pub(crate) tool_name: String,
+    pub(crate) resource: Option<devo_safety::ResourceKind>,
     pub(crate) path: Option<PathBuf>,
     pub(crate) host: Option<String>,
     pub(crate) command_prefix: Option<Vec<String>>,
+    pub(crate) command_pattern: Option<Vec<String>>,
+    pub(crate) requests_escalation: bool,
+    pub(crate) command: Option<String>,
+    pub(crate) cwd: PathBuf,
+    pub(crate) sandbox_permissions: String,
     pub(crate) tx: oneshot::Sender<ApprovalDecisionValue>,
 }
 
@@ -60,12 +84,17 @@ pub(crate) struct PendingUserInput {
     pub(crate) tx: oneshot::Sender<RequestUserInputResponse>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ApprovalGrantCache {
     pub(crate) tools: HashSet<String>,
     pub(crate) hosts: HashSet<String>,
-    pub(crate) path_prefixes: HashSet<PathBuf>,
+    pub(crate) read_path_prefixes: HashSet<PathBuf>,
+    pub(crate) write_path_prefixes: HashSet<PathBuf>,
     pub(crate) command_prefixes: HashSet<Vec<String>>,
+    pub(crate) command_patterns: HashSet<Vec<String>>,
+    /// Exact shell command + cwd grants (session-scoped; no wildcards).
+    pub(crate) exact_commands: HashSet<(String, PathBuf)>,
+    pub(crate) sandbox_bypass_commands: HashSet<SandboxBypassKey>,
 }
 
 /// Shared server-owned runtime dependencies used by live turn execution.
@@ -372,16 +401,27 @@ mod tests {
         let workspace_b = root.join("workspace-b");
         std::fs::create_dir_all(workspace_a.join(".devo")).expect("create workspace a config dir");
         std::fs::create_dir_all(workspace_b.join(".devo")).expect("create workspace b config dir");
+        let legacy_models_path = workspace_a.join(".devo").join("models.json");
+        let legacy_models =
+            br#"[{"slug":"legacy-only-workspace-model","display_name":"Legacy Only"}]"#;
+        std::fs::write(&legacy_models_path, legacy_models).expect("write legacy workspace models");
+        let absent_legacy_models_path = workspace_b.join(".devo").join("models.json");
         std::fs::write(
-            workspace_a.join(".devo").join("models.json"),
-            r#"[{"slug":"workspace-a-model","display_name":"Workspace A","priority":10000}]"#,
+            workspace_a.join(".devo").join("config.toml"),
+            r#"
+[model.workspace-a-model]
+display_name = "Workspace A"
+"#,
         )
-        .expect("write workspace a models");
+        .expect("write workspace a config");
         std::fs::write(
-            workspace_b.join(".devo").join("models.json"),
-            r#"[{"slug":"workspace-b-model","display_name":"Workspace B","priority":10000}]"#,
+            workspace_b.join(".devo").join("config.toml"),
+            r#"
+[model.workspace-b-model]
+display_name = "Workspace B"
+"#,
         )
-        .expect("write workspace b models");
+        .expect("write workspace b config");
 
         let context_a = deps
             .context_for_workspace(&workspace_a)
@@ -392,14 +432,101 @@ mod tests {
             .await
             .expect("load workspace b context");
 
-        assert_eq!(context_a.default_model, "workspace-a-model");
-        assert_eq!(context_b.default_model, "workspace-b-model");
         assert_eq!(context_a.provider.name(), "noop");
         assert_eq!(context_b.provider.name(), "noop");
+        assert_eq!(
+            context_a
+                .model_catalog
+                .get("workspace-a-model")
+                .expect("workspace a model")
+                .display_name,
+            "Workspace A"
+        );
+        assert_eq!(
+            context_b
+                .model_catalog
+                .get("workspace-b-model")
+                .expect("workspace b model")
+                .display_name,
+            "Workspace B"
+        );
         assert!(context_a.model_catalog.get("workspace-b-model").is_none());
         assert!(context_b.model_catalog.get("workspace-a-model").is_none());
+        assert!(
+            context_a
+                .model_catalog
+                .get("legacy-only-workspace-model")
+                .is_none()
+        );
+        assert!(
+            context_b
+                .model_catalog
+                .get("legacy-only-workspace-model")
+                .is_none()
+        );
+        assert_eq!(
+            std::fs::read(&legacy_models_path).expect("read legacy workspace models"),
+            legacy_models
+        );
+        assert!(!absent_legacy_models_path.exists());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn context_for_workspace_reuses_provider_runtime_for_model_metadata_overrides() {
+        let deps = test_deps(
+            r#"
+[defaults]
+model_binding = "main"
+
+[providers.openrouter]
+enabled = true
+name = "OpenRouter"
+wire_apis = ["openai_chat_completions"]
+
+[model_bindings.main]
+enabled = true
+model_slug = "catalog-slug"
+provider = "openrouter"
+request_model = "vendor/model-name"
+invocation_method = "openai_chat_completions"
+"#,
+        );
+        let workspace = unique_temp_dir("session-context-model-metadata");
+        std::fs::create_dir_all(workspace.join(".devo")).expect("create workspace config dir");
+        std::fs::write(
+            workspace.join(".devo").join("config.toml"),
+            r#"
+[model.catalog-slug]
+display_name = "Workspace Catalog Model"
+"#,
+        )
+        .expect("write workspace config");
+
+        let context = deps
+            .context_for_workspace(&workspace)
+            .await
+            .expect("load workspace context");
+
+        assert!(Arc::ptr_eq(
+            &context.provider,
+            &deps.process_context.provider
+        ));
+        assert!(Arc::ptr_eq(
+            &context.provider_router,
+            &deps.process_context.provider_router
+        ));
+        assert_eq!(
+            context
+                .model_catalog
+                .get("catalog-slug")
+                .expect("workspace catalog model")
+                .display_name,
+            "Workspace Catalog Model"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[tokio::test]

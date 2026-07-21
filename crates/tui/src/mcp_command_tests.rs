@@ -22,6 +22,7 @@ fn widget_with_model(model: Model) -> (ChatWidget, mpsc::UnboundedReceiver<AppEv
         initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -31,6 +32,7 @@ fn widget_with_model(model: Model) -> (ChatWidget, mpsc::UnboundedReceiver<AppEv
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
     (widget, app_event_rx)
 }

@@ -63,6 +63,7 @@ fn widget_with_model_and_reasoning_effort(
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_reasoning_effort_selection,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -72,6 +73,7 @@ fn widget_with_model_and_reasoning_effort(
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
     (widget, app_event_rx)
 }
@@ -101,6 +103,7 @@ fn onboarding_widget_with_model(
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -110,6 +113,7 @@ fn onboarding_widget_with_model(
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
     (widget, app_event_rx)
 }
@@ -135,6 +139,7 @@ fn onboarding_widget_with_available_model_and_exit_after_onboarding(
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -144,6 +149,7 @@ fn onboarding_widget_with_available_model_and_exit_after_onboarding(
         exit_after_onboarding,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
     (widget, app_event_rx)
 }
@@ -165,6 +171,12 @@ fn rendered_rows(widget: &ChatWidget, width: u16, height: u16) -> Vec<String> {
                 .collect::<String>()
         })
         .collect()
+}
+
+fn lines_contain_fg(lines: &[Line<'static>], color: Color) -> bool {
+    lines
+        .iter()
+        .any(|line| line.spans.iter().any(|span| span.style.fg == Some(color)))
 }
 
 fn press_key(code: KeyCode) -> KeyEvent {
@@ -969,6 +981,8 @@ fn approval_request_renders_bottom_pane_menu_and_accepts_once() {
         path: Some("src/main.rs".to_string()),
         host: None,
         target: None,
+        command_pattern: None,
+        command_prefix: None,
     });
 
     let scrollback = widget.drain_scrollback_lines(80);
@@ -977,11 +991,11 @@ fn approval_request_renders_bottom_pane_menu_and_accepts_once() {
         "Permission required"
     ));
 
-    let rendered = rendered_rows(&widget, 80, 16).join("\n");
+    let rendered = rendered_rows(&widget, 80, 24).join("\n");
     assert!(rendered.contains("Permission approval required"));
-    assert!(rendered.contains("Approve once"));
-    assert!(rendered.contains("Approve for session"));
-    assert!(rendered.contains("Deny"));
+    assert!(rendered.contains("Yes, proceed"));
+    assert!(rendered.contains("don't ask again"));
+    assert!(rendered.contains("No, continue without running it"));
 
     widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -1040,6 +1054,8 @@ fn approval_request_does_not_duplicate_already_committed_assistant_text() {
         path: Some("src/main.rs".to_string()),
         host: None,
         target: None,
+        command_pattern: None,
+        command_prefix: None,
     });
 
     let transcript = widget.transcript_overlay_lines(100);
@@ -1082,12 +1098,14 @@ fn approval_request_bottom_pane_menu_denies_with_n_shortcut() {
         path: None,
         host: None,
         target: Some("cargo test".to_string()),
+        command_pattern: None,
+        command_prefix: None,
     });
 
-    let rendered = rendered_rows(&widget, 80, 16).join("\n");
+    let rendered = rendered_rows(&widget, 80, 24).join("\n");
     assert!(rendered.contains("Permission approval required"));
     assert!(rendered.contains("run shell command"));
-    assert!(rendered.contains("Deny"));
+    assert!(rendered.contains("No, continue without running it"));
 
     widget.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
 
@@ -1606,22 +1624,14 @@ fn permissions_command_opens_bottom_pane_picker_and_updates_default() {
         ..Model::default()
     };
     let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
-    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
-        model: "test-model".to_string(),
-        model_binding_id: None,
-        reasoning_effort_selection: None,
-        reasoning_effort: None,
-        turn_id: TurnId::new(),
-    });
 
     widget.handle_app_event(AppEvent::RunSlashCommand {
         command: "permissions".to_string(),
     });
 
     let rendered = rendered_rows(&widget, 100, 18).join("\n");
-    assert!(rendered.contains("Update Model Permissions"));
-    assert!(rendered.contains("Read Only"));
-    assert!(rendered.contains("● 2. Default"));
+    assert!(rendered.contains("Update Permissions"));
+    assert!(rendered.contains("● 1. Default"));
     assert!(rendered.contains("Auto-review"));
     assert!(rendered.contains("Full Access"));
 
@@ -1631,9 +1641,46 @@ fn permissions_command_opens_bottom_pane_picker_and_updates_default() {
     assert_eq!(
         event,
         AppEvent::Command(AppCommand::UpdatePermissions {
-            preset: devo_protocol::PermissionPreset::ReadOnly,
+            preset: devo_protocol::PermissionPreset::Default,
         })
     );
+}
+
+#[test]
+fn busy_widget_blocks_permissions_change_with_transcript_message() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+    widget.handle_app_event(AppEvent::RunSlashCommand {
+        command: "permissions".to_string(),
+    });
+
+    assert!(app_event_rx.try_recv().is_err());
+
+    let scrollback = widget
+        .drain_scrollback_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(scrollback.contains("Cannot change permissions while generating"));
 }
 
 #[test]
@@ -1650,6 +1697,7 @@ fn permissions_command_marks_initial_project_preset_current() {
         initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: PermissionPreset::FullAccess,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -1659,6 +1707,7 @@ fn permissions_command_marks_initial_project_preset_current() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::RunSlashCommand {
@@ -1666,7 +1715,26 @@ fn permissions_command_marks_initial_project_preset_current() {
     });
 
     let rendered = rendered_rows(&widget, 100, 18).join("\n");
-    assert!(rendered.contains("● 4. Full Access"));
+    assert!(rendered.contains("● 3. Full Access"));
+}
+
+#[test]
+fn sandbox_slash_command_is_removed() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_app_event(AppEvent::RunSlashCommand {
+        command: "sandbox".to_string(),
+    });
+
+    assert!(
+        app_event_rx.try_recv().is_err(),
+        "/sandbox should no longer open a picker or emit update commands"
+    );
 }
 
 #[test]
@@ -2068,6 +2136,39 @@ fn busy_widget_blocks_model_change_with_transcript_message() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(scrollback.contains("Cannot change model while generating"));
+}
+
+#[test]
+fn theme_selection_applies_header_accent_immediately() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let aurora_accent = Color::Rgb(0x78, 0xD0, 0xA8);
+
+    // Flush the startup header into scrollback, matching the live TUI path.
+    let _ = widget.drain_scrollback_lines(100);
+
+    widget.handle_app_event(AppEvent::ThemeSelected {
+        name: "aurora".to_string(),
+    });
+
+    let reload = app_event_rx
+        .try_recv()
+        .expect("theme apply should request an inline transcript reload");
+    assert_eq!(reload, AppEvent::ReloadInlineTranscript);
+
+    let reloaded = widget.drain_scrollback_lines(100);
+    let reloaded_lines = reloaded
+        .iter()
+        .map(|line| line.line.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        lines_contain_fg(&reloaded_lines, aurora_accent),
+        "header should re-emit with aurora accent after theme selection"
+    );
 }
 
 #[test]
@@ -5654,6 +5755,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -5666,6 +5768,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::RunSlashCommand {
@@ -7133,6 +7236,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -7145,6 +7249,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::ModelSelected {
@@ -7209,6 +7314,7 @@ fn model_selection_with_reasoning_effort_support_waits_for_second_step() {
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -7218,6 +7324,7 @@ fn model_selection_with_reasoning_effort_support_waits_for_second_step() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::ModelSelected {
@@ -7264,6 +7371,7 @@ fn model_selection_without_reasoning_effort_support_finishes_immediately() {
         initial_session: TuiSessionState::new(cwd, Some(base_model)),
         initial_reasoning_effort_selection: None,
         initial_permission_preset: devo_protocol::PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -7273,6 +7381,7 @@ fn model_selection_without_reasoning_effort_support_finishes_immediately() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::ModelSelected {
@@ -7504,6 +7613,195 @@ fn live_reasoning_cell_renders_without_duplication() {
     assert_eq!(
         occurrences, 1,
         "reasoning should appear exactly once, got {occurrences}:\n{before}"
+    );
+}
+
+#[test]
+fn collapsed_reasoning_live_view_keeps_only_latest_lines() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
+        initial_reasoning_effort_selection: None,
+        initial_permission_preset: PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: Vec::new(),
+        saved_models: Vec::new(),
+        show_model_onboarding: false,
+        exit_after_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+        initial_collapse_reasoning: true,
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        "line one\n\nline two\n\nline three\n\nline four\n\nline five".to_string(),
+    ));
+
+    let live = widget
+        .active_viewport_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        live.contains("line five"),
+        "collapsed live view should keep the latest reasoning line:\n{live}"
+    );
+    assert!(
+        !live.contains("line one"),
+        "collapsed live view should drop older reasoning lines:\n{live}"
+    );
+    assert!(
+        live.contains("ctrl + t to view transcript"),
+        "collapsed live reasoning should hint Ctrl+T:\n{live}"
+    );
+}
+
+#[test]
+fn collapsed_short_reasoning_stays_full_after_completion() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
+        initial_reasoning_effort_selection: None,
+        initial_permission_preset: PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: Vec::new(),
+        saved_models: Vec::new(),
+        show_model_onboarding: false,
+        exit_after_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+        initial_collapse_reasoning: true,
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        "short thought".to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
+        "short thought".to_string(),
+    ));
+
+    let scrollback = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        scrollback.contains("short thought"),
+        "short collapsed reasoning should stay fully visible after completion:\n{scrollback}"
+    );
+    assert!(
+        scrollback.contains("ctrl + t to view transcript"),
+        "collapsed short reasoning should hint Ctrl+T:\n{scrollback}"
+    );
+}
+
+#[test]
+fn collapsed_long_reasoning_compacts_to_one_line_after_completion() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
+        initial_reasoning_effort_selection: None,
+        initial_permission_preset: PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: Vec::new(),
+        saved_models: Vec::new(),
+        show_model_onboarding: false,
+        exit_after_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+        initial_collapse_reasoning: true,
+    });
+
+    let long_reasoning = "line one\n\nline two\n\nline three\n\nline four\n\nline five";
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        long_reasoning.to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
+        long_reasoning.to_string(),
+    ));
+
+    let scrollback = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        scrollback.contains("Thought · line one"),
+        "long collapsed reasoning should compact to a one-line Thought summary:\n{scrollback}"
+    );
+    assert!(
+        scrollback.contains("ctrl + t to view transcript"),
+        "collapsed reasoning should hint Ctrl+T near the Thought cell:\n{scrollback}"
+    );
+    assert!(
+        !scrollback.contains("line five"),
+        "long collapsed reasoning should not keep the full body in main scrollback:\n{scrollback}"
+    );
+
+    let transcript = widget
+        .transcript_overlay_cells(80)
+        .into_iter()
+        .flat_map(|cell| cell.lines)
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        transcript.contains("line five"),
+        "long collapsed reasoning should remain available in Ctrl+T transcript:\n{transcript}"
     );
 }
 
@@ -8268,7 +8566,7 @@ fn read_tool_call_updates_placeholder_from_completed_tool_call_metadata() {
 }
 
 #[test]
-fn consecutive_read_tool_calls_render_on_one_line_with_spaces() {
+fn consecutive_read_tool_calls_render_each_on_its_own_line() {
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
@@ -8276,7 +8574,14 @@ fn consecutive_read_tool_calls_render_on_one_line_with_spaces() {
     };
     let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
 
-    for name in ["mod.rs", "lib.rs", "file1.rs", "file2.rs"] {
+    let paths = [
+        "crates/tui/src/mod.rs",
+        "crates/tui/src/lib.rs",
+        "crates/tui/src/file1.rs",
+        "crates/tui/src/file2.rs",
+    ];
+    for path in paths {
+        let name = path.rsplit('/').next().expect("basename");
         let tool_use_id = format!("tool-{name}");
         widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
             tool_use_id: tool_use_id.clone(),
@@ -8290,16 +8595,16 @@ fn consecutive_read_tool_calls_render_on_one_line_with_spaces() {
         });
         widget.handle_worker_event(crate::events::WorkerEvent::ToolCallUpdated {
             tool_use_id: tool_use_id.clone(),
-            summary: format!("read crates/tui/src/{name}"),
+            summary: format!("read {path}"),
             parsed_commands: vec![devo_protocol::parse_command::ParsedCommand::Read {
-                cmd: format!("read crates/tui/src/{name}"),
+                cmd: format!("read {path}"),
                 name: name.to_string(),
-                path: PathBuf::from(format!("crates/tui/src/{name}")),
+                path: PathBuf::from(path),
             }],
         });
         widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
             tool_use_id,
-            title: format!("read crates/tui/src/{name}"),
+            title: format!("read {path}"),
             preview: String::new(),
             is_error: false,
             truncated: false,
@@ -8318,11 +8623,15 @@ fn consecutive_read_tool_calls_render_on_one_line_with_spaces() {
         .collect::<Vec<_>>()
         .join("\n");
 
+    for path in paths {
+        assert!(
+            display.contains(&format!("Read {path}")),
+            "expected dedicated Read line for {path}: {display}"
+        );
+    }
     assert!(
-        display.contains(
-            "Read crates/tui/src/mod.rs crates/tui/src/lib.rs crates/tui/src/file1.rs crates/tui/src/file2.rs"
-        ),
-        "expected consecutive reads to render space-separated: {display}"
+        !display.contains("Read crates/tui/src/mod.rs crates/tui/src/lib.rs"),
+        "reads must not be space-joined on one Read line: {display}"
     );
 }
 

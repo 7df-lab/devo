@@ -14,6 +14,7 @@ use crate::history_cell;
 use crate::history_cell::PlainHistoryCell;
 use crate::slash_command::SlashCommand;
 use devo_protocol::MAX_THREAD_GOAL_OBJECTIVE_CHARS;
+use devo_protocol::PermissionPreset;
 use devo_protocol::ThreadGoalStatus;
 
 use super::ChatWidget;
@@ -38,6 +39,7 @@ impl ChatWidget {
             | SlashCommand::Exit
             | SlashCommand::Status
             | SlashCommand::Clear
+            | SlashCommand::ShowReasoning
             | SlashCommand::Btw => {
                 return;
             }
@@ -87,6 +89,22 @@ impl ChatWidget {
                         "  reasoning_effort_selection:    {reasoning_effort_selection}"
                     )),
                     Line::from(format!("  cwd:         {cwd}")),
+                    Line::from(format!(
+                        "  permissions: {}",
+                        match self.permission_preset {
+                            PermissionPreset::Default => "default",
+                            PermissionPreset::AutoReview => "auto-review",
+                            PermissionPreset::FullAccess => "full-access",
+                        }
+                    )),
+                    Line::from(format!(
+                        "  sandbox:     {}",
+                        self.sandbox_profile.as_deref().unwrap_or("workspace")
+                    )),
+                    Line::from(format!(
+                        "  reasoning:   {}",
+                        super::reasoning_view::reasoning_view_label(self.collapse_reasoning)
+                    )),
                     Line::from(format!("  turns:       {turns}")),
                     Line::from(format!(
                         "  tokens:      \u{2191}{tokens_in} \u{2193}{tokens_out}",
@@ -97,6 +115,9 @@ impl ChatWidget {
             }
             SlashCommand::Permissions => {
                 self.open_permissions_picker();
+            }
+            SlashCommand::ShowReasoning => {
+                self.open_reasoning_view_picker();
             }
             SlashCommand::Theme => {
                 self.open_theme_picker();

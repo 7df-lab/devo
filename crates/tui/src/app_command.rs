@@ -29,7 +29,7 @@ pub(crate) enum GoalObjectiveMode {
 
 /// Command requests emitted by v2 UI components.
 ///
-/// Codex keeps this as a thin wrapper around its protocol-wide `Op` enum. Claw's
+/// Thin wrapper around protocol-wide operations. Claw's
 /// protocol is RPC-shaped instead, so the TUI owns a small command enum and the
 /// host/worker adapter converts the relevant variants into protocol params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -93,6 +93,9 @@ pub(crate) enum AppCommand {
     },
     UpdatePermissions {
         preset: devo_protocol::PermissionPreset,
+    },
+    UpdateSandboxProfile {
+        profile: String,
     },
     BrowseInputHistory {
         direction: InputHistoryDirection,
@@ -161,6 +164,9 @@ pub(crate) enum AppCommandView<'a> {
     },
     UpdatePermissions {
         preset: devo_protocol::PermissionPreset,
+    },
+    UpdateSandboxProfile {
+        profile: &'a str,
     },
     OverrideTurnContext {
         cwd: &'a Option<PathBuf>,
@@ -342,6 +348,7 @@ impl AppCommand {
             Self::ApprovalRespond { .. } => "approval_respond",
             Self::RequestUserInputRespond { .. } => "request_user_input_respond",
             Self::UpdatePermissions { .. } => "update_permissions",
+            Self::UpdateSandboxProfile { .. } => "update_sandbox_profile",
             Self::BrowseInputHistory { .. } => "browse_input_history",
             Self::SwitchSession { .. } => "switch_session",
             Self::RollbackToUserTurn { .. } => "rollback_to_user_turn",
@@ -422,6 +429,9 @@ impl AppCommand {
             },
             Self::UpdatePermissions { preset, .. } => {
                 AppCommandView::UpdatePermissions { preset: *preset }
+            }
+            Self::UpdateSandboxProfile { profile } => {
+                AppCommandView::UpdateSandboxProfile { profile }
             }
             Self::BrowseInputHistory { direction } => AppCommandView::BrowseInputHistory {
                 direction: *direction,

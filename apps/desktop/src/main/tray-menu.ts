@@ -11,7 +11,7 @@ export interface DiscoveryCache {
 	sessions: Session[]
 }
 
-export interface CodexStyleTrayMenuOptions {
+export interface DevoTrayMenuOptions {
 	liveSessions: ReadonlyMap<string, SessionState>
 	discovery: DiscoveryCache | null
 	pendingCount: number
@@ -40,8 +40,8 @@ interface UsageSummary {
 	cacheReadTokens: number
 }
 
-export function buildCodexStyleTrayMenuTemplate(
-	options: CodexStyleTrayMenuOptions,
+export function buildDevoTrayMenuTemplate(
+	options: DevoTrayMenuOptions,
 ): MenuItemConstructorOptions[] {
 	const template: MenuItemConstructorOptions[] = []
 

@@ -36,9 +36,9 @@ fn init_params() -> InitializeRequestParams {
             tasks: None,
         },
         client_info: Implementation {
-            name: "codex-test".into(),
+            name: "devo-test".into(),
             version: "0.0.0-test".into(),
-            title: Some("Codex rmcp shutdown test".into()),
+            title: Some("Devo rmcp shutdown test".into()),
             description: None,
             icons: None,
             website_url: None,

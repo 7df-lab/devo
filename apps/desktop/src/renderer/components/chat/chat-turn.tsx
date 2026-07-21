@@ -583,10 +583,10 @@ function CompletedTurnProcessDisclosure({
  * Renders a single turn: user message + assistant response.
  *
  * Two modes based on turn state:
- * - **Active turn** (last + working): tool calls are individually rendered with
- *   per-tool ToolCards, smart default expand/collapse, and live activity.
- * - **Completed turn**: icon-pill summary bar with one-click expand to show
- *   individual tools. Response text is always visible.
+ * - **Active turn** (last + working): the process timeline streams live —
+ *   interleaved thoughts, unified tool rows, and text.
+ * - **Completed turn**: the process collapses behind a "Worked for ..."
+ *   disclosure; the final response text is always visible.
  *
  * Display mode preference (default/verbose) modifies behavior:
  * - default: interleaved text + grouped tool summaries as collapsible rows.
@@ -710,8 +710,6 @@ export const ChatTurnComponent = memo(
 			return ""
 		}, [turn.assistantMessages])
 
-		// Determine if tools should be shown individually (active turn behavior)
-		const isActiveTurn = working
 		const showVerboseTools = displayMode === "verbose"
 
 		const textAlreadyInline =
@@ -812,7 +810,6 @@ export const ChatTurnComponent = memo(
 						<ProcessTimelineView
 							defaultExpandAll={showVerboseTools}
 							expandedRowIds={showVerboseTools ? undefined : expandedRowIds}
-							isActiveTurn={isActiveTurn}
 							items={processTimelineItems}
 							onDeleteToolPart={onDeletePart ? handleDeleteToolPart : undefined}
 							onToggleRow={showVerboseTools ? undefined : handleToggleTimelineRow}

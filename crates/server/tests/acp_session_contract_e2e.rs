@@ -309,31 +309,22 @@ async fn stdio_acp_session_config_options_select_model_binding() -> Result<()> {
     std::fs::create_dir_all(&cwd)?;
     std::fs::create_dir_all(cwd.join(".devo"))?;
     std::fs::write(
-        cwd.join(".devo").join("models.json"),
-        serde_json::to_string(&serde_json::json!([
-            {
-                "slug": "test-model",
-                "display_name": "Test Model",
-                "reasoning_capability": {
-                    "levels": ["low", "medium", "high"]
-                },
-                "default_reasoning_effort": "medium",
-                "base_instructions": "Test model instructions",
-                "supported_in_api": true
-            },
-            {
-                "slug": "alt-model",
-                "display_name": "Alt Model",
-                "base_instructions": "Alt model instructions",
-                "supported_in_api": true
-            },
-            {
-                "slug": "catalog-only-model",
-                "display_name": "Catalog Only Model",
-                "base_instructions": "Catalog-only model instructions",
-                "supported_in_api": true
-            }
-        ]))?,
+        cwd.join(".devo").join("config.toml"),
+        r#"
+[model.test-model]
+display_name = "Test Model"
+reasoning_capability = { levels = ["low", "medium", "high"] }
+default_reasoning_effort = "medium"
+base_instructions = "Test model instructions"
+
+[model.alt-model]
+display_name = "Alt Model"
+base_instructions = "Alt model instructions"
+
+[model.catalog-only-model]
+display_name = "Catalog Only Model"
+base_instructions = "Catalog-only model instructions"
+"#,
     )?;
     let cwd = cwd.to_string_lossy().into_owned();
 
@@ -436,10 +427,7 @@ async fn stdio_acp_session_config_options_select_model_binding() -> Result<()> {
     assert_eq!(mode_option["name"], serde_json::json!("Session Mode"));
     assert_eq!(mode_option["category"], serde_json::json!("mode"));
     assert_eq!(mode_option["currentValue"], serde_json::json!("default"));
-    assert_config_option_values(
-        mode_option,
-        &["read-only", "default", "auto-review", "full-access"],
-    )?;
+    assert_config_option_values(mode_option, &["default", "auto-review", "full-access"])?;
 
     write_stdio_json(
         &mut stdin,

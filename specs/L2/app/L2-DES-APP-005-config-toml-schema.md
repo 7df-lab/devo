@@ -54,6 +54,7 @@ Configuration should use a single TOML schema version with stable, keyed records
 Keyed TOML tables are preferred for mergeable records because workspace-scoped configuration can override fields, disable records, or add records by stable identifier:
 
 - `[providers.<provider_id>]`
+- `[model.<slug>]`
 - `[model_bindings.<binding_id>]`
 - `[mcp.servers.<server_id>]`
 - `[skills.roots.<root_id>]`
@@ -78,6 +79,7 @@ Top-level sections:
 [defaults]
 [provider_http]
 [providers.<provider_id>]
+[model.<slug>]
 [model_bindings.<binding_id>]
 [tools.web_search]
 [mcp.servers.<server_id>]
@@ -121,6 +123,9 @@ enabled = true
 name = "OpenAI"
 base_url = "https://api.openai.com/v1"
 credential = "openai_api_key"
+
+[model."openai/gpt-5.5"]
+effective_context_window_percent = 90
 
 [model_bindings.gpt55-openrouter]
 enabled = true
@@ -382,6 +387,31 @@ Auth records:
 
 Credential ids are stable keys inside `auth.json`. Renaming a provider does not rename its credential id.
 
+## Model Metadata
+
+`[model.<slug>]` stores partial metadata overrides for embedded models and
+metadata for custom model slugs. The embedded catalog is the only model catalog
+base. Effective metadata is produced by overlaying user-scoped and then
+workspace-scoped `[model.<slug>]` fields; an omitted field preserves the
+lower-priority or embedded value.
+
+Supported fields include `display_name`, `description`, `channel`,
+`context_window`, `effective_context_window_percent`, `max_tokens`,
+`temperature`, `top_p`, `top_k`, `provider`, `reasoning_capability`,
+`reasoning_implementation`, `default_reasoning_effort`, `base_instructions`,
+`input_modalities`, `truncation_policy`, and
+`supports_image_detail_original`. A new slug creates a custom model definition
+with safe defaults; invocability still requires a matching provider and model
+binding.
+
+Legacy top-level `model = "slug"` remains readable, but new configuration must
+select through `[defaults].model_binding` because `[model.<slug>]` owns the
+top-level `model` table namespace. Old user `~/.devo/models.json` and workspace
+`<workspace>/.devo/models.json` files are ignored. Migration is manual: copy
+desired metadata fields into the corresponding user or workspace
+`config.toml` `[model.<slug>]` section, then retain or add the required provider
+and binding records. Credential values remain in user-scoped `auth.json`.
+
 ## Model Bindings
 
 `[model_bindings.<binding_id>]` stores configured invocable models.
@@ -410,7 +440,7 @@ Allowed `invocation_method` values for the initial schema:
 
 Rules:
 
-- `model_slug` must exist in the effective model catalog, whose precedence is workspace `models.json`, user `models.json`, then built-in defaults.
+- `model_slug` must exist in the effective model catalog produced from embedded definitions plus the field-wise merged user and workspace `[model.<slug>]` configuration.
 - `display_name` is display metadata only. It must not be used as a stable identifier, provider API model name, or cross-reference key.
 - Program-created model bindings must persist `display_name`. When the user accepts the default suggestion, that persisted value should be copied from the built-in supported model definition's display name.
 - `provider` must reference an enabled effective provider.

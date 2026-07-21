@@ -166,6 +166,8 @@ fn server_request_payload_roundtrip() {
         path: None,
         host: None,
         target: Some("echo hi".into()),
+        command_pattern: Some(vec!["echo".into(), "*".into()]),
+        command_prefix: None,
     };
 
     let json = serde_json::to_string(&payload).expect("serialize");

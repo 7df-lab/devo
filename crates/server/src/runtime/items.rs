@@ -101,6 +101,25 @@ impl ServerRuntime {
         });
     }
 
+    /// Persist session summary to SQLite if the session is durable.
+    /// The rollout file is the authoritative store, so failures here are
+    /// logged as warnings rather than propagated.
+    pub(super) async fn persist_session_summary_if_persistent(
+        &self,
+        session_id: SessionId,
+        summary: &SessionMetadata,
+    ) {
+        if !summary.ephemeral
+            && let Err(err) = self.deps.db.upsert_session(summary, None)
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "failed to persist session metadata to database"
+            );
+        }
+    }
+
     pub(super) async fn maybe_assign_provisional_title(
         &self,
         session_id: SessionId,
@@ -143,6 +162,9 @@ impl ServerRuntime {
         {
             tracing::warn!(session_id = %session_id, error = %error, "failed to persist provisional title");
         }
+
+        self.persist_session_summary_if_persistent(session_id, &updated_summary)
+            .await;
 
         self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
             session: updated_summary,
@@ -261,6 +283,9 @@ impl ServerRuntime {
             {
                 tracing::warn!(session_id = %session_id, error = %error, "failed to persist title");
             }
+
+            self.persist_session_summary_if_persistent(session_id, &updated_summary)
+                .await;
 
             self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
                 session: updated_summary,

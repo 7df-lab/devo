@@ -69,17 +69,22 @@ mod permission_presets;
 
 mod resume_browser;
 
+mod sandbox_profiles;
+
 mod text_stream;
 
 mod transcript_view;
 
 mod reasoning_effort;
 
+mod reasoning_view;
+
 mod worker_events;
 
 use self::permission_presets::permission_preset_items;
 use self::permission_presets::permission_preset_label;
 use self::resume_browser::ResumeBrowserState;
+use self::sandbox_profiles::sandbox_profile_label;
 use self::session_header::SessionHeaderParams;
 use self::subagent_monitor::SubagentMonitorState;
 
@@ -100,6 +105,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) initial_session: TuiSessionState,
     pub(crate) initial_reasoning_effort_selection: Option<String>,
     pub(crate) initial_permission_preset: devo_protocol::PermissionPreset,
+    pub(crate) initial_sandbox_profile: Option<String>,
     pub(crate) initial_user_message: Option<UserMessage>,
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) is_first_run: bool,
@@ -110,6 +116,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) exit_after_onboarding: bool,
     pub(crate) startup_tooltip_override: Option<String>,
     pub(crate) initial_theme_name: Option<String>,
+    pub(crate) initial_collapse_reasoning: bool,
 }
 
 /// Resolved runtime session projection owned by the chat widget.
@@ -278,6 +285,7 @@ pub(crate) struct ChatWidget {
     pending_model_selection: Option<PendingModelSelection>,
     theme_set: ThemeSet,
     active_theme_name: String,
+    collapse_reasoning: bool,
     resume_browser_last_height: Cell<u16>,
     turn_count: usize,
     total_input_tokens: usize,
@@ -300,6 +308,7 @@ pub(crate) struct ChatWidget {
     active_proposed_plan: Option<ActiveProposedPlan>,
     pending_proposed_plan_actions: bool,
     permission_preset: devo_protocol::PermissionPreset,
+    sandbox_profile: Option<String>,
     busy: bool,
     selection_mode: bool,
     selected_user_cell_index: Option<usize>,
@@ -392,6 +401,7 @@ impl ChatWidget {
             initial_session,
             initial_reasoning_effort_selection,
             initial_permission_preset,
+            initial_sandbox_profile,
             initial_user_message,
             enhanced_keys_supported,
             is_first_run,
@@ -401,6 +411,7 @@ impl ChatWidget {
             exit_after_onboarding,
             startup_tooltip_override,
             initial_theme_name,
+            initial_collapse_reasoning,
         } = common;
 
         // Prefer an explicit startup selection, but fall back to the model's default reasoning effort.
@@ -500,6 +511,7 @@ impl ChatWidget {
             pending_model_selection: None,
             theme_set,
             active_theme_name,
+            collapse_reasoning: initial_collapse_reasoning,
             resume_browser_last_height: Cell::new(0),
             turn_count: 0,
             total_input_tokens: 0,
@@ -522,6 +534,7 @@ impl ChatWidget {
             active_proposed_plan: None,
             pending_proposed_plan_actions: false,
             permission_preset: initial_permission_preset,
+            sandbox_profile: initial_sandbox_profile,
             busy: false,
             selection_mode: false,
             selected_user_cell_index: None,

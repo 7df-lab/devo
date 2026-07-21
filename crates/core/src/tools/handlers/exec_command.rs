@@ -48,14 +48,12 @@ impl ExecCommandHandler {
             background_tasks,
             spec: ToolSpec {
                 name: "exec_command".into(),
-                description: "Execute a command with PTY support and process management. Start the command string with a brief `# ...` comment on its own line explaining the command's purpose, then put the command on the next line.".into(),
+                description: "Execute a command with PTY support and process management.".into(),
                 input_schema: JsonSchema::object(
                     std::collections::BTreeMap::from([
                         (
                             "cmd".to_string(),
-                            JsonSchema::string(Some(
-                                "The command to execute. Start with a brief `# ...` purpose comment on the line above the command.",
-                            )),
+                            JsonSchema::string(Some("The command to execute.")),
                         ),
                         (
                             "workdir".to_string(),
@@ -219,13 +217,14 @@ impl ToolHandler for ExecCommandHandler {
             ));
         };
 
-        let spawned_process = UnifiedExecProcess::spawn(
+        let spawned_process = UnifiedExecProcess::spawn_with_sandbox(
             process_id,
             &args.cmd,
             &cwd,
             args.shell.as_deref(),
             args.login,
             args.tty,
+            ctx.sandbox_profile.clone(),
         )
         .await;
         let (proc, _broadcast_rx) = match spawned_process {
@@ -621,6 +620,7 @@ mod tests {
             file_read_ledger: None,
             network_proxy: None,
             network_no_proxy: None,
+            sandbox_profile: None,
         }
     }
 

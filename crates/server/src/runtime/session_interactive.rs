@@ -182,9 +182,15 @@ mod tests {
                 PendingApproval {
                     owner_session_id: child_session_id,
                     tool_name: "exec_command".to_string(),
+                    resource: Some(devo_safety::ResourceKind::ShellExec),
                     path: None,
                     host: None,
                     command_prefix: None,
+                    command_pattern: None,
+                    requests_escalation: false,
+                    command: None,
+                    cwd: std::path::PathBuf::new(),
+                    sandbox_permissions: String::new(),
                     tx,
                 },
             )

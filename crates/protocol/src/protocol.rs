@@ -58,6 +58,7 @@ pub struct ServerRequestEnvelope<T> {
 pub enum ClientMethod {
     SessionMetadataUpdate,
     SessionPermissionsUpdate,
+    SessionSandboxProfileUpdate,
     SessionTitleUpdate,
     SessionResume,
     SessionFork,
@@ -111,6 +112,7 @@ impl ClientMethod {
         match self {
             Self::SessionMetadataUpdate => "session/metadata/update",
             Self::SessionPermissionsUpdate => "session/permissions/update",
+            Self::SessionSandboxProfileUpdate => "session/sandbox_profile/update",
             Self::SessionTitleUpdate => "session/title/update",
             Self::SessionResume => "session/resume",
             Self::SessionFork => "session/fork",
@@ -164,6 +166,7 @@ impl ClientMethod {
         Some(match method {
             "session/metadata/update" => Self::SessionMetadataUpdate,
             "session/permissions/update" => Self::SessionPermissionsUpdate,
+            "session/sandbox_profile/update" => Self::SessionSandboxProfileUpdate,
             "session/title/update" => Self::SessionTitleUpdate,
             "session/resume" => Self::SessionResume,
             "session/fork" => Self::SessionFork,
@@ -633,5 +636,17 @@ mod tests {
     #[test]
     fn client_method_does_not_recognize_legacy_approval_respond() {
         assert_eq!(ClientMethod::parse("approval/respond"), None);
+    }
+
+    #[test]
+    fn client_method_recognizes_session_sandbox_profile_update() {
+        assert_eq!(
+            ClientMethod::parse("session/sandbox_profile/update"),
+            Some(ClientMethod::SessionSandboxProfileUpdate)
+        );
+        assert_eq!(
+            ClientMethod::SessionSandboxProfileUpdate.as_str(),
+            "session/sandbox_profile/update"
+        );
     }
 }

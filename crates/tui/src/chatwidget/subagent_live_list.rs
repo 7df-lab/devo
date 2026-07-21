@@ -13,13 +13,13 @@ use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
-use super::session_header::COMPLETED_COLOR;
 use super::session_header::MUTED_COLOR;
 use super::session_header::PREVIEW_COLOR;
-use super::session_header::REASONING_ACCENT_COLOR;
 use super::session_header::RUNNING_COLOR;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
+use crate::ui_consts::COMPLETED_COLOR;
 use crate::ui_consts::LIVE_PREFIX_COLS;
+use crate::ui_consts::REASONING_ACCENT_COLOR;
 
 pub(super) const MAX_VISIBLE_SUBAGENTS: usize = 3;
 

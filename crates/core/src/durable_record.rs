@@ -1051,6 +1051,23 @@ pub enum GoalProgressType {
 
 // ── Context Records ────────────────────────────────────────────────────
 
+/// Work around `serde_json` `arbitrary_precision` breaking `f64` fields inside
+/// internally tagged enums (`DurableRecord`): buffered number content can appear
+/// as a map to the nested deserializer.
+fn deserialize_f64_via_json_value<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_f64()
+            .ok_or_else(|| D::Error::custom("expected finite f64")),
+        other => serde_json::from_value(other).map_err(D::Error::custom),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContextSnapshotRecordedRecord {
     pub schema_version: u32,
@@ -1069,6 +1086,9 @@ pub struct ContextCompactionStartedRecord {
     pub turn_id: TurnId,
     pub compaction_id: String,
     pub pre_compaction_context_size: u64,
+    /// Compaction trigger ratio. Custom deserialize works around `serde_json`
+    /// `arbitrary_precision` breaking `f64` inside internally tagged enums.
+    #[serde(deserialize_with = "deserialize_f64_via_json_value")]
     pub threshold_ratio: f64,
     pub started_at: DateTime<Utc>,
 }

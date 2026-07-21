@@ -1,6 +1,7 @@
 mod auth;
 mod persistence;
 mod resolve;
+mod runtime_equivalence;
 mod schema;
 
 pub use devo_protocol::ProviderWireApi;
@@ -41,6 +42,7 @@ mod tests {
     use super::AuthCredentialConfig;
     use super::AuthCredentialKind;
     use super::ModelBindingConfig;
+    use super::ModelOverrideConfig;
     use super::ModelProviderConfig;
     use super::PreferredAuthMethod;
     use super::ProviderConfigSection;
@@ -49,6 +51,7 @@ mod tests {
     use super::ResolvedModelBinding;
     use super::ResolvedProviderSettings;
     use super::UserAuthConfigFile;
+    use super::read_provider_config;
     use super::read_user_auth_config;
     use super::resolve_enabled_model_binding;
     use super::resolve_model_binding;
@@ -442,6 +445,59 @@ name = "Other"
         assert_eq!(
             document["providers"]["other"]["name"].as_str(),
             Some("Other")
+        );
+    }
+
+    #[test]
+    fn write_provider_config_preserves_model_override_tables() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_file = dir.path().join(super::CONFIG_FILE_NAME);
+        std::fs::write(
+            &config_file,
+            r#"
+[model.grok-4]
+display_name = "Grok 4"
+context_window = 256000
+custom_model_key = "keep-me"
+"#,
+        )
+        .expect("write initial config");
+
+        let mut config = read_provider_config(&config_file).expect("read provider config");
+        config.providers.insert(
+            "xai".to_string(),
+            ModelProviderConfig {
+                name: "xAI".to_string(),
+                wire_apis: vec![ProviderWireApi::OpenAIResponses],
+                ..ModelProviderConfig::default()
+            },
+        );
+
+        write_provider_config(&config_file, &config).expect("write provider config");
+
+        let written = std::fs::read_to_string(&config_file).expect("read written config");
+        let document: toml::Value = toml::from_str(&written).expect("parse written config");
+        assert_eq!(
+            config.model_overrides,
+            [(
+                "grok-4".to_string(),
+                ModelOverrideConfig {
+                    display_name: Some("Grok 4".to_string()),
+                    context_window: Some(256_000),
+                    ..ModelOverrideConfig::default()
+                },
+            )]
+            .into_iter()
+            .collect()
+        );
+        assert_eq!(document["model"].as_str(), None);
+        assert_eq!(
+            document["model"]["grok-4"]["display_name"].as_str(),
+            Some("Grok 4")
+        );
+        assert_eq!(
+            document["model"]["grok-4"]["custom_model_key"].as_str(),
+            Some("keep-me")
         );
     }
 

@@ -1,97 +1,27 @@
 [
     {
-        "slug": "qwen3-coder-next",
-        "display_name": "qwen3-coder-next",
-        "channel": "Qwen",
-        "provider": "openai_chat_completions",
-        "description": "3B activated parameters (80B total parameters) released at 02/2026 by Qwen",
-        "reasoning_capability": "unsupported",
-        "default_reasoning_level": "",
-        "supported_reasoning_levels": [],
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "top_k": 40,
-        "context_window": 256000,
-        "effective_context_window_percent": 95,
-        "input_modalities": [
-            "text"
-        ],
-        "truncation_policy": {
-            "mode": "tokens",
-            "limit": 10000
-        },
-        "max_tokens": 4096
-    },
-    {
-        "slug": "gemma4-12b",
-        "display_name": "gemma4-12b",
-        "channel": "Gemma4",
-        "provider": "openai_chat_completions",
-        "description": "",
-        "reasoning_capability": "toggle",
-        "default_reasoning_level": "",
-        "supported_reasoning_levels": [],
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "top_k": 64,
-        "context_window": 65536,
-        "effective_context_window_percent": 95,
-        "input_modalities": [
-            "text"
-        ],
-        "truncation_policy": {
-            "mode": "tokens",
-            "limit": 10000
-        },
-        "max_tokens": 4096
-    },
-    {
-        "slug": "kimi-k2.5",
-        "display_name": "kimi-k2.5",
+        "slug": "kimi-k3",
+        "display_name": "kimi-k3",
         "channel": "Kimi",
         "provider": "openai_chat_completions",
-        "description": "An open-weight, native multimodal agentic model, 3B activated parameters (80B total parameters) released at 2026 by moonshot",
+        "description": "Kimi's flagship model",
         "reasoning_capability": "toggle",
-        "default_reasoning_level": "",
-        "supported_reasoning_levels": [],
-        "reasoning_implementation": {
-            "model_variant": {
-                "variants": [
-                    {
-                        "selection_value": "disabled",
-                        "model_slug": "kimi-k2.5",
-                        "reasoning_effort": null,
-                        "extra_body": {
-                            "thinking": {
-                                "type": "disabled"
-                            }
-                        },
-                        "label": "Off",
-                        "description": "Disable reasoning effort"
-                    },
-                    {
-                        "selection_value": "enabled",
-                        "model_slug": "kimi-k2.5",
-                        "reasoning_effort": "medium",
-                        "label": "On",
-                        "description": "Enable thinking"
-                    }
-                ]
-            }
-        },
-        "temperature": 1.0,
-        "top_p": 0.95,
-        "context_window": 256000,
+        "default_reasoning_level": "high",
+        "supported_reasoning_levels": [
+            "low",
+            "high",
+            "max"
+        ],
+        "context_window": 1048576,
+        "max_tokens": 8096,
         "effective_context_window_percent": 95,
         "truncation_policy": {
             "mode": "tokens",
             "limit": 10000
         },
         "input_modalities": [
-            "text",
-            "image"
-        ],
-        "max_tokens": 4096
+        "text", "image"
+        ]
     },
     {
         "slug": "MiniMax-M3",

@@ -31,8 +31,8 @@ Interactive startup 实现在 `crates/cli/src/agent_command.rs`。
 
 1. 解析当前工作目录。
 2. 解析 `DEVO_HOME`。
-3. 加载 preset model catalog。
-4. 加载当前工作区的 effective app config。
+3. 加载当前工作区的 effective app config。
+4. 使用 effective config 中的模型元数据覆盖构建 preset model catalog。
 5. 解析 project permission preset。
 6. 决定是否显示 onboarding。
 7. 解析 provider settings，或使用 onboarding fallback model。

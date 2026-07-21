@@ -15,6 +15,7 @@ pub enum SlashCommand {
     New,
     Status,
     Permissions,
+    ShowReasoning,
     Clear,
     Diff,
     Exit,
@@ -33,7 +34,12 @@ impl SlashCommand {
             SlashCommand::Resume => "resume a saved chat",
             SlashCommand::New => "start a new chat",
             SlashCommand::Status => "show current session configuration and token usage",
-            SlashCommand::Permissions => "choose what Devo is allowed to do",
+            SlashCommand::Permissions => {
+                "choose what Devo is allowed to do (also sets the OS sandbox)"
+            }
+            SlashCommand::ShowReasoning => {
+                "choose how reasoning content is shown in the transcript"
+            }
             SlashCommand::Clear => "clear the current transcript",
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Btw => {
@@ -55,6 +61,7 @@ impl SlashCommand {
             SlashCommand::New => "new",
             SlashCommand::Status => "status",
             SlashCommand::Permissions => "permissions",
+            SlashCommand::ShowReasoning => "show-reasoning",
             SlashCommand::Clear => "clear",
             SlashCommand::Diff => "diff",
             SlashCommand::Btw => "btw",
@@ -83,6 +90,7 @@ impl SlashCommand {
             | SlashCommand::New
             | SlashCommand::Status
             | SlashCommand::Permissions
+            | SlashCommand::ShowReasoning
             | SlashCommand::Clear
             | SlashCommand::Diff
             | SlashCommand::Exit => None,
@@ -98,6 +106,7 @@ impl SlashCommand {
                 | SlashCommand::Diff
                 | SlashCommand::New
                 | SlashCommand::Resume
+                | SlashCommand::Permissions
         )
     }
 
@@ -117,6 +126,7 @@ impl SlashCommand {
             | SlashCommand::New
             | SlashCommand::Status
             | SlashCommand::Permissions
+            | SlashCommand::ShowReasoning
             | SlashCommand::Clear
             | SlashCommand::Diff
             | SlashCommand::Exit
@@ -139,6 +149,7 @@ impl FromStr for SlashCommand {
             "new" => Ok(Self::New),
             "status" => Ok(Self::Status),
             "permissions" | "approvals" => Ok(Self::Permissions),
+            "show-reasoning" | "reasoning-view" => Ok(Self::ShowReasoning),
             "clear" => Ok(Self::Clear),
             "diff" => Ok(Self::Diff),
             "btw" => Ok(Self::Btw),
@@ -160,6 +171,7 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
         ("new", SlashCommand::New),
         ("status", SlashCommand::Status),
         ("permissions", SlashCommand::Permissions),
+        ("show-reasoning", SlashCommand::ShowReasoning),
         ("clear", SlashCommand::Clear),
         ("diff", SlashCommand::Diff),
         ("goal", SlashCommand::Goal),
@@ -229,5 +241,14 @@ mod tests {
         assert!(!SlashCommand::Model.available_over_acp());
         assert!(!SlashCommand::Btw.available_over_acp());
         assert!(!SlashCommand::Exit.available_over_acp());
+    }
+
+    #[test]
+    fn configuration_slash_commands_are_unavailable_during_task() {
+        assert!(!SlashCommand::Model.available_during_task());
+        assert!(!SlashCommand::Permissions.available_during_task());
+        assert!(!SlashCommand::Theme.available_during_task());
+        assert!(SlashCommand::Status.available_during_task());
+        assert!(SlashCommand::Goal.available_during_task());
     }
 }

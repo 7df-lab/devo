@@ -107,6 +107,7 @@ impl ServerRuntime {
             | SlashCommand::New
             | SlashCommand::Status
             | SlashCommand::Permissions
+            | SlashCommand::ShowReasoning
             | SlashCommand::Clear
             | SlashCommand::Diff
             | SlashCommand::Exit

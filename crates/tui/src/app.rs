@@ -46,6 +46,8 @@ pub struct InitialTuiSession {
     pub reasoning_effort_selection: Option<String>,
     /// Initial permission preset restored from project-level config.
     pub permission_preset: PermissionPreset,
+    /// Initial sandbox profile restored from project-level config.
+    pub sandbox_profile: Option<String>,
     /// Working directory used for the initial session.
     pub cwd: PathBuf,
 }
@@ -64,6 +66,4 @@ pub struct InteractiveTuiConfig {
     pub show_model_onboarding: bool,
     /// Whether successful onboarding should exit the TUI immediately.
     pub exit_after_onboarding: bool,
-    /// Non-fatal startup warnings to show in the transcript before user input.
-    pub startup_warnings: Vec<String>,
 }

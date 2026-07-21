@@ -1,0 +1,103 @@
+[package]
+description = "Windows restricted-token / elevated sandbox for Devo"
+edition.workspace = true
+license.workspace = true
+name = "devo-windows-sandbox"
+version.workspace = true
+# Elevated setup / command-runner bins are Phase 8b (WFP + UAC). Keep them
+# out of the default package build so legacy restricted-token launch can
+# cross-compile cleanly without wiring those helpers yet.
+autobins = false
+
+[lib]
+doctest = false
+name = "devo_windows_sandbox"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+devo-util-paths = { workspace = true }
+dunce = { workspace = true }
+glob = "0.3"
+globset = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+base64 = { workspace = true }
+chrono = { workspace = true, features = ["clock"] }
+dirs-next = "2.0"
+glob = "0.3"
+rand = { version = "0.8", default-features = false, features = [
+    "std",
+    "small_rng",
+] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = [
+    "sync",
+    "rt",
+    "macros",
+    "signal",
+    "time",
+] }
+tracing-appender = { workspace = true }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_WindowsFirewall",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+] }
+filedescriptor = "0.8.3"
+lazy_static = { workspace = true }
+log = "0.4"
+shared_library = "0.1.9"
+winapi = { version = "0.3.9", features = [
+    "handleapi",
+    "minwinbase",
+    "processthreadsapi",
+    "synchapi",
+    "winbase",
+    "wincon",
+    "winerror",
+    "winnt",
+] }
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_NetManagement",
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Environment",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_Rpc",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints]
+workspace = true

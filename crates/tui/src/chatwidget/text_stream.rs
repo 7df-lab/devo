@@ -324,7 +324,20 @@ impl ChatWidget {
             }
             TextItemKind::Reasoning => {
                 if !item.raw_text.trim().is_empty() {
-                    self.add_markdown_history_with_status("Reasoning", &item.raw_text, status);
+                    if self.collapse_reasoning {
+                        self.add_history_entry_without_redraw(
+                            super::reasoning_view::collapsed_reasoning_history_cell(
+                                item.raw_text,
+                                &self.session.cwd,
+                                "Thought: ",
+                                Self::reasoning_completed_heading_style(),
+                                Self::reasoning_text_style(),
+                                Self::reasoning_completed_dot_prefix(),
+                            ),
+                        );
+                    } else {
+                        self.add_markdown_history_with_status("Reasoning", &item.raw_text, status);
+                    }
                 }
             }
         }
@@ -482,7 +495,7 @@ impl ChatWidget {
         }
     }
 
-    fn sync_text_item_cell(&mut self, index: usize) {
+    pub(super) fn sync_text_item_cell(&mut self, index: usize) {
         if index >= self.active_text_items.len() {
             return;
         }
@@ -534,12 +547,22 @@ impl ChatWidget {
             Some(&self.session.cwd),
             &mut body_lines,
         );
-        Self::patch_lines_style(&mut body_lines, Self::reasoning_text_style());
+        // Keep live reasoning content undimmed so the in-flight cell stays
+        // colorful; completed Thought cells apply the muted style instead.
+        if self.collapse_reasoning
+            && body_lines.len() > super::reasoning_view::COLLAPSED_REASONING_LIVE_LINES
+        {
+            let start = body_lines.len() - super::reasoning_view::COLLAPSED_REASONING_LIVE_LINES;
+            body_lines = body_lines.split_off(start);
+        }
         if let Some(first_line) = body_lines.first_mut() {
             first_line.spans.insert(
                 0,
                 Span::styled("Thinking: ", Self::reasoning_heading_style()),
             );
+        }
+        if self.collapse_reasoning {
+            body_lines.push(history_cell::reasoning_transcript_hint_line());
         }
         Some(Box::new(
             history_cell::AgentMessageCell::new_ai_response_with_prefix(

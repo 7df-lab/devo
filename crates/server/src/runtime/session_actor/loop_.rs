@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -126,6 +127,7 @@ pub(super) async fn run_session_actor(
                     runtime_context: Arc::clone(&state.runtime_context),
                     tool_registry,
                     file_read_ledger: Arc::clone(&state.file_read_ledger),
+                    sandbox_profile: state.core.config.sandbox_profile.clone(),
                 });
             }
             SessionCommand::GetTitleGenerationContext { reply } => {
@@ -247,7 +249,38 @@ pub(super) async fn run_session_actor(
                 state.summary.last_activity_at = state.summary.last_activity_at.max(Utc::now());
             }
             SessionCommand::ApplyApprovalScope { scope, pending } => {
-                apply_approval_scope_to_state(&mut state, &scope, &pending);
+                apply_approval_scope_to_state(
+                    &mut state.session_approval_cache,
+                    &mut state.turn_approval_cache,
+                    &scope,
+                    &pending,
+                );
+                if matches!(
+                    scope,
+                    ApprovalScopeValue::PathPrefix | ApprovalScopeValue::Session
+                ) && let Some(path) = pending.path.as_ref()
+                {
+                    let grant = path_prefix_grant_root(path);
+                    match pending.resource.as_ref() {
+                        Some(devo_safety::ResourceKind::FileWrite) => {
+                            state
+                                .core
+                                .config
+                                .permission_profile
+                                .grant_writable_root(grant.clone());
+                            state.config.permission_profile.grant_writable_root(grant);
+                        }
+                        Some(devo_safety::ResourceKind::FileRead) | Some(_) | None => {
+                            // Read (and unknown) approvals must not elevate write roots.
+                            state
+                                .core
+                                .config
+                                .permission_profile
+                                .grant_readable_root(grant.clone());
+                            state.config.permission_profile.grant_readable_root(grant);
+                        }
+                    }
+                }
             }
             SessionCommand::UpdateSummary { summary } => {
                 state.summary = summary;
@@ -407,13 +440,33 @@ pub(super) async fn run_session_actor(
                 let _ = reply.send(state.summary.clone());
             }
             SessionCommand::ApplyPermissionProfile { profile, reply } => {
+                let sandbox = Some(profile.implied_sandbox_profile().to_string());
                 state.core.config.permission_mode = profile.permission_mode();
                 state.core.config.permission_profile = profile.clone();
+                state.core.config.sandbox_profile = sandbox.clone();
                 state.config.permission_mode = profile.permission_mode();
                 state.config.permission_profile = profile;
+                state.config.sandbox_profile = sandbox;
                 state.session_approval_cache = crate::execution::ApprovalGrantCache::default();
                 state.turn_approval_cache = crate::execution::ApprovalGrantCache::default();
                 let _ = reply.send(());
+            }
+            SessionCommand::ApplySandboxProfile { profile, reply } => {
+                // Validation only; approval caches are intentionally preserved:
+                // the sandbox profile does not widen tool permissions.
+                match crate::sandbox_profile::normalize_sandbox_profile_name(
+                    &profile,
+                    &state.summary.cwd,
+                ) {
+                    Ok(name) => {
+                        state.core.config.sandbox_profile = Some(name.clone());
+                        state.config.sandbox_profile = Some(name.clone());
+                        let _ = reply.send(Ok(name));
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
             }
             SessionCommand::SetSessionTitleUserRename { title, reply } => {
                 let updated_at = Utc::now();
@@ -629,59 +682,105 @@ fn subagent_usage_owner_from_pending_metadata(
 }
 
 fn apply_approval_scope_to_state(
-    state: &mut SessionActorState,
+    session_cache: &mut crate::execution::ApprovalGrantCache,
+    turn_cache: &mut crate::execution::ApprovalGrantCache,
     scope: &ApprovalScopeValue,
     pending: &PendingApproval,
 ) {
     match scope {
         ApprovalScopeValue::Once => {}
         ApprovalScopeValue::Turn => {
-            state
-                .turn_approval_cache
-                .tools
-                .insert(pending.tool_name.clone());
+            turn_cache.tools.insert(pending.tool_name.clone());
         }
         ApprovalScopeValue::Session => {
-            state
-                .session_approval_cache
-                .tools
-                .insert(pending.tool_name.clone());
+            // Prefer exact command + cwd. Fall back to a
+            // generalized pattern only when the exact command is unavailable,
+            // then to a whole-tool grant for non-shell tools.
+            if let Some(command) = pending.command.as_ref() {
+                session_cache
+                    .exact_commands
+                    .insert((command.clone(), pending.cwd.clone()));
+            } else if let Some(pattern) = pending.command_pattern.clone() {
+                session_cache.command_patterns.insert(pattern);
+            } else {
+                session_cache.tools.insert(pending.tool_name.clone());
+            }
+            if let Some(path) = pending.path.as_ref() {
+                insert_path_prefix_grant(session_cache, pending.resource.as_ref(), path);
+            }
         }
         ApprovalScopeValue::PathPrefix => {
-            if let Some(path) = pending.path.clone() {
-                state.turn_approval_cache.path_prefixes.insert(path);
+            if let Some(path) = pending.path.as_ref() {
+                // Session-scoped so "don't ask again for these files" lasts for
+                // the rest of the conversation (session-scoped file approval).
+                insert_path_prefix_grant(session_cache, pending.resource.as_ref(), path);
             }
         }
         ApprovalScopeValue::Host => {
             if let Some(host) = pending.host.clone() {
-                state.turn_approval_cache.hosts.insert(host);
+                session_cache.hosts.insert(host);
             }
         }
         ApprovalScopeValue::Tool => {
-            state
-                .turn_approval_cache
-                .tools
-                .insert(pending.tool_name.clone());
+            turn_cache.tools.insert(pending.tool_name.clone());
         }
         ApprovalScopeValue::CommandPrefix => {
             if let Some(command_prefix) = pending.command_prefix.clone() {
-                state
-                    .session_approval_cache
-                    .command_prefixes
-                    .insert(command_prefix);
+                session_cache.command_prefixes.insert(command_prefix);
             }
         }
+        ApprovalScopeValue::CommandPrefixPersist => {
+            if let Some(command_prefix) = pending.command_prefix.clone() {
+                session_cache.command_prefixes.insert(command_prefix);
+            }
+        }
+    }
+    if pending.requests_escalation
+        && matches!(scope, ApprovalScopeValue::Session)
+        && let Some(key) = crate::execution::sandbox_bypass_key_from_pending(pending)
+    {
+        session_cache.sandbox_bypass_commands.insert(key);
+    }
+}
+
+fn insert_path_prefix_grant(
+    cache: &mut crate::execution::ApprovalGrantCache,
+    resource: Option<&devo_safety::ResourceKind>,
+    path: &Path,
+) {
+    let grant = path_prefix_grant_root(path);
+    match resource {
+        Some(devo_safety::ResourceKind::FileWrite) => {
+            cache.write_path_prefixes.insert(grant);
+        }
+        Some(devo_safety::ResourceKind::FileRead) => {
+            cache.read_path_prefixes.insert(grant);
+        }
+        // Unknown / non-file resources: do not elevate write rights.
+        Some(_) | None => {
+            cache.read_path_prefixes.insert(grant);
+        }
+    }
+}
+
+fn path_prefix_grant_root(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(path).to_path_buf()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use devo_protocol::ApprovalScopeValue;
     use devo_protocol::PendingInputItem;
     use devo_protocol::PendingInputKind;
     use pretty_assertions::assert_eq;
 
     use super::QueuedTurnInputData;
+    use super::apply_approval_scope_to_state;
     use super::pop_queued_turn_input_data;
 
     #[test]
@@ -709,5 +808,268 @@ mod tests {
                 subagent_usage_owner: None,
             }
         );
+    }
+
+    #[test]
+    fn command_prefix_persist_scope_stores_prefix_in_session_cache() {
+        let mut session_cache = crate::execution::ApprovalGrantCache::default();
+        let mut turn_cache = crate::execution::ApprovalGrantCache::default();
+        let mut pending = pending_approval(/*command_pattern*/ None);
+        pending.command_prefix = Some(vec!["git".to_string(), "pull".to_string()]);
+
+        apply_approval_scope_to_state(
+            &mut session_cache,
+            &mut turn_cache,
+            &ApprovalScopeValue::CommandPrefixPersist,
+            &pending,
+        );
+
+        let mut expected_session_cache = crate::execution::ApprovalGrantCache::default();
+        expected_session_cache
+            .command_prefixes
+            .insert(vec!["git".to_string(), "pull".to_string()]);
+        assert_eq!(session_cache, expected_session_cache);
+        assert_eq!(turn_cache, crate::execution::ApprovalGrantCache::default());
+    }
+
+    #[test]
+    fn host_scope_stores_host_in_session_cache() {
+        let mut session_cache = crate::execution::ApprovalGrantCache::default();
+        let mut turn_cache = crate::execution::ApprovalGrantCache::default();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let pending = crate::execution::PendingApproval {
+            owner_session_id: devo_protocol::SessionId::new(),
+            tool_name: "fetch".to_string(),
+            resource: Some(devo_safety::ResourceKind::Network),
+            path: None,
+            host: Some("api.example.com".to_string()),
+            command_prefix: None,
+            command_pattern: None,
+            requests_escalation: false,
+            command: None,
+            cwd: std::path::PathBuf::from("/workspace"),
+            sandbox_permissions: String::new(),
+            tx,
+        };
+
+        apply_approval_scope_to_state(
+            &mut session_cache,
+            &mut turn_cache,
+            &ApprovalScopeValue::Host,
+            &pending,
+        );
+
+        let mut expected_session_cache = crate::execution::ApprovalGrantCache::default();
+        expected_session_cache
+            .hosts
+            .insert("api.example.com".to_string());
+        assert_eq!(session_cache, expected_session_cache);
+        assert_eq!(turn_cache, crate::execution::ApprovalGrantCache::default());
+    }
+
+    fn pending_approval(command_pattern: Option<Vec<String>>) -> crate::execution::PendingApproval {
+        pending_approval_with_escalation(command_pattern, false, None)
+    }
+
+    fn pending_approval_with_escalation(
+        command_pattern: Option<Vec<String>>,
+        requests_escalation: bool,
+        command: Option<String>,
+    ) -> crate::execution::PendingApproval {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        crate::execution::PendingApproval {
+            owner_session_id: devo_protocol::SessionId::new(),
+            tool_name: "shell_command".to_string(),
+            resource: Some(devo_safety::ResourceKind::ShellExec),
+            path: None,
+            host: None,
+            command_prefix: None,
+            command_pattern,
+            requests_escalation,
+            command,
+            cwd: std::path::PathBuf::from("/workspace"),
+            sandbox_permissions: if requests_escalation {
+                "require_escalated".to_string()
+            } else {
+                String::new()
+            },
+            tx,
+        }
+    }
+
+    #[test]
+    fn path_prefix_scope_stores_parent_directory_for_files() {
+        let mut session_cache = crate::execution::ApprovalGrantCache::default();
+        let mut turn_cache = crate::execution::ApprovalGrantCache::default();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let file_path = std::path::PathBuf::from("/workspace/src/main.rs");
+        let pending = crate::execution::PendingApproval {
+            owner_session_id: devo_protocol::SessionId::new(),
+            tool_name: "write".to_string(),
+            resource: Some(devo_safety::ResourceKind::FileWrite),
+            path: Some(file_path.clone()),
+            host: None,
+            command_prefix: None,
+            command_pattern: None,
+            requests_escalation: false,
+            command: None,
+            cwd: std::path::PathBuf::from("/workspace"),
+            sandbox_permissions: String::new(),
+            tx,
+        };
+
+        apply_approval_scope_to_state(
+            &mut session_cache,
+            &mut turn_cache,
+            &ApprovalScopeValue::PathPrefix,
+            &pending,
+        );
+
+        let mut expected_session_cache = crate::execution::ApprovalGrantCache::default();
+        expected_session_cache
+            .write_path_prefixes
+            .insert(std::path::PathBuf::from("/workspace/src"));
+        assert_eq!(session_cache, expected_session_cache);
+        assert_eq!(turn_cache, crate::execution::ApprovalGrantCache::default());
+    }
+
+    #[test]
+    fn path_prefix_scope_stores_read_grants_separately() {
+        let mut session_cache = crate::execution::ApprovalGrantCache::default();
+        let mut turn_cache = crate::execution::ApprovalGrantCache::default();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let file_path = std::path::PathBuf::from("/workspace/src/main.rs");
+        let pending = crate::execution::PendingApproval {
+            owner_session_id: devo_protocol::SessionId::new(),
+            tool_name: "read".to_string(),
+            resource: Some(devo_safety::ResourceKind::FileRead),
+            path: Some(file_path),
+            host: None,
+            command_prefix: None,
+            command_pattern: None,
+            requests_escalation: false,
+            command: None,
+            cwd: std::path::PathBuf::from("/workspace"),
+            sandbox_permissions: String::new(),
+            tx,
+        };
+
+        apply_approval_scope_to_state(
+            &mut session_cache,
+            &mut turn_cache,
+            &ApprovalScopeValue::PathPrefix,
+            &pending,
+        );
+
+        let mut expected_session_cache = crate::execution::ApprovalGrantCache::default();
+        expected_session_cache
+            .read_path_prefixes
+            .insert(std::path::PathBuf::from("/workspace/src"));
+        assert_eq!(session_cache, expected_session_cache);
+        assert!(session_cache.write_path_prefixes.is_empty());
+    }
+
+    #[test]
+    fn session_scope_stores_sandbox_bypass_for_escalation() {
+        let mut session_cache = crate::execution::ApprovalGrantCache::default();
+        let mut turn_cache = crate::execution::ApprovalGrantCache::default();
+        let pending = pending_approval_with_escalation(None, true, Some("npm install".to_string()));
+
+        apply_approval_scope_to_state(
+            &mut session_cache,
+            &mut turn_cache,
+            &ApprovalScopeValue::Session,
+            &pending,
+        );
+
+        let mut expected_session_cache = crate::execution::ApprovalGrantCache::default();
+        expected_session_cache.exact_commands.insert((
+            "npm install".to_string(),
+            std::path::PathBuf::from("/workspace"),
+        ));
+        expected_session_cache
+            .sandbox_bypass_commands
+            .insert(crate::execution::SandboxBypassKey {
+                command: "npm install".to_string(),
+                cwd: std::path::PathBuf::from("/workspace"),
+                sandbox_permissions: "require_escalated".to_string(),
+            });
+        assert_eq!(session_cache, expected_session_cache);
+        assert_eq!(turn_cache, crate::execution::ApprovalGrantCache::default());
+    }
+
+    #[test]
+    fn session_scope_with_exact_command_prefers_exact_over_pattern() {
+        let mut session_cache = crate::execution::ApprovalGrantCache::default();
+        let mut turn_cache = crate::execution::ApprovalGrantCache::default();
+        let mut pending = pending_approval(Some(vec![
+            "git".to_string(),
+            "add".to_string(),
+            "*".to_string(),
+        ]));
+        pending.command = Some("git add file.txt".to_string());
+
+        apply_approval_scope_to_state(
+            &mut session_cache,
+            &mut turn_cache,
+            &ApprovalScopeValue::Session,
+            &pending,
+        );
+
+        let mut expected_session_cache = crate::execution::ApprovalGrantCache::default();
+        expected_session_cache.exact_commands.insert((
+            "git add file.txt".to_string(),
+            std::path::PathBuf::from("/workspace"),
+        ));
+        assert_eq!(session_cache, expected_session_cache);
+        assert_eq!(turn_cache, crate::execution::ApprovalGrantCache::default());
+    }
+
+    #[test]
+    fn session_scope_with_pattern_stores_pattern_not_tool_name() {
+        let mut session_cache = crate::execution::ApprovalGrantCache::default();
+        let mut turn_cache = crate::execution::ApprovalGrantCache::default();
+        let pending = pending_approval(Some(vec![
+            "git".to_string(),
+            "add".to_string(),
+            "*".to_string(),
+        ]));
+
+        apply_approval_scope_to_state(
+            &mut session_cache,
+            &mut turn_cache,
+            &ApprovalScopeValue::Session,
+            &pending,
+        );
+
+        let mut expected_session_cache = crate::execution::ApprovalGrantCache::default();
+        expected_session_cache.command_patterns.insert(vec![
+            "git".to_string(),
+            "add".to_string(),
+            "*".to_string(),
+        ]);
+        assert_eq!(session_cache, expected_session_cache);
+        assert_eq!(turn_cache, crate::execution::ApprovalGrantCache::default());
+    }
+
+    #[test]
+    fn session_scope_without_pattern_keeps_tool_grant() {
+        let mut session_cache = crate::execution::ApprovalGrantCache::default();
+        let mut turn_cache = crate::execution::ApprovalGrantCache::default();
+        let pending = pending_approval(/*command_pattern*/ None);
+
+        apply_approval_scope_to_state(
+            &mut session_cache,
+            &mut turn_cache,
+            &ApprovalScopeValue::Session,
+            &pending,
+        );
+
+        let mut expected_session_cache = crate::execution::ApprovalGrantCache::default();
+        expected_session_cache
+            .tools
+            .insert("shell_command".to_string());
+        assert_eq!(session_cache, expected_session_cache);
+        assert_eq!(turn_cache, crate::execution::ApprovalGrantCache::default());
     }
 }

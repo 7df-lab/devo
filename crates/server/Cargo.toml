@@ -17,11 +17,14 @@ clap = { workspace = true }
 devo-client = { workspace = true }
 devo-code-search = { workspace = true }
 devo-core = { workspace = true }
+devo-execpolicy = { workspace = true }
 devo-file-search = { workspace = true }
 devo-mcp = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }
 devo-safety = { workspace = true }
+devo-sandbox = { workspace = true }
+devo-sandbox-network-proxy = { workspace = true }
 devo-util-fuzzy = { workspace = true }
 devo-util-git = { workspace = true }
 devo-util-paths = { workspace = true }
@@ -33,6 +36,7 @@ rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+shlex = { workspace = true }
 smol_str = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

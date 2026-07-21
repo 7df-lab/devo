@@ -16,7 +16,6 @@ Before executing the command, please follow these steps:
    - For example, before running "mkdir foo/bar", first use `ls foo` to check that "foo" exists and is the intended parent directory
 
 2. Command Execution:
-   - Start the command string with a brief `# ...` comment on its own line explaining the command's purpose, then put the command on the next line
    - Always quote file paths that contain spaces with double quotes (e.g., rm "path with spaces/file.txt")
    - Examples of proper quoting:
      - mkdir "/Users/name/My Documents" (correct)
@@ -44,7 +43,7 @@ Usage notes:
     - If the commands are independent and can run in parallel, make multiple shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two shell_command tool calls in parallel.
     - ${chaining}
     - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
-    - DO NOT use bare newlines to separate multiple commands. The leading purpose-comment newline and newlines inside quoted strings or scripts are allowed
+    - DO NOT use bare newlines to separate multiple commands. Newlines inside quoted strings or scripts are allowed
   - AVOID using `cd <directory> && <command>`. Use the `workdir` parameter to change directories instead.
     <good-example>
     Use workdir="/foo/bar" with command: pytest tests

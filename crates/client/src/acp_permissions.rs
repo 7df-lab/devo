@@ -143,9 +143,28 @@ fn acp_approval_request_notification(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("ACP tool permission request")
         .to_string();
-    let target = params
-        .get("toolCall")
-        .and_then(|tool_call| tool_call.get("toolCallId"))
+    let meta = params.get("_meta");
+    let target = meta
+        .and_then(|meta| meta.get("target"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            params
+                .get("toolCall")
+                .and_then(|tool_call| tool_call.get("rawInput"))
+                .and_then(|raw_input| raw_input.get("command"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.is_empty());
+    let justification = meta
+        .and_then(|meta| meta.get("justification"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Tool execution requires approval.")
+        .to_string();
+    let resource = meta
+        .and_then(|meta| meta.get("resource"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
     let request = PendingServerRequestContext {
@@ -155,16 +174,41 @@ fn acp_approval_request_notification(
         turn_id: Some(pending.turn_id),
         item_id: Some(pending.item_id),
     };
+    let command_pattern = meta
+        .and_then(|meta| meta.get("commandPattern"))
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok());
+    let command_prefix = meta
+        .and_then(|meta| meta.get("commandPrefix"))
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok());
+    let path = params
+        .get("toolCall")
+        .and_then(|tool_call| tool_call.get("locations"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|locations| locations.first())
+        .and_then(|location| location.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            meta.and_then(|meta| meta.get("path"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    let host = meta
+        .and_then(|meta| meta.get("host"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     let payload = ApprovalRequestPayload {
         request,
         approval_id: approval_id.to_string().into(),
         action_summary,
-        justification: "ACP agent requested permission to continue this tool call.".to_string(),
-        resource: target.clone(),
+        justification,
+        resource,
         available_scopes: acp_approval_scopes(&pending.options),
-        path: None,
-        host: None,
+        path,
+        host,
         target,
+        command_pattern,
+        command_prefix,
     };
     acp_item_notification(
         "item/completed",
@@ -220,10 +264,46 @@ fn acp_item_notification(method: &str, event: ServerEvent) -> ServerNotification
 
 fn acp_approval_scopes(options: &[AcpPermissionOption]) -> Vec<String> {
     let mut scopes = Vec::new();
-    if options.iter().any(|option| option.kind == "allow_once") {
+    if options
+        .iter()
+        .any(|option| option.option_id == "allow_once" || option.kind == "allow_once")
+    {
         scopes.push("once".to_string());
     }
-    if options.iter().any(|option| option.kind == "allow_always") {
+    if options
+        .iter()
+        .any(|option| option.option_id == "allow_session")
+    {
+        scopes.push("session".to_string());
+    }
+    if options
+        .iter()
+        .any(|option| option.option_id == "allow_prefix_rule")
+    {
+        scopes.push("command_prefix_persist".to_string());
+    }
+    if options
+        .iter()
+        .any(|option| option.option_id == "allow_path_prefix")
+    {
+        scopes.push("path_prefix".to_string());
+    }
+    if options
+        .iter()
+        .any(|option| option.option_id == "allow_host")
+    {
+        scopes.push("host".to_string());
+    }
+    // Fallback: generic allow_always without a more specific option id.
+    if !scopes.iter().any(|scope| scope == "session")
+        && options.iter().any(|option| {
+            option.kind == "allow_always"
+                && !matches!(
+                    option.option_id.as_str(),
+                    "allow_prefix_rule" | "allow_path_prefix" | "allow_host"
+                )
+        })
+    {
         scopes.push("session".to_string());
     }
     scopes
@@ -249,24 +329,69 @@ fn acp_selected_permission_option(
     params: &ApprovalResponseParams,
     pending: &AcpPendingPermission,
 ) -> Option<String> {
+    if matches!(params.decision, ApprovalDecisionValue::Cancel) {
+        return None;
+    }
+
+    // Prefer exact option ids so prefix / path / host approvals do not collapse
+    // into a generic allow_always / allow_once selection.
+    let preferred_option_ids: &[&str] = match (&params.decision, &params.scope) {
+        (ApprovalDecisionValue::Approve, ApprovalScopeValue::CommandPrefixPersist) => {
+            &["allow_prefix_rule"]
+        }
+        (ApprovalDecisionValue::Approve, ApprovalScopeValue::PathPrefix) => &["allow_path_prefix"],
+        (ApprovalDecisionValue::Approve, ApprovalScopeValue::Host) => &["allow_host"],
+        (ApprovalDecisionValue::Approve, ApprovalScopeValue::Session) => {
+            &["allow_session", "allow_always", "allow_once"]
+        }
+        (ApprovalDecisionValue::Approve, _) => &["allow_once", "allow_session", "allow_always"],
+        (ApprovalDecisionValue::Deny, ApprovalScopeValue::Session) => {
+            &["reject_always", "reject_once"]
+        }
+        (ApprovalDecisionValue::Deny, _) => &["reject_once", "reject_always"],
+        (ApprovalDecisionValue::Cancel, _) => return None,
+    };
+
+    if let Some(option_id) = preferred_option_ids.iter().find_map(|option_id| {
+        pending
+            .options
+            .iter()
+            .find(|option| option.option_id == *option_id)
+            .map(|option| option.option_id.clone())
+    }) {
+        return Some(option_id);
+    }
+
+    // PathPrefix / Host must not silently widen to session/always when the
+    // exact option is missing — fall back to once or cancel.
+    if matches!(
+        (&params.decision, &params.scope),
+        (
+            ApprovalDecisionValue::Approve,
+            ApprovalScopeValue::PathPrefix | ApprovalScopeValue::Host
+        )
+    ) {
+        return pending
+            .options
+            .iter()
+            .find(|option| option.option_id == "allow_once" || option.kind == "allow_once")
+            .map(|option| option.option_id.clone());
+    }
+
     let preferred_kinds: &[&str] = match params.decision {
         ApprovalDecisionValue::Approve => match params.scope {
-            ApprovalScopeValue::Session => &["allow_always", "allow_once"],
+            ApprovalScopeValue::Session | ApprovalScopeValue::CommandPrefixPersist => {
+                &["allow_always", "allow_once"]
+            }
+            ApprovalScopeValue::PathPrefix | ApprovalScopeValue::Host => &["allow_once"],
             ApprovalScopeValue::Once
             | ApprovalScopeValue::Turn
-            | ApprovalScopeValue::PathPrefix
-            | ApprovalScopeValue::Host
             | ApprovalScopeValue::Tool
             | ApprovalScopeValue::CommandPrefix => &["allow_once", "allow_always"],
         },
         ApprovalDecisionValue::Deny => match params.scope {
             ApprovalScopeValue::Session => &["reject_always", "reject_once"],
-            ApprovalScopeValue::Once
-            | ApprovalScopeValue::Turn
-            | ApprovalScopeValue::PathPrefix
-            | ApprovalScopeValue::Host
-            | ApprovalScopeValue::Tool
-            | ApprovalScopeValue::CommandPrefix => &["reject_once", "reject_always"],
+            _ => &["reject_once", "reject_always"],
         },
         ApprovalDecisionValue::Cancel => return None,
     };
@@ -304,6 +429,7 @@ fn acp_approval_scope_label(scope: &ApprovalScopeValue) -> &'static str {
         ApprovalScopeValue::Host => "host",
         ApprovalScopeValue::Tool => "tool",
         ApprovalScopeValue::CommandPrefix => "command_prefix",
+        ApprovalScopeValue::CommandPrefixPersist => "command_prefix_persist",
     }
 }
 
@@ -331,7 +457,10 @@ mod tests {
                     { "optionId": "allow-once", "kind": "allow_once" },
                     { "optionId": "allow-always", "kind": "allow_always" },
                     { "optionId": "reject-once", "kind": "reject_once" }
-                ]
+                ],
+                "_meta": {
+                    "commandPattern": ["git", "add", "*"]
+                }
             }),
             Arc::clone(&pending_permissions),
             notifications_tx,
@@ -378,13 +507,14 @@ mod tests {
                 },
                 approval_id: request_payload.approval_id.clone(),
                 action_summary: "Edit file".to_string(),
-                justification: "ACP agent requested permission to continue this tool call."
-                    .to_string(),
-                resource: Some("call-1".to_string()),
+                justification: "Tool execution requires approval.".to_string(),
+                resource: None,
                 available_scopes: vec!["once".to_string(), "session".to_string()],
                 path: None,
                 host: None,
-                target: Some("call-1".to_string()),
+                target: None,
+                command_pattern: Some(vec!["git".to_string(), "add".to_string(), "*".to_string(),]),
+                command_prefix: None,
             }
         );
 
@@ -440,5 +570,226 @@ mod tests {
                 scope: "once".to_string(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn permission_request_resolves_prefix_persist_to_allow_prefix_rule() {
+        let pending_permissions = Arc::new(Mutex::new(HashMap::new()));
+        let (notifications_tx, mut notifications_rx) = mpsc::unbounded_channel();
+        let session_id = devo_protocol::SessionId::new();
+
+        handle_acp_request_permission(
+            serde_json::json!(88),
+            serde_json::json!({
+                "sessionId": session_id,
+                "toolCall": {
+                    "toolCallId": "call-2",
+                    "title": "Run git pull"
+                },
+                "options": [
+                    { "optionId": "allow_once", "kind": "allow_once" },
+                    { "optionId": "allow_session", "kind": "allow_always" },
+                    { "optionId": "allow_prefix_rule", "kind": "allow_always" },
+                    { "optionId": "reject_once", "kind": "reject_once" }
+                ],
+                "_meta": {
+                    "commandPrefix": ["git", "pull"]
+                }
+            }),
+            Arc::clone(&pending_permissions),
+            notifications_tx,
+        )
+        .await
+        .expect("permission request is accepted");
+
+        let request_notification = notifications_rx
+            .try_recv()
+            .expect("approval request notification");
+        let ServerEvent::ItemCompleted(request_item) =
+            serde_json::from_value::<ServerEvent>(request_notification.params)
+                .expect("decode approval request event")
+        else {
+            panic!("expected item/completed request event");
+        };
+        let request_payload =
+            serde_json::from_value::<ApprovalRequestPayload>(request_item.item.payload.clone())
+                .expect("decode approval request payload");
+        assert_eq!(
+            request_payload.available_scopes,
+            vec![
+                "once".to_string(),
+                "session".to_string(),
+                "command_prefix_persist".to_string(),
+            ]
+        );
+        assert_eq!(
+            request_payload.command_prefix,
+            Some(vec!["git".to_string(), "pull".to_string()])
+        );
+
+        let turn_id = request_item.context.turn_id.expect("request turn id");
+        let response_params = ApprovalResponseParams {
+            session_id,
+            turn_id,
+            approval_id: request_payload.approval_id.clone(),
+            decision: ApprovalDecisionValue::Approve,
+            scope: ApprovalScopeValue::CommandPrefixPersist,
+        };
+        let (response, _) = resolve_acp_permission_response(&pending_permissions, &response_params)
+            .await
+            .expect("pending permission resolves");
+        assert_eq!(
+            response,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 88,
+                "result": {
+                    "outcome": {
+                        "outcome": "selected",
+                        "optionId": "allow_prefix_rule"
+                    }
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_request_resolves_path_and_host_scopes() {
+        let pending_permissions = Arc::new(Mutex::new(HashMap::new()));
+        let (notifications_tx, mut notifications_rx) = mpsc::unbounded_channel();
+        let session_id = devo_protocol::SessionId::new();
+
+        handle_acp_request_permission(
+            serde_json::json!(99),
+            serde_json::json!({
+                "sessionId": session_id,
+                "toolCall": {
+                    "toolCallId": "call-3",
+                    "title": "Write file",
+                    "locations": [{ "path": "/tmp/out/file.txt" }]
+                },
+                "options": [
+                    { "optionId": "allow_once", "kind": "allow_once" },
+                    { "optionId": "allow_path_prefix", "kind": "allow_always" },
+                    { "optionId": "allow_host", "kind": "allow_always" },
+                    { "optionId": "reject_once", "kind": "reject_once" }
+                ],
+                "_meta": {
+                    "host": "api.example.com"
+                }
+            }),
+            Arc::clone(&pending_permissions),
+            notifications_tx,
+        )
+        .await
+        .expect("permission request is accepted");
+
+        let request_notification = notifications_rx
+            .try_recv()
+            .expect("approval request notification");
+        let ServerEvent::ItemCompleted(request_item) =
+            serde_json::from_value::<ServerEvent>(request_notification.params)
+                .expect("decode approval request event")
+        else {
+            panic!("expected item/completed request event");
+        };
+        let request_payload =
+            serde_json::from_value::<ApprovalRequestPayload>(request_item.item.payload.clone())
+                .expect("decode approval request payload");
+        assert_eq!(
+            request_payload.available_scopes,
+            vec![
+                "once".to_string(),
+                "path_prefix".to_string(),
+                "host".to_string(),
+            ]
+        );
+        assert_eq!(request_payload.path.as_deref(), Some("/tmp/out/file.txt"));
+        assert_eq!(request_payload.host.as_deref(), Some("api.example.com"));
+
+        let turn_id = request_item.context.turn_id.expect("request turn id");
+        let path_response_params = ApprovalResponseParams {
+            session_id,
+            turn_id,
+            approval_id: request_payload.approval_id.clone(),
+            decision: ApprovalDecisionValue::Approve,
+            scope: ApprovalScopeValue::PathPrefix,
+        };
+        let (path_response, _) =
+            resolve_acp_permission_response(&pending_permissions, &path_response_params)
+                .await
+                .expect("pending permission resolves");
+        assert_eq!(
+            path_response,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "result": {
+                    "outcome": {
+                        "outcome": "selected",
+                        "optionId": "allow_path_prefix"
+                    }
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_request_uses_meta_target_not_tool_call_id() {
+        let pending_permissions = Arc::new(Mutex::new(HashMap::new()));
+        let (notifications_tx, mut notifications_rx) = mpsc::unbounded_channel();
+        let session_id = devo_protocol::SessionId::new();
+        let command = r#"echo "Hello from Devo!" > ~/Desktop/hello-devo.txt"#.to_string();
+        let title = format!("shell_command: {command}");
+
+        handle_acp_request_permission(
+            serde_json::json!(101),
+            serde_json::json!({
+                "sessionId": session_id,
+                "toolCall": {
+                    "toolCallId": "call_00_O1jvONaD7gYFgfVFYGrr6527",
+                    "title": title,
+                    "rawInput": { "command": command.clone() }
+                },
+                "options": [
+                    { "optionId": "allow_once", "kind": "allow_once" },
+                    { "optionId": "allow_session", "kind": "allow_always" },
+                    { "optionId": "reject_once", "kind": "reject_once" }
+                ],
+                "_meta": {
+                    "target": command.clone(),
+                    "resource": "ShellExec",
+                    "justification": "Write a greeting file on the desktop."
+                }
+            }),
+            Arc::clone(&pending_permissions),
+            notifications_tx,
+        )
+        .await
+        .expect("permission request is accepted");
+
+        let request_notification = notifications_rx
+            .try_recv()
+            .expect("approval request notification");
+        let ServerEvent::ItemCompleted(request_item) =
+            serde_json::from_value::<ServerEvent>(request_notification.params)
+                .expect("decode approval request event")
+        else {
+            panic!("expected item/completed request event");
+        };
+        let request_payload =
+            serde_json::from_value::<ApprovalRequestPayload>(request_item.item.payload.clone())
+                .expect("decode approval request payload");
+        assert_eq!(request_payload.target.as_deref(), Some(command.as_str()));
+        assert_eq!(request_payload.resource.as_deref(), Some("ShellExec"));
+        assert_eq!(
+            request_payload.justification,
+            "Write a greeting file on the desktop."
+        );
+        assert_ne!(
+            request_payload.target.as_deref(),
+            Some("call_00_O1jvONaD7gYFgfVFYGrr6527")
+        );
+        assert!(request_payload.command_pattern.is_none());
     }
 }

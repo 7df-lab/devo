@@ -268,7 +268,18 @@ async fn run_cli() -> Result<()> {
 }
 
 fn direct_server_early_dispatch() -> devo_arg0::EarlyDispatch {
-    devo_arg0::EarlyDispatch::Continue
+    let args: Vec<String> = std::env::args().collect();
+    match devo_windows_sandbox::run_as_windows_sandbox_if_requested(&args) {
+        Ok(true) => {
+            // The helper exits the process on success; reaching here is unexpected.
+            devo_arg0::EarlyDispatch::Handled(Ok(()))
+        }
+        Ok(false) => devo_arg0::EarlyDispatch::Continue,
+        Err(error) => {
+            eprintln!("windows sandbox wrapper failed: {error}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn server_process_args_from_cli(cli: &Cli) -> Option<ServerProcessArgs> {

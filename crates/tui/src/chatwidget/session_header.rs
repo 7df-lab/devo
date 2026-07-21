@@ -18,14 +18,12 @@ use ratatui::text::Span;
 use crate::history_cell;
 use crate::history_cell::HistoryCell;
 use crate::startup_header::STARTUP_HEADER_ANIMATION_INTERVAL;
+use crate::ui_consts::COMPLETED_COLOR;
+use crate::ui_consts::REASONING_ACCENT_COLOR;
 
 use super::ChatWidget;
 use super::DotStatus;
 
-/// Warm amber used for the "Thought" heading and the failed-tool indicator.
-pub(super) const REASONING_ACCENT_COLOR: Color = Color::Rgb(210, 150, 60);
-/// Green used for completed, idle, and done indicators.
-pub(super) const COMPLETED_COLOR: Color = Color::Rgb(120, 220, 160);
 /// Blue used for the pending-state dot prefix.
 pub(super) const PENDING_DOT_COLOR: Color = Color::Rgb(110, 200, 255);
 /// Blue used for running/active state text.
@@ -518,6 +516,16 @@ impl ChatWidget {
         Style::default().italic().fg(REASONING_ACCENT_COLOR)
     }
 
+    /// Completed reasoning uses a muted style so finished Thought cells read as
+    /// settled history, while the live "Thinking" cell keeps the accent color.
+    pub(super) fn reasoning_completed_heading_style() -> Style {
+        Style::default().dim().italic()
+    }
+
+    pub(super) fn reasoning_completed_dot_prefix() -> Line<'static> {
+        Line::from(vec![Span::styled("▌", Style::default().dim()), " ".into()])
+    }
+
     pub(super) fn patch_lines_style(lines: &mut [Line<'static>], style: Style) {
         if style == Style::default() {
             return;
@@ -567,6 +575,7 @@ mod tests {
             initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
             initial_reasoning_effort_selection: None,
             initial_permission_preset: PermissionPreset::Default,
+            initial_sandbox_profile: Some("workspace".to_string()),
             initial_user_message: None,
             enhanced_keys_supported: true,
             is_first_run: false,
@@ -576,6 +585,7 @@ mod tests {
             exit_after_onboarding: false,
             startup_tooltip_override: None,
             initial_theme_name: None,
+            initial_collapse_reasoning: false,
         });
         widget.total_input_tokens = 124_000;
         widget.total_cache_read_tokens = 82_000;
@@ -604,6 +614,7 @@ mod tests {
             initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
             initial_reasoning_effort_selection: None,
             initial_permission_preset: PermissionPreset::Default,
+            initial_sandbox_profile: Some("workspace".to_string()),
             initial_user_message: None,
             enhanced_keys_supported: true,
             is_first_run: false,
@@ -613,6 +624,7 @@ mod tests {
             exit_after_onboarding: false,
             startup_tooltip_override: None,
             initial_theme_name: None,
+            initial_collapse_reasoning: false,
         });
 
         let summary = widget.status_summary_text();

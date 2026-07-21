@@ -8,6 +8,7 @@ use devo_core::AppConfigLoader;
 use devo_core::FileSystemAppConfigLoader;
 use devo_protocol::Model;
 use devo_protocol::ModelCatalog;
+use devo_protocol::PermissionPreset;
 use devo_protocol::ProviderWireApi;
 use devo_util_paths::find_devo_home;
 use futures::StreamExt;
@@ -29,13 +30,13 @@ use crate::chatwidget::MCP_SERVERS_TRANSCRIPT_TITLE;
 use crate::chatwidget::TuiSessionState;
 use crate::chatwidget::UserMessage;
 use crate::events::WorkerEvent;
-use crate::history_cell;
 use crate::host_overlay::OverlayState;
 use crate::onboarding::OnboardingModelBinding;
 use crate::onboarding::onboarding_provider_model_binding;
 use crate::onboarding::onboarding_provider_vendor;
 use crate::onboarding::save_last_used_model;
 use crate::onboarding::save_project_permission_preset;
+use crate::onboarding::save_project_sandbox_profile;
 use crate::onboarding::save_reasoning_effort_selection;
 use crate::pager_overlay::TranscriptOverlay;
 use crate::render::renderable::Renderable;
@@ -243,6 +244,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         server_log_level: config.server_log_level.clone(),
         reasoning_effort_selection: initial_session.reasoning_effort_selection.clone(),
         permission_preset: initial_session.permission_preset,
+        initial_sandbox_profile: initial_session.sandbox_profile.clone(),
         client_capabilities: devo_protocol::AcpClientCapabilities {
             fs: devo_protocol::AcpFileSystemCapabilities {
                 read_text_file: false,
@@ -300,6 +302,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         },
         initial_reasoning_effort_selection: initial_session.reasoning_effort_selection.clone(),
         initial_permission_preset: initial_session.permission_preset,
+        initial_sandbox_profile: initial_session.sandbox_profile.clone(),
         initial_user_message: None,
         enhanced_keys_supported: tui.enhanced_keys_supported(),
         is_first_run: config.saved_models.is_empty(),
@@ -309,14 +312,11 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         exit_after_onboarding: config.exit_after_onboarding,
         startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
         initial_theme_name,
+        initial_collapse_reasoning: crate::onboarding::load_collapse_reasoning(),
     });
 
     if initial_session.session_id.is_some() && !config.show_model_onboarding {
         chat_widget.begin_session_resume();
-    }
-
-    for warning in &config.startup_warnings {
-        chat_widget.add_to_history(history_cell::new_warning_event(warning.clone()));
     }
 
     // tui events, such as `[TuiEvent::Draw]`, `[TuiEvent::Key]`, `TuiEvent::Paste`
@@ -773,6 +773,11 @@ fn handle_app_event(
                 .open_subagent_transcript(tui, chat_widget, *session_id)?;
             return Ok(LoopAction::Continue);
         }
+        AppEvent::ReloadInlineTranscript => {
+            tui.replace_inline_session_ui()?;
+            chat_widget.handle_app_event(app_event);
+            return Ok(LoopAction::Continue);
+        }
         _ => {}
     }
     if let AppEvent::Command(command) = &app_event {
@@ -1068,7 +1073,19 @@ fn handle_app_command(
         AppCommand::UpdatePermissions { preset } => {
             worker.update_permissions(*preset)?;
             save_project_permission_preset(context.project_config_key, *preset)?;
+            let implied_sandbox = match preset {
+                PermissionPreset::FullAccess => "off",
+                PermissionPreset::Default | PermissionPreset::AutoReview => "workspace",
+            };
+            save_project_sandbox_profile(context.project_config_key, implied_sandbox)?;
+            worker.update_sandbox_profile(implied_sandbox.to_string())?;
             chat_widget.note_permissions_updated(*preset);
+            chat_widget.note_sandbox_profile_updated(implied_sandbox.to_string());
+        }
+        AppCommand::UpdateSandboxProfile { profile } => {
+            worker.update_sandbox_profile(profile.clone())?;
+            save_project_sandbox_profile(context.project_config_key, profile)?;
+            chat_widget.note_sandbox_profile_updated(profile.clone());
         }
         AppCommand::OverrideTurnContext {
             model,

@@ -7,13 +7,7 @@ import {
 	CodeBlockTitle,
 } from "@devo/ui/components/ai-elements/code-block"
 import { Diff, DiffContent } from "@devo/ui/components/ai-elements/diff"
-import {
-	Terminal,
-	TerminalContent,
-	TerminalCopyButton,
-	TerminalHeader,
-	TerminalTitle,
-} from "@devo/ui/components/ai-elements/terminal"
+import { Terminal, TerminalContent } from "@devo/ui/components/ai-elements/terminal"
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@devo/ui/components/dialog"
 import { cn } from "@devo/ui/lib/utils"
 
@@ -45,7 +39,7 @@ import { viewFileInDiffPanelAtom } from "../../atoms/ui"
 import { detectContentLanguage, detectLanguage, prettyPrintJson } from "../../lib/language"
 import type { FilePart, ToolPart, ToolStateCompleted } from "../../lib/types"
 import { SubAgentCard } from "./sub-agent-card"
-import type { ToolCategory } from "./tool-card"
+import type { ToolCategory } from "./tool-category"
 import {
 	TranscriptDisclosure,
 	TranscriptDisclosureContent,
@@ -71,12 +65,51 @@ function truncateOutput(output: string, max = MAX_OUTPUT_LENGTH): string {
 	return `${output.slice(0, max)}\n... (truncated)`
 }
 
-// ============================================================
-// Read output parsing — strip cat -n prefixes and <file> tags
-// ============================================================
+/** Shell-family tools that share the command/terminal display. */
+const SHELL_TOOLS: ReadonlySet<string> = new Set(["bash", "shell_command", "exec_command"])
 
-/** Pre-compiled regex for line-number formats (hoisted to avoid re-creation per call) */
-const LINE_NUM_REGEX = /^\s*(\d+)[|:\t]\s?(.*)$/
+/**
+ * The shell tool's result text is `<stdout>\n<envelope-json>`, where the
+ * envelope carries display metadata ({output, command, exit, description,
+ * cwd, yield_time_ms}). Strip it so the terminal shows only real command
+ * output; the command and description already appear in the tool row itself.
+ */
+export function stripShellEnvelope(output: string): string {
+	const parseEnvelope = (text: string): { body?: string } | undefined => {
+		try {
+			const parsed = JSON.parse(text)
+			if (
+				parsed &&
+				typeof parsed === "object" &&
+				typeof parsed.exit === "number" &&
+				(typeof parsed.command === "string" || typeof parsed.cmd === "string")
+			) {
+				return { body: typeof parsed.output === "string" ? parsed.output : undefined }
+			}
+		} catch {
+			// Not JSON — ordinary command output.
+		}
+		return undefined
+	}
+
+	const trimmed = output.trim()
+	// The output IS the envelope (the command produced no stdout).
+	if (trimmed.startsWith("{")) {
+		const whole = parseEnvelope(trimmed)
+		if (whole) return whole.body ?? ""
+	}
+	// Stdout followed by the envelope JSON (they are joined with "\n").
+	const separator = output.lastIndexOf("\n{")
+	if (separator !== -1) {
+		const tail = parseEnvelope(output.slice(separator + 1).trim())
+		if (tail) return output.slice(0, separator).trimEnd()
+	}
+	return output
+}
+
+// ============================================================
+// Read output parsing — strip wrapper tags, keep original line numbers
+// ============================================================
 
 /**
  * Parses output from various read tools.
@@ -84,10 +117,11 @@ const LINE_NUM_REGEX = /^\s*(\d+)[|:\t]\s?(.*)$/
  * 1. Claude Code's `cat -n` format: <file>00001| content</file>
  * 2. Devo's XML-wrapped format: <path>...</path><content>1: content</content>
  *
- * This function strips the wrapper tags, removes the line-number
- * prefixes, and returns the clean content + the starting line number.
+ * Strips the wrapper tags and trailing metadata lines, but keeps the
+ * content's own line-number prefixes — the read output already carries
+ * line numbers, so the UI must not add another gutter of its own.
  */
-function parseReadOutput(raw: string): { content: string; startLine: number } {
+function parseReadOutput(raw: string): string {
 	let text = raw
 
 	// 1. Strip Devo XML-style tags
@@ -113,28 +147,7 @@ function parseReadOutput(raw: string): { content: string; startLine: number } {
 	text = text.replace(/\n?\s*\(File has more lines[^)]*\)\s*$/, "")
 	text = text.replace(/\n?\s*\(Output truncated[^)]*\)\s*$/, "")
 
-	const lines = text.split("\n")
-	// If first line has a line number, use it as startLine
-	const firstMatch = lines[0]?.match(LINE_NUM_REGEX)
-
-	if (!firstMatch) {
-		return { content: text, startLine: 1 }
-	}
-
-	const startLine = Number.parseInt(firstMatch[1], 10)
-	const stripped: string[] = []
-
-	for (const line of lines) {
-		const match = line.match(LINE_NUM_REGEX)
-		if (match) {
-			stripped.push(match[2])
-		} else {
-			// Lines without prefix (e.g. blank lines) — keep as-is
-			stripped.push(line)
-		}
-	}
-
-	return { content: stripped.join("\n"), startLine }
+	return text
 }
 
 // ============================================================
@@ -186,6 +199,8 @@ export function getToolInfo(tool: string): {
 		case "webfetch":
 			return { icon: GlobeIcon, title: "Fetch" }
 		case "bash":
+		case "shell_command":
+		case "exec_command":
 			return { icon: TerminalIcon, title: "Shell" }
 		case "edit":
 			return { icon: EditIcon, title: "Edit" }
@@ -241,6 +256,8 @@ function getPendingLabel(tool: string): string {
 		case "apply_patch":
 			return "Preparing patch..."
 		case "bash":
+		case "shell_command":
+		case "exec_command":
 			return "Preparing command..."
 		case "read":
 			return "Preparing read..."
@@ -294,11 +311,14 @@ export function getToolSubtitle(
 				extractFromRaw(state, "pattern", "path")
 			break
 		case "bash":
+		case "shell_command":
+		case "exec_command":
 			subtitle =
 				title ??
 				(input.description as string) ??
 				(input.command as string) ??
-				extractFromRaw(state, "command", "description")
+				(input.cmd as string) ??
+				extractFromRaw(state, "command", "cmd", "description")
 			break
 		case "edit":
 			subtitle =
@@ -394,27 +414,38 @@ function formatInputParams(input: Record<string, unknown>): string | undefined {
 	return `[${parts.join(", ")}]`
 }
 
-/** Compute completed tool duration from the SDK tool-state timestamps. */
-export function getToolDuration(part: ToolPart): string | undefined {
-	const state = part.state
-	if (state.status === "completed" || state.status === "error") {
-		const ms = Math.max(0, state.time.end - state.time.start)
-		if (ms < 1000) return `${ms}ms`
-		const seconds = Math.floor(ms / 1000)
-		if (seconds < 60) return `${seconds}s`
-		const minutes = Math.floor(seconds / 60)
-		const remainingSeconds = seconds % 60
-		return `${minutes}m ${remainingSeconds}s`
-	}
-	return undefined
-}
-
 // ============================================================
 // Tool-specific content renderers
 // ============================================================
 
 /**
- * Bash tool: shows command with syntax highlighting + ANSI-colored terminal output.
+ * Builds the text of the single terminal block shown for a bash tool call:
+ * the command as its first line, followed by the (cleaned) output.
+ *
+ * The SDK output often echoes the command as the first line (e.g.
+ * "$ command\n..."). Since we prepend the command ourselves, strip the
+ * duplicate before joining.
+ */
+export function buildBashTerminalOutput(
+	command: string | undefined,
+	output: string | undefined,
+	error: string | undefined,
+): string {
+	let body = stripShellEnvelope(error ?? output ?? "")
+	if (command) {
+		const prefix = `$ ${command}`
+		if (body.startsWith(prefix)) {
+			body = body.slice(prefix.length).replace(/^\r?\n/, "")
+		}
+	}
+	body = truncateOutput(body)
+	if (!command) return body
+	return body ? `$ ${command}\n${body}` : `$ ${command}`
+}
+
+/**
+ * Bash tool: one terminal block — command on the first line, ANSI-colored
+ * output below. No separate command code block or "Output" header.
  *
  * During `running` state the server streams incremental output via
  * `state.metadata.output` (accumulated string, updated on every stdout/stderr
@@ -422,7 +453,9 @@ export function getToolDuration(part: ToolPart): string | undefined {
  * behaviour of the Devo TUI and web UI.
  */
 function BashContent({ part }: { part: ToolPart }) {
-	const command = part.state.input?.command as string | undefined
+	const command =
+		(part.state.input?.command as string | undefined) ??
+		(part.state.input?.cmd as string | undefined)
 
 	// During "running", live output arrives in state.metadata.output.
 	// After completion it moves to state.output.
@@ -434,68 +467,27 @@ function BashContent({ part }: { part: ToolPart }) {
 	const error = part.state.status === "error" ? (part.state as { error: string }).error : undefined
 	const isStreaming = part.state.status === "running"
 
-	const displayOutput = useMemo(() => {
-		if (error) return error
-		if (!output) return ""
-		let cleaned = output
-		// The SDK output often echoes the command as the first line (e.g. "$ command\n...").
-		// Since we already render the command in a separate CodeBlock above, strip the duplicate.
-		if (command) {
-			const prefix = `$ ${command}`
-			if (cleaned.startsWith(prefix)) {
-				cleaned = cleaned.slice(prefix.length).replace(/^\r?\n/, "")
-			}
-		}
-		return truncateOutput(cleaned)
-	}, [output, error, command])
+	const terminalOutput = useMemo(
+		() => buildBashTerminalOutput(command, output, error),
+		[command, output, error],
+	)
 
-	// If there's meaningful output, show a terminal view with ANSI support
-	if (displayOutput || isStreaming) {
-		return (
-			<div className="space-y-1.5">
-				{command && (
-					<CodeBlock
-						code={`$ ${command}`}
-						language="bash"
-						className="border-0 shadow-none rounded-none text-[11px]"
-					>
-						<CodeBlockContent code={`$ ${command}`} language="bash" />
-					</CodeBlock>
-				)}
-				<Terminal
-					output={displayOutput}
-					isStreaming={isStreaming}
-					className="max-h-64 border-0 shadow-none rounded-none text-[11px]"
-				>
-					<TerminalHeader className="py-1.5 px-3">
-						<TerminalTitle className="text-[11px]">Output</TerminalTitle>
-						<TerminalCopyButton className="size-6" />
-					</TerminalHeader>
-					<TerminalContent className="max-h-48 p-3 text-[11px] leading-relaxed" />
-				</Terminal>
-			</div>
-		)
-	}
+	if (!terminalOutput && !isStreaming) return null
 
-	// Command only (no output yet)
-	if (command) {
-		return (
-			<CodeBlock
-				code={`$ ${command}`}
-				language="bash"
-				className="border-0 shadow-none rounded-none text-[11px]"
-			>
-				<CodeBlockContent code={`$ ${command}`} language="bash" />
-			</CodeBlock>
-		)
-	}
-
-	return null
+	return (
+		<Terminal
+			output={terminalOutput}
+			isStreaming={isStreaming}
+			className="max-h-64 border-0 shadow-none rounded-none text-[11px]"
+		>
+			<TerminalContent className="max-h-56 p-3 text-[11px] leading-relaxed" />
+		</Terminal>
+	)
 }
 
 /**
  * Edit tool: shows inline diff of oldString → newString with syntax highlighting.
- * No inner headers — diff stats are shown in the ToolCard trailing area.
+ * No inner headers — diff stats are shown in the tool row's trailing area.
  */
 function EditDiffContent({ part }: { part: ToolPart }) {
 	const filePath = (part.state.input?.filePath as string) ?? (part.state.input?.path as string)
@@ -535,7 +527,7 @@ function EditDiffContent({ part }: { part: ToolPart }) {
 
 /**
  * Write tool: shows syntax-highlighted file content being written.
- * No inner header — the ToolCard header already shows the filename.
+ * No inner header — the tool row header already shows the filename.
  */
 function WriteContent({ part }: { part: ToolPart }) {
 	const filePath = (part.state.input?.filePath as string) ?? (part.state.input?.path as string)
@@ -575,7 +567,7 @@ function WriteContent({ part }: { part: ToolPart }) {
 
 /**
  * Apply patch tool: shows diff in patch mode.
- * No inner header — the ToolCard header identifies this as a patch.
+ * No inner header — the tool row header identifies this as a patch.
  */
 function PatchContent({ part }: { part: ToolPart }) {
 	const output = part.state.status === "completed" ? part.state.output : undefined
@@ -618,7 +610,8 @@ function PatchContent({ part }: { part: ToolPart }) {
 
 /**
  * Read tool: shows syntax-highlighted file contents.
- * Strips cat -n prefixes and <file> tags, preserves original line numbers.
+ * Strips wrapper tags but keeps the read output's own line numbers —
+ * the code block renders no line-number gutter of its own.
  */
 function ReadContent({ part }: { part: ToolPart }) {
 	const filePath = (part.state.input?.filePath as string) ?? (part.state.input?.path as string)
@@ -630,25 +623,16 @@ function ReadContent({ part }: { part: ToolPart }) {
 
 	const language = (detectLanguage(filePath) ?? "text") as BundledLanguage
 
-	// Parse out cat -n line numbers and <file> wrapper
-	const { content: cleanContent, startLine } = parseReadOutput(output)
-	const displayContent = truncateOutput(cleanContent)
+	// No inner header — the tool row header already shows the filename.
+	const displayContent = truncateOutput(parseReadOutput(output))
 
-	// No inner header — the ToolCard header already shows the filename.
-	// Just the code block with correct line number offset.
 	return (
 		<CodeBlock
 			code={displayContent}
 			language={language}
-			showLineNumbers
 			className="devo-read-output max-h-96 border-0 shadow-none rounded-none"
 		>
-			<CodeBlockContent
-				code={displayContent}
-				language={language}
-				showLineNumbers
-				startLine={startLine}
-			/>
+			<CodeBlockContent code={displayContent} language={language} />
 		</CodeBlock>
 	)
 }
@@ -838,6 +822,26 @@ function GenericContent({ part }: { part: ToolPart }) {
 // Tool group summaries
 // ============================================================
 
+/**
+ * Verb for an explore tool group: specific when every tool in the group is
+ * the same kind (e.g. a run of greps reads "Searched", not "Read").
+ */
+function exploreGroupVerb(tools: ToolPart[]): string {
+	const first = tools[0]?.tool
+	if (!first || !tools.every((t) => t.tool === first)) return "Explored"
+	switch (first) {
+		case "read":
+			return "Read"
+		case "grep":
+		case "glob":
+			return "Searched"
+		case "list":
+			return "Listed"
+		default:
+			return "Explored"
+	}
+}
+
 export function describeToolGroup(
 	category: ToolCategory,
 	tools: ToolPart[],
@@ -857,7 +861,7 @@ export function describeToolGroup(
 		if (details.length > 0) {
 			switch (category) {
 				case "explore":
-					return count === 1 ? `Read ${details[0]}` : `Read ${details.join(", ")}`
+					return `${exploreGroupVerb(tools)} ${count === 1 ? details[0] : details.join(", ")}`
 				case "edit":
 					return count === 1 ? `Edited ${details[0]}` : `Edited ${details.join(", ")}`
 				case "run":
@@ -877,8 +881,10 @@ export function describeToolGroup(
 	}
 
 	switch (category) {
-		case "explore":
-			return `Explored ${count} files`
+		case "explore": {
+			const verb = exploreGroupVerb(tools)
+			return `${verb} ${count} ${verb === "Searched" ? "patterns" : "files"}`
+		}
 		case "edit":
 			return `Edited ${count} files`
 		case "run":
@@ -904,22 +910,12 @@ export function isGroupError(tools: ToolPart[]): boolean {
 	return tools.some((t) => t.state.status === "error")
 }
 
-// ============================================================
-// Smart defaults: which tools should be open by default
-// ============================================================
-
-/**
- * Returns whether a tool should default to expanded in the active turn.
- */
-export function shouldDefaultOpen(_tool: string, _status: string): boolean {
-	return false
-}
 /**
  * Returns whether a tool has expandable content.
  */
 function hasExpandableContent(part: ToolPart): boolean {
 	const { tool, state } = part
-	// Task uses SubAgentCard, not ToolCard
+	// Task uses SubAgentCard, not a tool row
 	if (tool === "task") return false
 	// Todowrite has expandable todo items
 	if (tool === "todowrite" || tool === "todoread") {
@@ -940,8 +936,8 @@ function hasExpandableContent(part: ToolPart): boolean {
 	// If there's output or error, there's content
 	if (state.status === "completed" && state.output) return true
 	if (state.status === "error") return true
-	// Bash always has content (the command at least)
-	if (tool === "bash") return true
+	// Shell tools always have content (the command at least)
+	if (SHELL_TOOLS.has(tool)) return true
 	return false
 }
 
@@ -952,7 +948,7 @@ function getToolContent(part: ToolPart): ReactNode {
 	const error = part.state.status === "error" ? (part.state as { error: string }).error : undefined
 	if (
 		error &&
-		part.tool !== "bash" &&
+		!SHELL_TOOLS.has(part.tool) &&
 		part.tool !== "edit" &&
 		part.tool !== "write" &&
 		part.tool !== "read" &&
@@ -963,6 +959,8 @@ function getToolContent(part: ToolPart): ReactNode {
 
 	switch (part.tool) {
 		case "bash":
+		case "shell_command":
+		case "exec_command":
 			return <BashContent part={part} />
 		case "edit":
 			return <EditDiffContent part={part} />
@@ -992,8 +990,6 @@ function getToolContent(part: ToolPart): ReactNode {
 
 interface ChatToolCallProps {
 	part: ToolPart
-	/** Whether this tool is in the active (last) turn */
-	isActiveTurn?: boolean
 	/** Whether the turn containing this tool has an error (enables delete action) */
 	turnHasError?: boolean
 	/** Delete this tool part (for error recovery) */
@@ -1038,13 +1034,12 @@ function areToolPartsEqual(a: ToolPart, b: ToolPart): boolean {
 }
 
 /**
- * Renders a single tool call as a ToolCard with tool-specific content,
- * or as a SubAgentCard for sub-agent tasks.
+ * Renders a single tool call as a unified disclosure row with tool-specific
+ * content, or as a SubAgentCard for sub-agent tasks.
  */
 export const ChatToolCall = memo(
 	function ChatToolCall({
 		part,
-		isActiveTurn = false,
 		turnHasError = false,
 		onDelete,
 		projectRoot,
@@ -1082,7 +1077,7 @@ export const ChatToolCall = memo(
 
 		const status = part.state.status as "running" | "error" | "completed" | "pending"
 
-		// Build trailing element: diff stats + "view diff" button, or a running spinner.
+		// Build trailing element: diff stats, or a running spinner.
 		const trailingElement = useMemo(() => {
 			const parts: ReactNode[] = []
 
@@ -1115,29 +1110,6 @@ export const ChatToolCall = memo(
 			return <span className="flex items-center gap-2.5">{parts}</span>
 		}, [diffStats, status])
 
-		// Combine trailing element with "View diff" button for edit-category tools
-		const combinedTrailing = useMemo(() => {
-			if (!editFilePath || status !== "completed") return trailingElement
-			const viewButton = (
-				<button
-					key="view-diff"
-					type="button"
-					onClick={handleViewDiff}
-					className="rounded p-0.5 text-muted-foreground/40 transition-colors hover:bg-muted hover:text-foreground"
-					title="View in diff panel"
-				>
-					<DiffIcon className="size-3" aria-hidden="true" />
-				</button>
-			)
-			if (!trailingElement) return viewButton
-			return (
-				<span className="flex items-center gap-2">
-					{trailingElement}
-					{viewButton}
-				</span>
-			)
-		}, [editFilePath, status, trailingElement, handleViewDiff])
-
 		// When the turn has an error, add a delete button so the user can
 		// surgically remove a problematic tool part and continue the conversation.
 		const handleDelete = useCallback(
@@ -1149,7 +1121,7 @@ export const ChatToolCall = memo(
 		)
 
 		const finalTrailing = useMemo(() => {
-			if (!turnHasError || !onDelete) return combinedTrailing
+			if (!turnHasError || !onDelete) return trailingElement
 			const deleteButton = (
 				<button
 					key="delete-part"
@@ -1161,14 +1133,14 @@ export const ChatToolCall = memo(
 					<XIcon className="size-3" aria-hidden="true" />
 				</button>
 			)
-			if (!combinedTrailing) return deleteButton
+			if (!trailingElement) return deleteButton
 			return (
 				<span className="flex items-center gap-2">
-					{combinedTrailing}
+					{trailingElement}
 					{deleteButton}
 				</span>
 			)
-		}, [turnHasError, onDelete, combinedTrailing, handleDelete])
+		}, [turnHasError, onDelete, trailingElement, handleDelete])
 
 		// Skip rendering todoread parts without output
 		if (part.tool === "todoread" && part.state.status !== "completed") return null
@@ -1178,12 +1150,11 @@ export const ChatToolCall = memo(
 			return <SubAgentCard part={part} />
 		}
 
-		// --- All other tools (including todos): ToolCard ---
+		// --- All other tools (including todos): unified tool row ---
 		const { icon: Icon, title } = getToolInfo(part.tool)
 		const subtitle = getToolSubtitle(part, { projectRoot })
 		const hasContent = hasExpandableContent(part)
-		const defaultOpen =
-			defaultOpenProp ?? (isActiveTurn ? shouldDefaultOpen(part.tool, status) : false)
+		const defaultOpen = defaultOpenProp ?? false
 		const isRunning = status === "running" || status === "pending"
 
 		// Extract attachments
@@ -1201,10 +1172,13 @@ export const ChatToolCall = memo(
 			<span>{title}</span>
 		)
 
+		// Completed edit-category tools can jump to the diff panel; the action
+		// lives at the top of the expanded content so the row trailing stays lean.
+		const showViewDiff = editFilePath != null && status === "completed"
+
 		return (
 			<div className="space-y-1.5">
 				<TranscriptDisclosure
-					className="mb-0"
 					defaultOpen={defaultOpen}
 					expandable={hasContent}
 					open={open}
@@ -1213,7 +1187,7 @@ export const ChatToolCall = memo(
 					<TranscriptDisclosureTrigger
 						leading={
 							<Icon
-								className={`size-4 shrink-0 ${
+								className={`size-3.5 shrink-0 stroke-[1.5] ${
 									isRunning
 										? "animate-pulse text-muted-foreground"
 										: "text-muted-foreground/50"
@@ -1224,7 +1198,20 @@ export const ChatToolCall = memo(
 						trailing={finalTrailing}
 					/>
 					{hasContent && (
-						<TranscriptDisclosureContent className="overflow-hidden rounded-md border border-border/50">
+						<TranscriptDisclosureContent rail className="overflow-hidden">
+							{showViewDiff && (
+								<div className="flex justify-end pb-1">
+									<button
+										type="button"
+										onClick={handleViewDiff}
+										className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground"
+										title="View in diff panel"
+									>
+										<DiffIcon className="size-3" aria-hidden="true" />
+										View diff
+									</button>
+								</div>
+							)}
 							{getToolContent(part)}
 						</TranscriptDisclosureContent>
 					)}
@@ -1236,10 +1223,12 @@ export const ChatToolCall = memo(
 	},
 	(prev, next) => {
 		if (!areToolPartsEqual(prev.part, next.part)) return false
-		if (prev.isActiveTurn !== next.isActiveTurn) return false
+		// open is controlled by the parent timeline (expandedRowIds); without this
+		// comparison the memo blocks the re-render and the row can never expand.
+		if (prev.open !== next.open) return false
 		if (prev.turnHasError !== next.turnHasError) return false
 		if (prev.projectRoot !== next.projectRoot) return false
-		// onDelete is a callback ref - skip reference comparison to avoid
+		// onDelete/onOpenChange are callback refs - skip reference comparison to avoid
 		// re-renders from parent creating new closures
 		return true
 	},

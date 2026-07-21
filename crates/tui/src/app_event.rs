@@ -176,6 +176,13 @@ pub(crate) enum AppEvent {
     #[allow(dead_code)]
     /// Apply a selected theme.
     ThemeSelected { name: String },
+    /// Apply show-reasoning preference (collapsed vs full).
+    CollapseReasoningSelected { collapsed: bool },
+    /// Clear the managed inline UI and re-emit committed transcript lines.
+    ///
+    /// Used after theme changes so already-flushed header/logo cells can be
+    /// redrawn with the new accent colors.
+    ReloadInlineTranscript,
     /// Result of computing a `/diff` command (ANSI-colored diff text).
     DiffResult(String),
 }

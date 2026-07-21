@@ -164,6 +164,15 @@ impl WebSocketServerClient {
             .await
     }
 
+    pub async fn session_sandbox_profile_update(
+        &mut self,
+        params: SessionSandboxProfileUpdateParams,
+    ) -> Result<SessionSandboxProfileUpdateResult> {
+        self.core
+            .request_devo("session/sandbox_profile/update", params)
+            .await
+    }
+
     pub async fn session_compact(
         &mut self,
         params: SessionCompactParams,

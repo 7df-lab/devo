@@ -1,6 +1,11 @@
 use std::collections::BTreeMap;
 
+use devo_protocol::InputModality;
 use devo_protocol::ProviderWireApi;
+use devo_protocol::ReasoningCapability;
+use devo_protocol::ReasoningEffort;
+use devo_protocol::ReasoningImplementation;
+use devo_protocol::TruncationPolicyConfig;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -137,6 +142,48 @@ impl Default for ModelBindingConfig {
     }
 }
 
+/// Partial metadata overrides for one catalog model stored under `[model.<slug>]`.
+///
+/// Each field is optional so user, workspace, and command-line config layers can
+/// override independent model attributes without replacing lower-priority values.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelOverrideConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_context_window_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderWireApi>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_capability: Option<ReasoningCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_implementation: Option<ReasoningImplementation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_modalities: Option<Vec<InputModality>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_policy: Option<TruncationPolicyConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_image_detail_original: Option<bool>,
+}
+
 /// Durable default selections stored under `[defaults]`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderDefaultsConfig {
@@ -197,13 +244,10 @@ pub enum AuthCredentialKind {
 }
 
 /// Provider-owned portion of app config, including active model selection.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProviderConfigSection {
-    #[serde(default, skip_serializing_if = "ProviderDefaultsConfig::is_empty")]
     pub defaults: ProviderDefaultsConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Logical reasoning effort selection for the active model, such as `disabled`,
     /// `enabled`, or one effort-like level supported by the selected model.
@@ -212,21 +256,14 @@ pub struct ProviderConfigSection {
     /// field. The runtime later resolves it into the final request model,
     /// provider `thinking` parameter, effective reasoning effort, and any
     /// provider-specific extra payload.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_reasoning_effort_selection: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_auto_compact_token_limit: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_context_window: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_response_storage: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_auth_method: Option<PreferredAuthMethod>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderVendorConfig>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_bindings: BTreeMap<String, ModelBindingConfig>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_overrides: BTreeMap<String, ModelOverrideConfig>,
     pub model_providers: BTreeMap<String, LegacyModelProviderConfig>,
 }
 
@@ -235,7 +272,7 @@ struct ProviderConfigSectionWire {
     #[serde(default)]
     defaults: ProviderDefaultsConfig,
     model_provider: Option<String>,
-    model: Option<String>,
+    model: Option<ModelConfigField>,
     model_reasoning_effort_selection: Option<String>,
     model_thinking_selection: Option<String>,
     model_thinking: Option<String>,
@@ -251,12 +288,86 @@ struct ProviderConfigSectionWire {
     model_providers: BTreeMap<String, LegacyModelProviderConfig>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ModelConfigField {
+    Legacy(String),
+    Overrides(BTreeMap<String, ModelOverrideConfig>),
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum SerializedModelConfigField<'a> {
+    Legacy(&'a str),
+    Overrides(&'a BTreeMap<String, ModelOverrideConfig>),
+}
+
+#[derive(Serialize)]
+struct ProviderConfigSectionSerialize<'a> {
+    #[serde(default, skip_serializing_if = "ProviderDefaultsConfig::is_empty")]
+    defaults: &'a ProviderDefaultsConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_provider: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<SerializedModelConfigField<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_reasoning_effort_selection: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_auto_compact_token_limit: &'a Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_context_window: &'a Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disable_response_storage: &'a Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preferred_auth_method: &'a Option<PreferredAuthMethod>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    providers: &'a BTreeMap<String, ProviderVendorConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_bindings: &'a BTreeMap<String, ModelBindingConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_providers: &'a BTreeMap<String, LegacyModelProviderConfig>,
+}
+
+impl Serialize for ProviderConfigSection {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let model = if self.model_overrides.is_empty() {
+            self.model
+                .as_deref()
+                .map(SerializedModelConfigField::Legacy)
+        } else {
+            Some(SerializedModelConfigField::Overrides(&self.model_overrides))
+        };
+        ProviderConfigSectionSerialize {
+            defaults: &self.defaults,
+            model_provider: &self.model_provider,
+            model,
+            model_reasoning_effort_selection: &self.model_reasoning_effort_selection,
+            model_auto_compact_token_limit: &self.model_auto_compact_token_limit,
+            model_context_window: &self.model_context_window,
+            disable_response_storage: &self.disable_response_storage,
+            preferred_auth_method: &self.preferred_auth_method,
+            providers: &self.providers,
+            model_bindings: &self.model_bindings,
+            model_providers: &self.model_providers,
+        }
+        .serialize(serializer)
+    }
+}
+
 impl From<ProviderConfigSectionWire> for ProviderConfigSection {
     fn from(wire: ProviderConfigSectionWire) -> Self {
+        let (model, model_overrides) = match wire.model {
+            Some(ModelConfigField::Legacy(model)) => (Some(model), BTreeMap::new()),
+            Some(ModelConfigField::Overrides(model_overrides)) => (None, model_overrides),
+            None => (None, BTreeMap::new()),
+        };
         Self {
             defaults: wire.defaults,
             model_provider: wire.model_provider,
-            model: wire.model,
+            model,
             model_reasoning_effort_selection: wire
                 .model_reasoning_effort_selection
                 .or(wire.model_thinking_selection)
@@ -267,6 +378,7 @@ impl From<ProviderConfigSectionWire> for ProviderConfigSection {
             preferred_auth_method: wire.preferred_auth_method,
             providers: wire.providers,
             model_bindings: wire.model_bindings,
+            model_overrides,
             model_providers: wire.model_providers,
         }
     }
@@ -368,6 +480,62 @@ impl ProviderConfigSection {
             }
             if enabled_present {
                 binding.enabled = overlay_binding.enabled;
+            }
+        }
+        for (model_slug, overlay_override) in overlay.model_overrides {
+            let model_override = self.model_overrides.entry(model_slug).or_default();
+            if overlay_override.display_name.is_some() {
+                model_override.display_name = overlay_override.display_name;
+            }
+            if overlay_override.description.is_some() {
+                model_override.description = overlay_override.description;
+            }
+            if overlay_override.context_window.is_some() {
+                model_override.context_window = overlay_override.context_window;
+            }
+            if overlay_override.effective_context_window_percent.is_some() {
+                model_override.effective_context_window_percent =
+                    overlay_override.effective_context_window_percent;
+            }
+            if overlay_override.max_tokens.is_some() {
+                model_override.max_tokens = overlay_override.max_tokens;
+            }
+            if overlay_override.temperature.is_some() {
+                model_override.temperature = overlay_override.temperature;
+            }
+            if overlay_override.top_p.is_some() {
+                model_override.top_p = overlay_override.top_p;
+            }
+            if overlay_override.top_k.is_some() {
+                model_override.top_k = overlay_override.top_k;
+            }
+            if overlay_override.provider.is_some() {
+                model_override.provider = overlay_override.provider;
+            }
+            if overlay_override.reasoning_capability.is_some() {
+                model_override.reasoning_capability = overlay_override.reasoning_capability;
+            }
+            if overlay_override.reasoning_implementation.is_some() {
+                model_override.reasoning_implementation = overlay_override.reasoning_implementation;
+            }
+            if overlay_override.default_reasoning_effort.is_some() {
+                model_override.default_reasoning_effort = overlay_override.default_reasoning_effort;
+            }
+            if overlay_override.base_instructions.is_some() {
+                model_override.base_instructions = overlay_override.base_instructions;
+            }
+            if overlay_override.input_modalities.is_some() {
+                model_override.input_modalities = overlay_override.input_modalities;
+            }
+            if overlay_override.channel.is_some() {
+                model_override.channel = overlay_override.channel;
+            }
+            if overlay_override.truncation_policy.is_some() {
+                model_override.truncation_policy = overlay_override.truncation_policy;
+            }
+            if overlay_override.supports_image_detail_original.is_some() {
+                model_override.supports_image_detail_original =
+                    overlay_override.supports_image_detail_original;
             }
         }
     }
@@ -501,5 +669,124 @@ model_reasoning_effort_selection = "high"
         assert!(serialized.contains("model_reasoning_effort_selection"));
         assert!(!serialized.contains("model_thinking_selection"));
         assert!(!serialized.contains("model_thinking"));
+    }
+
+    #[test]
+    fn provider_config_reads_legacy_model_selector() {
+        let config: ProviderConfigSection =
+            toml::from_str("model = \"legacy-model\"").expect("parse legacy model selector");
+
+        assert_eq!(config.model.as_deref(), Some("legacy-model"));
+        assert!(config.model_overrides.is_empty());
+        assert_eq!(
+            toml::to_string(&config).expect("serialize legacy model selector"),
+            "model = \"legacy-model\"\n"
+        );
+    }
+
+    #[test]
+    fn provider_config_reads_model_override_table() {
+        let config: ProviderConfigSection = toml::from_str(
+            r#"
+[model.grok-4]
+display_name = "Grok 4"
+description = "Fast reasoning model"
+context_window = 256000
+effective_context_window_percent = 90
+max_tokens = 8192
+temperature = 0.7
+top_p = 0.95
+top_k = 40.0
+provider = "openai_responses"
+reasoning_capability = "toggle"
+reasoning_implementation = "request_parameter"
+default_reasoning_effort = "high"
+base_instructions = "Be concise."
+input_modalities = ["text", "image"]
+channel = "xAI"
+truncation_policy = { mode = "tokens", limit = 12000 }
+supports_image_detail_original = true
+"#,
+        )
+        .expect("parse model overrides");
+
+        assert_eq!(config.model, None);
+        assert_eq!(
+            config.model_overrides,
+            BTreeMap::from([(
+                "grok-4".to_string(),
+                ModelOverrideConfig {
+                    display_name: Some("Grok 4".to_string()),
+                    description: Some("Fast reasoning model".to_string()),
+                    context_window: Some(256_000),
+                    effective_context_window_percent: Some(90),
+                    max_tokens: Some(8_192),
+                    temperature: Some(0.7),
+                    top_p: Some(0.95),
+                    top_k: Some(40.0),
+                    provider: Some(ProviderWireApi::OpenAIResponses),
+                    reasoning_capability: Some(ReasoningCapability::Toggle),
+                    reasoning_implementation: Some(ReasoningImplementation::RequestParameter),
+                    default_reasoning_effort: Some(ReasoningEffort::High),
+                    base_instructions: Some("Be concise.".to_string()),
+                    input_modalities: Some(vec![InputModality::Text, InputModality::Image]),
+                    channel: Some("xAI".to_string()),
+                    truncation_policy: Some(TruncationPolicyConfig::tokens(12_000)),
+                    supports_image_detail_original: Some(true),
+                },
+            )])
+        );
+
+        let serialized = toml::to_string(&config).expect("serialize model overrides");
+        assert!(serialized.contains("[model.grok-4]"));
+        assert!(!serialized.contains("model = \""));
+    }
+
+    #[test]
+    fn provider_config_operational_equality_ignores_model_overrides() {
+        let baseline = ProviderConfigSection::default();
+        let metadata_override = ProviderConfigSection {
+            model_overrides: BTreeMap::from([(
+                "custom-model".to_string(),
+                ModelOverrideConfig {
+                    display_name: Some("Custom Model".to_string()),
+                    ..ModelOverrideConfig::default()
+                },
+            )]),
+            ..baseline.clone()
+        };
+
+        assert_ne!(baseline, metadata_override);
+        assert!(baseline.is_operationally_equivalent_to(&metadata_override));
+    }
+
+    #[test]
+    fn provider_config_operational_equality_detects_provider_and_binding_changes() {
+        let baseline = ProviderConfigSection::default();
+        let provider_change = ProviderConfigSection {
+            providers: BTreeMap::from([(
+                "openai".to_string(),
+                ProviderVendorConfig {
+                    name: "OpenAI".to_string(),
+                    ..ProviderVendorConfig::default()
+                },
+            )]),
+            ..baseline.clone()
+        };
+        let binding_change = ProviderConfigSection {
+            model_bindings: BTreeMap::from([(
+                "main".to_string(),
+                ModelBindingConfig {
+                    model_slug: "gpt-5.5".to_string(),
+                    provider: "openai".to_string(),
+                    request_model: "gpt-5.5".to_string(),
+                    ..ModelBindingConfig::default()
+                },
+            )]),
+            ..baseline.clone()
+        };
+
+        assert!(!baseline.is_operationally_equivalent_to(&provider_change));
+        assert!(!baseline.is_operationally_equivalent_to(&binding_change));
     }
 }

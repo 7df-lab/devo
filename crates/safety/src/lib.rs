@@ -1,4 +1,4 @@
-pub mod sandbox;
+pub mod permission;
 
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -25,12 +25,10 @@ pub enum PermissionMode {
 }
 
 /// User-facing permission presets exposed by `/permissions`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[derive(Default)]
 pub enum PermissionPreset {
-    /// Read workspace files without approval; edits, commands, and network ask.
-    ReadOnly,
     /// Read and edit workspace files and run shell commands; network and outside
     /// workspace writes ask.
     #[default]
@@ -40,6 +38,35 @@ pub enum PermissionPreset {
     AutoReview,
     /// Allow all tool requests without approval.
     FullAccess,
+}
+
+impl<'de> Deserialize<'de> for PermissionPreset {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            // The "read-only" preset was removed; existing persisted sessions that
+            // still reference it are migrated to Default (more permissive: shell
+            // is allowed). Prefer setting sandbox_profile = "read-only" separately.
+            "read-only" => {
+                tracing::warn!(
+                    "permission_preset \"read-only\" is deprecated and maps to Default \
+                     (shell allowed); set sandbox_profile = \"read-only\" for a \
+                     read-only OS sandbox instead"
+                );
+                Ok(PermissionPreset::Default)
+            }
+            "default" => Ok(PermissionPreset::Default),
+            "auto-review" => Ok(PermissionPreset::AutoReview),
+            "full-access" => Ok(PermissionPreset::FullAccess),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["default", "auto-review", "full-access"],
+            )),
+        }
+    }
 }
 
 /// Selects who reviews approval requests after policy decides that approval is required.
@@ -81,16 +108,6 @@ impl RuntimePermissionProfile {
         };
 
         match preset {
-            PermissionPreset::ReadOnly => RuntimePermissionProfile {
-                preset,
-                reviewer,
-                workspace_root,
-                readable_roots,
-                writable_roots,
-                allow_shell_commands: false,
-                allow_network: false,
-                auto_approve: false,
-            },
             PermissionPreset::Default | PermissionPreset::AutoReview => {
                 writable_roots.insert(workspace_root.clone());
                 RuntimePermissionProfile {
@@ -117,6 +134,24 @@ impl RuntimePermissionProfile {
         }
     }
 
+    /// Session sandbox profile implied by this permission preset.
+    ///
+    /// Default / Auto-review use the workspace sandbox; Full Access runs without
+    /// an OS sandbox (`off`).
+    pub fn implied_sandbox_profile(&self) -> &'static str {
+        sandbox_profile_for_permission_preset(self.preset)
+    }
+}
+
+/// Maps a permission preset to the session sandbox profile name.
+pub fn sandbox_profile_for_permission_preset(preset: PermissionPreset) -> &'static str {
+    match preset {
+        PermissionPreset::FullAccess => "off",
+        PermissionPreset::Default | PermissionPreset::AutoReview => "workspace",
+    }
+}
+
+impl RuntimePermissionProfile {
     pub fn with_additional_roots(
         mut self,
         additional_roots: impl IntoIterator<Item = PathBuf>,
@@ -133,6 +168,17 @@ impl RuntimePermissionProfile {
         self
     }
 
+    /// Grants read and write access to an additional filesystem root.
+    pub fn grant_writable_root(&mut self, root: PathBuf) {
+        self.readable_roots.insert(root.clone());
+        self.writable_roots.insert(root);
+    }
+
+    /// Grants read-only access to an additional filesystem root.
+    pub fn grant_readable_root(&mut self, root: PathBuf) {
+        self.readable_roots.insert(root);
+    }
+
     pub fn permission_mode(&self) -> PermissionMode {
         if self.auto_approve {
             PermissionMode::AutoApprove
@@ -140,6 +186,23 @@ impl RuntimePermissionProfile {
             PermissionMode::Interactive
         }
     }
+}
+
+/// Evaluates a shell command against the filesystem roots of a runtime
+/// permission profile. Returns `Ask` when the command cannot be fully analyzed
+/// or touches a path outside the allowed roots, and `NoMatch` when every
+/// detected file access stays within the roots.
+pub fn evaluate_shell_command_for_profile(
+    profile: &RuntimePermissionProfile,
+    command: &str,
+    cwd: &std::path::Path,
+) -> permission::PolicyDecision {
+    permission::evaluate_shell_access_with_roots(
+        command,
+        cwd,
+        &profile.readable_roots,
+        &profile.writable_roots,
+    )
 }
 
 /// The fixed placeholder inserted when a secret is redacted from model-visible text.
@@ -935,6 +998,29 @@ mod tests {
         {
             PathBuf::from(format!("/{suffix}"))
         }
+    }
+
+    #[test]
+    fn permission_preset_implies_sandbox_profile() {
+        use pretty_assertions::assert_eq;
+
+        assert_eq!(
+            super::sandbox_profile_for_permission_preset(super::PermissionPreset::Default),
+            "workspace"
+        );
+        assert_eq!(
+            super::sandbox_profile_for_permission_preset(super::PermissionPreset::AutoReview),
+            "workspace"
+        );
+        assert_eq!(
+            super::sandbox_profile_for_permission_preset(super::PermissionPreset::FullAccess),
+            "off"
+        );
+        let profile = super::RuntimePermissionProfile::from_preset(
+            super::PermissionPreset::FullAccess,
+            abs_path("repo"),
+        );
+        assert_eq!(profile.implied_sandbox_profile(), "off");
     }
 
     #[test]

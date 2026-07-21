@@ -314,6 +314,11 @@ impl ServerRuntime {
             Some(ClientMethod::SessionPermissionsUpdate) => {
                 Some(self.handle_session_permissions_update(id?, params).await)
             }
+            // update the session's sandbox profile for spawned commands
+            Some(ClientMethod::SessionSandboxProfileUpdate) => Some(
+                self.handle_session_sandbox_profile_update(id?, params)
+                    .await,
+            ),
             // update session title, user may customized session title from ui client
             Some(ClientMethod::SessionTitleUpdate) => {
                 Some(self.handle_session_title_update(id?, params).await)

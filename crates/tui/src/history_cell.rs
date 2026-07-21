@@ -385,24 +385,45 @@ impl HistoryCell for UserHistoryCell {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReasoningViewportMode {
+    /// Show the full reasoning body in the main transcript.
+    Full,
+    /// Show a one-line summary in the main transcript; full body in Ctrl+T.
+    Compact,
+    /// Hide from the main transcript; full body remains in Ctrl+T.
+    TranscriptOnly,
+}
+
+pub(crate) const REASONING_TRANSCRIPT_HINT: &str = "(ctrl + t to view transcript)";
+
+pub(crate) fn reasoning_transcript_hint_line() -> Line<'static> {
+    Line::from(REASONING_TRANSCRIPT_HINT.dim())
+}
+
 #[derive(Debug)]
 pub(crate) struct ReasoningSummaryCell {
     _header: String,
     content: String,
     /// Session cwd used to render local file links inside the reasoning body.
     cwd: PathBuf,
-    transcript_only: bool,
+    viewport_mode: ReasoningViewportMode,
 }
 
 impl ReasoningSummaryCell {
     /// Create a reasoning summary cell that will render local file links relative to the session
     /// cwd active when the summary was recorded.
-    pub(crate) fn new(header: String, content: String, cwd: &Path, transcript_only: bool) -> Self {
+    pub(crate) fn new(
+        header: String,
+        content: String,
+        cwd: &Path,
+        viewport_mode: ReasoningViewportMode,
+    ) -> Self {
         Self {
             _header: header,
             content,
             cwd: cwd.to_path_buf(),
-            transcript_only,
+            viewport_mode,
         }
     }
 
@@ -434,14 +455,47 @@ impl ReasoningSummaryCell {
                 .subsequent_indent("  ".into()),
         )
     }
+
+    fn compact_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let preview = compact_reasoning_preview(&self.content);
+        let muted = Style::default().dim().italic();
+        let label = if preview.is_empty() {
+            "Thought".to_string()
+        } else {
+            format!("Thought · {preview}")
+        };
+        let thought = Line::from(vec![
+            Span::styled("▌ ", Style::default().dim()),
+            Span::styled(label, muted),
+        ]);
+        vec![
+            crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
+                thought,
+                width as usize,
+            ),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(REASONING_TRANSCRIPT_HINT, Style::default().dim()),
+            ]),
+        ]
+    }
+}
+
+fn compact_reasoning_preview(content: &str) -> String {
+    content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.trim_matches('*').trim().to_string())
+        .unwrap_or_default()
 }
 
 impl HistoryCell for ReasoningSummaryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        if self.transcript_only {
-            Vec::new()
-        } else {
-            self.lines(width)
+        match self.viewport_mode {
+            ReasoningViewportMode::Full => self.lines(width),
+            ReasoningViewportMode::Compact => self.compact_lines(width),
+            ReasoningViewportMode::TranscriptOnly => Vec::new(),
         }
     }
 
@@ -922,24 +976,24 @@ pub fn new_guardian_denied_patch_request(files: Vec<String>) -> Box<dyn HistoryC
     ))
 }
 
-pub fn new_guardian_denied_action_request(summary: String) -> Box<dyn HistoryCell> {
+pub(crate) fn new_guardian_denied_action_request(summary: String) -> PrefixedWrappedHistoryCell {
     let line = Line::from(vec![
         "Request ".into(),
         "denied".bold(),
         " for ".into(),
         Span::from(summary).dim(),
     ]);
-    Box::new(PrefixedWrappedHistoryCell::new(line, "✗ ".red(), "  "))
+    PrefixedWrappedHistoryCell::new(line, "✗ ".red(), "  ")
 }
 
-pub fn new_guardian_approved_action_request(summary: String) -> Box<dyn HistoryCell> {
+pub(crate) fn new_guardian_approved_action_request(summary: String) -> PrefixedWrappedHistoryCell {
     let line = Line::from(vec![
         "Request ".into(),
         "approved".bold(),
         " for ".into(),
         Span::from(summary).dim(),
     ]);
-    Box::new(PrefixedWrappedHistoryCell::new(line, "✔ ".green(), "  "))
+    PrefixedWrappedHistoryCell::new(line, "✔ ".green(), "  ")
 }
 
 pub fn new_permission_request_cell(title: String, body: String) -> Box<dyn HistoryCell> {
@@ -1596,7 +1650,7 @@ pub(crate) fn new_reasoning_summary_block(
                     header_buffer,
                     summary_buffer,
                     &cwd,
-                    /*transcript_only*/ false,
+                    ReasoningViewportMode::Full,
                 ));
             }
         }
@@ -1605,7 +1659,7 @@ pub(crate) fn new_reasoning_summary_block(
         "".to_string(),
         full_reasoning_buffer.to_string(),
         &cwd,
-        /*transcript_only*/ true,
+        ReasoningViewportMode::TranscriptOnly,
     ))
 }
 
@@ -1841,5 +1895,43 @@ mod tests {
                 ("/unknown check this".to_string(), None),
             ]
         );
+    }
+
+    #[test]
+    fn compact_reasoning_summary_truncates_and_hints_transcript() {
+        use std::path::Path;
+
+        use super::REASONING_TRANSCRIPT_HINT;
+        use super::ReasoningSummaryCell;
+        use super::ReasoningViewportMode;
+
+        let cell = ReasoningSummaryCell::new(
+            String::new(),
+            "abcdefghijklmnopqrstuvwxyz0123456789 long reasoning preview".to_string(),
+            Path::new("."),
+            ReasoningViewportMode::Compact,
+        );
+        let lines = cell.display_lines(24);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rendered.len(), 2);
+        assert!(
+            rendered[0].ends_with('…'),
+            "Thought line should truncate with ellipsis: {}",
+            rendered[0]
+        );
+        assert!(
+            !rendered[0].contains("long reasoning"),
+            "Thought line should not include the untruncated tail: {}",
+            rendered[0]
+        );
+        assert_eq!(rendered[1].trim(), REASONING_TRANSCRIPT_HINT);
     }
 }

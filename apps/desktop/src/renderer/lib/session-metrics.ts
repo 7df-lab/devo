@@ -6,7 +6,7 @@
  */
 
 import type { ChatTurn } from "../atoms/derived/session-chat"
-import type { ToolCategory } from "../components/chat/tool-card"
+import type { ToolCategory } from "../components/chat/tool-category"
 import type { AssistantMessage, Message, Part } from "./types"
 
 // ============================================================

@@ -56,6 +56,7 @@ fn widget_with_model(
         },
         initial_reasoning_effort_selection: None,
         initial_permission_preset: PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -65,6 +66,7 @@ fn widget_with_model(
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     })
 }
 
@@ -108,6 +110,7 @@ fn saved_model_metadata_overlays_catalog_display_for_picker() {
             provider: ProviderWireApi::OpenAIChatCompletions,
             reasoning_effort_selection: None,
             permission_preset: PermissionPreset::Default,
+            sandbox_profile: Some("workspace".to_string()),
             cwd: PathBuf::from("."),
         },
         server_log_level: None,
@@ -125,7 +128,6 @@ fn saved_model_metadata_overlays_catalog_display_for_picker() {
         }],
         show_model_onboarding: false,
         exit_after_onboarding: false,
-        startup_warnings: Vec::new(),
     };
 
     let available_models = crate::interactive::available_models_with_saved_metadata(&config);
@@ -225,6 +227,7 @@ fn model_picker_distinguishes_same_model_slug_by_provider_binding() {
         },
         initial_reasoning_effort_selection: None,
         initial_permission_preset: PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -234,6 +237,7 @@ fn model_picker_distinguishes_same_model_slug_by_provider_binding() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::RunSlashCommand {

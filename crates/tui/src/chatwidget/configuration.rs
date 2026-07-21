@@ -25,6 +25,7 @@ use super::permission_preset_items;
 use super::permission_preset_label;
 use super::reasoning_effort;
 use super::reasoning_effort::ReasoningEffortListEntry;
+use super::sandbox_profile_label;
 
 impl ChatWidget {
     pub(crate) fn set_model(&mut self, model: Model) {
@@ -419,7 +420,7 @@ impl ChatWidget {
         self.bottom_pane
             .open_popup_view(Box::new(ListSelectionView::new(
                 SelectionViewParams {
-                    title: Some("Update Model Permissions".to_string()),
+                    title: Some("Update Permissions".to_string()),
                     footer_hint: Some(Line::from("Press enter to confirm or esc to go back")),
                     items: permission_preset_items(current),
                     ..SelectionViewParams::default()
@@ -430,8 +431,52 @@ impl ChatWidget {
         self.set_status_message("Select permissions");
     }
 
+    pub(super) fn open_reasoning_view_picker(&mut self) {
+        let current = self.collapse_reasoning;
+        self.bottom_pane
+            .open_popup_view(Box::new(ListSelectionView::new(
+                SelectionViewParams {
+                    title: Some("Show Reasoning".to_string()),
+                    footer_hint: Some(Line::from("Press enter to confirm or esc to go back")),
+                    items: super::reasoning_view::reasoning_view_items(current),
+                    ..SelectionViewParams::default()
+                },
+                self.app_event_tx.clone(),
+                self.active_accent_color(),
+            )));
+        self.set_status_message("Select reasoning view");
+    }
+
+    pub(crate) fn apply_collapse_reasoning(&mut self, collapsed: bool) {
+        self.collapse_reasoning = collapsed;
+        let _ = crate::onboarding::save_collapse_reasoning(collapsed);
+        let label = super::reasoning_view::reasoning_view_label(collapsed);
+        self.add_to_history(history_cell::new_info_event(
+            format!("Show reasoning set to {label}"),
+            None,
+        ));
+        self.set_status_message(format!("Show reasoning set to {label}"));
+        // Refresh the live reasoning cell if one is streaming.
+        if let Some(index) = self
+            .active_text_items
+            .iter()
+            .position(|item| item.kind == crate::events::TextItemKind::Reasoning)
+        {
+            self.sync_text_item_cell(index);
+        }
+        self.frame_requester.schedule_frame();
+    }
+
     pub(crate) fn note_permissions_updated(&mut self, preset: devo_protocol::PermissionPreset) {
         self.permission_preset = preset;
+        self.sandbox_profile = Some(
+            match preset {
+                devo_protocol::PermissionPreset::FullAccess => "off",
+                devo_protocol::PermissionPreset::Default
+                | devo_protocol::PermissionPreset::AutoReview => "workspace",
+            }
+            .to_string(),
+        );
         let label = permission_preset_label(preset);
         self.add_to_history(history_cell::new_info_event(
             format!("Permissions updated to {label}"),
@@ -440,13 +485,40 @@ impl ChatWidget {
         self.set_status_message(format!("Permissions updated to {label}"));
     }
 
+    pub(crate) fn note_sandbox_profile_updated(&mut self, profile: String) {
+        let label = sandbox_profile_label(&profile).to_string();
+        self.sandbox_profile = Some(profile);
+        self.add_to_history(history_cell::new_info_event(
+            format!("Sandbox profile updated to {label}"),
+            None,
+        ));
+        self.set_status_message(format!("Sandbox profile updated to {label}"));
+    }
+
     pub(super) fn apply_theme_selection(&mut self, name: String) {
         if let Some(theme) = self.theme_set.find(&name).cloned() {
             self.active_theme_name = name.clone();
             self.bottom_pane.set_accent_color(theme.accent_color);
             let _ = crate::onboarding::save_theme_selection(&name);
+            self.refresh_header_box();
+            if self.history.first().is_some_and(|cell| {
+                cell.as_any()
+                    .is::<crate::startup_logo_cell::StartupLogoCell>()
+            }) {
+                self.history[0] = Box::new(crate::startup_logo_cell::StartupLogoCell::new(
+                    self.active_accent_color(),
+                ));
+            }
             self.set_status_message(format!("Theme set to {name}"));
-            self.frame_requester.schedule_frame();
+            // Header/logo are flushed into terminal scrollback. Reset the flush
+            // cursor and ask the host to clear the managed inline area so the
+            // next draw re-emits transcript lines with the new accent.
+            if self.next_history_flush_index > 0 {
+                self.next_history_flush_index = 0;
+                self.app_event_tx.send(AppEvent::ReloadInlineTranscript);
+            } else {
+                self.frame_requester.schedule_frame();
+            }
         }
     }
 

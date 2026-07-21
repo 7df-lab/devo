@@ -31,14 +31,12 @@ impl ShellCommandHandler {
         Self {
             spec: ToolSpec {
                 name: "shell_command".into(),
-                description: "Executes a shell command with optional timeout. Start the command string with a brief `# ...` comment on its own line explaining the command's purpose, then put the command on the next line.".into(),
+                description: "Executes a shell command with optional timeout.".into(),
                 input_schema: JsonSchema::object(
                     std::collections::BTreeMap::from([
                         (
                             "command".to_string(),
-                            JsonSchema::string(Some(
-                                "The command to execute. Start with a brief `# ...` purpose comment on the line above the command.",
-                            )),
+                            JsonSchema::string(Some("The command to execute.")),
                         ),
                         (
                             "workdir".to_string(),
@@ -127,6 +125,7 @@ impl ToolHandler for ShellCommandHandler {
                 timeout_ms,
                 yield_time_ms: default_yield_time_ms(),
                 max_output_tokens: default_max_output_tokens(),
+                sandbox_profile: ctx.sandbox_profile.clone(),
             },
             None,
             ctx.cancel_token.clone(),

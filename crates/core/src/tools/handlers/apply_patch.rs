@@ -190,6 +190,7 @@ mod tests {
                     file_read_ledger: None,
                     network_proxy: None,
                     network_no_proxy: None,
+                    sandbox_profile: None,
                 },
                 serde_json::json!({
                     "patchText": "*** Begin Patch\n*** Add File: file.txt\n+hello\n*** End Patch"

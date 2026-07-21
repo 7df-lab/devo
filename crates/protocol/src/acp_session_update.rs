@@ -262,7 +262,7 @@ pub enum AcpToolCallStatus {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AcpToolCallContent {
     Content {
-        content: AcpContentBlock,
+        content: Box<AcpContentBlock>,
     },
     Diff {
         path: PathBuf,
@@ -275,6 +275,15 @@ pub enum AcpToolCallContent {
         #[serde(rename = "terminalId")]
         terminal_id: AcpTerminalId,
     },
+}
+
+impl AcpToolCallContent {
+    /// Convenience constructor for a content block payload.
+    pub fn content(content: AcpContentBlock) -> Self {
+        Self::Content {
+            content: Box::new(content),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

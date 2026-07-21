@@ -13,11 +13,11 @@ use ratatui::widgets::BorderType;
 use ratatui::widgets::Borders;
 use ratatui::widgets::Clear;
 use ratatui::widgets::Widget;
-use super::session_header::COMPLETED_COLOR;
 use super::session_header::FAILED_COLOR;
 use super::session_header::MUTED_COLOR;
-use super::session_header::REASONING_ACCENT_COLOR;
 use super::session_header::RUNNING_COLOR;
+use crate::ui_consts::COMPLETED_COLOR;
+use crate::ui_consts::REASONING_ACCENT_COLOR;
 
 pub(super) struct SubagentSelectorAgent<'a> {
     pub(super) session_id: SessionId,

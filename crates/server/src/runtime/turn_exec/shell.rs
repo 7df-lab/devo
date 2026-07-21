@@ -99,6 +99,7 @@ impl ServerRuntime {
                 hooks: self.hook_context_for_session(session_id).await,
                 network_proxy: provider_http.proxy_url,
                 network_no_proxy: provider_http.no_proxy,
+                sandbox_profile: shell_context.sandbox_profile.clone(),
             },
             ToolExecutionOptions {
                 cancel_token: turn_cancel_token,
