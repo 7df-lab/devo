@@ -73,6 +73,7 @@ fn widget_with_model_and_reasoning_effort(
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
     (widget, app_event_rx)
 }
@@ -112,6 +113,7 @@ fn onboarding_widget_with_model(
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
     (widget, app_event_rx)
 }
@@ -147,6 +149,7 @@ fn onboarding_widget_with_available_model_and_exit_after_onboarding(
         exit_after_onboarding,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
     (widget, app_event_rx)
 }
@@ -1704,6 +1707,7 @@ fn permissions_command_marks_initial_project_preset_current() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::RunSlashCommand {
@@ -5764,6 +5768,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::RunSlashCommand {
@@ -7244,6 +7249,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::ModelSelected {
@@ -7318,6 +7324,7 @@ fn model_selection_with_reasoning_effort_support_waits_for_second_step() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::ModelSelected {
@@ -7374,6 +7381,7 @@ fn model_selection_without_reasoning_effort_support_finishes_immediately() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::ModelSelected {
@@ -7605,6 +7613,195 @@ fn live_reasoning_cell_renders_without_duplication() {
     assert_eq!(
         occurrences, 1,
         "reasoning should appear exactly once, got {occurrences}:\n{before}"
+    );
+}
+
+#[test]
+fn collapsed_reasoning_live_view_keeps_only_latest_lines() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
+        initial_reasoning_effort_selection: None,
+        initial_permission_preset: PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: Vec::new(),
+        saved_models: Vec::new(),
+        show_model_onboarding: false,
+        exit_after_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+        initial_collapse_reasoning: true,
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        "line one\n\nline two\n\nline three\n\nline four\n\nline five".to_string(),
+    ));
+
+    let live = widget
+        .active_viewport_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        live.contains("line five"),
+        "collapsed live view should keep the latest reasoning line:\n{live}"
+    );
+    assert!(
+        !live.contains("line one"),
+        "collapsed live view should drop older reasoning lines:\n{live}"
+    );
+    assert!(
+        live.contains("ctrl + t to view transcript"),
+        "collapsed live reasoning should hint Ctrl+T:\n{live}"
+    );
+}
+
+#[test]
+fn collapsed_short_reasoning_stays_full_after_completion() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
+        initial_reasoning_effort_selection: None,
+        initial_permission_preset: PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: Vec::new(),
+        saved_models: Vec::new(),
+        show_model_onboarding: false,
+        exit_after_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+        initial_collapse_reasoning: true,
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        "short thought".to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
+        "short thought".to_string(),
+    ));
+
+    let scrollback = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        scrollback.contains("short thought"),
+        "short collapsed reasoning should stay fully visible after completion:\n{scrollback}"
+    );
+    assert!(
+        scrollback.contains("ctrl + t to view transcript"),
+        "collapsed short reasoning should hint Ctrl+T:\n{scrollback}"
+    );
+}
+
+#[test]
+fn collapsed_long_reasoning_compacts_to_one_line_after_completion() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
+        initial_reasoning_effort_selection: None,
+        initial_permission_preset: PermissionPreset::Default,
+        initial_sandbox_profile: Some("workspace".to_string()),
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: Vec::new(),
+        saved_models: Vec::new(),
+        show_model_onboarding: false,
+        exit_after_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+        initial_collapse_reasoning: true,
+    });
+
+    let long_reasoning = "line one\n\nline two\n\nline three\n\nline four\n\nline five";
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        model_binding_id: None,
+        reasoning_effort_selection: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        long_reasoning.to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
+        long_reasoning.to_string(),
+    ));
+
+    let scrollback = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        scrollback.contains("Thought · line one"),
+        "long collapsed reasoning should compact to a one-line Thought summary:\n{scrollback}"
+    );
+    assert!(
+        scrollback.contains("ctrl + t to view transcript"),
+        "collapsed reasoning should hint Ctrl+T near the Thought cell:\n{scrollback}"
+    );
+    assert!(
+        !scrollback.contains("line five"),
+        "long collapsed reasoning should not keep the full body in main scrollback:\n{scrollback}"
+    );
+
+    let transcript = widget
+        .transcript_overlay_cells(80)
+        .into_iter()
+        .flat_map(|cell| cell.lines)
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        transcript.contains("line five"),
+        "long collapsed reasoning should remain available in Ctrl+T transcript:\n{transcript}"
     );
 }
 

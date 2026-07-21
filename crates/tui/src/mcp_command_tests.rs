@@ -32,6 +32,7 @@ fn widget_with_model(model: Model) -> (ChatWidget, mpsc::UnboundedReceiver<AppEv
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
     (widget, app_event_rx)
 }

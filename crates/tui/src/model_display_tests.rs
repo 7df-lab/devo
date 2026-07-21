@@ -66,6 +66,7 @@ fn widget_with_model(
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     })
 }
 
@@ -236,6 +237,7 @@ fn model_picker_distinguishes_same_model_slug_by_provider_binding() {
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
 
     widget.handle_app_event(AppEvent::RunSlashCommand {

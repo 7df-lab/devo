@@ -334,6 +334,7 @@ mod tests {
                 "new",
                 "status",
                 "permissions",
+                "show-reasoning",
                 "clear",
                 "diff",
                 "goal",

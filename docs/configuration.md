@@ -142,6 +142,22 @@ Legacy `model = "slug"` remains readable. Because `[model.<slug>]` now owns the
 top-level `model` table namespace, new configuration must select the active
 connection with `[defaults].model_binding` instead of the legacy scalar key.
 
+### TUI Preferences
+
+Top-level keys in `DEVO_HOME/config.toml` also store a few UI preferences:
+
+```toml
+theme = "aurora"
+collapse_reasoning = true
+```
+
+- `theme` selects the TUI color theme (also set via `/theme`).
+- `collapse_reasoning` controls reasoning display (also set via `/show-reasoning`):
+  - `true` (default): while streaming, show only the latest 3 lines; when finished, keep short
+    reasoning in full and collapse longer reasoning to a one-line `Thought · …`
+    summary (full text remains available in Ctrl+T).
+  - `false`: show full reasoning while streaming and after it finishes.
+
 ### Migrating from `models.json`
 
 Old `~/.devo/models.json` and `<workspace>/.devo/models.json` files are ignored.

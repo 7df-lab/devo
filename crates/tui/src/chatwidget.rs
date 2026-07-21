@@ -77,6 +77,8 @@ mod transcript_view;
 
 mod reasoning_effort;
 
+mod reasoning_view;
+
 mod worker_events;
 
 use self::permission_presets::permission_preset_items;
@@ -114,6 +116,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) exit_after_onboarding: bool,
     pub(crate) startup_tooltip_override: Option<String>,
     pub(crate) initial_theme_name: Option<String>,
+    pub(crate) initial_collapse_reasoning: bool,
 }
 
 /// Resolved runtime session projection owned by the chat widget.
@@ -282,6 +285,7 @@ pub(crate) struct ChatWidget {
     pending_model_selection: Option<PendingModelSelection>,
     theme_set: ThemeSet,
     active_theme_name: String,
+    collapse_reasoning: bool,
     resume_browser_last_height: Cell<u16>,
     turn_count: usize,
     total_input_tokens: usize,
@@ -407,6 +411,7 @@ impl ChatWidget {
             exit_after_onboarding,
             startup_tooltip_override,
             initial_theme_name,
+            initial_collapse_reasoning,
         } = common;
 
         // Prefer an explicit startup selection, but fall back to the model's default reasoning effort.
@@ -506,6 +511,7 @@ impl ChatWidget {
             pending_model_selection: None,
             theme_set,
             active_theme_name,
+            collapse_reasoning: initial_collapse_reasoning,
             resume_browser_last_height: Cell::new(0),
             turn_count: 0,
             total_input_tokens: 0,

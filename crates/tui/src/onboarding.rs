@@ -236,6 +236,47 @@ pub(crate) fn load_theme_selection() -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+pub(crate) fn save_collapse_reasoning(collapsed: bool) -> Result<()> {
+    let path = find_devo_home()
+        .context("could not determine user config path")?
+        .join("config.toml");
+    let mut root = if path.exists() {
+        let data = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        data.parse::<Value>()
+            .with_context(|| format!("failed to parse {}", path.display()))?
+    } else {
+        Value::Table(Default::default())
+    };
+    root = merge_collapse_reasoning(root, collapsed)?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let rendered = toml::to_string_pretty(&root)?;
+
+    std::fs::write(&path, rendered)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+pub(crate) fn load_collapse_reasoning() -> bool {
+    let path = find_devo_home().ok().map(|home| home.join("config.toml"));
+    let Some(path) = path else {
+        return true;
+    };
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return true;
+    };
+    let Ok(root) = data.parse::<Value>() else {
+        return true;
+    };
+    root.get("collapse_reasoning")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
 fn merge_project_config_value(
     mut root: Value,
     project_key: &str,
@@ -266,6 +307,14 @@ fn merge_theme_selection(mut root: Value, name: &str) -> Result<Value> {
         .as_table_mut()
         .context("config root must be a TOML table")?;
     table.insert("theme".to_string(), Value::String(name.to_string()));
+    Ok(root)
+}
+
+fn merge_collapse_reasoning(mut root: Value, collapsed: bool) -> Result<Value> {
+    let table = root
+        .as_table_mut()
+        .context("config root must be a TOML table")?;
+    table.insert("collapse_reasoning".to_string(), Value::Boolean(collapsed));
     Ok(root)
 }
 

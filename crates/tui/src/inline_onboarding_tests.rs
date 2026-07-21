@@ -52,6 +52,7 @@ fn onboarding_widget_with_models(
         exit_after_onboarding: false,
         startup_tooltip_override: None,
         initial_theme_name: None,
+        initial_collapse_reasoning: false,
     });
     (widget, app_event_rx)
 }

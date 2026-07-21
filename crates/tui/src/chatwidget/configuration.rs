@@ -431,6 +431,42 @@ impl ChatWidget {
         self.set_status_message("Select permissions");
     }
 
+    pub(super) fn open_reasoning_view_picker(&mut self) {
+        let current = self.collapse_reasoning;
+        self.bottom_pane
+            .open_popup_view(Box::new(ListSelectionView::new(
+                SelectionViewParams {
+                    title: Some("Show Reasoning".to_string()),
+                    footer_hint: Some(Line::from("Press enter to confirm or esc to go back")),
+                    items: super::reasoning_view::reasoning_view_items(current),
+                    ..SelectionViewParams::default()
+                },
+                self.app_event_tx.clone(),
+                self.active_accent_color(),
+            )));
+        self.set_status_message("Select reasoning view");
+    }
+
+    pub(crate) fn apply_collapse_reasoning(&mut self, collapsed: bool) {
+        self.collapse_reasoning = collapsed;
+        let _ = crate::onboarding::save_collapse_reasoning(collapsed);
+        let label = super::reasoning_view::reasoning_view_label(collapsed);
+        self.add_to_history(history_cell::new_info_event(
+            format!("Show reasoning set to {label}"),
+            None,
+        ));
+        self.set_status_message(format!("Show reasoning set to {label}"));
+        // Refresh the live reasoning cell if one is streaming.
+        if let Some(index) = self
+            .active_text_items
+            .iter()
+            .position(|item| item.kind == crate::events::TextItemKind::Reasoning)
+        {
+            self.sync_text_item_cell(index);
+        }
+        self.frame_requester.schedule_frame();
+    }
+
     pub(crate) fn note_permissions_updated(&mut self, preset: devo_protocol::PermissionPreset) {
         self.permission_preset = preset;
         self.sandbox_profile = Some(

@@ -275,6 +275,19 @@ impl ChatWidget {
             vec![Line::from(title.to_string()).bold()]
         };
         if title == "Reasoning" {
+            if self.collapse_reasoning {
+                self.add_history_entry_without_redraw(
+                    super::reasoning_view::collapsed_reasoning_history_cell(
+                        body.to_string(),
+                        &self.session.cwd,
+                        reasoning_heading_for_status(status),
+                        Self::reasoning_completed_heading_style(),
+                        Self::reasoning_text_style(),
+                        Self::reasoning_completed_dot_prefix(),
+                    ),
+                );
+                return;
+            }
             let mut body_lines = Vec::new();
             append_markdown(
                 body,
@@ -288,7 +301,7 @@ impl ChatWidget {
                     0,
                     Span::styled(
                         reasoning_heading_for_status(status),
-                        Self::reasoning_heading_style(),
+                        Self::reasoning_completed_heading_style(),
                     ),
                 );
             }
@@ -297,12 +310,14 @@ impl ChatWidget {
             append_markdown(body, None, Some(&self.session.cwd), &mut lines);
         }
         if is_ai_message {
+            let prefix = if title == "Reasoning" {
+                Self::reasoning_completed_dot_prefix()
+            } else {
+                self.dot_prefix(status)
+            };
             self.add_history_entry_without_redraw(Box::new(
                 history_cell::AgentMessageCell::new_ai_response_with_prefix(
-                    lines,
-                    self.dot_prefix(status),
-                    "  ",
-                    false,
+                    lines, prefix, "  ", false,
                 ),
             ));
         } else {

@@ -15,6 +15,7 @@ pub enum SlashCommand {
     New,
     Status,
     Permissions,
+    ShowReasoning,
     Clear,
     Diff,
     Exit,
@@ -35,6 +36,9 @@ impl SlashCommand {
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::Permissions => {
                 "choose what Devo is allowed to do (also sets the OS sandbox)"
+            }
+            SlashCommand::ShowReasoning => {
+                "choose how reasoning content is shown in the transcript"
             }
             SlashCommand::Clear => "clear the current transcript",
             SlashCommand::Diff => "show git diff (including untracked files)",
@@ -57,6 +61,7 @@ impl SlashCommand {
             SlashCommand::New => "new",
             SlashCommand::Status => "status",
             SlashCommand::Permissions => "permissions",
+            SlashCommand::ShowReasoning => "show-reasoning",
             SlashCommand::Clear => "clear",
             SlashCommand::Diff => "diff",
             SlashCommand::Btw => "btw",
@@ -85,6 +90,7 @@ impl SlashCommand {
             | SlashCommand::New
             | SlashCommand::Status
             | SlashCommand::Permissions
+            | SlashCommand::ShowReasoning
             | SlashCommand::Clear
             | SlashCommand::Diff
             | SlashCommand::Exit => None,
@@ -120,6 +126,7 @@ impl SlashCommand {
             | SlashCommand::New
             | SlashCommand::Status
             | SlashCommand::Permissions
+            | SlashCommand::ShowReasoning
             | SlashCommand::Clear
             | SlashCommand::Diff
             | SlashCommand::Exit
@@ -142,6 +149,7 @@ impl FromStr for SlashCommand {
             "new" => Ok(Self::New),
             "status" => Ok(Self::Status),
             "permissions" | "approvals" => Ok(Self::Permissions),
+            "show-reasoning" | "reasoning-view" => Ok(Self::ShowReasoning),
             "clear" => Ok(Self::Clear),
             "diff" => Ok(Self::Diff),
             "btw" => Ok(Self::Btw),
@@ -163,6 +171,7 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
         ("new", SlashCommand::New),
         ("status", SlashCommand::Status),
         ("permissions", SlashCommand::Permissions),
+        ("show-reasoning", SlashCommand::ShowReasoning),
         ("clear", SlashCommand::Clear),
         ("diff", SlashCommand::Diff),
         ("goal", SlashCommand::Goal),

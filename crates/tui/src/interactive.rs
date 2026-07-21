@@ -312,6 +312,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         exit_after_onboarding: config.exit_after_onboarding,
         startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
         initial_theme_name,
+        initial_collapse_reasoning: crate::onboarding::load_collapse_reasoning(),
     });
 
     if initial_session.session_id.is_some() && !config.show_model_onboarding {

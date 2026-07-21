@@ -39,6 +39,7 @@ impl ChatWidget {
             | SlashCommand::Exit
             | SlashCommand::Status
             | SlashCommand::Clear
+            | SlashCommand::ShowReasoning
             | SlashCommand::Btw => {
                 return;
             }
@@ -100,6 +101,10 @@ impl ChatWidget {
                         "  sandbox:     {}",
                         self.sandbox_profile.as_deref().unwrap_or("workspace")
                     )),
+                    Line::from(format!(
+                        "  reasoning:   {}",
+                        super::reasoning_view::reasoning_view_label(self.collapse_reasoning)
+                    )),
                     Line::from(format!("  turns:       {turns}")),
                     Line::from(format!(
                         "  tokens:      \u{2191}{tokens_in} \u{2193}{tokens_out}",
@@ -110,6 +115,9 @@ impl ChatWidget {
             }
             SlashCommand::Permissions => {
                 self.open_permissions_picker();
+            }
+            SlashCommand::ShowReasoning => {
+                self.open_reasoning_view_picker();
             }
             SlashCommand::Theme => {
                 self.open_theme_picker();
