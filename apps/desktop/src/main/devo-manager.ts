@@ -39,6 +39,8 @@ export interface DevoServer {
 let stdioClient: StdioNativeClient | null = null
 let server: DevoServer | null = null
 let initializing: Promise<DevoServer> | null = null
+// Invalidate an in-flight startup when the desktop stops or restarts the server.
+let lifecycleGeneration = 0
 let nativeTrafficLogger: NativeTrafficLogger | null = null
 const serverReadyListeners = new Set<() => void>()
 
@@ -46,10 +48,12 @@ export async function ensureServer(): Promise<DevoServer> {
 	if (server && stdioClient?.connected()) return server
 	if (initializing) return initializing
 
-	initializing = startServer().finally(() => {
-		initializing = null
+	const startup = startServer(lifecycleGeneration).finally(() => {
+		// An older startup must not clear a newer restart's promise.
+		if (initializing === startup) initializing = null
 	})
-	return initializing
+	initializing = startup
+	return startup
 }
 
 export function getServerUrl(): string | null {
@@ -71,6 +75,8 @@ export function onServerReady(listener: () => void): () => void {
 }
 
 export function stopServer(): boolean {
+	lifecycleGeneration++
+	initializing = null
 	stopNotificationWatcher()
 	const hadClient = stdioClient !== null
 	stdioClient?.stop()
@@ -186,23 +192,40 @@ export function getNativeTrafficLogState(): NativeTrafficLogState {
 	return getNativeTrafficLogger().getState()
 }
 
-async function startServer(): Promise<DevoServer> {
+async function startServer(generation: number): Promise<DevoServer> {
 	await waitForEnv()
+	if (generation !== lifecycleGeneration) throw new Error("Devo Native stdio server startup cancelled")
+
 	const client = getOrCreateClient()
-	client.start()
+	try {
+		client.start()
+		await initialize(client)
+		if (generation !== lifecycleGeneration || stdioClient !== client) {
+			throw new Error("Devo Native stdio server startup cancelled")
+		}
 
-	await initialize(client)
-
-	server = {
-		url: STDIO_URL,
-		transport: "stdio",
-		pid: client.pid(),
-		managed: true,
+		const readyServer: DevoServer = {
+			url: STDIO_URL,
+			transport: "stdio",
+			pid: client.pid(),
+			managed: true,
+		}
+		server = readyServer
+		startNotificationWatcher(getNativeTransport())
+		notifyServerReady()
+		log.info("Devo Native stdio server ready", { pid: readyServer.pid })
+		return readyServer
+	} catch (error) {
+		// stopServer may already have stopped this child and installed a replacement.
+		// Only clean up a client that this startup still owns.
+		if (stdioClient === client) {
+			stopNotificationWatcher()
+			client.stop()
+			stdioClient = null
+			server = null
+		}
+		throw error
 	}
-	startNotificationWatcher(getNativeTransport())
-	notifyServerReady()
-	log.info("Devo Native stdio server ready", { pid: server.pid })
-	return server
 }
 
 async function ensureClient(): Promise<StdioNativeClient> {
@@ -218,12 +241,13 @@ function getOrCreateClient(): StdioNativeClient {
 			isPackaged: app.isPackaged,
 			resourcesPath: process.resourcesPath,
 		})
-			stdioClient = new StdioNativeClient({
-				program,
-				networkProxy: getSettings().servers.networkProxy,
-				trafficLogger: getNativeTrafficLogger(),
-			})
-		stdioClient.subscribe(handleTransportEvent)
+		const client = new StdioNativeClient({
+			program,
+			networkProxy: getSettings().servers.networkProxy,
+			trafficLogger: getNativeTrafficLogger(),
+		})
+		stdioClient = client
+		client.subscribe((event) => handleTransportEvent(client, event))
 	}
 	return stdioClient
 }
@@ -237,7 +261,8 @@ function getNativeTrafficLogger(): NativeTrafficLogger {
 	return nativeTrafficLogger
 }
 
-function handleTransportEvent(event: NativeTransportEvent): void {
+function handleTransportEvent(client: StdioNativeClient, event: NativeTransportEvent): void {
+	if (client !== stdioClient) return
 	if (event.type === "closed") {
 		log.warn("Devo Native stdio transport closed", { error: event.error })
 		server = null

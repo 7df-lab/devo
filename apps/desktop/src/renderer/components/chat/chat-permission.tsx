@@ -1,7 +1,16 @@
 import { Button } from "@devo/ui/components/button"
 import { cn } from "@devo/ui/lib/utils"
 import { ArrowUpIcon, CheckIcon, Loader2Icon } from "lucide-react"
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react"
+import {
+	memo,
+	useCallback,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+	type KeyboardEvent,
+	type RefObject,
+} from "react"
 import type { Agent, PermissionRequest, PermissionResponse } from "../../lib/types"
 import {
 	buildApprovalChoices,
@@ -99,43 +108,27 @@ export const ChatPermissionFlow = memo(function ChatPermissionFlow({
 		[choices.length],
 	)
 
-	useEffect(() => {
-		function handleKeyDown(event: KeyboardEvent) {
-			if (event.target instanceof HTMLInputElement && event.target.id === "permission-deny-note") {
-				if (event.key === "ArrowDown") {
-					event.preventDefault()
-					moveSelection(1)
-					return
-				}
-				if (event.key === "ArrowUp") {
-					event.preventDefault()
-					moveSelection(-1)
-					return
-				}
-				if (event.key === "Enter" && !event.shiftKey) {
-					event.preventDefault()
-					void handleSubmit()
-				}
-				return
-			}
+	// Only keyboard events from this card can answer the pending permission.
+	// In particular, Enter in another part of the app must never approve it.
+	function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
+		if (event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return
 
-			if (event.key === "ArrowDown") {
-				event.preventDefault()
-				moveSelection(1)
-			} else if (event.key === "ArrowUp") {
-				event.preventDefault()
-				moveSelection(-1)
-			} else if (event.key === "Enter" && !event.shiftKey) {
-				event.preventDefault()
-				void handleSubmit()
-			} else if (event.key === "Escape") {
-				event.preventDefault()
-				setSelectedIndex(choices.findIndex((choice) => choice.kind === "deny"))
-			}
+		if (event.key === "ArrowDown") {
+			event.preventDefault()
+			moveSelection(1)
+		} else if (event.key === "ArrowUp") {
+			event.preventDefault()
+			moveSelection(-1)
+		} else if (event.key === "Enter" && !event.shiftKey) {
+			// Let focused buttons handle Enter as a native click, not two submissions.
+			if (event.target instanceof Element && event.target.closest("button")) return
+			event.preventDefault()
+			void handleSubmit()
+		} else if (event.key === "Escape") {
+			event.preventDefault()
+			setSelectedIndex(choices.findIndex((choice) => choice.kind === "deny"))
 		}
-		document.addEventListener("keydown", handleKeyDown)
-		return () => document.removeEventListener("keydown", handleKeyDown)
-	}, [choices, handleSubmit, moveSelection])
+	}
 
 	useEffect(() => {
 		const timer = requestAnimationFrame(() => cardRef.current?.focus())
@@ -145,6 +138,7 @@ export const ChatPermissionFlow = memo(function ChatPermissionFlow({
 	return (
 		<section
 			ref={cardRef}
+			onKeyDown={handleKeyDown}
 			tabIndex={-1}
 			aria-label="Tool permission request"
 			className="devo-composer animate-in fade-in slide-in-from-bottom-2 bg-background/95 shadow-[0_8px_32px_rgba(0,0,0,0.05)] outline-none duration-200 dark:shadow-[0_10px_36px_rgba(0,0,0,0.28)]"

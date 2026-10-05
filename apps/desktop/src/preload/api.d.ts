@@ -21,6 +21,7 @@ export interface ProviderOAuthUpdate {
 	url?: string
 	instructions: string
 	userCode?: string
+	phase?: "saving"
 }
 
 export interface ModelRef {
@@ -484,7 +485,8 @@ export interface DevoAPI {
 	}
 	providerOAuth: {
 		login: (providerId: string, enterpriseUrl?: string) => Promise<void>
-		cancel: () => Promise<void>
+		/** False once the non-cancellable credential save has started. */
+		cancel: () => Promise<boolean>
 		onUpdate: (callback: (update: ProviderOAuthUpdate) => void) => () => void
 	}
 	terminal: {

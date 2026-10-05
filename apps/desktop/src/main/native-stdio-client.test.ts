@@ -1,5 +1,8 @@
 import path from "node:path"
-import { describe, expect, test } from "bun:test"
+import * as childProcess from "node:child_process"
+import { EventEmitter } from "node:events"
+import { PassThrough } from "node:stream"
+import { describe, expect, spyOn, test } from "bun:test"
 import {
 	StdioNativeClient,
 	buildServerProcessEnv,
@@ -48,6 +51,69 @@ describe("routeNativeLine", () => {
 })
 
 describe("StdioNativeClient", () => {
+	test("ignores delayed events from a stopped child after restart", async () => {
+		type SyntheticChild = childProcess.ChildProcessWithoutNullStreams & {
+			stdin: PassThrough
+			stdout: PassThrough
+			stderr: PassThrough
+			pid: number
+		}
+		const children: SyntheticChild[] = []
+		const spawnMock = spyOn(childProcess, "spawn").mockImplementation((() => {
+			let killed = false
+			const child = Object.assign(new EventEmitter(), {
+				stdin: new PassThrough(),
+				stdout: new PassThrough(),
+				stderr: new PassThrough(),
+				pid: 100 + children.length,
+				get killed() { return killed },
+				kill() {
+					killed = true
+					return true
+				},
+			}) as unknown as SyntheticChild
+			children.push(child)
+			return child
+		}) as unknown as typeof childProcess.spawn)
+		const client = new StdioNativeClient({ requestTimeoutMs: 1_000 })
+		const events: unknown[] = []
+		const unsubscribe = client.subscribe((event) => events.push(event))
+		try {
+			client.start()
+			const oldChild = children[0]!
+			client.stop()
+			const response = client.request("session/list")
+			void response.catch(() => {})
+			const currentChild = children[1]!
+			expect(client.pid()).toBe(currentChild.pid)
+
+			// Reproduce the old exit event arriving after start() resets stopped.
+			oldChild.emit("exit", null, "SIGTERM")
+			oldChild.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: "old" })}\n`)
+			oldChild.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "old/event" })}\n`)
+			oldChild.stderr.write("old stderr\n")
+			oldChild.stdin.emit("error", new Error("old stdin failed"))
+			oldChild.emit("error", new Error("old process failed"))
+
+			expect(client.connected()).toBe(true)
+			expect(client.pid()).toBe(currentChild.pid)
+			expect(events).toEqual([{ type: "closed", error: "Devo Native stdio client stopped" }])
+			expect((client as unknown as { pending: Map<unknown, unknown> }).pending.size).toBe(1)
+
+			currentChild.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: "new" })}\n`)
+			await expect(response).resolves.toBe("new")
+		} finally {
+			client.stop()
+			unsubscribe()
+			for (const child of children) {
+				child.stdin.destroy()
+				child.stdout.destroy()
+				child.stderr.destroy()
+			}
+			spawnMock.mockRestore()
+		}
+	})
+
 	test("unsubscribes event listeners from the shared transport emitter", () => {
 		const client = new StdioNativeClient()
 		const emitter = (client as unknown as {

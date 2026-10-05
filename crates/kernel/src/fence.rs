@@ -1,12 +1,11 @@
-//! OS fence wiring for the RLM kernel (design doc `docs/design/rlm-permissions.md`
-//! §5.2/§5.3, P0).
+//! OS fence wiring for the RLM kernel.
 //!
 //! Windows: the kernel argv is wrapped in the restricted-token sandbox launcher
 //! (`devo.exe --run-as-windows-sandbox ... python -m rlm.repl`). Linux/macOS
-//! wiring (bwrap strict profile / Seatbelt) is P0 follow-up; until then a fence
-//! request on those platforms is an explicit downgrade, never a silent one.
+//! enforcement uses a child sandbox plan when available. If enforcement is
+//! unavailable, a fence request is an explicit downgrade, never a silent one.
 //!
-//! Downgrade semantics (§5.3): if the sandbox is not provisioned — or the
+//! Downgrade semantics: if the sandbox is not provisioned — or the
 //! wrapped launch fails — the kernel still spawns unfenced, but the downgrade is
 //! loud (`tracing::warn`) and the caller is expected to surface it in the UI and
 //! record a `fence-off` event. The one hard exception stays with the approval
@@ -44,7 +43,7 @@ pub(crate) fn decide_fence(requested: Option<&KernelFenceSpec>, sandbox_ready: b
 
 /// Result of the fence application: the launch command, the decision, and —
 /// on Windows when fenced — the per-session credential authority whose SID
-/// traveled in the kernel's restricted token (§9, P2). Unix platforms carry
+/// traveled in the kernel's restricted token. Unix platforms carry
 /// no authority yet (dirfd delivery channel is follow-up work).
 pub(crate) struct FenceOutcome {
     pub command: Command,
@@ -57,12 +56,12 @@ pub(crate) struct FenceOutcome {
     #[cfg(unix)]
     pub child_plan: Option<devo_util_process::sandbox::ResolvedEnforcementPlan>,
     /// Unix credential delivery channel host end (fenced kernels only):
-    /// grants travel as fds over SCM_RIGHTS (§9). `None` when unfenced.
+    /// grants travel as fds over SCM_RIGHTS. `None` when unfenced.
     #[cfg(unix)]
     pub grant_channel: Option<crate::credential_unix::GrantChannel>,
 }
 
-/// Read roots the interpreter itself needs (design doc §5.1 `python_ro`): the
+/// Read roots the interpreter itself needs (`python_ro` profile): the
 /// Python runtime prefix (`<prefix>/bin/python*` layout) plus every PYTHONPATH
 /// entry (vendored rlm-runtime, skills). Without these a no-default-read fence
 /// would break interpreter startup.
@@ -90,7 +89,7 @@ fn interpreter_read_roots(config: &crate::session::KernelSessionConfig) -> Vec<s
     roots
 }
 
-/// Unix fence (design doc §5.2): enforcement is entirely the Landlock/seccomp
+/// Unix fence: enforcement is entirely the Landlock/seccomp
 /// child plan applied in `pre_exec` on the kernel process itself — the same
 /// mechanism the product's pipe-mode shell sandbox uses. No outer wrapper:
 /// a PipeComposed bwrap only adds read-deny bind-overs (rlm-kernel has none)
@@ -125,7 +124,7 @@ pub(super) fn fence_or_bare(
             devo_sandbox::SandboxNetworkPermission::Enabled
         },
     };
-    // `rlm-kernel` has no default read (design doc §5.1, P4): the fence
+    // `rlm-kernel` has no default read: the fence
     // derives from the session's permission state, so reads outside the
     // granted roots are OS-refused and `rlm.read` escalates to the host
     // approval pipeline instead of silently succeeding.
@@ -143,7 +142,7 @@ pub(super) fn fence_or_bare(
         Ok(None) => {
             tracing::warn!(
                 "RLM kernel fence requested but no enforcement plan resolved; kernel runs \
-                 UNFENCED with full user permissions (explicit downgrade, design doc §5.3)"
+                 UNFENCED with full user permissions (explicit downgrade)"
             );
             FenceOutcome {
                 command: bare,
@@ -156,7 +155,7 @@ pub(super) fn fence_or_bare(
             tracing::warn!(
                 error = %err,
                 "RLM kernel fence enforcement plan resolution failed; kernel runs UNFENCED \
-                 with full user permissions (explicit downgrade, §5.3)"
+                 with full user permissions (explicit downgrade)"
             );
             FenceOutcome {
                 command: bare,
@@ -186,7 +185,7 @@ pub(super) fn wrap_or_bare(
             tracing::warn!(
                 error = %err,
                 "RLM kernel fence requested but devo home is unavailable; kernel runs UNFENCED \
-                 with full user permissions (explicit downgrade, design doc §5.3)"
+                 with full user permissions (explicit downgrade)"
             );
             return FenceOutcome {
                 command: bare,
@@ -205,8 +204,8 @@ pub(super) fn wrap_or_bare(
         FenceState::DowngradedUnfenced => {
             tracing::warn!(
                 "RLM kernel fence requested but the Windows sandbox is not provisioned; \
-                 kernel runs UNFENCED with full user permissions (explicit downgrade, \
-                 design doc §5.3). Run the Windows sandbox setup to enable the fence."
+                 kernel runs UNFENCED with full user permissions (explicit downgrade). \
+                 Run the Windows sandbox setup to enable the fence."
             );
             FenceOutcome {
                 command: bare,
@@ -231,7 +230,7 @@ pub(super) fn wrap_or_bare(
                     tracing::warn!(
                         error = %err,
                         "RLM kernel session credential authority could not be minted; \
-                         kernel runs UNFENCED (explicit downgrade, design doc §5.3)"
+                         kernel runs UNFENCED (explicit downgrade)"
                     );
                     return FenceOutcome {
                         command: bare,
@@ -295,7 +294,7 @@ pub(super) fn wrap_or_bare(
                     tracing::warn!(
                         error = %err,
                         "RLM kernel fence launch failed; kernel runs UNFENCED with full user \
-                         permissions (explicit downgrade, design doc §5.3)"
+                         permissions (explicit downgrade)"
                     );
                     FenceOutcome {
                         command: bare,

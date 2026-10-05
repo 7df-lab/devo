@@ -1748,12 +1748,20 @@ class NativeClient {
 		if (!this.transport) throw new Error("Devo Native transport is not connected")
 		if (this.initialized) return
 
-		let promise = initializePromises.get(this.transport)
+		const transport = this.transport
+		let promise = initializePromises.get(transport)
 		if (!promise) {
 			promise = this.request("initialize", DESKTOP_INITIALIZE_PARAMS).then(() => {})
-			initializePromises.set(this.transport, promise)
+			initializePromises.set(transport, promise)
 		}
-		await promise
+		try {
+			await promise
+		} catch (error) {
+			// A failed handshake must not block retries on a still-open transport.
+			// Another caller may have already replaced this entry with a new attempt.
+			if (initializePromises.get(transport) === promise) initializePromises.delete(transport)
+			throw error
+		}
 		this.initialized = true
 	}
 

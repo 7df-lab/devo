@@ -50,6 +50,7 @@ import {
 import { createLogger } from "../lib/logger"
 import { formatShortcut } from "../lib/shortcut-display"
 import { navigateToNewChat } from "../lib/project-selection"
+import { shouldToggleCommandPalette } from "./root-layout-keyboard"
 import type { ColorScheme } from "../lib/themes"
 import type { Agent } from "../lib/types"
 import { reloadConfig } from "../services/connection-manager"
@@ -136,7 +137,7 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 
 	useEffect(() => {
 		function handleKeyDown(e: KeyboardEvent) {
-			if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+			if (shouldToggleCommandPalette(e, open)) {
 				e.preventDefault()
 				onOpenChange(!open)
 			}
@@ -157,7 +158,7 @@ export function CommandPalette({ open, onOpenChange, agents, onForkSession }: Co
 		<CommandDialog
 			open={open}
 			onOpenChange={onOpenChange}
-			className="w-[calc(100%-2rem)] sm:max-w-2xl"
+			className="devo-command-palette w-[calc(100%-2rem)] sm:max-w-2xl"
 		>
 			<CommandInput placeholder="Type a command or search..." />
 			<CommandList className="max-h-[min(32rem,60vh)]">

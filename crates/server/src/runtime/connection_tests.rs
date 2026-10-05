@@ -5666,6 +5666,292 @@ async fn native_admin_directory_lists() -> Result<()> {
     Ok(())
 }
 
+/// A credential-only overlay must inherit the bundled protocol and URL, and
+/// credential/set must refresh routers held by already-live sessions.
+#[tokio::test]
+async fn native_oauth_credential_set_keeps_builtin_protocol_and_refreshes_live_routers()
+-> Result<()> {
+    use devo_protocol::ProviderWireApi;
+    use devo_provider::ProviderRoute;
+
+    let data_root = TempDir::new()?;
+    let runtime = build_runtime_with_provider_and_catalog(
+        data_root.path(),
+        Arc::new(NoopProvider::failing()),
+        Arc::new(PresetModelCatalog::load()?),
+    );
+    let connection_id = initialized_with_protocol_meta(&runtime, true).await;
+    let session_id = start_durable_session(&runtime, connection_id, data_root.path()).await?;
+    let session_context = runtime
+        .session(session_id)
+        .await
+        .expect("live session")
+        .runtime_context()
+        .await
+        .expect("workspace context");
+    let process_context = Arc::clone(&runtime.deps.process_context);
+    let process_before = process_context.provider_router();
+    let session_before = session_context.provider_router();
+
+    for (index, provider) in ["anthropic", "openai-codex"].into_iter().enumerate() {
+        let response = history_request(
+            &runtime,
+            connection_id,
+            900 + index as u64,
+            "credential/set",
+            serde_json::json!({
+                "provider": provider,
+                "kind": "oauth",
+                "access": "local-test-token",
+                "expiresAt": Utc::now().timestamp() + 86_400,
+            }),
+        )
+        .await;
+        assert!(
+            response.get("error").is_none(),
+            "credential/set failed: {response}"
+        );
+    }
+
+    let listed: devo_protocol::native::rpc_admin::ProviderListResult = json_result(
+        &history_request(
+            &runtime,
+            connection_id,
+            902,
+            "provider/list",
+            serde_json::json!({}),
+        )
+        .await,
+        "provider/list",
+    );
+    for (provider_id, base_url, wire_api) in [
+        (
+            "anthropic",
+            "https://api.anthropic.com",
+            ProviderWireApi::AnthropicMessages,
+        ),
+        (
+            "openai-codex",
+            "https://chatgpt.com/backend-api/codex",
+            ProviderWireApi::OpenAIResponses,
+        ),
+    ] {
+        let entry = listed
+            .providers
+            .iter()
+            .find(|entry| entry.id == provider_id)
+            .expect("bundled provider");
+        assert_eq!(
+            (
+                entry.base_url.as_deref(),
+                entry.wire_apis.as_slice(),
+                entry.credential.as_deref()
+            ),
+            (Some(base_url), &[wire_api][..], Some(provider_id)),
+        );
+        assert!(
+            !entry.models.is_empty(),
+            "bundled models must remain visible"
+        );
+    }
+    assert_eq!(
+        listed.connected_provider_ids,
+        vec!["anthropic", "openai-codex"]
+    );
+    assert!(
+        !Arc::ptr_eq(&process_before, &process_context.provider_router()),
+        "the process router must be replaced after credential/set"
+    );
+    assert!(
+        !Arc::ptr_eq(&session_before, &session_context.provider_router()),
+        "a live session router must be replaced after credential/set"
+    );
+    for context in [&process_context, &session_context] {
+        let configured = context
+            .config_store
+            .lock()
+            .expect("config store")
+            .effective_config()
+            .provider_catalog_config();
+        assert_eq!(
+            configured
+                .providers
+                .get("openai-codex")
+                .and_then(|entry| entry.credential.as_deref()),
+            Some("openai-codex"),
+        );
+        let router = context.reload_provider_router().await?;
+        assert!(router.has_route(&ProviderRoute::connection(
+            "anthropic",
+            ProviderWireApi::AnthropicMessages
+        )));
+        assert!(router.has_route(&ProviderRoute::connection(
+            "openai-codex",
+            ProviderWireApi::OpenAIResponses
+        )));
+        assert!(!router.has_route(&ProviderRoute::connection(
+            "anthropic",
+            ProviderWireApi::OpenAIChatCompletions
+        )));
+    }
+
+    // An explicit user override beats the builtin; an explicit custom-provider
+    // override beats the user connection without dropping its OAuth binding.
+    let provider_path = data_root.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME);
+    let mut user = devo_core::read_provider_catalog_config(&provider_path)?;
+    user.providers
+        .get_mut("anthropic")
+        .expect("user connection")
+        .base_url = Some("https://user.example/messages".to_string());
+    devo_core::write_provider_catalog_config(&provider_path, &user)?;
+    runtime.deps.config_store.lock().expect("store").reload()?;
+    let listed: devo_protocol::native::rpc_admin::ProviderListResult = json_result(
+        &history_request(
+            &runtime,
+            connection_id,
+            903,
+            "provider/list",
+            serde_json::json!({}),
+        )
+        .await,
+        "provider/list user override",
+    );
+    let anth = listed
+        .providers
+        .iter()
+        .find(|entry| entry.id == "anthropic")
+        .expect("anthropic");
+    assert_eq!(
+        (anth.base_url.as_deref(), anth.wire_apis.as_slice()),
+        (
+            Some("https://user.example/messages"),
+            &[ProviderWireApi::AnthropicMessages][..]
+        ),
+    );
+
+    devo_core::write_provider_catalog_config(
+        &data_root
+            .path()
+            .join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME),
+        &devo_core::ProviderConfigFile {
+            providers: std::collections::BTreeMap::from([(
+                "anthropic".to_string(),
+                devo_core::ProviderConfigEntry {
+                    base_url: Some("https://custom.example/messages".to_string()),
+                    wire_api: Some(ProviderWireApi::OpenAIResponses),
+                    ..devo_core::ProviderConfigEntry::default()
+                },
+            )]),
+            ..devo_core::ProviderConfigFile::default()
+        },
+    )?;
+    runtime.deps.config_store.lock().expect("store").reload()?;
+    let listed: devo_protocol::native::rpc_admin::ProviderListResult = json_result(
+        &history_request(
+            &runtime,
+            connection_id,
+            904,
+            "provider/list",
+            serde_json::json!({}),
+        )
+        .await,
+        "provider/list custom override",
+    );
+    let anth = listed
+        .providers
+        .iter()
+        .find(|entry| entry.id == "anthropic")
+        .expect("anthropic");
+    assert_eq!(
+        (
+            anth.base_url.as_deref(),
+            anth.wire_apis.as_slice(),
+            anth.credential.as_deref()
+        ),
+        (
+            Some("https://custom.example/messages"),
+            &[ProviderWireApi::OpenAIResponses][..],
+            Some("anthropic")
+        ),
+    );
+
+    let credentials: devo_protocol::native::rpc_admin::CredentialListResult = json_result(
+        &history_request(
+            &runtime,
+            connection_id,
+            905,
+            "credential/list",
+            serde_json::json!({}),
+        )
+        .await,
+        "credential/list",
+    );
+    assert_eq!(
+        credentials
+            .credentials
+            .iter()
+            .map(|credential| credential.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["anthropic", "openai-codex"],
+    );
+    assert!(
+        credentials
+            .credentials
+            .iter()
+            .all(|credential| credential.masked != "local-test-token")
+    );
+
+    let process_before_delete = process_context.provider_router();
+    let session_before_delete = session_context.provider_router();
+    let deleted = history_request(
+        &runtime,
+        connection_id,
+        906,
+        "credential/delete",
+        serde_json::json!({ "credentialId": "anthropic" }),
+    )
+    .await;
+    assert!(
+        deleted.get("error").is_none(),
+        "credential/delete failed: {deleted}"
+    );
+    assert!(!Arc::ptr_eq(
+        &process_before_delete,
+        &process_context.provider_router()
+    ));
+    assert!(!Arc::ptr_eq(
+        &session_before_delete,
+        &session_context.provider_router()
+    ));
+    let credentials: devo_protocol::native::rpc_admin::CredentialListResult = json_result(
+        &history_request(
+            &runtime,
+            connection_id,
+            907,
+            "credential/list",
+            serde_json::json!({}),
+        )
+        .await,
+        "credential/list after delete",
+    );
+    assert_eq!(
+        credentials
+            .credentials
+            .iter()
+            .map(|credential| credential.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["openai-codex"],
+    );
+    assert!(
+        !devo_core::read_user_auth_config(
+            &data_root.path().join(devo_core::AUTH_CONFIG_FILE_NAME)
+        )?
+        .credentials
+        .contains_key("anthropic")
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn native_session_message_edit_branches() -> Result<()> {
     let env = NativeEnv::native().await?;

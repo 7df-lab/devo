@@ -107,6 +107,7 @@
 		"electron": "^43.4.1",
 		"electron-builder": "^26.0.0",
 		"electron-vite": "^5.0.0",
+		"happy-dom": "^20.14.5",
 		"rcedit": "^5.0.2",
 		"shiki": "^3.22.0",
 		"tailwindcss": "^4.0.0",

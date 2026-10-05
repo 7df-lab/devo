@@ -65,6 +65,7 @@ type DialogStep =
 type DialogState =
 	| { status: "idle" }
 	| { status: "loading" }
+	| { status: "saving" }
 	| { status: "success" }
 	| { status: "error"; message: string }
 
@@ -297,11 +298,38 @@ export function ConnectProviderDialog({
 		}
 	}, [open, authMethods, provider])
 
+	const tryCancelOAuth = useCallback(async (): Promise<boolean> => {
+		try {
+			const cancelled = await window.devo.providerOAuth.cancel()
+			if (!cancelled) {
+				setState((current) => current.status === "success" ? current : { status: "saving" })
+			}
+			return cancelled
+		} catch (error) {
+			log.error("Could not confirm OAuth cancellation", { error })
+			setState((current) => current.status === "success" ? current : {
+				status: "error", message: "Could not confirm cancellation. Please try again.",
+			})
+			return false
+		}
+	}, [])
+
+	const handleOAuthClose = useCallback(async () => {
+		// The main process decides atomically whether credential/set has started.
+		// Do not hide the dialog if cancellation cannot stop the save.
+		if (await tryCancelOAuth()) onClose()
+	}, [onClose, tryCancelOAuth])
+
 	const handleOpenChange = useCallback(
 		(isOpen: boolean) => {
-			if (!isOpen) onClose()
+			if (isOpen) return
+			if (step.type === "oauth" && state.status !== "success") {
+				void handleOAuthClose()
+			} else {
+				onClose()
+			}
 		},
-		[onClose],
+		[handleOAuthClose, onClose, state.status, step.type],
 	)
 
 	const handleOAuthSuccess = useCallback(() => {
@@ -404,12 +432,15 @@ export function ConnectProviderDialog({
 						onBack={
 							authMethods && authMethods.length > 1
 								? () => {
-										setStep({ type: "select-method" })
-										setState({ status: "idle" })
+										void tryCancelOAuth().then((cancelled) => {
+											if (!cancelled) return
+											setStep({ type: "select-method" })
+											setState({ status: "idle" })
+										})
 									}
 								: undefined
 						}
-						onCancel={onClose}
+						onCancel={() => { void handleOAuthClose() }}
 					/>
 				) : null}
 			</DialogContent>
@@ -832,12 +863,14 @@ function OAuthView({
 	// Start OAuth flow on mount
 	useEffect(() => {
 		let cancelled = false
+		let saving = false
 		const unsubscribe = window.devo.providerOAuth.onUpdate((update) => {
 			if (cancelled) return
+			saving = update.phase === "saving"
 			setAuthUrl(update.url ?? null)
 			setOauthMethod("auto")
 			setAuthInstructions(update.instructions)
-			setState({ status: "idle" })
+			setState({ status: update.phase === "saving" ? "saving" : "idle" })
 		})
 
 		async function startOAuth() {
@@ -848,8 +881,10 @@ function OAuthView({
 				onSuccess()
 			} catch (err) {
 				if (cancelled) return
-				const message = err instanceof Error ? err.message : "Failed to start OAuth"
-				log.error("Failed to start OAuth", { provider: provider.id, error: err })
+				const message = saving
+					? "Could not confirm whether the credential was saved. Check the provider before retrying."
+					: err instanceof Error ? err.message : "Failed to start OAuth"
+				log.error("Desktop OAuth failed", { provider: provider.id, error: err })
 				setState({ status: "error", message })
 			}
 		}
@@ -870,6 +905,15 @@ function OAuthView({
 		},
 		[code, setState],
 	)
+
+	if (state.status === "saving") {
+		return (
+			<div className="flex items-center justify-center gap-2 py-6" role="status">
+				<Spinner className="size-5" />
+				<span className="text-sm text-muted-foreground">Saving credential... Please wait.</span>
+			</div>
+		)
+	}
 
 	if (oauthMethod === "code" && authUrl) {
 		return (
