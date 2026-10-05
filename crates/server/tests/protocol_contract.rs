@@ -1,19 +1,78 @@
 use std::collections::VecDeque;
 
 use chrono::Utc;
-use devo_core::{
-    ItemId, SessionId, SessionRecord, SessionTitleFinalSource, SessionTitleState, TurnId,
-    TurnRecord, TurnStatus,
-};
+use devo_core::{ItemId, SessionId, SessionTitleFinalSource, SessionTitleState, TurnId};
+use devo_protocol::native::event::ServerNotification;
+use devo_protocol::native::ids::{ItemId as NativeItemId, SessionId as NativeSessionId};
 use devo_protocol::{AcpClientCapabilities, AcpInitializeParams};
 use devo_server::{
     ActiveTurnSteeringState, ApprovalDecisionValue, ApprovalRequestPayload, ApprovalResponseParams,
-    ApprovalScopeValue, ClientRequest, DefaultProjection, EventContext, InputItem, ItemDeltaKind,
-    ItemDeltaPayload, PendingServerRequestContext, ProtocolError, ProtocolErrorCode, ServerEvent,
-    ServerRequestKind, SessionMetadata, SessionProjector, SessionRuntimeStatus, SteerInputRecord,
-    TurnKind, TurnProjector,
+    ApprovalScopeValue, ClientRequest, ItemDeltaKind, PendingServerRequestContext, ProtocolError,
+    ProtocolErrorCode, ServerRequestKind, SteerInputRecord, TurnKind, item_delta_notification,
 };
 use pretty_assertions::assert_eq;
+
+fn sample_native_session(
+    title: Option<&str>,
+    title_state: SessionTitleState,
+) -> devo_protocol::native::session::Session {
+    use devo_protocol::native::ids::SessionId as NativeSessionId;
+    use devo_protocol::native::model::{ModelBinding, PermissionProfile};
+    use devo_protocol::native::session::{
+        Session, SessionActivity, SessionSettings, SessionStatus,
+    };
+    use devo_protocol::native::usage::{SessionUsage, UsageTotals};
+
+    let now = Utc::now();
+    Session {
+        id: NativeSessionId::new(),
+        version: 1,
+        cwd: ".".into(),
+        additional_directories: Vec::new(),
+        parent: None,
+        fork_from_id: None,
+        at_turn_id: None,
+        ephemeral: false,
+        created_at: now,
+        status: SessionStatus::Idle,
+        activity: SessionActivity::Idle,
+        flags: Vec::new(),
+        archived: false,
+        active_turn_id: None,
+        queued_count: 0,
+        title: title.map(str::to_string),
+        title_state,
+        model: ModelBinding {
+            provider: "unknown".into(),
+            model: "claude-sonnet".into(),
+            variant: None,
+            reasoning_effort: None,
+        },
+        settings: SessionSettings {
+            permission_profile: PermissionProfile::AutoReview,
+            reasoning_effort: None,
+            mode: Some("build".into()),
+            sandbox_profile: None,
+            effective_context_window: None,
+            auto_refine_enabled: None,
+            auto_refine_turn_interval: None,
+            python_cell_first_wait_ms: None,
+        },
+        git_info: None,
+        preview: String::new(),
+        last_activity_at: now,
+        transcript_size_bytes: None,
+        message_count: None,
+        summary: None,
+        task_state: None,
+        usage: SessionUsage {
+            total: UsageTotals::default(),
+            by_purpose: Vec::new(),
+            legacy: None,
+            updated_at: now,
+        },
+    }
+}
 
 #[test]
 fn acp_initialize_params_accept_documented_minimal_shape() {
@@ -48,24 +107,9 @@ fn approval_response_roundtrip() {
 }
 
 #[test]
-fn event_context_keeps_correlation_ids() {
-    let context = EventContext {
-        session_id: SessionId::new(),
-        turn_id: Some(TurnId::new()),
-        item_id: None,
-        seq: 7,
-        item_seq: None,
-    };
-
-    assert_eq!(context.seq, 7);
-    assert!(context.turn_id.is_some());
-}
-
-#[test]
-fn input_item_serializes_tagged_shape() {
-    let input = InputItem::Skill {
+fn user_input_serializes_tagged_shape() {
+    let input = devo_protocol::native::item::UserInput::Skill {
         name: "rust-docs".into(),
-        path: std::path::PathBuf::from("/skills/rust/SKILL.md"),
     };
 
     let json = serde_json::to_string(&input).expect("serialize");
@@ -116,14 +160,14 @@ fn steering_state_preserves_queue_order() {
     let first = SteerInputRecord {
         item_id: ItemId::new(),
         received_at: Utc::now(),
-        input: vec![InputItem::Text {
+        input: vec![devo_protocol::native::item::UserInput::Text {
             text: "first".into(),
         }],
     };
     let second = SteerInputRecord {
         item_id: ItemId::new(),
         received_at: Utc::now(),
-        input: vec![InputItem::Text {
+        input: vec![devo_protocol::native::item::UserInput::Text {
             text: "second".into(),
         }],
     };
@@ -139,104 +183,18 @@ fn steering_state_preserves_queue_order() {
 }
 
 #[test]
-fn session_projection_maps_core_record() {
-    let projection = DefaultProjection;
-    let session = SessionRecord {
-        id: SessionId::new(),
-        rollout_path: "rollout.jsonl".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        last_activity_at: Some(Utc::now()),
-        source: "api".into(),
-        agent_nickname: None,
-        agent_role: None,
-        agent_path: None,
-        model_provider: "anthropic".into(),
-        model: Some("claude-sonnet".into()),
-        model_binding_id: None,
-        reasoning_effort_selection: None,
-        cwd: ".".into(),
-        additional_directories: Vec::new(),
-        cli_version: "0.1.0".into(),
-        title: Some("Test".into()),
-        title_state: SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate),
-        sandbox_policy: "workspace-write".into(),
-        approval_mode: "never".into(),
-        effective_context_window: None,
-        permission_preset: None,
-        tokens_used: 0,
-        first_user_message: None,
-        archived_at: None,
-        git_sha: None,
-        git_branch: None,
-        git_origin_url: None,
-        parent_session_id: None,
-        fork_from_id: None,
-        fork_at_turn_id: None,
-        session_context: None,
-        latest_turn_context: None,
-        collaboration_mode: None,
-        schema_version: 2,
-    };
+fn item_delta_notification_wires_expected_method() {
+    let notification = item_delta_notification(
+        ItemDeltaKind::AgentMessageDelta,
+        NativeSessionId::new(),
+        NativeItemId::new(),
+        0,
+        "hi",
+    );
 
-    let projected = projection.project_session(&session, false, SessionRuntimeStatus::Idle);
-    assert_eq!(projected.session_id, session.id);
-    assert_eq!(projected.model, session.model);
-}
-
-#[test]
-fn turn_projection_preserves_turn_status_vocabulary() {
-    let projection = DefaultProjection;
-    let turn = TurnRecord {
-        id: TurnId::new(),
-        session_id: SessionId::new(),
-        sequence: 1,
-        started_at: Utc::now(),
-        completed_at: None,
-        status: TurnStatus::Running,
-        kind: devo_core::TurnKind::Regular,
-        model: "claude-sonnet".into(),
-        model_binding_id: None,
-        reasoning_effort_selection: None,
-        request_model: "claude-sonnet".into(),
-        request_thinking: None,
-        input_token_estimate: None,
-        usage: None,
-        latest_query_usage: None,
-        context_occupancy: None,
-        stop_reason: None,
-        failure_reason: None,
-        error: None,
-        session_context: None,
-        turn_context: None,
-        schema_version: 2,
-    };
-
-    let projected = projection.project_turn(&turn);
-    assert_eq!(projected.status, TurnStatus::Running);
-}
-
-#[test]
-fn event_enum_carries_delta_kind() {
-    let event = ServerEvent::ItemDelta {
-        delta_kind: ItemDeltaKind::AgentMessageDelta,
-        payload: ItemDeltaPayload {
-            context: EventContext {
-                session_id: SessionId::new(),
-                turn_id: Some(TurnId::new()),
-                item_id: Some(ItemId::new()),
-                seq: 5,
-                item_seq: None,
-            },
-            delta: "hi".into(),
-            stream_index: None,
-            channel: None,
-            chunk_index: None,
-        },
-    };
-
-    let json = serde_json::to_string(&event).expect("serialize");
-    assert!(json.contains("agent_message_delta"));
+    let (method, _) =
+        devo_protocol::native::wire_projector::wire_from_server_notification(&notification);
+    assert_eq!(method, "item/assistantMessage/delta");
 }
 
 #[test]
@@ -253,203 +211,81 @@ fn request_envelope_keeps_method_and_id() {
 }
 
 #[test]
-fn session_title_updated_event_serializes_expected_kind() {
-    let event = ServerEvent::SessionTitleUpdated(devo_server::SessionEventPayload {
-        session: SessionMetadata {
-            session_id: SessionId::new(),
-            cwd: ".".into(),
-            additional_directories: Vec::new(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            last_activity_at: Utc::now(),
-            title: Some("Renamed session".into()),
-            title_state: SessionTitleState::Final(SessionTitleFinalSource::UserRename),
-            parent_session_id: None,
-            fork_from_id: None,
-            fork_at_turn_id: None,
-            agent_path: None,
-            agent_nickname: None,
-            agent_role: None,
-            ephemeral: false,
-            model: Some("claude-sonnet".into()),
-            model_binding_id: None,
-            reasoning_effort_selection: None,
-            reasoning_effort: None,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_tokens: 0,
-            total_cache_creation_tokens: 0,
-            total_cache_read_tokens: 0,
-            prompt_token_estimate: 0,
-            last_query_usage: None,
-            last_query_total_tokens: 0,
-            last_context_occupancy: None,
-            status: SessionRuntimeStatus::Idle,
-            collaboration_mode: Default::default(),
-            effective_context_window: None,
-            permission_preset: None,
-        },
-    });
+fn session_metadata_updated_notification_serializes_expected_method() {
+    let notification = ServerNotification::SessionMetadataUpdated {
+        session: Box::new(sample_native_session(
+            Some("Renamed session"),
+            SessionTitleState::Final(SessionTitleFinalSource::UserRename),
+        )),
+    };
 
-    let json = serde_json::to_string(&event).expect("serialize");
-    assert!(json.contains("session_title_updated"));
+    let (method, _) =
+        devo_protocol::native::wire_projector::wire_from_server_notification(&notification);
+    assert_eq!(method, "session/metadataUpdated");
 }
 
 #[test]
-fn session_compaction_events_serialize_expected_kinds() {
-    let metadata = SessionMetadata {
+fn session_compaction_notifications_serialize_expected_methods() {
+    let session = sample_native_session(Some("Compacting session"), SessionTitleState::Unset);
+    let turn_id = TurnId::new();
+    let started = ServerNotification::ContextCompactionStarted {
+        session_id: session.id,
+        turn_id,
+        trigger: devo_protocol::native::item::CompactionTrigger::Manual,
+    };
+    let completed = ServerNotification::ContextCompactionCompleted {
+        session_id: session.id,
+        turn_id,
+        item_id: ItemId::new(),
+    };
+    let failed = ServerNotification::ContextCompactionFailed {
         session_id: SessionId::new(),
-        cwd: ".".into(),
-        additional_directories: Vec::new(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        last_activity_at: Utc::now(),
-        title: Some("Compacting session".into()),
-        title_state: SessionTitleState::Unset,
-        parent_session_id: None,
-        fork_from_id: None,
-        fork_at_turn_id: None,
-        agent_path: None,
-        agent_nickname: None,
-        agent_role: None,
-        ephemeral: false,
-        model: Some("claude-sonnet".into()),
-        model_binding_id: None,
-        reasoning_effort_selection: None,
-        reasoning_effort: None,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_tokens: 0,
-        total_cache_creation_tokens: 0,
-        total_cache_read_tokens: 0,
-        prompt_token_estimate: 0,
-        last_query_usage: None,
-        last_query_total_tokens: 0,
-        last_context_occupancy: None,
-        status: SessionRuntimeStatus::Idle,
-        collaboration_mode: Default::default(),
-        effective_context_window: None,
-        permission_preset: None,
+        message: "boom".into(),
     };
 
-    let started =
-        ServerEvent::SessionCompactionStarted(devo_server::SessionCompactionStartedPayload {
-            session: metadata.clone(),
-            turn_id: TurnId::new(),
-            trigger: devo_protocol::native::item::CompactionTrigger::Manual,
-        });
-    let completed =
-        ServerEvent::SessionCompactionCompleted(devo_server::SessionCompactionCompletedPayload {
-            session: metadata,
-            turn_id: TurnId::new(),
-            item_id: None,
-        });
-    let failed =
-        ServerEvent::SessionCompactionFailed(devo_server::SessionCompactionFailedPayload {
-            session_id: SessionId::new(),
-            message: "boom".into(),
-        });
-
-    assert!(
-        serde_json::to_string(&started)
-            .expect("serialize")
-            .contains("session_compaction_started")
+    assert_eq!(
+        devo_protocol::native::wire_projector::wire_from_server_notification(&started).0,
+        "context/compactionStarted"
     );
-    assert!(
-        serde_json::to_string(&completed)
-            .expect("serialize")
-            .contains("session_compaction_completed")
+    assert_eq!(
+        devo_protocol::native::wire_projector::wire_from_server_notification(&completed).0,
+        "context/compactionCompleted"
     );
-    assert!(
-        serde_json::to_string(&failed)
-            .expect("serialize")
-            .contains("session_compaction_failed")
+    assert_eq!(
+        devo_protocol::native::wire_projector::wire_from_server_notification(&failed).0,
+        "context/compactionFailed"
     );
 }
 
 /// Trace: L2-DES-APP-009
-/// Verifies: emit-site-enriched compaction lifecycle events project to
-/// canonical context/compactionStarted and context/compactionCompleted
-/// (item-linked), while a completion without a persisted item stays legacy.
+/// Verifies: compaction lifecycle notifications wire as canonical
+/// context/compactionStarted and context/compactionCompleted.
 #[test]
 fn compaction_lifecycle_events_project_to_native_notifications() {
-    let metadata = SessionMetadata {
-        session_id: SessionId::new(),
-        cwd: ".".into(),
-        additional_directories: Vec::new(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        last_activity_at: Utc::now(),
-        title: Some("Compacting session".into()),
-        title_state: SessionTitleState::Unset,
-        parent_session_id: None,
-        fork_from_id: None,
-        fork_at_turn_id: None,
-        agent_path: None,
-        agent_nickname: None,
-        agent_role: None,
-        ephemeral: false,
-        model: Some("claude-sonnet".into()),
-        model_binding_id: None,
-        reasoning_effort_selection: None,
-        reasoning_effort: None,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_tokens: 0,
-        total_cache_creation_tokens: 0,
-        total_cache_read_tokens: 0,
-        prompt_token_estimate: 0,
-        last_query_usage: None,
-        last_query_total_tokens: 0,
-        last_context_occupancy: None,
-        status: SessionRuntimeStatus::Idle,
-        collaboration_mode: Default::default(),
-        effective_context_window: None,
-        permission_preset: None,
-    };
+    let session = sample_native_session(Some("Compacting session"), SessionTitleState::Unset);
 
     let turn_id = TurnId::new();
-    let (method, value) =
-        devo_protocol::native::wire_projector::typed_item_notification_from_server_event(
-            &ServerEvent::SessionCompactionStarted(devo_server::SessionCompactionStartedPayload {
-                session: metadata.clone(),
-                turn_id,
-                trigger: devo_protocol::native::item::CompactionTrigger::Manual,
-            }),
-        )
-        .expect("compaction started projects");
+    let (method, value) = devo_protocol::native::wire_projector::wire_from_server_notification(
+        &ServerNotification::ContextCompactionStarted {
+            session_id: session.id,
+            turn_id,
+            trigger: devo_protocol::native::item::CompactionTrigger::Manual,
+        },
+    );
     assert_eq!(method, "context/compactionStarted");
     assert_eq!(value["trigger"].as_str(), Some("manual"));
     assert_eq!(value["turnId"].as_str(), Some(turn_id.to_string().as_str()));
 
     let item_id = ItemId::new();
-    let (method, value) =
-        devo_protocol::native::wire_projector::typed_item_notification_from_server_event(
-            &ServerEvent::SessionCompactionCompleted(
-                devo_server::SessionCompactionCompletedPayload {
-                    session: metadata.clone(),
-                    turn_id,
-                    item_id: Some(item_id),
-                },
-            ),
-        )
-        .expect("compaction completed with item projects");
+    let (method, value) = devo_protocol::native::wire_projector::wire_from_server_notification(
+        &ServerNotification::ContextCompactionCompleted {
+            session_id: session.id,
+            turn_id,
+            item_id,
+        },
+    );
     assert_eq!(method, "context/compactionCompleted");
     assert_eq!(value["itemId"].as_str(), Some(item_id.to_string().as_str()));
-
-    assert!(
-        devo_protocol::native::wire_projector::typed_item_notification_from_server_event(
-            &ServerEvent::SessionCompactionCompleted(
-                devo_server::SessionCompactionCompletedPayload {
-                    session: metadata,
-                    turn_id,
-                    item_id: None,
-                },
-            ),
-        )
-        .is_none(),
-        "completion without a persisted item must stay on the legacy path"
-    );
 }
 
 /// Trace: L2-DES-APP-008, L2-DES-CONV-002
@@ -589,4 +425,55 @@ fn native_goal_params_wire_shapes() {
         transition.expected_goal_id.as_str(),
         "goal_00000000-0000-0000-0000-000000000002"
     );
+}
+
+/// Trace: L2-DES-APP-010
+/// Verifies: first-party Native turn lifecycle uses identity `turn/started`
+/// wire (session/event projector deleted).
+#[test]
+fn native_turn_started_identity_wire() {
+    use devo_protocol::native::wire_projector::wire_from_server_notification;
+
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let notification = ServerNotification::TurnStarted {
+        turn: Box::new(devo_protocol::native::turn::Turn {
+            id: turn_id,
+            session_id,
+            sequence: 1,
+            kind: devo_protocol::native::turn::TurnKind::Regular,
+            status: devo_protocol::native::turn::TurnStatus::InProgress,
+            model: devo_protocol::native::model::ModelBinding {
+                provider: "unknown".into(),
+                model: "m".into(),
+                variant: None,
+                reasoning_effort: None,
+            },
+            collaboration_mode: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            error: None,
+            usage: None,
+        }),
+    };
+    let (method, params) = wire_from_server_notification(&notification);
+    assert_eq!(method, "turn/started");
+    assert!(params.get("turn").is_some());
+}
+
+/// Trace: L2-DES-AUTH-001
+/// Verifies: provider/authStale notification serializes with camelCase providerId.
+#[test]
+fn provider_auth_stale_notification_wire() {
+    let notification = ServerNotification::ProviderAuthStale {
+        provider_id: "anthropic".to_string(),
+        reason: Some("oauth expired".to_string()),
+    };
+    let value = serde_json::to_value(&notification).expect("serialize authStale");
+    assert_eq!(value["method"], "provider/authStale");
+    assert_eq!(value["params"]["providerId"], "anthropic");
+    assert_eq!(value["params"]["reason"], "oauth expired");
+    let roundtrip: ServerNotification =
+        serde_json::from_value(value).expect("deserialize authStale");
+    assert_eq!(roundtrip, notification);
 }

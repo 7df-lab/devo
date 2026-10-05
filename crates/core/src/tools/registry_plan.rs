@@ -9,11 +9,6 @@ use crate::tools::websearch_prompt::web_search_prompt;
 use devo_config::AppConfig;
 
 const SHELL_COMMAND_DESCRIPTION: &str = include_str!("shell_command.txt");
-const READ_DESCRIPTION: &str = include_str!("read.txt");
-const WRITE_DESCRIPTION: &str = include_str!("write.txt");
-const EDIT_DESCRIPTION: &str = include_str!("edit.txt");
-const GLOB_DESCRIPTION: &str = include_str!("glob.txt");
-const GREP_DESCRIPTION: &str = include_str!("grep.txt");
 const WEBFETCH_DESCRIPTION: &str = include_str!("webfetch.txt");
 const APPLY_PATCH_DESCRIPTION: &str = include_str!("apply_patch.txt");
 
@@ -52,6 +47,9 @@ pub struct ToolPlanConfig {
     pub web_fetch: bool,
     pub network_proxy: Option<String>,
     pub network_no_proxy: Option<String>,
+    /// Internal registry execution surface. Model requests separately expose
+    /// only the Python kernel schema.
+    pub execution_surface: devo_kernel::ExecutionSurface,
 }
 
 impl ToolPlanConfig {
@@ -61,6 +59,12 @@ impl ToolPlanConfig {
             web_fetch: app_config_uses_local_web_fetch(config),
             network_proxy: config.provider_http.proxy_url.clone(),
             network_no_proxy: config.provider_http.no_proxy.clone(),
+            execution_surface: match config.tools.execution_surface {
+                devo_config::ToolExecutionSurface::Rlm => devo_kernel::ExecutionSurface::Rlm,
+                devo_config::ToolExecutionSurface::Discrete => {
+                    devo_kernel::ExecutionSurface::Discrete
+                }
+            },
             ..Self::default()
         }
     }
@@ -83,6 +87,9 @@ impl Default for ToolPlanConfig {
             web_fetch: true,
             network_proxy: None,
             network_no_proxy: None,
+            // Internal plan default. Application config and a live-kernel turn
+            // select Rlm explicitly; model requests expose only ipython.
+            execution_surface: devo_kernel::ExecutionSurface::Discrete,
         }
     }
 }
@@ -191,149 +198,6 @@ fn shell_command_description() -> String {
         .replace("${shell}", shell)
         .replace("${chaining}", chaining)
         .replace("${maxBytes}", "64 KB")
-}
-
-fn read_schema() -> JsonSchema {
-    JsonSchema::object(
-        BTreeMap::from([
-            (
-                "filePath".to_string(),
-                JsonSchema::string(Some("The absolute path to the file or directory to read")),
-            ),
-            (
-                "offset".to_string(),
-                JsonSchema::integer(Some(
-                    "The line number to start reading from (1-indexed, default 1)",
-                )),
-            ),
-            (
-                "limit".to_string(),
-                JsonSchema::integer(Some(
-                    "The maximum number of lines to read (no limit by default)",
-                )),
-            ),
-        ]),
-        Some(vec!["filePath".to_string()]),
-        Some(false),
-    )
-}
-
-fn write_schema() -> JsonSchema {
-    JsonSchema::object(
-        BTreeMap::from([
-            (
-                "filePath".to_string(),
-                JsonSchema::string(Some("The absolute path to the file to write")),
-            ),
-            (
-                "content".to_string(),
-                JsonSchema::string(Some("The full file content to write")),
-            ),
-        ]),
-        Some(vec!["filePath".to_string(), "content".to_string()]),
-        Some(false),
-    )
-}
-
-fn edit_schema() -> JsonSchema {
-    JsonSchema::object(
-        BTreeMap::from([
-            (
-                "filePath".to_string(),
-                JsonSchema::string(Some(
-                    "The absolute path to the file to modify. Preferred field name; `path` and `file_path` are also accepted.",
-                )),
-            ),
-            (
-                "path".to_string(),
-                JsonSchema::string(Some("Alias for `filePath`.")),
-            ),
-            (
-                "file_path".to_string(),
-                JsonSchema::string(Some("Alias for `filePath`.")),
-            ),
-            (
-                "oldString".to_string(),
-                JsonSchema::string(Some(
-                    "The exact text to replace. Must be non-empty and unique unless replaceAll is true. Preferred field name; `old_string` is also accepted.",
-                )),
-            ),
-            (
-                "old_string".to_string(),
-                JsonSchema::string(Some("Alias for `oldString`.")),
-            ),
-            (
-                "newString".to_string(),
-                JsonSchema::string(Some(
-                    "The text to replace oldString with. May be empty to delete text. Preferred field name; `new_string` is also accepted.",
-                )),
-            ),
-            (
-                "new_string".to_string(),
-                JsonSchema::string(Some("Alias for `newString`.")),
-            ),
-            (
-                "replaceAll".to_string(),
-                JsonSchema::boolean(Some(
-                    "Replace every occurrence of oldString. Defaults to false. Preferred field name; `replace_all` is also accepted.",
-                )),
-            ),
-            (
-                "replace_all".to_string(),
-                JsonSchema::boolean(Some("Alias for `replaceAll`.")),
-            ),
-        ]),
-        Some(vec![
-            "filePath".to_string(),
-            "oldString".to_string(),
-            "newString".to_string(),
-        ]),
-        Some(false),
-    )
-}
-
-fn find_schema() -> JsonSchema {
-    JsonSchema::object(
-        BTreeMap::from([
-            (
-                "pattern".to_string(),
-                JsonSchema::string(Some("The ripgrep glob pattern to match file paths against")),
-            ),
-            (
-                "path".to_string(),
-                JsonSchema::string(Some(
-                    "The directory to search in. Defaults to workspace root.",
-                )),
-            ),
-        ]),
-        Some(vec!["pattern".to_string()]),
-        Some(false),
-    )
-}
-
-fn grep_schema() -> JsonSchema {
-    JsonSchema::object(
-        BTreeMap::from([
-            (
-                "pattern".to_string(),
-                JsonSchema::string(Some("The regex pattern to search for")),
-            ),
-            (
-                "include".to_string(),
-                JsonSchema::string(Some("File pattern to include (e.g. '*.rs')")),
-            ),
-            (
-                "case_insensitive".to_string(),
-                JsonSchema::boolean(Some("Search without case sensitivity")),
-            ),
-            (
-                "path".to_string(),
-                JsonSchema::string(Some("The directory to search in. Defaults to current dir.")),
-            ),
-        ]),
-        Some(vec!["pattern".to_string()]),
-        Some(false),
-    )
 }
 
 fn apply_patch_schema() -> JsonSchema {
@@ -620,12 +484,13 @@ fn write_stdin_schema() -> JsonSchema {
     )
 }
 
-fn invalid_schema() -> JsonSchema {
-    JsonSchema::object(BTreeMap::new(), None, Some(false))
-}
-
 pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
     config.validate();
+
+    if config.execution_surface == devo_kernel::ExecutionSurface::Rlm {
+        return build_rlm_registry_plan();
+    }
+
     let mut plan = ToolRegistryPlan::new();
 
     if config.use_shell_command {
@@ -640,95 +505,6 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
             ToolHandlerKind::ShellCommand,
         );
     }
-
-    plan.push(
-        ToolSpec {
-            name: "read".to_string(),
-            description: READ_DESCRIPTION.to_string(),
-            input_schema: read_schema(),
-            output_mode: ToolOutputMode::Mixed,
-            execution_mode: ToolExecutionMode::ReadOnly,
-            capability_tags: vec![ToolCapabilityTag::ReadFiles],
-            supports_parallel: true,
-            preparation_feedback: ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        },
-        ToolHandlerKind::Read,
-    );
-
-    plan.push(
-        ToolSpec {
-            name: "write".to_string(),
-            description: WRITE_DESCRIPTION.to_string(),
-            input_schema: write_schema(),
-            output_mode: ToolOutputMode::Mixed,
-            execution_mode: ToolExecutionMode::Mutating,
-            capability_tags: vec![ToolCapabilityTag::WriteFiles],
-            supports_parallel: false,
-            preparation_feedback: ToolPreparationFeedback::LiveOnly,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        },
-        ToolHandlerKind::Write,
-    );
-
-    plan.push(
-        ToolSpec {
-            name: "edit".to_string(),
-            description: EDIT_DESCRIPTION.to_string(),
-            input_schema: edit_schema(),
-            output_mode: ToolOutputMode::Mixed,
-            execution_mode: ToolExecutionMode::Mutating,
-            capability_tags: vec![ToolCapabilityTag::WriteFiles],
-            supports_parallel: false,
-            preparation_feedback: ToolPreparationFeedback::LiveOnly,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        },
-        ToolHandlerKind::Edit,
-    );
-
-    let find_description = GLOB_DESCRIPTION;
-
-    plan.push(
-        ToolSpec {
-            name: "find".to_string(),
-            description: find_description.to_string(),
-            input_schema: find_schema(),
-            output_mode: ToolOutputMode::Text,
-            execution_mode: ToolExecutionMode::ReadOnly,
-            capability_tags: vec![ToolCapabilityTag::SearchWorkspace],
-            supports_parallel: true,
-            preparation_feedback: ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        },
-        ToolHandlerKind::Glob,
-    );
-
-    let grep_description = GREP_DESCRIPTION;
-
-    plan.push(
-        ToolSpec {
-            name: "grep".to_string(),
-            description: grep_description.to_string(),
-            input_schema: grep_schema(),
-            output_mode: ToolOutputMode::Text,
-            execution_mode: ToolExecutionMode::ReadOnly,
-            capability_tags: vec![ToolCapabilityTag::SearchWorkspace],
-            supports_parallel: true,
-            preparation_feedback: ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        },
-        ToolHandlerKind::Grep,
-    );
 
     plan.push(
         ToolSpec {
@@ -839,24 +615,6 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
         ToolHandlerKind::Lsp,
     );
 
-    plan.push(
-        ToolSpec {
-            name: "invalid".to_string(),
-            description: "A tool that always returns an error. Useful for testing error handling."
-                .to_string(),
-            input_schema: invalid_schema(),
-            output_mode: ToolOutputMode::Text,
-            execution_mode: ToolExecutionMode::ReadOnly,
-            capability_tags: vec![],
-            supports_parallel: true,
-            preparation_feedback: ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        },
-        ToolHandlerKind::Invalid,
-    );
-
     if config.use_unified_exec {
         plan.push(
             ToolSpec {
@@ -899,6 +657,76 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
     plan
 }
 
+/// Build the internal RLM registry, including the Python kernel and host handlers.
+///
+/// Registry assembly keeps non-Python handlers available to server-side flows,
+/// but marks every model-facing schema except `ipython` Hidden. Hosted web tools
+/// are not attached to provider requests, and ToolSearch cannot reveal hidden tools.
+pub fn build_rlm_registry_plan() -> ToolRegistryPlan {
+    let mut plan = ToolRegistryPlan::new();
+    plan.push(
+        ToolSpec {
+            name: "ipython".to_string(),
+            description: "Execute Python code in the session RLM kernel. Namespace persists across cells and turns.".to_string(),
+            input_schema: JsonSchema::object(
+                BTreeMap::from([(
+                    "code".to_string(),
+                    JsonSchema::string(Some("Python source to execute")),
+                )]),
+                Some(vec!["code".to_string()]),
+                None,
+            ),
+            output_mode: ToolOutputMode::Mixed,
+            execution_mode: ToolExecutionMode::Mutating,
+            capability_tags: vec![],
+            supports_parallel: false,
+            preparation_feedback: ToolPreparationFeedback::None,
+            display_name: Some("ipython".into()),
+            supports_cancellation: Some(true),
+            supports_streaming: Some(true),
+        },
+        ToolHandlerKind::Ipython,
+    );
+    plan.push(
+        shell_command_tool_spec("bash"),
+        ToolHandlerKind::ShellCommand,
+    );
+    plan.push(
+        ToolSpec {
+            name: "update_plan".to_string(),
+            description: "Updates the task plan.\nProvide an optional explanation and a list of plan items, each with a step and status.\nAt most one step can be in_progress at a time.".to_string(),
+            input_schema: plan_schema(),
+            output_mode: ToolOutputMode::Text,
+            execution_mode: ToolExecutionMode::Mutating,
+            capability_tags: vec![],
+            supports_parallel: false,
+            preparation_feedback: ToolPreparationFeedback::None,
+            display_name: None,
+            supports_cancellation: None,
+            supports_streaming: None,
+        },
+        ToolHandlerKind::Plan,
+    );
+    plan.push(
+        ToolSpec {
+            name: "request_user_input".to_string(),
+            description: "Ask the user one or more questions and wait for the response."
+                .to_string(),
+            input_schema: question_schema(),
+            output_mode: ToolOutputMode::StructuredJson,
+            execution_mode: ToolExecutionMode::ReadOnly,
+            capability_tags: vec![],
+            supports_parallel: true,
+            preparation_feedback: ToolPreparationFeedback::None,
+            display_name: None,
+            supports_cancellation: None,
+            supports_streaming: None,
+        },
+        ToolHandlerKind::Question,
+    );
+    plan
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -932,6 +760,21 @@ mod tests {
     }
 
     #[test]
+    fn app_config_selects_matching_registry_execution_surface() {
+        let mut app_config = AppConfig::default();
+        assert_eq!(
+            ToolPlanConfig::from_app_config(&app_config).execution_surface,
+            devo_kernel::ExecutionSurface::Rlm
+        );
+
+        app_config.tools.execution_surface = devo_config::ToolExecutionSurface::Discrete;
+        assert_eq!(
+            ToolPlanConfig::from_app_config(&app_config).execution_surface,
+            devo_kernel::ExecutionSurface::Discrete
+        );
+    }
+
+    #[test]
     fn config_validate_does_not_panic() {
         let config = ToolPlanConfig::default();
         config.validate(); // should not panic
@@ -958,10 +801,11 @@ mod tests {
     }
 
     #[test]
-    fn schema_invalid_has_no_required() {
-        let schema = invalid_schema();
-        // invalid tool has no required fields and no properties
-        assert!(schema.properties.as_ref().unwrap().is_empty());
+    fn default_registry_does_not_expose_an_always_failing_tool() {
+        let plan = build_tool_registry_plan(&ToolPlanConfig::default());
+
+        assert!(plan.specs.iter().all(|spec| spec.name != "invalid"));
+        assert!(plan.handlers.iter().all(|(_, name)| name != "invalid"));
     }
 
     #[test]
@@ -1051,18 +895,68 @@ mod tests {
         assert!(!provider_spec_names.contains(&"webfetch"));
     }
 
+    /// Trace: kernel-tools-only design (user direction, R27)
+    /// Verifies: the stale host-side file tools (read/write/edit/find/grep)
+    /// are gone from every registry plan — file work goes through the shell
+    /// tool (and the python kernel's rlm front door on the kernel surface).
     #[test]
-    fn plan_builder_registers_find_not_glob() {
-        let plan = build_tool_registry_plan(&ToolPlanConfig::default());
-        let spec_names: Vec<&str> = plan.specs.iter().map(|spec| spec.name.as_str()).collect();
+    fn plan_builder_omits_stale_host_file_tools() {
+        for config in [
+            ToolPlanConfig::default(),
+            ToolPlanConfig {
+                execution_surface: devo_kernel::ExecutionSurface::Rlm,
+                ..ToolPlanConfig::default()
+            },
+        ] {
+            let plan = build_tool_registry_plan(&config);
+            let spec_names: Vec<&str> = plan.specs.iter().map(|spec| spec.name.as_str()).collect();
+            for stale in ["read", "write", "edit", "find", "grep"] {
+                assert!(
+                    !spec_names.contains(&stale),
+                    "stale file tool {stale} still registered: {spec_names:?}"
+                );
+            }
+        }
+    }
 
-        assert!(spec_names.contains(&"find"));
-        assert!(!spec_names.contains(&"glob"));
-        assert!(
-            plan.handlers
+    /// Trace: prompt-payload audit (R27)
+    /// Verifies: the shell description never steers the model toward the
+    /// removed file tools — it used to instruct "Use Read (NOT cat/head/tail)"
+    /// in kernel sessions where no such tool exists, sending the model on
+    /// ToolSearch hunts for tools that are not there.
+    #[test]
+    fn shell_description_references_no_removed_file_tools() {
+        for config in [
+            ToolPlanConfig::default(),
+            ToolPlanConfig {
+                execution_surface: devo_kernel::ExecutionSurface::Rlm,
+                ..ToolPlanConfig::default()
+            },
+        ] {
+            let plan = build_tool_registry_plan(&config);
+            let shell = plan
+                .specs
                 .iter()
-                .any(|(kind, name)| *kind == ToolHandlerKind::Glob && name == "find")
-        );
+                .find(|spec| spec.name == "shell_command" || spec.name == "bash")
+                .expect("shell tool spec");
+            for stale in [
+                "Use Read",
+                "Use Edit",
+                "Use Write",
+                "NOT cat/head/tail",
+                "NOT sed/awk",
+            ] {
+                assert!(
+                    !shell.description.contains(stale),
+                    "shell description still references removed tool guidance: {stale}"
+                );
+            }
+            assert!(
+                shell
+                    .description
+                    .contains("There are no separate file tools")
+            );
+        }
     }
 
     /// Trace: L2-DES-MCP-002
@@ -1079,5 +973,76 @@ mod tests {
 
         assert!(!spec_names.contains(&"code_search"));
         assert!(!handler_names.contains(&"code_search"));
+    }
+
+    /// Trace: L2-DES-RLM-001
+    /// Verifies: the internal RLM plan retains Python, shell, plan, and question handlers.
+    #[test]
+    fn rlm_runtime_plan_includes_ipython_and_bash_handlers() {
+        let plan = build_rlm_registry_plan();
+        let names: Vec<&str> = plan.specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["ipython", "bash", "update_plan", "request_user_input"]
+        );
+        assert!(
+            plan.handlers
+                .iter()
+                .any(|(kind, name)| *kind == ToolHandlerKind::Ipython && name == "ipython")
+        );
+        assert!(
+            plan.handlers
+                .iter()
+                .any(|(kind, name)| *kind == ToolHandlerKind::ShellCommand && name == "bash")
+        );
+        assert!(
+            plan.handlers
+                .iter()
+                .any(|(kind, name)| *kind == ToolHandlerKind::Question
+                    && name == "request_user_input")
+        );
+    }
+
+    /// Trace: L2-DES-RLM-001
+    /// Verifies: the discrete internal plan retains shell and patch handlers; the
+    /// registry exposure policy hides their schemas from model requests.
+    #[test]
+    fn discrete_plan_keeps_shell_and_patch_tools() {
+        let config = ToolPlanConfig {
+            execution_surface: devo_kernel::ExecutionSurface::Discrete,
+            ..ToolPlanConfig::default()
+        };
+        let plan = build_tool_registry_plan(&config);
+        let names: Vec<&str> = plan.specs.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"shell_command"),
+            "discrete registry must keep the shell tool, got {names:?}"
+        );
+        assert!(
+            names.contains(&"apply_patch"),
+            "discrete registry must keep apply_patch, got {names:?}"
+        );
+        assert!(
+            !names.iter().all(|n| *n == "ipython"),
+            "discrete must not collapse to ipython-only"
+        );
+    }
+
+    /// Trace: L2-DES-RLM-001
+    /// Verifies: Rlm execution_surface selects the RLM root plan.
+    #[test]
+    fn rlm_surface_selects_rlm_root_plan() {
+        let config = ToolPlanConfig {
+            execution_surface: devo_kernel::ExecutionSurface::Rlm,
+            ..ToolPlanConfig::default()
+        };
+        let plan = build_tool_registry_plan(&config);
+        let names: Vec<&str> = plan.specs.iter().map(|s| s.name.as_str()).collect();
+        // Plan updates and user questions remain available through RLM host
+        // requests; these handlers are not model-facing schemas.
+        assert_eq!(
+            names,
+            vec!["ipython", "bash", "update_plan", "request_user_input"]
+        );
     }
 }

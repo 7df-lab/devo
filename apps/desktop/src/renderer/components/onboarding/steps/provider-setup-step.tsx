@@ -118,7 +118,7 @@ export function ProviderSetupStep({ onComplete, onSkip }: ProviderSetupStepProps
 				>
 					<SparklesIcon className="size-6" />
 				</motion.div>
-				<h2 className="text-2xl font-bold tracking-tight">AI Providers</h2>
+				<h2 className="text-[22px] font-medium tracking-tight text-foreground">AI Providers</h2>
 				<p className="text-muted-foreground">
 					Devo supports connecting your own model API keys for more model choices.
 				</p>
@@ -143,7 +143,7 @@ export function ProviderSetupStep({ onComplete, onSkip }: ProviderSetupStepProps
 				) : null}
 
 				{/* Other providers grid */}
-				<div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+				<div className="grid max-h-[42vh] grid-cols-1 gap-3 overflow-y-auto p-1 sm:grid-cols-2">
 					{loading
 						? ["s1", "s2", "s3", "s4", "s5", "s6"].map((key) => (
 								<div

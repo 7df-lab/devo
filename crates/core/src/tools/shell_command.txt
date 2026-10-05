@@ -4,7 +4,7 @@ Be aware: OS: ${os}, Shell: ${shell}
 
 All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.
 
-IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. File operations (reading, searching, writing) also go through this tool - there are no separate file tools.
 
 Platform rules:
 - On Windows, write commands for PowerShell by default. Do not assume GNU/Bash tools exist. Do not default to `cmd /c ...`. Only use `cmd.exe` when the user explicitly asks for it or a command genuinely requires it. Do not use Bash syntax like `find ... | wc -l`, `ls`, `cat`, `grep`, or `&&` unless the user explicitly asks for a POSIX shell and that shell is actually available.
@@ -29,16 +29,9 @@ Usage notes:
   - The command argument is required.
   - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
-  - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
+  - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the full output will be written to a file. Read that file back (e.g. sed -n '1,200p' <file>) when you need more of it; do not re-run the command or pipe it through `head`/`tail` to capture more output.
 
-  - Avoid using shell_command with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
-    - Codebase investigation: When code_search is available, use it first for finding relevant code, modules, symbols, implementations, or architecture context.
-    - File search: Use find for filenames and paths (NOT shell find or ls)
-    - Content search: Use grep for exact text or regex searches (NOT shell grep or rg)
-    - Read files: Use Read (NOT cat/head/tail)
-    - Edit files: Use Edit (NOT sed/awk)
-    - Write files: Use Write (NOT echo >/cat <<EOF)
-    - Communication: Output text directly (NOT echo/printf)
+  - There are no separate file tools in this environment: read, search, create, and edit files with shell commands (or the python kernel, when one is attached). Prefer targeted commands (`grep -n`, `sed -n '1,50p'`, `ls <pattern>`) over dumping whole files. For multi-file or large structured edits, prefer apply_patch when it is available. Output text directly in your reply instead of echoing it.
   - When issuing multiple commands:
     - If the commands are independent and can run in parallel, make multiple shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two shell_command tool calls in parallel.
     - ${chaining}

@@ -101,6 +101,10 @@ pub struct SessionListParams {
     pub cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// When true, include subagent child sessions (`parent` set) alongside
+    /// user-visible roots/forks (Agents View roster).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_children: Option<bool>,
 }
 
 pub type SessionListResult = Page<Session>;
@@ -276,6 +280,15 @@ pub struct SessionSettingsPatch {
     /// applied per session clamped to the model's context window).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_context_window: Option<u64>,
+    /// Enable/disable root auto-refine (L2-DES-HARNESS-001).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_refine_enabled: Option<bool>,
+    /// Turn interval for root auto-refine (default 25 when enabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_refine_turn_interval: Option<u32>,
+    /// First foreground wait (ms) before Python cell wait-policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_cell_first_wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -331,6 +344,64 @@ pub struct SessionDeleteParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionDeleteResult {}
+
+// ── session/tree/read + session/tree/navigate ──
+
+/// Nested tree node for the InteractiveMode TreeSelector.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTreeNode {
+    /// Tree entry payload (`type`, `id`, `parentId`, `timestamp`, …).
+    pub entry: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_timestamp: Option<String>,
+    pub children: Vec<SessionTreeNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTreeReadParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTreeReadResult {
+    pub tree: Vec<SessionTreeNode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaf_id: Option<ItemId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTreeNavigateParams {
+    pub session_id: SessionId,
+    pub entry_id: ItemId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summarize: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace_instructions: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTreeNavigateResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaf_id: Option<ItemId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_text: Option<String>,
+    pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aborted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_item: Option<ItemEnvelope>,
+}
 
 // ── session/turns/list / session/items/list ──
 
@@ -514,4 +585,50 @@ pub struct SessionMessageEditResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement_turn_id: Option<TurnId>,
     pub edit_state: MessageEditState,
+}
+
+// ── session/refine/run ──
+
+/// Typed `/refine` entry for TUI/desktop (`L2-DES-HARNESS-001`). Never a
+/// user-prompt injection via `session.command`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRefineRunParams {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// When true, refine the optional global harness under `~/.devo/harness/`.
+    #[serde(default)]
+    pub global: bool,
+    /// Roll back a prior refinement by id instead of planning a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRefineRunResult {
+    /// True when refine was queued for apply at the next turn boundary / idle.
+    pub scheduled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refinement_id: Option<String>,
+}
+
+// ── session/systemPrompt/read ──
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSystemPromptReadParams {
+    pub session_id: SessionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSystemPromptReadResult {
+    /// Exact system prompt text the server would send on the next model call.
+    pub prompt: String,
 }

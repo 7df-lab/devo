@@ -23,11 +23,13 @@ use devo_protocol::ResponseExtra;
 use devo_protocol::ResponseMetadata;
 use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
-use devo_protocol::Usage;
 
 use super::capabilities::OpenAIReasoningMode;
 use super::capabilities::OpenAITransport;
 use super::capabilities::resolve_request_profile;
+use super::shared::OpenAICompletionUsage;
+use super::shared::completion_usage_to_usage;
+use super::shared::deserialize_null_vec;
 use super::shared::reasoning_value;
 use super::shared::request_role;
 use super::shared::tool_definitions;
@@ -251,333 +253,31 @@ pub(super) struct OpenAIChatCompletionCustomToolCall {
     name: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(super) struct OpenAICompletionUsage {
-    prompt_tokens: usize,
-    completion_tokens: usize,
-    #[serde(default)]
-    total_tokens: Option<usize>,
-    #[serde(default)]
-    prompt_tokens_details: Option<OpenAIPromptTokenDetails>,
-    #[serde(default)]
-    completion_tokens_details: Option<OpenAICompletionTokenDetails>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(super) struct OpenAIPromptTokenDetails {
-    #[serde(default)]
-    audio_tokens: Option<usize>,
-    #[serde(default)]
-    cached_tokens: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub(super) struct OpenAICompletionTokenDetails {
-    #[serde(default)]
-    accepted_prediction_tokens: Option<usize>,
-    #[serde(default)]
-    audio_tokens: Option<usize>,
-    #[serde(default)]
-    reasoning_tokens: Option<usize>,
-    #[serde(default)]
-    rejected_prediction_tokens: Option<usize>,
-}
-
-/// Here is the documentation of the ChatCompletion request body.
+/// Chat completions request body. See <https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create>.
+/// Emits a user message whose content came from multimodal parts.
 ///
-/// Official reference:
-/// <https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create>
-///
-/// Body Parameters
-/// - messages: array of `ChatCompletionMessageParam`
-///   A list of messages comprising the conversation so far. Depending on the
-///   model, different content modalities may be supported, including text,
-///   images, audio, files, tool calls, and tool results.
-///   One of the following:
-///   - `ChatCompletionDeveloperMessageParam = object`
-///     Developer-provided instructions that the model should follow regardless
-///     of messages sent by the user. With `o1` models and newer, developer
-///     messages replace previous system messages.
-///     - content: string or array of `ChatCompletionContentPartText`
-///       The contents of the developer message.
-///       One of the following:
-///       - `TextContent = string`
-///         The contents of the developer message.
-///       - `ArrayOfContentParts = array of ChatCompletionContentPartText`
-///         An array of content parts with a defined type. For developer
-///         messages, only `text` parts are supported.
-///         - text: string
-///           The text content.
-///         - type: `"text"`
-///           The type of the content part.
-///     - role: `"developer"`
-///       The role of the message author.
-///     - name: optional string
-///       Optional participant name used to differentiate participants of the
-///       same role.
-///   - `ChatCompletionSystemMessageParam = object`
-///     System-level instructions the model should follow regardless of user
-///     messages. For newer reasoning models, developer messages are preferred.
-///     - content: string or array of `ChatCompletionContentPartText`
-///       The contents of the system message.
-///       One of the following:
-///       - `TextContent = string`
-///       - `ArrayOfContentParts = array of ChatCompletionContentPartText`
-///         Only `text` parts are supported.
-///         - text: string
-///         - type: `"text"`
-///     - role: `"system"`
-///     - name: optional string
-///   - `ChatCompletionUserMessageParam = object`
-///     Messages sent by an end user, containing prompts or additional context.
-///     - content: string or array of `ChatCompletionContentPart`
-///       The contents of the user message.
-///       One of the following:
-///       - `TextContent = string`
-///         The text contents of the message.
-///       - `ArrayOfContentParts = array of ChatCompletionContentPart`
-///         Supported options differ by model and may include text, image,
-///         audio, or file inputs.
-///         One of the following:
-///         - `ChatCompletionContentPartText = object`
-///           - text: string
-///           - type: `"text"`
-///         - `ChatCompletionContentPartImage = object`
-///           Learn about image inputs.
-///           - image_url: object
-///             - url: string
-///               Either an image URL or base64-encoded image data.
-///             - detail: optional `"auto"` or `"low"` or `"high"`
-///               Specifies the image detail level.
-///           - type: `"image_url"`
-///         - `ChatCompletionContentPartInputAudio = object`
-///           Learn about audio inputs.
-///           - input_audio: object
-///             - data: string
-///               Base64 encoded audio data.
-///             - format: `"wav"` or `"mp3"`
-///           - type: `"input_audio"`
-///         - `FileContentPart = object`
-///           Learn about file inputs for text generation.
-///           - file: object
-///             - file_data: optional string
-///             - file_id: optional string
-///             - filename: optional string
-///           - type: `"file"`
-///     - role: `"user"`
-///     - name: optional string
-///   - `ChatCompletionAssistantMessageParam = object`
-///     Messages sent by the model in response to user messages.
-///     - role: `"assistant"`
-///     - audio: optional object
-///       Data about a previous audio response from the model.
-///       - id: string
-///         Unique identifier for a previous audio response.
-///     - content: optional string or array of
-///       `ChatCompletionContentPartText` or
-///       `ChatCompletionContentPartRefusal`
-///       Required unless `tool_calls` or deprecated `function_call` is
-///       specified.
-///       One of the following:
-///       - `TextContent = string`
-///       - `ArrayOfContentParts = array of ChatCompletionContentPartText or ChatCompletionContentPartRefusal`
-///         Can be one or more text parts, or exactly one refusal part.
-///         One of the following:
-///         - `ChatCompletionContentPartText = object`
-///           - text: string
-///           - type: `"text"`
-///         - `ChatCompletionContentPartRefusal = object`
-///           - refusal: string
-///           - type: `"refusal"`
-///     - function_call: optional object
-///       Deprecated and replaced by `tool_calls`.
-///       - arguments: string
-///       - name: string
-///     - name: optional string
-///     - refusal: optional string
-///       The refusal message by the assistant.
-///     - tool_calls: optional array of `ChatCompletionMessageToolCall`
-///       The tool calls generated by the model.
-///       One of the following:
-///       - `ChatCompletionMessageFunctionToolCall = object`
-///         A function tool call created by the model.
-///         - id: string
-///         - function: object
-///           - arguments: string
-///           - name: string
-///         - type: `"function"`
-///       - `ChatCompletionMessageCustomToolCall = object`
-///         A custom tool call created by the model.
-///         - id: string
-///         - custom: object
-///           - input: string
-///           - name: string
-///         - type: `"custom"`
-///   - `ChatCompletionToolMessageParam = object`
-///     Tool response message.
-///     - content: string or array of `ChatCompletionContentPartText`
-///       One of the following:
-///       - `TextContent = string`
-///       - `ArrayOfContentParts = array of ChatCompletionContentPartText`
-///         Only `text` parts are supported.
-///         - text: string
-///         - type: `"text"`
-///     - role: `"tool"`
-///     - tool_call_id: string
-///       Tool call that this message is responding to.
-///   - `ChatCompletionFunctionMessageParam = object`
-///     Deprecated function response message.
-///     - content: string
-///     - name: string
-///     - role: `"function"`
-/// - model: string
-///   Model slug used to generate the response, such as `gpt-4o`, `o3`,
-///   `gpt-5.4`, `gpt-5.4-mini`, or `gpt-5.4-nano`.
-/// - audio: optional `ChatCompletionAudioParam`
-///   Parameters for audio output. Required when audio output is requested with
-///   `modalities: ["audio"]`.
-///   - format: `"wav"` or `"aac"` or `"mp3"` or `"flac"` or `"opus"` or `"pcm16"`
-///     Specifies the output audio format.
-///   - voice: string or built-in voice name or object
-///     Supported built-in voices include `alloy`, `ash`, `ballad`, `coral`,
-///     `echo`, `sage`, `shimmer`, `verse`, `marin`, and `cedar`.
-///     Custom voice objects may also be used with an `id`.
-/// - frequency_penalty: optional number
-///   Number between `-2.0` and `2.0`. Positive values reduce verbatim
-///   repetition.
-/// - function_call: optional `"none"` or `"auto"` or object
-///   Deprecated in favor of `tool_choice`. Controls which function is called by
-///   the model.
-/// - functions: optional array of object
-///   Deprecated in favor of `tools`. A list of functions the model may call.
-///   - name: string
-///   - description: optional string
-///   - parameters: optional JSON Schema object
-/// - logit_bias: optional map[number]
-///   Maps token IDs to bias values between `-100` and `100`.
-/// - logprobs: optional boolean
-///   Whether to return log probabilities of output tokens.
-/// - max_completion_tokens: optional number
-///   Upper bound for completion tokens, including reasoning tokens.
-/// - max_tokens: optional number
-///   Deprecated in favor of `max_completion_tokens`. Controls the maximum
-///   number of generated tokens.
-/// - metadata: optional metadata object
-///   Up to 16 key-value pairs attached to the request object.
-/// - modalities: optional array of `"text"` or `"audio"`
-///   Requested output modalities.
-/// - n: optional number
-///   Number of chat completion choices to generate. Keep `n = 1` to minimize
-///   costs.
-/// - parallel_tool_calls: optional boolean
-///   Whether to enable parallel function calling during tool use.
-/// - prediction: optional `ChatCompletionPredictionContent`
-///   Static predicted output content that can accelerate regeneration.
-///   - content: string or array of `ChatCompletionContentPartText`
-///   - type: `"content"`
-/// - presence_penalty: optional number
-///   Number between `-2.0` and `2.0`. Positive values encourage new topics.
-/// - prompt_cache_key: optional string
-///   Used by OpenAI to cache responses for similar requests.
-/// - prompt_cache_retention: optional `"in-memory"` or `"24h"`
-///   Retention policy for prompt caching.
-/// - reasoning_effort: optional `ReasoningEffort`
-///   Supported values include `"none"`, `"minimal"`, `"low"`, `"medium"`,
-///   `"high"`, and `"xhigh"` depending on model family.
-/// - response_format: optional `ResponseFormatText`,
-///   `ResponseFormatJSONSchema`, or `ResponseFormatJSONObject`
-///   Controls the expected output format.
-///   One of the following:
-///   - `ResponseFormatText = object`
-///     - type: `"text"`
-///   - `ResponseFormatJSONSchema = object`
-///     - json_schema: object
-///       - name: string
-///       - description: optional string
-///       - schema: optional JSON Schema object
-///       - strict: optional boolean
-///     - type: `"json_schema"`
-///   - `ResponseFormatJSONObject = object`
-///     - type: `"json_object"`
-/// - safety_identifier: optional string
-///   Stable identifier used to help detect misuse while avoiding direct
-///   personal information.
-/// - seed: optional number
-///   Beta deterministic sampling hint. Deprecated in newer flows.
-/// - service_tier: optional `"auto"` or `"default"` or `"flex"` or `"scale"` or `"priority"`
-///   Specifies the processing tier used for serving the request.
-/// - stop: optional string or array of string
-///   Up to 4 stop sequences. Not supported with some latest reasoning models.
-/// - store: optional boolean
-///   Whether the output may be stored for model distillation or eval products.
-/// - stream: optional boolean
-///   If true, the response is streamed using server-sent events.
-/// - stream_options: optional `ChatCompletionStreamOptions`
-///   Options for streaming responses. Only set when `stream` is true.
-///   - include_obfuscation: optional boolean
-///   - include_usage: optional boolean
-///     If set, a final usage chunk is streamed before `data: [DONE]`.
-/// - temperature: optional number
-///   Sampling temperature between `0` and `2`.
-/// - tool_choice: optional `ChatCompletionToolChoiceOption`
-///   Controls which tool, if any, is called by the model.
-///   One of the following:
-///   - `"none"`
-///   - `"auto"`
-///   - `"required"`
-///   - allowed-tools object
-///   - named function tool object
-///   - named custom tool object
-/// - tools: optional array of `ChatCompletionTool`
-///   A list of tools the model may call.
-///   One of the following:
-///   - `ChatCompletionFunctionTool = object`
-///     - function: `FunctionDefinition`
-///       - name: string
-///       - description: optional string
-///       - parameters: optional JSON Schema object
-///       - strict: optional boolean
-///     - type: `"function"`
-///   - `ChatCompletionCustomTool = object`
-///     - custom: object
-///       - name: string
-///       - description: optional string
-///       - format: optional text or grammar object
-///     - type: `"custom"`
-/// - top_logprobs: optional number
-///   Integer between `0` and `20`. Requires `logprobs = true`.
-/// - top_p: optional number
-///   Nucleus sampling parameter between `0` and `1`.
-/// - user: optional string
-///   Deprecated in favor of `safety_identifier` and `prompt_cache_key`.
-/// - verbosity: optional `"low"` or `"medium"` or `"high"`
-///   Constrains the verbosity of the model's response.
-/// - web_search_options: optional object
-///   Options for the web search tool.
-///   - search_context_size: optional `"low"` or `"medium"` or `"high"`
-///   - user_location: optional object
-///     - approximate: object
-///       - city: optional string
-///       - country: optional string
-///       - region: optional string
-///       - timezone: optional string
-///       - type: `"approximate"`
-///
-/// Notes about this implementation:
-/// - This builder currently emits the subset of fields supported by the crate's
-///   `ModelRequest` and the selected OpenAI request profile.
-/// - System instructions are serialized as `system` messages.
-/// - Assistant tool calls are serialized as `tool_calls` with `type:
-///   "function"`.
-/// - Tool results are serialized as `tool` messages with `tool_call_id`.
-/// - Streaming requests add `stream_options: { "include_usage": true }`.
-/// - Additional provider-specific fields may be merged in via `extra_body`.
-fn deserialize_null_vec<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    Option::<Vec<T>>::deserialize(deserializer).map(|v| v.unwrap_or_default())
+/// Text-only parts collapse to a plain string so strict OpenAI-compatible
+/// servers keep receiving the widely supported string form; images force the
+/// content-parts array form.
+fn push_user_content_message(
+    messages: &mut Vec<Value>,
+    role: super::OpenAIRole,
+    parts: Vec<Value>,
+) {
+    let only_text = parts
+        .iter()
+        .all(|part| part.get("type").and_then(Value::as_str) == Some("text"));
+    let content = if only_text {
+        let text = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("");
+        Value::String(text)
+    } else {
+        Value::Array(parts)
+    };
+    messages.push(json!({ "role": role, "content": content }));
 }
 
 fn build_request(request: &ModelRequest, stream: bool) -> Value {
@@ -619,6 +319,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                         })),
                         RequestContent::HostedToolUse { .. } => {}
                         RequestContent::ToolResult { .. } => {}
+                        RequestContent::Image { .. } => {}
                     }
                 }
                 if text_parts.is_empty() && reasoning_parts.is_empty() && tool_calls.is_empty() {
@@ -639,11 +340,31 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                 messages.push(entry);
             }
             role => {
+                let mut multimodal_parts = Vec::new();
                 for block in &message.content {
                     match block {
+                        RequestContent::Text { text } if role == super::OpenAIRole::User => {
+                            multimodal_parts.push(json!({ "type": "text", "text": text }));
+                        }
+                        RequestContent::Image {
+                            mime_type,
+                            data_base64,
+                        } if role == super::OpenAIRole::User => {
+                            multimodal_parts.push(json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": format!("data:{mime_type};base64,{data_base64}")
+                                }
+                            }));
+                        }
                         RequestContent::Text { text } => {
+                            if !multimodal_parts.is_empty() {
+                                push_user_content_message(&mut messages, role, multimodal_parts);
+                                multimodal_parts = Vec::new();
+                            }
                             messages.push(json!({ "role": role, "content": text }));
                         }
+                        RequestContent::Image { .. } => {}
                         RequestContent::Reasoning { .. } => {}
                         RequestContent::ProviderReasoning { .. } => {}
                         RequestContent::HostedToolUse { .. } => {}
@@ -652,6 +373,10 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                             content,
                             ..
                         } => {
+                            if !multimodal_parts.is_empty() {
+                                push_user_content_message(&mut messages, role, multimodal_parts);
+                                multimodal_parts = Vec::new();
+                            }
                             messages.push(json!({
                                 "role": super::OpenAIRole::Tool,
                                 "tool_call_id": tool_use_id,
@@ -660,6 +385,9 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                         }
                         RequestContent::ToolUse { .. } => {}
                     }
+                }
+                if !multimodal_parts.is_empty() {
+                    push_user_content_message(&mut messages, role, multimodal_parts);
                 }
             }
         }
@@ -730,101 +458,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
     root
 }
 
-/// Here is the documentation of the ChatCompletion response body.
-///
-/// Returns
-/// - `ChatCompletion = object`
-///   Represents a chat completion response returned by the model based on the
-///   provided input.
-/// - id: string
-///   A unique identifier for the chat completion.
-/// - choices: array of object
-///   A list of chat completion choices. Can be more than one if `n > 1`.
-///   - finish_reason: `"stop"` or `"length"` or `"tool_calls"` or
-///     `"content_filter"` or `"function_call"`
-///     The reason the model stopped generating tokens.
-///   - index: number
-///     The index of the choice in the list of choices.
-///   - logprobs: object
-///     Log-probability information for the choice.
-///     - content: array of `ChatCompletionTokenLogprob`
-///       A list of message content tokens with log probability information.
-///       - token: string
-///       - bytes: array of number
-///       - logprob: number
-///       - top_logprobs: array of object
-///         The most likely tokens and their log probabilities at this token
-///         position.
-///         - token: string
-///         - bytes: array of number
-///         - logprob: number
-///     - refusal: array of `ChatCompletionTokenLogprob`
-///       A list of refusal tokens with the same token-logprob structure.
-///   - message: `ChatCompletionMessage`
-///     A chat completion message generated by the model.
-///     - content: string
-///       The contents of the message.
-///     - refusal: string
-///       The refusal message generated by the model.
-///     - role: `"assistant"`
-///       The role of the author of this message.
-///     - annotations: optional array of object
-///       Annotations for the message, for example when using web search.
-///       - type: `"url_citation"`
-///       - url_citation: object
-///         - end_index: number
-///         - start_index: number
-///         - title: string
-///         - url: string
-///     - audio: optional `ChatCompletionAudio`
-///       Audio response data when audio output is requested.
-///       - id: string
-///       - data: string
-///       - expires_at: number
-///       - transcript: string
-///     - function_call: optional object
-///       Deprecated and replaced by `tool_calls`.
-///       - arguments: string
-///       - name: string
-///     - tool_calls: optional array of `ChatCompletionMessageToolCall`
-///       The tool calls generated by the model.
-///       One of the following:
-///       - `ChatCompletionMessageFunctionToolCall = object`
-///         - id: string
-///         - function: object
-///           - arguments: string
-///           - name: string
-///         - type: `"function"`
-///       - `ChatCompletionMessageCustomToolCall = object`
-///         - id: string
-///         - custom: object
-///           - input: string
-///           - name: string
-///         - type: `"custom"`
-/// - created: number
-///   Unix timestamp in seconds indicating when the chat completion was created.
-/// - model: string
-///   The model used for the chat completion.
-/// - object: `"chat.completion"`
-///   The object type.
-/// - service_tier: optional `"auto"` or `"default"` or `"flex"` or `"scale"` or `"priority"`
-///   The processing tier used to serve the request.
-/// - system_fingerprint: optional string
-///   Deprecated backend fingerprint that can be used with `seed` to reason
-///   about determinism and backend changes.
-/// - usage: optional `CompletionUsage`
-///   Usage statistics for the completion request. See the comment above
-///   `parse_usage`.
-///
-/// Notes about this implementation:
-/// - `parse_response` currently reads `id`, the first entry from `choices`,
-///   assistant `message.content`, assistant `message.tool_calls`,
-///   `choice.finish_reason`, and `usage`.
-/// - Reasoning text is also read from `message.reasoning_content` when present,
-///   even though that field is not part of the basic schema summary above.
-/// - Other documented response fields such as `created`, `model`, `object`,
-///   `service_tier`, `annotations`, `audio`, `logprobs`, and deprecated
-///   `function_call` are not currently mapped into `ModelResponse`.
+/// Chat completions response body. See <https://developers.openai.com/api/reference/resources/chat/subresources/completions>.
 fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<ModelResponse> {
     let response: OpenAIChatCompletionResponse = serde_json::from_value(value.clone())
         .context("failed to deserialize openai chat-completion response")?;
@@ -865,20 +499,7 @@ fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<Mode
     let usage = response
         .usage
         .as_ref()
-        .map(|usage| Usage {
-            input_tokens: usage.prompt_tokens,
-            output_tokens: usage.completion_tokens,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: usage
-                .prompt_tokens_details
-                .as_ref()
-                .and_then(|details| details.cached_tokens),
-            reasoning_output_tokens: usage
-                .completion_tokens_details
-                .as_ref()
-                .and_then(|details| details.reasoning_tokens),
-            total_tokens: usage.total_tokens,
-        })
+        .map(completion_usage_to_usage)
         .unwrap_or_default();
 
     if let Some(provider_payload) = build_provider_specific_response_payload(&response) {
@@ -1020,78 +641,6 @@ fn build_provider_specific_message_payload(message: &OpenAIChatCompletionMessage
     }
 }
 
-/// Here is the documentation of `CompletionUsage`.
-///
-/// - usage: optional `CompletionUsage`
-///   Usage statistics for the completion request.
-///   - completion_tokens: number
-///     Number of tokens in the generated completion.
-///   - prompt_tokens: number
-///     Number of tokens in the prompt.
-///   - total_tokens: number
-///     Total number of tokens used in the request (`prompt + completion`).
-///   - completion_tokens_details: optional object
-///     Breakdown of tokens used in a completion.
-///     - accepted_prediction_tokens: optional number
-///       Tokens from a predicted output that appeared in the completion.
-///     - audio_tokens: optional number
-///       Audio input tokens generated by the model.
-///     - reasoning_tokens: optional number
-///       Tokens generated by the model for reasoning.
-///     - rejected_prediction_tokens: optional number
-///       Tokens from a predicted output that did not appear in the completion,
-///       but still count toward billing and context limits.
-///   - prompt_tokens_details: optional object
-///     Breakdown of tokens used in the prompt.
-///     - audio_tokens: optional number
-///       Audio input tokens present in the prompt.
-///     - cached_tokens: optional number
-///       Cached tokens present in the prompt.
-///
-/// Notes about this implementation:
-/// - `parse_usage` maps `prompt_tokens`, `completion_tokens`, cached prompt
-///   details, reasoning completion details, and provider-reported totals into
-///   the crate's conservative `Usage` fields.
-///
-/// Example:
-/// ```json
-/// {
-///   "usage": {
-///     "prompt_tokens": 19,
-///     "completion_tokens": 10,
-///     "total_tokens": 29,
-///     "prompt_tokens_details": {
-///       "cached_tokens": 0,
-///       "audio_tokens": 0
-///     },
-///     "completion_tokens_details": {
-///       "reasoning_tokens": 0,
-///       "audio_tokens": 0,
-///       "accepted_prediction_tokens": 0,
-///       "rejected_prediction_tokens": 0
-///     }
-///   }
-/// }
-/// ```
-#[allow(dead_code)]
-fn parse_usage(value: &Value) -> Option<Usage> {
-    let usage: OpenAICompletionUsage = serde_json::from_value(value.clone()).ok()?;
-    Some(Usage {
-        input_tokens: usage.prompt_tokens,
-        output_tokens: usage.completion_tokens,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: usage
-            .prompt_tokens_details
-            .as_ref()
-            .and_then(|details| details.cached_tokens),
-        reasoning_output_tokens: usage
-            .completion_tokens_details
-            .as_ref()
-            .and_then(|details| details.reasoning_tokens),
-        total_tokens: usage.total_tokens,
-    })
-}
-
 fn parse_finish_reason(value: &str) -> StopReason {
     match value {
         "tool_calls" => StopReason::ToolUse,
@@ -1203,7 +752,6 @@ mod tests {
 
     use super::parse_finish_reason;
     use super::parse_response;
-    use super::parse_usage;
     use devo_protocol::ResponseContent;
     use devo_protocol::ResponseExtra;
     use devo_protocol::StopReason;
@@ -1564,33 +1112,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_usage_reads_chat_completion_usage_shape() {
-        let usage = parse_usage(&json!({
-            "prompt_tokens": 11,
-            "completion_tokens": 7,
-            "total_tokens": 18,
-            "prompt_tokens_details": {
-                "cached_tokens": 5,
-                "audio_tokens": 0
-            },
-            "completion_tokens_details": {
-                "reasoning_tokens": 2,
-                "audio_tokens": 0,
-                "accepted_prediction_tokens": 1,
-                "rejected_prediction_tokens": 0
-            }
-        }))
-        .expect("parse usage");
-
-        assert_eq!(usage.input_tokens, 11);
-        assert_eq!(usage.output_tokens, 7);
-        assert_eq!(usage.cache_creation_input_tokens, None);
-        assert_eq!(usage.cache_read_input_tokens, Some(5));
-        assert_eq!(usage.reasoning_output_tokens, Some(2));
-        assert_eq!(usage.total_tokens, Some(18));
-    }
-
-    #[test]
     fn parse_finish_reason_matches_chat_completion_contract() {
         assert_eq!(parse_finish_reason("tool_calls"), StopReason::ToolUse);
         assert_eq!(parse_finish_reason("length"), StopReason::MaxTokens);
@@ -1673,6 +1194,58 @@ mod tests {
         assert_eq!(
             provider_payload["choices"][0]["message"]["annotations"][0]["type"],
             json!("url_citation")
+        );
+    }
+
+    #[test]
+    fn user_text_only_content_serializes_as_string_and_images_as_parts() {
+        let request = ModelRequest {
+            model_slug: ModelProfileKey::CatalogSlug("gpt-4o-mini".to_string()),
+            model: "gpt-4o-mini".to_string(),
+            system: None,
+            messages: vec![
+                RequestMessage {
+                    role: "user".to_string(),
+                    content: vec![RequestContent::Text {
+                        text: "text-only prompt".to_string(),
+                    }],
+                },
+                RequestMessage {
+                    role: "user".to_string(),
+                    content: vec![
+                        RequestContent::Text {
+                            text: "caption".to_string(),
+                        },
+                        RequestContent::Image {
+                            mime_type: "image/png".to_string(),
+                            data_base64: "aGVsbG8=".to_string(),
+                        },
+                    ],
+                },
+            ],
+            tools: None,
+            hosted_tools: Vec::new(),
+            sampling: SamplingControls::default(),
+            request_thinking: None,
+            reasoning_effort: None,
+            extra_body: None,
+            max_tokens: 0,
+        };
+
+        let body = build_request(&request, false);
+
+        assert_eq!(body["messages"][0]["role"], json!("user"));
+        assert_eq!(body["messages"][0]["content"], json!("text-only prompt"));
+        assert_eq!(body["messages"][1]["role"], json!("user"));
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([
+                { "type": "text", "text": "caption" },
+                {
+                    "type": "image_url",
+                    "image_url": { "url": "data:image/png;base64,aGVsbG8=" }
+                }
+            ])
         );
     }
 

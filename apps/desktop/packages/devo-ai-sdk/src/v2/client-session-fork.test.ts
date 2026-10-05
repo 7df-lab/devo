@@ -86,6 +86,9 @@ describe("session.fork", () => {
 			if (method === "session/items/list") {
 				return { data: [], nextCursor: null }
 			}
+			if (method === "session/queue/list") {
+				return { entries: [] }
+			}
 			if (method === "subscription/create") {
 				return { subscriptionId: "sub-1", cursors: [] }
 			}
@@ -98,14 +101,14 @@ describe("session.fork", () => {
 		})
 
 		const result = await client.session.fork({
-			sessionID: "parent-session",
+			sessionId: "parent-session",
 			atTurnId: "turn-2",
 			cut: "before",
 		})
 
 		expect(result.data.id).toBe("child-session")
 		expect(result.data.forkFromId).toBe("parent-session")
-		expect(result.data.parentID).toBeUndefined()
+		expect(result.data.parentId).toBeUndefined()
 		expect(transport.requests.some((request) => request.method === "session/fork")).toBe(true)
 	})
 })

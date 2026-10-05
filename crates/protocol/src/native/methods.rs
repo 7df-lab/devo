@@ -20,6 +20,7 @@ use super::item::Item;
 use super::item::ItemEnvelope;
 use super::page::Page;
 use super::rpc_admin::*;
+use super::rpc_schedule::*;
 use super::rpc_search::*;
 use super::rpc_session::*;
 use super::rpc_turn::*;
@@ -162,6 +163,14 @@ pub static NATIVE_METHODS: &[MethodSpec] = &[
         idempotency: Idempotency::None,
     },
     MethodSpec {
+        name: "session/systemPrompt/read",
+        params_schema: schema_of::<SessionSystemPromptReadParams>,
+        result_schema: schema_of::<SessionSystemPromptReadResult>,
+        error_codes: SESSION_ERRORS,
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
         name: "session/resume",
         params_schema: schema_of::<SessionResumeParams>,
         result_schema: schema_of::<SessionResumeResult>,
@@ -247,6 +256,80 @@ pub static NATIVE_METHODS: &[MethodSpec] = &[
         params_schema: schema_of::<SessionItemsListParams>,
         result_schema: schema_of::<Page<ItemEnvelope>>,
         error_codes: SESSION_ERRORS,
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
+        name: "session/tree/read",
+        params_schema: schema_of::<SessionTreeReadParams>,
+        result_schema: schema_of::<SessionTreeReadResult>,
+        error_codes: SESSION_ERRORS,
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
+        name: "session/tree/navigate",
+        params_schema: schema_of::<SessionTreeNavigateParams>,
+        result_schema: schema_of::<SessionTreeNavigateResult>,
+        error_codes: &[codes::SESSION_NOT_FOUND, codes::INVALID_ITEM_SHAPE],
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    // ── Schedule ──
+    MethodSpec {
+        name: "session/schedule/list",
+        params_schema: schema_of::<SessionScheduleListParams>,
+        result_schema: schema_of::<SessionScheduleListResult>,
+        error_codes: &[],
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
+        name: "session/schedule/upsert",
+        params_schema: schema_of::<SessionScheduleUpsertParams>,
+        result_schema: schema_of::<SessionScheduleUpsertResult>,
+        error_codes: SESSION_ERRORS,
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
+        name: "session/schedule/update",
+        params_schema: schema_of::<SessionScheduleUpdateParams>,
+        result_schema: schema_of::<SessionScheduleUpdateResult>,
+        error_codes: &[codes::JOB_NOT_FOUND],
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
+        name: "session/schedule/delete",
+        params_schema: schema_of::<SessionScheduleDeleteParams>,
+        result_schema: schema_of::<SessionScheduleDeleteResult>,
+        error_codes: &[codes::JOB_NOT_FOUND],
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
+        name: "session/heartbeat/command",
+        params_schema: schema_of::<SessionHeartbeatCommandParams>,
+        result_schema: schema_of::<SessionHeartbeatCommandResult>,
+        error_codes: SESSION_ERRORS,
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    // ── Export / import ──
+    MethodSpec {
+        name: "session/export",
+        params_schema: schema_of::<SessionExportParams>,
+        result_schema: schema_of::<SessionExportResult>,
+        error_codes: SESSION_ERRORS,
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
+        name: "session/import",
+        params_schema: schema_of::<SessionImportParams>,
+        result_schema: schema_of::<SessionImportResult>,
+        error_codes: &[codes::INVALID_CWD, codes::CWD_ACCESS_DENIED],
         required_capability: None,
         idempotency: Idempotency::None,
     },
@@ -342,18 +425,6 @@ pub static NATIVE_METHODS: &[MethodSpec] = &[
         params_schema: schema_of::<SessionQueueRemoveParams>,
         result_schema: schema_of::<SessionQueueRemoveResult>,
         error_codes: &[codes::SESSION_NOT_FOUND, codes::QUEUE_ITEM_NOT_FOUND],
-        required_capability: None,
-        idempotency: Idempotency::None,
-    },
-    MethodSpec {
-        name: "session/queue/steer",
-        params_schema: schema_of::<SessionQueueSteerParams>,
-        result_schema: schema_of::<SessionQueueSteerResult>,
-        error_codes: &[
-            codes::SESSION_NOT_FOUND,
-            codes::QUEUE_ITEM_NOT_FOUND,
-            codes::TURN_NOT_STEERABLE,
-        ],
         required_capability: None,
         idempotency: Idempotency::None,
     },
@@ -539,6 +610,14 @@ pub static NATIVE_METHODS: &[MethodSpec] = &[
         idempotency: Idempotency::Key,
     },
     MethodSpec {
+        name: "session/refine/run",
+        params_schema: schema_of::<SessionRefineRunParams>,
+        result_schema: schema_of::<SessionRefineRunResult>,
+        error_codes: SESSION_ERRORS,
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
         name: "session/goal/read",
         params_schema: schema_of::<SessionGoalReadParams>,
         result_schema: schema_of::<SessionGoalReadResult>,
@@ -608,6 +687,22 @@ pub static NATIVE_METHODS: &[MethodSpec] = &[
     },
     // ── Task & agent ──
     MethodSpec {
+        name: "task/start",
+        params_schema: schema_of::<TaskStartParams>,
+        result_schema: schema_of::<TaskStartResult>,
+        error_codes: SESSION_ERRORS,
+        required_capability: None,
+        idempotency: Idempotency::Key,
+    },
+    MethodSpec {
+        name: "task/resize",
+        params_schema: schema_of::<TaskResizeParams>,
+        result_schema: schema_of::<TaskResizeResult>,
+        error_codes: SESSION_ERRORS,
+        required_capability: None,
+        idempotency: Idempotency::None,
+    },
+    MethodSpec {
         name: "task/list",
         params_schema: schema_of::<TaskListParams>,
         result_schema: schema_of::<TaskListResult>,
@@ -671,23 +766,7 @@ pub static NATIVE_METHODS: &[MethodSpec] = &[
         required_capability: None,
         idempotency: Idempotency::None,
     },
-    // ── Security ──
-    MethodSpec {
-        name: "permission/profile/read",
-        params_schema: schema_of::<PermissionProfileReadParams>,
-        result_schema: schema_of::<PermissionProfileReadResult>,
-        error_codes: SESSION_ERRORS,
-        required_capability: None,
-        idempotency: Idempotency::None,
-    },
-    MethodSpec {
-        name: "permission/profile/update",
-        params_schema: schema_of::<PermissionProfileUpdateParams>,
-        result_schema: schema_of::<PermissionProfileUpdateResult>,
-        error_codes: SESSION_ERRORS,
-        required_capability: None,
-        idempotency: Idempotency::None,
-    },
+    // ── Security (permission profile: session/metadata/update settings) ──
     MethodSpec {
         name: "credential/list",
         params_schema: schema_of::<CredentialListParams>,

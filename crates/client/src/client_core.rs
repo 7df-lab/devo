@@ -35,13 +35,37 @@ use crate::native_approval::PendingApprovals;
 use crate::native_approval::discard_approval_request;
 use crate::native_approval::handle_approval_request;
 use crate::native_approval::resolve_approval_response;
+use devo_protocol::native::ids::SessionId as NativeSessionId;
+use devo_protocol::native::ids::TurnId as NativeTurnId;
+
+fn native_session_id(session_id: SessionId) -> NativeSessionId {
+    NativeSessionId::from_string(session_id.to_string())
+}
+
+fn native_turn_id(turn_id: TurnId) -> NativeTurnId {
+    NativeTurnId::from_string(turn_id.to_string())
+}
 
 const SERVER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cold-starting the managed `devo server` child can exceed the default RPC
+/// budget. Matches the Desktop stdio client's `INITIALIZE_REQUEST_TIMEOUT_MS`.
+const SERVER_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy)]
 enum ServerResponseWait {
     Standard,
+    Handshake,
     Unbounded,
+}
+
+impl ServerResponseWait {
+    fn timeout(self) -> Option<Duration> {
+        match self {
+            Self::Standard => Some(SERVER_RESPONSE_TIMEOUT),
+            Self::Handshake => Some(SERVER_INITIALIZE_TIMEOUT),
+            Self::Unbounded => None,
+        }
+    }
 }
 
 /// Server notifications forwarded by the Native client transports.
@@ -163,9 +187,8 @@ impl ServerClientCore {
     }
 
     pub(crate) async fn initialize(&mut self) -> Result<InitializeResult> {
-        let result: AcpInitializeResult = timeout(
-            SERVER_RESPONSE_TIMEOUT,
-            self.request(
+        let result: AcpInitializeResult = self
+            .request_with_wait(
                 ACP_INITIALIZE_METHOD,
                 AcpInitializeParams {
                     protocol_version: 1,
@@ -203,10 +226,9 @@ impl ServerClientCore {
                         })
                     },
                 },
-            ),
-        )
-        .await
-        .context("timed out waiting for initialize response from server")??;
+                ServerResponseWait::Handshake,
+            )
+            .await?;
         let meta = result.meta.as_ref();
         Ok(InitializeResult {
             server_name: result
@@ -255,6 +277,11 @@ impl ServerClientCore {
             .await
     }
 
+    async fn request_void<P: Serialize>(&mut self, method: &str, params: P) -> Result<()> {
+        let _: serde_json::Value = self.request(method, params).await?;
+        Ok(())
+    }
+
     async fn request_with_wait<P, R>(
         &mut self,
         method: &str,
@@ -276,24 +303,22 @@ impl ServerClientCore {
             return Err(error);
         }
 
-        let response = match wait {
-            ServerResponseWait::Standard => {
-                match timeout(SERVER_RESPONSE_TIMEOUT, response_rx).await {
-                    Ok(Ok(response)) => response,
-                    Ok(Err(error)) => {
-                        self.pending.lock().await.remove(&request_id);
-                        return Err(error).with_context(|| {
-                            format!("server dropped response for request {request_id}")
-                        });
-                    }
-                    Err(error) => {
-                        self.pending.lock().await.remove(&request_id);
-                        return Err(error)
-                            .with_context(|| format!("{method} request {request_id} timed out"));
-                    }
+        let response = match wait.timeout() {
+            Some(duration) => match timeout(duration, response_rx).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    self.pending.lock().await.remove(&request_id);
+                    return Err(error).with_context(|| {
+                        format!("server dropped response for request {request_id}")
+                    });
                 }
-            }
-            ServerResponseWait::Unbounded => match response_rx.await {
+                Err(error) => {
+                    self.pending.lock().await.remove(&request_id);
+                    return Err(error)
+                        .with_context(|| format!("{method} request {request_id} timed out"));
+                }
+            },
+            None => match response_rx.await {
                 Ok(response) => response,
                 Err(error) => {
                     self.pending.lock().await.remove(&request_id);
@@ -320,9 +345,7 @@ impl ServerClientCore {
         self.request(
             "turn/start",
             devo_protocol::native::rpc_turn::TurnStartParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
                 input,
                 client_user_message_id: None,
                 idempotency_key,
@@ -331,7 +354,6 @@ impl ServerClientCore {
         .await
     }
 
-    /// Native `session/compact/start` (L2-DES-APP-008 Phase B).
     pub(crate) async fn session_compact_start_native(
         &mut self,
         session_id: SessionId,
@@ -339,16 +361,12 @@ impl ServerClientCore {
         self.request(
             "session/compact/start",
             devo_protocol::native::rpc_session::SessionCompactStartParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
             },
         )
         .await
     }
 
-    /// Native `session/rollback/preview` (L2-DES-APP-008): computes the
-    /// history/workspace impact of a rollback without changing state.
     pub(crate) async fn session_rollback_preview_native(
         &mut self,
         session_id: SessionId,
@@ -358,9 +376,7 @@ impl ServerClientCore {
         self.request(
             "session/rollback/preview",
             devo_protocol::native::rpc_session::SessionRollbackPreviewParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
                 user_turn_index,
                 mode,
             },
@@ -368,8 +384,6 @@ impl ServerClientCore {
         .await
     }
 
-    /// Native `session/rollback/commit` (L2-DES-APP-008): commits a
-    /// previously previewed restore plan.
     pub(crate) async fn session_rollback_commit_native(
         &mut self,
         restore_plan_id: devo_protocol::native::ids::RestorePlanId,
@@ -385,7 +399,6 @@ impl ServerClientCore {
         .await
     }
 
-    /// Native `session/goal/update` (ratified #3): in-place edit patch.
     pub(crate) async fn session_goal_update_native(
         &mut self,
         session_id: SessionId,
@@ -395,9 +408,7 @@ impl ServerClientCore {
         self.request(
             "session/goal/update",
             devo_protocol::native::rpc_session::SessionGoalUpdateParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
                 expected_goal_id: None,
                 patch,
                 idempotency_key,
@@ -406,8 +417,6 @@ impl ServerClientCore {
         .await
     }
 
-    /// Native `session/new` (L2-DES-APP-008 Phase B): create a durable
-    /// session with idempotency-key replay safety.
     pub(crate) async fn session_new_native(
         &mut self,
         cwd: std::path::PathBuf,
@@ -423,8 +432,6 @@ impl ServerClientCore {
         .await
     }
 
-    /// Native `session/list` (L2-DES-APP-008): one page of canonical
-    /// session snapshots for the session picker.
     pub(crate) async fn session_list_native(
         &mut self,
         params: devo_protocol::native::rpc_session::SessionListParams,
@@ -432,23 +439,16 @@ impl ServerClientCore {
         self.request("session/list", params).await
     }
 
-    /// Native `session/delete` (L2-DES-APP-008): deletes the session tree.
     pub(crate) async fn session_delete_native(&mut self, session_id: SessionId) -> Result<()> {
-        self.request(
+        self.request_void(
             "session/delete",
             devo_protocol::native::rpc_session::SessionDeleteParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
             },
         )
         .await
-        .map(|_: devo_protocol::native::rpc_session::SessionDeleteResult| ())
     }
 
-    /// Native `session/resume` (L2-DES-APP-008 Phase B): hydrates the
-    /// session and returns the canonical snapshot. Transcript restore is via
-    /// `session/items/list` / `subscription/*`, not this result.
     pub(crate) async fn session_resume_native(
         &mut self,
         session_id: SessionId,
@@ -456,16 +456,12 @@ impl ServerClientCore {
         self.request(
             "session/resume",
             devo_protocol::native::rpc_session::SessionResumeParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
             },
         )
         .await
     }
 
-    /// Native `session/items/list` (L2-DES-APP-008 Phase C): one page of
-    /// history items for transcript restore.
     pub(crate) async fn session_items_list_native(
         &mut self,
         session_id: SessionId,
@@ -475,9 +471,7 @@ impl ServerClientCore {
         self.request(
             "session/items/list",
             devo_protocol::native::rpc_session::SessionItemsListParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
                 turn_id: None,
                 page: devo_protocol::native::page::PageParams { cursor, limit },
             },
@@ -485,8 +479,6 @@ impl ServerClientCore {
         .await
     }
 
-    /// Native `session/turns/list`: one page of turns (used to resolve a
-    /// user-turn index into a turn id for `session/fork`).
     pub(crate) async fn session_turns_list_native(
         &mut self,
         session_id: SessionId,
@@ -496,9 +488,7 @@ impl ServerClientCore {
         self.request(
             "session/turns/list",
             devo_protocol::native::rpc_session::SessionTurnsListParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
                 page: devo_protocol::native::page::PageParams { cursor, limit },
             },
         )
@@ -513,10 +503,8 @@ impl ServerClientCore {
         self.request(
             "turn/read",
             devo_protocol::native::rpc_turn::TurnReadParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
-                turn_id: devo_protocol::native::ids::TurnId::from_string(turn_id.to_string()),
+                session_id: native_session_id(session_id),
+                turn_id: native_turn_id(turn_id),
             },
         )
         .await
@@ -532,19 +520,14 @@ impl ServerClientCore {
         self.request(
             "session/items/list",
             devo_protocol::native::rpc_session::SessionItemsListParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
-                turn_id: Some(devo_protocol::native::ids::TurnId::from_string(
-                    turn_id.to_string(),
-                )),
+                session_id: native_session_id(session_id),
+                turn_id: Some(native_turn_id(turn_id)),
                 page: devo_protocol::native::page::PageParams { cursor, limit },
             },
         )
         .await
     }
 
-    /// Native `session/fork` (L2-DES-APP-008 Phase B).
     pub(crate) async fn session_fork_native(
         &mut self,
         session_id: SessionId,
@@ -554,7 +537,6 @@ impl ServerClientCore {
             .await
     }
 
-    /// Native `session/fork` with an explicit cut mode.
     pub(crate) async fn session_fork_native_with_cut(
         &mut self,
         session_id: SessionId,
@@ -564,20 +546,14 @@ impl ServerClientCore {
         self.request(
             "session/fork",
             devo_protocol::native::rpc_session::SessionForkParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
-                at_turn_id: at_turn_id.map(|turn_id| {
-                    devo_protocol::native::ids::TurnId::from_string(turn_id.to_string())
-                }),
+                session_id: native_session_id(session_id),
+                at_turn_id: at_turn_id.map(native_turn_id),
                 cut,
             },
         )
         .await
     }
 
-    /// Native session title rename via the `title` patch of
-    /// `session/metadata/update` (L2-DES-APP-008 Phase B).
     pub(crate) async fn session_title_update_native(
         &mut self,
         session_id: SessionId,
@@ -586,9 +562,7 @@ impl ServerClientCore {
         self.request(
             "session/metadata/update",
             devo_protocol::native::rpc_session::SessionMetadataUpdateParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
                 expected_version: 0,
                 title: devo_protocol::native::patch::PatchField::Value(title),
                 model: None,
@@ -599,7 +573,6 @@ impl ServerClientCore {
         .await
     }
 
-    /// Native `session/goal/set` (L2-DES-APP-008 Phase B).
     pub(crate) async fn session_goal_set_native(
         &mut self,
         session_id: SessionId,
@@ -611,9 +584,7 @@ impl ServerClientCore {
         self.request(
             "session/goal/set",
             devo_protocol::native::rpc_session::SessionGoalSetParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
                 objective,
                 token_budget,
                 if_exists,
@@ -623,7 +594,6 @@ impl ServerClientCore {
         .await
     }
 
-    /// Native `session/goal/read` (L2-DES-APP-008 Phase B).
     pub(crate) async fn session_goal_read_native(
         &mut self,
         session_id: SessionId,
@@ -631,16 +601,12 @@ impl ServerClientCore {
         self.request(
             "session/goal/read",
             devo_protocol::native::rpc_session::SessionGoalReadParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
             },
         )
         .await
     }
 
-    /// Native goal lifecycle transition with the `expectedGoalId`
-    /// precondition; `Clear` returns no goal payload.
     pub(crate) async fn session_goal_transition_native(
         &mut self,
         session_id: SessionId,
@@ -655,8 +621,8 @@ impl ServerClientCore {
             GoalLifecycleTransition::Clear => "session/goal/clear",
         };
         let params = devo_protocol::native::rpc_session::SessionGoalTransitionParams {
-            session_id: devo_protocol::native::ids::SessionId::from_string(session_id.to_string()),
-            expected_goal_id: expected_goal_id.clone(),
+            session_id: native_session_id(session_id),
+            expected_goal_id: *expected_goal_id,
         };
         if matches!(transition, GoalLifecycleTransition::Clear) {
             let _: serde_json::Value = self.request(method, params).await?;
@@ -667,7 +633,6 @@ impl ServerClientCore {
         Ok(Some(result.goal))
     }
 
-    /// Native `session/interrupt`: stop the selected active work scope.
     pub(crate) async fn session_interrupt_native(
         &mut self,
         scope: devo_protocol::native::rpc_session::SessionInterruptScope,
@@ -679,8 +644,6 @@ impl ServerClientCore {
         .await
     }
 
-    /// Native `agent/list` (L2-DES-APP-008 Phase B facade): child agents
-    /// as `SubAgent` item envelopes.
     pub(crate) async fn agent_list_native(
         &mut self,
         session_id: SessionId,
@@ -688,64 +651,49 @@ impl ServerClientCore {
         self.request(
             "agent/list",
             devo_protocol::native::rpc_turn::AgentListParams {
-                session_id: Some(devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                )),
+                session_id: Some(native_session_id(session_id)),
             },
         )
         .await
     }
 
-    /// Native `agent/cancel` (Phase B facade).
     pub(crate) async fn agent_cancel_native(
         &mut self,
         item_id: &devo_protocol::native::ids::ItemId,
     ) -> Result<()> {
-        let _: serde_json::Value = self
-            .request(
-                "agent/cancel",
-                devo_protocol::native::rpc_turn::AgentCancelParams {
-                    item_id: item_id.clone(),
-                },
-            )
-            .await?;
-        Ok(())
+        self.request_void(
+            "agent/cancel",
+            devo_protocol::native::rpc_turn::AgentCancelParams { item_id: *item_id },
+        )
+        .await
     }
 
-    /// Native `agent/message` (Phase B facade).
     pub(crate) async fn agent_message_native(
         &mut self,
         item_id: &devo_protocol::native::ids::ItemId,
         input: Vec<devo_protocol::native::item::UserInput>,
     ) -> Result<()> {
-        let _: serde_json::Value = self
-            .request(
-                "agent/message",
-                devo_protocol::native::rpc_turn::AgentMessageParams {
-                    item_id: item_id.clone(),
-                    input,
-                },
-            )
-            .await?;
-        Ok(())
+        self.request_void(
+            "agent/message",
+            devo_protocol::native::rpc_turn::AgentMessageParams {
+                item_id: *item_id,
+                input,
+            },
+        )
+        .await
     }
 
-    /// Native `agent/read` (Phase B facade).
     pub(crate) async fn agent_read_native(
         &mut self,
         item_id: &devo_protocol::native::ids::ItemId,
     ) -> Result<devo_protocol::native::rpc_turn::AgentReadResult> {
         self.request(
             "agent/read",
-            devo_protocol::native::rpc_turn::AgentReadParams {
-                item_id: item_id.clone(),
-            },
+            devo_protocol::native::rpc_turn::AgentReadParams { item_id: *item_id },
         )
         .await
     }
 
-    /// Native `task/start` with `kind: "process"` (L2-DES-APP-008 DD-7
-    /// facade).
     pub(crate) async fn task_start_process_native(
         &mut self,
         session_id: SessionId,
@@ -756,9 +704,7 @@ impl ServerClientCore {
         self.request(
             "task/start",
             devo_protocol::native::rpc_turn::TaskStartParams::Process {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
                 command,
                 cwd,
                 idempotency_key,
@@ -767,9 +713,6 @@ impl ServerClientCore {
         .await
     }
 
-    /// Native `task/start` with `kind: "agent"` (L2-DES-APP-008 DD-7):
-    /// spawns a child-session agent; the result item id is the child
-    /// session's `item_<uuid>`.
     pub(crate) async fn task_start_agent_native(
         &mut self,
         params: devo_protocol::native::rpc_turn::TaskStartParams,
@@ -777,20 +720,15 @@ impl ServerClientCore {
         self.request("task/start", params).await
     }
 
-    /// Native `task/interrupt` (DD-7 facade).
     pub(crate) async fn task_interrupt_native(
         &mut self,
         item_id: &devo_protocol::native::ids::ItemId,
     ) -> Result<()> {
-        let _: serde_json::Value = self
-            .request(
-                "task/interrupt",
-                devo_protocol::native::rpc_turn::TaskInterruptParams {
-                    item_id: item_id.clone(),
-                },
-            )
-            .await?;
-        Ok(())
+        self.request_void(
+            "task/interrupt",
+            devo_protocol::native::rpc_turn::TaskInterruptParams { item_id: *item_id },
+        )
+        .await
     }
 
     pub(crate) async fn approval_respond(&mut self, params: ApprovalResponseParams) -> Result<()> {
@@ -832,10 +770,6 @@ impl ServerClientCore {
         self.writer.close();
     }
 
-    /// Native settings patch (L2-DES-APP-008): sent on the canonical
-    /// method string with `expectedVersion: 0`
-    /// (no precondition — first-party clients do not track session versions
-    /// yet; the server treats 0 as "skip the check").
     pub(crate) async fn session_settings_update(
         &mut self,
         session_id: SessionId,
@@ -844,9 +778,7 @@ impl ServerClientCore {
         self.request(
             "session/metadata/update",
             devo_protocol::native::rpc_session::SessionMetadataUpdateParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
                 expected_version: 0,
                 title: devo_protocol::native::patch::PatchField::Missing,
                 model: None,
@@ -857,8 +789,6 @@ impl ServerClientCore {
         .await
     }
 
-    /// Native model/metadata update: model slug, provider binding,
-    /// reasoning effort, and collaboration mode in one patch.
     pub(crate) async fn session_model_update(
         &mut self,
         session_id: SessionId,
@@ -883,9 +813,7 @@ impl ServerClientCore {
         self.request(
             "session/metadata/update",
             devo_protocol::native::rpc_session::SessionMetadataUpdateParams {
-                session_id: devo_protocol::native::ids::SessionId::from_string(
-                    session_id.to_string(),
-                ),
+                session_id: native_session_id(session_id),
                 expected_version: 0,
                 title: devo_protocol::native::patch::PatchField::Missing,
                 model: model.map(|slug| devo_protocol::native::model::ModelBinding {
@@ -924,8 +852,6 @@ impl ServerClientCore {
         self.request("mcp/set_enabled", params).await
     }
 
-    /// Native `model/list` (L2-DES-APP-008): the model catalog in the
-    /// parity canonical `ModelInfo` shape (ratified #7).
     pub(crate) async fn model_list_native(
         &mut self,
     ) -> Result<devo_protocol::native::rpc_admin::ModelListResult> {
@@ -1018,11 +944,11 @@ impl ServerClientCore {
         self.request("session/queue/remove", params).await
     }
 
-    pub(crate) async fn session_queue_steer(
+    pub(crate) async fn turn_steer(
         &mut self,
-        params: native::rpc_turn::SessionQueueSteerParams,
-    ) -> Result<native::rpc_turn::SessionQueueSteerResult> {
-        self.request("session/queue/steer", params).await
+        params: native::rpc_turn::TurnSteerParams,
+    ) -> Result<native::rpc_turn::TurnSteerResult> {
+        self.request("turn/steer", params).await
     }
 
     pub(crate) async fn subscription_create(
@@ -1032,8 +958,6 @@ impl ServerClientCore {
         self.request("subscription/create", params).await
     }
 
-    /// Native `search/start` (L2-DES-APP-008): connection-local composer
-    /// reference search with the canonical camelCase snapshot.
     pub(crate) async fn search_start(
         &mut self,
         cwd: Option<std::path::PathBuf>,
@@ -1048,7 +972,6 @@ impl ServerClientCore {
         Ok(result.snapshot)
     }
 
-    /// Native `search/update` (L2-DES-APP-008).
     pub(crate) async fn search_update(
         &mut self,
         search_id: devo_protocol::ReferenceSearchId,
@@ -1063,23 +986,19 @@ impl ServerClientCore {
         Ok(result.snapshot)
     }
 
-    /// Native `search/cancel` (L2-DES-APP-008).
     pub(crate) async fn search_cancel(
         &mut self,
         search_id: devo_protocol::ReferenceSearchId,
     ) -> Result<()> {
-        self.request(
+        self.request_void(
             "search/cancel",
             devo_protocol::native::rpc_search::SearchCancelParams { search_id },
         )
         .await
-        .map(|_: devo_protocol::native::rpc_search::SearchCancelResult| ())
     }
 }
 
 impl ServerClientReaderState {
-    /// Classifies one inbound server payload and dispatches without blocking the
-    /// transport read loop on handler work.
     pub(crate) async fn handle_message(&self, message: serde_json::Value) {
         if let (Some(id), Some(method)) = (
             message.get("id").cloned(),
@@ -1149,26 +1068,21 @@ impl ServerClientReaderState {
                 discard_approval_request(&pending_approvals, &approval_id).await;
             });
         }
-        if notification.method == "item/completed"
-            && let Some(request_id) = notification
+        let user_input_request_id = match notification.method.as_str() {
+            "item/completed" => notification
                 .params
                 .pointer("/item/item/requestId")
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        {
-            let pending_user_inputs = Arc::clone(&self.native_pending_user_inputs);
-            tokio::spawn(async move {
-                pending_user_inputs.lock().await.remove(&request_id);
-            });
-        }
-        if notification.method == "serverRequest/resolved"
-            && let Some(request_id) = notification
+                .map(str::to_string),
+            "serverRequest/resolved" => notification
                 .params
                 .get("requestId")
                 .or_else(|| notification.params.get("request_id"))
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        {
+                .map(str::to_string),
+            _ => None,
+        };
+        if let Some(request_id) = user_input_request_id {
             let pending_user_inputs = Arc::clone(&self.native_pending_user_inputs);
             tokio::spawn(async move {
                 pending_user_inputs.lock().await.remove(&request_id);
@@ -1177,12 +1091,11 @@ impl ServerClientReaderState {
         if notification.method == ACP_SESSION_UPDATE_METHOD
             && let Ok(acp_notification) =
                 serde_json::from_value::<AcpSessionNotification>(notification.params.clone())
-            && let Some((method, event)) = original_event_from_acp_notification(&acp_notification)
+            && let Some((method, params)) = original_notification_wire_from_acp(&acp_notification)
         {
-            let _ = self.notifications_tx.send(ServerNotificationMessage {
-                method,
-                params: serde_json::to_value(event).expect("serialize original ACP event"),
-            });
+            let _ = self
+                .notifications_tx
+                .send(ServerNotificationMessage { method, params });
             return;
         }
         log_notification_received(&notification);
@@ -1315,6 +1228,7 @@ fn format_protocol_error_code(code: &ProtocolErrorCode) -> &'static str {
         ProtocolErrorCode::NotInitialized => "not_initialized",
         ProtocolErrorCode::InvalidParams => "invalid_params",
         ProtocolErrorCode::SessionNotFound => "session_not_found",
+        ProtocolErrorCode::SessionLocked => "session_locked",
         ProtocolErrorCode::TurnNotFound => "turn_not_found",
         ProtocolErrorCode::GoalNotFound => "goal_not_found",
         ProtocolErrorCode::TurnAlreadyRunning => "turn_already_running",
@@ -1368,27 +1282,15 @@ fn log_notification_received(notification: &NotificationEnvelope<serde_json::Val
         .then(|| notification.params.get("delta")?.as_str())
         .flatten();
     let delta_len = assistant_delta.map(str::len);
-    let assistant_token_text = assistant_delta.and_then(assistant_token_log_preview);
-    if let Some(assistant_token_text) = assistant_token_text.as_deref() {
-        tracing::debug!(
-            stream_elapsed_ms = stream_trace_elapsed_ms(),
-            method = %notification.method,
-            event_seq,
-            item_id = ?item_id,
-            delta_len = ?delta_len,
-            assistant_token_text,
-            "client received server notification"
-        );
-    } else {
-        tracing::debug!(
-            stream_elapsed_ms = stream_trace_elapsed_ms(),
-            method = %notification.method,
-            event_seq,
-            item_id = ?item_id,
-            delta_len = ?delta_len,
-            "client received server notification"
-        );
-    }
+    tracing::debug!(
+        stream_elapsed_ms = stream_trace_elapsed_ms(),
+        method = %notification.method,
+        event_seq,
+        item_id = ?item_id,
+        delta_len = ?delta_len,
+        assistant_token_text = assistant_delta.and_then(assistant_token_log_preview).as_deref(),
+        "client received server notification"
+    );
 }
 
 fn stream_trace_elapsed_ms() -> u128 {
@@ -1444,32 +1346,6 @@ fn format_assistant_token_log_preview(text: &str, max_chars: usize) -> String {
     preview
 }
 
-/// Converts TUI turn input into canonical `UserInput`.
-pub fn native_turn_start_input(
-    input: &[InputItem],
-) -> Option<Vec<devo_protocol::native::item::UserInput>> {
-    input
-        .iter()
-        .map(|item| match item {
-            InputItem::Text { text } => {
-                Some(devo_protocol::native::item::UserInput::Text { text: text.clone() })
-            }
-            InputItem::LocalImage { path } => {
-                Some(devo_protocol::native::item::UserInput::LocalImage {
-                    path: path.clone(),
-                    detail: None,
-                })
-            }
-            InputItem::Mention { path, .. } => {
-                Some(devo_protocol::native::item::UserInput::Mention { uri: path.clone() })
-            }
-            InputItem::Skill { name, .. } => {
-                Some(devo_protocol::native::item::UserInput::Skill { name: name.clone() })
-            }
-        })
-        .collect()
-}
-
 /// Goal lifecycle transitions for `session_goal_transition_native`
 /// (L2-DES-APP-008 Phase B).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1479,4 +1355,34 @@ pub enum GoalLifecycleTransition {
     Complete,
     Cancel,
     Clear,
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::SERVER_INITIALIZE_TIMEOUT;
+    use super::SERVER_RESPONSE_TIMEOUT;
+    use super::ServerResponseWait;
+
+    /// Trace: L2-DES-TUI-001, L1-REQ-TUI-010
+    /// Verifies: stdio initialize waits for a cold-started server instead of
+    /// the default 10s RPC budget used by later requests.
+    #[test]
+    fn initialize_handshake_timeout_exceeds_standard_rpc_budget() {
+        assert_eq!(
+            ServerResponseWait::Handshake.timeout(),
+            Some(SERVER_INITIALIZE_TIMEOUT)
+        );
+        assert_eq!(
+            ServerResponseWait::Standard.timeout(),
+            Some(SERVER_RESPONSE_TIMEOUT)
+        );
+        assert_eq!(ServerResponseWait::Unbounded.timeout(), None);
+        assert!(SERVER_INITIALIZE_TIMEOUT > SERVER_RESPONSE_TIMEOUT);
+        assert_eq!(
+            SERVER_INITIALIZE_TIMEOUT,
+            std::time::Duration::from_secs(60)
+        );
+    }
 }

@@ -484,6 +484,7 @@ export function DesktopTerminalPanel({
 			}
 			style={embedded ? undefined : { height: open ? height : 0 }}
 			aria-hidden={!open}
+			inert={!open}
 		>
 			{embedded ? null : (
 				<>

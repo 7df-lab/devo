@@ -9,15 +9,20 @@ mod schema;
 pub use devo_protocol::ProviderWireApi;
 
 pub use auth::AUTH_CONFIG_FILE_NAME;
+pub use auth::UpsertOauthCredential;
 pub use auth::default_provider_credential_id;
+pub use auth::legacy_provider_api_key_credential_id;
+pub use auth::provider_id_from_credential_id;
 pub use auth::read_user_auth_config;
 pub use auth::remove_user_auth_credential;
 pub use auth::upsert_user_auth_api_key;
+pub use auth::upsert_user_auth_oauth;
 pub use catalog::{
     PROVIDER_CONFIG_FILE_VERSION, ProviderConfigEntry, ProviderConfigFile, ProviderModelConfig,
     ProviderModelSelection, ProviderModelVariantConfig, model_reference,
 };
 pub use persistence::CONFIG_FILE_NAME;
+pub use persistence::CUSTOM_PROVIDER_CONFIG_FILE_NAME;
 pub use persistence::PROVIDER_CONFIG_FILE_NAME;
 pub use request::provider_request_config;
 pub use runtime::provider_runtime_config_changed;

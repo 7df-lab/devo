@@ -6,7 +6,7 @@
  * session's UI so the user can respond without navigating away.
  *
  * Architecture:
- *   1. `childrenMapAtom` — shared map of parentID→childIDs[], recomputed only
+ *   1. `childrenMapAtom` — shared map of parentId→childIDs[], recomputed only
  *      when the set of session IDs changes (not on every status update).
  *   2. `effectivePermissionFamily(sessionId)` — first pending permission in
  *      the session's subtree (self + all descendants).
@@ -26,20 +26,20 @@ import { buildChildrenMap, findTreeRequest } from "../../lib/session-tree"
 // ============================================================
 
 /**
- * A map from parentID → list of childIDs for all currently-known sessions.
+ * A map from parentId → list of childIDs for all currently-known sessions.
  *
  * This atom subscribes to `sessionIdsAtom` and iterates `sessionFamily` for
- * each ID to read the `parentID` field. It recomputes whenever sessions are
+ * each ID to read the `parentId` field. It recomputes whenever sessions are
  * added or removed (i.e. when `sessionIdsAtom` changes), but NOT when a
  * session's permissions or status change — those don't affect the tree shape.
  */
 export const childrenMapAtom = atom((get) => {
 	const ids = get(sessionIdsAtom)
-	const sessions = new Map<string, { parentID?: string }>()
+	const sessions = new Map<string, { parentId?: string }>()
 	for (const id of ids) {
 		const entry = get(sessionFamily(id))
 		if (!entry) continue
-		sessions.set(id, { parentID: entry.session.parentID })
+		sessions.set(id, { parentId: entry.session.parentId })
 	}
 	return buildChildrenMap(sessions)
 })

@@ -10,7 +10,7 @@ impl ServerRuntime {
             .lock()
             .await
             .get(&parent_session_id)
-            .and_then(|cursors| cursors.get(target_key).copied())
+            .and_then(|cursors| cursors.get(target_key).cloned())
             .unwrap_or_default()
     }
 
@@ -111,7 +111,7 @@ impl ServerRuntime {
         Ok(registries
             .get(&params.session_id)
             .map(|registry| {
-                registry.list_children(params.session_id, params.path_prefix.as_deref())
+                registry.list_children(&params.session_id, params.path_prefix.as_deref())
             })
             .unwrap_or_default())
     }
@@ -147,10 +147,10 @@ impl ServerRuntime {
         &self,
         info: devo_protocol::AgentInfo,
     ) -> devo_protocol::TaskInfo {
-        let waiting_approval = match info.parent_session_id {
+        let waiting_approval = match &info.parent_session_id {
             Some(parent_session_id) => {
                 self.session_interactive
-                    .has_pending_approval_for_session(parent_session_id, info.session_id)
+                    .has_pending_approval_for_session(*parent_session_id, info.session_id)
                     .await
                     || self
                         .session_interactive
@@ -314,22 +314,18 @@ impl AgentToolCoordinator for ServerRuntime {
 
     async fn request_user_input(
         self: Arc<Self>,
-        session_id: String,
-        turn_id: String,
+        session_id: SessionId,
+        turn_id: TurnId,
         tool_call_id: String,
         args: devo_protocol::RequestUserInputArgs,
     ) -> Result<devo_protocol::RequestUserInputResponse, ToolCallError> {
-        let session_id = SessionId::try_from(session_id.as_str())
-            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
-        let turn_id = TurnId::try_from(turn_id.as_str())
-            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
         self.request_user_input_for_tool(session_id, turn_id, tool_call_id, args)
             .await
     }
 
     async fn update_goal(
         self: Arc<Self>,
-        session_id: String,
+        session_id: SessionId,
         status: String,
     ) -> Result<serde_json::Value, ToolCallError> {
         if status != "complete" {
@@ -337,8 +333,6 @@ impl AgentToolCoordinator for ServerRuntime {
                 "update_goal only accepts status='complete'".to_string(),
             ));
         }
-        let session_id = SessionId::try_from(session_id.as_str())
-            .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
 
         let mut stores = self.goal_stores.lock().await;
         let store = stores.get_mut(&session_id).ok_or_else(|| {
@@ -348,9 +342,11 @@ impl AgentToolCoordinator for ServerRuntime {
             ToolCallError::InvalidInput("no active goal exists for this session".to_string())
         })?;
         let goal = store
-            .set_status(devo_protocol::ThreadGoalStatus::Complete)
+            .set_status(crate::goal::GoalStatus::Completed)
             .map_err(|error| ToolCallError::ExecutionFailed(error.to_string()))?;
         let thread_goal = goal.to_thread_goal();
+        let native_goal = goal.to_native_goal();
+        let goal_id = native_goal.id;
         drop(stores);
 
         if let Err(error) = self
@@ -360,7 +356,16 @@ impl AgentToolCoordinator for ServerRuntime {
         {
             tracing::warn!(session_id = %session_id, error = %error, "failed to persist update_goal status record");
         }
+        // Clear actor tip so no further goal continuations are scheduled after this turn.
         self.sync_core_session_goal(session_id, None).await;
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::GoalStatusChanged {
+                session_id,
+                goal_id,
+                status: native_goal.status,
+            },
+        )
+        .await;
         Ok(serde_json::json!({
             "status": "complete",
             "tokens_used": thread_goal.tokens_used,

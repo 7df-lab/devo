@@ -14,12 +14,16 @@
 
 import fs from "node:fs"
 import path from "node:path"
-import type { DevoClient } from "@devo-ai/sdk/v2/client"
+import type { DevoClient, NativeItemEnvelope } from "@devo-ai/sdk/v2/client"
 import { createLogger } from "../logger"
 import { createAutomationClient } from "./devo-client"
+import { extractAutomationItem } from "./item-extract"
 import { getConfigDir } from "./paths"
 import { buildPermissionRuleset } from "./permission-policy"
 import type { AutomationConfig, PermissionPreset } from "./types"
+
+export type { AutomationItemExtract } from "./item-extract"
+export { extractAutomationItem }
 
 const log = createLogger("automation-executor")
 
@@ -126,7 +130,7 @@ async function monitorSession(
 	signal: AbortSignal,
 	permissionPreset: PermissionPreset,
 ): Promise<{ text: string; error: string | null }> {
-	const textParts: string[] = []
+	const textByItemId = new Map<string, string>()
 	let error: string | null = null
 
 	const timeoutPromise = new Promise<"timeout">((resolve) => {
@@ -145,22 +149,28 @@ async function monitorSession(
 				// biome-ignore lint/suspicious/noExplicitAny: Native events have dynamic types not fully covered by SDK
 				const evt = event as any
 
-				// Capture text output from the assistant
-				if (evt.type === "message.part.updated") {
-					const part = evt.properties?.part
-					if (
-						part?.sessionID === sessionId &&
-						part?.type === "text" &&
-						part?.time?.end &&
-						part?.text
-					) {
-						textParts.push(part.text)
+				// Capture text / tools from Native ItemEnvelope upserts
+				if (evt.type === "item.updated") {
+					const info = evt.properties?.info as NativeItemEnvelope | undefined
+					if (info?.sessionId === sessionId) {
+						const extracted = extractAutomationItem(info)
+						if (extracted.text) {
+							textByItemId.set(info.id, extracted.text)
+						}
+						if (extracted.toolName) {
+							log.debug("Automation tool item", {
+								sessionId,
+								itemId: info.id,
+								toolName: extracted.toolName,
+								state: info.state,
+							})
+						}
 					}
 				}
 
 				// Capture errors
 				if (evt.type === "session.error") {
-					if (evt.properties?.sessionID === sessionId && evt.properties?.error) {
+					if (evt.properties?.sessionId === sessionId && evt.properties?.error) {
 						const errObj = evt.properties.error
 						const errMsg = errObj.data?.message ?? errObj.name ?? "Unknown error"
 						error = error ? `${error}\n${errMsg}` : String(errMsg)
@@ -175,14 +185,14 @@ async function monitorSession(
 				// policy remains waiting for an external controller instead of silently
 				// changing the user's effective permissions.
 				if (evt.type === "permission.asked" && permissionPreset === "read-only") {
-					if (evt.properties?.sessionID === sessionId) {
+					if (evt.properties?.sessionId === sessionId) {
 						log.warn("Auto-rejecting permission request during automation", {
 							sessionId,
 							permission: evt.properties.permission,
 						})
 						try {
 							await client.permission.reply({
-								requestID: evt.properties.id,
+								requestId: evt.properties.id,
 								reply: "reject",
 							})
 						} catch (rejectErr) {
@@ -194,7 +204,7 @@ async function monitorSession(
 				// Session went idle -- we're done
 				if (
 					evt.type === "session.status" &&
-					evt.properties?.sessionID === sessionId &&
+					evt.properties?.sessionId === sessionId &&
 					evt.properties?.status?.type === "idle"
 				) {
 					break
@@ -216,7 +226,7 @@ async function monitorSession(
 	if (outcome === "timeout") {
 		log.warn("Session monitoring timed out", { sessionId, timeoutMs })
 		try {
-			await client.session.abort({ sessionID: sessionId })
+			await client.session.abort({ sessionId: sessionId })
 			log.info("Session aborted after timeout", { sessionId })
 		} catch {
 			log.warn("Failed to abort session after timeout", { sessionId })
@@ -226,7 +236,7 @@ async function monitorSession(
 			: `Session timed out after ${Math.round(timeoutMs / 1000)}s`
 	}
 
-	return { text: textParts.join("\n"), error }
+	return { text: [...textByItemId.values()].join("\n"), error }
 }
 
 /**
@@ -305,6 +315,7 @@ export async function executeRun(
 
 	const abortController = new AbortController()
 	let worktreePath: string | null = null
+	let worktreeClient: DevoClient | null = null
 	let sessionId = ""
 	const runStartTime = Date.now()
 	log.info("Starting execution", {
@@ -360,7 +371,9 @@ export async function executeRun(
 		const permissionRuleset = buildPermissionRuleset(config.execution.permissionPreset ?? "default")
 
 		// If running in a worktree, create a client scoped to that directory
-		const sessionClient = worktreePath ? (createAutomationClient(worktreePath) ?? client) : client
+		const sessionClient = worktreePath
+			? ((worktreeClient = createAutomationClient(worktreePath)) ?? client)
+			: client
 
 		log.info("Creating session", {
 			automationId: config.id,
@@ -431,7 +444,7 @@ export async function executeRun(
 		const promptStart = Date.now()
 		await withTimeout(
 			sessionClient.session.promptAsync({
-				sessionID: sessionId,
+				sessionId: sessionId,
 				system: systemPrompt,
 				parts: [{ type: "text", text: config.prompt }],
 				model,
@@ -471,7 +484,7 @@ export async function executeRun(
 		// Try to get session summary/diff info
 		let branch: string | null = null
 		try {
-			const sessionInfo = await sessionClient.session.get({ sessionID: sessionId })
+			const sessionInfo = await sessionClient.session.get({ sessionId: sessionId })
 			// biome-ignore lint/suspicious/noExplicitAny: session response shape varies
 			const info = sessionInfo.data as any
 			if (info?.summary?.diffs?.length > 0) {
@@ -531,5 +544,7 @@ export async function executeRun(
 		}
 	} finally {
 		abortController.abort()
+		worktreeClient?.dispose()
+		client.dispose()
 	}
 }

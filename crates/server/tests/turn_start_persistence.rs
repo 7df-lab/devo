@@ -5,15 +5,6 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::Datelike;
-use chrono::SecondsFormat;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
-use devo_protocol::Model;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::ResponseContent;
@@ -37,7 +28,6 @@ use tokio::time::timeout;
 
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 
 struct BlockingRouter {
     stream_calls: mpsc::UnboundedSender<ModelRequest>,
@@ -199,7 +189,7 @@ async fn turn_start_append_failure_does_not_launch_model_turn_or_leave_session_a
         &runtime,
         connection_id,
         &session.id,
-        TurnId::try_from(response.result.turn.id.as_str())?,
+        TurnId::from(response.result.turn.id.as_str()),
     )
     .await?;
 
@@ -307,7 +297,7 @@ async fn message_edit_previous_accepts_skip_restore_and_replaces_prompt_branch()
         &runtime,
         connection_id,
         &session.id,
-        TurnId::try_from(original_start.result.turn.id.as_str())?,
+        TurnId::from(original_start.result.turn.id.as_str()),
     )
     .await?;
 
@@ -336,7 +326,6 @@ async fn message_edit_previous_accepts_skip_restore_and_replaces_prompt_branch()
         serde_json::from_value(edit_response["result"].clone())?;
     let replacement_turn_id = edit_response
         .replacement_turn_id
-        .clone()
         .context("replacement turn id")?;
     let replacement_request = stream_calls_rx
         .recv()
@@ -363,7 +352,7 @@ async fn message_edit_previous_accepts_skip_restore_and_replaces_prompt_branch()
         &runtime,
         connection_id,
         &session.id,
-        TurnId::try_from(replacement_turn_id.as_str()).context("legacy replacement turn id")?,
+        TurnId::from(replacement_turn_id.as_str()),
     )
     .await?;
 
@@ -402,7 +391,7 @@ async fn message_edit_previous_default_safe_restore_records_and_broadcasts() -> 
         &runtime,
         connection_id,
         &session.id,
-        TurnId::try_from(original_start.result.turn.id.as_str())?,
+        TurnId::from(original_start.result.turn.id.as_str()),
     )
     .await?;
     drain_notifications(&mut notifications_rx).await;
@@ -431,7 +420,6 @@ async fn message_edit_previous_default_safe_restore_records_and_broadcasts() -> 
         serde_json::from_value(edit_response["result"].clone())?;
     let replacement_turn_id = edit_response
         .replacement_turn_id
-        .clone()
         .context("replacement turn id")?;
     let replacement_request = stream_calls_rx
         .recv()
@@ -457,21 +445,21 @@ async fn message_edit_previous_default_safe_restore_records_and_broadcasts() -> 
     assert!(
         methods
             .iter()
-            .any(|method| method == "workspace_restore_started"),
-        "expected workspace_restore_started notification in {methods:?}"
+            .any(|method| method == "workspace/restoreStarted"),
+        "expected workspace/restoreStarted notification in {methods:?}"
     );
     assert!(
         methods
             .iter()
-            .any(|method| method == "workspace_restore_completed"),
-        "expected workspace_restore_completed notification in {methods:?}"
+            .any(|method| method == "workspace/restoreCompleted"),
+        "expected workspace/restoreCompleted notification in {methods:?}"
     );
 
     interrupt_session(
         &runtime,
         connection_id,
         &session.id,
-        TurnId::try_from(replacement_turn_id.as_str()).context("legacy replacement turn id")?,
+        TurnId::from(replacement_turn_id.as_str()),
     )
     .await?;
 
@@ -616,35 +604,13 @@ fn build_runtime_with_router(
     data_root: &Path,
     router: Arc<dyn ProviderRouter>,
 ) -> Result<Arc<ServerRuntime>> {
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(UnusedProvider);
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("turn_start_persistence.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            provider,
-            router,
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::new(vec![Model {
-                slug: "test-model".to_string(),
-                display_name: "Test Model".to_string(),
-                ..Model::default()
-            }])),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                /*workspace_root*/ None,
-            )?)),
-        ),
-    ))
+    Ok(
+        devo_server::test_support::TestRuntime::new(Arc::new(UnusedProvider))
+            .router(router)
+            .with_named_model("test-model", "Test Model")
+            .db_file("turn_start_persistence.db")
+            .runtime(data_root),
+    )
 }
 
 fn request_messages_json(request: &ModelRequest) -> Result<String> {
@@ -708,7 +674,7 @@ async fn start_session(
     let response: devo_server::SuccessResponse<
         devo_protocol::native::rpc_session::SessionNewResult,
     > = serde_json::from_value(response)?;
-    let session_id = response.result.session.id.clone();
+    let session_id = response.result.session.id;
     let metadata_response = runtime
         .handle_incoming(
             connection_id,
@@ -771,14 +737,7 @@ fn rollout_path_for_session(
     data_root: &Path,
     session: &devo_protocol::native::session::Session,
 ) -> std::path::PathBuf {
-    let timestamp = session
-        .created_at
-        .to_rfc3339_opts(SecondsFormat::Secs, true)
-        .replace(':', "-");
     data_root
         .join("sessions")
-        .join(format!("{:04}", session.created_at.year()))
-        .join(format!("{:02}", session.created_at.month()))
-        .join(format!("{:02}", session.created_at.day()))
-        .join(format!("rollout-{timestamp}-{}.jsonl", session.id))
+        .join(format!("{}.jsonl", session.id))
 }

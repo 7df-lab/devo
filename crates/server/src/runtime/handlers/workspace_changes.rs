@@ -2,8 +2,7 @@ use super::super::*;
 
 impl ServerRuntime {
     /// Native `workspace/changes/read` (L2-DES-APP-008): the desktop
-    /// client's diff read model; translates into the legacy machinery and
-    /// projects views to the canonical camelCase shape.
+    /// client's diff read model.
     pub(crate) async fn handle_native_workspace_changes_read(
         self: &Arc<Self>,
         request_id: serde_json::Value,
@@ -20,13 +19,7 @@ impl ServerRuntime {
                     );
                 }
             };
-        let Ok(session_id) = SessionId::try_from(params.session_id.as_str()) else {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::SessionNotFound,
-                "session id is not addressable by this server",
-            );
-        };
+        let session_id = params.session_id;
         let turn_id: Option<TurnId> = params.turn_id.as_ref().and_then(|turn_id| {
             serde_json::from_value(serde_json::Value::String(turn_id.as_str().to_string())).ok()
         });
@@ -36,7 +29,7 @@ impl ServerRuntime {
                 cwd: params.cwd,
                 scopes: params.scopes,
                 base_branch: params.base_branch,
-                turn_id,
+                turn_id: turn_id.as_ref().map(|id| *id),
                 diff_detail: params.diff_detail,
                 max_diff_bytes: params.max_diff_bytes,
                 ignore_whitespace: params.ignore_whitespace,
@@ -47,12 +40,7 @@ impl ServerRuntime {
         match views {
             Ok(views) => serde_json::to_value(SuccessResponse {
                 id: request_id,
-                result: devo_protocol::native::rpc_workspace::WorkspaceChangesReadResult {
-                    views: views
-                        .into_iter()
-                        .map(devo_protocol::native::rpc_workspace::WorkspaceChangeView::from)
-                        .collect(),
-                },
+                result: devo_protocol::native::rpc_workspace::WorkspaceChangesReadResult { views },
             })
             .expect("serialize canonical workspace/changes/read response"),
             Err((code, message)) => self.error_response(request_id, code, message),
@@ -97,7 +85,6 @@ impl ServerRuntime {
             .or(session_handle.turn_reservation_snapshot().await);
         let Some(cwd) = params
             .cwd
-            .clone()
             .or_else(|| reservation.as_ref().map(|r| r.summary.cwd.clone()))
         else {
             return Err((
@@ -107,10 +94,10 @@ impl ServerRuntime {
         };
         let active_turn_id = reservation
             .as_ref()
-            .and_then(|r| r.active_turn.as_ref().map(|turn| turn.turn_id));
+            .and_then(|r| r.active_turn.as_ref().map(|turn| turn.turn_id()));
         let latest_turn_id = reservation
             .as_ref()
-            .and_then(|r| r.latest_turn.as_ref().map(|turn| turn.turn_id));
+            .and_then(|r| r.latest_turn.as_ref().map(|turn| turn.turn_id()));
         let ignore_whitespace = params.ignore_whitespace.unwrap_or(false);
         let path_filter = params
             .paths

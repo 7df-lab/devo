@@ -119,21 +119,61 @@ impl ToolHandler for ToolSearchHandler {
         let selection = if is_select_query(query) {
             query.to_string()
         } else {
-            let mut selection = String::from(SELECT_QUERY_PREFIX);
+            let mut names: Vec<String> = Vec::new();
             for name in self.search(query, limit) {
                 if resolve_tool_policy(name, &config) == PromptLoadingPolicy::Hidden {
                     continue;
                 }
-                if selection.len() > SELECT_QUERY_PREFIX.len() {
-                    selection.push(',');
-                }
-                selection.push_str(name);
+                names.push(name.to_string());
             }
-            if selection.len() == SELECT_QUERY_PREFIX.len() {
+            // Keyword searches must also surface DIRECTLY-available tools:
+            // the bm25 index only covers deferred tools, so a query like
+            // "echo" or "mcp" dead-ended with "No matching deferred tools"
+            // even when a directly-callable tool matched by name or
+            // description. Report those as already-available (nothing to
+            // load) instead of a false "not found".
+            //
+            // Multi-term queries ("update_plan|todo|plan") never
+            // substring-match a whole tool name, so also match per token:
+            // preloaded tools are absent from the bm25 index, and without
+            // the token fallback they would be undiscoverable by any query
+            // that is not an exact name substring.
+            let query_lower = query.to_ascii_lowercase();
+            let query_tokens: Vec<&str> = query_lower
+                .split(|ch: char| !ch.is_ascii_alphanumeric())
+                .filter(|token| token.len() >= 2)
+                .collect();
+            for definition in &self.definitions {
+                if resolve_tool_policy(&definition.name, &config) != PromptLoadingPolicy::Preloaded
+                {
+                    continue;
+                }
+                if names.contains(&definition.name) {
+                    continue;
+                }
+                let name_lower = definition.name.to_ascii_lowercase();
+                let name_hit = name_lower.contains(&query_lower)
+                    || query_tokens.iter().any(|token| name_lower.contains(token));
+                let description_hit = definition
+                    .description
+                    .to_ascii_lowercase()
+                    .contains(&query_lower);
+                if name_hit || description_hit {
+                    names.push(definition.name.clone());
+                }
+            }
+            if names.is_empty() {
                 return Ok(ToolResult::success(
                     ToolResultContent::Text("No matching deferred tools found.".to_string()),
                     "No tools available",
                 ));
+            }
+            let mut selection = String::from(SELECT_QUERY_PREFIX);
+            for name in names {
+                if selection.len() > SELECT_QUERY_PREFIX.len() {
+                    selection.push(',');
+                }
+                selection.push_str(&name);
             }
             selection
         };
@@ -142,7 +182,7 @@ impl ToolHandler for ToolSearchHandler {
             ToolCallError::InternalError("loaded deferred tool state lock poisoned".into())
         })?;
         let result = execute_tool_search(
-            &ctx.session_id,
+            ctx.session_id.as_str(),
             &selection,
             &self.definitions,
             &mut loaded_tools,
@@ -251,6 +291,35 @@ mod tests {
             description: description.to_string(),
             input_schema: schema,
             output_schema: None,
+        }
+    }
+
+    fn dummy_context() -> ToolContext {
+        ToolContext {
+            output_store: None,
+            tool_call_id: crate::invocation::ToolCallId("call".to_string()),
+            session_id: "session-1".into(),
+            turn_id: Some("turn-1".into()),
+            workspace_root: std::path::PathBuf::from("."),
+            budgets: crate::contracts::ToolBudgets {
+                output_limit_bytes: 1024,
+                wall_time_limit_ms: None,
+            },
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            agent_scope: ToolAgentScope::Parent,
+            collaboration_mode: devo_protocol::CollaborationMode::Build,
+            agent_coordinator: None,
+            client_filesystem: None,
+            file_read_ledger: None,
+            network_proxy: None,
+            network_no_proxy: None,
+            sandbox_permission_overlay: None,
+            sandbox_profile: None,
+            kernel: None,
+            python_cell_first_wait_ms: None,
+            python_cell_watch: None,
+            python_cell_completion: None,
+            session_dir: None,
         }
     }
 
@@ -415,6 +484,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn select_returns_schema_definition_and_loads_deferred_tool() {
+        // Regression: select: used to reply "Already available … call these
+        // tools directly without loading" with no schema attached, so models
+        // behind deferred-tool gateways could never actually call the tool
+        // and looped on the same ToolSearch call dozens of times.
+        let loaded_tools = Arc::new(Mutex::new(LoadedDeferredTools::default()));
+        let handler = ToolSearchHandler::new(
+            vec![
+                (
+                    definition(
+                        "ipython",
+                        "Execute Python code in the session RLM kernel.",
+                        serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "code": { "type": "string", "description": "Python source" }
+                            },
+                            "required": ["code"]
+                        }),
+                    ),
+                    None,
+                ),
+                (
+                    definition(
+                        "ToolSearch",
+                        "Search available tools.",
+                        serde_json::json!({"type": "object"}),
+                    ),
+                    None,
+                ),
+            ],
+            Arc::clone(&loaded_tools),
+            DeferredLoadingConfig::default(),
+        );
+
+        let result = handler
+            .handle(
+                dummy_context(),
+                serde_json::json!({ "query": "select:ipython" }),
+                None,
+            )
+            .await
+            .expect("select should succeed");
+        let ToolResultContent::Text(text) = result.content else {
+            panic!("expected text result");
+        };
+        assert!(text.contains("ipython"), "missing tool name in: {text}");
+        assert!(text.contains("<function>"), "missing definition in: {text}");
+        assert!(
+            text.contains("\"properties\""),
+            "missing schema body in: {text}"
+        );
+        let loaded_tools = loaded_tools.lock().expect("loaded tools");
+        assert!(loaded_tools.is_loaded("session-1", "ipython"));
+    }
+
+    #[tokio::test]
+    async fn keyword_search_surfaces_deferred_tool_by_name_tokens() {
+        // Regression: a query like "update_plan|todo|plan" (the shape models
+        // emit when unsure of the exact name) dead-ended with "No matching
+        // deferred tools found" even though a deferred `update_plan` was
+        // registered — bm25 tokenization missed it and the name-substring
+        // fallback only scanned Preloaded tools.
+        let handler = ToolSearchHandler::new(
+            vec![
+                (
+                    definition(
+                        "ipython",
+                        "Execute Python code in the session RLM kernel.",
+                        serde_json::json!({"type": "object"}),
+                    ),
+                    None,
+                ),
+                (
+                    definition(
+                        "update_plan",
+                        "Updates the task plan.\nProvide an optional explanation and a list of plan items, each with a step and status.",
+                        serde_json::json!({"type": "object"}),
+                    ),
+                    None,
+                ),
+            ],
+            Arc::new(Mutex::new(LoadedDeferredTools::default())),
+            DeferredLoadingConfig::default(),
+        );
+        for query in ["update_plan|todo|plan", "plan todo", "update plan"] {
+            let result = handler
+                .handle(dummy_context(), serde_json::json!({ "query": query }), None)
+                .await
+                .unwrap_or_else(|error| panic!("query {query:?} should succeed: {error:?}"));
+            let ToolResultContent::Text(text) = result.content else {
+                panic!("expected text result for {query:?}");
+            };
+            assert!(
+                text.contains("update_plan"),
+                "query {query:?} should surface update_plan, got: {text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn keyword_search_surfaces_directly_available_tool() {
+        // Direct (preloaded) tools are not in the bm25 deferred index; a
+        // keyword query matching one by name or description must report it
+        // as already-available instead of dead-ending with "no matching".
+        let handler = ToolSearchHandler::new(
+            vec![
+                (
+                    definition(
+                        "mcp__echo_test__mcp_echo",
+                        "Echo back the input text prefixed with MCP-ECHO-OK.",
+                        serde_json::json!({"type": "object"}),
+                    ),
+                    None,
+                ),
+                (
+                    definition(
+                        "mcp__docs__search",
+                        "Search docs",
+                        serde_json::json!({"type": "object"}),
+                    ),
+                    Some("mcp__docs__search docs knowledge base query".to_string()),
+                ),
+            ],
+            Arc::new(Mutex::new(LoadedDeferredTools::default())),
+            DeferredLoadingConfig::default(),
+        );
+
+        for query in ["echo", "mcp", "MCP-ECHO-OK"] {
+            let result = handler
+                .handle(
+                    ToolContext {
+                        output_store: None,
+                        tool_call_id: crate::invocation::ToolCallId("call".to_string()),
+                        session_id: "session-1".into(),
+                        turn_id: Some("turn-1".into()),
+                        workspace_root: std::path::PathBuf::from("."),
+                        budgets: crate::contracts::ToolBudgets {
+                            output_limit_bytes: 1024,
+                            wall_time_limit_ms: None,
+                        },
+                        cancel_token: tokio_util::sync::CancellationToken::new(),
+                        agent_scope: ToolAgentScope::Parent,
+                        collaboration_mode: devo_protocol::CollaborationMode::Build,
+                        agent_coordinator: None,
+                        client_filesystem: None,
+                        file_read_ledger: None,
+                        network_proxy: None,
+                        network_no_proxy: None,
+                        sandbox_permission_overlay: None,
+                        sandbox_profile: None,
+                        kernel: None,
+                        python_cell_first_wait_ms: None,
+                        python_cell_watch: None,
+                        python_cell_completion: None,
+                        session_dir: None,
+                    },
+                    serde_json::json!({ "query": query }),
+                    None,
+                )
+                .await
+                .expect("tool search should succeed");
+            let text = match result.content {
+                ToolResultContent::Text(text) => text,
+                _ => String::new(),
+            };
+            assert!(
+                text.contains("mcp__echo_test__mcp_echo"),
+                "query {query:?} should surface the direct tool: {text}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn natural_language_search_returns_matching_available_tool() {
         let loaded_tools = Arc::new(Mutex::new(LoadedDeferredTools::default()));
         let handler = ToolSearchHandler::new(
@@ -444,8 +687,8 @@ mod tests {
                 ToolContext {
                     output_store: None,
                     tool_call_id: crate::invocation::ToolCallId("call".to_string()),
-                    session_id: "session-1".to_string(),
-                    turn_id: Some("turn-1".to_string()),
+                    session_id: "session-1".into(),
+                    turn_id: Some("turn-1".into()),
                     workspace_root: std::path::PathBuf::from("."),
                     budgets: crate::contracts::ToolBudgets {
                         output_limit_bytes: 1024,
@@ -461,6 +704,11 @@ mod tests {
                     network_no_proxy: None,
                     sandbox_permission_overlay: None,
                     sandbox_profile: None,
+                    kernel: None,
+                    python_cell_first_wait_ms: None,
+                    python_cell_watch: None,
+                    python_cell_completion: None,
+                    session_dir: None,
                 },
                 serde_json::json!({ "query": "knowledge base" }),
                 None,
@@ -469,8 +717,19 @@ mod tests {
             .expect("tool search should succeed");
 
         assert_eq!(result.result_summary, "Tools available");
+        // Keyword matches are composed into a select: by the handler, so the
+        // surfaced deferred tool is actually loaded (and its definition is
+        // attached) — "found but uncallable" was the original loop bug.
         let loaded_tools = loaded_tools.lock().expect("loaded tools");
-        assert!(!loaded_tools.is_loaded("session-1", "mcp__docs__search"));
+        assert!(loaded_tools.is_loaded("session-1", "mcp__docs__search"));
+        let ToolResultContent::Text(text) = result.content else {
+            panic!("expected text result");
+        };
+        assert!(text.contains("<function>"), "missing definition in: {text}");
+        assert!(
+            text.contains("\"name\":\"mcp__docs__search\""),
+            "missing schema name in: {text}"
+        );
     }
 
     #[tokio::test]
@@ -584,8 +843,8 @@ mod tests {
                     ToolContext {
                         output_store: None,
                         tool_call_id: crate::invocation::ToolCallId(format!("call-{requested}")),
-                        session_id: "session-1".to_string(),
-                        turn_id: Some("turn-1".to_string()),
+                        session_id: "session-1".into(),
+                        turn_id: Some("turn-1".into()),
                         workspace_root: std::path::PathBuf::from("."),
                         budgets: crate::contracts::ToolBudgets {
                             output_limit_bytes: 1024,
@@ -601,6 +860,11 @@ mod tests {
                         network_no_proxy: None,
                         sandbox_permission_overlay: None,
                         sandbox_profile: None,
+                        kernel: None,
+                        python_cell_first_wait_ms: None,
+                        python_cell_watch: None,
+                        python_cell_completion: None,
+                        session_dir: None,
                     },
                     serde_json::json!({ "query": format!("select:{requested}") }),
                     None,

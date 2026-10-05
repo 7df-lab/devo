@@ -1,3 +1,4 @@
+import { nativeItemType } from "@devo-ai/sdk/v2/client"
 import { cn } from "@devo/ui/lib/utils"
 import { useAtomValue } from "jotai"
 import {
@@ -9,32 +10,26 @@ import {
 	XCircleIcon,
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
-import { messagesFamily } from "../../atoms/messages"
-import { partStorageKey, partsFamily } from "../../atoms/parts"
-import { appStore } from "../../atoms/store"
+import { itemsFamily } from "../../atoms/messages"
 import { streamingVersionFamily } from "../../atoms/streaming"
 import { todosFamily } from "../../atoms/todos"
 import type { Todo } from "../../lib/types"
 
+/** Native camelCase todo/plan statuses only — no snake_case aliases. */
 function normalizeTodoStatus(status: string): string {
 	switch (status) {
 		case "completed":
-			return "completed"
-		case "in_progress":
 		case "inProgress":
-			return "in_progress"
 		case "cancelled":
-			return "cancelled"
+		case "pending":
+			return status
 		default:
 			return "pending"
 	}
 }
 
-function todosFromPlanPart(part: { type: string; metadata?: Record<string, unknown> }): Todo[] | null {
-	if (part.type !== "text") return null
-	const kind = part.metadata?.["devo/itemKind"]
-	if (kind !== "plan") return null
-	const raw = part.metadata?.planEntries
+function todosFromPlanItem(item: Record<string, unknown>): Todo[] | null {
+	const raw = item.entries
 	if (!Array.isArray(raw) || raw.length === 0) return null
 	const todos = raw
 		.map((entry) => {
@@ -58,44 +53,26 @@ function todosFromPlanPart(part: { type: string; metadata?: Record<string, unkno
  *
  * Priority order:
  * 1. Store `todos[sessionId]` — set by `todo.updated` Native events (real-time)
- * 2. Fallback: last Native `plan` text part's `planEntries` (session reload)
- * 3. Fallback: last `todowrite` tool part (legacy)
+ * 2. Fallback: last Native `plan` item's `entries` (session reload)
  */
 function useSessionTodos(sessionId: string | null): Todo[] {
 	const storeTodos = useAtomValue(todosFamily(sessionId ?? ""))
-	const storeMessages = useAtomValue(messagesFamily(sessionId ?? ""))
+	const storeItems = useAtomValue(itemsFamily(sessionId ?? ""))
 	const streamingVersion = useAtomValue(streamingVersionFamily(sessionId ?? ""))
 
 	return useMemo(() => {
-		// If we have Native-pushed todos, prefer those — they're the most up-to-date
 		if (storeTodos && storeTodos.length > 0) return storeTodos
 
-		// Fallback: walk messages backwards for plan entries or legacy todowrite
-		if (!storeMessages || storeMessages.length === 0) return []
-		// streamingVersion in deps triggers recomputation when parts update
+		if (!storeItems || storeItems.length === 0) return []
 		void streamingVersion
-		const sid = sessionId ?? ""
-		for (let i = storeMessages.length - 1; i >= 0; i--) {
-			const msg = storeMessages[i]
-			const parts = appStore.get(partsFamily(partStorageKey(sid, msg.id)))
-			if (!parts) continue
-			for (let j = parts.length - 1; j >= 0; j--) {
-				const part = parts[j]
-				const fromPlan = todosFromPlanPart(part)
-				if (fromPlan) return fromPlan
-				if (part.type === "tool" && part.tool === "todowrite") {
-					const todos = part.state.input?.todos as Todo[] | undefined
-					if (todos && todos.length > 0) {
-						return todos.map((todo) => ({
-							...todo,
-							status: normalizeTodoStatus(String(todo.status ?? "pending")),
-						}))
-					}
-				}
-			}
+		for (let i = storeItems.length - 1; i >= 0; i--) {
+			const envelope = storeItems[i]
+			if (nativeItemType(envelope) !== "plan") continue
+			const fromPlan = todosFromPlanItem(envelope.item)
+			if (fromPlan) return fromPlan
 		}
 		return []
-	}, [storeTodos, storeMessages, streamingVersion, sessionId])
+	}, [storeTodos, storeItems, streamingVersion, sessionId])
 }
 
 /** Compact status icon for a todo item */
@@ -103,7 +80,7 @@ function TodoStatusIcon({ status }: { status: string }) {
 	switch (normalizeTodoStatus(status)) {
 		case "completed":
 			return <CheckCircle2Icon className="size-3.5 text-emerald-500/80" />
-		case "in_progress":
+		case "inProgress":
 			return <Loader2Icon className="size-3.5 animate-spin text-blue-400/80" />
 		case "cancelled":
 			return <XCircleIcon className="size-3.5 text-muted-foreground/30" />
@@ -127,7 +104,7 @@ export function SessionTaskList({ sessionId }: SessionTaskListProps) {
 	const scrollRef = useRef<HTMLDivElement>(null)
 
 	const activeTask = useMemo(
-		() => todos.find((t) => normalizeTodoStatus(t.status) === "in_progress"),
+		() => todos.find((t) => normalizeTodoStatus(t.status) === "inProgress"),
 		[todos],
 	)
 
@@ -206,7 +183,7 @@ export function SessionTaskList({ sessionId }: SessionTaskListProps) {
 													? "text-muted-foreground/50 line-through"
 													: todo.status === "cancelled"
 														? "text-muted-foreground/40 line-through"
-														: todo.status === "in_progress"
+														: todo.status === "inProgress"
 															? "text-foreground"
 															: "text-muted-foreground",
 											)}

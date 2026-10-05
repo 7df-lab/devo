@@ -34,13 +34,14 @@ impl ToolIntentJournal for Journal {
 }
 
 struct CountedTool {
+    inner: StaticTool,
     calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
 impl ToolHandler for CountedTool {
     fn spec(&self) -> &ToolSpec {
-        MutatingTool.spec()
+        self.inner.spec()
     }
 
     async fn handle(
@@ -50,7 +51,7 @@ impl ToolHandler for CountedTool {
         progress: Option<crate::tools::ToolProgressSender>,
     ) -> Result<crate::tools::ToolResult, crate::tools::ToolCallError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        MutatingTool.handle(context, input, progress).await
+        self.inner.handle(context, input, progress).await
     }
 }
 
@@ -63,6 +64,7 @@ async fn journal_failures_stop_dispatch_or_model_continuation() {
         builder.register_handler(
             "mutating_tool",
             Arc::new(CountedTool {
+                inner: mutating_tool(),
                 calls: calls.clone(),
             }),
         );
@@ -73,9 +75,10 @@ async fn journal_failures_stop_dispatch_or_model_continuation() {
         ));
         let registry = Arc::new(builder.build());
         let runtime = ToolRuntime::new_without_permissions(registry.clone());
-        let provider = Arc::new(SingleToolUseProvider {
-            requests: AtomicUsize::new(0),
-        });
+        let provider = Arc::new(ScriptedProvider::scripted(
+            "test-provider",
+            StreamScript::SingleMutating,
+        ));
         let journal = Arc::new(Journal {
             state: Mutex::new(ExecutionReplay::default()),
             fault: Some(fault),
@@ -99,7 +102,7 @@ async fn journal_failures_stop_dispatch_or_model_continuation() {
         assert_eq!(
             (
                 calls.load(Ordering::SeqCst),
-                provider.requests.load(Ordering::SeqCst)
+                provider.attempts.load(Ordering::SeqCst)
             ),
             (expected_calls, 1)
         );
@@ -128,9 +131,10 @@ async fn acknowledged_final_response_only_finishes_bookkeeping() {
         state: Mutex::new(replay),
         fault: None,
     });
-    let provider = Arc::new(SingleToolUseProvider {
-        requests: AtomicUsize::new(0),
-    });
+    let provider = Arc::new(ScriptedProvider::scripted(
+        "test-provider",
+        StreamScript::SingleMutating,
+    ));
     let registry = Arc::new(ToolRegistry::new());
     let runtime = ToolRuntime::new_without_permissions(registry.clone());
     let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
@@ -150,7 +154,7 @@ async fn acknowledged_final_response_only_finishes_bookkeeping() {
     .unwrap();
     assert_eq!(
         (
-            provider.requests.load(Ordering::SeqCst),
+            provider.attempts.load(Ordering::SeqCst),
             session.prompt_source_messages()
         ),
         (0, messages.as_slice())

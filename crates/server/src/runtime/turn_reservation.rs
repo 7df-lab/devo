@@ -51,25 +51,45 @@ impl ServerRuntime {
         }
     }
 
-    pub(super) async fn runtime_active_turn_id(&self, session_id: SessionId) -> Option<TurnId> {
+    pub(super) async fn runtime_active_turn_id(
+        &self,
+        session_id: devo_protocol::native::ids::SessionId,
+    ) -> Option<devo_protocol::native::ids::TurnId> {
         self.active_turns.active_turn_id(session_id).await
+    }
+
+    pub(super) async fn add_active_turn_user_text(
+        &self,
+        session_id: devo_protocol::native::ids::SessionId,
+        turn_id: devo_protocol::native::ids::TurnId,
+        text: String,
+    ) {
+        self.active_turns
+            .add_active_user_text(session_id, turn_id, text)
+            .await;
     }
 
     pub(super) async fn register_runtime_active_turn(
         &self,
-        session_id: SessionId,
-        turn: TurnMetadata,
+        session_id: devo_protocol::native::ids::SessionId,
+        turn: crate::turn::RuntimeTurn,
     ) {
         self.active_turns
-            .register_turn_metadata(session_id, turn)
+            .register_turn(session_id, turn.native)
             .await;
     }
 
-    pub(super) async fn clear_active_turn_interrupt_handles(&self, session_id: SessionId) {
+    pub(super) async fn clear_active_turn_interrupt_handles(
+        &self,
+        session_id: devo_protocol::native::ids::SessionId,
+    ) {
         self.active_turns.clear_interrupt_handles(session_id).await;
     }
 
-    pub(super) async fn clear_active_turn_runtime_handles(&self, session_id: SessionId) {
+    pub(super) async fn clear_active_turn_runtime_handles(
+        &self,
+        session_id: devo_protocol::native::ids::SessionId,
+    ) {
         self.active_turns.clear_runtime_handles(session_id).await;
     }
 }
@@ -79,71 +99,15 @@ mod tests {
     use super::*;
 
     use anyhow::Result;
-    use async_trait::async_trait;
-    use devo_core::AppConfigStore;
-    use devo_core::BundledSkillsConfig;
-    use devo_core::FileSystemSkillCatalog;
-    use devo_core::PresetModelCatalog;
-    use devo_core::SkillsConfig;
-    use devo_core::tools::ToolRegistry;
     use devo_protocol::ErrorResponse;
-    use devo_protocol::ModelRequest;
-    use devo_protocol::ModelResponse;
-    use devo_protocol::StreamEvent;
     use devo_protocol::SuccessResponse;
-    use devo_provider::ModelProviderSDK;
-    use devo_provider::SingleProviderRouter;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
-    struct NoopProvider;
-
-    #[async_trait]
-    impl ModelProviderSDK for NoopProvider {
-        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-            anyhow::bail!("noop provider does not support completion")
-        }
-
-        async fn completion_stream(
-            &self,
-            _request: ModelRequest,
-        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>>
-        {
-            anyhow::bail!("noop provider does not support streaming")
-        }
-
-        fn name(&self) -> &str {
-            "noop-provider"
-        }
-    }
-
     fn build_runtime(data_root: &std::path::Path) -> Arc<ServerRuntime> {
-        let provider: Arc<dyn ModelProviderSDK> = Arc::new(NoopProvider);
-        let db = Arc::new(
-            crate::db::Database::open(data_root.join("turn_reservation.db"))
-                .expect("open test database"),
-        );
-        ServerRuntime::new(
-            data_root.to_path_buf(),
-            ServerRuntimeDependencies::new(
-                Arc::clone(&provider),
-                Arc::new(SingleProviderRouter::new(provider)),
-                Arc::new(ToolRegistry::new()),
-                crate::empty_mcp_manager(),
-                "test-model".to_string(),
-                Arc::new(PresetModelCatalog::default()),
-                Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                    bundled: Some(BundledSkillsConfig { enabled: false }),
-                    ..SkillsConfig::default()
-                })),
-                devo_core::AgentsMdConfig::default(),
-                db,
-                Arc::new(std::sync::Mutex::new(
-                    AppConfigStore::load(data_root.to_path_buf(), None)
-                        .expect("load app config store"),
-                )),
-            ),
-        )
+        crate::test_support::TestRuntime::noop()
+            .db_file("turn_reservation.db")
+            .runtime(data_root)
     }
 
     async fn start_session(runtime: &Arc<ServerRuntime>, cwd: std::path::PathBuf) -> SessionId {
@@ -164,7 +128,7 @@ mod tests {
             .await;
         let response: SuccessResponse<SessionStartResult> =
             serde_json::from_value(value).expect("session start response");
-        response.result.session.session_id
+        SessionId::from(response.result.session.id.as_str())
     }
 
     #[tokio::test]
@@ -178,26 +142,35 @@ mod tests {
             .await
             .expect("turn reservation snapshot");
         let turn_config = reservation.runtime_context.resolve_turn_config(None, None);
-        let active_turn = TurnMetadata {
-            turn_id: TurnId::new(),
-            session_id,
-            sequence: 1,
-            status: TurnStatus::Running,
-            kind: devo_core::TurnKind::Regular,
-            model: "test-model".to_string(),
-            model_binding_id: None,
-            reasoning_effort_selection: None,
-            reasoning_effort: None,
-            request_model: "test-model".to_string(),
-            request_thinking: None,
-            started_at: Utc::now(),
-            completed_at: None,
-            usage: None,
-            stop_reason: None,
-            failure_reason: None,
-        };
+        let native_turn_id = devo_protocol::native::ids::TurnId::new();
+        let native_session_id = reservation.summary.native.id;
+        let active_turn = crate::turn::RuntimeTurn::new(
+            devo_protocol::native::turn::Turn {
+                id: native_turn_id,
+                session_id: native_session_id,
+                sequence: 1,
+                status: devo_protocol::native::turn::TurnStatus::InProgress,
+                kind: devo_protocol::native::turn::TurnKind::Regular,
+                model: devo_protocol::native::model::ModelBinding {
+                    provider: "unknown".to_string(),
+                    model: "test-model".to_string(),
+                    variant: None,
+                    reasoning_effort: None,
+                },
+                collaboration_mode: None,
+                started_at: Utc::now(),
+                completed_at: None,
+                usage: None,
+                error: None,
+            },
+            crate::turn::RuntimeTurnExtras {
+                request_thinking: None,
+                stop_reason: None,
+                failure_reason: None,
+            },
+        );
         session_handle
-            .begin_active_turn(active_turn, turn_config)
+            .begin_runtime_turn(active_turn, turn_config)
             .await;
 
         let value = runtime
@@ -206,7 +179,7 @@ mod tests {
                 serde_json::json!(2),
                 TurnStartParams {
                     session_id,
-                    input: vec![devo_protocol::InputItem::Text {
+                    input: vec![devo_protocol::native::item::UserInput::Text {
                         text: "must not queue".to_string(),
                     }],
                     model: None,

@@ -18,6 +18,8 @@ devo-client = { workspace = true }
 devo-core = { workspace = true }
 devo-execpolicy = { workspace = true }
 devo-file-search = { workspace = true }
+devo-harness = { workspace = true }
+devo-kernel = { workspace = true }
 devo-mcp = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }
@@ -33,6 +35,7 @@ futures = { workspace = true }
 fs2 = { workspace = true }
 jsonrepair = { workspace = true }
 lru = { workspace = true }
+libc = { workspace = true }
 rusqlite = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

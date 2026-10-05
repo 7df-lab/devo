@@ -212,7 +212,7 @@ function updateTrayTitle(
 	if (IS_MAC) {
 		// Show counts next to the tray icon
 		const busyCount = Array.from(liveSessions.values()).filter(
-			(s) => !s.parentID && (s.status === "busy" || s.status === "retry"),
+			(s) => !s.parentId && (s.status === "busy" || s.status === "retry"),
 		).length
 
 		let title = ""
@@ -226,9 +226,9 @@ function updateTrayTitle(
 	}
 
 	// Update tooltip with summary
-	const totalSessions = Array.from(liveSessions.values()).filter((s) => !s.parentID).length
+	const totalSessions = Array.from(liveSessions.values()).filter((s) => !s.parentId).length
 	const busyCount = Array.from(liveSessions.values()).filter(
-		(s) => !s.parentID && (s.status === "busy" || s.status === "retry"),
+		(s) => !s.parentId && (s.status === "busy" || s.status === "retry"),
 	).length
 
 	let tooltip = "Devo"
@@ -260,8 +260,9 @@ async function refreshDiscovery(): Promise<void> {
 }
 
 async function refreshDiscoveryForServer(): Promise<void> {
+	let client: ReturnType<typeof createDevoClient> | null = null
 	try {
-		const client = createDevoClient({ transport: getNativeTransport() })
+		client = createDevoClient({ transport: getNativeTransport() })
 		const [projectsResult, sessionsResult] = await Promise.all([
 			client.project.list(),
 			client.session.list({ roots: true }),
@@ -276,6 +277,8 @@ async function refreshDiscoveryForServer(): Promise<void> {
 		rebuildMenu()
 	} catch (err) {
 		log.warn("Failed to refresh discovery data for tray", err)
+	} finally {
+		client?.dispose()
 	}
 }
 

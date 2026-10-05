@@ -1,137 +1,12 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 
-use chrono::DateTime;
-use chrono::Utc;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::ReasoningEffort;
 use crate::SessionId;
-use crate::SessionTitleState;
-use crate::TurnId;
-use crate::TurnUsage;
-use crate::parse_command::ParsedCommand;
-use crate::permissions::PermissionPreset;
-use crate::protocol::FileChange;
 use crate::turn::CollaborationMode;
-use crate::turn::TurnMetadata;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionRuntimeStatus {
-    Idle,
-    ActiveTurn,
-    WaitingClient,
-    Archived,
-    Unloaded,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-pub struct SessionMetadata {
-    pub session_id: SessionId,
-    pub cwd: PathBuf,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub additional_directories: Vec<PathBuf>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub last_activity_at: DateTime<Utc>,
-    pub title: Option<String>,
-    pub title_state: SessionTitleState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<SessionId>,
-    /// Source session for a user fork; independent of sub-agent parentage.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_from_id: Option<SessionId>,
-    /// Cut turn for a user fork; absent for tip forks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork_at_turn_id: Option<TurnId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_nickname: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_role: Option<String>,
-    pub ephemeral: bool,
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_binding_id: Option<String>,
-    #[serde(default, alias = "thinking", skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort_selection: Option<String>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    pub total_input_tokens: usize,
-    pub total_output_tokens: usize,
-    #[serde(default)]
-    pub total_tokens: usize,
-    pub total_cache_creation_tokens: usize,
-    pub total_cache_read_tokens: usize,
-    pub prompt_token_estimate: usize,
-    /// Structured usage for the latest completed model query.
-    ///
-    /// Context length in the UI is based on this latest-query snapshot (display
-    /// total: provider `total_tokens` when available, otherwise
-    /// `input_tokens + output_tokens`). It is **not** the session cumulative
-    /// `total_input_tokens` / `total_output_tokens` / `total_tokens`.
-    ///
-    /// Refreshed on every completed model invoke so resume and clients can show
-    /// the latest completed-query usage rather than rolling session totals.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_query_usage: Option<TurnUsage>,
-    /// Compatibility scalar for current context-window occupancy.
-    ///
-    /// Prefer [`Self::last_query_usage`] when available for provider query
-    /// accounting. Prefer [`Self::last_context_occupancy`] when available for
-    /// window occupancy (including category breakdown).
-    ///
-    /// When `last_context_occupancy` is set, this should equal
-    /// `last_context_occupancy.total_tokens` (a derived projection, not a
-    /// second independent counter). When occupancy is absent (for example
-    /// before the first completed query, or older resume payloads), this may
-    /// still carry a legacy scalar from `last_query_usage.display_total_tokens()`
-    /// or remain `0`.
-    ///
-    /// Kept for TUI status, resume, and existing `SessionMetadata` consumers
-    /// until they migrate to reading `last_context_occupancy.total_tokens`.
-    /// While a turn is in flight, the UI may temporarily fall back to the live
-    /// prompt estimate instead.
-    pub last_query_total_tokens: usize,
-    /// Source of truth for context-window occupancy and category shares.
-    ///
-    /// Includes `total_tokens`, effective `context_window_tokens`, and
-    /// category breakdown (`base`, `skills`, `toolsBuiltin`, `toolsMcp`,
-    /// `conversation`). New clients should use this for occupancy reads
-    /// (`context/usage/read`, `context/usageUpdated`) rather than inventing a
-    /// second total.
-    ///
-    /// Refreshed on completed turn queries (categories scaled so they sum to
-    /// the latest provider query display total) and immediately after
-    /// successful compaction (conversation bucket replaced; other buckets
-    /// reused). When present, [`Self::last_query_total_tokens`] should mirror
-    /// `total_tokens` as a compatibility projection.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_context_occupancy: Option<crate::native::item::ContextOccupancy>,
-    pub status: SessionRuntimeStatus,
-    /// Collaboration mode restored from the latest completed turn context.
-    ///
-    /// Defaults to [`CollaborationMode::Build`] for older payloads that omit
-    /// the field. Resume and session-switch clients use this to rehydrate the
-    /// composer (Plan vs Build) without waiting for the next turn start.
-    #[serde(default)]
-    pub collaboration_mode: CollaborationMode,
-    /// Session override for the absolute effective context window (tokens).
-    ///
-    /// When set, clients should treat this as the effective Settings Hub /
-    /// compaction-threshold value on resume (clamped to the model
-    /// `context_window`). Absent means use the model-derived
-    /// `effective_context_window()`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effective_context_window: Option<u64>,
-    /// Permission preset restored from session durable metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_preset: Option<PermissionPreset>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionStartParams {
@@ -145,9 +20,9 @@ pub struct SessionStartParams {
     pub model_binding_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionStartResult {
-    pub session: SessionMetadata,
+    pub session: crate::native::session::Session,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -157,125 +32,59 @@ pub struct SessionResumeParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionResumeResult {
-    pub session: SessionMetadata,
-    pub latest_turn: Option<TurnMetadata>,
+    pub session: crate::native::session::Session,
+    pub latest_turn: Option<crate::native::turn::Turn>,
     pub loaded_item_count: u64,
-    pub history_items: Vec<SessionHistoryItem>,
+    /// In-memory history for ACP resume projection. First-party Native clients
+    /// should use `session/items/list` instead of this field.
+    pub history_items: Vec<SessionHistoryEntry>,
     /// Pending turn input texts queued for the next turn.
     pub pending_texts: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionHistoryItemKind {
-    User,
-    Assistant,
-    Reasoning,
-    ToolCall,
-    ToolResult,
-    CommandExecution,
-    Error,
-    TurnSummary,
-    ContextCompaction,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionPlanStepStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-pub struct SessionPlanStep {
-    pub text: String,
-    pub status: SessionPlanStepStatus,
-}
-
+/// Server-owned history row.
+///
+/// **Live / first-party path:** only [`SessionHistoryEntry::Item`] (Native
+/// [`crate::native::item::Item`], including terminal
+/// [`crate::native::item::Item::Warning`] for turn failures). Native `Turn`
+/// status/timing is the turn summary source — do not invent parallel summary
+/// vocabulary on this enum for new writes.
+///
+/// **Leftover (migrate / ACP):** `TurnSummary` / `Error` remain so packed
+/// legacy `TurnItem::TurnSummary` and older resume payloads can still project
+/// into ACP thought/error updates. Do not emit them from live finalize.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SessionHistoryMetadata {
-    Explored {
-        actions: Vec<ParsedCommand>,
+#[serde(
+    tag = "entryType",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+// Wire DTO: boxing the Item variant would break nested exhaustive matches on
+// the entry enum across protocol consumers.
+#[allow(clippy::large_enum_variant)]
+pub enum SessionHistoryEntry {
+    Item {
+        item: crate::native::item::Item,
     },
-    Edited {
-        changes: HashMap<PathBuf, FileChange>,
-    },
-    PlanUpdate {
-        explanation: Option<String>,
-        steps: Vec<SessionPlanStep>,
-    },
-    /// Markdown Proposed Plan from Plan mode (not the `update_plan` checklist).
-    ///
-    /// Body text lives on [`SessionHistoryItem::body`]. Resume uses this to
-    /// rebuild the Proposed Plan cell and reopen Implement/Revise actions.
-    ProposedPlan,
-    /// Collaboration mode for a restored turn-summary row (`▣ PLAN · …`).
-    ///
-    /// Defaults to [`CollaborationMode::Build`] when older payloads omit the
-    /// field. Resume uses this so Plan turns do not render as Build.
+    /// Migrate/ACP-only synthetic row (not written by live finalize).
     TurnSummary {
+        title: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
         #[serde(default)]
         collaboration_mode: CollaborationMode,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-pub struct SessionHistoryToolIo {
-    pub tool_name: String,
-    pub input: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<serde_json::Value>,
-    /// Optional human-facing rendering of `output`.
-    ///
-    /// Session history keeps the canonical output for replay/debugging and this
-    /// separate text for compact display surfaces.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_content: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-pub struct SessionHistoryItem {
-    pub tool_call_id: Option<String>,
-    pub kind: SessionHistoryItemKind,
-    pub title: String,
-    pub body: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_io: Option<SessionHistoryToolIo>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<SessionHistoryMetadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-}
-
-impl SessionHistoryItem {
-    pub fn new(
-        tool_call_id: Option<String>,
-        kind: SessionHistoryItemKind,
+    /// Migrate/ACP-only synthetic row (live path uses `Item::Warning`).
+    Error {
         title: String,
         body: String,
-    ) -> Self {
-        Self {
-            tool_call_id,
-            kind,
-            title,
-            body,
-            tool_io: None,
-            metadata: None,
-            duration_ms: None,
-        }
-    }
+    },
+}
 
-    pub fn with_tool_io(mut self, tool_io: SessionHistoryToolIo) -> Self {
-        self.tool_io = Some(tool_io);
-        self
-    }
-
-    pub fn with_metadata(mut self, metadata: SessionHistoryMetadata) -> Self {
-        self.metadata = Some(metadata);
-        self
+impl SessionHistoryEntry {
+    pub fn item(item: crate::native::item::Item) -> Self {
+        Self::Item { item }
     }
 }
 
@@ -288,9 +97,9 @@ pub struct SessionForkParams {
     pub user_turn_index: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SessionForkResult {
-    pub session: SessionMetadata,
+    pub session: crate::native::session::Session,
     pub forked_from_session_id: SessionId,
 }
 
@@ -317,123 +126,22 @@ pub struct SessionSubscribeResult {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::SessionTitleState;
 
     #[test]
-    fn session_metadata_roundtrips_with_model_and_reasoning_effort_selection() {
-        let metadata = SessionMetadata {
-            session_id: SessionId::new(),
-            cwd: "/tmp".into(),
-            additional_directories: Vec::new(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            last_activity_at: Utc::now(),
-            title: Some("Test".to_string()),
-            title_state: SessionTitleState::Unset,
-            parent_session_id: None,
-            fork_from_id: None,
-            fork_at_turn_id: None,
-            agent_path: None,
-            agent_nickname: None,
-            agent_role: None,
-            ephemeral: false,
-            model: Some("test-model".to_string()),
-            model_binding_id: Some("test-binding".to_string()),
-            reasoning_effort_selection: Some("medium".to_string()),
-            reasoning_effort: Some(crate::ReasoningEffort::Medium),
-            total_input_tokens: 12,
-            total_output_tokens: 34,
-            total_tokens: 46,
-            total_cache_creation_tokens: 5,
-            total_cache_read_tokens: 7,
-            prompt_token_estimate: 21,
-            last_query_usage: Some(TurnUsage {
-                input_tokens: 10,
-                output_tokens: 11,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                total_tokens: Some(21),
-            }),
-            last_query_total_tokens: 21,
-            last_context_occupancy: None,
-            status: SessionRuntimeStatus::Idle,
-            collaboration_mode: CollaborationMode::Plan,
-            effective_context_window: None,
-            permission_preset: None,
-        };
-
-        let json = serde_json::to_string(&metadata).expect("serialize");
-        let restored: SessionMetadata = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored, metadata);
-    }
-
-    #[test]
-    fn session_metadata_deserializes_without_last_query_usage() {
-        let session_id = SessionId::new();
-        let created_at = Utc::now();
-        let payload = serde_json::json!({
-            "session_id": session_id,
-            "cwd": "/tmp",
-            "created_at": created_at,
-            "updated_at": created_at,
-            "last_activity_at": created_at,
-            "title": null,
-            "title_state": "Unset",
-            "ephemeral": false,
-            "model": null,
-            "reasoning_effort": null,
-            "total_input_tokens": 100,
-            "total_output_tokens": 20,
-            "total_tokens": 120,
-            "total_cache_creation_tokens": 0,
-            "total_cache_read_tokens": 0,
-            "prompt_token_estimate": 50,
-            "last_query_total_tokens": 30,
-            "status": "idle"
+    fn session_history_entry_item_roundtrips() {
+        let entry = SessionHistoryEntry::item(crate::native::item::Item::UserMessage {
+            client_user_message_id: None,
+            content: vec![crate::native::item::UserInput::Text {
+                text: "hello".into(),
+            }],
+            entry: crate::native::item::UserMessageEntry::TurnStart,
         });
-
-        let restored: SessionMetadata =
-            serde_json::from_value(payload).expect("deserialize legacy session metadata");
-        assert_eq!(restored.last_query_usage, None);
-        assert_eq!(restored.last_query_total_tokens, 30);
-        assert_eq!(restored.total_input_tokens, 100);
-        assert_eq!(restored.collaboration_mode, CollaborationMode::Build);
-    }
-
-    #[test]
-    fn session_history_tool_io_is_optional_and_roundtrips() {
-        let legacy: SessionHistoryItem = serde_json::from_str(
-            r#"{
-                "tool_call_id": "call-1",
-                "kind": "tool_call",
-                "title": "read foo.txt",
-                "body": ""
-            }"#,
-        )
-        .expect("deserialize legacy history item");
-        assert_eq!(legacy.tool_io, None);
-
-        let item = SessionHistoryItem::new(
-            Some("call-1".to_string()),
-            SessionHistoryItemKind::ToolCall,
-            "read foo.txt".to_string(),
-            String::new(),
-        )
-        .with_tool_io(SessionHistoryToolIo {
-            tool_name: "read".to_string(),
-            input: serde_json::json!({"filePath": "foo.txt"}),
-            output: None,
-            display_content: None,
-        });
-
-        let json = serde_json::to_string(&item).expect("serialize history item");
-        let restored: SessionHistoryItem =
-            serde_json::from_str(&json).expect("deserialize history item");
-        assert_eq!(restored, item);
+        let json = serde_json::to_string(&entry).expect("serialize history entry");
+        let restored: SessionHistoryEntry =
+            serde_json::from_str(&json).expect("deserialize history entry");
+        assert_eq!(restored, entry);
     }
 }

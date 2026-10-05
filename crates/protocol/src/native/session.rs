@@ -54,6 +54,10 @@ pub struct Session {
     /// so equivalent snapshots produce stable JSON.
     pub flags: Vec<SessionFlag>,
     pub archived: bool,
+    /// Agents View / list tray activity. Server-maintained from `status` +
+    /// `flags` so clients do not re-derive (L2-DES-RLM-001 Agents View).
+    #[serde(default)]
+    pub activity: SessionActivity,
 
     // ── Runtime pointers ──
     /// Invariant: `status == Active` iff `active_turn_id.is_some()`; updated
@@ -86,6 +90,16 @@ pub struct Session {
     /// the session has no readable rollout file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_size_bytes: Option<u64>,
+    /// Approximate user+assistant item count for list / Agents View trays.
+    /// Optional so older snapshots and non-list reads stay compact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u32>,
+    /// Idle-session summary line for Agents View (may be stale).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Coarse task/agent state label when known (`idle`, `working`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_state: Option<String>,
     /// Redundant aggregate of turn usages for list views; the ledger wins on
     /// any disagreement.
     pub usage: SessionUsage,
@@ -96,6 +110,44 @@ pub struct Session {
 pub enum SessionStatus {
     Idle,
     Active,
+}
+
+/// List / Agents View activity. Derived from [`SessionStatus`] + [`SessionFlag`]
+/// on the server (`Session::sync_activity`) so first-party clients read it
+/// directly from Native wire — no client-side projection adapters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionActivity {
+    #[default]
+    Idle,
+    Working,
+}
+
+impl Session {
+    /// Recompute [`Self::activity`] from `status` and `flags`.
+    pub fn sync_activity(&mut self) {
+        self.activity = SessionActivity::from_status_and_flags(self.status, &self.flags);
+    }
+}
+
+impl SessionActivity {
+    pub fn from_status_and_flags(status: SessionStatus, flags: &[SessionFlag]) -> Self {
+        if matches!(status, SessionStatus::Active)
+            || flags.iter().any(|flag| {
+                matches!(
+                    flag,
+                    SessionFlag::Compacting
+                        | SessionFlag::WaitingApproval
+                        | SessionFlag::WaitingUserInput
+                        | SessionFlag::UpdatingGoal
+                )
+            })
+        {
+            Self::Working
+        } else {
+            Self::Idle
+        }
+    }
 }
 
 /// Blocking reasons, stackable on top of `status`. "Waiting" is a flag, not a
@@ -158,6 +210,15 @@ pub struct SessionSettings {
     /// automatic-compaction boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_context_window: Option<u64>,
+    /// Root auto-refine enable (default on when unset). Persist-first via patch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_refine_enabled: Option<bool>,
+    /// Successful user-visible turns between auto-refine runs (default 25).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_refine_turn_interval: Option<u32>,
+    /// First foreground wait (ms) before Python cell wait-policy. Default 180_000 when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_cell_first_wait_ms: Option<u64>,
 }
 
 /// Snapshot semantics: the current value is *copied* into the record at
@@ -193,6 +254,9 @@ mod tests {
                 mode: None,
                 sandbox_profile: None,
                 effective_context_window: None,
+                auto_refine_enabled: None,
+                auto_refine_turn_interval: None,
+                python_cell_first_wait_ms: None,
             };
             let json = serde_json::to_value(&settings).expect("serialize settings");
             assert_eq!(
@@ -203,5 +267,21 @@ mod tests {
             let back: SessionSettings = serde_json::from_value(json).expect("deserialize settings");
             assert_eq!(back.reasoning_effort.as_deref(), Some(literal));
         }
+    }
+
+    #[test]
+    fn activity_from_status_and_flags() {
+        assert_eq!(
+            SessionActivity::from_status_and_flags(SessionStatus::Active, &[]),
+            SessionActivity::Working
+        );
+        assert_eq!(
+            SessionActivity::from_status_and_flags(SessionStatus::Idle, &[SessionFlag::Compacting]),
+            SessionActivity::Working
+        );
+        assert_eq!(
+            SessionActivity::from_status_and_flags(SessionStatus::Idle, &[]),
+            SessionActivity::Idle
+        );
     }
 }

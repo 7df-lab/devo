@@ -68,6 +68,16 @@ pub struct ToolSearchResult {
     pub already_loaded: Vec<String>,
     pub already_available: Vec<String>,
     pub not_found: Vec<String>,
+    /// Rendered `<function>{...}</function>` definitions for every matched
+    /// tool (loaded, already loaded, or already available).
+    ///
+    /// Provider gateways may defer tools behind their own search mechanism
+    /// even when the tool is present in the request's tools array; their
+    /// contract only makes a tool callable once its schema has appeared in
+    /// the conversation. Always attaching the definition satisfies both the
+    /// plain case and that gateway case, and matches the ToolSearch spec
+    /// ("returns the matched tools' complete schema definitions").
+    pub definitions: Vec<String>,
 }
 
 const SUBAGENT_PROHIBITED_AGENT_COORDINATION_TOOLS: &[&str] = &[
@@ -150,6 +160,14 @@ impl ToolSearchResult {
                 self.not_found.join(", ")
             ));
         }
+        if !self.definitions.is_empty() {
+            lines.push(String::new());
+            lines.push(
+                "Full definitions — every tool below is immediately callable exactly as defined:"
+                    .to_string(),
+            );
+            lines.extend(self.definitions.iter().cloned());
+        }
         lines.join("\n")
     }
 }
@@ -180,8 +198,8 @@ pub struct LoadedDeferredTools {
     by_session: HashMap<String, BTreeSet<String>>,
 }
 
-// TODO: should noted that the tool search tool is still a simple tool.
-
+/// ToolSearch is a simple lookup tool: `select:` loads exact names, and any
+/// other query ranks registered tools by name+description tokens.
 impl LoadedDeferredTools {
     pub fn mark_loaded(&mut self, session_id: &str, tool_name: &str) {
         self.by_session
@@ -292,24 +310,75 @@ pub fn assemble_deferred_tool_prompt(
 }
 
 pub fn execute_tool_search(
-    _session_id: &str,
+    session_id: &str,
     query: &str,
     all_tools: &[ToolDefinition],
-    _loaded: &mut LoadedDeferredTools,
+    loaded: &mut LoadedDeferredTools,
     config: &DeferredLoadingConfig,
 ) -> Result<ToolSearchResult, String> {
-    let Some(selection) = query
-        .trim()
+    let query = query.trim();
+    if let Some(selection) = query
         .strip_prefix("select:")
-        .or_else(|| query.trim().strip_prefix("SELECT:"))
-    else {
-        return Err("Expected query format: select:<name>[,<name>...]".to_string());
-    };
+        .or_else(|| query.strip_prefix("SELECT:"))
+    {
+        return execute_select_tool_search(selection, session_id, all_tools, loaded, config);
+    }
 
+    execute_keyword_tool_search(query, all_tools, config)
+}
+
+fn execute_select_tool_search(
+    selection: &str,
+    session_id: &str,
+    all_tools: &[ToolDefinition],
+    loaded: &mut LoadedDeferredTools,
+    config: &DeferredLoadingConfig,
+) -> Result<ToolSearchResult, String> {
     let names = selection
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty());
+    finish_tool_search(names, session_id, all_tools, Some(loaded), config)
+}
+
+fn execute_keyword_tool_search(
+    query: &str,
+    all_tools: &[ToolDefinition],
+    config: &DeferredLoadingConfig,
+) -> Result<ToolSearchResult, String> {
+    if query.is_empty() {
+        return Err("Expected a non-empty search query".to_string());
+    }
+
+    let query_tokens = keyword_tokens(query);
+    if query_tokens.is_empty() {
+        return Err("Expected a non-empty search query".to_string());
+    }
+
+    let mut scored = all_tools
+        .iter()
+        .filter_map(|tool| {
+            let score = keyword_score(&query_tokens, tool);
+            (score > 0).then_some((score, tool.name.as_str()))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(right.1)));
+    finish_tool_search(
+        scored.into_iter().map(|(_, name)| name),
+        /*session_id*/ "",
+        all_tools,
+        /*loaded_state*/ None,
+        config,
+    )
+}
+
+fn finish_tool_search<'a>(
+    names: impl Iterator<Item = &'a str>,
+    session_id: &str,
+    all_tools: &[ToolDefinition],
+    mut loaded_state: Option<&mut LoadedDeferredTools>,
+    config: &DeferredLoadingConfig,
+) -> Result<ToolSearchResult, String> {
     let registered: HashSet<_> = all_tools.iter().map(|tool| tool.name.as_str()).collect();
     let alias_map = alias_map(&registered);
     let mut result = ToolSearchResult {
@@ -317,21 +386,50 @@ pub fn execute_tool_search(
         already_loaded: Vec::new(),
         already_available: Vec::new(),
         not_found: Vec::new(),
+        definitions: Vec::new(),
     };
 
     for requested_name in names {
         let canonical_name = resolve_alias(requested_name, &alias_map);
-        if !registered.contains(canonical_name.as_str()) {
+        let Some(tool) = all_tools.iter().find(|tool| tool.name == canonical_name) else {
             result.not_found.push(requested_name.to_string());
             continue;
-        }
+        };
 
         match resolve_tool_policy(&canonical_name, config) {
-            PromptLoadingPolicy::Preloaded | PromptLoadingPolicy::Deferred => {
-                result.already_available.push(canonical_name);
+            PromptLoadingPolicy::Preloaded => {
+                if !result.already_available.contains(&canonical_name) {
+                    result.already_available.push(canonical_name.clone());
+                }
             }
-            PromptLoadingPolicy::Hidden => result.not_found.push(requested_name.to_string()),
+            PromptLoadingPolicy::Deferred => match loaded_state.as_deref_mut() {
+                // select: semantics — load the deferred tool for this session
+                // so it counts as exposed from now on.
+                Some(state) if state.is_loaded(session_id, &canonical_name) => {
+                    if !result.already_loaded.contains(&canonical_name) {
+                        result.already_loaded.push(canonical_name.clone());
+                    }
+                }
+                Some(state) => {
+                    state.mark_loaded(session_id, &canonical_name);
+                    result.loaded.push(canonical_name.clone());
+                }
+                // Keyword discovery only surfaces names; loading stays
+                // opt-in via select:.
+                None => {
+                    if !result.already_available.contains(&canonical_name) {
+                        result.already_available.push(canonical_name.clone());
+                    }
+                }
+            },
+            PromptLoadingPolicy::Hidden => {
+                result.not_found.push(requested_name.to_string());
+                continue;
+            }
         }
+        result
+            .definitions
+            .push(function_definition_json(&canonical_name, tool));
     }
 
     if result.is_error() {
@@ -339,6 +437,58 @@ pub fn execute_tool_search(
     }
 
     Ok(result)
+}
+
+/// Render a tool as a gateway-portable `<function>{...}</function>`
+/// definition (name/description/parameters), the shape deferred-tool
+/// gateways look for before allowing a call.
+fn function_definition_json(name: &str, tool: &ToolDefinition) -> String {
+    let definition = serde_json::json!({
+        "name": name,
+        "description": tool.description,
+        "parameters": tool.input_schema,
+    });
+    format!("<function>{definition}</function>")
+}
+
+fn keyword_tokens(query: &str) -> Vec<String> {
+    let tokens = tokenize(query);
+    if tokens.len() <= 1 {
+        tokens
+    } else {
+        tokens
+            .into_iter()
+            .filter(|token| token.len() >= 2)
+            .collect()
+    }
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn keyword_score(query_tokens: &[String], tool: &ToolDefinition) -> usize {
+    let name_lower = tool.name.to_ascii_lowercase();
+    let name_tokens = tokenize(&tool.name);
+    let description_lower = tool.description.to_ascii_lowercase();
+    let description_tokens = tokenize(&tool.description);
+    let mut score = 0usize;
+    for token in query_tokens {
+        if name_lower == *token || name_tokens.iter().any(|name| name == token) {
+            score += 3;
+        } else if name_lower.contains(token) || name_tokens.iter().any(|name| name.contains(token))
+        {
+            score += 2;
+        } else if description_tokens.iter().any(|part| part == token)
+            || description_lower.contains(token)
+        {
+            score += 1;
+        }
+    }
+    score
 }
 
 pub fn resolve_spec_policy(spec: &ToolSpec, config: &DeferredLoadingConfig) -> PromptLoadingPolicy {
@@ -512,6 +662,12 @@ mod tests {
         }
     }
 
+    /// Struct-equality helper: reuse the produced definitions for the
+    /// expected initializer, then assert their shape separately.
+    fn result_definitions_snapshot(result: &ToolSearchResult) -> Vec<String> {
+        result.definitions.clone()
+    }
+
     fn tools() -> Vec<ToolDefinition> {
         vec![
             tool("read", "Read a file."),
@@ -620,10 +776,30 @@ mod tests {
                     "find".to_string(),
                 ],
                 not_found: Vec::new(),
+                definitions: result_definitions_snapshot(&result),
             }
         );
+        assert_eq!(result.definitions.len(), 4);
         assert!(!loaded.is_loaded("session-1", "web_search"));
         assert!(!loaded.is_loaded("session-1", "fetch_url"));
+    }
+
+    #[test]
+    fn tool_search_keyword_ranks_name_and_description_tokens() {
+        let config = DeferredLoadingConfig::default();
+        let mut loaded = LoadedDeferredTools::default();
+
+        let result = execute_tool_search("session-1", "read file", &tools(), &mut loaded, &config)
+            .expect("keyword search should return matching tools");
+
+        assert!(
+            result.already_available.contains(&"read".to_string()),
+            "expected read in {:?}",
+            result.already_available
+        );
+        assert!(result.loaded.is_empty());
+        assert!(result.already_loaded.is_empty());
+        assert!(!loaded.is_loaded("session-1", "read"));
     }
 
     #[test]
@@ -648,8 +824,10 @@ mod tests {
                     already_loaded: Vec::new(),
                     already_available: vec!["spawn_agent".to_string()],
                     not_found: Vec::new(),
+                    definitions: result_definitions_snapshot(&result),
                 }
             );
+            assert_eq!(result.definitions.len(), 1);
             assert!(!loaded.is_loaded("session-1", "spawn_agent"));
         }
     }
@@ -765,6 +943,14 @@ mod tests {
                 already_loaded: Vec::new(),
                 already_available: vec!["shell_command".to_string()],
                 not_found: Vec::new(),
+                definitions: vec![format!(
+                    "<function>{}</function>",
+                    json!({
+                        "name": "shell_command",
+                        "description": "Run a shell command.",
+                        "parameters": {"type": "object"},
+                    })
+                )],
             }
         );
     }
@@ -804,6 +990,14 @@ mod tests {
                 already_loaded: Vec::new(),
                 already_available: vec!["web_search".to_string()],
                 not_found: vec!["missing".to_string()],
+                definitions: vec![format!(
+                    "<function>{}</function>",
+                    json!({
+                        "name": "web_search",
+                        "description": "Search the web.\nLonger details are schema-only.",
+                        "parameters": {"type": "object"},
+                    })
+                )],
             }
         );
         assert!(
@@ -812,6 +1006,11 @@ mod tests {
                 .contains("Already available 1 tool(s): web_search")
         );
         assert!(result.summary().contains("Not found: missing"));
+        // The definition must accompany even "already available" tools —
+        // provider gateways that defer tools only allow calls once the
+        // schema has appeared in the conversation.
+        assert!(result.summary().contains("<function>"));
+        assert!(result.summary().contains("\"name\":\"web_search\""));
     }
 
     #[test]
@@ -870,6 +1069,69 @@ mod tests {
             loaded.list_loaded("s2"),
             BTreeSet::from(["fetch_url".to_string()])
         );
+    }
+
+    #[test]
+    fn select_loads_deferred_tool_and_returns_schema_definition() {
+        // Regression: ToolSearch used to answer "Already available … call
+        // these tools directly without loading" for deferred tools without
+        // ever marking them loaded and without attaching a schema. Models
+        // behind deferred-tool gateways (which only allow calls after the
+        // schema appears in-conversation) looped on the same select: query
+        // dozens of times per turn.
+        let config = DeferredLoadingConfig::default();
+        let tools = vec![
+            tool("ipython", "Execute Python code in the session RLM kernel."),
+            tool("ToolSearch", "Search available tools."),
+        ];
+        let mut loaded = LoadedDeferredTools::default();
+
+        let first = execute_tool_search("s1", "select:ipython", &tools, &mut loaded, &config)
+            .expect("select should succeed");
+        assert_eq!(first.loaded, vec!["ipython".to_string()]);
+        assert!(first.already_available.is_empty());
+        assert!(loaded.is_loaded("s1", "ipython"));
+        let summary = first.summary();
+        assert!(summary.contains("Loaded 1 tool(s): ipython"));
+        assert!(summary.contains("<function>"));
+        assert!(summary.contains("\"name\":\"ipython\""));
+        assert!(summary.contains("\"parameters\""));
+
+        // Re-selecting degrades to already-loaded but still carries the
+        // definition, so the tool stays callable in the eyes of a gateway.
+        let second = execute_tool_search("s1", "select:ipython", &tools, &mut loaded, &config)
+            .expect("second select should succeed");
+        assert_eq!(second.already_loaded, vec!["ipython".to_string()]);
+        assert!(second.definitions.len() == 1);
+        assert!(
+            second
+                .summary()
+                .contains("Already loaded 1 tool(s): ipython")
+        );
+        assert!(second.summary().contains("<function>"));
+
+        // Loading stays session-scoped.
+        let other = execute_tool_search("s2", "select:ipython", &tools, &mut loaded, &config)
+            .expect("other session select should succeed");
+        assert_eq!(other.loaded, vec!["ipython".to_string()]);
+    }
+
+    #[test]
+    fn keyword_search_reports_definition_without_loading() {
+        let config = DeferredLoadingConfig::default();
+        let tools = vec![
+            tool("ipython", "Execute Python code in the session RLM kernel."),
+            tool("ToolSearch", "Search available tools."),
+        ];
+        let mut loaded = LoadedDeferredTools::default();
+
+        let result = execute_tool_search("s1", "python repl", &tools, &mut loaded, &config)
+            .expect("keyword search should succeed");
+        assert!(result.loaded.is_empty());
+        assert!(!loaded.is_loaded("s1", "ipython"));
+        assert!(result.definitions.len() == 1);
+        assert!(result.summary().contains("<function>"));
+        assert!(result.summary().contains("\"name\":\"ipython\""));
     }
 
     #[test]

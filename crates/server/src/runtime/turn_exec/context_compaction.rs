@@ -1,26 +1,28 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use devo_core::ResponseItem;
-use devo_core::{ItemId, SessionId, TurnId};
+use devo_protocol::native::event::ServerNotification;
+use devo_protocol::native::ids::{
+    ItemId as NativeItemId, SessionId as NativeSessionId, TurnId as NativeTurnId,
+};
+use devo_protocol::native::item::ItemState;
 use devo_protocol::native::item::{CompactionTrigger, ContextUsage, Item};
-use devo_protocol::native::legacy_wire_from_native_item;
+use devo_protocol::native::wire_projector::typed_item_envelope;
 
 use super::super::ServerRuntime;
-use crate::{
-    EventContext, ItemEnvelope, ItemEventPayload, ServerEvent, SessionCompactionFailedPayload,
-};
 
 #[derive(Default)]
 pub(super) struct ContextCompactionLifecycle {
-    item_id: Option<ItemId>,
+    item_id: Option<NativeItemId>,
 }
 
 impl ContextCompactionLifecycle {
     pub(super) async fn start(
         &mut self,
         runtime: &Arc<ServerRuntime>,
-        session_id: SessionId,
-        turn_id: TurnId,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
     ) {
         if self.item_id.is_some() {
             self.fail(
@@ -31,7 +33,7 @@ impl ContextCompactionLifecycle {
             )
             .await;
         }
-        let item_id = ItemId::new();
+        let item_id = NativeItemId::new();
         self.item_id = Some(item_id);
         runtime
             .emit_native_item_started(
@@ -47,8 +49,8 @@ impl ContextCompactionLifecycle {
     pub(super) async fn complete(
         &mut self,
         runtime: &Arc<ServerRuntime>,
-        session_id: SessionId,
-        turn_id: TurnId,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
         compacted_items: Vec<ResponseItem>,
     ) {
         let Some(item_id) = self.item_id.take() else {
@@ -71,31 +73,30 @@ impl ContextCompactionLifecycle {
     pub(super) async fn fail(
         &mut self,
         runtime: &Arc<ServerRuntime>,
-        session_id: SessionId,
-        turn_id: TurnId,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
         message: String,
     ) {
         if let Some(item_id) = self.item_id.take() {
-            for event in failed_events(session_id, turn_id, item_id, message) {
-                runtime.broadcast_event(event).await;
-            }
-        } else {
             runtime
-                .broadcast_event(ServerEvent::SessionCompactionFailed(
-                    SessionCompactionFailedPayload {
-                        session_id,
-                        message,
-                    },
+                .broadcast_notification(failed_item_notification(
+                    session_id, turn_id, item_id, &message,
                 ))
                 .await;
         }
+        runtime
+            .broadcast_notification(ServerNotification::ContextCompactionFailed {
+                session_id,
+                message,
+            })
+            .await;
     }
 
     pub(super) async fn close_if_open(
         &mut self,
         runtime: &Arc<ServerRuntime>,
-        session_id: SessionId,
-        turn_id: TurnId,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
     ) {
         if self.item_id.is_some() {
             self.fail(
@@ -163,134 +164,156 @@ fn manual_compaction_completed_item() -> Item {
 
 #[cfg(test)]
 pub(super) fn started_event(
-    session_id: SessionId,
-    turn_id: TurnId,
-    item_id: ItemId,
-) -> ServerEvent {
-    item_event_from_native(
+    session_id: devo_core::SessionId,
+    turn_id: devo_core::TurnId,
+    item_id: devo_core::ItemId,
+) -> ServerNotification {
+    item_notification_from_legacy(
         session_id,
         turn_id,
         item_id,
         None,
-        ServerEvent::ItemStarted,
+        /*completed*/ false,
         compaction_started_item(),
+        ItemState::Running,
     )
 }
 
 #[cfg(test)]
 pub(super) fn completed_event(
-    session_id: SessionId,
-    turn_id: TurnId,
-    item_id: ItemId,
+    session_id: devo_core::SessionId,
+    turn_id: devo_core::TurnId,
+    item_id: devo_core::ItemId,
     item_seq: Option<u64>,
-) -> ServerEvent {
-    item_event_from_native(
+) -> ServerNotification {
+    item_notification_from_legacy(
         session_id,
         turn_id,
         item_id,
         item_seq,
-        ServerEvent::ItemCompleted,
+        /*completed*/ true,
         compaction_completed_item(),
+        ItemState::Completed,
     )
 }
 
-pub(super) fn failed_events(
-    session_id: SessionId,
-    turn_id: TurnId,
-    item_id: ItemId,
-    message: String,
-) -> [ServerEvent; 2] {
-    [
-        item_event_from_native(
-            session_id,
-            turn_id,
-            item_id,
-            None,
-            ServerEvent::ItemCompleted,
-            compaction_failed_item(&message),
-        ),
-        ServerEvent::SessionCompactionFailed(SessionCompactionFailedPayload {
-            session_id,
-            message,
-        }),
-    ]
-}
-
-pub(crate) fn manual_compaction_started_event(
-    session_id: SessionId,
-    turn_id: TurnId,
-    item_id: ItemId,
-    item_seq: Option<u64>,
-) -> ServerEvent {
-    item_event_from_native(
-        session_id,
-        turn_id,
-        item_id,
-        item_seq,
-        ServerEvent::ItemStarted,
-        manual_compaction_started_item(),
-    )
-}
-
-pub(crate) fn manual_compaction_completed_event(
-    session_id: SessionId,
-    turn_id: TurnId,
-    item_id: ItemId,
-    item_seq: u64,
-) -> ServerEvent {
-    item_event_from_native(
-        session_id,
-        turn_id,
-        item_id,
-        Some(item_seq),
-        ServerEvent::ItemCompleted,
-        manual_compaction_completed_item(),
-    )
-}
-
-pub(crate) fn manual_compaction_item_failed_event(
-    session_id: SessionId,
-    turn_id: TurnId,
-    item_id: ItemId,
-    message: String,
-) -> ServerEvent {
-    item_event_from_native(
+pub(super) fn failed_item_notification(
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
+    item_id: NativeItemId,
+    message: &str,
+) -> ServerNotification {
+    item_notification_from_native_ids(
         session_id,
         turn_id,
         item_id,
         None,
-        ServerEvent::ItemCompleted,
+        /*completed*/ true,
+        compaction_failed_item(message),
+        ItemState::Completed,
+    )
+}
+
+pub(crate) fn manual_compaction_started_event(
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
+    item_id: NativeItemId,
+    item_seq: Option<u64>,
+) -> ServerNotification {
+    item_notification_from_native_ids(
+        session_id,
+        turn_id,
+        item_id,
+        item_seq,
+        /*completed*/ false,
+        manual_compaction_started_item(),
+        ItemState::Running,
+    )
+}
+
+pub(crate) fn manual_compaction_completed_event(
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
+    item_id: NativeItemId,
+    item_seq: u64,
+) -> ServerNotification {
+    item_notification_from_native_ids(
+        session_id,
+        turn_id,
+        item_id,
+        Some(item_seq),
+        /*completed*/ true,
+        manual_compaction_completed_item(),
+        ItemState::Completed,
+    )
+}
+
+pub(crate) fn manual_compaction_item_failed_event(
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
+    item_id: NativeItemId,
+    message: String,
+) -> ServerNotification {
+    item_notification_from_native_ids(
+        session_id,
+        turn_id,
+        item_id,
+        None,
+        /*completed*/ true,
         Item::ContextCompaction {
             trigger: CompactionTrigger::Manual,
             before: compaction_usage(),
             after: None,
             summary: Some(format!("Compaction failed: {message}")),
         },
+        ItemState::Completed,
     )
 }
 
-fn item_event_from_native(
-    session_id: SessionId,
-    turn_id: TurnId,
-    item_id: ItemId,
+#[cfg(test)]
+fn item_notification_from_legacy(
+    session_id: devo_core::SessionId,
+    turn_id: devo_core::TurnId,
+    item_id: devo_core::ItemId,
     item_seq: Option<u64>,
-    wrap: impl FnOnce(ItemEventPayload) -> ServerEvent,
+    completed: bool,
     native_item: Item,
-) -> ServerEvent {
-    let (item_kind, payload) =
-        legacy_wire_from_native_item(&native_item).expect("compaction item must reverse-project");
-    wrap(ItemEventPayload {
-        context: EventContext {
+    state: ItemState,
+) -> ServerNotification {
+    // test fixture: bare UUID wire form via from_legacy_uuid
+    item_notification_from_native_ids(
+        session_id,
+        turn_id,
+        item_id,
+        item_seq,
+        completed,
+        native_item,
+        state,
+    )
+}
+
+fn item_notification_from_native_ids(
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
+    item_id: NativeItemId,
+    item_seq: Option<u64>,
+    completed: bool,
+    native_item: Item,
+    state: ItemState,
+) -> ServerNotification {
+    use devo_protocol::native::wire_projector::item_lifecycle_server_notification;
+
+    item_lifecycle_server_notification(
+        &typed_item_envelope(
             session_id,
-            turn_id: Some(turn_id),
-            item_id: Some(item_id),
-            seq: item_seq.unwrap_or(0),
-            item_seq,
-        },
-        item: ItemEnvelope {
+            turn_id,
             item_id,
-            item_kind,
-            payload,
-        },
-    })
+            item_seq.unwrap_or(0),
+            &native_item,
+            state,
+            Utc::now(),
+            None,
+        ),
+        completed,
+    )
 }

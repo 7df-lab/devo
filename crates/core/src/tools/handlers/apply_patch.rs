@@ -175,8 +175,8 @@ mod tests {
                 ToolContext {
                     output_store: None,
                     tool_call_id: crate::invocation::ToolCallId("call-1".to_string()),
-                    session_id: "session-1".to_string(),
-                    turn_id: Some("turn-1".to_string()),
+                    session_id: "session-1".into(),
+                    turn_id: Some("turn-1".into()),
                     workspace_root: root.path().to_path_buf(),
                     budgets: crate::contracts::ToolBudgets {
                         output_limit_bytes: 1024,
@@ -192,6 +192,11 @@ mod tests {
                     network_no_proxy: None,
                     sandbox_permission_overlay: None,
                     sandbox_profile: None,
+                    kernel: None,
+                    python_cell_first_wait_ms: None,
+                    python_cell_watch: None,
+                    python_cell_completion: None,
+                    session_dir: None,
                 },
                 serde_json::json!({
                     "patchText": "*** Begin Patch\n*** Add File: file.txt\n+hello\n*** End Patch"

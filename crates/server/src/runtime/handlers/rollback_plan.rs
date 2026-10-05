@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use devo_core::TurnWorkspaceRestoreCompletedRecord;
-use devo_core::{ItemId, SessionId, TurnWorkspaceCheckpointRecordedRecord};
+use devo_core::{SessionId, TurnWorkspaceCheckpointRecordedRecord};
 use devo_protocol::native::rpc_session::{RestorePlan, RollbackMode, SessionRollbackCommitResult};
 use tokio::sync::Notify;
 
@@ -25,7 +25,10 @@ pub(crate) struct StoredRestorePlan {
     pub(super) session_id: SessionId,
     pub(super) user_turn_index: u32,
     pub(super) rollback_mode: RollbackMode,
-    pub(super) history_fingerprint: Vec<(TurnId, ItemId)>,
+    pub(super) history_fingerprint: Vec<(
+        devo_protocol::native::ids::TurnId,
+        devo_protocol::native::ids::ItemId,
+    )>,
     pub(super) checkpoint: Option<TurnWorkspaceCheckpointRecordedRecord>,
     pub(super) public_plan: RestorePlan,
     pub(super) expires_at: DateTime<Utc>,
@@ -124,7 +127,10 @@ pub(super) fn recovery_action(status: &RestorePlanStatus) -> Option<CommitAction
 
 pub(super) fn history_fingerprint(
     items: &[crate::execution::PersistedTurnItem],
-) -> Vec<(TurnId, ItemId)> {
+) -> Vec<(
+    devo_protocol::native::ids::TurnId,
+    devo_protocol::native::ids::ItemId,
+)> {
     items
         .iter()
         .map(|item| (item.turn_id, item.item_id))
@@ -134,8 +140,8 @@ pub(super) fn history_fingerprint(
 pub(super) fn dropped_turn_ids(
     source: &[crate::execution::PersistedTurnItem],
     retained: &[crate::execution::PersistedTurnItem],
-) -> Vec<TurnId> {
-    let retained_ids: HashSet<TurnId> = retained.iter().map(|item| item.turn_id).collect();
+) -> Vec<devo_protocol::native::ids::TurnId> {
+    let retained_ids: HashSet<_> = retained.iter().map(|item| item.turn_id).collect();
     let mut dropped = Vec::new();
     for item in source {
         if !retained_ids.contains(&item.turn_id) && !dropped.contains(&item.turn_id) {
@@ -147,7 +153,10 @@ pub(super) fn dropped_turn_ids(
 
 pub(super) fn retained_ids(
     items: &[crate::execution::PersistedTurnItem],
-) -> (Vec<TurnId>, Vec<ItemId>) {
+) -> (
+    Vec<devo_protocol::native::ids::TurnId>,
+    Vec<devo_protocol::native::ids::ItemId>,
+) {
     let mut turn_ids = Vec::new();
     let mut item_ids = Vec::new();
     for item in items {

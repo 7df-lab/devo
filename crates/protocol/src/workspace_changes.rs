@@ -65,7 +65,10 @@ pub enum WorkspaceChangedFileStatus {
     Unknown,
 }
 
+/// Internal / legacy-UUID read params. Native wire uses
+/// [`crate::native::rpc_workspace::WorkspaceChangesReadParams`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceChangesReadParams {
     pub session_id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,18 +90,21 @@ pub struct WorkspaceChangesReadParams {
     /// Optional path filter for expand-on-demand Full reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<PathBuf>>,
-    /// When true with path-scoped Full, attach `old_text`/`new_text` so
+    /// When true with path-scoped Full, attach `oldText`/`newText` so
     /// clients can render expandable (non-partial) diffs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_file_sides: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceChangesReadResult {
     pub views: Vec<WorkspaceChangeView>,
 }
 
+/// Canonical workspace change view (Native camelCase wire).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceChangeView {
     pub scope: WorkspaceChangeScope,
     pub status: WorkspaceChangeViewStatus,
@@ -118,10 +124,16 @@ pub struct WorkspaceChangeView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum WorkspaceChangeBase {
     Branch {
+        #[schemars(rename = "baseBranch")]
         base_branch: String,
+        #[schemars(rename = "mergeBase")]
         merge_base: String,
         head: String,
     },
@@ -129,7 +141,9 @@ pub enum WorkspaceChangeBase {
         head: Option<String>,
     },
     TurnCheckpoint {
+        #[schemars(rename = "turnId")]
         turn_id: TurnId,
+        #[schemars(rename = "checkpointId")]
         checkpoint_id: String,
         backend: WorkspaceCheckpointBackend,
     },
@@ -151,6 +165,7 @@ pub enum WorkspaceChangeAttribution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceChangedFile {
     pub path: PathBuf,
     pub status: WorkspaceChangedFileStatus,
@@ -173,21 +188,9 @@ pub struct WorkspaceChangedFile {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceChangeStats {
     pub files_changed: u64,
     pub additions: u64,
     pub deletions: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-pub struct WorkspaceChangesUpdatedPayload {
-    pub session_id: SessionId,
-    pub turn_id: TurnId,
-    pub scope: WorkspaceChangeScope,
-    pub status: WorkspaceChangeViewStatus,
-    pub coverage: WorkspaceChangeCoverage,
-    pub change_set_status: WorkspaceChangeSetStatus,
-    pub stats: WorkspaceChangeStats,
-    pub version: u64,
-    pub generated_at: DateTime<Utc>,
 }

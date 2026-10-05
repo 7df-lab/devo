@@ -131,8 +131,6 @@ interface AgentDetailProps {
 	onForkFromTurn?: (turnId?: string) => Promise<void>
 	/** Edit and resend the latest user message */
 	onEditUserMessage?: (messageId: string, text: string) => Promise<void>
-	/** Delete a specific part from a message (for error recovery) */
-	onDeletePart?: (sessionId: string, messageId: string, partId: string) => Promise<void>
 }
 
 export function AgentDetail({
@@ -163,7 +161,6 @@ export function AgentDetail({
 	isReverted,
 	onForkFromTurn,
 	onEditUserMessage,
-	onDeletePart,
 }: AgentDetailProps) {
 	const navigate = useNavigate()
 	const { projectSlug } = useParams({ strict: false }) as { projectSlug?: string }
@@ -300,7 +297,6 @@ export function AgentDetail({
 					isReverted={isReverted}
 					onForkFromTurn={onForkFromTurn}
 					onEditUserMessage={onEditUserMessage}
-					onDeletePart={onDeletePart}
 					parentSessionName={parentSessionName}
 					reviewPanelOpen={reviewPanelOpen}
 				/>

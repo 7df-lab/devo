@@ -1,6 +1,6 @@
 import { cn } from "@devo/ui/lib/utils"
 import { useAtom } from "jotai"
-import { memo, useCallback, useState } from "react"
+import { memo, useCallback, useLayoutEffect, useRef, useState } from "react"
 import { reviewPanelOpenAtom, reviewPanelSettingsAtom } from "../../atoms/ui"
 import { clampReviewPanelWidth, REVIEW_PANEL_DEFAULT_WIDTH_PX } from "../../lib/review-panel-width"
 import { RightPanel } from "../right-panel"
@@ -25,10 +25,35 @@ export const ReviewSideRail = memo(function ReviewSideRail({
 	const [open] = useAtom(reviewPanelOpenAtom)
 	const [settings, setSettings] = useAtom(reviewPanelSettingsAtom)
 	const [resizing, setResizing] = useState(false)
+	const railRef = useRef<HTMLDivElement>(null)
+	const [availableWidth, setAvailableWidth] = useState(0)
 
+	useLayoutEffect(() => {
+		const container = railRef.current?.parentElement
+		if (!container) return
+
+		const updateAvailableWidth = () => setAvailableWidth(container.clientWidth)
+		updateAvailableWidth()
+		if (typeof ResizeObserver === "undefined") {
+			window.addEventListener("resize", updateAvailableWidth)
+			return () => window.removeEventListener("resize", updateAvailableWidth)
+		}
+
+		const observer = new ResizeObserver(updateAvailableWidth)
+		observer.observe(container)
+		return () => observer.disconnect()
+	}, [])
+
+	const splitWidth =
+		availableWidth > 0
+			? availableWidth
+			: typeof window !== "undefined"
+				? window.innerWidth
+				: undefined
+	const widthOptions = splitWidth === undefined ? undefined : { availableWidth: splitWidth }
 	const widthPx = clampReviewPanelWidth(
 		settings.widthPx ?? REVIEW_PANEL_DEFAULT_WIDTH_PX,
-		typeof window !== "undefined" ? { windowWidth: window.innerWidth } : undefined,
+		widthOptions,
 	)
 	const expanded = Boolean(settings.expanded)
 
@@ -37,14 +62,20 @@ export const ReviewSideRail = memo(function ReviewSideRail({
 			setSettings((prev) => ({
 				...prev,
 				expanded: false,
-				widthPx: clampReviewPanelWidth(next, { windowWidth: window.innerWidth }),
+				widthPx: clampReviewPanelWidth(
+					next,
+					splitWidth === undefined ? undefined : { availableWidth: splitWidth },
+				),
 			}))
 		},
-		[setSettings],
+		[setSettings, splitWidth],
 	)
 
 	return (
 		<div
+			ref={railRef}
+			aria-hidden={!open}
+			inert={!open}
 			className={cn(
 				"relative min-w-0 overflow-hidden",
 				open && "border-l border-border/70",
@@ -64,6 +95,7 @@ export const ReviewSideRail = memo(function ReviewSideRail({
 			{open && !expanded ? (
 				<RightPanelResizeHandle
 					width={widthPx}
+					availableWidth={splitWidth ?? REVIEW_PANEL_DEFAULT_WIDTH_PX}
 					onWidthChange={handleWidthChange}
 					onResizingChange={setResizing}
 				/>

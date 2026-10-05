@@ -37,4 +37,8 @@ pub enum ApprovalScopeValue {
     Tool,
     CommandPrefix,
     CommandPrefixPersist,
+    /// Always allow file access under a path prefix (persisted rule).
+    PathPrefixPersist,
+    /// Always allow a network host (persisted rule).
+    HostPersist,
 }

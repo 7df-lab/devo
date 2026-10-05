@@ -446,7 +446,8 @@ async fn assemble_model_turn(
                     | ContentBlock::Reasoning { .. }
                     | ContentBlock::ToolUse { .. }
                     | ContentBlock::HostedToolUse { .. }
-                    | ContentBlock::ToolResult { .. } => None,
+                    | ContentBlock::ToolResult { .. }
+                    | ContentBlock::Image { .. } => None,
                 })
                 .collect::<String>();
             if !final_reasoning.is_empty() {

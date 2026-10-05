@@ -11,7 +11,6 @@ use ts_rs::TS;
 use super::ids::SessionId;
 use super::item::ContextOccupancy;
 use super::item::ToolSource;
-use super::model::PermissionProfile;
 use std::path::PathBuf;
 
 // ── initialize ──
@@ -184,6 +183,15 @@ pub struct ModelInfo {
     pub provider: crate::ProviderWireApi,
     pub context_window: u32,
     pub reasoning_capability: crate::ReasoningCapability,
+    /// Whether the model exposes configurable thinking (pi-ai `reasoning`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reasoning: bool,
+    /// pi-ai-compatible map; `None` map values serialize as JSON `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level_map: Option<crate::ThinkingLevelMap>,
+    /// Precomputed chip list from [`crate::get_supported_thinking_levels`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_thinking_levels: Vec<String>,
     pub input_modalities: Vec<crate::InputModality>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -219,6 +227,8 @@ pub struct ModelInfo {
 
 impl From<crate::ModelCatalogEntry> for ModelInfo {
     fn from(entry: crate::ModelCatalogEntry) -> Self {
+        let (reasoning, thinking_level_map, available_thinking_levels) =
+            crate::resolve_thinking_fields_for_model_info(&entry.reasoning_capability, None, None);
         Self {
             slug: entry.slug,
             display_name: entry.display_name,
@@ -229,6 +239,13 @@ impl From<crate::ModelCatalogEntry> for ModelInfo {
             provider: entry.provider,
             context_window: entry.context_window,
             reasoning_capability: entry.reasoning_capability,
+            reasoning,
+            thinking_level_map: if thinking_level_map.is_empty() {
+                None
+            } else {
+                Some(thinking_level_map)
+            },
+            available_thinking_levels,
             input_modalities: entry.input_modalities,
             max_tokens: entry.max_tokens,
             family: None,
@@ -292,6 +309,20 @@ impl ModelInfo {
         self.default_reasoning_selection = metadata.default_reasoning_selection;
         self.enabled = metadata.enabled;
         self.priority = metadata.priority;
+
+        let (reasoning, thinking_level_map, available_thinking_levels) =
+            crate::resolve_thinking_fields_for_model_info(
+                &self.reasoning_capability,
+                metadata.reasoning,
+                metadata.thinking_level_map.as_ref(),
+            );
+        self.reasoning = reasoning;
+        self.thinking_level_map = if thinking_level_map.is_empty() {
+            None
+        } else {
+            Some(thinking_level_map)
+        };
+        self.available_thinking_levels = available_thinking_levels;
         self
     }
 }
@@ -483,32 +514,8 @@ pub struct ContextUsageReadResult {
     pub occupancy: ContextOccupancy,
 }
 
-// ── permission/profile/* ──
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PermissionProfileReadParams {
-    pub session_id: SessionId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PermissionProfileReadResult {
-    pub profile: PermissionProfile,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PermissionProfileUpdateParams {
-    pub session_id: SessionId,
-    pub profile: PermissionProfile,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PermissionProfileUpdateResult {
-    pub profile: PermissionProfile,
-}
+// Permission profile is session-scoped via `session/metadata/update`
+// (`SessionSettingsPatch.permission_profile`), not a standalone RPC.
 
 // ── provider/* (ratified #11) ──
 
@@ -635,6 +642,9 @@ pub struct CredentialInfo {
     pub id: String,
     pub provider: String,
     pub masked: String,
+    /// `api_key` or `oauth` — never includes secret material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -651,10 +661,24 @@ pub struct CredentialListResult {
 #[serde(rename_all = "camelCase")]
 pub struct CredentialSetParams {
     pub provider: String,
-    /// The secret itself; write-only, never appears in any response.
-    pub secret: String,
+    /// API key secret (write-only). For oauth, prefer `access` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// `api_key` (default) or `oauth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enterprise_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -708,5 +732,77 @@ mod tests {
             serde_json::from_value::<McpToolsResult>(result_json).expect("parse result"),
             result
         );
+    }
+
+    /// Trace: L2-DES-MODEL-003
+    /// Verifies: model/list dual-writes legacy capability and derived thinking fields.
+    #[test]
+    fn model_info_dual_writes_legacy_and_derived_thinking_fields() {
+        let info = ModelInfo::from(crate::ModelCatalogEntry {
+            slug: String::from("custom/reasoner"),
+            display_name: String::from("Reasoner"),
+            channel: None,
+            description: None,
+            provider: crate::ProviderWireApi::OpenAIChatCompletions,
+            context_window: 128_000,
+            reasoning_capability: crate::ReasoningCapability::Toggle,
+            input_modalities: vec![crate::InputModality::Text],
+            max_tokens: None,
+            default_reasoning_selection: None,
+        });
+        let value = serde_json::to_value(info).expect("serialize model info");
+
+        assert_eq!(value["reasoningCapability"], serde_json::json!("toggle"));
+        assert_eq!(value["reasoning"], serde_json::json!(true));
+        assert_eq!(value["thinkingLevelMap"]["high"], serde_json::json!("on"));
+        assert_eq!(
+            value["availableThinkingLevels"],
+            serde_json::json!(["off", "high"])
+        );
+    }
+
+    /// Trace: L2-DES-AUTH-001
+    /// Verifies: credential/set oauth params are write-only camelCase without echoing secrets in CredentialInfo.
+    #[test]
+    fn credential_set_oauth_params_and_masked_info_wire() {
+        let params = CredentialSetParams {
+            provider: "openai-codex".to_string(),
+            secret: None,
+            id: Some("openai-codex_oauth".to_string()),
+            kind: Some("oauth".to_string()),
+            access: Some("secret-access-token".to_string()),
+            refresh: Some("secret-refresh-token".to_string()),
+            expires_at: Some(1_700_000_000),
+            account_id: Some("acct".to_string()),
+            enterprise_url: None,
+        };
+        let params_json = serde_json::to_value(&params).expect("serialize credential/set");
+        assert_eq!(params_json["kind"], "oauth");
+        assert_eq!(params_json["access"], "secret-access-token");
+        assert_eq!(params_json["expiresAt"], 1_700_000_000);
+        assert_eq!(
+            serde_json::from_value::<CredentialSetParams>(params_json).expect("parse"),
+            params
+        );
+
+        let info = CredentialInfo {
+            id: "openai-codex_oauth".to_string(),
+            provider: "openai-codex".to_string(),
+            masked: "****oken".to_string(),
+            kind: Some("oauth".to_string()),
+        };
+        let info_json = serde_json::to_value(&info).expect("serialize credential info");
+        assert_eq!(
+            info_json,
+            serde_json::json!({
+                "id": "openai-codex_oauth",
+                "provider": "openai-codex",
+                "masked": "****oken",
+                "kind": "oauth"
+            })
+        );
+        assert!(info_json.get("access").is_none());
+        assert!(info_json.get("refresh").is_none());
+        assert!(info_json.get("secret").is_none());
     }
 }

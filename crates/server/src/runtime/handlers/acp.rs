@@ -82,17 +82,13 @@ use crate::AcpToolCallStatus;
 use crate::AcpToolKind;
 use crate::CollaborationMode;
 use crate::DEVO_SESSION_META;
-use crate::DEVO_SESSION_RESUME_META;
 use crate::ServerProtocol;
-use crate::SessionHistoryItem;
-use crate::SessionHistoryItemKind;
-use crate::SessionHistoryMetadata;
-use crate::SessionPlanStepStatus;
+use crate::SessionHistoryEntry;
 use crate::TurnExecutionMode;
 use crate::acp_error_response;
-use crate::acp_session_info_from_metadata;
+use crate::acp_session_info_from_native_session;
 use crate::acp_success_response;
-use crate::input_items_from_acp_prompt;
+use crate::user_inputs_from_acp_prompt;
 
 mod history;
 mod mcp;
@@ -101,7 +97,7 @@ mod response;
 mod session;
 mod session_support;
 
-use history::acp_update_from_history_item;
+use history::acp_update_from_history_entry;
 use mcp::acp_mcp_config;
 pub(super) use response::legacy_error_to_acp;
 use session_support::decode_session_list_cursor;
@@ -145,7 +141,7 @@ pub(crate) fn acp_route(method: &str) -> Option<AcpRoute> {
             ])
         })
         .get(method)
-        .copied()
+        .cloned()
 }
 
 impl ServerRuntime {

@@ -88,6 +88,9 @@ pub struct ProviderConfigEntry {
     /// Provider-level request-body defaults merged into model requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<serde_json::Value>,
+    /// Open-ended compatibility hints preserved for custom adapters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<serde_json::Value>,
     /// Wire protocol used by models unless a model overrides it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire_api: Option<ProviderWireApi>,
@@ -103,6 +106,9 @@ pub struct ProviderConfigEntry {
     /// Optional provider-hosted web fetch behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_fetch: Option<WebFetchConfig>,
+    /// Sparse patches applied to inherited models before `models`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_overrides: BTreeMap<String, ProviderModelConfig>,
     /// Models keyed by the model id sent to the provider.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, ProviderModelConfig>,
@@ -135,6 +141,12 @@ pub struct ProviderModelConfig {
     pub top_k: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_capability: Option<ReasoningCapability>,
+    /// pi-ai-compatible configurable-thinking flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// Logical thinking-level key to provider wire-value map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level_map: Option<devo_protocol::ThinkingLevelMap>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_implementation: Option<ReasoningImplementation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -705,6 +717,8 @@ impl ProviderModelConfig {
         replace_some!(top_p);
         replace_some!(top_k);
         replace_some!(reasoning_capability);
+        replace_some!(reasoning);
+        replace_some!(thinking_level_map);
         replace_some!(reasoning_implementation);
         replace_some!(default_reasoning_effort);
         replace_some!(default_reasoning_selection);
@@ -755,6 +769,8 @@ impl ProviderModelConfig {
             top_k: self.top_k,
             provider: Some(self.wire_api.unwrap_or(provider_wire_api)),
             reasoning_capability: self.reasoning_capability.clone(),
+            reasoning: self.reasoning,
+            thinking_level_map: self.thinking_level_map.clone(),
             reasoning_implementation: self.reasoning_implementation.clone(),
             default_reasoning_effort: self.default_reasoning_effort,
             base_instructions: self.base_instructions.clone(),
@@ -767,71 +783,42 @@ impl ProviderModelConfig {
     }
 
     fn apply_model_override(&mut self, override_config: &ModelOverrideConfig) {
-        if override_config.display_name.is_some() {
-            self.name = override_config.display_name.clone();
-        }
-        if override_config.context_window.is_some() {
-            self.context_window = override_config.context_window;
-        }
-        if override_config.effective_context_window_percent.is_some() {
-            self.effective_context_window_percent =
-                override_config.effective_context_window_percent;
-        }
-        if override_config.max_tokens.is_some() {
-            self.max_tokens = override_config.max_tokens;
-        }
-        if override_config.temperature.is_some() {
-            self.temperature = override_config.temperature;
-        }
-        if override_config.top_p.is_some() {
-            self.top_p = override_config.top_p;
-        }
-        if override_config.top_k.is_some() {
-            self.top_k = override_config.top_k;
-        }
-        if override_config.provider.is_some() {
-            self.wire_api = override_config.provider;
-        }
-        if override_config.reasoning_capability.is_some() {
-            self.reasoning_capability = override_config.reasoning_capability.clone();
-        }
-        if override_config.reasoning_implementation.is_some() {
-            self.reasoning_implementation = override_config.reasoning_implementation.clone();
-        }
-        if override_config.default_reasoning_effort.is_some() {
-            self.default_reasoning_effort = override_config.default_reasoning_effort;
-        }
-        if override_config.base_instructions.is_some() {
-            self.base_instructions = override_config.base_instructions.clone();
-        }
-        if override_config.input_modalities.is_some() {
-            self.input_modalities = override_config.input_modalities.clone();
-        }
-        if override_config.channel.is_some() {
-            self.channel = override_config.channel.clone();
-        }
-        if override_config.truncation_policy.is_some() {
-            self.truncation_policy = override_config.truncation_policy;
-        }
-        if override_config.supports_image_detail_original.is_some() {
-            self.supports_image_detail_original = override_config.supports_image_detail_original;
-        }
+        self.apply_overlay(ProviderModelConfig {
+            name: override_config.display_name.clone(),
+            context_window: override_config.context_window,
+            effective_context_window_percent: override_config.effective_context_window_percent,
+            max_tokens: override_config.max_tokens,
+            temperature: override_config.temperature,
+            top_p: override_config.top_p,
+            top_k: override_config.top_k,
+            wire_api: override_config.provider,
+            reasoning_capability: override_config.reasoning_capability.clone(),
+            reasoning: override_config.reasoning,
+            thinking_level_map: override_config.thinking_level_map.clone(),
+            reasoning_implementation: override_config.reasoning_implementation.clone(),
+            default_reasoning_effort: override_config.default_reasoning_effort,
+            base_instructions: override_config.base_instructions.clone(),
+            input_modalities: override_config.input_modalities.clone(),
+            channel: override_config.channel.clone(),
+            truncation_policy: override_config.truncation_policy,
+            supports_image_detail_original: override_config.supports_image_detail_original,
+            ..ProviderModelConfig::default()
+        });
     }
 }
 
 fn merge_provider_entry(base: &mut ProviderConfigEntry, overlay: ProviderConfigEntry) {
-    if overlay.name.is_some() {
-        base.name = overlay.name;
+    macro_rules! replace_some {
+        ($field:ident) => {
+            if overlay.$field.is_some() {
+                base.$field = overlay.$field;
+            }
+        };
     }
-    if overlay.description.is_some() {
-        base.description = overlay.description;
-    }
-    if overlay.base_url.is_some() {
-        base.base_url = overlay.base_url;
-    }
-    if overlay.credential.is_some() {
-        base.credential = overlay.credential;
-    }
+    replace_some!(name);
+    replace_some!(description);
+    replace_some!(base_url);
+    replace_some!(credential);
     if let Some(headers) = overlay.headers {
         base.headers
             .get_or_insert_with(BTreeMap::new)
@@ -839,20 +826,23 @@ fn merge_provider_entry(base: &mut ProviderConfigEntry, overlay: ProviderConfigE
     }
     merge_optional_json(&mut base.options, overlay.options);
     merge_optional_json(&mut base.request, overlay.request);
-    if overlay.wire_api.is_some() {
-        base.wire_api = overlay.wire_api;
-    }
-    if overlay.enabled.is_some() {
-        base.enabled = overlay.enabled;
-    }
+    merge_optional_json(&mut base.compat, overlay.compat);
+    replace_some!(wire_api);
+    replace_some!(enabled);
     if !overlay.env.is_empty() {
         base.env = overlay.env;
     }
-    if overlay.web_search.is_some() {
-        base.web_search = overlay.web_search;
-    }
-    if overlay.web_fetch.is_some() {
-        base.web_fetch = overlay.web_fetch;
+    replace_some!(web_search);
+    replace_some!(web_fetch);
+    for (model_id, model_override) in overlay.model_overrides {
+        merge_model_entry(
+            base.models.entry(model_id.clone()).or_default(),
+            model_override.clone(),
+        );
+        merge_model_entry(
+            base.model_overrides.entry(model_id).or_default(),
+            model_override,
+        );
     }
     for (model_id, overlay_model) in overlay.models {
         merge_model_entry(base.models.entry(model_id).or_default(), overlay_model);
@@ -922,80 +912,37 @@ mod tests {
     };
 
     #[test]
-    fn canonical_json_uses_nested_model_keys_without_legacy_identifiers() {
-        let file: ProviderConfigFile = serde_json::from_str(
-            r#"
-{
-  "model": "local/qwen3",
-  "provider": {
-    "local": {
-      "models": {
-        "qwen3": {"name": "Qwen 3"}
-      }
-    }
-  }
-}
-"#,
+    fn provider_catalog_json_projection_table() {
+        let canonical = serde_json::from_str::<ProviderConfigFile>(
+            r#"{"model":"local/qwen3","provider":{"local":{"models":{"qwen3":{"name":"Qwen 3"}}}}}"#,
         )
-        .expect("parse provider config");
-
+        .expect("parse canonical provider config");
         assert_eq!(
-            file.providers["local"].models["qwen3"],
+            canonical.providers["local"].models["qwen3"],
             ProviderModelConfig {
                 name: Some("Qwen 3".to_string()),
                 ..ProviderModelConfig::default()
             }
         );
-        let rendered = serde_json::to_string(&file).expect("serialize provider config");
+        let rendered = serde_json::to_string(&canonical).expect("serialize provider config");
         assert!(!rendered.contains("model_slug"));
         assert!(!rendered.contains("model_name"));
         assert!(!rendered.contains("description"));
-    }
 
-    #[test]
-    fn json_provider_overlay_projects_a_top_level_model_without_nested_metadata() {
-        let file: ProviderConfigFile = serde_json::from_str(
-            r#"
-{
-  "model": "openai/gpt-5.5",
-  "provider": {
-    "openai": {
-      "base_url": "https://example.com/v1",
-      "wire_api": "openai_responses"
-    }
-  }
-}
-"#,
+        let overlay = serde_json::from_str::<ProviderConfigFile>(
+            r#"{"model":"openai/gpt-5.5","provider":{"openai":{"base_url":"https://example.com/v1","wire_api":"openai_responses"}}}"#,
         )
-        .expect("parse provider config");
-        let section = file.to_provider_config_section();
-        let binding = &section.model_bindings["openai/gpt-5.5"];
-
+        .expect("parse overlay provider config");
+        let binding = &overlay.to_provider_config_section().model_bindings["openai/gpt-5.5"];
         assert_eq!(binding.provider, "openai");
         assert_eq!(binding.request_model, "gpt-5.5");
         assert_eq!(binding.invocation_method.to_string(), "openai_responses");
-    }
 
-    #[test]
-    fn json_disabled_entries_remain_disabled_in_the_compatibility_projection() {
-        let file: ProviderConfigFile = serde_json::from_str(
-            r#"
-{
-  "model": "local/qwen3",
-  "provider": {
-    "local": {
-      "enabled": false,
-      "models": {
-        "qwen3": {"enabled": false}
-      }
-    }
-  }
-}
-"#,
+        let disabled = serde_json::from_str::<ProviderConfigFile>(
+            r#"{"model":"local/qwen3","provider":{"local":{"enabled":false,"models":{"qwen3":{"enabled":false}}}}}"#,
         )
-        .expect("parse provider config");
-        let section = file.to_provider_config_section();
-
+        .expect("parse disabled provider config");
+        let section = disabled.to_provider_config_section();
         assert!(!section.providers["local"].enabled);
         assert!(!section.model_bindings["local/qwen3"].enabled);
     }
@@ -1159,6 +1106,103 @@ mod tests {
         assert_eq!(
             model.resolve_turn_variant_id(None, Some("low")).as_deref(),
             Some("low")
+        );
+    }
+
+    /// Trace: L2-DES-MODEL-002, L2-DES-MODEL-003
+    /// Verifies: provider model_overrides merge before custom models and preserve rich fields.
+    #[test]
+    fn provider_scoped_model_overrides_merge_before_custom_models() {
+        let mut base = ProviderConfigFile {
+            providers: [(
+                String::from("custom"),
+                super::ProviderConfigEntry {
+                    models: [(
+                        String::from("reasoner"),
+                        ProviderModelConfig {
+                            name: Some(String::from("Builtin")),
+                            context_window: Some(128_000),
+                            cost: Some(serde_json::json!({"input": 1, "output": 4})),
+                            ..ProviderModelConfig::default()
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    ..super::ProviderConfigEntry::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..ProviderConfigFile::default()
+        };
+        base.merge_overlay(ProviderConfigFile {
+            providers: [(
+                String::from("custom"),
+                super::ProviderConfigEntry {
+                    compat: Some(serde_json::json!({"supportsDeveloperRole": true})),
+                    model_overrides: [(
+                        String::from("reasoner"),
+                        ProviderModelConfig {
+                            context_window: Some(256_000),
+                            reasoning: Some(true),
+                            thinking_level_map: Some(
+                                [
+                                    (String::from("off"), Some(String::from("none"))),
+                                    (String::from("high"), Some(String::from("max"))),
+                                ]
+                                .into_iter()
+                                .collect(),
+                            ),
+                            cost: Some(serde_json::json!({"input": 2})),
+                            ..ProviderModelConfig::default()
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    models: [(
+                        String::from("reasoner"),
+                        ProviderModelConfig {
+                            name: Some(String::from("User model")),
+                            cost: Some(serde_json::json!({"output": 8})),
+                            ..ProviderModelConfig::default()
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    ..super::ProviderConfigEntry::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..ProviderConfigFile::default()
+        });
+
+        let provider = &base.providers["custom"];
+        assert_eq!(
+            provider.model_overrides["reasoner"].context_window,
+            Some(256_000)
+        );
+        assert_eq!(
+            provider.compat,
+            Some(serde_json::json!({"supportsDeveloperRole": true}))
+        );
+        assert_eq!(
+            provider.models["reasoner"],
+            ProviderModelConfig {
+                name: Some(String::from("User model")),
+                context_window: Some(256_000),
+                reasoning: Some(true),
+                thinking_level_map: Some(
+                    [
+                        (String::from("off"), Some(String::from("none"))),
+                        (String::from("high"), Some(String::from("max"))),
+                    ]
+                    .into_iter()
+                    .collect()
+                ),
+                cost: Some(serde_json::json!({"input": 2, "output": 8})),
+                ..ProviderModelConfig::default()
+            }
         );
     }
 }

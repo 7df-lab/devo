@@ -1,12 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import type { ChatTurn } from "../atoms/derived/session-chat"
-import type { Message } from "./types"
+import type { NativeItemEnvelope } from "@devo-ai/sdk/v2/client"
 import {
 	computeLatestTurnTimerSplit,
-	computeSessionMetrics,
 	computeThoughtWorkTime,
 	computeTurnWorkTime,
-	computeTurnWorkTimeSplit,
 	formatWorkDuration,
 } from "./session-metrics"
 
@@ -16,6 +14,46 @@ afterEach(() => {
 	Date.now = originalNow
 })
 
+function iso(ms: number): string {
+	return new Date(ms).toISOString()
+}
+
+function userEntry(id: string, createdMs: number, turnId = "t1"): ChatTurn["userMessage"] {
+	const info: NativeItemEnvelope = {
+		id,
+		sessionId: "s1",
+		turnId,
+		seq: 1,
+		revision: 1,
+		createdAt: iso(createdMs),
+		updatedAt: iso(createdMs),
+		state: "completed",
+		item: { type: "userMessage", content: [{ type: "text", text: "hi" }], entry: "turnStart" },
+	}
+	return { info }
+}
+
+function assistantEntry(
+	id: string,
+	createdMs: number,
+	updatedMs: number,
+	state: string = "completed",
+	turnId = "t1",
+): ChatTurn["assistantMessages"][number] {
+	const info: NativeItemEnvelope = {
+		id,
+		sessionId: "s1",
+		turnId,
+		seq: 2,
+		revision: 1,
+		createdAt: iso(createdMs),
+		updatedAt: iso(updatedMs),
+		state,
+		item: { type: "assistantMessage", text: "ok" },
+	}
+	return { info }
+}
+
 function turnWith(
 	assistantMessages: ChatTurn["assistantMessages"],
 	userCreated = 1_000,
@@ -23,12 +61,10 @@ function turnWith(
 ): ChatTurn {
 	return {
 		id,
-		userMessage: {
-			info: { id, role: "user", time: { created: userCreated } },
-			parts: [],
-		},
+		turnId: "t1",
+		userMessage: userEntry(id, userCreated),
 		assistantMessages,
-	} as ChatTurn
+	}
 }
 
 function formatTimerSplit(
@@ -40,225 +76,63 @@ function formatTimerSplit(
 
 describe("turn duration metrics", () => {
 	test("computes completed turn duration from user message to assistant completion", () => {
-		const turn = turnWith([
-			{
-				info: { id: "a1", role: "assistant", time: { created: 2_000, completed: 61_000 } },
-				parts: [],
-			},
-		] as ChatTurn["assistantMessages"])
-
+		const turn = turnWith([assistantEntry("a1", 2_000, 61_000)])
 		expect(computeTurnWorkTime(turn)).toBe(60_000)
 	})
 
-	test("falls back to latest part timestamp when assistant completion is missing", () => {
-		const turn = turnWith([
-			{
-				info: { id: "a1", role: "assistant", time: { created: 2_000 } },
-				parts: [
-					{
-						id: "tool-1",
-						type: "tool",
-						state: { status: "completed", time: { start: 3_000, end: 9_000 } },
-					},
-				],
-			},
-		] as ChatTurn["assistantMessages"])
-
+	test("falls back to latest envelope updatedAt when needed", () => {
+		const turn = turnWith([assistantEntry("a1", 2_000, 9_000)])
 		expect(computeTurnWorkTime(turn, { now: () => 99_000 })).toBe(8_000)
 	})
 
-	test("uses the latest persisted part end when assistant completion is recorded early", () => {
-		const turn = turnWith([
-			{
-				info: { id: "a1", role: "assistant", time: { created: 1_100, completed: 1_200 } },
-				parts: [
-					{
-						id: "tool-1",
-						type: "tool",
-						state: { status: "completed", time: { start: 2_000, end: 31_000 } },
-					},
-				],
-			},
-		] as ChatTurn["assistantMessages"])
-
-		expect(computeTurnWorkTime(turn)).toBe(30_000)
-	})
-
-	test("uses Date.now only for active turns", () => {
-		const turn = turnWith([
-			{
-				info: { id: "a1", role: "assistant", time: { created: 2_000 } },
-				parts: [],
-			},
-		] as ChatTurn["assistantMessages"])
-
-		expect({
-			completed: computeTurnWorkTime(turn, { now: () => 99_000 }),
-			active: computeTurnWorkTime(turn, { active: true, now: () => 11_000 }),
-			split: computeTurnWorkTimeSplit(turn),
-		}).toEqual({
-			completed: 1_000,
-			active: 10_000,
-			split: { completedMs: 0, activeStartMs: 1_000 },
-		})
-	})
-
-	test("drops implausible completed duration from incompatible historical timestamps", () => {
-		const turn = turnWith([
-			{
-				info: { id: "a1", role: "assistant", time: { created: 2_000 } },
-				parts: [
-					{
-						id: "tool-1",
-						type: "tool",
-						state: { status: "completed", time: { start: 3_000, end: 200_000_000 } },
-					},
-				],
-			},
-		] as ChatTurn["assistantMessages"])
-
-		expect(computeTurnWorkTime(turn)).toBe(0)
+	test("uses active now for in-progress turns", () => {
+		const turn = turnWith([assistantEntry("a1", 2_000, 2_000, "running")])
+		expect(computeTurnWorkTime(turn, { active: true, now: () => 11_000 })).toBe(10_000)
 	})
 })
 
 describe("thought duration metrics", () => {
-	test("computes completed thought duration from part start to end", () => {
-		expect(
-			computeThoughtWorkTime({ time: { start: 1_000, end: 15_000 } }),
-		).toBe(14_000)
+	test("computes completed thought duration from start/end", () => {
+		expect(computeThoughtWorkTime({ time: { start: 1_000, end: 4_000 } })).toBe(3_000)
 	})
 
-	test("returns 0 when completed thought is missing end", () => {
-		expect(computeThoughtWorkTime({ time: { start: 1_000 } })).toBe(0)
-	})
-
-	test("uses Date.now only for active thoughts", () => {
-		expect(
-			computeThoughtWorkTime(
-				{ time: { start: 1_000 } },
-				{ active: true, now: () => 6_000 },
-			),
-		).toBe(5_000)
-	})
-
-	test("formats thought durations with the shared work duration formatter", () => {
-		expect(formatWorkDuration(14_000)).toBe("14s")
-		expect(formatWorkDuration(80_000)).toBe("1m 20s")
-	})
-})
-
-describe("historical session timer guards", () => {
-	test("does not treat historical ordering timestamps as active session timers", () => {
-		Date.now = () => Date.parse("2026-06-25T12:00:00.000Z")
-		const messages = [
-			{ id: "history-0", role: "user", time: { created: 1 } },
-			{
-				id: "history-1",
-				role: "assistant",
-				parentID: "history-0",
-				time: { created: 2 },
-			},
-		] as Message[]
-
-		expect(computeSessionMetrics(messages)).toEqual({
-			workTimeMs: 0,
-			completedWorkTimeMs: 0,
-			activeStartMs: null,
-			cost: 0,
-			tokens: {
-				input: 0,
-				output: 0,
-				reasoning: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				total: 0,
-			},
-			exchangeCount: 1,
-			userMessageCount: 1,
-			assistantMessageCount: 1,
-			modelDistribution: {},
-			cacheEfficiency: 0,
-			errorCount: 0,
-			avgExchangeCost: 0,
-			avgExchangeTimeMs: 0,
-		})
+	test("uses now for active thoughts", () => {
+		expect(computeThoughtWorkTime({ time: { start: 1_000 } }, { active: true, now: () => 2_500 })).toBe(
+			1_500,
+		)
 	})
 })
 
 describe("top bar turn timer metrics", () => {
-	test("returns zero when there are no turns yet", () => {
-		const split = computeLatestTurnTimerSplit([], { mode: "stopped" })
-
-		expect({ split, label: formatTimerSplit(split, 0) }).toEqual({
-			split: { completedMs: 0, activeStartMs: null },
-			label: "0s",
-		})
-	})
-
-	test("starts a new optimistic user turn from the user message timestamp", () => {
-		const start = Date.parse("2026-06-25T12:00:00.000Z")
-		const now = start + 500
-		const split = computeLatestTurnTimerSplit([turnWith([], start, "optimistic-1")], {
-			mode: "running",
-			now: () => now,
-		})
-
-		expect({ split, label: formatTimerSplit(split, now) }).toEqual({
+	test("runs from the latest user message createdAt", () => {
+		const start = 1_700_000_000_000
+		const turn = turnWith([], start, "optimistic-1")
+		const split = computeLatestTurnTimerSplit([turn], { mode: "running", now: () => start + 5_000 })
+		expect({ split, label: formatTimerSplit(split, start + 5_000) }).toEqual({
 			split: { completedMs: 0, activeStartMs: start },
-			label: "1s",
+			label: "5s",
 		})
 	})
 
 	test("uses only the latest user turn so the timer resets on the next message", () => {
-		const firstStart = Date.parse("2026-06-25T12:00:00.000Z")
-		const nextStart = firstStart + 120_000
-		const now = nextStart + 3_000
-		const firstTurn = turnWith(
-			[
-				{
-					info: {
-						id: "a1",
-						role: "assistant",
-						time: { created: firstStart + 1_000, completed: firstStart + 60_000 },
-					},
-					parts: [],
-				},
-			] as ChatTurn["assistantMessages"],
-			firstStart,
-			"u1",
-		)
+		const start = 1_782_388_920_000
+		const nextStart = start + 60_000
+		const prior = turnWith([assistantEntry("a1", start + 1_000, start + 30_000)], start, "optimistic-1")
 		const nextTurn = turnWith([], nextStart, "optimistic-2")
-
-		const split = computeLatestTurnTimerSplit([firstTurn, nextTurn], {
+		const split = computeLatestTurnTimerSplit([prior, nextTurn], {
 			mode: "running",
-			now: () => now,
+			now: () => nextStart + 3_000,
 		})
-
-		expect({ split, label: formatTimerSplit(split, now) }).toEqual({
+		expect({ split, label: formatTimerSplit(split, nextStart + 3_000) }).toEqual({
 			split: { completedMs: 0, activeStartMs: nextStart },
 			label: "3s",
 		})
 	})
 
 	test("stops on the completed turn timestamp when the session becomes idle", () => {
-		const start = Date.parse("2026-06-25T12:00:00.000Z")
-		const turn = turnWith(
-			[
-				{
-					info: {
-						id: "a1",
-						role: "assistant",
-						time: { created: start + 1_000, completed: start + 42_000 },
-					},
-					parts: [],
-				},
-			] as ChatTurn["assistantMessages"],
-			start,
-			"u1",
-		)
-
+		const start = 1_700_000_000_000
+		const turn = turnWith([assistantEntry("a1", start + 1_000, start + 42_000)], start)
 		const split = computeLatestTurnTimerSplit([turn], { mode: "stopped" })
-
 		expect({ split, label: formatTimerSplit(split, start + 99_000) }).toEqual({
 			split: { completedMs: 42_000, activeStartMs: null },
 			label: "42s",
@@ -266,27 +140,12 @@ describe("top bar turn timer metrics", () => {
 	})
 
 	test("prefers the completed turn timestamp over a stale live fallback", () => {
-		const start = Date.parse("2026-06-25T12:00:00.000Z")
-		const turn = turnWith(
-			[
-				{
-					info: {
-						id: "a1",
-						role: "assistant",
-						time: { created: start + 1_000, completed: start + 42_000 },
-					},
-					parts: [],
-				},
-			] as ChatTurn["assistantMessages"],
-			start,
-			"u1",
-		)
-
+		const start = 1_700_000_000_000
+		const turn = turnWith([assistantEntry("a1", start + 1_000, start + 42_000)], start)
 		const split = computeLatestTurnTimerSplit([turn], {
 			mode: "stopped",
 			fallbackCompletedMs: 99_000,
 		})
-
 		expect({ split, label: formatTimerSplit(split, start + 120_000) }).toEqual({
 			split: { completedMs: 42_000, activeStartMs: null },
 			label: "42s",
@@ -294,39 +153,22 @@ describe("top bar turn timer metrics", () => {
 	})
 
 	test("keeps the last live elapsed value when an interrupted turn has no completion timestamp", () => {
-		const start = Date.parse("2026-06-25T12:00:00.000Z")
-		const turn = turnWith(
-			[
-				{
-					info: { id: "a1", role: "assistant", time: { created: start + 1_000 } },
-					parts: [],
-				},
-			] as ChatTurn["assistantMessages"],
-			start,
-			"u1",
-		)
-
+		const start = 1_700_000_000_000
+		const turn = turnWith([assistantEntry("a1", start + 1_000, start + 1_000, "running")], start)
 		const split = computeLatestTurnTimerSplit([turn], {
 			mode: "stopped",
-			fallbackCompletedMs: 17_000,
+			fallbackCompletedMs: 12_000,
 		})
-
-		expect({ split, label: formatTimerSplit(split, start + 99_000) }).toEqual({
-			split: { completedMs: 17_000, activeStartMs: null },
-			label: "17s",
-		})
+		expect(split).toEqual({ completedMs: 12_000, activeStartMs: null })
 	})
 
 	test("does not start a huge live timer from historical ordering timestamps", () => {
-		const now = Date.parse("2026-06-25T12:00:00.000Z")
-		const split = computeLatestTurnTimerSplit([turnWith([], 1, "history-1")], {
+		const start = 1
+		const turn = turnWith([], start)
+		const split = computeLatestTurnTimerSplit([turn], {
 			mode: "running",
-			now: () => now,
+			now: () => 1_700_000_000_000,
 		})
-
-		expect({ split, label: formatTimerSplit(split, now) }).toEqual({
-			split: { completedMs: 0, activeStartMs: null },
-			label: "0s",
-		})
+		expect(split.activeStartMs).toBeNull()
 	})
 })

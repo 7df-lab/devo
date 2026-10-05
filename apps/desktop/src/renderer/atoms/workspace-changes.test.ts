@@ -23,8 +23,8 @@ const CWD = "C:/tmp/repo"
 
 function turnEvent(scope: WorkspaceChangeScope): WorkspaceChangesUpdatedEventProperties {
 	return {
-		sessionID: SESSION,
-		turnID: TURN,
+		sessionId: SESSION,
+		turnId: TURN,
 		scope,
 		status: "ready",
 		coverage: "git_visible",
@@ -39,14 +39,14 @@ function fakeView(scope: WorkspaceChangeScope): WorkspaceChangeView {
 	return {
 		scope,
 		status: "ready",
-		workspace_root: "C:/tmp/repo",
+		workspaceRoot: "C:/tmp/repo",
 		coverage: "git_visible",
 		attribution: "git_working_tree",
-		change_set_status: "accumulating",
+		changeSetStatus: "accumulating",
 		files: [],
-		stats: { files_changed: 0n, additions: 0n, deletions: 0n },
+		stats: { filesChanged: 0n, additions: 0n, deletions: 0n },
 		warnings: [],
-		generated_at: "2026-09-07T00:00:00Z",
+		generatedAt: "2026-09-07T00:00:00Z",
 	}
 }
 

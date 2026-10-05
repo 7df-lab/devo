@@ -1,9 +1,8 @@
 //! Native `search/*` (connection-local composer reference search).
 //!
 //! The search is ephemeral and connection-scoped — it deliberately does NOT
-//! ride the durable `subscription/*` selector model. Types mirror the legacy
-//! reference-search shapes with native camelCase naming; conversions are
-//! 1:1.
+//! ride the durable `subscription/*` selector model. These types are the
+//! canonical first-party search model.
 
 use std::path::PathBuf;
 
@@ -12,8 +11,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use ts_rs::TS;
 
-/// Reused legacy uuid newtype: the wire form (a uuid string) is identical on
-/// both surfaces.
+/// Shared UUID newtype for connection-local searches.
 pub type SearchId = crate::ReferenceSearchId;
 
 // ── search/start ──
@@ -72,23 +70,6 @@ pub struct SearchSnapshot {
     pub file_search_complete: bool,
 }
 
-impl From<crate::ReferenceSearchSnapshot> for SearchSnapshot {
-    fn from(snapshot: crate::ReferenceSearchSnapshot) -> Self {
-        Self {
-            search_id: snapshot.search_id,
-            query: snapshot.query,
-            results: snapshot
-                .results
-                .into_iter()
-                .map(SearchResult::from)
-                .collect(),
-            total_file_match_count: snapshot.total_file_match_count,
-            scanned_file_count: snapshot.scanned_file_count,
-            file_search_complete: snapshot.file_search_complete,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
@@ -109,22 +90,6 @@ pub struct SearchResult {
     pub disabled_reason: Option<String>,
 }
 
-impl From<crate::ReferenceSearchResult> for SearchResult {
-    fn from(result: crate::ReferenceSearchResult) -> Self {
-        Self {
-            kind: result.kind.into(),
-            display_name: result.display_name,
-            description: result.description,
-            insert_text: result.insert_text,
-            mention_path: result.mention_path,
-            file_path: result.file_path,
-            match_indices: result.match_indices,
-            is_disabled: result.is_disabled,
-            disabled_reason: result.disabled_reason,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum SearchResultKind {
@@ -133,58 +98,47 @@ pub enum SearchResultKind {
     File,
 }
 
-impl From<crate::ReferenceSearchResultKind> for SearchResultKind {
-    fn from(kind: crate::ReferenceSearchResultKind) -> Self {
-        match kind {
-            crate::ReferenceSearchResultKind::Skill => Self::Skill,
-            crate::ReferenceSearchResultKind::Mcp => Self::Mcp,
-            crate::ReferenceSearchResultKind::File => Self::File,
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFailedPayload {
+    pub search_id: SearchId,
+    pub query: String,
+    pub message: String,
 }
 
-// Inverse conversions: first-party consumers (the TUI popup) still render
-// legacy snapshots while server notifications stay legacy-shaped during the
-// event cutover.
-impl From<SearchSnapshot> for crate::ReferenceSearchSnapshot {
-    fn from(snapshot: SearchSnapshot) -> Self {
-        Self {
-            search_id: snapshot.search_id,
-            query: snapshot.query,
-            results: snapshot
-                .results
-                .into_iter()
-                .map(crate::ReferenceSearchResult::from)
-                .collect(),
-            total_file_match_count: snapshot.total_file_match_count,
-            scanned_file_count: snapshot.scanned_file_count,
-            file_search_complete: snapshot.file_search_complete,
-        }
-    }
-}
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
 
-impl From<SearchResult> for crate::ReferenceSearchResult {
-    fn from(result: SearchResult) -> Self {
-        Self {
-            kind: result.kind.into(),
-            display_name: result.display_name,
-            description: result.description,
-            insert_text: result.insert_text,
-            mention_path: result.mention_path,
-            file_path: result.file_path,
-            match_indices: result.match_indices,
-            is_disabled: result.is_disabled,
-            disabled_reason: result.disabled_reason,
-        }
-    }
-}
+    use super::*;
 
-impl From<SearchResultKind> for crate::ReferenceSearchResultKind {
-    fn from(kind: SearchResultKind) -> Self {
-        match kind {
-            SearchResultKind::Skill => Self::Skill,
-            SearchResultKind::Mcp => Self::Mcp,
-            SearchResultKind::File => Self::File,
-        }
+    /// Trace: L2-DES-CLIENT-002
+    /// Verifies: canonical search snapshots round-trip with camelCase fields.
+    #[test]
+    fn search_snapshot_roundtrips() {
+        let snapshot = SearchSnapshot {
+            search_id: SearchId::new(),
+            query: "docs".to_string(),
+            results: vec![SearchResult {
+                kind: SearchResultKind::Mcp,
+                display_name: "Docs".to_string(),
+                description: Some("docs".to_string()),
+                insert_text: "@mcp:docs".to_string(),
+                mention_path: Some("mcp://server/docs".to_string()),
+                file_path: None,
+                match_indices: Some(vec![0, 1, 2]),
+                is_disabled: false,
+                disabled_reason: None,
+            }],
+            total_file_match_count: 0,
+            scanned_file_count: 0,
+            file_search_complete: true,
+        };
+
+        let json = serde_json::to_string(&snapshot).expect("serialize");
+        assert!(json.contains("\"searchId\""));
+        let restored: SearchSnapshot = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(restored, snapshot);
     }
 }

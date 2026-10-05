@@ -388,7 +388,7 @@ function ModelRowView({
 				checked={row.enabled}
 				disabled={toggling}
 				onCheckedChange={(checked) => onToggle(row.providerId, row.modelId, checked)}
-				aria-label={row.enabled ? "Disable model" : "Enable model"}
+				aria-label={`${row.enabled ? "Disable" : "Enable"} ${row.model.name ?? row.modelId}`}
 			/>
 		</div>
 	)

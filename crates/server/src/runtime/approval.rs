@@ -4,7 +4,7 @@ use crate::execution::PendingApproval;
 use crate::runtime::permission_decision::AuthorizationDecision;
 use crate::runtime::session_actor::approval_scope::{
     apply_approval_scope_to_state, apply_path_scope_to_permission_profile,
-    normalize_permission_path, path_prefix_grant_root,
+    normalize_permission_path, path_prefix_grant_root, windows_path_prefix_unsupported,
 };
 use crate::runtime::session_interactive::complete_approval_wait;
 use chrono::Utc;
@@ -15,6 +15,27 @@ use std::path::Path;
 enum AutoReviewOutcome {
     Approve,
     AskUser,
+}
+
+fn admit_live_approval_scope(
+    is_windows: bool,
+    permission_result: Result<(ApprovalDecisionValue, ApprovalScopeValue), String>,
+    resource: &devo_safety::ResourceKind,
+    path: Option<&Path>,
+) -> Result<(ApprovalDecisionValue, ApprovalScopeValue), String> {
+    permission_result.and_then(|(decision, scope)| {
+        if let Some(reason) = windows_path_prefix_unsupported(
+            is_windows,
+            matches!(decision, ApprovalDecisionValue::Approve),
+            &scope,
+            resource,
+            path,
+        ) {
+            Err(reason.to_string())
+        } else {
+            Ok((decision, scope))
+        }
+    })
 }
 
 fn review_response_preview(content: &[devo_protocol::ResponseContent]) -> String {
@@ -83,16 +104,8 @@ impl ServerRuntime {
                     Ok(grant)
                 }
                 AuthorizationDecision::Deny { source, reason } => {
-                    trace_permission_decision(
-                        session_id,
-                        &request,
-                        source,
-                        "deny",
-                        Some(reason.as_str()),
-                    );
-                    self.run_permission_denied_hook(session_id, &request, &reason)
-                        .await;
-                    Err(reason)
+                    self.deny_tool_request(session_id, &request, source, reason)
+                        .await
                 }
                 AuthorizationDecision::Ask { .. } => {
                     unreachable!("permission mode override never returns ask")
@@ -136,16 +149,8 @@ impl ServerRuntime {
                 Ok(escalation_permission_grant(&request))
             }
             AuthorizationDecision::Deny { source, reason } => {
-                trace_permission_decision(
-                    session_id,
-                    &request,
-                    source,
-                    "deny",
-                    Some(reason.as_str()),
-                );
-                self.run_permission_denied_hook(session_id, &request, &reason)
-                    .await;
-                Err(reason)
+                self.deny_tool_request(session_id, &request, source, reason)
+                    .await
             }
             AuthorizationDecision::Ask { source } => {
                 tracing::debug!(
@@ -159,17 +164,14 @@ impl ServerRuntime {
                     .permission_request_hook_block_reason(session_id, &request)
                     .await
                 {
-                    let message = format!("blocked by PermissionRequest hook: {reason}");
-                    trace_permission_decision(
-                        session_id,
-                        &request,
-                        devo_protocol::native::item::ApprovalDecisionSource::Hook,
-                        "deny",
-                        Some(message.as_str()),
-                    );
-                    self.run_permission_denied_hook(session_id, &request, &message)
+                    return self
+                        .deny_tool_request(
+                            session_id,
+                            &request,
+                            devo_protocol::native::item::ApprovalDecisionSource::Hook,
+                            format!("blocked by PermissionRequest hook: {reason}"),
+                        )
                         .await;
-                    return Err(message);
                 }
                 if matches!(
                     permission_profile.reviewer,
@@ -207,6 +209,19 @@ impl ServerRuntime {
                 result
             }
         }
+    }
+
+    async fn deny_tool_request(
+        &self,
+        session_id: SessionId,
+        request: &ToolPermissionRequest,
+        source: devo_protocol::native::item::ApprovalDecisionSource,
+        reason: String,
+    ) -> Result<PermissionGrant, String> {
+        trace_permission_decision(session_id, request, source, "deny", Some(reason.as_str()));
+        self.run_permission_denied_hook(session_id, request, &reason)
+            .await;
+        Err(reason)
     }
 
     async fn permission_request_hook_block_reason(
@@ -255,10 +270,11 @@ impl ServerRuntime {
                     .lock()
                     .ok()
                     .and_then(|guard| guard.clone());
-                let fallback_model =
-                    inline.summary.model.clone().unwrap_or_else(|| {
-                        inline.hook_context.runtime_context.default_model.clone()
-                    });
+                let fallback_model = inline
+                    .summary
+                    .model_name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| inline.hook_context.runtime_context.default_model.clone());
                 (
                     Arc::clone(&inline.hook_context.runtime_context),
                     prefix,
@@ -277,8 +293,8 @@ impl ServerRuntime {
             let runtime_context = reservation.runtime_context;
             let fallback_model = reservation
                 .summary
-                .model
-                .clone()
+                .model_name()
+                .map(str::to_string)
                 .unwrap_or_else(|| runtime_context.default_model.clone());
             (runtime_context, None, fallback_model)
         };
@@ -335,6 +351,32 @@ impl ServerRuntime {
                 );
                 self.emit_auto_review_decision(session_id, turn_id, request, &assessment)
                     .await;
+                // Surface the auto-decision to the user (goal rule 7 /
+                // user feedback): AutoReview approving on the user's behalf
+                // must be visible, not silent. Rides the same Warning item
+                // channel the fence downgrade uses (TUI live + replay).
+                self.emit_native_item_completed(
+                    self.native_session_turn_ids(session_id, turn_id).await.0,
+                    self.native_session_turn_ids(session_id, turn_id).await.1,
+                    devo_protocol::native::ids::ItemId::new(),
+                    Some(
+                        self.allocate_item_sequence(
+                            &self.native_session_turn_ids(session_id, turn_id).await.0,
+                        )
+                        .await,
+                    ),
+                    devo_protocol::native::item::Item::Warning {
+                        code: "autoReview".to_string(),
+                        message: format!(
+                            "Auto-review allowed `{}` (risk: {}): {}",
+                            request.tool_name,
+                            assessment.risk.as_str(),
+                            assessment.rationale
+                        ),
+                        retryable: false,
+                    },
+                )
+                .await;
                 AutoReviewOutcome::Approve
             }
             Some(assessment) => {
@@ -431,14 +473,16 @@ impl ServerRuntime {
         session_id: SessionId,
         turn_id: TurnId,
         request: &ToolPermissionRequest,
-        assessment: &crate::approval_reviewer::ReviewerAssessment,
+        _assessment: &crate::approval_reviewer::ReviewerAssessment,
     ) {
         let approval_id = format!("auto-review-{}", request.tool_call_id);
-        let item_id = ItemId::new();
-        let item_seq = self.allocate_item_sequence(session_id).await;
+        let (native_session_id, native_turn_id) =
+            self.native_session_turn_ids(session_id, turn_id).await;
+        let item_id = devo_protocol::native::ids::ItemId::new();
+        let item_seq = self.allocate_item_sequence(&native_session_id).await;
         self.persist_completed_approval_item(
-            session_id,
-            turn_id,
+            native_session_id,
+            native_turn_id,
             item_id,
             item_seq,
             &approval_id,
@@ -447,28 +491,24 @@ impl ServerRuntime {
             devo_protocol::native::item::ApprovalDecisionSource::AutoReview,
         )
         .await;
-        self.emit_item_completed(
-            session_id,
-            turn_id,
+        self.emit_native_item_completed(
+            native_session_id,
+            native_turn_id,
             item_id,
             Some(item_seq),
-            ItemKind::ApprovalDecision,
-            serde_json::json!({
-                "approval_id": approval_id,
-                "decision": "approve",
-                "risk": assessment.risk.as_str(),
-                "scope": "auto_review",
-                "decision_source": "autoReview",
-                "revision": 1,
-                "rationale": assessment.rationale,
-                "action_summary": request.action_summary,
-                "justification": request.justification,
-                "tool_name": request.tool_name,
-                "resource": format!("{:?}", request.resource),
-                "path": request.path,
-                "host": request.host,
-                "target": request.target,
-            }),
+            native_decided_approval_item(
+                &approval_id,
+                request,
+                &[],
+                native_approval_target(request),
+                ApprovalDecision {
+                    decision: devo_protocol::native::item::ApprovalDecisionKind::Approved,
+                    scope: devo_protocol::native::item::ApprovalScope::Once,
+                    decision_source:
+                        devo_protocol::native::item::ApprovalDecisionSource::AutoReview,
+                    decided_at: Utc::now(),
+                },
+            ),
         )
         .await;
     }
@@ -613,32 +653,135 @@ impl ServerRuntime {
         if let Some(stream) = self.active_stream_state(session_id).await {
             let stream = stream.lock().await;
             if let Some(inline) = stream.turn_inline.as_ref() {
-                return inline.summary.parent_session_id;
+                return inline.summary.parent_session_id();
             }
         }
         let session_handle = self.sessions.lock().await.get(&session_id).cloned()?;
         session_handle.parent_session_id().await.and_then(|p| p)
     }
 
-    /// Sub-agent turns route interactive approvals through the parent session so
-    /// the active ACP connection and approval cache stay aligned with the UI.
+    /// Sub-agent turns route interactive approvals through the root of their
+    /// parent chain so the request reaches a connection that actually
+    /// subscribes to the conversation.
+    ///
+    /// Child sessions never have client subscribers of their own, and a
+    /// direct parent only holds a live connection attribution while its own
+    /// turn is running — gating on that liveness orphaned children spawned by
+    /// a spawn-and-return turn (parent already idle when the child first
+    /// needs an approval): the request fell back to the child's own session,
+    /// matched no controller, and failed as an instant permission error. The
+    /// durable restore path already keys waiting-approval lanes by the
+    /// parent chain without a liveness gate; this matches it.
     pub(in crate::runtime) async fn permission_host_session_id(
         &self,
         session_id: SessionId,
     ) -> SessionId {
-        let Some(parent_session_id) = self.parent_session_id(session_id).await else {
-            return session_id;
-        };
-        if self
-            .active_turns
-            .active_connection_id(parent_session_id)
-            .await
-            .is_some()
-        {
-            parent_session_id
-        } else {
-            session_id
+        let mut host = session_id;
+        let mut visited = std::collections::HashSet::from([session_id]);
+        while let Some(parent_session_id) = self.parent_session_id(host).await {
+            if !visited.insert(parent_session_id) {
+                break;
+            }
+            host = parent_session_id;
         }
+        host
+    }
+
+    /// Rule line for a PathPrefixPersist approval (§8, P3). Test-only.
+    #[cfg(test)]
+    pub(crate) fn path_prefix_rule_line(root: &std::path::Path, write: bool) -> String {
+        format!(
+            "path_prefix allow {} {}
+",
+            if write { "write" } else { "read" },
+            root.display()
+        )
+    }
+
+    /// Rule line for a HostPersist approval (§8, P3). Test-only.
+    #[cfg(test)]
+    pub(crate) fn host_rule_line(host: &str) -> String {
+        format!(
+            "network_rule allow {host}
+"
+        )
+    }
+
+    /// Persist a PathPrefixPersist approval (design doc §8, P3): grant the
+    /// prefix as a readable/writable root in the durable sandbox config so
+    /// every future session derives it into its fence — no re-asking.
+    pub(crate) async fn persist_path_prefix_rule(
+        &self,
+        root: &std::path::Path,
+        write: bool,
+    ) -> Result<(), String> {
+        // Durable form: the devo home rules store, same append-only + reload
+        // pattern as command prefixes. The rule engine (RuntimePermissionProfile
+        // derivation) reads roots from this store at session build.
+        let rules_path = crate::exec_policy_store::default_user_rules_path()
+            .map_err(|error| error.to_string())?;
+        let line = format!(
+            "path_prefix allow {} {}
+",
+            if write { "write" } else { "read" },
+            root.display()
+        );
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            if let Some(dir) = rules_path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            let existing = std::fs::read_to_string(&rules_path).unwrap_or_default();
+            if existing.lines().any(|l| l.trim() == line.trim()) {
+                return Ok(()); // idempotent
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&rules_path)
+                .map_err(|e| e.to_string())?;
+            file.write_all(line.as_bytes()).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        *self
+            .user_exec_policy
+            .lock()
+            .expect("user exec policy lock poisoned") =
+            crate::exec_policy_store::load_user_exec_policy();
+        Ok(())
+    }
+
+    /// Persist a HostPersist approval (§8, P3): append a network host rule to
+    /// the durable rules store.
+    pub(crate) async fn persist_host_rule(&self, host: &str) -> Result<(), String> {
+        let rules_path = crate::exec_policy_store::default_user_rules_path()
+            .map_err(|error| error.to_string())?;
+        let line = format!(
+            "network_rule allow {host}
+"
+        );
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            if let Some(dir) = rules_path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            let existing = std::fs::read_to_string(&rules_path).unwrap_or_default();
+            if existing.lines().any(|l| l.trim() == line.trim()) {
+                return Ok(());
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&rules_path)
+                .map_err(|e| e.to_string())?;
+            file.write_all(line.as_bytes()).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     pub(crate) async fn persist_command_prefix_rule(
@@ -686,12 +829,14 @@ impl ServerRuntime {
         }
 
         let approval_id = request.tool_call_id.clone();
-        let approval_item_id = ItemId::new();
-        let approval_item_seq = self.allocate_item_sequence(session_id).await;
+        let (native_session_id, native_turn_id) =
+            self.native_session_turn_ids(session_id, turn_id).await;
+        let approval_item_id = devo_protocol::native::ids::ItemId::new();
+        let approval_item_seq = self.allocate_item_sequence(&native_session_id).await;
         let persisted_approval = self
             .persist_waiting_approval_item(
-                session_id,
-                turn_id,
+                native_session_id,
+                native_turn_id,
                 approval_item_id,
                 approval_item_seq,
                 &request,
@@ -746,11 +891,12 @@ impl ServerRuntime {
             | devo_safety::ResourceKind::Custom(_) => "approval/permission/request",
         };
         let native_target = native_approval_target(&request);
-        let native_params = serde_json::to_value(native_waiting_approval_item(
+        let native_params = serde_json::to_value(native_approval_item(
             &approval_id,
             &request,
             &available_scopes,
             native_target.clone(),
+            None,
         ))
         .expect("serialize native approval request params");
         let cancel_token = self
@@ -780,15 +926,16 @@ impl ServerRuntime {
             match request_ready_rx.await {
                 Ok(Ok(())) => {
                     self.emit_native_item_started(
-                        session_id,
-                        turn_id,
+                        native_session_id,
+                        native_turn_id,
                         approval_item_id,
                         Some(approval_item_seq),
-                        native_waiting_approval_item(
+                        native_approval_item(
                             &approval_id,
                             &request,
                             &available_scopes,
                             native_target.clone(),
+                            None,
                         ),
                     )
                     .await;
@@ -800,13 +947,22 @@ impl ServerRuntime {
         };
         let (permission_result, publish_result) =
             tokio::join!(permission_request, publish_waiting_item);
+        // Reject unsupported Windows directory-capability scopes before the
+        // generic error arm below records an approved item, sends pending.tx,
+        // updates any cache/profile, or persists an always-allow rule.
+        let permission_result = admit_live_approval_scope(
+            cfg!(windows),
+            permission_result,
+            &request.resource,
+            request.path.as_deref(),
+        );
         let (decision, scope) = match permission_result {
             Ok(decision) => decision,
             Err(error) => {
                 if let Some(persisted) = &persisted_approval {
                     self.persist_resolved_approval_item(
-                        session_id,
-                        turn_id,
+                        native_session_id,
+                        native_turn_id,
                         &request,
                         &available_scopes,
                         devo_protocol::native::item::ApprovalDecisionKind::Cancelled,
@@ -818,8 +974,8 @@ impl ServerRuntime {
                 }
                 if publish_result.is_ok() {
                     self.emit_native_item_completed(
-                        session_id,
-                        turn_id,
+                        native_session_id,
+                        native_turn_id,
                         approval_item_id,
                         Some(approval_item_seq),
                         native_decided_approval_item(
@@ -871,8 +1027,8 @@ impl ServerRuntime {
         };
         if let Some(persisted) = &persisted_approval {
             self.persist_resolved_approval_item(
-                session_id,
-                turn_id,
+                native_session_id,
+                native_turn_id,
                 &request,
                 &available_scopes,
                 native_decision,
@@ -883,8 +1039,8 @@ impl ServerRuntime {
             .await;
         }
         self.emit_native_item_completed(
-            session_id,
-            turn_id,
+            native_session_id,
+            native_turn_id,
             approval_item_id,
             Some(approval_item_seq),
             native_decided_approval_item(
@@ -936,13 +1092,51 @@ impl ServerRuntime {
                     &pending_for_scope,
                 )
                 .await;
+                // P3 durable-rule captures (§8) — taken before the pending
+                // value moves into the actor call.
+                let prefix_to_persist = (scope == ApprovalScopeValue::CommandPrefixPersist)
+                    .then(|| pending_for_scope.command_prefix.clone())
+                    .flatten();
+                let path_to_persist = matches!(scope, ApprovalScopeValue::PathPrefixPersist)
+                    .then(|| {
+                        pending_for_scope.path.as_ref().map(|path| {
+                            (
+                                crate::runtime::session_actor::approval_scope::path_prefix_grant_root(path),
+                                matches!(
+                                    pending_for_scope.resource.as_ref(),
+                                    Some(devo_safety::ResourceKind::FileWrite)
+                                ),
+                            )
+                        })
+                    })
+                    .flatten();
+                let host_to_persist = matches!(scope, ApprovalScopeValue::HostPersist)
+                    .then(|| pending_for_scope.host.clone())
+                    .flatten();
                 if let Some(session_handle) = self.session(host_session_id).await {
-                    let prefix_to_persist = (scope == ApprovalScopeValue::CommandPrefixPersist)
-                        .then(|| pending_for_scope.command_prefix.clone())
-                        .flatten();
                     session_handle
                         .apply_approval_scope(scope, pending_for_scope)
                         .await;
+                    // P3 durable rules (§8): always-scopes persist at
+                    // resolution time, mirroring CommandPrefixPersist.
+                    if let Some((root, write)) = path_to_persist
+                        && let Err(error) = self.persist_path_prefix_rule(&root, write).await
+                    {
+                        tracing::warn!(
+                            session_id = %host_session_id,
+                            error = %error,
+                            "failed to persist path prefix rule"
+                        );
+                    }
+                    if let Some(host) = host_to_persist
+                        && let Err(error) = self.persist_host_rule(&host).await
+                    {
+                        tracing::warn!(
+                            session_id = %host_session_id,
+                            error = %error,
+                            "failed to persist host rule"
+                        );
+                    }
                     if let Some(prefix) = prefix_to_persist
                         && let Err(error) = self.persist_command_prefix_rule(&prefix).await
                     {
@@ -966,75 +1160,58 @@ impl ServerRuntime {
     }
 }
 
+fn static_policy_allow() -> AuthorizationDecision {
+    AuthorizationDecision::Allow {
+        source: devo_protocol::native::item::ApprovalDecisionSource::StaticPolicy,
+    }
+}
+
+fn static_policy_ask() -> AuthorizationDecision {
+    AuthorizationDecision::Ask {
+        source: devo_protocol::native::item::ApprovalDecisionSource::StaticPolicy,
+    }
+}
+
+fn static_policy_if(allow: bool) -> AuthorizationDecision {
+    if allow {
+        static_policy_allow()
+    } else {
+        static_policy_ask()
+    }
+}
+
 fn policy_decision(
     profile: &devo_safety::RuntimePermissionProfile,
     request: &ToolPermissionRequest,
     exec_policy: Option<&devo_execpolicy::Policy>,
 ) -> AuthorizationDecision {
-    use devo_protocol::native::item::ApprovalDecisionSource;
-
     if profile.yolo {
-        return AuthorizationDecision::Allow {
-            source: ApprovalDecisionSource::StaticPolicy,
-        };
+        return static_policy_allow();
     }
     if request_forces_approval(request) {
-        return AuthorizationDecision::Ask {
-            source: ApprovalDecisionSource::StaticPolicy,
-        };
+        return static_policy_ask();
     }
     match request.resource {
-        devo_safety::ResourceKind::Network => {
-            if profile.allow_network {
-                AuthorizationDecision::Allow {
-                    source: ApprovalDecisionSource::StaticPolicy,
-                }
-            } else {
-                AuthorizationDecision::Ask {
-                    source: ApprovalDecisionSource::StaticPolicy,
-                }
-            }
-        }
+        devo_safety::ResourceKind::Network => static_policy_if(profile.allow_network),
         devo_safety::ResourceKind::ShellExec => {
             shell_exec_policy_decision(profile, request, exec_policy)
         }
         devo_safety::ResourceKind::FileRead => {
             let Some(path) = request.path.as_ref() else {
-                return AuthorizationDecision::Ask {
-                    source: ApprovalDecisionSource::StaticPolicy,
-                };
+                return static_policy_ask();
             };
-            if path_matches_any_prefix(path, &profile.readable_roots)
-                || path_matches_any_prefix(path, &profile.writable_roots)
-            {
-                AuthorizationDecision::Allow {
-                    source: ApprovalDecisionSource::StaticPolicy,
-                }
-            } else {
-                AuthorizationDecision::Ask {
-                    source: ApprovalDecisionSource::StaticPolicy,
-                }
-            }
+            static_policy_if(
+                path_matches_any_prefix(path, &profile.readable_roots)
+                    || path_matches_any_prefix(path, &profile.writable_roots),
+            )
         }
         devo_safety::ResourceKind::FileWrite => {
             let Some(path) = request.path.as_ref() else {
-                return AuthorizationDecision::Ask {
-                    source: ApprovalDecisionSource::StaticPolicy,
-                };
+                return static_policy_ask();
             };
-            if path_matches_any_prefix(path, &profile.writable_roots) {
-                AuthorizationDecision::Allow {
-                    source: ApprovalDecisionSource::StaticPolicy,
-                }
-            } else {
-                AuthorizationDecision::Ask {
-                    source: ApprovalDecisionSource::StaticPolicy,
-                }
-            }
+            static_policy_if(path_matches_any_prefix(path, &profile.writable_roots))
         }
-        devo_safety::ResourceKind::Custom(_) => AuthorizationDecision::Allow {
-            source: ApprovalDecisionSource::StaticPolicy,
-        },
+        devo_safety::ResourceKind::Custom(_) => static_policy_allow(),
     }
 }
 
@@ -1048,33 +1225,21 @@ fn shell_exec_policy_decision(
     use devo_util_shell_command::is_dangerous_command::command_might_be_dangerous;
 
     if !profile.allow_shell_commands {
-        return AuthorizationDecision::Ask {
-            source: ApprovalDecisionSource::StaticPolicy,
-        };
+        return static_policy_ask();
     }
     let command = shell_command_for_policy(request);
     if command.is_empty() {
-        return AuthorizationDecision::Ask {
-            source: ApprovalDecisionSource::StaticPolicy,
-        };
+        return static_policy_ask();
     }
     // Fail closed on multi-line / control-separated commands even when a
     // pre-parsed argv is present (shlex would otherwise collapse newlines).
-    if command
-        .as_bytes()
-        .iter()
-        .any(|b| matches!(b, b'\n' | b'\r' | 0x0b | 0x0c))
-    {
-        return AuthorizationDecision::Ask {
-            source: ApprovalDecisionSource::StaticPolicy,
-        };
+    if shell_command_has_control_separators(&command) {
+        return static_policy_ask();
     }
     // Background `&` (not `&&`) splits jobs; argv-based checks miss the
     // trailing command, so fail closed like newlines.
     if command_contains_standalone_ampersand(&command) {
-        return AuthorizationDecision::Ask {
-            source: ApprovalDecisionSource::StaticPolicy,
-        };
+        return static_policy_ask();
     }
     let argv = shell_argv_for_policy(request, &command);
 
@@ -1100,9 +1265,7 @@ fn shell_exec_policy_decision(
         .as_ref()
         .is_some_and(|argv| command_might_be_dangerous(argv))
     {
-        return AuthorizationDecision::Ask {
-            source: ApprovalDecisionSource::StaticPolicy,
-        };
+        return static_policy_ask();
     }
 
     match devo_safety::evaluate_shell_command_for_profile(profile, &command, &request.cwd) {
@@ -1153,12 +1316,15 @@ fn shell_argv_for_policy(request: &ToolPermissionRequest, command: &str) -> Opti
         .or_else(|| parse_safe_shell_argv(command))
 }
 
-fn parse_safe_shell_argv(command: &str) -> Option<Vec<String>> {
-    if command
+fn shell_command_has_control_separators(command: &str) -> bool {
+    command
         .as_bytes()
         .iter()
         .any(|b| matches!(b, b'\n' | b'\r' | 0x0b | 0x0c))
-    {
+}
+
+fn parse_safe_shell_argv(command: &str) -> Option<Vec<String>> {
+    if shell_command_has_control_separators(command) {
         return None;
     }
     let argv = shlex::split(command)?;
@@ -1233,9 +1399,15 @@ pub(super) fn approval_scopes_for_request(request: &ToolPermissionRequest) -> Ve
     }
     if request.path.is_some() {
         scopes.push(approval_scope_wire_string(ApprovalScopeValue::PathPrefix));
+        // P3 (§8): the durable variant — persists a readable/writable root
+        // rule so future sessions derive it into their fence.
+        scopes.push(approval_scope_wire_string(
+            ApprovalScopeValue::PathPrefixPersist,
+        ));
     }
     if request.host.is_some() {
         scopes.push(approval_scope_wire_string(ApprovalScopeValue::Host));
+        scopes.push(approval_scope_wire_string(ApprovalScopeValue::HostPersist));
     }
     if let Some(prefix) = request.command_prefix.as_ref() {
         scopes.push(approval_scope_wire_string(
@@ -1264,11 +1436,12 @@ pub(super) fn native_approval_target(
     }
 }
 
-fn native_waiting_approval_item(
+fn native_approval_item(
     approval_id: &str,
     request: &ToolPermissionRequest,
     available_scopes: &[String],
     target: Option<devo_protocol::native::item::ApprovalTarget>,
+    decision: Option<ApprovalDecision>,
 ) -> Item {
     Item::Approval {
         approval_id: approval_id.to_string(),
@@ -1287,7 +1460,7 @@ fn native_waiting_approval_item(
         command_pattern: request.command_pattern.clone(),
         command_prefix: request.command_prefix.clone(),
         target,
-        decision: None,
+        decision,
     }
 }
 
@@ -1298,25 +1471,13 @@ pub(super) fn native_decided_approval_item(
     target: Option<devo_protocol::native::item::ApprovalTarget>,
     decision: ApprovalDecision,
 ) -> Item {
-    Item::Approval {
-        approval_id: approval_id.to_string(),
-        target_item_id: None,
-        action_summary: request.action_summary.clone(),
-        justification: request.justification.clone().unwrap_or_default(),
-        resource: Some(format!("{:?}", request.resource)),
-        available_scopes: available_scopes
-            .iter()
-            .filter_map(|scope| {
-                serde_json::to_value(scope)
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_string))
-            })
-            .collect(),
-        command_pattern: request.command_pattern.clone(),
-        command_prefix: request.command_prefix.clone(),
+    native_approval_item(
+        approval_id,
+        request,
+        available_scopes,
         target,
-        decision: Some(decision),
-    }
+        Some(decision),
+    )
 }
 
 pub(super) fn native_approval_scope(
@@ -1335,6 +1496,10 @@ pub(super) fn native_approval_scope(
         ApprovalScopeValue::CommandPrefixPersist => {
             devo_protocol::native::item::ApprovalScope::CommandPrefixPersist
         }
+        ApprovalScopeValue::PathPrefixPersist => {
+            devo_protocol::native::item::ApprovalScope::PathPrefixPersist
+        }
+        ApprovalScopeValue::HostPersist => devo_protocol::native::item::ApprovalScope::HostPersist,
     }
 }
 
@@ -1488,6 +1653,34 @@ fn acp_permission_options_for_scopes(
         options.push(devo_protocol::AcpPermissionOption {
             option_id: "allow_host".to_string(),
             name: format!("Yes, and allow `{host}` for this session"),
+            kind: devo_protocol::AcpPermissionOptionKind::AllowAlways,
+            meta: None,
+        });
+    }
+    if scopes
+        .iter()
+        .any(|scope| scope == "pathPrefixPersist" || scope == "path_prefix_persist")
+        && let Some(path) = path
+    {
+        let root = path_prefix_grant_root(path);
+        options.push(devo_protocol::AcpPermissionOption {
+            option_id: "allow_path_prefix_persist".to_string(),
+            name: format!(
+                "Yes, and always allow files under `{}` (saved as a rule)",
+                root.display()
+            ),
+            kind: devo_protocol::AcpPermissionOptionKind::AllowAlways,
+            meta: None,
+        });
+    }
+    if scopes
+        .iter()
+        .any(|scope| scope == "hostPersist" || scope == "host_persist")
+        && let Some(host) = host
+    {
+        options.push(devo_protocol::AcpPermissionOption {
+            option_id: "allow_host_persist".to_string(),
+            name: format!("Yes, and always allow `{host}` (saved as a rule)"),
             kind: devo_protocol::AcpPermissionOptionKind::AllowAlways,
             meta: None,
         });
@@ -1671,9 +1864,7 @@ fn permission_mode_authorization(mode: PermissionMode) -> Option<AuthorizationDe
     use devo_protocol::native::item::ApprovalDecisionSource;
 
     match mode {
-        PermissionMode::Yolo => Some(AuthorizationDecision::Allow {
-            source: ApprovalDecisionSource::StaticPolicy,
-        }),
+        PermissionMode::Yolo => Some(static_policy_allow()),
         PermissionMode::Deny => Some(AuthorizationDecision::Deny {
             source: ApprovalDecisionSource::StaticPolicy,
             reason: "approval policy is deny".to_string(),
@@ -1717,39 +1908,80 @@ fn push_recent_approval_decisions(
 }
 
 fn format_persisted_turn_item(item: &crate::execution::PersistedTurnItem) -> String {
-    match &item.turn_item {
-        devo_core::TurnItem::UserMessage(text) => format!("user: {}", text.text),
-        devo_core::TurnItem::SteerInput(text) => format!("steer: {}", text.text),
-        devo_core::TurnItem::AgentMessage(text) => format!("assistant: {}", text.text),
-        devo_core::TurnItem::Plan(text) => format!("plan: {}", text.text),
-        devo_core::TurnItem::Reasoning(text) => format!("reasoning: {}", text.text),
-        devo_core::TurnItem::ToolCall(tool_call) => {
-            format!("tool_call {}: {}", tool_call.tool_name, tool_call.input)
+    use devo_protocol::native::item::Item;
+    use devo_protocol::native::item::UserInput;
+
+    match &item.item {
+        Item::UserMessage { content, entry, .. } => {
+            let text = content
+                .iter()
+                .filter_map(|part| match part {
+                    UserInput::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            match entry {
+                devo_protocol::native::item::UserMessageEntry::Steer => {
+                    format!("steer: {text}")
+                }
+                _ => format!("user: {text}"),
+            }
         }
-        devo_core::TurnItem::ToolResult(result) => {
-            let name = result.tool_name.as_deref().unwrap_or("unknown");
-            format!("tool_result {}: {}", name, result.output)
+        Item::AssistantMessage { text, .. } => format!("assistant: {text}"),
+        Item::Plan { entries, .. } => {
+            let text = entries
+                .iter()
+                .map(|entry| entry.step.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("plan: {text}")
         }
-        devo_core::TurnItem::CommandExecution(exec) => {
-            format!("command: {}", exec.command)
+        Item::Reasoning { text, .. } => format!("reasoning: {text}"),
+        Item::ToolCall {
+            tool_name, input, ..
+        } => format!(
+            "tool_call {tool_name}: {}",
+            input.clone().unwrap_or(serde_json::Value::Null)
+        ),
+        Item::ToolResult {
+            call_id, output, ..
+        } => format!("tool_result {call_id}: {output}"),
+        Item::CommandExecution { command, .. } => format!("command: {command}"),
+        Item::Approval {
+            action_summary,
+            decision,
+            ..
+        } => {
+            if let Some(decision) = decision {
+                format!(
+                    "approval_decision: {:?} ({:?})",
+                    decision.decision, decision.scope
+                )
+            } else {
+                format!("approval_request: {action_summary}")
+            }
         }
-        devo_core::TurnItem::ApprovalRequest(request) => {
-            format!("approval_request: {}", request.action_summary)
+        Item::HostedToolCall {
+            tool_name, output, ..
+        } => {
+            let text = output
+                .as_ref()
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            format!("{tool_name}: {text}")
         }
-        devo_core::TurnItem::ApprovalDecision(decision) => {
-            format!(
-                "approval_decision: {} ({})",
-                decision.decision, decision.scope
-            )
+        Item::ContextCompaction { summary, .. } => {
+            format!("compaction: {}", summary.as_deref().unwrap_or_default())
         }
-        devo_core::TurnItem::HookPrompt(text) => format!("hook: {}", text.text),
-        devo_core::TurnItem::WebSearch(text) => format!("web_search: {}", text.text),
-        devo_core::TurnItem::ImageGeneration(text) => format!("image: {}", text.text),
-        devo_core::TurnItem::ContextCompaction(text) => format!("compaction: {}", text.text),
-        devo_core::TurnItem::TurnSummary(text) => format!("turn_summary: {}", text.text),
-        devo_core::TurnItem::ToolProgress(progress) => {
-            format!("tool_progress: {}", progress.message)
-        }
+        Item::FileChange { call_id, .. } => format!("file_change: {call_id}"),
+        Item::UserInputRequest { .. } => "user_input_request".to_string(),
+        Item::SubAgent { .. } => "subagent".to_string(),
+        Item::BackgroundTask { .. } => "background_task".to_string(),
+        Item::GoalProgress { .. } => "goal_progress".to_string(),
+        Item::Refinement { .. } => "refinement".to_string(),
+        Item::Warning { message, .. } => format!("warning: {message}"),
+        Item::BranchSummary { summary, .. } => format!("branch_summary: {summary}"),
     }
 }
 
@@ -1760,24 +1992,44 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn approval_policy_strings_map_to_permission_modes() {
-        assert_eq!(
-            permission_mode_from_approval_policy("on-request"),
-            Some(PermissionMode::Interactive)
+    fn live_windows_path_prefix_enters_error_arm_before_approval_side_effects() {
+        let path = Path::new("approved.txt");
+        let result = admit_live_approval_scope(
+            true,
+            Ok((
+                ApprovalDecisionValue::Approve,
+                ApprovalScopeValue::PathPrefix,
+            )),
+            &devo_safety::ResourceKind::FileRead,
+            Some(path),
         );
+        assert!(result.unwrap_err().contains("unsupported"));
         assert_eq!(
-            permission_mode_from_approval_policy("never"),
-            Some(PermissionMode::Yolo)
+            admit_live_approval_scope(
+                true,
+                Ok((ApprovalDecisionValue::Approve, ApprovalScopeValue::Once)),
+                &devo_safety::ResourceKind::FileRead,
+                Some(path),
+            )
+            .expect("mediated Once"),
+            (ApprovalDecisionValue::Approve, ApprovalScopeValue::Once)
         );
-        assert_eq!(
-            permission_mode_from_approval_policy("deny"),
-            Some(PermissionMode::Deny)
-        );
-        assert_eq!(permission_mode_from_approval_policy("unknown"), None);
     }
 
     #[test]
-    fn command_prefix_cache_allows_matching_command_prefix() {
+    fn approval_policy_strings_map_to_permission_modes() {
+        for (policy, expected) in [
+            ("on-request", Some(PermissionMode::Interactive)),
+            ("never", Some(PermissionMode::Yolo)),
+            ("deny", Some(PermissionMode::Deny)),
+            ("unknown", None),
+        ] {
+            assert_eq!(permission_mode_from_approval_policy(policy), expected);
+        }
+    }
+
+    #[test]
+    fn approval_scopes_and_prefix_cache_for_shell_commands() {
         let mut cache = crate::execution::ApprovalGrantCache::default();
         cache
             .command_prefixes
@@ -1785,37 +2037,24 @@ mod tests {
         let mut request = test_permission_request("shell_command");
         request.command_prefix = Some(vec!["git".to_string(), "add".to_string()]);
         assert!(permission_cache_matches(&cache, &request));
-    }
-
-    #[test]
-    fn approval_scopes_include_command_prefix_for_shell_commands() {
-        let mut request = test_permission_request("shell_command");
-        request.command_prefix = Some(vec!["git".to_string(), "add".to_string()]);
         assert!(
             approval_scopes_for_request(&request)
                 .iter()
                 .any(|scope| scope == "commandPrefix" || scope == "command_prefix")
         );
-    }
 
-    #[test]
-    fn approval_scopes_gate_session_scope_on_command_pattern_for_shell_tools() {
         let mut shell_request = test_permission_request("shell_command");
         assert!(
             !approval_scopes_for_request(&shell_request)
                 .iter()
-                .any(|scope| scope == "session"),
-            "shell command without a safe pattern must not offer session scope"
+                .any(|scope| scope == "session")
         );
-
         shell_request.target = Some("git status".to_string());
         assert!(
             approval_scopes_for_request(&shell_request)
                 .iter()
-                .any(|scope| scope == "session"),
-            "shell command with an exact command string should offer session scope"
+                .any(|scope| scope == "session")
         );
-
         shell_request.command_pattern =
             Some(vec!["git".to_string(), "add".to_string(), "*".to_string()]);
         assert!(
@@ -1823,20 +2062,15 @@ mod tests {
                 .iter()
                 .any(|scope| scope == "session")
         );
-
-        let exec_request = test_permission_request("exec_command");
         assert!(
-            !approval_scopes_for_request(&exec_request)
+            !approval_scopes_for_request(&test_permission_request("exec_command"))
                 .iter()
                 .any(|scope| scope == "session")
         );
-
-        let file_request = test_permission_request("write");
         assert!(
-            approval_scopes_for_request(&file_request)
+            approval_scopes_for_request(&test_permission_request("write"))
                 .iter()
-                .any(|scope| scope == "session"),
-            "non-shell tools keep the session scope"
+                .any(|scope| scope == "session")
         );
     }
 
@@ -1906,37 +2140,7 @@ mod tests {
 
     #[test]
     fn yolo_grants_sandbox_bypass_for_escalation() {
-        let mut request = test_permission_request("shell_command");
-        request.sandbox_permissions = devo_core::tools::SandboxPermissionRequest::FullEscalation;
-        request.input = serde_json::json!({
-            "command": "npm install",
-            "sandbox_permissions": "require_escalated"
-        });
-
-        assert_eq!(
-            permission_mode_authorization(PermissionMode::Yolo),
-            Some(AuthorizationDecision::Allow {
-                source: devo_protocol::native::item::ApprovalDecisionSource::StaticPolicy,
-            })
-        );
-        assert_eq!(
-            escalation_permission_grant(&request),
-            PermissionGrant {
-                bypass_sandbox: true,
-                already_approved: false,
-                sandbox_permission_overlay: None,
-            }
-        );
-    }
-
-    #[test]
-    fn yolo_profile_grants_sandbox_bypass_for_escalation() {
         let root = abs_path(&["workspace"]);
-        let mut profile = devo_safety::RuntimePermissionProfile::from_preset(
-            devo_safety::PermissionPreset::Default,
-            root.clone(),
-        );
-        profile.yolo = true;
         let mut request = test_permission_request("shell_command");
         request.sandbox_permissions = devo_core::tools::SandboxPermissionRequest::FullEscalation;
         request.input = serde_json::json!({
@@ -1944,37 +2148,30 @@ mod tests {
             "sandbox_permissions": "require_escalated"
         });
         request.target = Some("npm install".to_string());
-        request.cwd = root;
+        request.cwd = root.clone();
+        let grant = PermissionGrant {
+            bypass_sandbox: true,
+            already_approved: false,
+            sandbox_permission_overlay: None,
+        };
 
+        assert_eq!(
+            permission_mode_authorization(PermissionMode::Yolo),
+            Some(AuthorizationDecision::Allow {
+                source: devo_protocol::native::item::ApprovalDecisionSource::StaticPolicy,
+            })
+        );
+        assert_eq!(escalation_permission_grant(&request), grant);
+
+        let mut profile = devo_safety::RuntimePermissionProfile::from_preset(
+            devo_safety::PermissionPreset::Default,
+            root,
+        );
+        profile.yolo = true;
         assert!(matches!(
             test_policy_decision(&profile, &request),
             AuthorizationDecision::Allow { .. }
         ));
-        assert_eq!(
-            escalation_permission_grant(&request),
-            PermissionGrant {
-                bypass_sandbox: true,
-                already_approved: false,
-                sandbox_permission_overlay: None,
-            }
-        );
-    }
-
-    #[test]
-    fn approval_scopes_include_command_prefix_persist_when_not_banned() {
-        let mut request = test_permission_request("shell_command");
-        request.command_prefix = Some(vec!["git".to_string(), "pull".to_string()]);
-        let scopes = approval_scopes_for_request(&request);
-        assert!(scopes.iter().any(|scope| scope == "commandPrefix"));
-        assert!(scopes.iter().any(|scope| scope == "commandPrefixPersist"));
-
-        request.command_prefix = Some(vec!["git".to_string()]);
-        let scopes = approval_scopes_for_request(&request);
-        assert!(scopes.iter().any(|scope| scope == "commandPrefix"));
-        assert!(
-            !scopes.iter().any(|scope| scope == "commandPrefixPersist"),
-            "banned bare git prefix must not offer persist scope"
-        );
     }
 
     #[test]
@@ -2005,110 +2202,73 @@ mod tests {
     }
 
     #[test]
-    fn file_tool_session_scope_matches_exact_path_only() {
-        let root = abs_path(&["workspace", "src"]);
-        let granted = root.join("main.rs");
-        let sibling = root.join("helper.rs");
-
-        let mut cache = crate::execution::ApprovalGrantCache::default();
-        cache
-            .write_exact_paths
-            .insert(normalize_permission_path(&granted));
-
-        let mut allowed = test_permission_request("write");
-        allowed.resource = devo_safety::ResourceKind::FileWrite;
-        allowed.path = Some(granted.clone());
-
-        let mut sibling_request = test_permission_request("write");
-        sibling_request.resource = devo_safety::ResourceKind::FileWrite;
-        sibling_request.path = Some(sibling);
-
-        let mut read_request = test_permission_request("read");
-        read_request.resource = devo_safety::ResourceKind::FileRead;
-        read_request.path = Some(granted.clone());
-
-        let mut edit_request = test_permission_request("edit");
-        edit_request.resource = devo_safety::ResourceKind::FileWrite;
-        edit_request.path = Some(granted);
-
-        assert!(permission_cache_matches(&cache, &allowed));
-        assert!(permission_cache_matches(&cache, &edit_request));
-        assert!(
-            !permission_cache_matches(&cache, &sibling_request),
-            "session exact-file grant must not cover siblings"
-        );
-        assert!(
-            !permission_cache_matches(&cache, &read_request),
-            "write exact-file grant must not cover reads"
-        );
-    }
-
-    #[test]
-    fn file_tool_path_prefix_matches_directory_siblings() {
+    fn file_tool_cache_scope_matches_expected_paths() {
         let root = abs_path(&["workspace", "src"]);
         let granted = root.join("main.rs");
         let sibling = root.join("helper.rs");
         let outside = abs_path(&["workspace", "other.rs"]);
 
-        let mut cache = crate::execution::ApprovalGrantCache::default();
-        cache
+        let mut exact_cache = crate::execution::ApprovalGrantCache::default();
+        exact_cache
+            .write_exact_paths
+            .insert(normalize_permission_path(&granted));
+        let mut exact_allowed = test_permission_request("write");
+        exact_allowed.resource = devo_safety::ResourceKind::FileWrite;
+        exact_allowed.path = Some(granted.clone());
+        let mut exact_sibling = exact_allowed.clone();
+        exact_sibling.path = Some(sibling.clone());
+        let mut exact_read = test_permission_request("read");
+        exact_read.resource = devo_safety::ResourceKind::FileRead;
+        exact_read.path = Some(granted.clone());
+        assert!(permission_cache_matches(&exact_cache, &exact_allowed));
+        assert!(!permission_cache_matches(&exact_cache, &exact_sibling));
+        assert!(!permission_cache_matches(&exact_cache, &exact_read));
+
+        let mut prefix_cache = crate::execution::ApprovalGrantCache::default();
+        prefix_cache
             .write_path_prefixes
             .insert(path_prefix_grant_root(&granted));
-
-        let mut allowed = test_permission_request("write");
-        allowed.resource = devo_safety::ResourceKind::FileWrite;
-        allowed.path = Some(granted.clone());
-
-        let mut sibling_request = test_permission_request("edit");
-        sibling_request.resource = devo_safety::ResourceKind::FileWrite;
-        sibling_request.path = Some(sibling);
-
-        let mut outside_request = test_permission_request("write");
-        outside_request.resource = devo_safety::ResourceKind::FileWrite;
-        outside_request.path = Some(outside);
-
-        let mut read_request = test_permission_request("read");
-        read_request.resource = devo_safety::ResourceKind::FileRead;
-        read_request.path = Some(root.join("notes.txt"));
-
-        assert!(permission_cache_matches(&cache, &allowed));
-        assert!(permission_cache_matches(&cache, &sibling_request));
-        assert!(!permission_cache_matches(&cache, &outside_request));
-        assert!(
-            !permission_cache_matches(&cache, &read_request),
-            "write path-prefix grant must not cover reads"
-        );
+        let mut prefix_sibling = test_permission_request("edit");
+        prefix_sibling.resource = devo_safety::ResourceKind::FileWrite;
+        prefix_sibling.path = Some(sibling);
+        let mut prefix_outside = test_permission_request("write");
+        prefix_outside.resource = devo_safety::ResourceKind::FileWrite;
+        prefix_outside.path = Some(outside);
+        assert!(permission_cache_matches(&prefix_cache, &exact_allowed));
+        assert!(permission_cache_matches(&prefix_cache, &prefix_sibling));
+        assert!(!permission_cache_matches(&prefix_cache, &prefix_outside));
     }
 
     #[test]
     fn approval_decision_from_acp_maps_file_tool_scopes() {
-        assert_eq!(
-            approval_decision_from_acp_outcome(devo_protocol::AcpPermissionOutcome::Selected {
-                option_id: "allow_once".to_string(),
-            }),
-            Ok((ApprovalDecisionValue::Approve, ApprovalScopeValue::Once))
-        );
-        assert_eq!(
-            approval_decision_from_acp_outcome(devo_protocol::AcpPermissionOutcome::Selected {
-                option_id: "allow_session".to_string(),
-            }),
-            Ok((ApprovalDecisionValue::Approve, ApprovalScopeValue::Session))
-        );
-        assert_eq!(
-            approval_decision_from_acp_outcome(devo_protocol::AcpPermissionOutcome::Selected {
-                option_id: "allow_path_prefix".to_string(),
-            }),
-            Ok((
-                ApprovalDecisionValue::Approve,
-                ApprovalScopeValue::PathPrefix
-            ))
-        );
-        assert_eq!(
-            approval_decision_from_acp_outcome(devo_protocol::AcpPermissionOutcome::Selected {
-                option_id: "reject_once".to_string(),
-            }),
-            Ok((ApprovalDecisionValue::Deny, ApprovalScopeValue::Once))
-        );
+        for (option_id, expected) in [
+            (
+                "allow_once",
+                (ApprovalDecisionValue::Approve, ApprovalScopeValue::Once),
+            ),
+            (
+                "allow_session",
+                (ApprovalDecisionValue::Approve, ApprovalScopeValue::Session),
+            ),
+            (
+                "allow_path_prefix",
+                (
+                    ApprovalDecisionValue::Approve,
+                    ApprovalScopeValue::PathPrefix,
+                ),
+            ),
+            (
+                "reject_once",
+                (ApprovalDecisionValue::Deny, ApprovalScopeValue::Once),
+            ),
+        ] {
+            assert_eq!(
+                approval_decision_from_acp_outcome(devo_protocol::AcpPermissionOutcome::Selected {
+                    option_id: option_id.to_string(),
+                }),
+                Ok(expected)
+            );
+        }
     }
 
     #[test]
@@ -2138,186 +2298,77 @@ mod tests {
     }
 
     #[test]
-    fn policy_allows_file_read_inside_readable_roots() {
-        let root = abs_path(&["workspace"]);
-        let profile = devo_safety::RuntimePermissionProfile::from_preset(
-            devo_safety::PermissionPreset::Default,
-            root.clone(),
-        );
-        let mut request = test_permission_request("read");
-        request.resource = devo_safety::ResourceKind::FileRead;
-        request.path = Some(root.join("Cargo.toml"));
-
+    fn policy_decisions_for_file_and_shell_requests() {
+        let (root, profile) = workspace_profile();
+        let mut inside_read = test_permission_request("read");
+        inside_read.resource = devo_safety::ResourceKind::FileRead;
+        inside_read.path = Some(root.join("Cargo.toml"));
         assert!(matches!(
-            test_policy_decision(&profile, &request),
+            test_policy_decision(&profile, &inside_read),
             AuthorizationDecision::Allow { .. }
         ));
-    }
 
-    #[test]
-    fn policy_asks_for_file_read_outside_readable_roots() {
-        let root = abs_path(&["workspace"]);
-        let profile = devo_safety::RuntimePermissionProfile::from_preset(
-            devo_safety::PermissionPreset::Default,
-            root,
-        );
-        let mut request = test_permission_request("read");
-        request.resource = devo_safety::ResourceKind::FileRead;
-        request.path = Some(abs_path(&["outside", "secret.txt"]));
-
+        let mut outside_read = test_permission_request("read");
+        outside_read.resource = devo_safety::ResourceKind::FileRead;
+        outside_read.path = Some(abs_path(&["outside", "secret.txt"]));
         assert!(matches!(
-            test_policy_decision(&profile, &request),
+            test_policy_decision(&profile, &outside_read),
             AuthorizationDecision::Ask { .. }
         ));
-    }
 
-    #[test]
-    fn policy_asks_for_shell_redirect_outside_writable_roots() {
-        let root = abs_path(&["workspace"]);
-        let profile = devo_safety::RuntimePermissionProfile::from_preset(
-            devo_safety::PermissionPreset::Default,
-            root.clone(),
-        );
-        let mut request = test_permission_request("shell_command");
-        request.target = Some(format!(
+        let mut outside_redirect = test_permission_request("shell_command");
+        outside_redirect.target = Some(format!(
             "cat > {}/outside.txt",
             abs_path(&["etc"]).display()
         ));
-        request.input = serde_json::json!({ "command": request.target });
-
+        outside_redirect.input = serde_json::json!({ "command": outside_redirect.target });
         assert!(matches!(
-            test_policy_decision(&profile, &request),
+            test_policy_decision(&profile, &outside_redirect),
             AuthorizationDecision::Ask { .. }
         ));
-    }
 
-    #[test]
-    fn policy_allows_shell_redirect_inside_writable_roots() {
-        let root = abs_path(&["workspace"]);
-        let profile = devo_safety::RuntimePermissionProfile::from_preset(
-            devo_safety::PermissionPreset::Default,
-            root.clone(),
-        );
-        let mut request = test_permission_request("shell_command");
-        // On Windows, backslashes inside an untrusted bash command string can
-        // interfere with the shell parser. Use forward slashes to keep the
-        // redirect destination a stable literal path for static analysis.
         let file_path = root
             .join("file.txt")
             .display()
             .to_string()
             .replace('\\', "/");
-        request.target = Some(format!("cat > '{file_path}'"));
-        request.input = serde_json::json!({ "command": request.target });
-        request.cwd = root;
-
-        let command = request
-            .target
-            .as_deref()
-            .expect("test builds a command string");
-        let tree = devo_util_shell_command::bash::try_parse_shell(command)
-            .expect("devo_util shell parser should parse the command");
-        assert!(
-            !tree.root_node().has_error(),
-            "shell parser root node has_error for command={command:?}"
-        );
-        let policy_decision =
-            devo_safety::evaluate_shell_command_for_profile(&profile, command, &request.cwd);
-        assert!(
-            matches!(
-                policy_decision,
-                devo_safety::permission::PolicyDecision::NoMatch
-                    | devo_safety::permission::PolicyDecision::Allow
-            ),
-            "unexpected policy_decision={policy_decision:?}"
-        );
+        let mut inside_redirect = test_permission_request("shell_command");
+        inside_redirect.target = Some(format!("cat > '{file_path}'"));
+        inside_redirect.input = serde_json::json!({ "command": inside_redirect.target });
+        inside_redirect.cwd = root.clone();
         assert!(matches!(
-            test_policy_decision(&profile, &request),
+            test_policy_decision(&profile, &inside_redirect),
             AuthorizationDecision::Allow { .. }
         ));
-    }
 
-    #[test]
-    fn policy_allows_shell_command_without_file_access() {
-        let root = abs_path(&["workspace"]);
-        let profile = devo_safety::RuntimePermissionProfile::from_preset(
-            devo_safety::PermissionPreset::Default,
-            root.clone(),
-        );
-        let mut request = test_permission_request("shell_command");
-        request.target = Some("git status".to_string());
-        request.input = serde_json::json!({ "command": "git status" });
-        request.cwd = root;
-
-        assert!(matches!(
-            test_policy_decision(&profile, &request),
-            AuthorizationDecision::Allow { .. }
-        ));
-    }
-
-    #[test]
-    fn policy_asks_for_dangerous_shell_command() {
-        let root = abs_path(&["workspace"]);
-        let profile = devo_safety::RuntimePermissionProfile::from_preset(
-            devo_safety::PermissionPreset::Default,
-            root.clone(),
-        );
-        let mut request = test_permission_request("shell_command");
-        request.target = Some("rm -f important.txt".to_string());
-        request.input = serde_json::json!({ "command": "rm -f important.txt" });
-        request.cwd = root;
-
-        assert!(matches!(
-            test_policy_decision(&profile, &request),
-            AuthorizationDecision::Ask { .. }
-        ));
-    }
-
-    #[test]
-    fn policy_asks_for_shell_background_ampersand() {
-        let root = abs_path(&["workspace"]);
-        let profile = devo_safety::RuntimePermissionProfile::from_preset(
-            devo_safety::PermissionPreset::Default,
-            root.clone(),
-        );
-        for command in ["sleep 1 & touch evil", "sleep 1& rm x"] {
+        for (command, expect_allow) in [
+            ("git status", true),
+            ("rm -f important.txt", false),
+            ("sleep 1 & touch evil", false),
+            ("sleep 1& rm x", false),
+            (r#"echo "http://x/?a=1&b=2""#, true),
+        ] {
             let mut request = test_permission_request("shell_command");
-            // Background `&` (spaced or attached) must not pass safe-prefix Allow.
             request.target = Some(command.to_string());
             request.input = serde_json::json!({ "command": command });
             request.cwd = root.clone();
-
-            assert!(
-                matches!(
-                    test_policy_decision(&profile, &request),
-                    AuthorizationDecision::Ask { .. }
-                ),
-                "expected Ask for {command}"
-            );
+            let decision = test_policy_decision(&profile, &request);
+            if expect_allow {
+                assert!(
+                    matches!(decision, AuthorizationDecision::Allow { .. }),
+                    "expected Allow for {command}"
+                );
+            } else {
+                assert!(
+                    matches!(decision, AuthorizationDecision::Ask { .. }),
+                    "expected Ask for {command}"
+                );
+            }
         }
     }
 
     #[test]
-    fn policy_allows_quoted_ampersand_in_url_query() {
-        let root = abs_path(&["workspace"]);
-        let profile = devo_safety::RuntimePermissionProfile::from_preset(
-            devo_safety::PermissionPreset::Default,
-            root.clone(),
-        );
-        let mut request = test_permission_request("shell_command");
-        // `&` inside quotes is part of the URL, not a background job.
-        request.target = Some(r#"echo "http://x/?a=1&b=2""#.to_string());
-        request.input = serde_json::json!({ "command": r#"echo "http://x/?a=1&b=2""# });
-        request.cwd = root;
-
-        assert!(matches!(
-            test_policy_decision(&profile, &request),
-            AuthorizationDecision::Allow { .. }
-        ));
-    }
-
-    #[test]
-    fn sandbox_bypass_cache_grants_unsandboxed_execution() {
+    fn sandbox_bypass_cache_matches_exact_escalation_command() {
         let mut cache = crate::execution::ApprovalGrantCache::default();
         let mut request = test_permission_request("shell_command");
         request.input = serde_json::json!({
@@ -2337,21 +2388,6 @@ mod tests {
                 sandbox_permission_overlay: None,
             })
         );
-    }
-
-    #[test]
-    fn sandbox_bypass_cache_requires_exact_command_and_permissions() {
-        let mut cache = crate::execution::ApprovalGrantCache::default();
-        let mut request = test_permission_request("shell_command");
-        request.input = serde_json::json!({
-            "command": "npm install",
-            "sandbox_permissions": "require_escalated"
-        });
-        request.target = Some("npm install".to_string());
-        request.sandbox_permissions = devo_core::tools::SandboxPermissionRequest::FullEscalation;
-        let key = sandbox_bypass_key_from_request(&request).expect("bypass key");
-        cache.sandbox_bypass_commands.insert(key);
-
         request.target = Some("npm ci".to_string());
         assert_eq!(cache_grant(&cache, &request), None);
     }
@@ -2383,6 +2419,14 @@ mod tests {
             sandbox_permissions: devo_core::tools::SandboxPermissionRequest::Default,
         }
     }
+    fn workspace_profile() -> (PathBuf, devo_safety::RuntimePermissionProfile) {
+        let root = abs_path(&["workspace"]);
+        let profile = devo_safety::RuntimePermissionProfile::from_preset(
+            devo_safety::PermissionPreset::Default,
+            root.clone(),
+        );
+        (root, profile)
+    }
 
     fn abs_path(parts: &[&str]) -> PathBuf {
         #[cfg(windows)]
@@ -2394,5 +2438,29 @@ mod tests {
             path.push(part);
         }
         path
+    }
+
+    #[test]
+    fn p3_rule_lines_are_stable_and_idempotent_shaped() {
+        // The durable rule text is the wire contract between sessions —
+        // lock its shape (goal rule 7).
+        let write_line = super::ServerRuntime::path_prefix_rule_line(
+            std::path::Path::new(r"C:\Users\me\proj"),
+            true,
+        );
+        assert!(
+            write_line.starts_with("path_prefix allow write "),
+            "{write_line}"
+        );
+        let read_line = super::ServerRuntime::path_prefix_rule_line(
+            std::path::Path::new("/home/me/proj"),
+            false,
+        );
+        assert!(
+            read_line.starts_with("path_prefix allow read /"),
+            "{read_line}"
+        );
+        let host_line = super::ServerRuntime::host_rule_line("api.example.com");
+        assert_eq!(host_line, "network_rule allow api.example.com\n");
     }
 }

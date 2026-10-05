@@ -78,6 +78,7 @@ impl Default for ProviderCapabilities {
 /// This trait describes the provider family and the capabilities for a
 /// particular model. It lets adapters specialize behavior per vendor or per
 /// model without introducing a separate provider family.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ProviderAdapter: ModelProviderSDK {
     /// Returns the provider family handled by this adapter.
@@ -91,6 +92,7 @@ pub trait ProviderAdapter: ModelProviderSDK {
 ///
 /// Implementations handle the specifics of each provider SDK while exposing a
 /// common completion and completion-stream API.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ModelProviderSDK: Send + Sync {
     /// Send a request and get a complete response.

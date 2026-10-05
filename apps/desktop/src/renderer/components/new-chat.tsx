@@ -556,7 +556,7 @@ export function NewChat() {
 			if (!client?.session?.updateSettings) return
 			try {
 				await client.session.updateSettings({
-					sessionID: sessionId,
+					sessionId: sessionId,
 					permissionProfile,
 					mode: collaborationMode,
 				})

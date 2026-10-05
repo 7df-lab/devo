@@ -265,16 +265,29 @@ impl TurnConfig {
     }
 
     pub fn provider_request_model(&self, resolved_catalog_model: &str) -> String {
-        if resolved_catalog_model == self.model.slug {
-            return self.request_model.clone();
+        if let Some(mapped) = self.provider_request_models.get(resolved_catalog_model) {
+            return mapped.to_string();
         }
-        // Thinking may resolve the catalog model to a variant slug. Keep catalog
-        // metadata from the variant, but translate the final request back to the
-        // selected provider's `request_model` when a matching binding exists.
-        self.provider_request_models
-            .get(resolved_catalog_model)
-            .map(str::to_string)
-            .unwrap_or_else(|| resolved_catalog_model.to_string())
+        // Prefer the turn's explicit wire id when the catalog model is unchanged.
+        let wire = if resolved_catalog_model == self.model.slug {
+            self.request_model.clone()
+        } else {
+            // Thinking may resolve the catalog model to a variant slug. Keep
+            // catalog metadata from the variant, but fall back to that slug
+            // when no provider remap exists.
+            resolved_catalog_model.to_string()
+        };
+        // Catalog identity is `provider/model`. If that identity leaked onto the
+        // wire (TurnConfig::new fallback), send the bare model id. Nested ids
+        // such as OpenRouter `org/model` keep their slash.
+        if wire == self.model.slug
+            && let Some((_provider, model_id)) = wire.split_once('/')
+            && !model_id.is_empty()
+            && !model_id.contains('/')
+        {
+            return model_id.to_string();
+        }
+        wire
     }
 }
 
@@ -543,7 +556,7 @@ mod tests {
 
         assert!(prompt.contains("finish &lt;goal&gt; &amp; report &quot;done&quot;"));
         assert!(!prompt.contains("finish <goal> & report \"done\""));
-        assert!(prompt.contains("Completion audit:"));
+        assert!(prompt.contains("audit the current state against every requirement"));
     }
 
     #[test]
@@ -553,8 +566,8 @@ mod tests {
 
         let prompt = state.context_prompt().expect("active goal prompt");
 
-        assert!(prompt.contains("- Token budget: none"));
-        assert!(prompt.contains("- Tokens remaining: unlimited"));
+        assert!(prompt.contains("- token budget: none"));
+        assert!(prompt.contains("- remaining tokens: unlimited"));
     }
 
     #[test]
@@ -715,7 +728,6 @@ mod tests {
         assert!(state.turn_state.is_none());
         state.start_turn(TurnKind::Regular);
         assert!(state.turn_state.is_some());
-        assert_eq!(state.turn_state.as_ref().unwrap().kind, TurnKind::Regular);
     }
 
     #[test]

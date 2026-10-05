@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { describe, expect, test } from "bun:test"
 
 const settingsPageSource = readFileSync(new URL("./settings-page.tsx", import.meta.url), "utf8")
+const settingsNavigationSource = readFileSync(new URL("./settings-navigation.ts", import.meta.url), "utf8")
 const mcpSource = readFileSync(new URL("./mcp-settings.tsx", import.meta.url), "utf8")
 const skillSource = readFileSync(new URL("./skill-settings.tsx", import.meta.url), "utf8")
 const ruleSource = readFileSync(new URL("./rule-settings.tsx", import.meta.url), "utf8")
@@ -14,11 +15,12 @@ const ipcSource = readFileSync(new URL("../../../main/ipc-handlers.ts", import.m
 const preloadSource = readFileSync(new URL("../../../preload/index.ts", import.meta.url), "utf8")
 
 describe("Desktop MCP and Skills settings", () => {
-	test("registers MCP and Skills settings tabs and routes", () => {
+	test("registers MCP and Skills settings navigation and routes", () => {
 		expect({
-			mcpTab: settingsPageSource.includes('id: "mcp"') && settingsPageSource.includes('label: "MCP"'),
-			skillsTab:
-				settingsPageSource.includes('id: "skills"') && settingsPageSource.includes('label: "Skills"'),
+			mcpNavigation:
+				settingsNavigationSource.includes('id: "mcp"') && settingsNavigationSource.includes('label: "MCP"'),
+			skillsNavigation:
+				settingsNavigationSource.includes('id: "skills"') && settingsNavigationSource.includes('label: "Skills"'),
 			settingsNavUsesTopActionRow:
 				settingsPageSource.includes("TopActionRow") &&
 				settingsPageSource.includes("sidebarPrimaryIconClass") &&
@@ -34,8 +36,8 @@ describe("Desktop MCP and Skills settings", () => {
 			listsSkills: skillSource.includes("client.app.skills()"),
 			togglesSkills: skillSource.includes("setSkillEnabled"),
 		}).toEqual({
-			mcpTab: true,
-			skillsTab: true,
+			mcpNavigation: true,
+			skillsNavigation: true,
 			settingsNavUsesTopActionRow: true,
 			mcpRoute: true,
 			skillsRoute: true,

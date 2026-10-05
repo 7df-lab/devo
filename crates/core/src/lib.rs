@@ -1,14 +1,10 @@
 mod approval_review_prompt;
 mod collaboration_mode_prompts;
 mod context;
-mod context_pipeline;
 mod conversation;
 pub mod durable_execution;
 mod durable_record;
 mod error;
-pub mod execution;
-pub mod fork;
-pub mod fuzzy_search;
 mod goal_prompts;
 pub mod history;
 mod hooks;
@@ -16,18 +12,17 @@ mod instruction_discovery;
 mod jsonl_store;
 mod logging;
 pub mod mcp;
-pub mod memory;
 mod message_edit;
 mod model_catalog;
-mod permission;
 mod provider_request;
 mod query;
-mod replay;
+mod remote_catalog;
 mod response_item;
+mod resume_perf_probe;
+pub mod rlm_prompts;
 mod session;
 mod session_store;
 mod skills;
-mod small_model;
 mod state;
 pub mod tools;
 mod update_check;
@@ -55,7 +50,6 @@ pub use approval_review_prompt::APPROVAL_REVIEW_PROMPT;
 #[allow(ambiguous_glob_reexports)]
 pub use context::*;
 #[allow(ambiguous_glob_reexports)]
-pub use context_pipeline::*;
 pub use conversation::*;
 #[allow(ambiguous_glob_reexports)]
 pub use devo_config::*;
@@ -64,10 +58,6 @@ pub use devo_protocol::*;
 pub use devo_protocol::{ContentBlock, Message, Role};
 pub use durable_record::*;
 pub use error::*;
-#[allow(ambiguous_glob_reexports)]
-pub use execution::*;
-pub use fork::*;
-pub use fuzzy_search::*;
 pub use goal_prompts::*;
 pub use history::*;
 pub use hooks::*;
@@ -75,16 +65,17 @@ pub use instruction_discovery::*;
 pub use jsonl_store::*;
 pub use logging::*;
 pub use mcp::*;
-pub use memory::*;
 pub use message_edit::*;
 #[allow(ambiguous_glob_reexports)]
 pub use model_catalog::*;
-pub use permission::*;
 pub use provider_request::{add_model_request_headers, merge_model_request_body};
 pub use query::*;
-#[allow(ambiguous_glob_reexports)]
-pub use replay::*;
+pub use remote_catalog::*;
 pub use response_item::*;
+pub use rlm_prompts::{
+    CatalogSkillEntry, DEFAULT_RLM_EXTRA_IMPORT_LABELS, RLM_BOOTSTRAP_SKILL_IMPORTS,
+    RlmPromptOptions, build_child_agent_doctrine, build_rlm_base_prompt, format_catalog_skills_xml,
+};
 pub use session::*;
 pub use session_store::*;
 pub use skills::SkillRecord as CoreSkillRecord;
@@ -97,7 +88,6 @@ pub use skills::{
     collect_explicit_skill_mentions, default_skill_metadata_budget, normalize_native_path,
     render_available_skills_body,
 };
-pub use small_model::resolve_small_model;
 pub use update_check::*;
 
 pub mod output_replay;

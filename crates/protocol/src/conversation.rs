@@ -1,108 +1,10 @@
-use std::fmt;
-use std::str::FromStr;
-
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
-use uuid::Uuid;
 
 use crate::{RequestContent, RequestMessage, Usage};
 
-macro_rules! define_id {
-    ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        #[serde(transparent)]
-        pub struct $name(Uuid);
-
-        impl JsonSchema for $name {
-            fn schema_name() -> String {
-                String::from(stringify!($name))
-            }
-
-            fn json_schema(
-                generator: &mut schemars::r#gen::SchemaGenerator,
-            ) -> schemars::schema::Schema {
-                String::json_schema(generator)
-            }
-        }
-
-        impl TS for $name {
-            type WithoutGenerics = Self;
-            type OptionInnerType = Self;
-
-            fn name(_: &ts_rs::Config) -> String {
-                String::from(stringify!($name))
-            }
-
-            fn inline(cfg: &ts_rs::Config) -> String {
-                Self::name(cfg)
-            }
-
-            fn decl(_: &ts_rs::Config) -> String {
-                String::from(concat!("type ", stringify!($name), " = string;"))
-            }
-        }
-
-        impl $name {
-            pub fn new() -> Self {
-                Self(Uuid::now_v7())
-            }
-        }
-
-        impl Default for $name {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-
-        impl From<Uuid> for $name {
-            fn from(value: Uuid) -> Self {
-                Self(value)
-            }
-        }
-
-        impl From<$name> for Uuid {
-            fn from(value: $name) -> Self {
-                value.0
-            }
-        }
-
-        impl TryFrom<&str> for $name {
-            type Error = uuid::Error;
-
-            fn try_from(value: &str) -> Result<Self, Self::Error> {
-                Ok(Self(Uuid::parse_str(value)?))
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = uuid::Error;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::try_from(value.as_str())
-            }
-        }
-
-        impl FromStr for $name {
-            type Err = uuid::Error;
-
-            fn from_str(s: &str) -> Result<Self, Self::Err> {
-                Self::try_from(s)
-            }
-        }
-    };
-}
-
-define_id!(SessionId);
-define_id!(TurnId);
-define_id!(ItemId);
-define_id!(PendingInputId);
+pub use crate::native::ids::{ItemId, OpaqueId, QueueItemId, SessionId, TurnId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +73,50 @@ impl TurnUsage {
             .map(|tokens| tokens.try_into().unwrap_or(usize::MAX))
             .unwrap_or_else(|| self.derived_total_tokens())
     }
+
+    /// Persistence / ACP boundary only — first-party live paths use Native
+    /// [`crate::native::usage::TurnUsage`] directly.
+    pub fn to_native(&self) -> crate::native::usage::TurnUsage {
+        crate::native::usage::TurnUsage {
+            query: crate::native::usage::UsageTotals {
+                total_tokens: u64::from(
+                    self.total_tokens
+                        .unwrap_or(self.input_tokens.saturating_add(self.output_tokens)),
+                ),
+                input_tokens: u64::from(self.input_tokens),
+                output_tokens: u64::from(self.output_tokens),
+                reasoning_tokens: u64::from(self.reasoning_output_tokens.unwrap_or(0)),
+                cache_read_input_tokens: u64::from(self.cache_read_input_tokens.unwrap_or(0)),
+                cache_creation_input_tokens: u64::from(
+                    self.cache_creation_input_tokens.unwrap_or(0),
+                ),
+                call_count: 0,
+                metered_call_count: 1,
+                ..crate::native::usage::UsageTotals::default()
+            },
+            overhead: crate::native::usage::UsageTotals::default(),
+        }
+    }
+
+    /// Migrate-only: inverse of [`Self::to_native`] for packed `TurnRecord`
+    /// / fixture inverse projection. Not for live persistence.
+    ///
+    /// Optional cache/reasoning counters map `0 → None` so round-trips match
+    /// packed legacy records that omitted those fields.
+    pub fn from_native(usage: &crate::native::usage::TurnUsage) -> Self {
+        Self {
+            input_tokens: u32::try_from(usage.query.input_tokens).unwrap_or(u32::MAX),
+            output_tokens: u32::try_from(usage.query.output_tokens).unwrap_or(u32::MAX),
+            cache_creation_input_tokens: (usage.query.cache_creation_input_tokens > 0).then(|| {
+                u32::try_from(usage.query.cache_creation_input_tokens).unwrap_or(u32::MAX)
+            }),
+            cache_read_input_tokens: (usage.query.cache_read_input_tokens > 0)
+                .then(|| u32::try_from(usage.query.cache_read_input_tokens).unwrap_or(u32::MAX)),
+            reasoning_output_tokens: (usage.query.reasoning_tokens > 0)
+                .then(|| u32::try_from(usage.query.reasoning_tokens).unwrap_or(u32::MAX)),
+            total_tokens: Some(u32::try_from(usage.query.total_tokens).unwrap_or(u32::MAX)),
+        }
+    }
 }
 
 fn saturating_u32(value: usize) -> u32 {
@@ -230,6 +176,11 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    #[serde(rename = "image")]
+    Image {
+        mime_type: String,
+        data_base64: String,
+    },
 }
 
 /// One role-tagged turn in the conversation (session / protocol shape).
@@ -279,7 +230,8 @@ impl Message {
                 | ContentBlock::Reasoning { .. }
                 | ContentBlock::ProviderReasoning { .. }
                 | ContentBlock::HostedToolUse { .. }
-                | ContentBlock::ToolResult { .. } => None,
+                | ContentBlock::ToolResult { .. }
+                | ContentBlock::Image { .. } => None,
             })
             .collect()
     }
@@ -325,6 +277,13 @@ impl Message {
                     tool_use_id: tool_use_id.clone(),
                     content: content.clone(),
                     is_error: if *is_error { Some(true) } else { None },
+                },
+                ContentBlock::Image {
+                    mime_type,
+                    data_base64,
+                } => RequestContent::Image {
+                    mime_type: mime_type.clone(),
+                    data_base64: data_base64.clone(),
                 },
             })
             .collect();

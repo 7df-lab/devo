@@ -1,7 +1,7 @@
 //! Native recovery notifications emitted after execution ownership changes.
 
-use devo_core::SessionId;
 use devo_protocol::native::event::{ServerNotification, StreamSelector};
+use devo_protocol::native::ids::SessionId;
 
 use super::super::ServerRuntime;
 use super::super::outbound::{
@@ -12,12 +12,18 @@ impl ServerRuntime {
     pub(crate) async fn broadcast_recovery_state(&self, session_id: SessionId) {
         match self.turn_recovery(session_id).await {
             Ok(recovery) => {
+                let native_session_id = if let Some(handle) = self.session(session_id).await
+                    && let Some(summary) = handle.summary().await
+                {
+                    summary.native.id
+                } else {
+                    // boundary: legacy session id when summary unavailable
+                    session_id
+                };
                 self.broadcast_recovery_notification(
                     session_id,
                     ServerNotification::TurnRecoveryUpdated {
-                        session_id: devo_protocol::native::ids::SessionId::from_legacy_uuid(
-                            session_id.into(),
-                        ),
+                        session_id: native_session_id,
                         recovery,
                     },
                 )

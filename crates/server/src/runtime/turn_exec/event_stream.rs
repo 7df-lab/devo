@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use devo_core::{ItemId, SessionId, TurnId};
+use devo_protocol::native::ids::SessionId;
+use devo_protocol::native::ids::{
+    ItemId as NativeItemId, SessionId as NativeSessionId, TurnId as NativeTurnId,
+};
 
 use super::super::ServerRuntime;
 use super::super::proposed_plan::ProposedPlanParser;
@@ -19,8 +22,11 @@ use super::trace::{
     query_event_trace_kind, query_event_trace_token_preview, stream_trace_elapsed_ms,
 };
 use super::types::{PendingToolCall, ToolDisplayKind, TurnEventStreamSummary};
+use crate::ItemDeltaKind;
+use crate::item_delta_notification;
 use crate::runtime::session_actor::state::SessionStreamState;
-use crate::{ItemDeltaKind, ItemDeltaPayload, ServerEvent};
+use devo_protocol::native::event::ServerNotification;
+use devo_protocol::native::item::Item;
 use tokio::sync::mpsc;
 
 pub(crate) const QUERY_EVENT_CHANNEL_CAPACITY: usize = 8192;
@@ -58,16 +64,18 @@ pub(crate) fn spawn_turn_event_stream(
     runtime: Arc<ServerRuntime>,
     event_stream: Arc<tokio::sync::Mutex<SessionStreamState>>,
     session_id: SessionId,
-    turn: crate::TurnMetadata,
+    turn: crate::turn::RuntimeTurn,
     collaboration_mode: devo_protocol::CollaborationMode,
     event_tool_registry: Arc<devo_core::tools::ToolRegistry>,
     usage_parent_session_id: Option<SessionId>,
     usage_context_window: Option<u64>,
     mut event_rx: tokio::sync::mpsc::Receiver<devo_core::QueryEvent>,
 ) -> tokio::task::JoinHandle<TurnEventStreamSummary> {
-    let turn_for_events = turn.clone();
-    let turn_for_plan_updates = turn;
+    let turn_for_events = turn;
     tokio::spawn(async move {
+        let native_session_id = turn_for_events.native.session_id;
+        let native_turn_id = turn_for_events.native.id;
+        let usage_session_id = session_id;
         let mut assistant_item_id = None;
         let mut assistant_item_seq = None;
         let mut assistant_delta_seq = 0_u64;
@@ -99,47 +107,61 @@ pub(crate) fn spawn_turn_event_stream(
             log_dequeued_query_event(&event);
             match event {
                 devo_core::QueryEvent::ProviderRetryStatus(status) => {
+                    let Some(max_attempts) = u32::try_from(status.max_attempts).ok() else {
+                        continue;
+                    };
+                    let mut error = devo_protocol::native::error::AgentError::new(
+                        devo_protocol::native::error::codes::PROVIDER_TEMPORARY_FAILURE.to_string(),
+                        status.message.clone(),
+                    );
+                    error.retryable = true;
+                    error.retry_after_ms = Some(status.backoff_ms);
                     runtime
-                        .broadcast_event(ServerEvent::TurnProviderRetryStatus(
-                            devo_protocol::TurnProviderRetryStatusPayload {
-                                session_id,
-                                turn_id: turn_for_events.turn_id,
-                                attempt: status.attempt,
-                                max_attempts: u32::try_from(status.max_attempts).ok(),
-                                backoff_ms: status.backoff_ms,
-                                provider: status.provider,
-                                model: status.model,
-                                phase: match status.phase {
-                                    devo_core::QueryProviderRetryPhase::Scheduled => {
-                                        devo_protocol::ProviderRetryPhase::Scheduled
-                                    }
-                                    devo_core::QueryProviderRetryPhase::Resumed => {
-                                        devo_protocol::ProviderRetryPhase::Resumed
-                                    }
-                                },
-                                message: status.message,
-                            },
-                        ))
+                        .broadcast_notification(ServerNotification::ModelQueryRetrying {
+                            session_id: native_session_id,
+                            turn_id: native_turn_id,
+                            attempt: u32::try_from(status.attempt).unwrap_or(u32::MAX),
+                            max_attempts,
+                            next_delay_ms: status.backoff_ms,
+                            error,
+                            provider: Some(status.provider),
+                            model: Some(status.model),
+                            phase: Some(status.phase),
+                        })
+                        .await;
+                }
+                devo_core::QueryEvent::ProviderQueryFailed {
+                    attempt,
+                    max_attempts,
+                    message,
+                } => {
+                    let error = devo_protocol::native::error::AgentError::new(
+                        devo_protocol::native::error::codes::PROVIDER_TEMPORARY_FAILURE.to_string(),
+                        message,
+                    );
+                    runtime
+                        .broadcast_notification(ServerNotification::ModelQueryFailed {
+                            session_id: native_session_id,
+                            turn_id: native_turn_id,
+                            error,
+                            attempt: u32::try_from(attempt).ok(),
+                            max_attempts: u32::try_from(max_attempts).ok(),
+                        })
                         .await;
                 }
                 devo_core::QueryEvent::ContextCompactionStarted => {
                     context_compaction
-                        .start(&runtime, session_id, turn_for_events.turn_id)
+                        .start(&runtime, native_session_id, native_turn_id)
                         .await;
                 }
                 devo_core::QueryEvent::ContextCompactionCompleted { compacted_items } => {
                     context_compaction
-                        .complete(
-                            &runtime,
-                            session_id,
-                            turn_for_events.turn_id,
-                            compacted_items,
-                        )
+                        .complete(&runtime, native_session_id, native_turn_id, compacted_items)
                         .await;
                 }
                 devo_core::QueryEvent::ContextCompactionFailed { message } => {
                     context_compaction
-                        .fail(&runtime, session_id, turn_for_events.turn_id, message)
+                        .fail(&runtime, native_session_id, native_turn_id, message)
                         .await;
                 }
                 devo_core::QueryEvent::ContextEstimate { breakdown } => {
@@ -157,8 +179,8 @@ pub(crate) fn spawn_turn_event_stream(
                         handle_proposed_plan_segments(
                             &runtime,
                             &event_stream,
-                            session_id,
-                            turn_for_events.turn_id,
+                            native_session_id,
+                            native_turn_id,
                             segments,
                             &mut assistant_item_id,
                             &mut assistant_item_seq,
@@ -172,8 +194,8 @@ pub(crate) fn spawn_turn_event_stream(
                         push_assistant_text_delta(
                             &runtime,
                             &event_stream,
-                            session_id,
-                            turn_for_events.turn_id,
+                            native_session_id,
+                            native_turn_id,
                             &mut assistant_item_id,
                             &mut assistant_item_seq,
                             &mut assistant_text,
@@ -187,8 +209,8 @@ pub(crate) fn spawn_turn_event_stream(
                     handle_reasoning_delta(
                         &runtime,
                         &event_stream,
-                        session_id,
-                        turn_for_events.turn_id,
+                        native_session_id,
+                        native_turn_id,
                         text,
                         &mut reasoning_item_id,
                         &mut reasoning_item_seq,
@@ -200,8 +222,8 @@ pub(crate) fn spawn_turn_event_stream(
                 devo_core::QueryEvent::ReasoningCompleted => {
                     complete_open_reasoning_item(
                         &runtime,
-                        session_id,
-                        turn_for_events.turn_id,
+                        native_session_id,
+                        native_turn_id,
                         &mut reasoning_item_id,
                         &mut reasoning_item_seq,
                         &mut reasoning_text,
@@ -212,8 +234,8 @@ pub(crate) fn spawn_turn_event_stream(
                 devo_core::QueryEvent::ToolUseStart { id, name, input } => {
                     handle_tool_use_start(
                         &runtime,
-                        session_id,
-                        turn_for_events.turn_id,
+                        native_session_id,
+                        native_turn_id,
                         id,
                         name,
                         input,
@@ -232,8 +254,7 @@ pub(crate) fn spawn_turn_event_stream(
                 devo_core::QueryEvent::ToolUseInputDelta { id, partial_json } => {
                     handle_tool_input_delta(
                         &runtime,
-                        session_id,
-                        turn_for_events.turn_id,
+                        native_session_id,
                         id,
                         partial_json,
                         &pending_tool_calls,
@@ -243,14 +264,12 @@ pub(crate) fn spawn_turn_event_stream(
                 }
                 devo_core::QueryEvent::ToolExecutionStart { id } => {
                     runtime
-                        .broadcast_event(ServerEvent::ToolCallStatusUpdated(
-                            devo_protocol::ToolCallStatusUpdatedPayload {
-                                session_id,
-                                turn_id: turn_for_events.turn_id,
-                                tool_call_id: id,
-                                status: "in_progress".to_string(),
-                            },
-                        ))
+                        .broadcast_notification(ServerNotification::ToolCallStatusUpdated {
+                            session_id: native_session_id,
+                            turn_id: native_turn_id,
+                            tool_call_id: id,
+                            status: "in_progress".to_string(),
+                        })
                         .await;
                 }
                 devo_core::QueryEvent::ToolResult {
@@ -264,9 +283,8 @@ pub(crate) fn spawn_turn_event_stream(
                 } => {
                     handle_tool_result(
                         &runtime,
-                        session_id,
-                        turn_for_events.turn_id,
-                        &turn_for_plan_updates,
+                        native_session_id,
+                        native_turn_id,
                         tool_use_id,
                         final_tool_name,
                         final_input,
@@ -286,8 +304,7 @@ pub(crate) fn spawn_turn_event_stream(
                 } => {
                     handle_tool_progress(
                         &runtime,
-                        session_id,
-                        turn_for_events.turn_id,
+                        native_session_id,
                         tool_use_id,
                         progress,
                         &pending_tool_calls,
@@ -296,7 +313,8 @@ pub(crate) fn spawn_turn_event_stream(
                     .await;
                 }
                 devo_core::QueryEvent::UsageDelta { usage } => {
-                    let usage = devo_core::TurnUsage::from_usage(&usage);
+                    let usage =
+                        devo_protocol::native::usage::TurnUsage::from_provider_usage(&usage);
                     turn_usage = Some(usage.clone());
                     latest_query_usage = Some(usage.clone());
                     let kind = super::super::subagent_usage::UsageUpdateKind::InFlight;
@@ -304,16 +322,16 @@ pub(crate) fn spawn_turn_event_stream(
                         let _ = runtime
                             .publish_subagent_turn_usage(
                                 session_id,
-                                turn_for_events.turn_id,
-                                usage,
+                                turn_for_events.turn_id(),
+                                usage.clone(),
                                 kind,
                             )
                             .await;
                     } else {
                         if let Some(snapshot) = runtime
                             .publish_parent_turn_usage(
-                                session_id,
-                                turn_for_events.turn_id,
+                                usage_session_id,
+                                turn_for_events.turn_id(),
                                 usage.clone(),
                                 usage_context_window,
                                 kind,
@@ -326,17 +344,18 @@ pub(crate) fn spawn_turn_event_stream(
                         if let Some(raw) = last_context_breakdown {
                             runtime
                                 .publish_live_context_occupancy(
-                                    session_id,
+                                    usage_session_id,
                                     usage_context_window,
                                     raw,
-                                    usage.display_total_tokens() as u64,
+                                    usage.display_total_tokens(),
                                 )
                                 .await;
                         }
                     }
                 }
                 devo_core::QueryEvent::Usage { usage } => {
-                    let usage = devo_core::TurnUsage::from_usage(&usage);
+                    let usage =
+                        devo_protocol::native::usage::TurnUsage::from_provider_usage(&usage);
                     turn_usage = Some(usage.clone());
                     latest_query_usage = Some(usage.clone());
                     let kind = super::super::subagent_usage::UsageUpdateKind::CompletedLeg;
@@ -344,16 +363,16 @@ pub(crate) fn spawn_turn_event_stream(
                         let _ = runtime
                             .publish_subagent_turn_usage(
                                 session_id,
-                                turn_for_events.turn_id,
-                                usage,
+                                turn_for_events.turn_id(),
+                                usage.clone(),
                                 kind,
                             )
                             .await;
                     } else {
                         if let Some(snapshot) = runtime
                             .publish_parent_turn_usage(
-                                session_id,
-                                turn_for_events.turn_id,
+                                usage_session_id,
+                                turn_for_events.turn_id(),
                                 usage.clone(),
                                 usage_context_window,
                                 kind,
@@ -366,10 +385,10 @@ pub(crate) fn spawn_turn_event_stream(
                         if let Some(raw) = last_context_breakdown {
                             runtime
                                 .publish_live_context_occupancy(
-                                    session_id,
+                                    usage_session_id,
                                     usage_context_window,
                                     raw,
-                                    usage.display_total_tokens() as u64,
+                                    usage.display_total_tokens(),
                                 )
                                 .await;
                         }
@@ -383,13 +402,13 @@ pub(crate) fn spawn_turn_event_stream(
             }
         }
         context_compaction
-            .close_if_open(&runtime, session_id, turn_for_events.turn_id)
+            .close_if_open(&runtime, native_session_id, native_turn_id)
             .await;
         finish_proposed_plan_stream(
             &runtime,
             &event_stream,
-            session_id,
-            turn_for_events.turn_id,
+            native_session_id,
+            native_turn_id,
             &mut proposed_plan_parser,
             &mut assistant_item_id,
             &mut assistant_item_seq,
@@ -410,25 +429,19 @@ pub(crate) fn spawn_turn_event_stream(
                     Some((item_id, item_seq, std::mem::take(&mut reasoning_text)));
             }
         }
-        complete_deferred_stream_items(
-            &runtime,
-            &event_stream,
-            session_id,
-            turn_for_events.turn_id,
-        )
-        .await;
+        complete_deferred_stream_items(&runtime, &event_stream, native_session_id, native_turn_id)
+            .await;
         complete_pending_tool_calls_as_interrupted(
             &runtime,
-            session_id,
-            turn_for_events.turn_id,
-            &turn_for_plan_updates,
+            native_session_id,
+            native_turn_id,
             &tool_names_by_id,
             &mut pending_tool_calls,
         )
         .await;
         tracing::debug!(
             session_id = %session_id,
-            turn_id = %turn_for_events.turn_id,
+            turn_id = %turn_for_events.turn_id(),
             "query event stream drained"
         );
         TurnEventStreamSummary {
@@ -463,10 +476,10 @@ fn log_dequeued_query_event(event: &devo_core::QueryEvent) {
 async fn handle_reasoning_delta(
     runtime: &Arc<ServerRuntime>,
     event_stream: &Arc<tokio::sync::Mutex<SessionStreamState>>,
-    session_id: SessionId,
-    turn_id: TurnId,
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
     text: String,
-    reasoning_item_id: &mut Option<ItemId>,
+    reasoning_item_id: &mut Option<NativeItemId>,
     reasoning_item_seq: &mut Option<u64>,
     reasoning_text: &mut String,
     reasoning_delta_seq: &mut u64,
@@ -475,11 +488,13 @@ async fn handle_reasoning_delta(
         (Some(item_id), Some(item_seq)) => (item_id, item_seq),
         (None, None) => {
             let (item_id, item_seq) = runtime
-                .start_item(
+                .start_native_item(
                     session_id,
                     turn_id,
-                    crate::ItemKind::Reasoning,
-                    serde_json::json!({ "title": "Reasoning", "text": "" }),
+                    Item::Reasoning {
+                        text: String::new(),
+                        provider_payload_ref: None,
+                    },
                 )
                 .await;
             *reasoning_item_id = Some(item_id);
@@ -493,22 +508,13 @@ async fn handle_reasoning_delta(
     let chunk_index = *reasoning_delta_seq;
     *reasoning_delta_seq = reasoning_delta_seq.saturating_add(1);
     runtime
-        .broadcast_event(ServerEvent::ItemDelta {
-            delta_kind: ItemDeltaKind::ReasoningTextDelta,
-            payload: ItemDeltaPayload {
-                chunk_index: Some(chunk_index),
-                context: crate::EventContext {
-                    session_id,
-                    turn_id: Some(turn_id),
-                    item_id: Some(item_id),
-                    seq: 0,
-                    item_seq: None,
-                },
-                delta: text,
-                stream_index: None,
-                channel: None,
-            },
-        })
+        .broadcast_notification(item_delta_notification(
+            ItemDeltaKind::ReasoningTextDelta,
+            session_id,
+            item_id,
+            chunk_index,
+            text,
+        ))
         .await;
     // Deferred reasoning text is written once when the event stream drains.
     let _ = (event_stream, item_seq, item_id, reasoning_text);
@@ -516,9 +522,9 @@ async fn handle_reasoning_delta(
 
 async fn complete_open_reasoning_item(
     runtime: &Arc<ServerRuntime>,
-    session_id: SessionId,
-    turn_id: TurnId,
-    reasoning_item_id: &mut Option<ItemId>,
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
+    reasoning_item_id: &mut Option<NativeItemId>,
     reasoning_item_seq: &mut Option<u64>,
     reasoning_text: &mut String,
     event_stream: &Arc<tokio::sync::Mutex<SessionStreamState>>,
@@ -543,17 +549,17 @@ async fn complete_open_reasoning_item(
 #[allow(clippy::too_many_arguments)]
 async fn handle_tool_use_start(
     runtime: &Arc<ServerRuntime>,
-    session_id: SessionId,
-    turn_id: TurnId,
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
     id: String,
     name: String,
     input: serde_json::Value,
     tool_names_by_id: &mut std::collections::HashMap<String, String>,
     pending_tool_calls: &mut std::collections::HashMap<String, PendingToolCall>,
-    reasoning_item_id: &mut Option<ItemId>,
+    reasoning_item_id: &mut Option<NativeItemId>,
     reasoning_item_seq: &mut Option<u64>,
     reasoning_text: &mut String,
-    assistant_item_id: &mut Option<ItemId>,
+    assistant_item_id: &mut Option<NativeItemId>,
     assistant_item_seq: &mut Option<u64>,
     assistant_text: &mut String,
     event_tool_registry: &Arc<devo_core::tools::ToolRegistry>,
@@ -585,13 +591,12 @@ async fn handle_tool_use_start(
                 event_tool_registry.preparation_feedback(&name),
             );
             runtime
-                .emit_item_started(
+                .emit_native_item_started(
                     session_id,
                     turn_id,
                     item_id,
                     Some(item_seq),
-                    start_item.item_kind,
-                    start_item.payload,
+                    start_item.native_item,
                 )
                 .await;
         }
@@ -634,12 +639,7 @@ async fn handle_tool_use_start(
         preparation_feedback,
     );
     let (item_id, item_seq) = runtime
-        .start_item(
-            session_id,
-            turn_id,
-            start_item.item_kind,
-            start_item.payload,
-        )
+        .start_native_item(session_id, turn_id, start_item.native_item)
         .await;
     pending_tool_calls.insert(
         id,
@@ -649,6 +649,7 @@ async fn handle_tool_use_start(
             input,
             display_kind,
             command,
+            started_at: std::time::Instant::now(),
         },
     );
 }
@@ -656,9 +657,8 @@ async fn handle_tool_use_start(
 #[allow(clippy::too_many_arguments)]
 async fn handle_tool_result(
     runtime: &Arc<ServerRuntime>,
-    session_id: SessionId,
-    turn_id: TurnId,
-    turn_for_plan_updates: &crate::TurnMetadata,
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
     tool_use_id: String,
     final_tool_name: String,
     final_input: serde_json::Value,
@@ -699,12 +699,7 @@ async fn handle_tool_result(
                 &summary,
             );
             let (item_id, item_seq) = runtime
-                .start_item(
-                    session_id,
-                    turn_id,
-                    start_item.item_kind,
-                    start_item.payload,
-                )
+                .start_native_item(session_id, turn_id, start_item.native_item)
                 .await;
             pending.item_id = Some(item_id);
             pending.item_seq = Some(item_seq);
@@ -713,7 +708,6 @@ async fn handle_tool_result(
             runtime,
             session_id,
             turn_id,
-            turn_for_plan_updates,
             &tool_use_id,
             tool_name.clone(),
             &pending,
@@ -724,6 +718,9 @@ async fn handle_tool_result(
         )
         .await
         {
+            runtime
+                .notify_accumulating_turn_workspace_changes(session_id, turn_id)
+                .await;
             return;
         }
     }
@@ -740,13 +737,15 @@ async fn handle_tool_result(
         summary,
     )
     .await;
+    runtime
+        .notify_accumulating_turn_workspace_changes(session_id, turn_id)
+        .await;
 }
 
 async fn complete_pending_tool_calls_as_interrupted(
     runtime: &Arc<ServerRuntime>,
-    session_id: SessionId,
-    turn_id: TurnId,
-    turn_for_plan_updates: &crate::TurnMetadata,
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
     tool_names_by_id: &std::collections::HashMap<String, String>,
     pending_tool_calls: &mut std::collections::HashMap<String, PendingToolCall>,
 ) {
@@ -759,9 +758,13 @@ async fn complete_pending_tool_calls_as_interrupted(
             .get(&tool_use_id)
             .cloned()
             .unwrap_or_default();
-        let content = devo_core::tools::ToolContent::Text(
-            devo_core::tools::INTERRUPTED_TOOL_RESULT_MESSAGE.to_string(),
-        );
+        // How long the call ran before the abort — the model needs this to
+        // reason about hung or slow commands that never returned.
+        let elapsed_ms = pending.started_at.elapsed().as_millis();
+        let content = devo_core::tools::ToolContent::Text(format!(
+            "{} after {elapsed_ms}ms",
+            devo_core::tools::INTERRUPTED_TOOL_RESULT_MESSAGE
+        ));
         let summary = if tool_name.is_empty() {
             "interrupted".to_string()
         } else {
@@ -772,7 +775,6 @@ async fn complete_pending_tool_calls_as_interrupted(
                 runtime,
                 session_id,
                 turn_id,
-                turn_for_plan_updates,
                 &tool_use_id,
                 (!tool_name.is_empty()).then(|| tool_name.clone()),
                 &pending,
@@ -805,8 +807,7 @@ async fn complete_pending_tool_calls_as_interrupted(
 
 async fn handle_tool_input_delta(
     runtime: &Arc<ServerRuntime>,
-    session_id: SessionId,
-    turn_id: TurnId,
+    session_id: NativeSessionId,
     tool_use_id: String,
     partial_json: String,
     pending_tool_calls: &std::collections::HashMap<String, PendingToolCall>,
@@ -820,37 +821,27 @@ async fn handle_tool_input_delta(
     };
     let chunk_index = tool_input_delta_seqs
         .get(&tool_use_id)
-        .copied()
+        .cloned()
         .unwrap_or(0);
     tool_input_delta_seqs.insert(tool_use_id.clone(), chunk_index + 1);
     let _ = runtime
-        .broadcast_event(ServerEvent::ItemDelta {
-            delta_kind: ItemDeltaKind::ToolCallInputDelta,
-            payload: ItemDeltaPayload {
-                context: crate::EventContext {
-                    session_id,
-                    turn_id: Some(turn_id),
-                    item_id: Some(item_id),
-                    seq: 0,
-                    item_seq: None,
-                },
-                delta: serde_json::json!({
-                    "tool_use_id": tool_use_id,
-                    "partial_json": partial_json,
-                })
-                .to_string(),
-                stream_index: None,
-                channel: None,
-                chunk_index: Some(chunk_index),
-            },
-        })
+        .broadcast_notification(item_delta_notification(
+            ItemDeltaKind::ToolCallInputDelta,
+            session_id,
+            item_id,
+            chunk_index,
+            serde_json::json!({
+                "tool_use_id": tool_use_id,
+                "partial_json": partial_json,
+            })
+            .to_string(),
+        ))
         .await;
 }
 
 async fn handle_tool_progress(
     runtime: &Arc<ServerRuntime>,
-    session_id: SessionId,
-    turn_id: TurnId,
+    session_id: NativeSessionId,
     tool_use_id: String,
     progress: devo_core::tools::ToolProgress,
     pending_tool_calls: &std::collections::HashMap<String, PendingToolCall>,
@@ -867,36 +858,29 @@ async fn handle_tool_progress(
     let Some(content) = content else {
         return;
     };
-    let item_id = super::tool_display::command_execution_item_id_for_progress(
+    let Some(item_id) = super::tool_display::command_execution_item_id_for_progress(
         pending_tool_calls,
         &tool_use_id,
-    );
+    ) else {
+        return;
+    };
     let chunk_index = command_output_delta_seqs
         .get(&tool_use_id)
-        .copied()
+        .cloned()
         .unwrap_or(0);
     command_output_delta_seqs.insert(tool_use_id.clone(), chunk_index + 1);
     let _ = runtime
-        .broadcast_event(ServerEvent::ItemDelta {
-            delta_kind: ItemDeltaKind::CommandExecutionOutputDelta,
-            payload: ItemDeltaPayload {
-                context: crate::EventContext {
-                    session_id,
-                    turn_id: Some(turn_id),
-                    item_id,
-                    seq: 0,
-                    item_seq: None,
-                },
-                delta: serde_json::json!({
-                    "tool_use_id": tool_use_id,
-                    "text": content,
-                })
-                .to_string(),
-                stream_index: None,
-                channel: None,
-                chunk_index: Some(chunk_index),
-            },
-        })
+        .broadcast_notification(item_delta_notification(
+            ItemDeltaKind::CommandExecutionOutputDelta,
+            session_id,
+            item_id,
+            chunk_index,
+            serde_json::json!({
+                "tool_use_id": tool_use_id,
+                "text": content,
+            })
+            .to_string(),
+        ))
         .await;
 }
 
@@ -904,10 +888,10 @@ async fn handle_tool_progress(
 async fn finish_proposed_plan_stream(
     runtime: &Arc<ServerRuntime>,
     event_stream: &Arc<tokio::sync::Mutex<SessionStreamState>>,
-    session_id: SessionId,
-    turn_id: TurnId,
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
     proposed_plan_parser: &mut Option<ProposedPlanParser>,
-    assistant_item_id: &mut Option<ItemId>,
+    assistant_item_id: &mut Option<NativeItemId>,
     assistant_item_seq: &mut Option<u64>,
     assistant_text: &mut String,
     assistant_delta_seq: &mut u64,
@@ -939,8 +923,8 @@ async fn finish_proposed_plan_stream(
 async fn complete_deferred_stream_items(
     runtime: &Arc<ServerRuntime>,
     event_stream: &Arc<tokio::sync::Mutex<SessionStreamState>>,
-    session_id: SessionId,
-    turn_id: TurnId,
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
 ) {
     if let Some((item_id, item_seq, text)) = {
         let mut stream = event_stream.lock().await;

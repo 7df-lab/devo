@@ -51,6 +51,7 @@ import {
 } from "./onboarding"
 import { openUserMcpConfigFile } from "./mcp-config"
 import { getOpenInTargets, openInTarget, setPreferredTarget } from "./open-in-targets"
+import { isDesktopOAuthProviderId, loginDesktopOAuth, credentialSetParamsFromDesktopOAuth } from "./provider-oauth"
 import { MCP_CONFIG_OPEN_PATH } from "../shared/mcp-config"
 import {
 	ensureServer,
@@ -79,6 +80,7 @@ import {
 } from "./updater"
 
 const log = createLogger("ipc")
+const oauthControllers = new Map<number, AbortController>()
 
 /** Read the opaque windows preference for use at window creation time. */
 export { getOpaqueWindows as getOpaqueWindowsPref } from "./settings-store"
@@ -259,6 +261,42 @@ export function registerIpcHandlers(): void {
 	ipcMain.handle("native:connected", () => isNativeConnected())
 
 	ipcMain.handle("native-traffic-log:state", () => getNativeTrafficLogState())
+
+	ipcMain.handle(
+		"provider-oauth:login",
+		withLogging(
+			"provider-oauth:login",
+			async (event, request: { providerId: string; enterpriseUrl?: string }) => {
+				if (!isDesktopOAuthProviderId(request.providerId)) {
+					throw new Error(`Unsupported OAuth provider: ${request.providerId}`)
+				}
+				oauthControllers.get(event.sender.id)?.abort()
+				const controller = new AbortController()
+				oauthControllers.set(event.sender.id, controller)
+				try {
+					const credential = await loginDesktopOAuth(request.providerId, {
+						signal: controller.signal,
+						enterpriseUrl: request.enterpriseUrl,
+						onUpdate: (update) => event.sender.send("provider-oauth:update", update),
+					})
+					await requestNative(
+						"credential/set",
+						credentialSetParamsFromDesktopOAuth(request.providerId, credential),
+					)
+				} finally {
+					controller.abort()
+					if (oauthControllers.get(event.sender.id) === controller) {
+						oauthControllers.delete(event.sender.id)
+					}
+				}
+			},
+		),
+	)
+
+	ipcMain.handle("provider-oauth:cancel", (event) => {
+		oauthControllers.get(event.sender.id)?.abort()
+		oauthControllers.delete(event.sender.id)
+	})
 
 	subscribeNative((event) => {
 		for (const win of BrowserWindow.getAllWindows()) {

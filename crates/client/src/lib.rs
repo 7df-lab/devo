@@ -12,6 +12,5 @@ mod websocket;
 
 pub use client_core::GoalLifecycleTransition;
 pub use client_core::ServerNotificationMessage;
-pub use client_core::native_turn_start_input;
 pub use stdio::*;
 pub use websocket::*;

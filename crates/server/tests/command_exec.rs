@@ -10,13 +10,6 @@ use async_trait::async_trait;
 use base64::Engine;
 #[cfg(unix)]
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use devo_core::AgentsMdConfig;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
 #[cfg(unix)]
 use devo_protocol::CommandExecResult;
 use devo_protocol::ModelRequest;
@@ -25,11 +18,9 @@ use devo_protocol::ModelResponse;
 use devo_protocol::SessionId;
 use devo_protocol::StreamEvent;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ProtocolErrorCode;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use futures::Stream;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -267,31 +258,11 @@ async fn session_bound_command_exec_resolves_session_cwd() -> Result<()> {
 }
 
 fn build_runtime(data_root: &std::path::Path) -> Result<Arc<ServerRuntime>> {
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(UnusedProvider);
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("command_exec.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                /*workspace_root*/ None,
-            )?)),
-        ),
-    ))
+    Ok(
+        devo_server::test_support::TestRuntime::new(Arc::new(UnusedProvider))
+            .db_file("command_exec.db")
+            .runtime(data_root),
+    )
 }
 
 async fn initialize_connection(
@@ -353,7 +324,7 @@ async fn start_session(
     let response: devo_server::SuccessResponse<
         devo_protocol::native::rpc_session::SessionNewResult,
     > = serde_json::from_value(response)?;
-    Ok(SessionId::try_from(response.result.session.id.as_str())?)
+    Ok(SessionId::from(response.result.session.id.as_str()))
 }
 
 #[cfg(unix)]
@@ -380,7 +351,11 @@ async fn wait_for_command_exec_exit(
                     let original_method = meta["devo/originalMethod"].as_str();
                     let original_event = &meta["devo/originalEvent"];
                     original_method.map(|method| {
-                        let event_payload = if original_event.get("process_id").is_some() {
+                        let event_payload = if original_event
+                            .get("processId")
+                            .or_else(|| original_event.get("process_id"))
+                            .is_some()
+                        {
                             original_event
                         } else {
                             match method {
@@ -400,24 +375,24 @@ async fn wait_for_command_exec_exit(
         };
         match payload {
             Some(("command/exec/outputDelta", params)) => {
-                if params["process_id"] != serde_json::json!(process_id) {
+                if params["processId"] != serde_json::json!(process_id) {
                     continue;
                 }
                 assert_notification_session(params, session_id);
                 assert_eq!(params["stream"], "pty");
-                let delta_base64 = params["delta_base64"]
+                let delta_base64 = params["deltaBase64"]
                     .as_str()
-                    .context("delta_base64 should be a string")?;
+                    .context("deltaBase64 should be a string")?;
                 let bytes = BASE64_STANDARD.decode(delta_base64)?;
                 output.push_str(&String::from_utf8_lossy(&bytes));
             }
             Some(("command/exec/exited", params)) => {
-                if params["process_id"] != serde_json::json!(process_id) {
+                if params["processId"] != serde_json::json!(process_id) {
                     continue;
                 }
                 assert_notification_session(params, session_id);
                 if let Some(expected_exit_code) = expected_exit_code {
-                    assert_eq!(params["exit_code"], expected_exit_code);
+                    assert_eq!(params["exitCode"], expected_exit_code);
                 }
                 return Ok(output);
             }
@@ -433,12 +408,12 @@ async fn wait_for_command_exec_exit(
 fn assert_notification_session(params: &serde_json::Value, session_id: Option<SessionId>) {
     match session_id {
         Some(session_id) => {
-            assert_eq!(params["session_id"], serde_json::json!(session_id));
+            assert_eq!(params["sessionId"], serde_json::json!(session_id));
         }
         None => {
             assert!(
-                params.get("session_id").is_none(),
-                "sessionless command/exec notification should omit session_id: {params}"
+                params.get("sessionId").is_none(),
+                "sessionless command/exec notification should omit sessionId: {params}"
             );
         }
     }

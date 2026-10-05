@@ -1,19 +1,19 @@
 use std::sync::Arc;
 
-use devo_core::SessionId;
+use devo_protocol::native::ids::SessionId;
 use tokio_util::sync::CancellationToken;
 
-use crate::turn::TurnMetadata;
+use crate::turn::RuntimeTurn;
 
 use super::ServerRuntime;
 
 impl ServerRuntime {
     /// Registers cancellation, metadata, and optional connection ownership for a
     /// turn that is about to run on a background task.
-    pub(crate) async fn register_active_turn_execution(
+    pub(crate) async fn register_active_runtime_turn_execution(
         &self,
         session_id: SessionId,
-        turn: TurnMetadata,
+        turn: RuntimeTurn,
         connection_id: Option<u64>,
     ) -> CancellationToken {
         let cancel_token = CancellationToken::new();
@@ -59,16 +59,16 @@ impl ServerRuntime {
         }
     }
 
-    pub(crate) async fn spawn_active_turn_task<F>(
+    pub(crate) async fn spawn_active_runtime_turn_task<F>(
         self: &Arc<Self>,
         session_id: SessionId,
-        turn: TurnMetadata,
+        turn: RuntimeTurn,
         connection_id: Option<u64>,
         task: F,
     ) where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        self.register_active_turn_execution(session_id, turn, connection_id)
+        self.register_active_runtime_turn_execution(session_id, turn, connection_id)
             .await;
         let runtime = Arc::clone(self);
         let join_handle = tokio::spawn(task);

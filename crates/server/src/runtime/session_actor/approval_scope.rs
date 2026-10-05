@@ -1,6 +1,14 @@
 use std::path::{Component, Path, PathBuf};
 
 use devo_protocol::ApprovalScopeValue;
+
+/// Access class for credential delivery (design doc §9): Windows maps it to
+/// the delivered ACE mask; the POSIX dirfd channel distinguishes the same two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialAccess {
+    Read,
+    Write,
+}
 use devo_safety::RuntimePermissionProfile;
 
 use crate::execution::ApprovalGrantCache;
@@ -34,11 +42,18 @@ pub(crate) fn apply_approval_scope_to_state(
                 session_cache.tools.insert(pending.tool_name.clone());
             }
         }
-        ApprovalScopeValue::PathPrefix => {
+        ApprovalScopeValue::PathPrefix | ApprovalScopeValue::PathPrefixPersist => {
             if let Some(path) = pending.path.as_ref() {
                 // Session-scoped so "don't ask again for these files" lasts for
                 // the rest of the conversation (session-scoped file approval).
+                // The Persist variant additionally writes a durable rule at
+                // resolution time (see persist_path_prefix_rule).
                 insert_path_prefix_grant(session_cache, pending.resource.as_ref(), path);
+            }
+        }
+        ApprovalScopeValue::HostPersist => {
+            if let Some(host) = pending.host.clone() {
+                session_cache.hosts.insert(host);
             }
         }
         ApprovalScopeValue::Host => {
@@ -74,7 +89,10 @@ pub(crate) fn apply_path_scope_to_permission_profile(
     scope: &ApprovalScopeValue,
     pending: &PendingApproval,
 ) {
-    if !matches!(scope, ApprovalScopeValue::PathPrefix) {
+    if !matches!(
+        scope,
+        ApprovalScopeValue::PathPrefix | ApprovalScopeValue::PathPrefixPersist
+    ) {
         return;
     }
     let Some(path) = pending.path.as_ref() else {
@@ -157,6 +175,64 @@ pub(crate) fn path_prefix_grant_root(path: &Path) -> PathBuf {
     }
 }
 
+/// Credential-delivery decision (design doc §8/§9, P2): which root and access
+/// class, if any, a granted scope should deliver to the fenced kernel's
+/// session SID as an ACE.
+///
+/// Only PathPrefix approvals deliver — the user explicitly chose a directory
+/// scope. Session-scope exact-file approvals deliberately do not (a directory
+/// ACE would widen beyond what was approved; they stay mediated, with the
+/// grant cache making repeat calls frictionless). Non-file resources deliver
+/// nothing (no ACE shape exists for them).
+pub(crate) fn credential_delivery_root(
+    scope: &ApprovalScopeValue,
+    pending: &PendingApproval,
+) -> Option<(PathBuf, CredentialAccess)> {
+    if !matches!(
+        scope,
+        ApprovalScopeValue::PathPrefix | ApprovalScopeValue::PathPrefixPersist
+    ) {
+        return None;
+    }
+    let access = match pending.resource.as_ref() {
+        Some(devo_safety::ResourceKind::FileWrite) => CredentialAccess::Write,
+        Some(devo_safety::ResourceKind::FileRead) => CredentialAccess::Read,
+        Some(_) | None => return None,
+    };
+    pending
+        .path
+        .as_deref()
+        .map(path_prefix_grant_root)
+        .map(|root| (root, access))
+}
+
+/// Temporary Windows limitation: elevated sandbox tokens need both the
+/// sandbox account's normal access pass and the per-session restricting SID
+/// pass. A single SID ACE cannot deliver a native directory capability.
+/// Reject all Windows PathPrefix approvals BEFORE recording an Approved
+/// decision or updating any cache/profile. Recovered requests can lack the
+/// original resource/path metadata, so metadata cannot gate this rejection.
+/// Once and Session mediated file reads remain valid.
+pub(crate) fn windows_path_prefix_unsupported(
+    is_windows: bool,
+    approved: bool,
+    scope: &ApprovalScopeValue,
+    _resource: &devo_safety::ResourceKind,
+    _path: Option<&Path>,
+) -> Option<&'static str> {
+    (is_windows
+        && approved
+        && matches!(
+            scope,
+            ApprovalScopeValue::PathPrefix | ApprovalScopeValue::PathPrefixPersist
+        ))
+    .then_some(
+        "Windows native file PathPrefix approvals are unsupported: the elevated sandbox \
+         cannot safely deliver the required directory credential; choose Once or Session \
+         for mediated file access instead",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -166,11 +242,81 @@ mod tests {
 
     use super::apply_approval_scope_to_state;
     use super::apply_path_scope_to_permission_profile;
+    use super::credential_delivery_root;
     use super::normalize_permission_path;
     use super::path_prefix_grant_root;
+    use super::windows_path_prefix_unsupported;
     use devo_safety::PermissionPreset;
     use devo_safety::ResourceKind;
     use devo_safety::RuntimePermissionProfile;
+
+    #[test]
+    fn windows_native_path_prefix_is_rejected_before_grant_but_mediated_is_available() {
+        let path = std::path::Path::new("approved.txt");
+        for scope in [
+            ApprovalScopeValue::PathPrefix,
+            ApprovalScopeValue::PathPrefixPersist,
+        ] {
+            assert!(
+                windows_path_prefix_unsupported(
+                    true,
+                    true,
+                    &scope,
+                    &ResourceKind::FileRead,
+                    Some(path),
+                )
+                .unwrap()
+                .contains("unsupported")
+            );
+            assert!(
+                windows_path_prefix_unsupported(
+                    true,
+                    true,
+                    &scope,
+                    &ResourceKind::FileWrite,
+                    Some(path),
+                )
+                .is_some()
+            );
+            assert!(
+                windows_path_prefix_unsupported(true, true, &scope, &ResourceKind::Network, None,)
+                    .is_some(),
+                "missing recovered metadata must not bypass PathPrefix rejection"
+            );
+            assert!(
+                windows_path_prefix_unsupported(
+                    false,
+                    true,
+                    &scope,
+                    &ResourceKind::FileRead,
+                    Some(path),
+                )
+                .is_none()
+            );
+            assert!(
+                windows_path_prefix_unsupported(
+                    true,
+                    false,
+                    &scope,
+                    &ResourceKind::FileRead,
+                    Some(path),
+                )
+                .is_none()
+            );
+        }
+        for scope in [ApprovalScopeValue::Once, ApprovalScopeValue::Session] {
+            assert!(
+                windows_path_prefix_unsupported(
+                    true,
+                    true,
+                    &scope,
+                    &ResourceKind::FileRead,
+                    Some(path),
+                )
+                .is_none()
+            );
+        }
+    }
 
     #[test]
     fn command_prefix_persist_scope_stores_prefix_in_session_cache() {
@@ -630,6 +776,41 @@ mod tests {
 
         assert_eq!(profile.readable_roots, before_readable);
         assert_eq!(profile.writable_roots, before_writable);
+    }
+
+    #[test]
+    fn path_prefix_write_delivers_credential_root_session_scope_does_not() {
+        // P2 delivery decision (design doc §8/§9): an explicit PathPrefix
+        // approval delivers a directory ACE (write or read mask); Session
+        // exact-file and once stay on the mediated path.
+        let dir = abs_path(&["workspace", "src"]);
+        let file = dir.join("main.rs");
+
+        let prefix_write = file_pending_approval("write", ResourceKind::FileWrite, file.clone());
+        assert_eq!(
+            credential_delivery_root(&ApprovalScopeValue::PathPrefix, &prefix_write),
+            Some((dir.clone(), super::CredentialAccess::Write))
+        );
+
+        let prefix_read = file_pending_approval("read", ResourceKind::FileRead, file.clone());
+        assert_eq!(
+            credential_delivery_root(&ApprovalScopeValue::PathPrefix, &prefix_read),
+            Some((dir.clone(), super::CredentialAccess::Read)),
+            "PathPrefix read approvals deliver a read-mask ACE"
+        );
+
+        let session_write = file_pending_approval("write", ResourceKind::FileWrite, file.clone());
+        assert_eq!(
+            credential_delivery_root(&ApprovalScopeValue::Session, &session_write),
+            None,
+            "session exact-file approval must not deliver a widened directory ACE"
+        );
+
+        let once_write = file_pending_approval("write", ResourceKind::FileWrite, file);
+        assert_eq!(
+            credential_delivery_root(&ApprovalScopeValue::Once, &once_write),
+            None
+        );
     }
 
     #[test]

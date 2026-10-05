@@ -102,7 +102,7 @@ fn legacy_bare_uuid_id_round_trips() {
             .expect("legacy id parses");
     assert_eq!(id.as_str(), "019b1c2d-3e4f-7890-abcd-ef1234567890");
     assert_eq!(
-        serde_json::to_value(&id).expect("serialize"),
+        serde_json::to_value(id).expect("serialize"),
         serde_json::json!("019b1c2d-3e4f-7890-abcd-ef1234567890")
     );
 }

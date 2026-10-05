@@ -104,7 +104,15 @@ pub(crate) async fn run_doctor() -> Result<()> {
             let cwd = std::env::current_dir()?;
             let app_config = FileSystemAppConfigLoader::new(home.clone()).load(Some(&cwd))?;
             let provider_config = app_config.provider_catalog_config();
-            match provider_config.resolve_model(None) {
+            let resolved = {
+                let effective = devo_core::effective_provider_catalog_with_home(
+                    &provider_config,
+                    Some(home.as_path()),
+                )
+                .unwrap_or_else(|_| provider_config.clone());
+                effective.resolve_model(None)
+            };
+            match resolved {
                 Ok(selection) => {
                     let provider = provider_config
                         .providers

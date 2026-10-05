@@ -39,6 +39,51 @@ This repository is a Rust-based coding agent, currently called `devo`.
   - Never rely on Windows-style paths being interpreted correctly on Unix, or Unix-style paths on Windows.
   - Always use platform-native path formats in tests so they align with `std::path::Path` semantics.
 
+### InteractiveMode product TUI (tmux / psmux)
+
+When verifying the **product** path (`target/debug/devo` → Node InteractiveMode), use a real TTY under **tmux** or **psmux** (Windows: winget `marlocarlo.psmux`; set `DEVO_TMUX_BIN` if it is not on `PATH`). Do **not** assert exact model reply text — assert turn activity (user bubble, thinking, assistant output, and/or tool use).
+
+```bash
+# Session name may be any label; this example uses the binary path as the name.
+tmux new-session -d -s .\target\debug\devo -x 80 -y 24
+
+# Wait for startup, then capture output
+sleep 3 && tmux capture-pane -t .\target\debug\devo -p
+
+# Send input
+tmux send-keys -t .\target\debug\devo "your prompt here" Enter
+
+# Send special keys
+tmux send-keys -t .\target\debug\devo Escape
+tmux send-keys -t .\target\debug\devo C-o  # ctrl+o
+
+# Cleanup
+tmux kill-session -t .\target\debug\devo
+```
+
+On Windows PowerShell with psmux, prefer an absolute binary path and an explicit cwd, for example:
+
+```powershell
+$tmux = $env:DEVO_TMUX_BIN  # or full path to psmux.exe
+$devo = (Resolve-Path .\target\debug\devo.exe).Path
+& $tmux new-session -d -s devo-repro -c (Get-Location) -x 100 -y 30 $devo
+Start-Sleep -Seconds 4
+& $tmux capture-pane -t devo-repro -p
+& $tmux send-keys -t devo-repro "Say hello in one short sentence." Enter
+Start-Sleep -Seconds 30
+& $tmux capture-pane -t devo-repro -p
+& $tmux kill-session -t devo-repro
+```
+
+Slash commands to spot-check under the same TTY path (do not assert exact model text):
+
+- `/model` — opens model selector (Esc to close)
+- `/effort` — opens effort selector
+- `/system-prompt` — prints server-owned system prompt note in chat
+- `/goal` — status line (“No active goal” or current objective); `/goal <text>` sets; `/goal pause|resume|clear` mutate
+
+Scenario harness (markers / T1–T3): `apps/tui` → `npm run test:tmux` (`scripts/tmux-tui-smoke.ps1` / `.sh`).
+
 ## Protocol and Session Settings
 
 Per L2-DES-APP-008 and L2-DES-CONV-002 (both Approved):
@@ -46,6 +91,6 @@ Per L2-DES-APP-008 and L2-DES-CONV-002 (both Approved):
 - The Native protocol (`crates/protocol/src/native/`) is the single retained surface. New features land on Native only; legacy-shaped handlers only shrink and are deleted in Phase E. During migration, legacy handlers translate into the Native path — never maintain parallel implementations.
 - External protocols (ACP, future A2A) are pure adapters: transport + projection, zero business logic. Their wire behavior is pinned by `protocol-lock.json` and must not drift mid-migration.
 - Session settings changes go through canonical `session/metadata/update` with `SessionSettingsPatch` (partial semantics: only present fields change). Do not add per-concern settings methods.
-- Settings writes are persist-first: field-level rollout lines (`InternalRecordV2::SessionSettings`) written synchronously by the handler, which never waits on the session actor; actor notification is best-effort (`SessionHandle::notify_*`). Replay prefers field lines over whole-record `SessionMeta` values.
+- Settings writes are persist-first: field-level rollout lines (`InternalRecord::SessionSettings`) written synchronously by the handler, which never waits on the session actor; actor notification is best-effort (`SessionHandle::notify_*`). Replay prefers field lines over whole-record `SessionMeta` values.
 - Mid-turn effect rides the turn-inline override (`TurnInlineState.live_turn_settings`, `sandbox_profile_live`). Every live setting must declare its decision point and mid-turn semantics in the DD-6 promise matrix of L2-DES-CONV-002 before implementation.
 - Session actor vs turn isolation: see `L2-DES-SERVER-002` and `crates/server/AGENTS.md`. Actor mailbox commands must stay short; turns run on a spawned task with `TurnWorkingSet` and re-enter via `MergeTurn`.

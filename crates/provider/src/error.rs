@@ -3,6 +3,8 @@
 //! Implements L3-BEH-PROVIDER-001 §B6. Classifies provider failures into
 //! recoverable and non-recoverable categories with retry hints.
 
+use std::error::Error as StdError;
+
 use serde::{Deserialize, Serialize};
 
 /// Structured error from a model provider invocation.
@@ -78,6 +80,24 @@ pub enum ProviderError {
         message: String,
         status_code: Option<u16>,
     },
+}
+
+pub(crate) fn stream_error(message: impl Into<String>) -> ProviderError {
+    ProviderError::StreamError {
+        message: message.into(),
+        bytes_received: None,
+    }
+}
+
+pub(crate) fn format_eventsource_error(error: &reqwest_eventsource::Error) -> String {
+    let mut message = format!("{error}; debug={error:?}");
+    let mut source = error.source();
+    while let Some(error) = source {
+        message.push_str("; source=");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    message
 }
 
 impl ProviderError {

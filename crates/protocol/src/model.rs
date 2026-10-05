@@ -165,6 +165,12 @@ pub enum RequestContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+
+    #[serde(rename = "image")]
+    Image {
+        mime_type: String,
+        data_base64: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -215,6 +221,9 @@ pub enum ProviderWireApi {
     /// Anthropic-compatible `/v1/messages`.
     #[serde(rename = "anthropic_messages")]
     AnthropicMessages,
+    /// Google AI Studio / Generative Language API.
+    #[serde(rename = "google_generative_ai")]
+    GoogleGenerativeAi,
 }
 
 impl ProviderWireApi {
@@ -224,6 +233,7 @@ impl ProviderWireApi {
             Self::OpenAIChatCompletions => "openai_chat_completions",
             Self::OpenAIResponses => "openai_responses",
             Self::AnthropicMessages => "anthropic_messages",
+            Self::GoogleGenerativeAi => "google_generative_ai",
         }
     }
 }
@@ -255,6 +265,10 @@ pub struct Model {
     /// Reasoning control available for this model.
     #[serde(alias = "thinking_capability")]
     pub reasoning_capability: ReasoningCapability,
+    /// Authored pi-ai-compatible reasoning flag; derived from capability when absent.
+    pub reasoning: Option<bool>,
+    /// Authored pi-ai-compatible logical-level to wire-value map.
+    pub thinking_level_map: Option<crate::ThinkingLevelMap>,
     /// Default reasoning effort selected for the model when no levels are exposed.
     pub default_reasoning_effort: Option<ReasoningEffort>,
     /// Exact default reasoning selection, including toggle values such as
@@ -303,6 +317,8 @@ impl Default for Model {
             provider: ProviderWireApi::OpenAIChatCompletions,
             description: None,
             reasoning_capability: ReasoningCapability::Unsupported,
+            reasoning: None,
+            thinking_level_map: None,
             default_reasoning_effort: Some(ReasoningEffort::default()),
             default_reasoning_selection: None,
             reasoning_implementation: None,
@@ -407,12 +423,47 @@ impl Model {
     }
 
     pub fn normalize_reasoning_effort_selection(&self, selection: Option<&str>) -> Option<String> {
-        selection
+        let selected = selection
             .map(str::trim)
             .filter(|selection| !selection.is_empty())
             .filter(|selection| !selection.eq_ignore_ascii_case("default"))
-            .map(normalize_reasoning_effort_literal)
-            .or_else(|| self.default_reasoning_effort_selection())
+            .map(str::to_string)
+            .or_else(|| self.default_reasoning_effort_selection())?;
+        let (reasoning, map, available) = crate::resolve_thinking_fields_for_model_info(
+            &self.reasoning_capability,
+            self.reasoning,
+            self.thinking_level_map.as_ref(),
+        );
+        let available = available
+            .iter()
+            .filter_map(|level| level.parse::<crate::ModelThinkingLevel>().ok())
+            .collect::<Vec<_>>();
+        let normalized = crate::normalize_model_thinking_level_selection(&selected, &available);
+        let Ok(level) = normalized.parse::<crate::ModelThinkingLevel>() else {
+            return Some(normalized);
+        };
+        Some(
+            crate::clamp_thinking_level(level, reasoning, Some(&map))
+                .as_str()
+                .to_string(),
+        )
+    }
+
+    fn thinking_wire_value(&self, selection: &str) -> Option<String> {
+        let (_, map, _) = crate::resolve_thinking_fields_for_model_info(
+            &self.reasoning_capability,
+            self.reasoning,
+            self.thinking_level_map.as_ref(),
+        );
+        map.get(selection).cloned().flatten()
+    }
+
+    fn authored_thinking_wire_value(&self, selection: &str) -> Option<String> {
+        self.thinking_level_map
+            .as_ref()
+            .and_then(|map| map.get(selection))
+            .cloned()
+            .flatten()
     }
 
     pub fn nearest_supported_reasoning_effort(&self, target: ReasoningEffort) -> ReasoningEffort {
@@ -428,7 +479,11 @@ impl Model {
     /// selection, when one exists and is selectable.
     pub fn effort_catalog_variant_key(&self, selection: Option<&str>) -> Option<&str> {
         let normalized = self.normalize_reasoning_effort_selection(selection)?;
-        let key = find_effort_variant_key(&self.catalog_variants, &normalized)?;
+        let key = find_effort_variant_key(&self.catalog_variants, &normalized).or_else(|| {
+            self.thinking_wire_value(&normalized)
+                .as_deref()
+                .and_then(|wire| find_effort_variant_key(&self.catalog_variants, wire))
+        })?;
         let variant = self.catalog_variants.get(key)?;
         (!variant.disabled).then_some(key)
     }
@@ -475,6 +530,7 @@ impl Model {
                         ReasoningCapability::Unsupported => (None, None, None),
                         ReasoningCapability::Toggle => {
                             let logical = normalized_selection
+                                .clone()
                                 .filter(|selection| selection == "on" || selection == "off")
                                 .or_else(|| self.default_reasoning_effort_selection());
                             let effective_reasoning_effort = logical
@@ -536,6 +592,10 @@ impl Model {
                             }
                         }
                     };
+                let request_thinking = normalized_selection
+                    .as_deref()
+                    .and_then(|selection| self.authored_thinking_wire_value(selection))
+                    .or(request_thinking);
                 ResolvedReasoningRequest {
                     request_model: self.slug.clone(),
                     request_thinking,
@@ -545,12 +605,17 @@ impl Model {
                 }
             }
             ReasoningImplementation::ModelVariant(config) => {
+                let mapped_selection = normalized_selection
+                    .as_deref()
+                    .and_then(|selection| self.thinking_wire_value(selection));
                 let selected_variant = normalized_selection
                     .as_deref()
                     .and_then(|selection| {
                         config.variants.iter().find(|variant| {
-                            normalize_reasoning_effort_literal(&variant.selection_value)
-                                == selection
+                            let variant_selection =
+                                normalize_reasoning_effort_literal(&variant.selection_value);
+                            variant_selection == selection
+                                || mapped_selection.as_deref() == Some(variant_selection.as_str())
                         })
                     })
                     .or_else(|| {
@@ -659,41 +724,6 @@ pub trait ModelCatalog: Send + Sync {
     fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&Model, ModelError>;
 }
 
-/// TODO: Do we really need a In memory model catalog? let's remove it.
-#[derive(Debug, Clone)]
-pub struct InMemoryModelCatalog {
-    models: Vec<Model>,
-}
-
-impl InMemoryModelCatalog {
-    pub fn new(models: Vec<Model>) -> Self {
-        Self { models }
-    }
-}
-
-impl ModelCatalog for InMemoryModelCatalog {
-    fn list_visible(&self) -> Vec<&Model> {
-        self.models.iter().collect()
-    }
-
-    fn get(&self, slug: &str) -> Option<&Model> {
-        self.models.iter().find(|model| model.slug == slug)
-    }
-
-    fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&Model, ModelError> {
-        if let Some(slug) = requested {
-            return self.get(slug).ok_or_else(|| ModelError::ModelNotFound {
-                slug: slug.to_string(),
-            });
-        }
-
-        self.list_visible()
-            .into_iter()
-            .next()
-            .ok_or(ModelError::NoVisibleModels)
-    }
-}
-
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ModelError {
     #[error("model not found: {slug}")]
@@ -740,15 +770,41 @@ mod tests {
     use crate::RequestRole;
     use pretty_assertions::assert_eq;
 
-    use super::InMemoryModelCatalog;
     use super::InputModality;
     use super::Model;
     use super::ModelCatalog;
+    use super::ModelError;
     use super::ProviderWireApi;
     use super::ReasoningCapability;
     use super::ReasoningEffort;
     use super::ReasoningImplementation;
     use super::TruncationPolicyConfig;
+
+    struct TestCatalog {
+        models: Vec<Model>,
+    }
+
+    impl ModelCatalog for TestCatalog {
+        fn list_visible(&self) -> Vec<&Model> {
+            self.models.iter().collect()
+        }
+
+        fn get(&self, slug: &str) -> Option<&Model> {
+            self.models.iter().find(|model| model.slug == slug)
+        }
+
+        fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&Model, ModelError> {
+            if let Some(slug) = requested {
+                return self.get(slug).ok_or_else(|| ModelError::ModelNotFound {
+                    slug: slug.to_string(),
+                });
+            }
+            self.list_visible()
+                .into_iter()
+                .next()
+                .ok_or(ModelError::NoVisibleModels)
+        }
+    }
 
     fn model(slug: &str) -> Model {
         Model {
@@ -757,6 +813,8 @@ mod tests {
             provider: ProviderWireApi::OpenAIChatCompletions,
             description: None,
             reasoning_capability: ReasoningCapability::Unsupported,
+            reasoning: None,
+            thinking_level_map: None,
             default_reasoning_effort: Some(ReasoningEffort::Medium),
             default_reasoning_selection: None,
             reasoning_implementation: None,
@@ -780,7 +838,9 @@ mod tests {
 
     #[test]
     fn resolve_for_turn_honors_requested_slug() {
-        let catalog = InMemoryModelCatalog::new(vec![model("test")]);
+        let catalog = TestCatalog {
+            models: vec![model("test")],
+        };
         let resolved = catalog
             .resolve_for_turn(Some("test"))
             .expect("resolve explicit");
@@ -810,6 +870,7 @@ mod tests {
             ),
             (ProviderWireApi::OpenAIResponses, "openai_responses"),
             (ProviderWireApi::AnthropicMessages, "anthropic_messages"),
+            (ProviderWireApi::GoogleGenerativeAi, "google_generative_ai"),
         ] {
             assert_eq!(wire_api.as_str(), expected);
         }
@@ -821,6 +882,7 @@ mod tests {
             ProviderWireApi::OpenAIChatCompletions,
             ProviderWireApi::OpenAIResponses,
             ProviderWireApi::AnthropicMessages,
+            ProviderWireApi::GoogleGenerativeAi,
         ] {
             assert_eq!(
                 serde_json::to_value(wire_api).expect("serialize wire api"),
@@ -838,6 +900,7 @@ mod tests {
             ),
             (ProviderWireApi::OpenAIResponses, "openai_responses"),
             (ProviderWireApi::AnthropicMessages, "anthropic_messages"),
+            (ProviderWireApi::GoogleGenerativeAi, "google_generative_ai"),
         ] {
             let converted: &'static str = wire_api.into();
 
@@ -881,10 +944,10 @@ mod tests {
         let resolved = preset.resolve_reasoning_effort_selection(Some("medium"));
 
         assert_eq!(resolved.request_model, "o-model");
-        assert_eq!(resolved.request_thinking, Some(String::from("low")));
+        assert_eq!(resolved.request_thinking, Some(String::from("high")));
         assert_eq!(
             resolved.effective_reasoning_effort,
-            Some(ReasoningEffort::Low)
+            Some(ReasoningEffort::High)
         );
     }
 

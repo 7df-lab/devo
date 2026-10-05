@@ -43,8 +43,7 @@ import {
 	useState,
 } from "react"
 import { collaborationModeFamily, type CollaborationMode } from "../../atoms/collaboration-mode"
-import { compactionStatusFamily } from "../../atoms/compaction"
-import { messagesFamily } from "../../atoms/messages"
+import { itemsFamily } from "../../atoms/messages"
 import { projectModelsAtom, setProjectModelAtom } from "../../atoms/preferences"
 import {
 	composerFromSessionModel,
@@ -117,6 +116,7 @@ import {
 } from "../review/review-comments"
 import { ChatPermissionFlow } from "./chat-permission"
 import { ChatQuestionFlow } from "./chat-question"
+import { isAssistantItemError } from "./assistant-item-error"
 import { ChatTurnComponent, isSyntheticMessage } from "./chat-turn"
 import { ForkBoundaryDivider } from "./fork-boundary-divider"
 import { forkBoundaryAfterTurnIndex } from "./fork-boundary"
@@ -433,44 +433,18 @@ const TURN_ESTIMATE_MIN = 120
 const TURN_ESTIMATE_MAX = 12_000
 
 function estimateTurnSize(turn: ChatTurn): number {
-	let partCount = turn.userMessage.parts.length
-	for (const message of turn.assistantMessages) {
-		partCount += message.parts.length
-	}
+	const itemCount = 1 + turn.assistantMessages.length
 	const assistantTextLength = turn.assistantMessages.reduce((total, message) => {
-		return (
-			total +
-			message.parts.reduce((messageTotal, part) => {
-				return messageTotal + (part.type === "text" || part.type === "reasoning" ? part.text.length : 0)
-			}, 0)
-		)
+		const item = message.info.item
+		const text = typeof item?.text === "string" ? item.text : ""
+		return total + text.length
 	}, 0)
-	const toolCount = turn.assistantMessages.reduce((total, message) => {
-		return total + message.parts.filter((part) => part.type === "tool").length
-	}, 0)
-	const reasoningCount = turn.assistantMessages.reduce((total, message) => {
-		return total + message.parts.filter((part) => part.type === "reasoning").length
-	}, 0)
-	const estimated =
-		180 +
-		turn.assistantMessages.length * 72 +
-		partCount * 36 +
-		toolCount * 96 +
-		reasoningCount * 48 +
-		assistantTextLength / 10
+	const estimated = 180 + itemCount * 72 + assistantTextLength / 10
 	return Math.max(TURN_ESTIMATE_MIN, Math.min(TURN_ESTIMATE_MAX, estimated))
 }
 
 function turnListStructureRevision(turns: ChatTurn[]): string {
-	return turns
-		.map((turn) => {
-			let partCount = turn.userMessage.parts.length
-			for (const message of turn.assistantMessages) {
-				partCount += message.parts.length
-			}
-			return `${turn.id}:${partCount}`
-		})
-		.join("|")
+	return turns.map((turn) => `${turn.id}:${1 + turn.assistantMessages.length}`).join("|")
 }
 
 interface VirtualizedTurnListProps {
@@ -719,8 +693,6 @@ interface ChatViewProps {
 	onForkFromTurn?: (turnId?: string) => Promise<void>
 	/** Edit and resend the latest user message */
 	onEditUserMessage?: (messageId: string, text: string) => Promise<void>
-	/** Delete a specific part from a message (for error recovery) */
-	onDeletePart?: (sessionId: string, messageId: string, partId: string) => Promise<void>
 	/** Whether the review panel is open (removes max-w constraint) */
 	reviewPanelOpen?: boolean
 	/** Parent session title for fork boundary marker */
@@ -787,7 +759,6 @@ export function ChatView({
 	isReverted,
 	onForkFromTurn,
 	onEditUserMessage,
-	onDeletePart,
 	reviewPanelOpen,
 	parentSessionName,
 	isActive = true,
@@ -834,7 +805,6 @@ export function ChatView({
 	const sessionEntry = useAtomValue(sessionFamily(agent.sessionId))
 	const sessionError = sessionEntry?.error
 	const setupPhase = sessionEntry?.setupPhase
-	const compactionStatus = useAtomValue(compactionStatusFamily(agent.sessionId))
 	const [sideCards, setSideCards] = useState<SideCard[]>([])
 
 	const startSideQuestion = useCallback(
@@ -859,7 +829,7 @@ export function ChatView({
 				`Side question:\n${question}`
 			try {
 				const result = await client.task.startAgent({
-					sessionID: agent.sessionId,
+					sessionId: agent.sessionId,
 					prompt,
 					forkTurns: "all",
 					maxTurns: 1,
@@ -873,16 +843,14 @@ export function ChatView({
 					await new Promise((resolve) => setTimeout(resolve, 250))
 					try {
 						const messages = await client.session.messages({
-							sessionID: childSessionId,
+							sessionId: childSessionId,
 							limit: 50,
 						})
 						const texts: string[] = []
 						for (const entry of messages.data ?? []) {
-							if (entry.info.role !== "assistant") continue
-							for (const part of entry.parts ?? []) {
-								if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
-									texts.push(part.text)
-								}
+							const item = entry.info?.item
+							if (item?.type === "assistantMessage" && typeof item.text === "string" && item.text.trim()) {
+								texts.push(item.text)
 							}
 						}
 						answer = texts.join("\n").trim()
@@ -984,7 +952,7 @@ export function ChatView({
 
 	// Format the session-level error for display. Only shown when the last
 	// turn doesn't already carry an assistant-level error (the server emits
-	// both session.error and message.updated for the same failure, so showing
+	// both session.error and item.updated for the same failure, so showing
 	// both would duplicate the message).
 	const sessionErrorText = useMemo(() => {
 		if (!sessionError) return undefined
@@ -997,9 +965,7 @@ export function ChatView({
 	const lastTurnHasError = useMemo(() => {
 		const lastTurn = turns.at(-1)
 		if (!lastTurn) return false
-		return lastTurn.assistantMessages.some(
-			(m) => m.info.role === "assistant" && m.info.error != null,
-		)
+		return lastTurn.assistantMessages.some(({ info }) => isAssistantItemError(info))
 	}, [turns])
 
 	const showSessionError =
@@ -1123,7 +1089,6 @@ export function ChatView({
 				isWorking={isWorking}
 				agent={agent}
 				isConnected={isConnected}
-				compactionStatus={compactionStatus}
 				retryStatus={activeRetryStatus}
 				providerErrors={turnProviderErrors}
 				onForkFromTurn={
@@ -1136,18 +1101,6 @@ export function ChatView({
 						? (text) => onEditUserMessage(turn.userMessage.info.id, text)
 						: undefined
 				}
-				onDeletePart={onDeletePart}
-				onImplementPlan={
-					onSendMessage
-						? () => {
-								appStore.set(collaborationModeFamily(agent.sessionId), "build")
-								void onSendMessage(agent, "Implement Plan", { collaborationMode: "build" })
-							}
-						: undefined
-				}
-				onRevisePlan={() => {
-					appStore.set(collaborationModeFamily(agent.sessionId), "plan")
-				}}
 			/>
 			{index === forkBoundaryAfterIndex ? (
 				<ForkBoundaryDivider
@@ -1162,14 +1115,12 @@ export function ChatView({
 		[
 			agent,
 			effectivePermission,
-			compactionStatus,
 			forkBoundaryAfterIndex,
 			handleApprovePermission,
 			handleDenyPermission,
 			isConnected,
 			isWorking,
 			latestEditableUserTurnIndex,
-			onDeletePart,
 			onForkFromTurn,
 			onEditUserMessage,
 			onSendMessage,
@@ -1209,7 +1160,7 @@ export function ChatView({
 						scrollClassName="scrollbar-chat"
 						className="gap-12 px-6 pt-4 pb-4 sm:px-10 sm:pt-8 sm:pb-6 lg:px-12"
 					>
-						<div className={cn(contentWidthClass, "animate-in fade-in space-y-12 duration-150")}>
+						<div className={cn(contentWidthClass, "animate-in fade-in space-y-6 duration-150")}>
 							<LoadEarlierOnScroll
 								hasEarlierMessages={hasEarlierMessages}
 								loadingEarlier={loadingEarlier}
@@ -1298,7 +1249,6 @@ export function ChatView({
 				>
 					<ChatInputSection
 						agent={agent}
-						turns={turns}
 						isConnected={isConnected}
 						isWorking={isWorking}
 						recoveryState={recoveryState}
@@ -1331,7 +1281,6 @@ export function ChatView({
 
 interface ChatInputSectionProps {
 	agent: Agent
-	turns: ChatTurn[]
 	isConnected: boolean
 	isWorking: boolean
 	recoveryState?: ReturnType<typeof useTurnRecovery>
@@ -1366,7 +1315,6 @@ interface ChatInputSectionProps {
 export function ChatInputSection({
 	recoveryState,
 	agent,
-	turns,
 	isConnected,
 	isWorking,
 	onSendMessage,
@@ -1422,7 +1370,7 @@ export function ChatInputSection({
 		if (!agent.directory) return null
 		const client = getProjectClient(agent.directory)
 		if (!client?.goal?.status) return null
-		const result = await client.goal.status({ sessionID: agent.sessionId })
+		const result = await client.goal.status({ sessionId: agent.sessionId })
 		return normalizeComposerGoal(result.data)
 	}, [agent.directory, agent.sessionId])
 
@@ -1533,7 +1481,7 @@ export function ChatInputSection({
 	const interruptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
 	// Per-session composer settings (model / variant / agent).
-	const sessionMessages = useAtomValue(messagesFamily(agent.sessionId))
+	const sessionMessages = useAtomValue(itemsFamily(agent.sessionId))
 	const projectModels = useAtomValue(projectModelsAtom)
 	const composerState = useAtomValue(sessionComposerFamily(agent.sessionId))
 	const setComposerState = useSetAtom(setSessionComposerAtom)
@@ -1600,7 +1548,7 @@ export function ChatInputSection({
 		})
 		const next = hydrateSessionComposerState(
 			composerState,
-			sessionMessages,
+			sessionMessages.length,
 			projectDefault,
 			sessionSeed,
 		)
@@ -1765,7 +1713,7 @@ export function ChatInputSection({
 			// been logged — callers await this to order the flush ahead of a
 			// turn without taking on error handling.
 			return Promise.resolve()
-				.then(() => updateSettings.call(client.session, { sessionID: agent.sessionId, ...pending }))
+				.then(() => updateSettings.call(client.session, { sessionId: agent.sessionId, ...pending }))
 				.then(() => {
 					if (pending.permissionProfile) {
 						permissionProfileDirtyRef.current = false
@@ -1864,7 +1812,7 @@ export function ChatInputSection({
 		if (!client?.goal?.pause) return
 		setGoalAction("pause")
 		try {
-			const result = await client.goal.pause({ sessionID: agent.sessionId })
+			const result = await client.goal.pause({ sessionId: agent.sessionId })
 			setActiveGoal(normalizeComposerGoal(result.data))
 		} catch (err) {
 			log.error("goal.pause failed", { sessionId: agent.sessionId }, err)
@@ -1879,7 +1827,7 @@ export function ChatInputSection({
 		if (!client?.goal?.resume) return
 		setGoalAction("resume")
 		try {
-			const result = await client.goal.resume({ sessionID: agent.sessionId })
+			const result = await client.goal.resume({ sessionId: agent.sessionId })
 			setActiveGoal(normalizeComposerGoal(result.data))
 		} catch (err) {
 			log.error("goal.resume failed", { sessionId: agent.sessionId }, err)
@@ -1894,7 +1842,7 @@ export function ChatInputSection({
 		if (!client?.goal?.clear) return
 		setGoalAction("clear")
 		try {
-			await client.goal.clear({ sessionID: agent.sessionId })
+			await client.goal.clear({ sessionId: agent.sessionId })
 			setActiveGoal(null)
 		} catch (err) {
 			log.error("goal.clear failed", { sessionId: agent.sessionId }, err)
@@ -1920,7 +1868,7 @@ export function ChatInputSection({
 						if (client) {
 							try {
 								await client.session.summarize({
-									sessionID: agent.sessionId,
+									sessionId: agent.sessionId,
 								})
 							} catch (err) {
 								log.error("session.summarize failed", { sessionId: agent.sessionId }, err)
@@ -1994,7 +1942,7 @@ export function ChatInputSection({
 			// overwrite the persisted per-session choice.
 			await flushSelectionPersist()
 			await client.session.promptAsync({
-				sessionID: agent.sessionId,
+				sessionId: agent.sessionId,
 				parts,
 				model: selectedModel
 					? { providerID: selectedModel.providerID, modelID: selectedModel.modelID }
@@ -2433,7 +2381,7 @@ export function ChatInputSection({
 									/>
 
 									{/* Toolbar inside the card — agent + model + variant selectors + submit */}
-									<PromptInputFooter>
+									<PromptInputFooter className="flex-wrap">
 										<PromptInputTools>
 											<AttachButton disabled={!isConnected} />
 											<ComposerPermissionPicker

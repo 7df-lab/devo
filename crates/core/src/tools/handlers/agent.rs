@@ -172,6 +172,7 @@ impl ToolHandler for AgentToolHandler {
                         max_turns: None,
                         tool_policy: AgentToolPolicy::Inherit,
                         ephemeral: false,
+                        nickname: None,
                     })
                     .await?;
                 json_result(ParentSpawnAgentResult::from(result), "agent spawned")
@@ -365,9 +366,7 @@ struct CancelTaskInput {
 }
 
 fn current_session_id(ctx: &ToolContext) -> Result<SessionId, ToolCallError> {
-    SessionId::try_from(ctx.session_id.clone()).map_err(|error| {
-        ToolCallError::InvalidInput(format!("invalid current session id: {error}"))
-    })
+    Ok(ctx.session_id)
 }
 
 fn parse_input<T: serde::de::DeserializeOwned>(
@@ -599,6 +598,8 @@ mod tests {
                 agent_path: "root/reviewer".to_string(),
                 agent_nickname: "reviewer".to_string(),
                 status: "running".to_string(),
+                session_dir: None,
+                model: None,
             })
         }
 
@@ -606,8 +607,7 @@ mod tests {
             self: Arc<Self>,
             params: AgentMessageParams,
         ) -> Result<devo_protocol::AgentMessageResult, ToolCallError> {
-            let child_session_id = SessionId::try_from(params.target.as_str())
-                .map_err(|error| ToolCallError::InvalidInput(error.to_string()))?;
+            let child_session_id = SessionId::from(params.target.as_str());
             self.messages.lock().await.push(params);
             Ok(devo_protocol::AgentMessageResult {
                 delivered: true,
@@ -713,6 +713,7 @@ mod tests {
                 max_turns: None,
                 tool_policy: AgentToolPolicy::Inherit,
                 ephemeral: false,
+                nickname: None,
             }]
         );
     }
@@ -913,7 +914,7 @@ mod tests {
         ToolContext {
             output_store: None,
             tool_call_id: crate::invocation::ToolCallId("tool-call".to_string()),
-            session_id: session_id.to_string(),
+            session_id,
             turn_id: None,
             workspace_root: ".".into(),
             budgets: ToolBudgets {
@@ -930,6 +931,11 @@ mod tests {
             network_no_proxy: None,
             sandbox_permission_overlay: None,
             sandbox_profile: None,
+            kernel: None,
+            python_cell_first_wait_ms: None,
+            python_cell_watch: None,
+            python_cell_completion: None,
+            session_dir: None,
         }
     }
 }

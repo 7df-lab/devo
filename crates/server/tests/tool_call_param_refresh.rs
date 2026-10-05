@@ -11,7 +11,6 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
 use futures::stream;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -19,19 +18,6 @@ use tempfile::TempDir;
 use tokio::time::Duration;
 use tokio::time::timeout;
 
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolCallError;
-use devo_core::tools::ToolResult;
-use devo_core::tools::ToolResultContent;
-use devo_core::tools::json_schema::JsonSchema;
-use devo_core::tools::registry::ToolRegistryBuilder;
-use devo_core::tools::tool_handler::ToolHandler;
-use devo_core::tools::tool_spec::ToolExecutionMode;
-use devo_core::tools::tool_spec::ToolOutputMode;
-use devo_core::tools::tool_spec::ToolSpec;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::ResponseContent;
@@ -40,12 +26,11 @@ use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
+use devo_server::test_support::TestRuntime;
 
-const TOOL_COMMAND: &str = "cargo test -p devo-server";
+const TOOL_CODE: &str = "print('streamed input refresh')";
 
 /// Streams a tool call the way real providers do: `ToolCallStart` with empty
 /// input, the arguments via `ToolCallInputDelta`, then the assembled response
@@ -70,12 +55,12 @@ impl ModelProviderSDK for StreamedToolProvider {
             .requests
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let events = if request_number == 0 {
-            let tool_input = json!({ "command": TOOL_COMMAND });
+            let tool_input = json!({ "code": TOOL_CODE });
             vec![
                 Ok(StreamEvent::ToolCallStart {
                     index: 0,
-                    id: "bash-1".to_string(),
-                    name: "bash".to_string(),
+                    id: "ipython-1".to_string(),
+                    name: "ipython".to_string(),
                     input: json!({}),
                 }),
                 Ok(StreamEvent::ToolCallInputDelta {
@@ -86,8 +71,8 @@ impl ModelProviderSDK for StreamedToolProvider {
                     response: ModelResponse {
                         id: "resp-tools".to_string(),
                         content: vec![ResponseContent::ToolUse {
-                            id: "bash-1".to_string(),
-                            name: "bash".to_string(),
+                            id: "ipython-1".to_string(),
+                            name: "ipython".to_string(),
                             input: json!({}),
                         }],
                         stop_reason: Some(StopReason::ToolUse),
@@ -121,83 +106,12 @@ impl ModelProviderSDK for StreamedToolProvider {
     }
 }
 
-struct EchoTool;
-
-#[async_trait]
-impl ToolHandler for EchoTool {
-    fn spec(&self) -> &ToolSpec {
-        Box::leak(Box::new(ToolSpec {
-            name: "bash".into(),
-            description: "Returns its input as output.".into(),
-            input_schema: JsonSchema::object(Default::default(), None, None),
-            output_mode: ToolOutputMode::Text,
-            execution_mode: ToolExecutionMode::ReadOnly,
-            capability_tags: vec![],
-            supports_parallel: true,
-            preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        }))
-    }
-
-    async fn handle(
-        &self,
-        _ctx: devo_core::tools::ToolContext,
-        _input: serde_json::Value,
-        _progress: Option<devo_core::tools::ToolProgressSender>,
-    ) -> std::result::Result<ToolResult, ToolCallError> {
-        Ok(ToolResult::success(
-            ToolResultContent::Text("ok".into()),
-            "ok",
-        ))
-    }
-}
-
 fn build_runtime(data_root: &Path) -> Arc<ServerRuntime> {
     let provider: Arc<dyn ModelProviderSDK> = Arc::new(StreamedToolProvider::default());
-    let mut builder = ToolRegistryBuilder::new();
-    builder.register_handler("bash", Arc::new(EchoTool));
-    builder.push_spec(ToolSpec {
-        name: "bash".into(),
-        description: "Returns its input as output.".into(),
-        input_schema: JsonSchema::object(Default::default(), None, None),
-        output_mode: ToolOutputMode::Text,
-        execution_mode: ToolExecutionMode::ReadOnly,
-        capability_tags: vec![],
-        supports_parallel: true,
-        preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-        display_name: None,
-        supports_cancellation: None,
-        supports_streaming: None,
-    });
-    let db_path = data_root.join("test_tool_param_refresh.db");
-    let db = Arc::new(devo_server::db::Database::open(db_path).expect("open test database"));
-    ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(builder.build()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                enabled: false,
-                user_roots: Vec::new(),
-                workspace_roots: Vec::new(),
-                watch_for_changes: false,
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                include_instructions: Some(false),
-                config: Vec::new(),
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(
-                AppConfigStore::load(data_root.to_path_buf(), None).expect("load app config store"),
-            )),
-        ),
-    )
+    TestRuntime::new(provider)
+        .disabled_skills()
+        .db_file("test_tool_param_refresh.db")
+        .runtime(data_root)
 }
 
 fn tool_call_started_payload(value: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -357,8 +271,8 @@ async fn streamed_tool_call_rebroadcasts_started_with_complete_parameters() -> R
     );
 
     assert_eq!(
-        second["item"]["input"]["command"],
-        json!(TOOL_COMMAND),
+        second["item"]["input"]["code"],
+        json!(TOOL_CODE),
         "refreshed item/started must carry the complete parameters: {second}"
     );
     assert_eq!(

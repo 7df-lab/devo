@@ -7,12 +7,17 @@
 // ============================================================
 
 /** Popular providers shown prominently in onboarding and settings, in display order.
- * Ordered to match the built-in catalog (crates/core/providers.json). */
+ * OAuth subscription providers lead so ChatGPT / Claude / Copilot / xAI are one click away. */
 export const POPULAR_PROVIDER_IDS = [
+	"openai-codex",
+	"anthropic",
+	"github-copilot",
+	"xai",
+	"openai",
 	"deepseek",
+	"google",
 	"kimi",
 	"qwen",
-	"openai",
 	"zai",
 	"zhipu",
 	"ollama",

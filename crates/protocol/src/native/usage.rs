@@ -40,6 +40,10 @@ pub enum UsagePurpose {
     Compaction,
     /// Session title generation.
     TitleGeneration,
+    /// Continual Harness refine planning (`L2-DES-HARNESS-001`).
+    Refine,
+    /// Mid-tool Python cell wait-policy decision.
+    PythonCellWatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -140,6 +144,45 @@ pub struct PurposeUsage {
 pub struct TurnUsage {
     pub query: UsageTotals,
     pub overhead: UsageTotals,
+}
+
+impl TurnUsage {
+    /// Builds a turn query meter from one provider-reported usage sample.
+    ///
+    /// First-party live paths keep this Native shape end-to-end; overhead stays
+    /// zero until AutoReview/Compaction metering is folded in.
+    pub fn from_provider_usage(usage: &crate::Usage) -> Self {
+        Self {
+            query: UsageTotals {
+                total_tokens: u64::try_from(usage.display_total_tokens()).unwrap_or(u64::MAX),
+                input_tokens: u64::try_from(usage.input_tokens).unwrap_or(u64::MAX),
+                output_tokens: u64::try_from(usage.output_tokens).unwrap_or(u64::MAX),
+                reasoning_tokens: u64::try_from(usage.reasoning_output_tokens.unwrap_or(0))
+                    .unwrap_or(u64::MAX),
+                cache_read_input_tokens: u64::try_from(usage.cache_read_input_tokens.unwrap_or(0))
+                    .unwrap_or(u64::MAX),
+                cache_creation_input_tokens: u64::try_from(
+                    usage.cache_creation_input_tokens.unwrap_or(0),
+                )
+                .unwrap_or(u64::MAX),
+                call_count: 0,
+                metered_call_count: 1,
+                ..UsageTotals::default()
+            },
+            overhead: UsageTotals::default(),
+        }
+    }
+
+    /// Display total for the query meter (provider total when present).
+    pub fn display_total_tokens(&self) -> u64 {
+        if self.query.total_tokens > 0 {
+            self.query.total_tokens
+        } else {
+            self.query
+                .input_tokens
+                .saturating_add(self.query.output_tokens)
+        }
+    }
 }
 
 /// Derived cache aggregated from the usage ledger (truth = ledger sum).

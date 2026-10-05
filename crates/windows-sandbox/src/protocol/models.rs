@@ -40,8 +40,8 @@ impl FileSystemPermissions {
                 return None;
             };
             match entry.access {
-                FileSystemAccessMode::Read => read.push(path.clone()),
-                FileSystemAccessMode::Write => write.push(path.clone()),
+                FileSystemAccessMode::Read => read.push(path.clone().into()),
+                FileSystemAccessMode::Write => write.push(path.clone().into()),
                 FileSystemAccessMode::Deny => return None,
             }
         }
@@ -58,13 +58,13 @@ impl FileSystemPermissions {
         let mut entries = Vec::new();
         if let Some(read) = read {
             entries.extend(read.into_iter().map(|path| FileSystemSandboxEntry {
-                path: FileSystemPath::Path { path },
+                path: FileSystemPath::from_path(path),
                 access: FileSystemAccessMode::Read,
             }));
         }
         if let Some(write) = write {
             entries.extend(write.into_iter().map(|path| FileSystemSandboxEntry {
-                path: FileSystemPath::Path { path },
+                path: FileSystemPath::from_path(path),
                 access: FileSystemAccessMode::Write,
             }));
         }

@@ -1,287 +1,111 @@
 import { describe, expect, test } from "bun:test"
 import { createStore } from "jotai"
-import { groupIntoTurns, mergeSessionParts } from "./derived/session-chat"
-import { messagesFamily, setMessagesAtom, upsertMessageAtom } from "./messages"
-import { partsFamily, partStorageKey } from "./parts"
+import type { NativeItemEnvelope } from "@devo-ai/sdk/v2/client"
+import { groupIntoTurns, mergeSessionItems } from "./derived/session-chat"
+import { itemsFamily, setItemsAtom, upsertItemAtom } from "./messages"
 
-describe("message ordering", () => {
-	test("keeps assistant replies after optimistic user messages by creation time", () => {
+function userItem(id: string, turnId: string, seq: number, createdAt: string): NativeItemEnvelope {
+	return {
+		id,
+		sessionId: "s1",
+		turnId,
+		seq,
+		revision: 1,
+		createdAt,
+		updatedAt: createdAt,
+		state: "completed",
+		item: { type: "userMessage", content: [{ type: "text", text: "hi" }], entry: "turnStart" },
+	}
+}
+
+function assistantItem(id: string, turnId: string, seq: number, createdAt: string): NativeItemEnvelope {
+	return {
+		id,
+		sessionId: "s1",
+		turnId,
+		seq,
+		revision: 1,
+		createdAt,
+		updatedAt: createdAt,
+		state: "completed",
+		item: { type: "assistantMessage", text: "hello" },
+	}
+}
+
+describe("Native item ordering", () => {
+	test("keeps assistant replies after optimistic user messages by seq", () => {
 		const store = createStore()
-		const user = {
-			id: "optimistic-2000",
-			sessionID: "s1",
-			role: "user",
-			time: { created: 2_000 },
-		}
-		const assistant = {
-			id: "019ef97e-0b70-7b20-88ee-d124de3aacde",
-			sessionID: "s1",
-			role: "assistant",
-			parentID: user.id,
-			time: { created: 2_100 },
-		}
+		const user = userItem("optimistic-2000", "", 1, "2026-01-01T00:00:02.000Z")
+		const assistant = assistantItem("a1", "turn-1", 2, "2026-01-01T00:00:02.100Z")
 
-		store.set(upsertMessageAtom, user)
-		store.set(upsertMessageAtom, assistant)
+		store.set(upsertItemAtom, user)
+		store.set(upsertItemAtom, assistant)
 
-		const messages = store.get(messagesFamily("s1"))
-		const entries = mergeSessionParts("s1", messages, () => [], 0)
+		const items = store.get(itemsFamily("s1"))
+		const entries = mergeSessionItems(items)
 
-		expect(messages.map((message) => message.id)).toEqual([user.id, assistant.id])
+		expect(items.map((item) => item.id)).toEqual([user.id, assistant.id])
 		expect(groupIntoTurns(entries, [])).toEqual([
 			{
 				id: user.id,
 				turnId: undefined,
-				userMessage: { info: user, parts: [] },
-				assistantMessages: [{ info: assistant, parts: [] }],
+				userMessage: { info: user },
+				assistantMessages: [{ info: assistant }],
 			},
 		])
 	})
 
 	test("propagates protocol turn ids onto chat turns", () => {
-		const user = {
-			id: "u1",
-			sessionID: "s1",
-			role: "user",
-			turnID: "protocol-turn-1",
-			time: { created: 1 },
-		}
-		const assistant = {
-			id: "a1",
-			sessionID: "s1",
-			role: "assistant",
-			parentID: "u1",
-			turnID: "protocol-turn-1",
-			time: { created: 2 },
-		}
-		const turns = groupIntoTurns(
-			[
-				{ info: user, parts: [] },
-				{ info: assistant, parts: [] },
-			],
-			[],
-		)
+		const user = userItem("u1", "protocol-turn-1", 1, "2026-01-01T00:00:01.000Z")
+		const assistant = assistantItem("a1", "protocol-turn-1", 2, "2026-01-01T00:00:02.000Z")
+		const turns = groupIntoTurns([{ info: user }, { info: assistant }], [])
 
 		expect(turns).toEqual([
 			{
 				id: "u1",
 				turnId: "protocol-turn-1",
-				userMessage: { info: user, parts: [] },
-				assistantMessages: [{ info: assistant, parts: [] }],
+				userMessage: { info: user },
+				assistantMessages: [{ info: assistant }],
 			},
 		])
 	})
 
-	test("keeps parts scoped when message IDs repeat across sessions", () => {
+	test("hydrates session items without a Part dual", () => {
 		const store = createStore()
-		const messageId = "repeat-message"
-		const firstMessage = {
-			id: messageId,
-			sessionID: "s1",
-			role: "user",
-			time: { created: 1 },
-		}
-		const secondMessage = {
-			id: messageId,
-			sessionID: "s2",
-			role: "user",
-			time: { created: 1 },
-		}
-		const firstPart = {
-			id: "text",
-			sessionID: "s1",
-			messageID: messageId,
-			type: "text",
-			text: "first session",
-			time: { start: 1 },
-		}
-		const secondPart = {
-			id: "text",
-			sessionID: "s2",
-			messageID: messageId,
-			type: "text",
-			text: "second session",
-			time: { start: 1 },
-		}
-
-		store.set(setMessagesAtom, {
-			sessionId: "s1",
-			messages: [firstMessage],
-			parts: { [messageId]: [firstPart] },
-		})
-		store.set(setMessagesAtom, {
-			sessionId: "s2",
-			messages: [secondMessage],
-			parts: { [messageId]: [secondPart] },
-		})
-
-		const firstEntries = mergeSessionParts(
-			"s1",
-			store.get(messagesFamily("s1")),
-			(id) => store.get(partsFamily(partStorageKey("s1", id))),
-			0,
-		)
-		const secondEntries = mergeSessionParts(
-			"s2",
-			store.get(messagesFamily("s2")),
-			(id) => store.get(partsFamily(partStorageKey("s2", id))),
-			0,
-		)
-
-		expect(firstEntries).toEqual([{ info: firstMessage, parts: [firstPart] }])
-		expect(secondEntries).toEqual([{ info: secondMessage, parts: [secondPart] }])
+		const first = userItem("m1", "t1", 1, "2026-01-01T00:00:01.000Z")
+		store.set(setItemsAtom, { sessionId: "s1", items: [first] })
+		expect(store.get(itemsFamily("s1"))).toEqual([first])
 	})
 
-	test("groups turns once and skips orphan or mismatched assistant messages", () => {
-		const orphanAssistant = {
-			id: "orphan",
-			sessionID: "s1",
-			role: "assistant",
-			time: { created: 1 },
-		}
-		const firstUser = {
-			id: "u1",
-			sessionID: "s1",
-			role: "user",
-			time: { created: 2 },
-		}
-		const firstAssistant = {
-			id: "a1",
-			sessionID: "s1",
-			role: "assistant",
-			parentID: "u1",
-			time: { created: 3 },
-		}
-		const mismatchedAssistant = {
-			id: "a-mismatch",
-			sessionID: "s1",
-			role: "assistant",
-			parentID: "u2",
-			time: { created: 4 },
-		}
-		const secondUser = {
-			id: "u2",
-			sessionID: "s1",
-			role: "user",
-			time: { created: 5 },
-		}
-		const secondAssistant = {
-			id: "a2",
-			sessionID: "s1",
-			role: "assistant",
-			time: { created: 6 },
-		}
-		const entries = [
-			orphanAssistant,
-			firstUser,
-			firstAssistant,
-			mismatchedAssistant,
-			secondUser,
-			secondAssistant,
-		].map((info) => ({ info, parts: [] }))
+	test("keeps explicitly loaded earlier history during live updates", () => {
+		const store = createStore()
+		const history = Array.from({ length: 240 }, (_, index) =>
+			assistantItem(`item-${index}`, `turn-${index}`, index + 1, "2026-01-01T00:00:00.000Z"),
+		)
+		store.set(setItemsAtom, { sessionId: "s1", items: history })
+		store.set(upsertItemAtom, { ...history[239], revision: 2 })
+		store.set(upsertItemAtom, assistantItem("new-item", "new-turn", 241, "2026-01-01T00:01:00.000Z"))
 
-		expect(groupIntoTurns(entries, [])).toEqual([
-			{
-				id: "u1",
-				turnId: undefined,
-				userMessage: { info: firstUser, parts: [] },
-				assistantMessages: [{ info: firstAssistant, parts: [] }],
-			},
-			{
-				id: "u2",
-				turnId: undefined,
-				userMessage: { info: secondUser, parts: [] },
-				assistantMessages: [{ info: secondAssistant, parts: [] }],
-			},
-		])
+		const items = store.get(itemsFamily("s1"))
+		expect(items).toHaveLength(241)
+		expect(items[0]?.id).toBe("item-0")
+		expect(items.at(-1)?.id).toBe("new-item")
 	})
 
-	test("keeps tool messages in their parent turn", () => {
-		const firstUser = {
-			id: "u1",
-			sessionID: "s1",
-			role: "user",
-			time: { created: 1 },
-		}
-		const firstTool = {
-			id: "tool-a",
-			sessionID: "s1",
-			role: "assistant",
-			parentID: "u1",
-			time: { created: 2 },
-		}
-		const firstAssistant = {
-			id: "a1",
-			sessionID: "s1",
-			role: "assistant",
-			parentID: "u1",
-			time: { created: 3 },
-		}
-		const secondUser = {
-			id: "u2",
-			sessionID: "s1",
-			role: "user",
-			time: { created: 4 },
-		}
-		const secondTool = {
-			id: "tool-b",
-			sessionID: "s1",
-			role: "assistant",
-			parentID: "u2",
-			time: { created: 5 },
-		}
-		const secondAssistant = {
-			id: "a2",
-			sessionID: "s1",
-			role: "assistant",
-			parentID: "u2",
-			time: { created: 6 },
-		}
-		const firstToolPart = {
-			id: "tool-a-part",
-			sessionID: "s1",
-			messageID: "tool-a",
-			type: "tool",
-			callID: "call-a",
-			tool: "read",
-			state: { status: "completed", input: {}, output: "", title: "Read A", metadata: {} },
-		}
-		const secondToolPart = {
-			id: "tool-b-part",
-			sessionID: "s1",
-			messageID: "tool-b",
-			type: "tool",
-			callID: "call-b",
-			tool: "read",
-			state: { status: "completed", input: {}, output: "", title: "Read B", metadata: {} },
-		}
-		const entries = [
-			{ info: firstUser, parts: [] },
-			{ info: firstTool, parts: [firstToolPart] },
-			{ info: firstAssistant, parts: [] },
-			{ info: secondUser, parts: [] },
-			{ info: secondTool, parts: [secondToolPart] },
-			{ info: secondAssistant, parts: [] },
-		]
-
-		expect(groupIntoTurns(entries, [])).toEqual([
+	test("groups turns once and skips orphan assistant items before a user message", () => {
+		const orphan = assistantItem("orphan", "t0", 1, "2026-01-01T00:00:01.000Z")
+		const firstUser = userItem("u1", "t1", 2, "2026-01-01T00:00:02.000Z")
+		const firstAssistant = assistantItem("a1", "t1", 3, "2026-01-01T00:00:03.000Z")
+		const turns = groupIntoTurns(
+			[{ info: orphan }, { info: firstUser }, { info: firstAssistant }],
+			[],
+		)
+		expect(turns).toEqual([
 			{
 				id: "u1",
-				turnId: undefined,
-				userMessage: { info: firstUser, parts: [] },
-				assistantMessages: [
-					{ info: firstTool, parts: [firstToolPart] },
-					{ info: firstAssistant, parts: [] },
-				],
-			},
-			{
-				id: "u2",
-				turnId: undefined,
-				userMessage: { info: secondUser, parts: [] },
-				assistantMessages: [
-					{ info: secondTool, parts: [secondToolPart] },
-					{ info: secondAssistant, parts: [] },
-				],
+				turnId: "t1",
+				userMessage: { info: firstUser },
+				assistantMessages: [{ info: firstAssistant }],
 			},
 		])
 	})

@@ -93,8 +93,8 @@ describe("notification policy", () => {
 })
 
 describe("applyWatcherEvent", () => {
-	function session(status: string, parentID?: string): SessionState {
-		return { status, title: "Fix the tray menu", directory: "/repo", parentID }
+	function session(status: string, parentId?: string): SessionState {
+		return { status, title: "Fix the tray menu", directory: "/repo", parentId }
 	}
 
 	test("does not toast completion while hydrating a busy-to-idle replay", () => {
@@ -104,7 +104,7 @@ describe("applyWatcherEvent", () => {
 				directory: "/repo",
 				payload: {
 					type: "session.status",
-					properties: { sessionID: "s1", status: { type: "idle" } },
+					properties: { sessionId: "s1", status: { type: "idle" } },
 				},
 			},
 			{ sessions, pendingCount: 0, hydrating: true },
@@ -121,7 +121,7 @@ describe("applyWatcherEvent", () => {
 				directory: "/repo",
 				payload: {
 					type: "session.status",
-					properties: { sessionID: "s1", status: { type: "idle" } },
+					properties: { sessionId: "s1", status: { type: "idle" } },
 				},
 			},
 			{ sessions, pendingCount: 0, hydrating: false },
@@ -145,7 +145,7 @@ describe("applyWatcherEvent", () => {
 				directory: "/repo",
 				payload: {
 					type: "permission.asked",
-					properties: { sessionID: "s1", id: "p1", permission: "Run npm test" },
+					properties: { sessionId: "s1", id: "p1", permission: "Run npm test" },
 				},
 			},
 			{ sessions, pendingCount: 0, hydrating: true },

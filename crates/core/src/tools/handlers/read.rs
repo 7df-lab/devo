@@ -141,7 +141,7 @@ impl ToolHandler for ReadHandler {
         if let Some(client_filesystem) = ctx.client_filesystem.clone() {
             match client_filesystem
                 .read_text_file(
-                    ctx.session_id.clone(),
+                    ctx.session_id,
                     path.clone(),
                     offset.map(|value| value as u64),
                     limit.map(|value| value as u64),
@@ -265,8 +265,8 @@ mod tests {
                 ToolContext {
                     output_store: None,
                     tool_call_id: ToolCallId("call-1".to_string()),
-                    session_id: "session-1".to_string(),
-                    turn_id: Some("turn-1".to_string()),
+                    session_id: "session-1".into(),
+                    turn_id: Some("turn-1".into()),
                     workspace_root: root.path().to_path_buf(),
                     budgets: ToolBudgets {
                         output_limit_bytes: 32_768,
@@ -282,6 +282,11 @@ mod tests {
                     network_no_proxy: None,
                     sandbox_permission_overlay: None,
                     sandbox_profile: None,
+                    kernel: None,
+                    python_cell_first_wait_ms: None,
+                    python_cell_watch: None,
+                    python_cell_completion: None,
+                    session_dir: None,
                 },
                 serde_json::json!({
                     "filePath": "sample.txt",

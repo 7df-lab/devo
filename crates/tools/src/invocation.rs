@@ -8,6 +8,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use devo_protocol::SessionId;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
@@ -23,7 +24,7 @@ pub struct ToolCallId(pub String);
 pub struct ToolInvocation {
     pub call_id: ToolCallId,
     pub tool_name: ToolName,
-    pub session_id: String,
+    pub session_id: SessionId,
     pub cwd: PathBuf,
     pub input: serde_json::Value,
 }
@@ -160,6 +161,21 @@ impl FunctionToolOutput {
                 json: Some(metadata),
             },
             is_error: false,
+            display_content: None,
+        }
+    }
+
+    /// Failed counterpart of [`Self::success_with_metadata`]: the run's
+    /// structured metadata (exit code, duration, …) stays model-visible even
+    /// when the command failed, so the model can reason about how long a
+    /// failing or hung command actually ran. `is_error` is set.
+    pub fn error_with_metadata(message: impl Into<String>, metadata: serde_json::Value) -> Self {
+        FunctionToolOutput {
+            content: ToolContent::Mixed {
+                text: Some(message.into()),
+                json: Some(metadata),
+            },
+            is_error: true,
             display_content: None,
         }
     }

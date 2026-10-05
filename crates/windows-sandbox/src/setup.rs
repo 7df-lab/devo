@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 
 use crate::allow::AllowDenyPaths;
 use crate::allow::compute_allow_paths_for_permissions;
+use crate::deny_read_resolver::resolve_windows_deny_read_paths;
 use crate::helper_materialization::bundled_executable_path_for_exe;
 use crate::helper_materialization::helper_bin_dir;
 use crate::identity::sandbox_setup_is_complete;
@@ -233,6 +234,8 @@ pub fn run_setup_refresh(
     else {
         return Ok(());
     };
+    let deny_read_paths =
+        setup_refresh_deny_read_paths(permission_profile, workspace_roots, command_cwd)?;
     run_setup_refresh_inner(
         SandboxSetupRequest {
             permissions: &permissions,
@@ -241,7 +244,10 @@ pub fn run_setup_refresh(
             devo_home,
             proxy_enforced,
         },
-        SetupRootOverrides::default(),
+        SetupRootOverrides {
+            deny_read_paths: Some(deny_read_paths),
+            ..SetupRootOverrides::default()
+        },
         /*offline_proxy_settings_override*/ None,
     )
 }
@@ -271,6 +277,8 @@ pub fn run_setup_refresh_with_extra_read_roots(
     else {
         return Ok(());
     };
+    let deny_read_paths =
+        setup_refresh_deny_read_paths(permission_profile, workspace_roots, command_cwd)?;
     let mut read_roots = gather_read_roots(command_cwd, &permissions, env_map, devo_home);
     read_roots.extend(extra_read_roots);
     run_setup_refresh_inner(
@@ -285,11 +293,32 @@ pub fn run_setup_refresh_with_extra_read_roots(
             read_roots: Some(read_roots),
             read_roots_include_platform_defaults: false,
             write_roots: Some(Vec::new()),
-            deny_read_paths: None,
+            deny_read_paths: Some(deny_read_paths),
             deny_write_paths: None,
         },
         /*offline_proxy_settings_override*/ None,
     )
+}
+
+fn setup_refresh_deny_read_paths(
+    permission_profile: &PermissionProfile,
+    workspace_roots: &[AbsolutePathBuf],
+    command_cwd: &Path,
+) -> Result<Vec<PathBuf>> {
+    let (file_system, _) = permission_profile.to_runtime_permissions();
+    // Devo's protocol has no skip-missing entry behavior to strip; every deny
+    // path (including not-yet-existing ones) is materialized before the deny
+    // ACE is applied.
+    let file_system = file_system.materialize_project_roots_with_workspace_roots(workspace_roots);
+    let command_cwd = AbsolutePathBuf::from_absolute_path(command_cwd)?;
+    resolve_windows_deny_read_paths(&file_system, &command_cwd)
+        .map(|paths| {
+            paths
+                .into_iter()
+                .map(AbsolutePathBuf::into_path_buf)
+                .collect()
+        })
+        .map_err(|err| anyhow!(err))
 }
 
 fn run_setup_refresh_inner(
@@ -595,22 +624,6 @@ pub(crate) fn gather_write_roots_for_permissions(
     out
 }
 
-pub(crate) fn effective_write_roots_for_setup(
-    permissions: &ResolvedWindowsSandboxPermissions,
-    command_cwd: &Path,
-    env_map: &HashMap<String, String>,
-    devo_home: &Path,
-    write_roots_override: Option<&[PathBuf]>,
-) -> Vec<PathBuf> {
-    effective_write_roots_for_permissions(
-        permissions,
-        command_cwd,
-        env_map,
-        devo_home,
-        write_roots_override,
-    )
-}
-
 pub(crate) fn effective_write_roots_for_permissions(
     permissions: &ResolvedWindowsSandboxPermissions,
     command_cwd: &Path,
@@ -733,6 +746,13 @@ fn offline_proxy_settings_for_request(
     })
 }
 
+// Internal wire format shared with the network proxy host. The value is a
+// comma-separated, sorted list of non-zero loopback proxy ports actually bound
+// at runtime — folded into the setup marker so the static per-account firewall
+// allowlist stays in sync with reality (upstream fix; devo's sandbox proxy
+// previously bound an ephemeral port the firewall never allowed).
+pub(crate) const WINDOWS_SANDBOX_PROXY_PORTS_ENV_KEY: &str = "DEVO_WINDOWS_SANDBOX_PROXY_PORTS";
+
 pub(crate) fn proxy_ports_from_env(env_map: &HashMap<String, String>) -> Vec<u16> {
     let mut ports = BTreeSet::new();
     for key in PROXY_ENV_KEYS {
@@ -741,6 +761,14 @@ pub(crate) fn proxy_ports_from_env(env_map: &HashMap<String, String>) -> Vec<u16
         {
             ports.insert(port);
         }
+    }
+    if let Some(value) = env_map.get(WINDOWS_SANDBOX_PROXY_PORTS_ENV_KEY) {
+        ports.extend(
+            value
+                .split(',')
+                .filter_map(|port| port.trim().parse::<u16>().ok())
+                .filter(|port| *port != 0),
+        );
     }
     ports.into_iter().collect()
 }
@@ -866,6 +894,7 @@ fn run_setup_exe_payload(payload_b64: &str, needs_elevation: bool, devo_home: &P
     use windows_sys::Win32::System::Threading::GetExitCodeProcess;
     use windows_sys::Win32::System::Threading::INFINITE;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    use windows_sys::Win32::UI::Shell::SEE_MASK_NOASYNC;
     use windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
     use windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW;
     use windows_sys::Win32::UI::Shell::ShellExecuteExW;
@@ -904,16 +933,7 @@ fn run_setup_exe_payload(payload_b64: &str, needs_elevation: bool, devo_home: &P
                 status.code(),
             ));
         }
-        verify_setup_completed(devo_home)?;
-        if let Err(err) = clear_setup_error_report(devo_home) {
-            log_note(
-                &format!(
-                    "setup orchestrator: failed to clear setup_error.json after success: {err}"
-                ),
-                Some(&sandbox_dir(devo_home)),
-            );
-        }
-        return Ok(());
+        return finish_setup_helper_success(devo_home, cleared_report);
     }
 
     let exe_w = crate::winutil::to_wide(&exe);
@@ -922,7 +942,9 @@ fn run_setup_exe_payload(payload_b64: &str, needs_elevation: bool, devo_home: &P
     let verb_w = crate::winutil::to_wide("runas");
     let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    // Sandbox setup runs on a Tokio worker without a Windows message loop.
+    // ShellExecuteEx requires synchronous activation on such threads.
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
     sei.lpVerb = verb_w.as_ptr();
     sei.lpFile = exe_w.as_ptr();
     sei.lpParameters = params_w.as_ptr();
@@ -954,6 +976,10 @@ fn run_setup_exe_payload(payload_b64: &str, needs_elevation: bool, devo_home: &P
             ));
         }
     }
+    finish_setup_helper_success(devo_home, cleared_report)
+}
+
+fn finish_setup_helper_success(devo_home: &Path, _cleared_report: bool) -> Result<()> {
     verify_setup_completed(devo_home)?;
     if let Err(err) = clear_setup_error_report(devo_home) {
         log_note(
@@ -1071,7 +1097,7 @@ fn build_payload_roots(
     request: &SandboxSetupRequest<'_>,
     overrides: &SetupRootOverrides,
 ) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let write_roots = effective_write_roots_for_setup(
+    let write_roots = effective_write_roots_for_permissions(
         request.permissions,
         request.command_cwd,
         request.env_map,
@@ -1133,10 +1159,10 @@ fn build_payload_deny_read_paths(explicit_deny_read_paths: Option<Vec<PathBuf>>)
 }
 
 fn expand_user_profile_root(roots: Vec<PathBuf>) -> Vec<PathBuf> {
-    let Ok(user_profile) = std::env::var("USERPROFILE") else {
-        return roots;
-    };
-    expand_user_profile_root_for(roots, Path::new(&user_profile))
+    match user_profile_path() {
+        Some(user_profile) => expand_user_profile_root_for(roots, &user_profile),
+        None => roots,
+    }
 }
 
 fn expand_user_profile_root_for(roots: Vec<PathBuf>, user_profile: &Path) -> Vec<PathBuf> {
@@ -1155,21 +1181,22 @@ fn expand_user_profile_root_for(roots: Vec<PathBuf>, user_profile: &Path) -> Vec
     expanded
 }
 
+fn user_profile_path() -> Option<PathBuf> {
+    std::env::var("USERPROFILE").ok().map(PathBuf::from)
+}
+
 fn filter_user_profile_root(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
-    let Ok(user_profile) = std::env::var("USERPROFILE") else {
-        return roots;
-    };
-    let user_profile_key = canonical_path_key(Path::new(&user_profile));
-    roots.retain(|root| canonical_path_key(root) != user_profile_key);
+    if let Some(user_profile) = user_profile_path() {
+        let user_profile_key = canonical_path_key(&user_profile);
+        roots.retain(|root| canonical_path_key(root) != user_profile_key);
+    }
     roots
 }
 
 fn filter_user_profile_root_exclusions(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
-    let Ok(user_profile) = std::env::var("USERPROFILE") else {
-        return roots;
-    };
-    let user_profile = Path::new(&user_profile);
-    roots.retain(|root| !is_user_profile_root_exclusion(root, user_profile));
+    if let Some(user_profile) = user_profile_path() {
+        roots.retain(|root| !is_user_profile_root_exclusion(root, &user_profile));
+    }
     roots
 }
 
@@ -1194,12 +1221,10 @@ fn is_user_profile_root_exclusion(root: &Path, user_profile: &Path) -> bool {
 }
 
 fn filter_ssh_config_dependency_roots(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
-    let Ok(user_profile) = std::env::var("USERPROFILE") else {
-        return roots;
-    };
-    let user_profile = Path::new(&user_profile);
-    let dependency_paths = ssh_config_dependency_paths(user_profile);
-    roots.retain(|root| !is_ssh_config_dependency_root(root, user_profile, &dependency_paths));
+    if let Some(user_profile) = user_profile_path() {
+        let dependency_paths = ssh_config_dependency_paths(&user_profile);
+        roots.retain(|root| !is_ssh_config_dependency_root(root, &user_profile, &dependency_paths));
+    }
     roots
 }
 
@@ -1408,19 +1433,21 @@ mod tests {
         )
     }
 
+    fn sandbox_paths(tmp: &TempDir) -> (PathBuf, PathBuf) {
+        let devo_home = tmp.path().join("devo-home");
+        let command_cwd = tmp.path().join("workspace");
+        fs::create_dir_all(&command_cwd).expect("create workspace");
+        (devo_home, command_cwd)
+    }
+
     #[test]
     fn setup_request_prefers_explicit_proxy_settings() {
         let tmp = TempDir::new().expect("tempdir");
-        let command_cwd = tmp.path().join("workspace");
-        fs::create_dir_all(&command_cwd).expect("create workspace");
+        let (_, command_cwd) = sandbox_paths(&tmp);
         let permissions = permissions_for(
             &PermissionProfile::read_only(),
             workspace_roots_for(&command_cwd).as_slice(),
         );
-        let env_map = HashMap::from([(
-            "HTTP_PROXY".to_string(),
-            "http://127.0.0.1:8080".to_string(),
-        )]);
         let explicit = super::OfflineProxySettings {
             proxy_ports: vec![7890],
             allow_local_binding: true,
@@ -1428,11 +1455,13 @@ mod tests {
         let request = super::SandboxSetupRequest {
             permissions: &permissions,
             command_cwd: &command_cwd,
-            env_map: &env_map,
+            env_map: &HashMap::from([(
+                "HTTP_PROXY".to_string(),
+                "http://127.0.0.1:8080".to_string(),
+            )]),
             devo_home: tmp.path(),
             proxy_enforced: false,
         };
-
         assert_eq!(
             super::offline_proxy_settings_for_request(&request, Some(&explicit)),
             explicit
@@ -1440,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn report_helper_failure_uses_setup_error_report_when_clear_succeeded() {
+    fn report_helper_failure_table() {
         let tmp = TempDir::new().expect("tempdir");
         let devo_home = tmp.path().join("devo-home");
         write_setup_error_report(
@@ -1451,50 +1480,29 @@ mod tests {
             },
         )
         .expect("write setup error report");
-
-        let err = super::report_helper_failure(
-            devo_home.as_path(),
-            /*cleared_report*/ true,
-            /*exit_code*/ Some(1),
-        );
-
-        let failure = extract_failure(&err).expect("structured setup failure");
-        assert_eq!(
-            &super::SetupFailure::new(
-                super::SetupErrorCode::HelperFirewallPolicyAccessFailed,
-                "firewall policy unavailable",
+        let cases = [
+            (
+                true,
+                super::SetupFailure::new(
+                    super::SetupErrorCode::HelperFirewallPolicyAccessFailed,
+                    "firewall policy unavailable",
+                ),
             ),
-            failure
-        );
-    }
-
-    #[test]
-    fn report_helper_failure_ignores_setup_error_report_when_clear_failed() {
-        let tmp = TempDir::new().expect("tempdir");
-        let devo_home = tmp.path().join("devo-home");
-        write_setup_error_report(
-            devo_home.as_path(),
-            &SetupErrorReport {
-                code: super::SetupErrorCode::HelperFirewallPolicyAccessFailed,
-                message: "stale report".to_string(),
-            },
-        )
-        .expect("write setup error report");
-
-        let err = super::report_helper_failure(
-            devo_home.as_path(),
-            /*cleared_report*/ false,
-            /*exit_code*/ Some(1),
-        );
-
-        let failure = extract_failure(&err).expect("structured setup failure");
-        assert_eq!(
-            &super::SetupFailure::new(
-                super::SetupErrorCode::OrchestratorHelperExitNonzero,
-                "setup helper exited with status Some(1)",
+            (
+                false,
+                super::SetupFailure::new(
+                    super::SetupErrorCode::OrchestratorHelperExitNonzero,
+                    "setup helper exited with status Some(1)",
+                ),
             ),
-            failure
-        );
+        ];
+        for (cleared_report, expected) in cases {
+            let err = super::report_helper_failure(devo_home.as_path(), cleared_report, Some(1));
+            assert_eq!(
+                &expected,
+                extract_failure(&err).expect("structured setup failure")
+            );
+        }
     }
 
     #[test]
@@ -1535,19 +1543,18 @@ mod tests {
     }
 
     #[test]
-    fn loopback_proxy_url_parsing_supports_common_forms() {
-        assert_eq!(
-            loopback_proxy_port_from_url("http://localhost:3128"),
-            Some(3128)
-        );
-        assert_eq!(
-            loopback_proxy_port_from_url("https://127.0.0.1:8080"),
-            Some(8080)
-        );
-        assert_eq!(
-            loopback_proxy_port_from_url("socks5h://user:pass@[::1]:1080"),
-            Some(1080)
-        );
+    fn loopback_proxy_url_parsing_table() {
+        let cases = [
+            ("http://localhost:3128", Some(3128)),
+            ("https://127.0.0.1:8080", Some(8080)),
+            ("socks5h://user:pass@[::1]:1080", Some(1080)),
+            ("http://example.com:3128", None),
+            ("http://127.0.0.1:0", None),
+            ("localhost:8080", None),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(loopback_proxy_port_from_url(url), expected, "{url}");
+        }
     }
 
     #[test]
@@ -1566,16 +1573,6 @@ mod tests {
         let resolved = find_setup_exe_for_current_exe(&exe).expect("setup exe");
 
         assert_eq!(resolved, setup_exe);
-    }
-
-    #[test]
-    fn loopback_proxy_url_parsing_rejects_non_loopback_and_zero_port() {
-        assert_eq!(
-            loopback_proxy_port_from_url("http://example.com:3128"),
-            None
-        );
-        assert_eq!(loopback_proxy_port_from_url("http://127.0.0.1:0"), None);
-        assert_eq!(loopback_proxy_port_from_url("localhost:8080"), None);
     }
 
     #[test]
@@ -1599,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_proxy_settings_ignore_proxy_env_when_online_identity_selected() {
+    fn offline_proxy_settings_from_env_table() {
         let mut env = HashMap::new();
         env.insert(
             "HTTP_PROXY".to_string(),
@@ -1609,7 +1606,6 @@ mod tests {
             "DEVO_NETWORK_ALLOW_LOCAL_BINDING".to_string(),
             "1".to_string(),
         );
-
         assert_eq!(
             offline_proxy_settings_from_env(&env, super::SandboxNetworkIdentity::Online),
             super::OfflineProxySettings {
@@ -1617,24 +1613,10 @@ mod tests {
                 allow_local_binding: false,
             }
         );
-    }
-
-    #[test]
-    fn offline_proxy_settings_capture_proxy_ports_and_local_binding_for_offline_identity() {
-        let mut env = HashMap::new();
-        env.insert(
-            "HTTP_PROXY".to_string(),
-            "http://127.0.0.1:8080".to_string(),
-        );
         env.insert(
             "ALL_PROXY".to_string(),
             "socks5h://127.0.0.1:1081".to_string(),
         );
-        env.insert(
-            "DEVO_NETWORK_ALLOW_LOCAL_BINDING".to_string(),
-            "1".to_string(),
-        );
-
         assert_eq!(
             offline_proxy_settings_from_env(&env, super::SandboxNetworkIdentity::Offline),
             super::OfflineProxySettings {
@@ -1645,7 +1627,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_marker_request_mismatch_reason_ignores_proxy_drift_for_online_identity() {
+    fn setup_marker_request_mismatch_reason_table() {
         let marker = super::SetupMarker {
             version: super::SETUP_VERSION,
             offline_username: "offline".to_string(),
@@ -1658,28 +1640,10 @@ mod tests {
             proxy_ports: vec![1081, 8080],
             allow_local_binding: true,
         };
-
         assert_eq!(
             marker.request_mismatch_reason(super::SandboxNetworkIdentity::Online, &desired),
             None
         );
-    }
-
-    #[test]
-    fn setup_marker_request_mismatch_reason_reports_offline_firewall_drift() {
-        let marker = super::SetupMarker {
-            version: super::SETUP_VERSION,
-            offline_username: "offline".to_string(),
-            online_username: "online".to_string(),
-            created_at: None,
-            proxy_ports: vec![3128],
-            allow_local_binding: false,
-        };
-        let desired = super::OfflineProxySettings {
-            proxy_ports: vec![1081, 8080],
-            allow_local_binding: true,
-        };
-
         assert_eq!(
             marker.request_mismatch_reason(super::SandboxNetworkIdentity::Offline, &desired),
             Some(
@@ -1690,89 +1654,54 @@ mod tests {
     }
 
     #[test]
-    fn profile_read_roots_excludes_configured_top_level_entries() {
+    fn profile_read_roots_table() {
         let tmp = TempDir::new().expect("tempdir");
         let user_profile = tmp.path();
         let allowed_dir = user_profile.join("Documents");
         let allowed_file = user_profile.join("settings.json");
-        let excluded_dir = user_profile.join(".ssh");
-        let excluded_tsh = user_profile.join(".tsh");
-        let excluded_case_variant = user_profile.join(".AWS");
-
-        fs::create_dir_all(&allowed_dir).expect("create allowed dir");
+        for path in [
+            &allowed_dir,
+            user_profile.join(".ssh").as_path(),
+            user_profile.join(".tsh").as_path(),
+            user_profile.join(".AWS").as_path(),
+        ] {
+            fs::create_dir_all(path).expect("create dir");
+        }
         fs::write(&allowed_file, "safe").expect("create allowed file");
-        fs::create_dir_all(&excluded_dir).expect("create excluded dir");
-        fs::create_dir_all(&excluded_tsh).expect("create excluded tsh dir");
-        fs::create_dir_all(&excluded_case_variant).expect("create excluded case variant");
-
-        let roots = profile_read_roots(user_profile);
-        let actual: HashSet<PathBuf> = roots.into_iter().collect();
-        let expected: HashSet<PathBuf> = [allowed_dir, allowed_file].into_iter().collect();
-
-        assert_eq!(expected, actual);
-    }
-
-    #[test]
-    fn profile_read_roots_falls_back_to_profile_root_when_enumeration_fails() {
-        let tmp = TempDir::new().expect("tempdir");
+        assert_eq!(
+            profile_read_roots(user_profile)
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            [allowed_dir, allowed_file].into_iter().collect()
+        );
         let missing_profile = tmp.path().join("missing-user-profile");
-
-        let roots = profile_read_roots(&missing_profile);
-
-        assert_eq!(vec![missing_profile], roots);
+        assert_eq!(profile_read_roots(&missing_profile), vec![missing_profile]);
     }
 
     #[test]
-    fn is_user_profile_root_exclusion_blocks_configured_children() {
+    fn profile_root_filter_predicates_table() {
         let tmp = TempDir::new().expect("tempdir");
         let user_profile = tmp.path().join("user-profile");
         let documents = user_profile.join("Documents");
         let app_data = user_profile.join("AppData");
         let ssh_child = user_profile.join(".ssh").join("config");
         let tsh_child = user_profile.join(".tsh").join("keys");
-        let other_root = tmp.path().join("other-root");
-        fs::create_dir_all(&documents).expect("create documents");
-        fs::create_dir_all(&app_data).expect("create app data");
-        fs::create_dir_all(&ssh_child).expect("create ssh child");
-        fs::create_dir_all(&tsh_child).expect("create tsh child");
-        fs::create_dir_all(&other_root).expect("create other root");
-
-        assert!(!super::is_user_profile_root_exclusion(
-            &documents,
-            &user_profile
-        ));
-        assert!(!super::is_user_profile_root_exclusion(
-            &app_data,
-            &user_profile
-        ));
-        assert!(super::is_user_profile_root_exclusion(
-            &ssh_child,
-            &user_profile
-        ));
-        assert!(super::is_user_profile_root_exclusion(
-            &tsh_child,
-            &user_profile
-        ));
-        assert!(!super::is_user_profile_root_exclusion(
-            &other_root,
-            &user_profile
-        ));
-    }
-
-    #[test]
-    fn is_ssh_config_dependency_root_blocks_config_dependencies() {
-        let tmp = TempDir::new().expect("tempdir");
-        let user_profile = tmp.path().join("user-profile");
-        let documents = user_profile.join("Documents");
         let ssh_dir = user_profile.join(".ssh");
         let key_dir = user_profile.join(".keys");
         let include_dir = user_profile.join(".included");
         let other_root = tmp.path().join("other-root");
-        fs::create_dir_all(&documents).expect("create documents");
-        fs::create_dir_all(&ssh_dir).expect("create .ssh");
-        fs::create_dir_all(&key_dir).expect("create key dir");
-        fs::create_dir_all(&include_dir).expect("create include dir");
-        fs::create_dir_all(&other_root).expect("create other root");
+        for path in [
+            &documents,
+            &app_data,
+            &ssh_child,
+            &tsh_child,
+            &ssh_dir,
+            &key_dir,
+            &include_dir,
+            &other_root,
+        ] {
+            fs::create_dir_all(path).expect("create path");
+        }
         fs::write(
             ssh_dir.join("config"),
             "IdentityFile ~/.keys/id_ed25519\nInclude ~/.included/config\n",
@@ -1780,29 +1709,36 @@ mod tests {
         .expect("write ssh config");
         fs::write(key_dir.join("id_ed25519"), "").expect("write key");
         fs::write(include_dir.join("config"), "User git\n").expect("write included config");
-
         let dependency_paths = super::ssh_config_dependency_paths(&user_profile);
-
-        assert!(!super::is_ssh_config_dependency_root(
-            &documents,
-            &user_profile,
-            &dependency_paths
-        ));
-        assert!(super::is_ssh_config_dependency_root(
-            &key_dir,
-            &user_profile,
-            &dependency_paths
-        ));
-        assert!(super::is_ssh_config_dependency_root(
-            &include_dir.join("config"),
-            &user_profile,
-            &dependency_paths
-        ));
-        assert!(!super::is_ssh_config_dependency_root(
-            &other_root,
-            &user_profile,
-            &dependency_paths
-        ));
+        let exclusion_cases = [
+            (&documents, false),
+            (&app_data, false),
+            (&ssh_child, true),
+            (&tsh_child, true),
+            (&other_root, false),
+        ];
+        for (path, expected) in exclusion_cases {
+            assert_eq!(
+                super::is_user_profile_root_exclusion(path, &user_profile),
+                expected,
+                "exclusion {:?}",
+                path
+            );
+        }
+        let dependency_cases = [
+            (&documents, false),
+            (&key_dir, true),
+            (&include_dir.join("config"), true),
+            (&other_root, false),
+        ];
+        for (path, expected) in dependency_cases {
+            assert_eq!(
+                super::is_ssh_config_dependency_root(path, &user_profile, &dependency_paths),
+                expected,
+                "dependency {:?}",
+                path
+            );
+        }
     }
 
     #[test]
@@ -1846,160 +1782,122 @@ mod tests {
     }
 
     #[test]
-    fn gather_read_roots_includes_helper_bin_dir() {
+    fn gather_read_roots_include_expected_paths() {
         let tmp = TempDir::new().expect("tempdir");
-        let devo_home = tmp.path().join("devo-home");
-        let command_cwd = tmp.path().join("workspace");
-        fs::create_dir_all(&command_cwd).expect("create workspace");
-        let permission_profile = PermissionProfile::read_only();
-        let workspace_roots = workspace_roots_for(command_cwd.as_path());
-        let permissions = permissions_for(&permission_profile, workspace_roots.as_slice());
-
-        let roots = gather_read_roots(&command_cwd, &permissions, &HashMap::new(), &devo_home);
-        let expected =
-            dunce::canonicalize(helper_bin_dir(&devo_home)).expect("canonical helper dir");
-
-        assert!(roots.contains(&expected));
-    }
-
-    #[test]
-    fn workspace_write_roots_remain_readable() {
-        let tmp = TempDir::new().expect("tempdir");
-        let devo_home = tmp.path().join("devo-home");
-        let command_cwd = tmp.path().join("workspace");
-        let writable_root = tmp.path().join("extra-write-root");
-        fs::create_dir_all(&command_cwd).expect("create workspace");
-        fs::create_dir_all(&writable_root).expect("create writable root");
-        let writable_roots = vec![
-            AbsolutePathBuf::from_absolute_path(&writable_root).expect("absolute writable root"),
-        ];
-        let permission_profile = workspace_write_profile(
-            &writable_roots,
-            /*exclude_tmpdir_env_var*/ true,
-            /*exclude_slash_tmp*/ true,
+        let (devo_home, command_cwd) = sandbox_paths(&tmp);
+        let read_only = permissions_for(
+            &PermissionProfile::read_only(),
+            workspace_roots_for(command_cwd.as_path()).as_slice(),
         );
-        let workspace_roots = workspace_roots_for(command_cwd.as_path());
-        let permissions = permissions_for(&permission_profile, workspace_roots.as_slice());
+        let helper = dunce::canonicalize(helper_bin_dir(&devo_home)).expect("canonical helper dir");
+        assert!(
+            gather_read_roots(&command_cwd, &read_only, &HashMap::new(), &devo_home)
+                .contains(&helper)
+        );
 
-        let roots = gather_read_roots(&command_cwd, &permissions, &HashMap::new(), &devo_home);
+        let writable_root = tmp.path().join("extra-write-root");
+        fs::create_dir_all(&writable_root).expect("create writable root");
+        let writable = permissions_for(
+            &workspace_write_profile(
+                &[AbsolutePathBuf::from_absolute_path(&writable_root)
+                    .expect("absolute writable root")],
+                true,
+                true,
+            ),
+            workspace_roots_for(command_cwd.as_path()).as_slice(),
+        );
         let expected_writable =
             dunce::canonicalize(&writable_root).expect("canonical writable root");
-
-        assert!(roots.contains(&expected_writable));
-    }
-
-    #[test]
-    fn build_payload_roots_preserves_helper_roots_when_read_override_is_provided() {
-        let tmp = TempDir::new().expect("tempdir");
-        let devo_home = tmp.path().join("devo-home");
-        let workspace_root = tmp.path().join("workspace-root");
-        let command_cwd = tmp.path().join("workspace");
-        let readable_root = tmp.path().join("docs");
-        fs::create_dir_all(&workspace_root).expect("create workspace root");
-        fs::create_dir_all(&command_cwd).expect("create workspace");
-        fs::create_dir_all(&readable_root).expect("create readable root");
-        let permission_profile = PermissionProfile::read_only();
-        let workspace_roots = workspace_roots_for(workspace_root.as_path());
-        let permissions = permissions_for(&permission_profile, workspace_roots.as_slice());
-
-        let (read_roots, write_roots) = build_payload_roots(
-            &super::SandboxSetupRequest {
-                permissions: &permissions,
-                command_cwd: &command_cwd,
-                env_map: &HashMap::new(),
-                devo_home: &devo_home,
-                proxy_enforced: false,
-            },
-            &super::SetupRootOverrides {
-                read_roots: Some(vec![readable_root.clone()]),
-                read_roots_include_platform_defaults: true,
-                write_roots: None,
-                deny_read_paths: None,
-                deny_write_paths: None,
-            },
-        );
-        let expected_helper =
-            dunce::canonicalize(helper_bin_dir(&devo_home)).expect("canonical helper dir");
-        let expected_cwd = dunce::canonicalize(&command_cwd).expect("canonical workspace");
-        let expected_readable =
-            dunce::canonicalize(&readable_root).expect("canonical readable root");
-
-        assert_eq!(write_roots, Vec::<PathBuf>::new());
-        assert!(read_roots.contains(&expected_helper));
-        assert!(!read_roots.contains(&expected_cwd));
-        assert!(read_roots.contains(&expected_readable));
         assert!(
-            canonical_windows_platform_default_roots()
-                .into_iter()
-                .all(|path| read_roots.contains(&path))
+            gather_read_roots(&command_cwd, &writable, &HashMap::new(), &devo_home)
+                .contains(&expected_writable)
         );
     }
 
     #[test]
-    fn build_payload_roots_replaces_full_read_policy_when_read_override_is_provided() {
-        let tmp = TempDir::new().expect("tempdir");
-        let devo_home = tmp.path().join("devo-home");
-        let workspace_root = tmp.path().join("workspace-root");
-        let command_cwd = tmp.path().join("workspace");
-        let readable_root = tmp.path().join("docs");
-        fs::create_dir_all(&workspace_root).expect("create workspace root");
-        fs::create_dir_all(&command_cwd).expect("create workspace");
-        fs::create_dir_all(&readable_root).expect("create readable root");
-        let permission_profile = PermissionProfile::read_only();
-        let workspace_roots = workspace_roots_for(workspace_root.as_path());
-        let permissions = permissions_for(&permission_profile, workspace_roots.as_slice());
-
-        let (read_roots, write_roots) = build_payload_roots(
-            &super::SandboxSetupRequest {
-                permissions: &permissions,
-                command_cwd: &command_cwd,
-                env_map: &HashMap::new(),
-                devo_home: &devo_home,
-                proxy_enforced: false,
+    fn build_payload_roots_read_override_table() {
+        struct Case {
+            include_platform_defaults: bool,
+            expect_platform_defaults: bool,
+        }
+        let cases = [
+            Case {
+                include_platform_defaults: true,
+                expect_platform_defaults: true,
             },
-            &super::SetupRootOverrides {
-                read_roots: Some(vec![readable_root.clone()]),
-                read_roots_include_platform_defaults: false,
-                write_roots: None,
-                deny_read_paths: None,
-                deny_write_paths: None,
+            Case {
+                include_platform_defaults: false,
+                expect_platform_defaults: false,
             },
-        );
-        let expected_helper =
-            dunce::canonicalize(helper_bin_dir(&devo_home)).expect("canonical helper dir");
-        let expected_cwd = dunce::canonicalize(&command_cwd).expect("canonical workspace");
-        let expected_readable =
-            dunce::canonicalize(&readable_root).expect("canonical readable root");
-
-        assert_eq!(write_roots, Vec::<PathBuf>::new());
-        assert!(read_roots.contains(&expected_helper));
-        assert!(!read_roots.contains(&expected_cwd));
-        assert!(read_roots.contains(&expected_readable));
-        assert!(
-            canonical_windows_platform_default_roots()
-                .into_iter()
-                .all(|path| !read_roots.contains(&path))
-        );
+        ];
+        for case in cases {
+            let tmp = TempDir::new().expect("tempdir");
+            let devo_home = tmp.path().join("devo-home");
+            let workspace_root = tmp.path().join("workspace-root");
+            let command_cwd = tmp.path().join("workspace");
+            let readable_root = tmp.path().join("docs");
+            fs::create_dir_all(&workspace_root).expect("create workspace root");
+            fs::create_dir_all(&command_cwd).expect("create workspace");
+            fs::create_dir_all(&readable_root).expect("create readable root");
+            let permissions = permissions_for(
+                &PermissionProfile::read_only(),
+                workspace_roots_for(workspace_root.as_path()).as_slice(),
+            );
+            let (read_roots, write_roots) = build_payload_roots(
+                &super::SandboxSetupRequest {
+                    permissions: &permissions,
+                    command_cwd: &command_cwd,
+                    env_map: &HashMap::new(),
+                    devo_home: &devo_home,
+                    proxy_enforced: false,
+                },
+                &super::SetupRootOverrides {
+                    read_roots: Some(vec![readable_root.clone()]),
+                    read_roots_include_platform_defaults: case.include_platform_defaults,
+                    write_roots: None,
+                    deny_read_paths: None,
+                    deny_write_paths: None,
+                },
+            );
+            let expected_helper =
+                dunce::canonicalize(helper_bin_dir(&devo_home)).expect("canonical helper dir");
+            let expected_cwd = dunce::canonicalize(&command_cwd).expect("canonical workspace");
+            let expected_readable =
+                dunce::canonicalize(&readable_root).expect("canonical readable root");
+            assert_eq!(write_roots, Vec::<PathBuf>::new());
+            assert!(read_roots.contains(&expected_helper));
+            assert!(!read_roots.contains(&expected_cwd));
+            assert!(read_roots.contains(&expected_readable));
+            let platform_defaults = canonical_windows_platform_default_roots();
+            if case.expect_platform_defaults {
+                assert!(
+                    platform_defaults
+                        .iter()
+                        .all(|path| read_roots.contains(path))
+                );
+            } else {
+                assert!(
+                    platform_defaults
+                        .iter()
+                        .all(|path| !read_roots.contains(path))
+                );
+            }
+        }
     }
 
     #[test]
-    fn effective_write_roots_match_payload_filtering_for_overrides() {
+    fn effective_write_roots_table() {
         let tmp = TempDir::new().expect("tempdir");
-        let devo_home = tmp.path().join("devo-home");
-        let command_cwd = tmp.path().join("workspace");
+        let (devo_home, command_cwd) = sandbox_paths(&tmp);
         let extra_root = tmp.path().join("extra-root");
         let sandbox_root = super::sandbox_dir(&devo_home);
         fs::create_dir_all(&devo_home).expect("create devo home");
-        fs::create_dir_all(&command_cwd).expect("create workspace");
         fs::create_dir_all(&extra_root).expect("create extra root");
         fs::create_dir_all(&sandbox_root).expect("create sandbox root");
-        let permission_profile = workspace_write_profile(
-            &[],
-            /*exclude_tmpdir_env_var*/ true,
-            /*exclude_slash_tmp*/ true,
+        let permissions = permissions_for(
+            &workspace_write_profile(&[], true, true),
+            workspace_roots_for(command_cwd.as_path()).as_slice(),
         );
-        let workspace_roots = workspace_roots_for(command_cwd.as_path());
-        let permissions = permissions_for(&permission_profile, workspace_roots.as_slice());
         let override_roots = vec![
             command_cwd.clone(),
             extra_root.clone(),
@@ -2020,8 +1918,7 @@ mod tests {
             deny_read_paths: None,
             deny_write_paths: None,
         };
-
-        let effective_write_roots = super::effective_write_roots_for_setup(
+        let effective_write_roots = super::effective_write_roots_for_permissions(
             &permissions,
             &command_cwd,
             &HashMap::new(),
@@ -2029,45 +1926,35 @@ mod tests {
             Some(&override_roots),
         );
         let (_read_roots, payload_write_roots) = build_payload_roots(&request, &overrides);
-
-        let expected_workspace = dunce::canonicalize(&command_cwd).expect("canonical workspace");
-        let expected_extra = dunce::canonicalize(&extra_root).expect("canonical extra root");
-        let forbidden_devo_home = dunce::canonicalize(&devo_home).expect("canonical devo home");
-        let forbidden_sandbox = dunce::canonicalize(&sandbox_root).expect("canonical sandbox root");
         assert_eq!(effective_write_roots, payload_write_roots);
-        assert!(effective_write_roots.contains(&expected_workspace));
-        assert!(effective_write_roots.contains(&expected_extra));
-        assert!(!effective_write_roots.contains(&forbidden_devo_home));
-        assert!(!effective_write_roots.contains(&forbidden_sandbox));
-    }
-
-    #[test]
-    fn effective_write_roots_use_runtime_workspace_roots_for_workspace_root() {
-        let tmp = TempDir::new().expect("tempdir");
-        let devo_home = tmp.path().join("devo-home");
-        let workspace_root = tmp.path().join("workspace");
-        let command_cwd = workspace_root.join("subdir");
-        fs::create_dir_all(&devo_home).expect("create devo home");
-        fs::create_dir_all(&command_cwd).expect("create command cwd");
-
-        let permission_profile = workspace_write_profile(
-            &[],
-            /*exclude_tmpdir_env_var*/ true,
-            /*exclude_slash_tmp*/ true,
+        assert!(
+            effective_write_roots
+                .contains(&dunce::canonicalize(&command_cwd).expect("canonical workspace"))
         );
-        let workspace_roots = workspace_roots_for(workspace_root.as_path());
-        let permissions = permissions_for(&permission_profile, workspace_roots.as_slice());
-
-        let effective_write_roots = super::effective_write_roots_for_setup(
-            &permissions,
-            &command_cwd,
-            &HashMap::new(),
-            &devo_home,
-            /*write_roots_override*/ None,
+        assert!(
+            effective_write_roots
+                .contains(&dunce::canonicalize(&extra_root).expect("canonical extra root"))
+        );
+        assert!(
+            !effective_write_roots
+                .contains(&dunce::canonicalize(&devo_home).expect("canonical devo home"))
         );
 
+        let workspace_root = tmp.path().join("workspace-root");
+        let nested_cwd = workspace_root.join("subdir");
+        fs::create_dir_all(&nested_cwd).expect("create command cwd");
+        let nested_permissions = permissions_for(
+            &workspace_write_profile(&[], true, true),
+            workspace_roots_for(workspace_root.as_path()).as_slice(),
+        );
         assert_eq!(
-            effective_write_roots,
+            super::effective_write_roots_for_permissions(
+                &nested_permissions,
+                &nested_cwd,
+                &HashMap::new(),
+                &devo_home,
+                None,
+            ),
             vec![dunce::canonicalize(&workspace_root).expect("canonical workspace root")]
         );
     }

@@ -37,6 +37,72 @@ fn generated_protocol_typescript_contains_non_acp_client_method_roots() {
     assert!(output.contains("export type SearchStartParams"));
     assert!(output.contains("session_id"));
     assert!(output.contains("searchId"));
+    assert!(output.contains("export type AgentMessage ="));
+    assert!(output.contains("\"role\": \"toolResult\""));
+    assert!(output.contains("export type AgentEvent ="));
+    assert!(output.contains("\"type\": \"tool_execution_start\""));
+    assert!(output.contains("assistantMessageEvent"));
+    assert!(output.contains("contentIndex: number"));
+}
+
+#[test]
+fn generated_native_typescript_has_unique_scoped_types_and_complete_item_graph() {
+    let output = devo_protocol::acp_ts::generate_protocol_typescript();
+    let mut scope: Option<String> = None;
+    let mut declarations = std::collections::BTreeSet::new();
+
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(namespace) = line.strip_prefix("export namespace ") {
+            scope = namespace
+                .split_whitespace()
+                .next()
+                .map(|name| name.trim_end_matches('{').to_owned());
+            continue;
+        }
+        if line == "}" {
+            scope = None;
+            continue;
+        }
+        let declaration = ["export type ", "export interface ", "export enum "]
+            .into_iter()
+            .find_map(|prefix| line.strip_prefix(prefix));
+        let Some(declaration) = declaration else {
+            continue;
+        };
+        let name: String = declaration
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        let qualified_name = scope
+            .as_ref()
+            .map_or_else(|| name.clone(), |namespace| format!("{namespace}.{name}"));
+        assert!(
+            declarations.insert(qualified_name.clone()),
+            "duplicate TypeScript declaration {qualified_name}"
+        );
+    }
+
+    assert!(output.contains("export type ToolCallData = NativePi.ToolCallData;"));
+    assert!(output.contains("export type Turn = NativeTurn.Turn;"));
+    assert!(output.contains("export type Item ="));
+    assert!(output.contains("export type SessionActivity ="));
+}
+
+#[test]
+fn generated_native_typescript_matches_checked_in_tui_artifact() {
+    let committed = include_str!("../../../apps/tui/src/generated/protocol/native.ts");
+    assert_eq!(
+        committed,
+        devo_protocol::acp_ts::generate_protocol_typescript()
+    );
+
+    let index = include_str!("../../../apps/tui/src/generated/protocol/index.ts");
+    assert!(index.contains("export * from \"./native.js\";"));
+    assert!(index.contains("export * as NativeProtocol from \"./native.js\";"));
 }
 
 #[test]

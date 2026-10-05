@@ -25,6 +25,7 @@ pub mod codes {
     pub const TURN_ALREADY_ACTIVE: &str = "TURN_ALREADY_ACTIVE";
     pub const TURN_NOT_STEERABLE: &str = "TURN_NOT_STEERABLE";
     pub const QUEUE_ITEM_NOT_FOUND: &str = "QUEUE_ITEM_NOT_FOUND";
+    pub const JOB_NOT_FOUND: &str = "JOB_NOT_FOUND";
     pub const RESTORE_PLAN_NOT_FOUND: &str = "RESTORE_PLAN_NOT_FOUND";
     pub const RESTORE_PLAN_EXPIRED: &str = "RESTORE_PLAN_EXPIRED";
     pub const VERSION_CONFLICT: &str = "VERSION_CONFLICT";

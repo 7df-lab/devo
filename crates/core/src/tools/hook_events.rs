@@ -211,6 +211,7 @@ mod tests {
             },
             is_error: false,
             display_content: None,
+            images: Vec::new(),
         };
 
         assert_eq!(

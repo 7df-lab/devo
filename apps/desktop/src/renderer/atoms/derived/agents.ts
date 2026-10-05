@@ -405,7 +405,7 @@ export const agentFamily = atomFamily((sessionId: string) => {
 			activities: [],
 			permissions,
 			questions,
-			parentId: session.parentID,
+			parentId: session.parentId,
 			forkFromId: session.forkFromId,
 			atTurnId: session.atTurnId,
 			worktreePath: entry.worktreePath,
@@ -500,7 +500,7 @@ export const projectSessionIdsFamily = atomFamily((directory: string) => {
 			if (!entry) continue
 			// Hide sub-agent sessions in the sidebar (they still exist in the store
 			// for message/part lookups and direct navigation)
-			if (entry.session.parentID) continue
+			if (entry.session.parentId) continue
 			// Match the project directory itself, or any of its sandbox directories
 			if (
 				!directoriesMatch(entry.directory, directory) &&
@@ -581,7 +581,7 @@ export const projectListAtom = (() => {
 		for (const id of sessionIds) {
 			const entry = get(sessionFamily(id))
 			if (!entry) continue
-			if (entry.session.parentID) continue
+			if (entry.session.parentId) continue
 			if (!entry.directory) continue
 
 			const parentDir = sandboxToParent.get(entry.directory)

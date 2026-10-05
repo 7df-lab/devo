@@ -13,7 +13,6 @@ use devo_core::default_base_instructions;
 use devo_core::provider_request_config;
 use devo_core::tools::ToolPlanConfig;
 use devo_core::tools::handlers;
-use devo_mcp::manager::RmcpMcpManager;
 use devo_provider::ModelProviderSDK;
 use devo_provider::ProviderRoute;
 use devo_provider::ProviderRouter;
@@ -53,16 +52,18 @@ pub(crate) async fn run_prompt(
         .load(Some(cwd.as_path()))
         .unwrap_or_else(|_| AppConfig::default());
     let resolved_provider =
-        devo_server::load_server_provider(&app_config, model_override, &home_dir)?;
-    let model_catalog = PresetModelCatalog::load_from_provider_config_with_overrides(
+        devo_server::load_server_provider(&app_config, model_override, &home_dir).await?;
+    let model_catalog = PresetModelCatalog::load_from_provider_config_with_home(
         &app_config.provider_catalog_config(),
         &app_config.provider.model_overrides,
+        Some(home_dir.as_path()),
     )?;
     let turn_config = prompt_turn_config(
         &app_config,
         &model_catalog,
         model_override,
         &resolved_provider.default_model,
+        Some(home_dir.as_path()),
     );
     let selected_model = turn_config.model.slug.clone();
 
@@ -88,55 +89,6 @@ pub(crate) async fn run_prompt(
     );
     session_state.push_message(devo_core::Message::user(input.to_string()));
 
-    let registry = {
-        let mcp_manager = std::sync::Arc::new(RmcpMcpManager::new(
-            app_config
-                .mcp_runtime
-                .clone()
-                .with_code_search_workspace_cwd(cwd.clone()),
-            app_config.mcp_oauth_credentials_store.unwrap_or_default(),
-        ));
-        let tool_plan = ToolPlanConfig::from_app_config(&app_config);
-        let reg = handlers::build_registry_from_plan_with_mcp(&tool_plan, mcp_manager).await;
-        std::sync::Arc::new(reg)
-    };
-    let runtime = ToolRuntime::new_with_context(
-        std::sync::Arc::clone(&registry),
-        devo_core::tools::PermissionChecker::always_allow(),
-        devo_core::tools::ToolRuntimeContext {
-            session_id: session_state.id.clone(),
-            turn_id: None,
-            cwd: cwd.clone(),
-            agent_scope: devo_core::tools::ToolAgentScope::Parent,
-            collaboration_mode: devo_protocol::CollaborationMode::Build,
-            agent_coordinator: None,
-            client_filesystem: None,
-            file_read_ledger: std::sync::Arc::new(devo_core::tools::FileReadLedger::new()),
-            local_web_search: None,
-            hooks: (!app_config.hooks.is_empty()).then(|| devo_core::HookRuntimeContext {
-                runner: devo_core::HookRunner::new(app_config.hooks.clone()),
-                base: devo_core::HookBaseInput {
-                    session_id: session_state.id.clone(),
-                    transcript_path: String::new(),
-                    cwd: cwd.clone(),
-                    permission_mode: Some("yolo".to_string()),
-                    agent_id: None,
-                    agent_type: None,
-                },
-            }),
-            network_proxy: None,
-            network_no_proxy: None,
-            sandbox_profile: session_state.config.sandbox_profile.clone(),
-            sandbox_profile_live: None,
-        },
-    );
-    let provider = Arc::new(RoutedPromptProvider::new(
-        Arc::clone(&resolved_provider.provider_router),
-        turn_config.provider_route.clone(),
-    ));
-
-    eprintln!("devo [prompt] model={selected_model} sending...");
-
     if output_format == PromptOutputFormat::Jsonl {
         write_jsonl(&PromptJsonlEvent::SessionStarted {
             session_id: session_state.id.as_str(),
@@ -149,7 +101,70 @@ pub(crate) async fn run_prompt(
         })?;
     }
 
-    let session_id_for_events = session_state.id.clone();
+    let tool_plan = ToolPlanConfig::from_app_config(&app_config);
+    let kernel = if app_config.tools.execution_surface == devo_core::ToolExecutionSurface::Rlm {
+        Some(
+            handlers::ensure_kernel(&None, &cwd, None, devo_protocol::CollaborationMode::Build)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let registry = Arc::new(handlers::build_registry_from_plan(&tool_plan));
+    let runtime = Arc::new(ToolRuntime::new_with_context(
+        std::sync::Arc::clone(&registry),
+        devo_core::tools::PermissionChecker::always_allow(),
+        devo_core::tools::ToolRuntimeContext {
+            session_id: session_state.id.as_str().into(),
+            turn_id: None,
+            cwd: cwd.clone(),
+            agent_scope: devo_core::tools::ToolAgentScope::Parent,
+            collaboration_mode: devo_protocol::CollaborationMode::Build,
+            agent_coordinator: None,
+            client_filesystem: None,
+            file_read_ledger: std::sync::Arc::new(devo_core::tools::FileReadLedger::new()),
+            local_web_search: match &turn_config.web_search {
+                devo_core::ResolvedWebSearchConfig::Local(config) => Some(config.clone()),
+                _ => None,
+            },
+            hooks: (!app_config.hooks.is_empty()).then(|| devo_core::HookRuntimeContext {
+                runner: devo_core::HookRunner::new(app_config.hooks.clone()),
+                base: devo_core::HookBaseInput {
+                    session_id: session_state.id.as_str().into(),
+                    transcript_path: String::new(),
+                    cwd: cwd.clone(),
+                    permission_mode: Some("yolo".to_string()),
+                    agent_id: None,
+                    agent_type: None,
+                },
+            }),
+            network_proxy: None,
+            network_no_proxy: None,
+            sandbox_profile: session_state.config.sandbox_profile.clone(),
+            sandbox_profile_live: None,
+            kernel: kernel.clone(),
+            python_cell_first_wait_ms: None,
+            live_turn_settings: None,
+            python_cell_watch: None,
+            python_cell_completion: None,
+            session_dir: None,
+        },
+    ));
+    if let Some(kernel) = &kernel {
+        kernel
+            .set_host_handler(Some(crate::prompt_host::host_request_handler(Arc::clone(
+                &runtime,
+            ))))
+            .await;
+    }
+    let provider = Arc::new(RoutedPromptProvider::new(
+        Arc::clone(&resolved_provider.provider_router),
+        turn_config.provider_route.clone(),
+    ));
+
+    eprintln!("devo [prompt] model={selected_model} sending...");
+
+    let session_id_for_events = session_state.id.as_str().into();
     let result = devo_core::query(
         &mut session_state,
         &turn_config,
@@ -160,6 +175,12 @@ pub(crate) async fn run_prompt(
         devo_core::QueryOptions::default(),
     )
     .await;
+
+    if let Some(kernel) = &kernel
+        && let Err(err) = kernel.shutdown().await
+    {
+        eprintln!("devo [prompt] kernel shutdown failed: {err}");
+    }
 
     match result {
         Ok(()) => match latest_assistant_text(&session_state.messages) {
@@ -246,6 +267,7 @@ fn prompt_turn_config(
     model_catalog: &PresetModelCatalog,
     requested_model: Option<&str>,
     default_model: &str,
+    home_dir: Option<&Path>,
 ) -> TurnConfig {
     let catalog_model = |model_slug: &str| {
         model_catalog
@@ -259,15 +281,17 @@ fn prompt_turn_config(
     };
 
     let provider_config = app_config.provider_catalog_config();
+    let effective = devo_core::effective_provider_catalog_with_home(&provider_config, home_dir)
+        .unwrap_or_else(|_| provider_config.clone());
     let selected_model = requested_model
-        .or(provider_config.model.as_deref())
+        .or(effective.model.as_deref())
         .or(Some(default_model));
     if let Some(selection) = selected_model
-        .and_then(|model| provider_config.resolve_model(Some(model)).ok())
-        .or_else(|| provider_config.resolve_model(None).ok())
+        .and_then(|model| effective.resolve_model(Some(model)).ok())
+        .or_else(|| effective.resolve_model(None).ok())
     {
         let model_reference = format!("{}/{}", selection.provider_id, selection.model_id);
-        let mut model_config = provider_config
+        let mut model_config = effective
             .providers
             .get(&selection.provider_id)
             .and_then(|provider| provider.models.get(&selection.model_id))
@@ -275,7 +299,7 @@ fn prompt_turn_config(
         if let Some(model) = model_config.as_mut() {
             model.migrate_reasoning_implementation_into_variants();
         }
-        let reasoning_effort_selection = provider_config.reasoning_effort.clone().or_else(|| {
+        let reasoning_effort_selection = effective.reasoning_effort.clone().or_else(|| {
             model_config
                 .as_ref()
                 .and_then(|model| model.default_reasoning_selection.clone())
@@ -287,13 +311,26 @@ fn prompt_turn_config(
             )
         });
         let (request_defaults, request_headers) = provider_request_config(
-            &provider_config,
+            &effective,
             &selection.provider_id,
             &selection.model_id,
             variant_id.as_deref(),
         );
-        let provider_request_models = devo_core::ProviderRequestModelMap::default()
-            .with_request_config(request_defaults, request_headers);
+        let provider_request_models = effective
+            .providers
+            .get(&selection.provider_id)
+            .into_iter()
+            .flat_map(|provider| provider.models.keys())
+            .map(|model_id| {
+                (
+                    format!("{}/{model_id}", selection.provider_id),
+                    model_id.clone(),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let provider_request_models =
+            devo_core::ProviderRequestModelMap::new(provider_request_models)
+                .with_request_config(request_defaults, request_headers);
         let mut turn_config = TurnConfig::with_provider_route(
             catalog_model(&model_reference),
             selection.model_id,
@@ -488,14 +525,13 @@ impl PromptUsageDelta {
 
 fn jsonl_event_callback(
     output_format: PromptOutputFormat,
-    session_id: String,
+    session_id: devo_protocol::SessionId,
 ) -> Option<EventCallback> {
     if output_format != PromptOutputFormat::Jsonl {
         return None;
     }
 
     Some(Arc::new(move |event| {
-        let session_id = session_id.clone();
         Box::pin(async move {
             if let Err(error) = write_query_event_jsonl(session_id.as_str(), &event) {
                 eprintln!("devo [prompt] failed to write jsonl event: {error}");
@@ -528,12 +564,13 @@ fn write_query_event_jsonl(session_id: &str, event: &QueryEvent) -> Result<()> {
                 provider: status.provider.as_str(),
                 model: status.model.as_str(),
                 phase: match status.phase {
-                    devo_core::QueryProviderRetryPhase::Scheduled => "scheduled",
-                    devo_core::QueryProviderRetryPhase::Resumed => "resumed",
+                    devo_core::ModelQueryRetryPhase::Scheduled => "scheduled",
+                    devo_core::ModelQueryRetryPhase::Resumed => "resumed",
                 },
                 message: status.message.as_str(),
             })
         }
+        QueryEvent::ProviderQueryFailed { .. } => Ok(()),
         QueryEvent::ContextCompactionStarted => {
             write_jsonl(&PromptJsonlEvent::ContextCompactionStarted { session_id })
         }
@@ -647,7 +684,8 @@ fn latest_assistant_text(messages: &[devo_core::Message]) -> Option<&str> {
                 | devo_core::ContentBlock::ProviderReasoning { .. }
                 | devo_core::ContentBlock::ToolUse { .. }
                 | devo_core::ContentBlock::HostedToolUse { .. }
-                | devo_core::ContentBlock::ToolResult { .. } => None,
+                | devo_core::ContentBlock::ToolResult { .. }
+                | devo_core::ContentBlock::Image { .. } => None,
             })
             .or_else(|| {
                 message.content.iter().find_map(|block| match block {
@@ -656,7 +694,8 @@ fn latest_assistant_text(messages: &[devo_core::Message]) -> Option<&str> {
                     | devo_core::ContentBlock::ProviderReasoning { .. }
                     | devo_core::ContentBlock::ToolUse { .. }
                     | devo_core::ContentBlock::HostedToolUse { .. }
-                    | devo_core::ContentBlock::ToolResult { .. } => None,
+                    | devo_core::ContentBlock::ToolResult { .. }
+                    | devo_core::ContentBlock::Image { .. } => None,
                 })
             })
     })

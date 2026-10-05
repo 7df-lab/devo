@@ -22,7 +22,6 @@ use devo_core::ResolvedSkill;
 use devo_core::ResolvedWebFetchConfig;
 use devo_core::ResolvedWebSearchConfig;
 use devo_core::SessionConfig;
-use devo_core::SessionId;
 use devo_core::SessionState;
 use devo_core::SkillCatalog;
 use devo_core::SkillError;
@@ -48,18 +47,25 @@ use devo_protocol::SkillInterface as ProtocolSkillInterface;
 use devo_protocol::SkillScope as ProtocolSkillScope;
 use devo_protocol::SkillToolDependency as ProtocolSkillToolDependency;
 use devo_protocol::StreamEvent;
+use devo_protocol::native::ids::SessionId;
 use devo_provider::ModelProviderSDK;
+use devo_provider::MultiProviderRouter;
 use devo_provider::ProviderRoute;
 use devo_provider::ProviderRouter;
 use futures::Stream;
 
-use crate::InputItem;
 use crate::SkillRecord;
 use crate::load_server_provider;
+use devo_protocol::native::item::UserInput;
 
 pub(crate) struct SessionRuntimeContext {
     pub(crate) provider: Arc<dyn ModelProviderSDK>,
-    pub(crate) provider_router: Arc<dyn ProviderRouter>,
+    /// Live provider router. Wrapped so provider connection changes (provider
+    /// upsert/disconnect, OAuth login) can swap the Arc for the next turn the
+    /// same way `registry` does for tools: sessions capture the router at
+    /// creation, and without the slot a connection added after session start
+    /// would route through the boot-time table forever.
+    pub(crate) provider_router: Arc<StdMutex<Arc<dyn ProviderRouter>>>,
     /// Live tool registry. Wrapped so MCP enable/disable can swap the Arc for
     /// the next turn without rebuilding the whole process context graph.
     pub(crate) registry: Arc<StdMutex<Arc<ToolRegistry>>>,
@@ -143,7 +149,7 @@ impl SessionRuntimeContext {
         };
         Self {
             provider,
-            provider_router,
+            provider_router: Arc::new(StdMutex::new(provider_router)),
             registry: Arc::new(StdMutex::new(registry)),
             mcp_manager,
             default_model,
@@ -170,6 +176,74 @@ impl SessionRuntimeContext {
             .registry
             .lock()
             .expect("tool registry mutex should not be poisoned") = registry;
+    }
+
+    pub(crate) fn provider_router(&self) -> Arc<dyn ProviderRouter> {
+        Arc::clone(
+            &self
+                .provider_router
+                .lock()
+                .expect("provider router mutex should not be poisoned"),
+        )
+    }
+
+    pub(crate) fn replace_provider_router(&self, router: Arc<dyn ProviderRouter>) {
+        *self
+            .provider_router
+            .lock()
+            .expect("provider router mutex should not be poisoned") = router;
+    }
+
+    /// Rebuilds this context's Connection routes from its current on-disk
+    /// provider config and installs them in place.
+    ///
+    /// Provider connections can change at any time (`provider/upsert`, OAuth
+    /// login writing `auth.json`) while sessions capture their router at
+    /// creation; without this refresh a connection added after the session
+    /// started fails every turn with "provider route not configured". The
+    /// default provider is kept so sessions on the Default route keep their
+    /// model selection.
+    pub(crate) async fn reload_provider_router(&self) -> anyhow::Result<Arc<MultiProviderRouter>> {
+        let (provider_config, provider_http, user_config_dir) = {
+            let mut config_store = self
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned");
+            // Connection mutations land through other store instances (the
+            // process store in provider/upsert) and only touch the files, so
+            // re-read from disk instead of trusting this instance's snapshot.
+            config_store
+                .reload()
+                .map_err(|error| anyhow::anyhow!(error))
+                .context("failed to reload app config for provider router refresh")?;
+            let config = config_store.effective_config().clone();
+            (
+                config.provider_catalog_config(),
+                config.provider_http.clone(),
+                config_store.user_config_dir().to_path_buf(),
+            )
+        };
+        let effective = devo_core::effective_provider_catalog_with_home(
+            &provider_config,
+            Some(user_config_dir.as_path()),
+        )
+        .context("failed to merge builtin provider catalog with user overlay")?;
+        let auth = read_user_auth_config(&user_config_dir.join(AUTH_CONFIG_FILE_NAME))?;
+        let routes = crate::provider_config::build_connection_route_table(
+            &provider_config,
+            &effective,
+            &provider_http,
+            &auth,
+            &user_config_dir,
+        )
+        .await?;
+        let mut router = MultiProviderRouter::new(Arc::clone(&self.provider));
+        for (route, provider) in routes {
+            router.insert_route(route, provider);
+        }
+        let router = Arc::new(router);
+        self.replace_provider_router(Arc::clone(&router) as Arc<dyn ProviderRouter>);
+        Ok(router)
     }
 
     pub(crate) async fn load_for_workspace(
@@ -248,17 +322,18 @@ impl SessionRuntimeContext {
             )));
             (registry, mcp_manager)
         };
-        let model_catalog: Arc<dyn ModelCatalog> = Arc::new(
-            PresetModelCatalog::load_from_provider_config_with_overrides(
+        let model_catalog: Arc<dyn ModelCatalog> =
+            Arc::new(PresetModelCatalog::load_from_provider_config_with_home(
                 &provider_catalog,
                 &config.provider.model_overrides,
-            )?,
-        );
+                Some(user_config_dir.as_path()),
+            )?);
         let default_model = model_catalog.resolve_for_turn(None)?.slug.clone();
         let (provider, provider_router, provider_default_model) = if provider_runtime_config_changed
         {
             let provider =
                 load_server_provider(&config, Some(default_model.as_str()), &user_config_dir)
+                    .await
                     .context("load server provider for session workspace")?;
             (
                 provider.provider,
@@ -268,7 +343,7 @@ impl SessionRuntimeContext {
         } else {
             (
                 Arc::clone(&inherited_context.provider),
-                Arc::clone(&inherited_context.provider_router),
+                inherited_context.provider_router(),
                 default_model,
             )
         };
@@ -286,7 +361,7 @@ impl SessionRuntimeContext {
 
         Ok(Arc::new(Self {
             provider,
-            provider_router,
+            provider_router: Arc::new(StdMutex::new(provider_router)),
             registry,
             mcp_manager,
             default_model: provider_default_model,
@@ -308,7 +383,7 @@ impl SessionRuntimeContext {
             ProviderRoute::Connection { provider_id, .. } => provider_id.clone(),
         };
         Arc::new(RoutedModelProvider::new(
-            Arc::clone(&self.provider_router),
+            self.provider_router(),
             route,
             provider_name,
         ))
@@ -448,15 +523,23 @@ impl SessionRuntimeContext {
             )
         };
         let provider_config = config.provider_catalog_config();
+        // Include `$DEVO_HOME/cache` models.dev overlay so remote-only model
+        // ids (for example `deepseek/deepseek-flash`) resolve and get a bare
+        // wire `request_model` instead of the catalog slug.
+        let effective = devo_core::effective_provider_catalog_with_home(
+            &provider_config,
+            Some(user_config_dir.as_path()),
+        )
+        .unwrap_or_else(|_| provider_config.clone());
         let selected_model = requested_model
-            .or(provider_config.model.as_deref())
+            .or(effective.model.as_deref())
             .or(Some(self.default_model.as_str()));
         let selection = selected_model
-            .and_then(|model| provider_config.resolve_model(Some(model)).ok())
-            .or_else(|| provider_config.resolve_model(None).ok());
+            .and_then(|model| effective.resolve_model(Some(model)).ok())
+            .or_else(|| effective.resolve_model(None).ok());
 
         if let Some(selection) = selection {
-            let provider = provider_config.providers.get(&selection.provider_id);
+            let provider = effective.providers.get(&selection.provider_id);
             let model_config =
                 provider.and_then(|provider| provider.models.get(&selection.model_id));
             let web_search = self.resolve_turn_web_search(
@@ -478,6 +561,14 @@ impl SessionRuntimeContext {
             if let Some(model) = model_config.as_mut() {
                 model.migrate_reasoning_implementation_into_variants();
             }
+            let model_reference = format!("{}/{}", selection.provider_id, selection.model_id);
+            let model = self.catalog_model_or_fallback(&model_reference);
+            let requested_effort = reasoning_effort_selection
+                .as_deref()
+                .or(config.provider.model_reasoning_effort_selection.as_deref())
+                .or(effective.reasoning_effort.as_deref());
+            let reasoning_effort_selection =
+                model.normalize_reasoning_effort_selection(requested_effort);
             let effort_for_variant = reasoning_effort_selection.clone().or_else(|| {
                 model_config
                     .as_ref()
@@ -490,12 +581,12 @@ impl SessionRuntimeContext {
                 )
             });
             let (request_defaults, request_headers) = provider_request_config(
-                &provider_config,
+                &effective,
                 &selection.provider_id,
                 &selection.model_id,
                 variant_id.as_deref(),
             );
-            let provider_request_models = provider_config
+            let provider_request_models = effective
                 .providers
                 .get(&selection.provider_id)
                 .into_iter()
@@ -509,9 +600,8 @@ impl SessionRuntimeContext {
                 .collect::<std::collections::HashMap<_, _>>();
             let provider_request_models = ProviderRequestModelMap::new(provider_request_models)
                 .with_request_config(request_defaults, request_headers);
-            let model_reference = format!("{}/{}", selection.provider_id, selection.model_id);
             let mut turn_config = TurnConfig::with_provider_route_and_web_tools(
-                self.catalog_model_or_fallback(&model_reference),
+                model,
                 selection.model_id,
                 provider_request_models,
                 ProviderRoute::connection(selection.provider_id.clone(), selection.wire_api),
@@ -527,6 +617,8 @@ impl SessionRuntimeContext {
         let model = self.resolve_turn_model(requested_model);
         let web_search = self.resolve_turn_web_search(&config, &user_config_dir, None, None);
         let web_fetch = self.resolve_turn_web_fetch(&config, None, None);
+        let reasoning_effort_selection =
+            model.normalize_reasoning_effort_selection(reasoning_effort_selection.as_deref());
         let mut turn_config = TurnConfig::new(model, reasoning_effort_selection);
         turn_config.web_search = web_search;
         turn_config.web_fetch = web_fetch;
@@ -622,7 +714,7 @@ impl SessionRuntimeContext {
 
     pub(crate) fn resolve_input_items(
         &self,
-        input: &[InputItem],
+        input: &[UserInput],
         workspace_root: Option<&Path>,
     ) -> Result<Option<ResolvedInput>, SkillError> {
         let mut skill_catalog = self
@@ -632,21 +724,27 @@ impl SessionRuntimeContext {
         let discovered_skills = skill_catalog.discover(workspace_root, false)?;
 
         let mut parts = Vec::new();
+        let mut images = Vec::new();
+        let mut image_paths = Vec::new();
         let structured_skill_names = input
             .iter()
             .filter_map(|item| match item {
-                InputItem::Skill { name, .. } => Some(name.clone()),
-                InputItem::Text { .. }
-                | InputItem::LocalImage { .. }
-                | InputItem::Mention { .. } => None,
+                UserInput::Skill { name } => Some(name.clone()),
+                UserInput::Text { .. }
+                | UserInput::LocalImage { .. }
+                | UserInput::Mention { .. }
+                | UserInput::Image { .. }
+                | UserInput::Audio { .. } => None,
             })
             .collect::<HashSet<_>>();
         let mut injected_plain_skill_paths = HashSet::new();
         for text in input.iter().filter_map(|item| match item {
-            InputItem::Text { text } => Some(text),
-            InputItem::Skill { .. } | InputItem::LocalImage { .. } | InputItem::Mention { .. } => {
-                None
-            }
+            UserInput::Text { text } => Some(text),
+            UserInput::Skill { .. }
+            | UserInput::LocalImage { .. }
+            | UserInput::Mention { .. }
+            | UserInput::Image { .. }
+            | UserInput::Audio { .. } => None,
         }) {
             for name in plain_skill_mentions(text) {
                 if structured_skill_names.contains(&name) {
@@ -691,31 +789,81 @@ impl SessionRuntimeContext {
         let item_parts = input
             .iter()
             .map(|item| match item {
-                InputItem::Text { text } => Ok(text.trim().to_string()),
-                InputItem::Skill { name, path } => skill_catalog
+                UserInput::Text { text } => Ok(text.trim().to_string()),
+                UserInput::Skill { name } => skill_catalog
                     .load(
                         &SkillSelector {
                             name: name.clone(),
-                            path: (!path.as_os_str().is_empty()).then(|| path.clone()),
+                            path: None,
                         },
                         workspace_root,
                     )
                     .map(|skill| render_resolved_skill(&skill)),
-                InputItem::LocalImage { path } => Ok(format!("[image:{}]", path.display())),
-                InputItem::Mention { path, name } => Ok(format!(
-                    "[mention:{}]",
-                    name.as_deref().unwrap_or(path.as_str())
-                )),
+                UserInput::LocalImage { path, .. } => {
+                    let label = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("image");
+                    match read_local_image_part(path) {
+                        Ok(part) => {
+                            images.push(part);
+                            image_paths.push(path.clone());
+                            Ok(format!("[image:{label}]"))
+                        }
+                        Err(error) => Ok(format!("[image:{label} (unreadable: {error})]")),
+                    }
+                }
+                UserInput::Mention { uri } => Ok(format!("[mention:{uri}]")),
+                UserInput::Image { uri, .. } => Ok(format!("[image:{uri}]")),
+                UserInput::Audio { uri, .. } => Ok(format!("[audio:{uri}]")),
             })
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>();
         parts.extend(item_parts);
-        Ok((!parts.is_empty()).then(|| ResolvedInput {
-            prompt_text: parts.join("\n"),
-            prompt_messages: parts,
-        }))
+        Ok(
+            (!parts.is_empty() || !images.is_empty()).then(|| ResolvedInput {
+                prompt_text: parts.join("\n"),
+                prompt_messages: parts,
+                images,
+                image_paths,
+            }),
+        )
+    }
+}
+
+const MAX_LOCAL_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Reads a local image file into a prompt image part (10MB cap).
+pub(crate) fn read_local_image_part(path: &Path) -> Result<devo_protocol::PromptImagePart, String> {
+    use base64::Engine;
+
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_LOCAL_IMAGE_BYTES {
+        return Err(format!(
+            "image exceeds max size ({MAX_LOCAL_IMAGE_BYTES} bytes)"
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    Ok(devo_protocol::PromptImagePart {
+        mime_type: mime_type_from_path(path).to_string(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+pub(crate) fn mime_type_from_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("png") | None => "image/png",
+        _ => "image/png",
     }
 }
 
@@ -723,6 +871,10 @@ impl SessionRuntimeContext {
 pub(crate) struct ResolvedInput {
     pub(crate) prompt_text: String,
     pub(crate) prompt_messages: Vec<String>,
+    pub(crate) images: Vec<devo_protocol::PromptImagePart>,
+    /// Paths for LocalImage inputs that resolved successfully (same order as
+    /// [`Self::images`]).
+    pub(crate) image_paths: Vec<std::path::PathBuf>,
 }
 
 fn core_skill_record_to_protocol(record: devo_core::CoreSkillRecord) -> SkillRecord {

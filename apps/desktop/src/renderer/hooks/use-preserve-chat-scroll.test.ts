@@ -9,10 +9,6 @@ const transcriptDisclosureSource = readFileSync(
 	new URL("../components/chat/transcript-disclosure.tsx", import.meta.url),
 	"utf8",
 )
-const chatTurnSource = readFileSync(
-	new URL("../components/chat/chat-turn.tsx", import.meta.url),
-	"utf8",
-)
 const preserveScrollSource = readFileSync(
 	new URL("./use-preserve-chat-scroll.ts", import.meta.url),
 	"utf8",
@@ -21,7 +17,7 @@ const preserveScrollSource = readFileSync(
 describe("chat scroll preservation on transcript expand", () => {
 	test("does not smooth-scroll the whole conversation on inline resizes", () => {
 		expect({
-			instantResize: conversationSource.includes('resize="instant"'),
+			instantResize: conversationSource.includes('resize={resize ?? (streaming ? "smooth" : "instant")}'),
 			noSmoothResize: !conversationSource.includes('resize="smooth"'),
 		}).toEqual({
 			instantResize: true,
@@ -35,13 +31,11 @@ describe("chat scroll preservation on transcript expand", () => {
 			stopsStickToBottom: preserveScrollSource.includes("stopScroll()"),
 			restoresScrollTop: preserveScrollSource.includes("scrollEl.scrollTop = savedTop"),
 			transcriptUsesHook: transcriptDisclosureSource.includes("usePreserveChatScroll"),
-			completedProcessUsesHook: chatTurnSource.includes("usePreserveChatScroll"),
 		}).toEqual({
 			hook: true,
 			stopsStickToBottom: true,
 			restoresScrollTop: true,
 			transcriptUsesHook: true,
-			completedProcessUsesHook: true,
 		})
 	})
 })

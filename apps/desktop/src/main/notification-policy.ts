@@ -2,7 +2,7 @@ export interface SessionState {
 	status: string
 	title: string
 	directory?: string
-	parentID?: string
+	parentId?: string
 }
 
 export function isWorkingSessionStatus(status: string | undefined): boolean {
@@ -86,7 +86,7 @@ export function applyWatcherEvent(
 
 	switch (event.type) {
 		case "permission.asked": {
-			const sessionId = props.sessionID as string
+			const sessionId = props.sessionId as string
 			const permission = (props as { permission?: string }).permission
 			const rootId = getRootSession(state.sessions, sessionId)
 			const rootTitle = state.sessions.get(rootId)?.title
@@ -115,7 +115,7 @@ export function applyWatcherEvent(
 		}
 
 		case "question.asked": {
-			const sessionId = props.sessionID as string
+			const sessionId = props.sessionId as string
 			const questions = props.questions as Array<{ header?: string }> | undefined
 			const header = questions?.[0]?.header ?? "Question"
 			const rootId = getRootSession(state.sessions, sessionId)
@@ -146,7 +146,7 @@ export function applyWatcherEvent(
 		}
 
 		case "session.status": {
-			const sessionId = props.sessionID as string
+			const sessionId = props.sessionId as string
 			const newStatusType = (props.status as { type: string })?.type
 			if (!sessionId || !newStatusType) break
 
@@ -156,7 +156,7 @@ export function applyWatcherEvent(
 				status: newStatusType,
 				title: prev?.title ?? "",
 				directory: directory ?? prev?.directory,
-				parentID: prev?.parentID,
+				parentId: prev?.parentId,
 			})
 			stateChanged = true
 
@@ -181,7 +181,7 @@ export function applyWatcherEvent(
 		}
 
 		case "session.error": {
-			const sessionId = props.sessionID as string
+			const sessionId = props.sessionId as string
 			const error = props.error as { name?: string } | undefined
 			if (!sessionId) break
 			if (!isSubAgent(state.sessions, sessionId) && shouldShowLiveNotification(state.hydrating)) {
@@ -199,7 +199,7 @@ export function applyWatcherEvent(
 		case "session.created":
 		case "session.updated": {
 			const info = (props.info ?? props.session) as
-				| { id?: string; title?: string; parentID?: string }
+				| { id?: string; title?: string; parentId?: string }
 				| undefined
 			if (info?.id) {
 				const existing = state.sessions.get(info.id)
@@ -207,7 +207,7 @@ export function applyWatcherEvent(
 					status: existing?.status ?? "idle",
 					title: info.title ?? existing?.title ?? "",
 					directory: directory ?? existing?.directory,
-					parentID: info.parentID ?? existing?.parentID,
+					parentId: info.parentId ?? existing?.parentId,
 				})
 				stateChanged = true
 			}
@@ -222,7 +222,7 @@ export function applyWatcherEvent(
 }
 
 function isSubAgent(sessions: ReadonlyMap<string, SessionState>, sessionId: string): boolean {
-	return !!sessions.get(sessionId)?.parentID
+	return !!sessions.get(sessionId)?.parentId
 }
 
 function getRootSession(sessions: ReadonlyMap<string, SessionState>, sessionId: string): string {
@@ -231,9 +231,9 @@ function getRootSession(sessions: ReadonlyMap<string, SessionState>, sessionId: 
 	while (true) {
 		if (seen.has(id)) break
 		seen.add(id)
-		const parentID = sessions.get(id)?.parentID
-		if (!parentID) break
-		id = parentID
+		const parentId = sessions.get(id)?.parentId
+		if (!parentId) break
+		id = parentId
 	}
 	return id
 }

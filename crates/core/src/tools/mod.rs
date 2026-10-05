@@ -71,12 +71,17 @@ pub(crate) fn sandbox_overlay_for_spawn(
 
 pub use contracts::{
     RedactionState, SessionMode, ToolAgentScope, ToolCallError, ToolContext, ToolPermissionProfile,
-    ToolProgress, ToolProgressSender, ToolResult, ToolResultContent, ToolTerminalStatus,
+    ToolProgress, ToolProgressSender, ToolResult, ToolResultContent, ToolResultImage,
+    ToolTerminalStatus,
 };
 pub use deferred_loading::*;
 pub use devo_tools::{
     AgentToolCoordinator, ClientFilesystem, ClientTextFileRead, ClientTextFileWrite,
-    FileReadFreshnessError, FileReadLedger,
+    FileReadFreshnessError, FileReadLedger, PYTHON_CELL_FIRST_WAIT_MS_DEFAULT,
+    PYTHON_CELL_MAX_CONTINUE_RENEWALS, PYTHON_CELL_WAIT_SECONDS_MAX, PYTHON_CELL_WAIT_SECONDS_MIN,
+    PythonCellCompletionEvent, PythonCellCompletionHook, PythonCellWatch, PythonCellWatchAction,
+    PythonCellWatchDecision, PythonCellWatchInput, clamp_wait_seconds, effective_first_wait_ms,
+    output_tail, parse_python_cell_watch_decision,
 };
 pub use errors::*;
 pub use events::ToolEvent;

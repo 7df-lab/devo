@@ -63,30 +63,53 @@ pub(crate) fn migrate_legacy_provider_config_on_startup(
 
     migrate_legacy_api_keys(&document, &legacy, &mut migrated, user_config_dir)?;
 
+    // Selection prefs stay in config.toml; strip them from the JSON catalog.
+    let selection_model = migrated.model.take();
+    let selection_effort = migrated.reasoning_effort.take();
+    let selection_small = migrated.small_model.take();
+
     let existing = read_provider_catalog_config(target_config_file)?;
     let target_exists = target_config_file.exists();
+    // Existing JSON session defaults win over legacy TOML (one-time migrate).
+    let json_model = existing.model.clone();
+    let json_effort = existing.reasoning_effort.clone();
+    let json_small = existing.small_model.clone();
     let migrated_snapshot = migrated.clone();
     let mut merged = migrated;
     if target_exists {
         merged.merge_overlay(existing.clone());
     }
+    // Never persist session defaults in providers.json.
+    merged.model = None;
+    merged.small_model = None;
+    merged.reasoning_effort = None;
     if has_persistable_provider_config(&merged) && (!target_exists || merged != existing) {
         write_provider_catalog_config(target_config_file, &merged)?;
     }
 
+    // Strip migrated provider tables first, then write session defaults so a
+    // stale in-memory document cannot clobber the fully-qualified model.
     remove_migrated_legacy_config(
         legacy_config_file,
         document,
         &legacy,
         &migrated_snapshot,
         &consumed_model_overrides,
+    )?;
+    ensure_toml_session_defaults(
+        legacy_config_file,
+        json_model.or(selection_model).or(legacy.model.clone()),
+        json_effort
+            .or(selection_effort)
+            .or(legacy.model_reasoning_effort_selection.clone()),
+        json_small.or(selection_small),
     )
 }
 
 fn has_legacy_provider_config(config: &ProviderConfigSection) -> bool {
+    // Session defaults (`model`, effort) may live permanently in config.toml.
+    // Only provider directory / binding tables count as legacy TOML to migrate.
     config.model_provider.is_some()
-        || config.model.is_some()
-        || config.model_reasoning_effort_selection.is_some()
         || config.defaults.model_binding.is_some()
         || !config.providers.is_empty()
         || !config.model_bindings.is_empty()
@@ -95,10 +118,7 @@ fn has_legacy_provider_config(config: &ProviderConfigSection) -> bool {
 }
 
 fn has_persistable_provider_config(config: &ProviderConfigFile) -> bool {
-    config.model.is_some()
-        || config.small_model.is_some()
-        || config.reasoning_effort.is_some()
-        || !config.providers.is_empty()
+    !config.providers.is_empty()
 }
 
 fn restore_legacy_provider_fields(document: &Value, catalog: &mut ProviderConfigFile) {
@@ -424,42 +444,96 @@ fn remove_migrated_legacy_config(
     {
         changed |= table.remove("model_provider").is_some();
     }
-    if legacy.model_reasoning_effort_selection.is_some() && migrated.reasoning_effort.is_some() {
-        for key in [
-            "model_reasoning_effort_selection",
-            "model_thinking_selection",
-            "model_thinking",
-        ] {
-            changed |= table.remove(key).is_some();
+    // Keep `model` / `model_reasoning_effort_selection` in config.toml as prefs.
+    // Promote defaults.model_binding → top-level model when absent.
+    if legacy.defaults.model_binding.is_some() {
+        let (promoted_binding, defaults_empty) =
+            if let Some(defaults) = table.get_mut("defaults").and_then(Value::as_table_mut) {
+                let binding = match defaults.remove("model_binding") {
+                    Some(Value::String(binding)) => Some(binding),
+                    _ => None,
+                };
+                (binding, defaults.is_empty())
+            } else {
+                (None, false)
+            };
+        if let Some(binding) = promoted_binding
+            && !table.contains_key("model")
+        {
+            table.insert("model".to_string(), Value::String(binding));
+            changed = true;
         }
-    }
-    if legacy.defaults.model_binding.is_some()
-        && migrated.model.is_some()
-        && let Some(defaults) = table.get_mut("defaults").and_then(Value::as_table_mut)
-    {
-        changed |= defaults.remove("model_binding").is_some();
-        if defaults.is_empty() {
+        if defaults_empty {
             changed |= table.remove("defaults").is_some();
         }
     }
 
-    if legacy.model.is_some() {
-        match table.get_mut("model") {
-            Some(Value::String(_)) if migrated.model.is_some() => {
-                changed |= table.remove("model").is_some();
-            }
-            Some(Value::Table(model_overrides)) => {
-                for model_reference in consumed_model_overrides {
-                    changed |= model_overrides.remove(model_reference).is_some();
-                }
-                if model_overrides.is_empty() {
-                    changed |= table.remove("model").is_some();
-                }
-            }
-            _ => {}
+    if let Some(Value::Table(model_overrides)) = table.get_mut("model") {
+        for model_reference in consumed_model_overrides {
+            changed |= model_overrides.remove(model_reference).is_some();
+        }
+        if model_overrides.is_empty() {
+            changed |= table.remove("model").is_some();
         }
     }
 
+    if changed {
+        let data =
+            toml::to_string_pretty(&document).map_err(|error| ProviderConfigError::Serialize {
+                message: error.to_string(),
+            })?;
+        write_atomic(config_file, data.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn ensure_toml_session_defaults(
+    config_file: &Path,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    small_model: Option<String>,
+) -> Result<(), ProviderConfigError> {
+    if model.is_none() && reasoning_effort.is_none() && small_model.is_none() {
+        return Ok(());
+    }
+    let mut document = if config_file.exists() {
+        read_provider_config_document(config_file)?
+    } else {
+        Value::Table(Default::default())
+    };
+    let table = ensure_table(&mut document);
+    let mut changed = false;
+    if let Some(model) = model {
+        // Prefer fully-qualified `provider/model` over a bare legacy model id.
+        let replace = match table.get("model").and_then(Value::as_str) {
+            None => true,
+            Some(existing) => existing != model.as_str(),
+        };
+        if replace {
+            table.insert("model".to_string(), Value::String(model));
+            changed = true;
+        }
+    }
+    if let Some(effort) = reasoning_effort
+        && !table.contains_key("model_reasoning_effort_selection")
+        && !table.contains_key("reasoning_effort")
+    {
+        table.insert(
+            "model_reasoning_effort_selection".to_string(),
+            Value::String(effort),
+        );
+        changed = true;
+    }
+    if let Some(small_model) = small_model {
+        let replace = match table.get("small_model").and_then(Value::as_str) {
+            None => true,
+            Some(existing) => existing != small_model.as_str(),
+        };
+        if replace {
+            table.insert("small_model".to_string(), Value::String(small_model));
+            changed = true;
+        }
+    }
     if changed {
         let data =
             toml::to_string_pretty(&document).map_err(|error| ProviderConfigError::Serialize {

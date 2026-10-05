@@ -5,21 +5,15 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
 use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::StreamEvent;
 use devo_protocol::TurnId;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
-use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use devo_server::WebSocketServerClient;
 use devo_server::WebSocketServerClientConfig;
+use devo_server::test_support::TestRuntime;
 use futures::stream;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -49,28 +43,11 @@ async fn websocket_server_client_drives_listener_session_and_notifications() -> 
     let workspace = TempDir::new()?;
     let server_home = TempDir::new()?;
     let bind_address = free_loopback_address()?;
-    let db = Arc::new(devo_server::db::Database::open(
-        server_home.path().join("websocket-client-e2e.db"),
-    )?);
     let provider: Arc<dyn ModelProviderSDK> = Arc::new(PendingProvider);
-    let runtime = ServerRuntime::new(
-        server_home.path().to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig::default())),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                server_home.path().to_path_buf(),
-                None,
-            )?)),
-        ),
-    );
+    let runtime = TestRuntime::new(provider)
+        .skills(SkillsConfig::default())
+        .db_file("websocket-client-e2e.db")
+        .runtime(server_home.path());
     let listen = vec![format!("ws://{bind_address}")];
     let listener_task =
         tokio::spawn(
@@ -94,7 +71,7 @@ async fn websocket_server_client_drives_listener_session_and_notifications() -> 
         .await?
         .session;
     assert_eq!(session.cwd, workspace.path());
-    let session_id = devo_protocol::SessionId::try_from(session.id.as_str())?;
+    let session_id = devo_protocol::SessionId::from(session.id.as_str());
 
     client
         .turn_start_native(
@@ -141,7 +118,7 @@ async fn wait_for_turn_started(client: &mut WebSocketServerClient) -> Result<Tur
             let turn: devo_protocol::native::turn::Turn =
                 serde_json::from_value(notification.params["turn"].clone())
                     .context("decode Native turn/started event")?;
-            return TurnId::try_from(turn.id.as_str()).context("convert Native turn id");
+            return Ok(TurnId::from(turn.id.as_str()));
         }
     })
     .await

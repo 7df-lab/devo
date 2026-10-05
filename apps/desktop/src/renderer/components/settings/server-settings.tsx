@@ -111,7 +111,7 @@ export function ServerSettings({ initialNativeTrafficLogState = null }: ServerSe
 							off: "Off",
 						}}
 					>
-						<SelectTrigger className="min-w-[140px]">
+						<SelectTrigger aria-label="Proxy mode" className="min-w-[140px]">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>

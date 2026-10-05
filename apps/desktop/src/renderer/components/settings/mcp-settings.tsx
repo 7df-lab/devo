@@ -206,6 +206,7 @@ export function McpSettings({
 									)}
 									<Switch
 										checked={enabled}
+										aria-label={`${enabled ? "Disable" : "Enable"} ${server.name}`}
 										onCheckedChange={(checked) => {
 											const nextEnabled = checked === true
 											if (!nextEnabled) {

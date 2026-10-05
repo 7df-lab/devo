@@ -18,7 +18,9 @@ use crate::deny::{
 use crate::paths::devo_home;
 #[cfg(all(feature = "enforce", unix))]
 use crate::paths::{DEVICE_DIRS, DEVICE_FILES};
-use crate::paths::{essential_writable_paths, essential_writable_paths_minimal};
+use crate::paths::{
+    essential_writable_paths, essential_writable_paths_minimal, temp_writable_paths,
+};
 #[cfg(all(feature = "enforce", unix))]
 use crate::permissions::SandboxPermissionOverlay;
 
@@ -66,6 +68,11 @@ pub enum ProfileName {
     Devbox,
     ReadOnly,
     Strict,
+    /// RLM kernel fence (design doc `rlm-permissions.md` §5.1, P4): unlike the
+    /// shell `workspace` profile it has **no default read** — the kernel reads
+    /// only the explicit system/interpreter roots, so any read outside them is
+    /// OS-refused and routes through the rlm front door (approval pipeline).
+    RlmKernel,
     Off,
     Custom(String),
 }
@@ -77,6 +84,7 @@ impl std::fmt::Display for ProfileName {
             Self::Devbox => write!(f, "devbox"),
             Self::ReadOnly => write!(f, "read-only"),
             Self::Strict => write!(f, "strict"),
+            Self::RlmKernel => write!(f, "rlm-kernel"),
             Self::Off => write!(f, "off"),
             Self::Custom(name) => write!(f, "{name}"),
         }
@@ -91,6 +99,7 @@ impl std::str::FromStr for ProfileName {
             "devbox" => Ok(Self::Devbox),
             "read-only" | "readonly" => Ok(Self::ReadOnly),
             "strict" => Ok(Self::Strict),
+            "rlm-kernel" => Ok(Self::RlmKernel),
             "off" | "none" => Ok(Self::Off),
             // Anything else is treated as a custom profile name.
             // Validation happens when we try to load it from config.
@@ -296,7 +305,13 @@ impl ProfileName {
                 tracing::warn!(path = ?path, "Skipping non-UTF8 read_only path");
                 continue;
             };
-            caps = caps.allow_path(path_str, AccessMode::Read)?;
+            if profile.name == "rlm-kernel" && path.parent() == Some(Path::new("/proc")) {
+                // These are exact, safe procfs metadata files, not directory
+                // subtrees. Do not broaden the rule to their parent /proc.
+                caps.allow_file_mut(path, AccessMode::Read)?;
+            } else {
+                caps = caps.allow_path(path_str, AccessMode::Read)?;
+            }
         }
 
         // Read-write paths. nono/Landlock need the directory to exist at
@@ -319,6 +334,12 @@ impl ProfileName {
         for dev in DEVICE_FILES {
             let p = Path::new(dev);
             if !p.exists() {
+                continue;
+            }
+            if profile.name == "rlm-kernel" && *dev == "/dev/fd" && cfg!(target_os = "linux") {
+                // /dev/fd points to /proc/self/fd. CapabilitySet canonicalizes
+                // it in the server *before* spawning the kernel, which would
+                // grant access to the server's open file descriptors instead.
                 continue;
             }
             if p.is_dir() {
@@ -501,6 +522,57 @@ impl ProfileName {
                     name: "strict".to_string(),
                     read_only: system_read,
                     read_write: essential_writable_paths(workspace)?,
+                    deny: vec![],
+                    default_read: false,
+                    restrict_network: true,
+                })
+            }
+
+            // RLM kernel fence (design doc §5.1): no default read. The kernel
+            // reads only what its interpreter needs — system trees carrying
+            // libc/libpython/stdlib plus the runtime pseudo-filesystems — and
+            // everything else (workspace, session artifacts, granted roots,
+            // the Python runtime prefix) arrives via the spawn overlay. Reads
+            // outside the fence are OS-refused so `rlm.read` escalates to the
+            // host instead of silently succeeding.
+            Self::RlmKernel => {
+                let system_read: Vec<PathBuf> = [
+                    "/usr", "/lib", "/lib64", "/bin", "/sbin",
+                    // Standalone runtime installs (uv/python-build standalones)
+                    "/opt", "/sys", "/dev",
+                    // macOS variants of the Linux trees above
+                    "/System", "/Library", "/private",
+                ]
+                .iter()
+                .map(PathBuf::from)
+                .filter(|p| p.exists())
+                .chain(
+                    // /proc is a shared process view outside bwrap. Giving
+                    // Landlock read permission on its root lets a same-UID
+                    // kernel read /proc/<server-pid>/environ (and fd, mem, …).
+                    // Grant only stable system metadata files. In particular,
+                    // never grant /proc/self: nono canonicalizes it in the
+                    // server before fork, turning it into /proc/<server-pid>.
+                    [
+                        "/proc/cpuinfo",
+                        "/proc/meminfo",
+                        "/proc/version",
+                        "/proc/stat",
+                        "/proc/uptime",
+                        "/proc/loadavg",
+                        "/proc/filesystems",
+                    ]
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_file()),
+                )
+                .collect();
+                Ok(SandboxProfile {
+                    name: "rlm-kernel".to_string(),
+                    read_only: system_read,
+                    // Temp dirs stay writable for scratch work; the workspace
+                    // and session artifact dir ride the spawn overlay.
+                    read_write: temp_writable_paths(),
                     deny: vec![],
                     default_read: false,
                     restrict_network: true,

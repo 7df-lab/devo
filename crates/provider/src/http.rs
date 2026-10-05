@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use tracing::warn;
 
+use crate::error::ProviderError;
 use crate::error::context_limit_error;
 use crate::timeout::connect_timeout;
 
@@ -162,21 +163,13 @@ pub(crate) async fn invalid_status_error(
     operation: &str,
     status: StatusCode,
     response: Response,
-    request_body: &Value,
+    _request_body: &Value,
 ) -> anyhow::Error {
     let response_body = response
         .text()
         .await
         .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
-    warn!(
-        provider,
-        model,
-        operation,
-        status = %status,
-        http_body = %request_body,
-        response_body = %response_body,
-        "provider request failed"
-    );
+    warn!(provider, model, operation, status = %status, "provider request failed");
     let response_value = serde_json::from_str::<Value>(&response_body).ok();
     let message = response_value
         .as_ref()
@@ -192,12 +185,48 @@ pub(crate) async fn invalid_status_error(
         .as_ref()
         .and_then(|value| value.pointer("/error/code"))
         .and_then(Value::as_str);
-    if let Some(error) = context_limit_error(message, error_kind, error_code) {
+    if let Some(error) = context_limit_error(message.clone(), error_kind, error_code) {
         return anyhow::Error::new(error);
     }
-    anyhow::anyhow!(
+    // Prefer typed HTTP classification so retry policy does not treat
+    // "stream error … 400 Bad Request" as a transient network failure.
+    let typed = match status.as_u16() {
+        401 | 403 => Some(ProviderError::AuthenticationError {
+            message: message.clone(),
+            provider_name: Some(provider.to_string()),
+            status_code: Some(status.as_u16()),
+        }),
+        404 => Some(ProviderError::ModelNotFoundError {
+            message: message.clone(),
+            model_name: Some(model.to_string()),
+        }),
+        408 => Some(ProviderError::ProviderTimeoutError {
+            message: message.clone(),
+            provider_name: Some(provider.to_string()),
+        }),
+        429 => Some(ProviderError::RateLimitError {
+            message: message.clone(),
+            retry_after_seconds: None,
+            provider_name: Some(provider.to_string()),
+        }),
+        400..=499 => Some(ProviderError::InvalidRequestError {
+            message: message.clone(),
+            details: Some(response_body.clone()),
+        }),
+        500..=599 => Some(ProviderError::ProviderServerError {
+            message: message.clone(),
+            status_code: Some(status.as_u16()),
+            provider_name: Some(provider.to_string()),
+        }),
+        _ => None,
+    };
+    let summary = format!(
         "{provider} {operation} error for model {model}: Invalid status code: {status}; response body: {response_body}"
-    )
+    );
+    if let Some(error) = typed {
+        return anyhow::Error::new(error).context(summary);
+    }
+    anyhow::anyhow!(summary)
 }
 
 fn parse_custom_headers(headers: Option<String>) -> Result<HeaderMap> {
@@ -253,6 +282,97 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[derive(Clone)]
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| std::io::Error::other("captured log lock poisoned"))?
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogWriter {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn invalid_status_warning_redacts_model_request_and_response_bodies() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(CapturedLogWriter(Arc::clone(&captured)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind local provider mock");
+                let address = listener.local_addr().expect("local provider address");
+                let response_body =
+                    r#"{"error":{"message":"SYNTHETIC_RESPONSE_SENTINEL"}}"#;
+                let server = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.expect("accept request");
+                    let mut request = [0; 4096];
+                    let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut request)
+                        .await
+                        .expect("read request");
+                    let response = format!(
+                        "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
+                        response_body.len()
+                    );
+                    tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes())
+                        .await
+                        .expect("write response");
+                });
+
+                let response = Client::new()
+                    .post(format!("http://{address}/v1/chat/completions"))
+                    .body("synthetic request")
+                    .send()
+                    .await
+                    .expect("mock provider response");
+                let request_body = serde_json::json!({
+                    "messages": [{ "content": "SYNTHETIC_REQUEST_SENTINEL" }]
+                });
+                let _ = invalid_status_error(
+                    "synthetic-provider",
+                    "synthetic-model",
+                    "completion",
+                    StatusCode::BAD_REQUEST,
+                    response,
+                    &request_body,
+                )
+                .await;
+                server.await.expect("mock provider exits");
+            });
+        });
+
+        let logs = String::from_utf8(captured.lock().expect("lock captured logs").clone())
+            .expect("captured logs are UTF-8");
+        assert!(!logs.contains("SYNTHETIC_REQUEST_SENTINEL"));
+        assert!(!logs.contains("SYNTHETIC_RESPONSE_SENTINEL"));
+        assert!(logs.contains("provider request failed"));
+    }
 
     #[test]
     fn http_client_cache_reuses_equivalent_clients() {

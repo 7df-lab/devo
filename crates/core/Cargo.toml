@@ -8,6 +8,7 @@ version.workspace = true
 [dependencies]
 devo-config = { workspace = true }
 devo-execpolicy = { workspace = true }
+devo-kernel = { workspace = true }
 devo-network-proxy = { workspace = true }
 devo-protocol = { workspace = true }
 devo-provider = { workspace = true }

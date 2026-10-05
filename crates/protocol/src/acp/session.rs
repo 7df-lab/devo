@@ -14,7 +14,7 @@ use crate::AcpSessionModeId;
 use crate::AcpSessionModeState;
 use crate::DEVO_SESSION_META;
 use crate::SessionId;
-use crate::SessionMetadata;
+use crate::native::session::Session;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -167,14 +167,17 @@ pub struct AcpSetConfigOptionResult {
     pub meta: Option<AcpMeta>,
 }
 
-pub fn acp_session_info_from_metadata(session: &SessionMetadata) -> AcpSessionInfo {
+/// Projects a canonical Native session into ACP's list-session shape.
+pub fn acp_session_info_from_native_session(session: &Session) -> AcpSessionInfo {
     let mut meta = AcpMeta::new();
     meta.insert(
         DEVO_SESSION_META.to_string(),
-        serde_json::to_value(session).expect("serialize session metadata"),
+        serde_json::to_value(session).expect("serialize native session"),
     );
+    // ACP wire uses the same opaque SessionId as Native.
+    let session_id = session.id;
     AcpSessionInfo {
-        session_id: session.session_id,
+        session_id,
         cwd: session.cwd.clone(),
         title: session.title.clone(),
         updated_at: Some(session.last_activity_at.to_rfc3339()),
@@ -189,53 +192,75 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::SessionRuntimeStatus;
     use crate::SessionTitleState;
+    use crate::native::model::ModelBinding;
+    use crate::native::model::PermissionProfile;
+    use crate::native::session::SessionActivity;
+    use crate::native::session::SessionSettings;
+    use crate::native::session::SessionStatus;
+    use crate::native::usage::SessionUsage;
+    use crate::native::usage::UsageTotals;
 
+    /// Trace: L2-DES-APP-008
+    /// Verifies: ACP session info is projected from canonical Native Session.
     #[test]
-    fn session_info_uses_acp_field_names_and_preserves_devo_metadata() {
+    fn session_info_uses_acp_field_names_and_preserves_native_session() {
         let created_at = Utc::now();
-        let updated_at = created_at + chrono::TimeDelta::minutes(2);
         let last_activity_at = created_at + chrono::TimeDelta::minutes(1);
-        let session = SessionMetadata {
-            session_id: SessionId::new(),
+        let session_id = SessionId::new();
+        let session = Session {
+            id: session_id,
+            version: 0,
             cwd: ".".into(),
             additional_directories: vec!["/workspace/shared".into()],
+            parent: None,
+            fork_from_id: None,
+            at_turn_id: None,
+            ephemeral: false,
             created_at,
-            updated_at,
+            status: SessionStatus::Idle,
+            flags: Vec::new(),
+            archived: false,
+            activity: SessionActivity::Idle,
+            active_turn_id: None,
+            queued_count: 0,
             last_activity_at,
             title: Some("Work".to_string()),
             title_state: SessionTitleState::Unset,
-            parent_session_id: None,
-            fork_from_id: None,
-            fork_at_turn_id: None,
-            agent_path: None,
-            agent_nickname: None,
-            agent_role: None,
-            ephemeral: false,
-            model: None,
-            model_binding_id: None,
-            reasoning_effort_selection: None,
-            reasoning_effort: None,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_tokens: 0,
-            total_cache_creation_tokens: 0,
-            total_cache_read_tokens: 0,
-            prompt_token_estimate: 0,
-            last_query_usage: None,
-            last_query_total_tokens: 0,
-            last_context_occupancy: None,
-            status: SessionRuntimeStatus::Idle,
-            collaboration_mode: Default::default(),
-            effective_context_window: None,
-            permission_preset: None,
+            model: ModelBinding {
+                provider: "unknown".to_string(),
+                model: String::new(),
+                variant: None,
+                reasoning_effort: None,
+            },
+            settings: SessionSettings {
+                permission_profile: PermissionProfile::Default,
+                reasoning_effort: None,
+                mode: None,
+                sandbox_profile: None,
+                effective_context_window: None,
+                auto_refine_enabled: None,
+                auto_refine_turn_interval: None,
+                python_cell_first_wait_ms: None,
+            },
+            git_info: None,
+            preview: String::new(),
+            transcript_size_bytes: None,
+            message_count: None,
+            summary: None,
+            task_state: None,
+            usage: SessionUsage {
+                total: UsageTotals::default(),
+                by_purpose: Vec::new(),
+                legacy: None,
+                updated_at: created_at,
+            },
         };
 
-        let info = acp_session_info_from_metadata(&session);
+        let info = acp_session_info_from_native_session(&session);
         let json = serde_json::to_value(&info).expect("serialize session info");
 
-        assert_eq!(json["sessionId"], serde_json::json!(session.session_id));
+        assert_eq!(json["sessionId"], serde_json::json!(session_id));
         assert_eq!(json["title"], serde_json::json!("Work"));
         assert_eq!(
             json["updatedAt"],
@@ -246,8 +271,8 @@ mod tests {
             serde_json::json!(["/workspace/shared"])
         );
         assert_eq!(
-            serde_json::from_value::<SessionMetadata>(json["_meta"][DEVO_SESSION_META].clone())
-                .expect("decode Devo session metadata"),
+            serde_json::from_value::<Session>(json["_meta"][DEVO_SESSION_META].clone())
+                .expect("decode Native session"),
             session
         );
     }

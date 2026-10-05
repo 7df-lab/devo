@@ -155,6 +155,19 @@ fn bwrap_available() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
+fn bwrap_user_namespace_unavailable(stderr: &str) -> bool {
+    [
+        "bwrap: unshare user ns: Permission denied",
+        "bwrap: unshare user ns: Operation not permitted",
+        "bwrap: unshare user ns: No space left on device",
+        "bwrap: setting up uid map: Permission denied",
+        "bwrap: setting up uid map: Operation not permitted",
+    ]
+    .iter()
+    .any(|message| stderr.contains(message))
+}
+
 /// The custom profile under test, read from the env the parent set.
 fn profile_from_env() -> devo_sandbox::ProfileName {
     devo_sandbox::ProfileName::Custom(std::env::var(PROFILE_ENV).expect(PROFILE_ENV))
@@ -370,6 +383,16 @@ fn run_deny_case(
     }
 
     let (status, stderr) = run_scenario(&tmp, profile, targets, controls, postlaunch);
+    #[cfg(target_os = "linux")]
+    if !status.success() && bwrap_user_namespace_unavailable(&stderr) {
+        if require {
+            panic!(
+                "SANDBOX_E2E_REQUIRE_ENFORCEMENT set but Bubblewrap user-namespace creation failed: {stderr}"
+            );
+        }
+        eprintln!("skipping: Bubblewrap user-namespace creation is unavailable: {stderr}");
+        return;
+    }
     assert!(
         status.success(),
         "[{tag}] custom-profile deny should block read/write/rename\nstderr: {stderr}"

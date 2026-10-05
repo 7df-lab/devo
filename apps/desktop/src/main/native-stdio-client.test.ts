@@ -48,6 +48,20 @@ describe("routeNativeLine", () => {
 })
 
 describe("StdioNativeClient", () => {
+	test("unsubscribes event listeners from the shared transport emitter", () => {
+		const client = new StdioNativeClient()
+		const emitter = (client as unknown as {
+			events: { listenerCount: (event: string) => number }
+		}).events
+		const unsubscribe = client.subscribe(() => {})
+
+		expect(emitter.listenerCount("event")).toBe(1)
+		unsubscribe()
+		expect(emitter.listenerCount("event")).toBe(0)
+		unsubscribe()
+		expect(emitter.listenerCount("event")).toBe(0)
+	})
+
 	test("builds server env with bin dir first while preserving caller env", () => {
 		const env = buildServerProcessEnv({
 			baseEnv: { PATH: "/usr/bin", KEEP: "base" },

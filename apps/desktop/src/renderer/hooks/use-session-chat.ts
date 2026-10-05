@@ -4,33 +4,24 @@ import {
 	type ChatMessageEntry,
 	type ChatTurn,
 	groupIntoTurns,
-	mergeSessionParts,
+	mergeSessionItems,
 } from "../atoms/derived/session-chat"
-import { messagesFamily, setMessagesAtom } from "../atoms/messages"
+import { itemsFamily, setItemsAtom } from "../atoms/messages"
 import { isMockModeAtom } from "../atoms/mock-mode"
-import { partsFamily, partStorageKey } from "../atoms/parts"
 import { appStore } from "../atoms/store"
 import { streamingVersionFamily } from "../atoms/streaming"
 import { queryClient } from "../lib/query-client"
-import type { Message, Part } from "../lib/types"
+import type { NativeItemEnvelope } from "@devo-ai/sdk/v2/client"
 import { getBaseClient, getProjectClient } from "../services/connection-manager"
 import { queryKeys } from "./use-devo-data"
+import { shouldShowChatLoadingSkeleton } from "./chat-loading"
 
-// Re-export types for consumers
 export type { ChatMessageEntry, ChatTurn }
 
-/** Sentinel empty array — stable reference */
 const EMPTY_ENTRIES: ChatMessageEntry[] = []
 
-/**
- * History is paginated by message count (aligned to user-message boundaries).
- * Agent turns with many tool calls can span dozens of messages, so budget
- * generously when targeting a turn count.
- */
 const MESSAGES_PER_TURN_ESTIMATE = 20
-/** Turns shown when opening a historical session. */
 const INITIAL_TURN_COUNT = 8
-/** Additional turns fetched each time the user scrolls toward the top. */
 const PAGE_TURN_COUNT = 5
 
 const INITIAL_LIMIT = INITIAL_TURN_COUNT * MESSAGES_PER_TURN_ESTIMATE
@@ -38,13 +29,7 @@ const PAGE_SIZE = PAGE_TURN_COUNT * MESSAGES_PER_TURN_ESTIMATE
 
 /**
  * Hook to load chat data for a session.
- *
- * - Reads messages/parts from Jotai atoms (populated by Native events)
- * - Does a one-time initial fetch to hydrate the store
- * - Uses structural sharing in `groupIntoTurns` to preserve React.memo()
- * - No polling — Native events keep data up to date
- * - Subscribes to the per-session streaming version so only updates for
- *   THIS session trigger re-renders (not all sessions globally).
+ * Reads Native ItemEnvelope atoms (populated by item.updated events).
  */
 export function useSessionChat(
 	directory: string | null,
@@ -60,42 +45,29 @@ export function useSessionChat(
 	const turnsRef = useRef<ChatTurn[]>([])
 	const loadedLimitsRef = useRef(new Map<string, number>())
 
-	// Read from Jotai atoms
-	const storeMessages = useAtomValue(messagesFamily(sessionId ?? ""))
-	// Per-session streaming version: only bumped when THIS session streams
+	const storeItems = useAtomValue(itemsFamily(sessionId ?? ""))
 	const streamingVersion = useAtomValue(streamingVersionFamily(sessionId ?? ""))
 
-	// Build ChatMessageEntry[] merging streaming overlay
 	const entries: ChatMessageEntry[] = useMemo(() => {
-		if (!storeMessages || storeMessages.length === 0) return EMPTY_ENTRIES
-		return mergeSessionParts(
-			sessionId ?? "",
-			storeMessages,
-			(messageId) => appStore.get(partsFamily(partStorageKey(sessionId ?? "", messageId))),
-			streamingVersion,
-		)
-	}, [storeMessages, streamingVersion, sessionId])
+		if (!storeItems || storeItems.length === 0) return EMPTY_ENTRIES
+		void streamingVersion
+		return mergeSessionItems(storeItems)
+	}, [storeItems, streamingVersion])
 
-	// Group into turns with structural sharing
 	const turns = useMemo(() => {
 		const result = groupIntoTurns(entries, turnsRef.current)
 		turnsRef.current = result
 		return result
 	}, [entries])
 
-	// One-time fetch to hydrate the store when session changes
 	const fetchAndHydrate = useCallback(
 		async (sid: string) => {
-			// Only show the loading spinner if the session has no cached data yet.
-			// When switching back to a previously-visited session the existing messages
-			// remain visible while the background refresh runs, avoiding a jarring flash.
-			const hasCachedData = (appStore.get(messagesFamily(sid)) ?? []).length > 0
+			const hasCachedData = (appStore.get(itemsFamily(sid)) ?? []).length > 0
 			if (!hasCachedData) {
 				setLoading(true)
 			}
 			setError(null)
 			try {
-				// Use a directory-scoped client when available, otherwise fall back to the base client
 				const client = (directory ? getProjectClient(directory) : null) ?? getBaseClient()
 				if (!client) {
 					setError("Not connected to Devo server")
@@ -104,20 +76,17 @@ export function useSessionChat(
 
 				const limit = loadedLimitsRef.current.get(sid) ?? INITIAL_LIMIT
 				const result = await client.session.messages({
-					sessionID: sid,
+					sessionId: sid,
 					limit,
 				})
-				const raw = (result.data ?? []) as Array<{ info: Message; parts: Part[] }>
+				const raw = (result.data ?? []) as Array<{ info: NativeItemEnvelope }>
 				loadedLimitsRef.current.set(sid, limit)
 				setHasEarlierMessages(raw.length >= limit)
 
-				// Hydrate the Jotai store
-				const messages = raw.map((m) => m.info)
-				const parts: Record<string, Part[]> = {}
-				for (const m of raw) {
-					parts[m.info.id] = m.parts
-				}
-				appStore.set(setMessagesAtom, { sessionId: sid, messages, parts })
+				appStore.set(setItemsAtom, {
+					sessionId: sid,
+					items: raw.map((m) => m.info),
+				})
 				if (directory) {
 					queryClient.invalidateQueries({ queryKey: queryKeys.providers(directory) })
 					queryClient.invalidateQueries({ queryKey: queryKeys.config(directory) })
@@ -132,7 +101,6 @@ export function useSessionChat(
 		[directory],
 	)
 
-	// Load the next page of older messages when the user scrolls toward the top.
 	const loadEarlier = useCallback(async () => {
 		if (!isActive || !sessionId || !directory || loadingEarlier || !hasEarlierMessages) return
 		const client = getProjectClient(directory)
@@ -144,21 +112,16 @@ export function useSessionChat(
 		setLoadingEarlier(true)
 		try {
 			const result = await client.session.messages({
-				sessionID: sessionId,
+				sessionId: sessionId,
 				limit: nextLimit,
 			})
-			const raw = (result.data ?? []) as Array<{ info: Message; parts: Part[] }>
+			const raw = (result.data ?? []) as Array<{ info: NativeItemEnvelope }>
 			loadedLimitsRef.current.set(sessionId, nextLimit)
 			setHasEarlierMessages(raw.length >= nextLimit)
-
-			const messages = raw.map((m) => m.info)
-			const parts: Record<string, Part[]> = {}
-			for (const m of raw) {
-				parts[m.info.id] = m.parts
-			}
-			appStore.set(setMessagesAtom, { sessionId, messages, parts })
-			queryClient.invalidateQueries({ queryKey: queryKeys.providers(directory) })
-			queryClient.invalidateQueries({ queryKey: queryKeys.config(directory) })
+			appStore.set(setItemsAtom, {
+				sessionId,
+				items: raw.map((m) => m.info),
+			})
 		} catch (err) {
 			console.error("Failed to load earlier messages:", err)
 		} finally {
@@ -166,49 +129,25 @@ export function useSessionChat(
 		}
 	}, [isActive, sessionId, directory, loadingEarlier, hasEarlierMessages])
 
-	// Trigger initial fetch when session changes (skip in mock mode -- data is pre-hydrated)
-	useEffect(() => {
-		if (!isActive || isMockMode) return
-		if (!sessionId) return
+	useLayoutEffect(() => {
+		if (!isActive || !sessionId || isMockMode) return
 		if (syncedRef.current === sessionId) return
 		syncedRef.current = sessionId
-		fetchAndHydrate(sessionId)
-	}, [isActive, sessionId, fetchAndHydrate, isMockMode])
+		void fetchAndHydrate(sessionId)
+	}, [isActive, sessionId, isMockMode, fetchAndHydrate])
 
-	// Reset per-session refs whenever the active session changes.
-	//
-	// - turnsRef: structural-sharing cache — must be cleared so stale turn objects
-	//   from the previous session aren't mixed into the new session's render.
-	// - hasEarlierMessages: tracks whether the server has older messages to load.
-	//   MUST be cleared so the load-earlier affordance from a previous session
-	//   doesn't appear on a freshly-switched session whose atom is still empty.
-	// - loading: if the new session has no cached data yet, pre-set the loading
-	//   flag so the UI shows a skeleton instead of "No messages yet" during the
-	//   first paint before the fetch effect fires.
-	useLayoutEffect(() => {
-		turnsRef.current = []
-		setHasEarlierMessages(false)
-		if (!isMockMode && sessionId) {
-			const hasCachedData = (appStore.get(messagesFamily(sessionId)) ?? []).length > 0
-			if (!hasCachedData) {
-				setLoading(true)
-			} else {
-				setLoading(false)
-			}
-		}
-	}, [sessionId, isMockMode])
-
-	const showLoading = loading && turns.length === 0
+	useEffect(() => {
+		if (!isActive) syncedRef.current = null
+	}, [isActive])
 
 	return {
 		turns,
-		rawMessages: entries,
 		loading,
-		showLoading,
+		showLoading: shouldShowChatLoadingSkeleton(loading, turns.length),
 		loadingEarlier,
-		error,
 		hasEarlierMessages,
 		loadEarlier,
-		reload: fetchAndHydrate,
+		error,
+		refresh: sessionId ? () => fetchAndHydrate(sessionId) : async () => {},
 	}
 }

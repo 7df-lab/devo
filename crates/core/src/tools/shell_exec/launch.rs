@@ -364,6 +364,8 @@ fn try_windows_sandbox_launch(
         writable_roots: resolved.read_write,
         deny_read: resolved.deny,
         restrict_network: resolved.restrict_network,
+        session_credential_sid: None,
+        env_extra: Vec::new(),
     };
     match devo_windows_sandbox::prepare_windows_sandbox_launch(&request) {
         Ok(Some(launch)) => Ok(Some(launch)),

@@ -2,8 +2,8 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 use devo_core::{
-    FileRestoreOutcome, RestoreFileStatus, ToolResultItem, TurnId, TurnItem,
-    TurnWorkspaceRestoreCompletedRecord, TurnWorkspaceRestoreStartedRecord, WorkspaceRestorePolicy,
+    FileRestoreOutcome, RestoreFileStatus, TurnWorkspaceRestoreCompletedRecord,
+    TurnWorkspaceRestoreStartedRecord, WorkspaceRestorePolicy,
 };
 
 use crate::execution::PersistedTurnItem;
@@ -52,26 +52,54 @@ pub(super) fn core_restore_policy(
 
 pub(super) fn discover_restore_candidates(
     persisted_items: &[PersistedTurnItem],
-    turn_id: TurnId,
+    turn_id: devo_protocol::native::ids::TurnId,
 ) -> Vec<RestoreCandidate> {
+    use devo_protocol::native::item::FileChangeKind;
+    use devo_protocol::native::item::Item;
+
     let mut candidates = Vec::new();
     for item in persisted_items
         .iter()
         .filter(|item| item.turn_id == turn_id)
     {
-        let TurnItem::ToolResult(ToolResultItem {
-            tool_name: Some(tool_name),
-            output,
-            is_error: false,
-            ..
-        }) = &item.turn_item
-        else {
-            continue;
-        };
-        if !matches!(tool_name.as_str(), "write" | "apply_patch" | "edit") {
-            continue;
+        match &item.item {
+            Item::FileChange { changes, .. } => {
+                for entry in changes {
+                    let file_path = entry.path.display().to_string();
+                    let state = match &entry.change {
+                        FileChangeKind::Add { content } => RestoreCandidateState::Added {
+                            post_content: content.clone(),
+                        },
+                        FileChangeKind::Delete { content } => RestoreCandidateState::Deleted {
+                            pre_content: content.clone(),
+                        },
+                        FileChangeKind::Update {
+                            unified_diff,
+                            move_path,
+                        } => {
+                            if let Some(source) = move_path {
+                                RestoreCandidateState::Moved {
+                                    source_path: source.display().to_string(),
+                                    pre_content: String::new(),
+                                    post_content: unified_diff.clone(),
+                                }
+                            } else {
+                                RestoreCandidateState::Unsupported
+                            }
+                        }
+                    };
+                    candidates.push(RestoreCandidate { file_path, state });
+                }
+            }
+            Item::ToolResult {
+                output,
+                is_error: false,
+                ..
+            } => {
+                collect_candidates_from_tool_output(output, &mut candidates);
+            }
+            _ => {}
         }
-        collect_candidates_from_tool_output(output, &mut candidates);
     }
     candidates
 }
@@ -101,39 +129,35 @@ pub(super) async fn apply_safe_workspace_restore(
     outcomes
 }
 
-pub(super) fn restore_started_payload(
+pub(super) fn restore_started_notification(
     record: &TurnWorkspaceRestoreStartedRecord,
     edit_id: &str,
-) -> crate::WorkspaceRestoreStartedPayload {
-    crate::WorkspaceRestoreStartedPayload {
+) -> devo_protocol::native::event::ServerNotification {
+    devo_protocol::native::event::ServerNotification::WorkspaceRestoreStarted {
         session_id: record.session_id,
-        edit_id: edit_id.to_string(),
-        superseded_turn_id: record.turn_id,
-        checkpoint_id: None,
-        candidate_files: record.candidate_files.clone(),
-        restore_policy: restore_policy_name(record.policy).to_string(),
-        timestamp: record.started_at,
+        restore_plan_id: devo_protocol::native::ids::RestorePlanId::from_string(
+            edit_id.to_string(),
+        ),
     }
 }
 
-pub(super) fn restore_completed_payload(
+pub(super) fn restore_completed_notification(
     record: &TurnWorkspaceRestoreCompletedRecord,
     edit_id: &str,
-    superseded_turn_id: TurnId,
-) -> crate::WorkspaceRestoreCompletedPayload {
-    crate::WorkspaceRestoreCompletedPayload {
+) -> devo_protocol::native::event::ServerNotification {
+    let succeeded = !record.outcomes.iter().any(|outcome| {
+        matches!(
+            outcome.status,
+            RestoreFileStatus::Failed | RestoreFileStatus::Unsupported
+        )
+    });
+    devo_protocol::native::event::ServerNotification::WorkspaceRestoreCompleted {
         session_id: record.session_id,
-        edit_id: edit_id.to_string(),
-        superseded_turn_id,
-        restored_files: files_with_status(&record.outcomes, RestoreFileStatus::Restored),
-        skipped_files: files_with_status(&record.outcomes, RestoreFileStatus::Skipped),
-        unsupported_files: files_with_status(&record.outcomes, RestoreFileStatus::Unsupported),
-        failed_files: files_with_status(&record.outcomes, RestoreFileStatus::Failed),
-        current_state_kept: record
-            .outcomes
-            .iter()
-            .any(|outcome| outcome.status != RestoreFileStatus::Restored),
-        timestamp: record.completed_at,
+        restore_plan_id: devo_protocol::native::ids::RestorePlanId::from_string(
+            edit_id.to_string(),
+        ),
+        succeeded,
+        error: None,
     }
 }
 
@@ -473,25 +497,11 @@ fn pre_content_from_reverse_patch(post_content: &str, diff: &str) -> Option<Stri
     diffy::apply(post_content, &reverse_patch).ok()
 }
 
-fn restore_policy_name(policy: WorkspaceRestorePolicy) -> &'static str {
-    match policy {
-        WorkspaceRestorePolicy::Safe => "safe",
-        WorkspaceRestorePolicy::Skip => "skip",
-        WorkspaceRestorePolicy::ConfiguredRestore => "configured_restore",
-    }
-}
-
-fn files_with_status(outcomes: &[FileRestoreOutcome], status: RestoreFileStatus) -> Vec<String> {
-    outcomes
-        .iter()
-        .filter(|outcome| outcome.status == status)
-        .map(|outcome| outcome.file_path.clone())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use devo_protocol::native::ids::TurnId;
+    use devo_protocol::native::item::Item;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
@@ -591,13 +601,12 @@ mod tests {
     #[test]
     fn discovers_structured_file_change_candidates() {
         let turn_id = TurnId::new();
-        let item = PersistedTurnItem {
+        let item = PersistedTurnItem::new(
             turn_id,
-            turn_kind: devo_core::TurnKind::Regular,
-            item_id: devo_core::ItemId::new(),
-            turn_item: TurnItem::ToolResult(ToolResultItem {
-                tool_call_id: "call-1".to_string(),
-                tool_name: Some("apply_patch".to_string()),
+            devo_protocol::native::turn::TurnKind::Regular,
+            devo_protocol::native::ids::ItemId::new(),
+            Item::ToolResult {
+                call_id: "call-1".to_string(),
                 output: serde_json::json!({
                     "files": [{
                         "path": "generated.txt",
@@ -607,8 +616,9 @@ mod tests {
                 }),
                 display_content: None,
                 is_error: false,
-            }),
-        };
+                truncated: false,
+            },
+        );
 
         let candidates = discover_restore_candidates(&[item], turn_id);
 
@@ -633,13 +643,12 @@ mod tests {
             .await
             .expect("write modified file");
         let turn_id = TurnId::new();
-        let item = PersistedTurnItem {
+        let item = PersistedTurnItem::new(
             turn_id,
-            turn_kind: devo_core::TurnKind::Regular,
-            item_id: devo_core::ItemId::new(),
-            turn_item: TurnItem::ToolResult(ToolResultItem {
-                tool_call_id: "call-1".to_string(),
-                tool_name: Some("apply_patch".to_string()),
+            devo_protocol::native::turn::TurnKind::Regular,
+            devo_protocol::native::ids::ItemId::new(),
+            Item::ToolResult {
+                call_id: "call-1".to_string(),
                 output: serde_json::json!({
                     "files": [{
                         "path": "edited.txt",
@@ -650,8 +659,9 @@ mod tests {
                 }),
                 display_content: None,
                 is_error: false,
-            }),
-        };
+                truncated: false,
+            },
+        );
 
         let candidates = discover_restore_candidates(&[item], turn_id);
         let outcomes = apply_safe_workspace_restore(workspace.path(), &candidates).await;
@@ -683,13 +693,12 @@ mod tests {
             .await
             .expect("write moved file");
         let turn_id = TurnId::new();
-        let item = PersistedTurnItem {
+        let item = PersistedTurnItem::new(
             turn_id,
-            turn_kind: devo_core::TurnKind::Regular,
-            item_id: devo_core::ItemId::new(),
-            turn_item: TurnItem::ToolResult(ToolResultItem {
-                tool_call_id: "call-1".to_string(),
-                tool_name: Some("apply_patch".to_string()),
+            devo_protocol::native::turn::TurnKind::Regular,
+            devo_protocol::native::ids::ItemId::new(),
+            Item::ToolResult {
+                call_id: "call-1".to_string(),
                 output: serde_json::json!({
                     "files": [{
                         "path": "moved/to.txt",
@@ -702,8 +711,9 @@ mod tests {
                 }),
                 display_content: None,
                 is_error: false,
-            }),
-        };
+                truncated: false,
+            },
+        );
 
         let candidates = discover_restore_candidates(&[item], turn_id);
         let outcomes = apply_safe_workspace_restore(workspace.path(), &candidates).await;

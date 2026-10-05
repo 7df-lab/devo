@@ -123,6 +123,7 @@ fn spawn_outbound_writer(
 ///
 /// Abstracts the connection to a client, allowing different transport
 /// implementations (stdio, WebSocket, etc.) to be used interchangeably.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// Send a success response to the client.
@@ -196,7 +197,7 @@ impl EventBroadcaster {
             .read()
             .await
             .get(session_id)
-            .copied()
+            .cloned()
             .unwrap_or(0)
     }
 
@@ -248,6 +249,10 @@ impl InternalProxyControl {
 
     fn request_shutdown(&self) {
         self.shutdown_token.cancel();
+    }
+
+    fn shutdown_token(&self) -> &CancellationToken {
+        &self.shutdown_token
     }
 }
 
@@ -335,6 +340,9 @@ async fn run_listener_tasks(
     internal_proxy: Option<(InternalProxyEndpoint, String, InternalProxyControl)>,
 ) -> Result<()> {
     let mut tasks = JoinSet::new();
+    let shutdown_token = internal_proxy
+        .as_ref()
+        .map(|(_, _, control)| control.shutdown_token().clone());
     for target in targets {
         let runtime = Arc::clone(&runtime);
         tasks.spawn(async move {
@@ -358,11 +366,101 @@ async fn run_listener_tasks(
         );
     }
 
-    if let Some(result) = tasks.join_next().await {
-        tasks.abort_all();
-        result??;
+    // Every select arm returns — this is a single wait, not a polling loop.
+    tokio::select! {
+        biased;
+        () = async {
+            match &shutdown_token {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        } => {
+            tracing::info!("listener shutdown signalled");
+            tasks.abort_all();
+            Ok(())
+        }
+        joined = tasks.join_next() => {
+            let Some(result) = joined else {
+                return Ok(());
+            };
+            match result {
+                Ok(Ok(())) => {
+                    // Primary stdio (or another listener) ended. Keep the
+                    // singleton alive while proxied TUI clients remain.
+                    let remaining = runtime.active_connection_count().await;
+                    if remaining > 0 && !tasks.is_empty() {
+                        tracing::info!(
+                            remaining,
+                            "primary client disconnected; keeping singleton for proxy clients"
+                        );
+                        wait_for_proxy_clients_to_drain(
+                            &runtime,
+                            &mut tasks,
+                            shutdown_token.as_ref(),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    tasks.abort_all();
+                    Ok(())
+                }
+                Ok(Err(error)) => {
+                    tasks.abort_all();
+                    Err(error)
+                }
+                Err(error) => {
+                    tasks.abort_all();
+                    Err(error.into())
+                }
+            }
+        }
     }
-    Ok(())
+}
+
+async fn wait_for_proxy_clients_to_drain(
+    runtime: &Arc<ServerRuntime>,
+    tasks: &mut JoinSet<Result<()>>,
+    shutdown_token: Option<&CancellationToken>,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            biased;
+            () = async {
+                match shutdown_token {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                tasks.abort_all();
+                return Ok(());
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                let remaining = runtime.active_connection_count().await;
+                if remaining == 0 {
+                    tracing::info!("no proxy clients remain; shutting down singleton server");
+                    tasks.abort_all();
+                    return Ok(());
+                }
+            }
+            joined = tasks.join_next() => {
+                match joined {
+                    None => return Ok(()),
+                    Some(Ok(Ok(()))) => {
+                        tasks.abort_all();
+                        return Ok(());
+                    }
+                    Some(Ok(Err(error))) => {
+                        tasks.abort_all();
+                        return Err(error);
+                    }
+                    Some(Err(error)) => {
+                        tasks.abort_all();
+                        return Err(error.into());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Stdio uses **NDJSON** (newline-delimited JSON): one JSON-RPC message per line.
@@ -483,47 +581,52 @@ async fn handle_internal_proxy_connection(
     let outbound_writer =
         spawn_outbound_writer(connection_id, outbound_rx, OutboundSink::WebSocket(writer));
 
-    if let Some(response) = runtime
-        .handle_incoming_with_actions(connection_id, first_value)
-        .await
-        && !send_incoming_response(
-            &runtime,
-            &outbound_tx,
-            response,
-            connection_id,
-            "internal_proxy_notifications",
-        )
-        .await
-    {
-        runtime.unregister_connection(connection_id).await;
-        tracing::info!(connection_id, "internal stdio proxy connection closed");
-        outbound_writer.abort();
-        return Ok(());
-    }
-
-    while let Some(frame) = reader.next().await {
-        let frame = frame?;
-        match frame {
-            Message::Text(text) => {
-                accept_incoming_client_message(
-                    Arc::clone(&runtime),
-                    connection_id,
-                    outbound_tx.clone(),
-                    Arc::clone(&transport.inbound_semaphore),
-                    text.as_str(),
-                    "internal_proxy_notifications",
-                )
-                .await;
-            }
-            Message::Close(_) => break,
-            _ => {}
+    // Serve the proxy client, but always run the cleanup below: an abrupt
+    // disconnect (connection reset without a WebSocket closing handshake)
+    // must still unregister, otherwise the connection count never drains and
+    // the singleton server keeps running after its last client is gone.
+    let result: Result<()> = async {
+        if let Some(response) = runtime
+            .handle_incoming_with_actions(connection_id, first_value)
+            .await
+            && !send_incoming_response(
+                &runtime,
+                &outbound_tx,
+                response,
+                connection_id,
+                "internal_proxy_notifications",
+            )
+            .await
+        {
+            return Ok(());
         }
+
+        while let Some(frame) = reader.next().await {
+            match frame {
+                Ok(Message::Text(text)) => {
+                    accept_incoming_client_message(
+                        Arc::clone(&runtime),
+                        connection_id,
+                        outbound_tx.clone(),
+                        Arc::clone(&transport.inbound_semaphore),
+                        text.as_str(),
+                        "internal_proxy_notifications",
+                    )
+                    .await;
+                }
+                Ok(Message::Close(_)) => break,
+                Ok(_) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
+    .await;
 
     runtime.unregister_connection(connection_id).await;
     tracing::info!(connection_id, "internal stdio proxy connection closed");
     outbound_writer.abort();
-    Ok(())
+    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -617,29 +720,37 @@ async fn handle_websocket_connection(
     let outbound_writer =
         spawn_outbound_writer(connection_id, outbound_rx, OutboundSink::WebSocket(writer));
 
-    while let Some(frame) = reader.next().await {
-        let frame = frame?;
-        match frame {
-            Message::Text(text) => {
-                accept_incoming_client_message(
-                    Arc::clone(&runtime),
-                    connection_id,
-                    outbound_tx.clone(),
-                    Arc::clone(&transport.inbound_semaphore),
-                    text.as_str(),
-                    "websocket_notifications",
-                )
-                .await;
+    // Serve the connection, but always run the cleanup below: an abrupt
+    // disconnect (connection reset without a WebSocket closing handshake)
+    // must still unregister, otherwise the connection count never drains and
+    // the singleton server never shuts down.
+    let result: Result<()> = async {
+        while let Some(frame) = reader.next().await {
+            match frame {
+                Ok(Message::Text(text)) => {
+                    accept_incoming_client_message(
+                        Arc::clone(&runtime),
+                        connection_id,
+                        outbound_tx.clone(),
+                        Arc::clone(&transport.inbound_semaphore),
+                        text.as_str(),
+                        "websocket_notifications",
+                    )
+                    .await;
+                }
+                Ok(Message::Close(_)) => break,
+                Ok(_) => {}
+                Err(error) => return Err(error.into()),
             }
-            Message::Close(_) => break,
-            _ => {}
         }
+        Ok(())
     }
+    .await;
 
     runtime.unregister_connection(connection_id).await;
     tracing::info!(connection_id, "websocket connection closed");
     outbound_writer.abort();
-    Ok(())
+    result
 }
 
 /// Parses one inbound client payload (NDJSON line or WebSocket text frame).

@@ -76,6 +76,7 @@ pub fn filter_by_modality(
     modalities: &[InputModality],
 ) -> Vec<ResponseItem> {
     let supports_text = modalities.contains(&InputModality::Text);
+    let supports_image = modalities.contains(&InputModality::Image);
     if supports_text && text_modality_keeps_all_items(items) {
         return items.to_vec();
     }
@@ -95,6 +96,7 @@ pub fn filter_by_modality(
                         devo_protocol::ContentBlock::ToolUse { .. } => true,
                         devo_protocol::ContentBlock::HostedToolUse { .. } => true,
                         devo_protocol::ContentBlock::ToolResult { .. } => true,
+                        devo_protocol::ContentBlock::Image { .. } => supports_image,
                     })
                     .cloned()
                     .collect();
@@ -123,6 +125,7 @@ pub(crate) fn text_modality_keeps_all_items(items: &[ResponseItem]) -> bool {
             | devo_protocol::ContentBlock::ToolUse { .. }
             | devo_protocol::ContentBlock::HostedToolUse { .. }
             | devo_protocol::ContentBlock::ToolResult { .. } => true,
+            devo_protocol::ContentBlock::Image { .. } => false,
         }),
         ResponseItem::Reason { .. }
         | ResponseItem::ToolCall { .. }

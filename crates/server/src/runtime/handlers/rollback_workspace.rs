@@ -1,6 +1,7 @@
 //! Git workspace side effects for two-phase session rollback.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
 
 use chrono::Utc;
@@ -25,7 +26,7 @@ impl ServerRuntime {
         restore_plan_id: &str,
         checkpoint: &TurnWorkspaceCheckpointRecordedRecord,
         affected_files: &[PathBuf],
-        record: Option<&devo_core::SessionRecord>,
+        rollout_path: Option<&Path>,
     ) -> Result<u32, Box<WorkspaceRestoreFailure>> {
         let workspace_root = PathBuf::from(
             checkpoint
@@ -46,10 +47,10 @@ impl ServerRuntime {
             policy: WorkspaceRestorePolicy::Safe,
             started_at: Utc::now(),
         };
-        if let Some(record) = record
+        if let Some(rollout_path) = rollout_path
             && let Err(error) = self
                 .rollout_store
-                .append_workspace_restore_started(record, started.clone())
+                .append_workspace_restore_started_at(rollout_path, started.clone())
         {
             return Err(Box::new(WorkspaceRestoreFailure {
                 response: self.error_response(
@@ -61,8 +62,9 @@ impl ServerRuntime {
                 completion_pending: None,
             }));
         }
-        self.broadcast_event(ServerEvent::WorkspaceRestoreStarted(
-            super::message_edit_restore::restore_started_payload(&started, restore_plan_id),
+        self.broadcast_notification(super::message_edit_restore::restore_started_notification(
+            &started,
+            restore_plan_id,
         ))
         .await;
         if let Err(error) = crate::workspace_changes::restore_git_checkpoint(
@@ -78,18 +80,17 @@ impl ServerRuntime {
                 &HashSet::new(),
                 RestoreFileStatus::Failed,
             );
-            if let Some(record) = record {
+            if let Some(rollout_path) = rollout_path {
                 let _ = self
                     .rollout_store
-                    .append_workspace_restore_completed(record, completed.clone());
+                    .append_workspace_restore_completed_at(rollout_path, completed.clone());
             }
-            self.broadcast_event(ServerEvent::WorkspaceRestoreCompleted(
-                super::message_edit_restore::restore_completed_payload(
+            self.broadcast_notification(
+                super::message_edit_restore::restore_completed_notification(
                     &completed,
                     restore_plan_id,
-                    checkpoint.turn_id,
                 ),
-            ))
+            )
             .await;
             let retry_workspace_version =
                 crate::workspace_changes::current_git_workspace_version(workspace_root)
@@ -120,18 +121,17 @@ impl ServerRuntime {
                     &HashSet::new(),
                     RestoreFileStatus::Failed,
                 );
-                if let Some(record) = record {
+                if let Some(rollout_path) = rollout_path {
                     let _ = self
                         .rollout_store
-                        .append_workspace_restore_completed(record, completed.clone());
+                        .append_workspace_restore_completed_at(rollout_path, completed.clone());
                 }
-                self.broadcast_event(ServerEvent::WorkspaceRestoreCompleted(
-                    super::message_edit_restore::restore_completed_payload(
+                self.broadcast_notification(
+                    super::message_edit_restore::restore_completed_notification(
                         &completed,
                         restore_plan_id,
-                        checkpoint.turn_id,
                     ),
-                ))
+                )
                 .await;
                 return Err(Box::new(WorkspaceRestoreFailure {
                     response: self.error_response(
@@ -160,10 +160,10 @@ impl ServerRuntime {
             RestoreFileStatus::Restored,
         );
         let restored_file_count = restored_file_count(&completed);
-        if let Some(record) = record
+        if let Some(rollout_path) = rollout_path
             && let Err(error) = self
                 .rollout_store
-                .append_workspace_restore_completed(record, completed.clone())
+                .append_workspace_restore_completed_at(rollout_path, completed.clone())
         {
             let retry_workspace_version =
                 crate::workspace_changes::current_git_workspace_version(PathBuf::from(
@@ -184,12 +184,9 @@ impl ServerRuntime {
                 completion_pending: Some((completed, restored_file_count)),
             }));
         }
-        self.broadcast_event(ServerEvent::WorkspaceRestoreCompleted(
-            super::message_edit_restore::restore_completed_payload(
-                &completed,
-                restore_plan_id,
-                checkpoint.turn_id,
-            ),
+        self.broadcast_notification(super::message_edit_restore::restore_completed_notification(
+            &completed,
+            restore_plan_id,
         ))
         .await;
         Ok(restored_file_count)
@@ -199,14 +196,14 @@ impl ServerRuntime {
         &self,
         request_id: &serde_json::Value,
         restore_plan_id: &str,
-        checkpoint_turn_id: devo_core::TurnId,
+        _checkpoint_turn_id: devo_core::TurnId,
         completed: &TurnWorkspaceRestoreCompletedRecord,
-        record: Option<&devo_core::SessionRecord>,
+        rollout_path: Option<&Path>,
     ) -> Result<(), serde_json::Value> {
-        if let Some(record) = record
+        if let Some(rollout_path) = rollout_path
             && let Err(error) = self
                 .rollout_store
-                .append_workspace_restore_completed(record, completed.clone())
+                .append_workspace_restore_completed_at(rollout_path, completed.clone())
         {
             return Err(self.error_response(
                 request_id.clone(),
@@ -214,12 +211,9 @@ impl ServerRuntime {
                 format!("failed to persist workspace restore completion: {error}"),
             ));
         }
-        self.broadcast_event(ServerEvent::WorkspaceRestoreCompleted(
-            super::message_edit_restore::restore_completed_payload(
-                completed,
-                restore_plan_id,
-                checkpoint_turn_id,
-            ),
+        self.broadcast_notification(super::message_edit_restore::restore_completed_notification(
+            completed,
+            restore_plan_id,
         ))
         .await;
         Ok(())

@@ -94,7 +94,6 @@ function SessionTranscriptPanel({
 			isReverted={controller.isReverted}
 			onForkFromTurn={controller.handleForkFromTurn}
 			onEditUserMessage={controller.handleEditUserMessage}
-			onDeletePart={controller.handleDeletePart}
 			parentSessionName={controller.parentSessionName}
 			reviewPanelOpen={reviewPanelOpen}
 			isActive={isActive}
@@ -301,7 +300,6 @@ export function SessionShell({ activeSessionId, evictRef }: SessionShellProps) {
 					<div ref={composerRef} className="relative z-30 shrink-0 px-3.5 pb-3 pt-1">
 						<ChatInputSection
 							agent={activeAgent}
-							turns={activeController.chatTurns}
 							isConnected
 							isWorking={isWorking}
 							onSendMessage={activeController.handleSendMessage}

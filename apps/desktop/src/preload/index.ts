@@ -85,6 +85,24 @@ contextBridge.exposeInMainWorld("devo", {
 		getState: () => ipcRenderer.invoke("native-traffic-log:state"),
 	},
 
+	providerOAuth: {
+		login: (providerId: string, enterpriseUrl?: string) =>
+			ipcRenderer.invoke("provider-oauth:login", { providerId, enterpriseUrl }),
+		cancel: () => ipcRenderer.invoke("provider-oauth:cancel"),
+		onUpdate: (
+			callback: (update: { url?: string; instructions: string; userCode?: string }) => void,
+		) => {
+			const listener = (
+				_event: unknown,
+				update: { url?: string; instructions: string; userCode?: string },
+			) => callback(update)
+			ipcRenderer.on("provider-oauth:update", listener)
+			return () => {
+				ipcRenderer.removeListener("provider-oauth:update", listener)
+			}
+		},
+	},
+
 	terminal: {
 		create: (options: { cwd?: string; cols?: number; rows?: number }) =>
 			ipcRenderer.invoke("terminal:create", options),

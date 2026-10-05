@@ -34,7 +34,8 @@ The short `ws://` listen target uses `127.0.0.1:3210`.
 
 - `spawn`: start the server process and attach stdin/stdout/stderr readers.
 - `connect`: connect to an existing WebSocket server.
-- `initialize`: perform the ACP protocol handshake.
+- `initialize`: perform the ACP protocol handshake. Cold-starting a stdio
+  server child uses a 60s handshake timeout; later RPCs use 10s.
 - `session_start`, `session_resume`, `session_list`: create, resume, and list
   sessions.
 - `session_settings_update`, `session_model_update`,

@@ -2,7 +2,6 @@ use super::*;
 use std::collections::HashSet;
 use std::path::Path;
 
-use devo_core::TurnStatus;
 use devo_protocol::native::item::{Item, UserInput, UserMessageEntry};
 use devo_protocol::{PendingInputItem, PendingInputKind};
 
@@ -16,18 +15,29 @@ impl ServerRuntime {
         session_id: SessionId,
         rollout_path: &Path,
     ) -> anyhow::Result<RuntimeSession> {
+        // Share one parsed projection with downstream restore work and Native
+        // history pages while the rollout remains unchanged.
+        let history = self
+            .history_cache
+            .load(session_id, rollout_path.to_path_buf())
+            .await
+            .ok();
         let mut runtime_session = self
             .rollout_store
-            .load_session_from_rollout(rollout_path, &self.deps)
+            .load_session_from_rollout_with_history(rollout_path, &self.deps, history.as_deref())
             .await?;
-        if runtime_session.summary.session_id != session_id {
+        if runtime_session.summary.session_id() != session_id {
             anyhow::bail!(
                 "rollout session id mismatch: expected {session_id}, got {}",
-                runtime_session.summary.session_id
+                runtime_session.summary.session_id()
             );
         }
-        self.apply_persisted_session_side_effects(session_id, &mut runtime_session)
-            .await?;
+        self.apply_persisted_session_side_effects_with_history(
+            session_id,
+            &mut runtime_session,
+            history.as_deref(),
+        )
+        .await?;
         Ok(runtime_session)
     }
 
@@ -36,13 +46,32 @@ impl ServerRuntime {
         session_id: SessionId,
         runtime_session: &mut RuntimeSession,
     ) -> anyhow::Result<()> {
+        let history = match runtime_session.rollout_path.as_ref() {
+            Some(path) => devo_core::read_canonical_history(path).ok(),
+            None => None,
+        };
+        self.apply_persisted_session_side_effects_with_history(
+            session_id,
+            runtime_session,
+            history.as_ref(),
+        )
+        .await
+    }
+
+    /// Applies SQLite + journal-derived side effects, reusing a history the
+    /// caller already parsed. `None` degrades exactly like the old failed
+    /// journal read: steer dedup finds no materialized keys and the
+    /// waiting-input / approval restores are skipped.
+    async fn apply_persisted_session_side_effects_with_history(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        runtime_session: &mut RuntimeSession,
+        history: Option<&devo_core::CanonicalHistory>,
+    ) -> anyhow::Result<()> {
         if !runtime_session.summary.ephemeral
             && let Err(err) = self.deps.db.upsert_session(
                 &runtime_session.summary,
-                runtime_session
-                    .record
-                    .as_ref()
-                    .map(|record| record.rollout_path.as_path()),
+                runtime_session.rollout_path.as_deref(),
             )
         {
             tracing::warn!(
@@ -54,12 +83,13 @@ impl ServerRuntime {
 
         match self.deps.db.get_stats(&session_id) {
             Ok(Some(stats)) => {
-                runtime_session.summary.total_input_tokens = stats.total_input_tokens;
-                runtime_session.summary.total_output_tokens = stats.total_output_tokens;
-                runtime_session.summary.total_tokens = stats.total_tokens;
-                runtime_session.summary.total_cache_creation_tokens =
-                    stats.total_cache_creation_tokens;
-                runtime_session.summary.total_cache_read_tokens = stats.total_cache_read_tokens;
+                runtime_session.summary.set_cumulative_usage(
+                    stats.total_input_tokens,
+                    stats.total_output_tokens,
+                    stats.total_tokens,
+                    stats.total_cache_creation_tokens,
+                    stats.total_cache_read_tokens,
+                );
                 runtime_session.summary.prompt_token_estimate = stats.prompt_token_estimate;
                 if let Ok(mut core) = runtime_session.core_session.try_lock() {
                     core.total_input_tokens = stats.total_input_tokens;
@@ -90,13 +120,13 @@ impl ServerRuntime {
             }
             Ok(None) => {
                 let stats = crate::db::SessionStats {
-                    total_input_tokens: runtime_session.summary.total_input_tokens,
-                    total_output_tokens: runtime_session.summary.total_output_tokens,
-                    total_tokens: runtime_session.summary.total_tokens,
+                    total_input_tokens: runtime_session.summary.total_input_tokens(),
+                    total_output_tokens: runtime_session.summary.total_output_tokens(),
+                    total_tokens: runtime_session.summary.total_tokens(),
                     total_cache_creation_tokens: runtime_session
                         .summary
-                        .total_cache_creation_tokens,
-                    total_cache_read_tokens: runtime_session.summary.total_cache_read_tokens,
+                        .total_cache_creation_tokens(),
+                    total_cache_read_tokens: runtime_session.summary.total_cache_read_tokens(),
                     last_input_tokens: 0,
                     turn_count: 0,
                     prompt_token_estimate: runtime_session.summary.prompt_token_estimate,
@@ -160,11 +190,7 @@ impl ServerRuntime {
         {
             Ok(items) => {
                 if !items.is_empty() {
-                    let materialized = runtime_session
-                        .record
-                        .as_ref()
-                        .map(|record| materialized_steer_keys(&record.rollout_path))
-                        .unwrap_or_default();
+                    let materialized = history.map(materialized_steer_keys).unwrap_or_default();
                     let core_session = runtime_session.core_session.lock().await;
                     let mut queue = core_session
                         .pending_turn_queue
@@ -216,7 +242,7 @@ impl ServerRuntime {
                     && goal.status == crate::goal::GoalStatus::Active
                 {
                     let previous_status = goal.status;
-                    match goal_store.set_status(devo_protocol::ThreadGoalStatus::Paused) {
+                    match goal_store.set_status(crate::goal::GoalStatus::Paused) {
                         Ok(paused_goal) => {
                             if let Err(error) = self
                                 .goal_durable_store
@@ -258,26 +284,71 @@ impl ServerRuntime {
             }
         }
 
-        if let Some(record) = runtime_session.record.as_ref() {
+        if let Some(history) = history {
             let host_session_id = runtime_session
                 .summary
-                .parent_session_id
+                .parent_session_id()
                 .unwrap_or(session_id);
-            self.restore_waiting_user_inputs_from_rollout(
-                session_id,
-                host_session_id,
-                &record.rollout_path,
-            )
-            .await;
-            self.restore_waiting_approvals_from_rollout(
-                session_id,
-                host_session_id,
-                &record.rollout_path,
-            )
-            .await;
+            self.restore_waiting_user_inputs_from_history(session_id, host_session_id, history)
+                .await;
+            self.restore_waiting_approvals_from_history(session_id, host_session_id, history)
+                .await;
         }
 
         Ok(())
+    }
+
+    /// Hydrates the child sessions of `root_session_id` that are not yet
+    /// resident.
+    ///
+    /// A child turn parked on an approval checkpoint when the process died
+    /// can only recover if the child session is hydrated: hydration is what
+    /// re-registers its waiting-approval lane
+    /// (`restore_waiting_approvals_from_rollout`), which the resume-time
+    /// reissue then delivers to the controlling client. Children otherwise
+    /// load lazily (only when a parent tool awaits them), so without this
+    /// the approval — and any parent flow waiting on the child — stays
+    /// stuck forever after a server restart.
+    pub(crate) async fn hydrate_child_sessions_for_approval_recovery(
+        self: &Arc<Self>,
+        root_session_id: SessionId,
+    ) {
+        let children = match self.deps.db.list_sessions() {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|row| row.parent_session_id == Some(root_session_id))
+                .map(|row| row.session_id)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to list child sessions for approval recovery"
+                );
+                return;
+            }
+        };
+        for child_session_id in children {
+            if self.session(child_session_id).await.is_some() {
+                continue;
+            }
+            match Arc::clone(self)
+                .get_or_load_parent_session(child_session_id)
+                .await
+            {
+                Ok(_handle) => {}
+                Err(crate::runtime::session_cache::LoadSessionError::SessionLocked { .. }) => {
+                    // Owned by another live Devo process: that process owns
+                    // the child's approvals too.
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %child_session_id,
+                        error = %error,
+                        "failed to hydrate child session for approval recovery"
+                    );
+                }
+            }
+        }
     }
 
     /// Loads durable sessions from rollout files and installs them into the runtime map.
@@ -289,44 +360,70 @@ impl ServerRuntime {
         for (session_id, mut runtime_session) in sessions {
             self.apply_persisted_session_side_effects(session_id, &mut runtime_session)
                 .await?;
-            if runtime_session.summary.parent_session_id.is_none() {
-                self.insert_root_session_actor(runtime_session)
+            // Cross-process lock: a rollout owned by a live Devo process is
+            // skipped (its owner holds the authoritative state); bulk restore
+            // continues with the rest instead of failing.
+            let session_lock = match runtime_session.rollout_path.as_deref() {
+                Some(rollout_path) => {
+                    match crate::runtime::session_cache::SessionFileLock::acquire(rollout_path) {
+                        Ok(lock) => Some(lock),
+                        Err(contention) => {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                holder_pid = contention.holder_pid,
+                                "skipping session locked by another Devo process during bulk restore"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                None => None,
+            };
+            if runtime_session.summary.parent_session_id().is_none() {
+                self.insert_root_session_actor(runtime_session, session_lock)
                     .await
                     .map_err(|error| anyhow::anyhow!("{error}"))?;
             } else {
-                let session_id = runtime_session.summary.session_id;
-                self.insert_session_actor(SessionActorState::from_runtime_session(runtime_session))
+                let session_id = runtime_session.summary.session_id();
+                // Same rebuild as the lazy child-hydrate path: bulk restore
+                // must also re-link children into their parent's registry.
+                self.restore_agent_registry_entry_for_hydrated_child(&runtime_session)
                     .await;
+                let mut state = SessionActorState::from_runtime_session(runtime_session);
+                state.session_file_lock = session_lock;
+                self.insert_session_actor(state).await;
                 self.resume_pending_queue_if_idle(session_id).await;
             }
-            // Loading a persisted InProgress turn with no live registry owner is
-            // an abandoned execution. Materialize recovery availability once so
-            // session reads and both clients see authoritative state.
-            if let Some(recovery) = self.turn_recovery(session_id).await?
-                && let Some(handle) = self.session(session_id).await
-                && let Some(snapshot) = handle.turn_persistence_snapshot().await
-                && let Some(record) = snapshot.record
-            {
-                let path = record.rollout_path.clone();
-                let turn_id = recovery.turn_id.clone();
-                let replay = tokio::task::spawn_blocking(move || {
-                    devo_core::durable_execution::read_execution_replay(
-                        &path,
-                        devo_core::TurnId::try_from(turn_id.as_str())?,
-                    )
-                })
-                .await??;
-                if replay.recovery.is_none() {
-                    self.persist_recovery_disposition(
-                        session_id,
-                        devo_core::TurnId::try_from(recovery.turn_id.as_str())?,
-                        devo_core::durable_execution::RecoveryDisposition::Available,
-                        "Execution was lost while the application was not running.",
-                    )
-                    .await?;
-                }
-            }
+            self.materialize_abandoned_turn_recovery_if_needed(session_id)
+                .await?;
         }
+        Ok(())
+    }
+
+    /// When a hydrated session has an abandoned non-terminal turn and no live
+    /// registry owner, persist `RecoveryDisposition::Available` once so resume
+    /// and `turn/recovery/read` agree for crash-kill (not only graceful shutdown).
+    pub(crate) async fn materialize_abandoned_turn_recovery_if_needed(
+        self: &Arc<Self>,
+        session_id: SessionId,
+    ) -> anyhow::Result<()> {
+        // One replay read serves both the disposition computation (inside
+        // `saved_turn`) and the has-Recovery-record check — re-reading the
+        // journal here doubled the parse cost of every hydrate.
+        let Some(saved) = self.saved_turn(session_id).await? else {
+            return Ok(());
+        };
+        if saved.execution.recovery.is_some() {
+            return Ok(());
+        }
+        self.persist_recovery_disposition(
+            session_id,
+            saved.recovery.turn_id,
+            devo_core::durable_execution::RecoveryDisposition::Available,
+            "Execution was lost while the application was not running.",
+        )
+        .await?;
+        self.broadcast_recovery_state(session_id).await;
         Ok(())
     }
 
@@ -347,6 +444,7 @@ impl ServerRuntime {
     /// Completes deferred (in-progress) items for all active turns and
     /// persists interrupted turn records. Called on graceful shutdown.
     pub async fn shutdown(self: &Arc<Self>) {
+        self.schedule_wake_cancel.cancel();
         self.command_exec_manager.terminate_all().await;
         let session_handles = self.list_session_handles().await;
 
@@ -363,9 +461,10 @@ impl ServerRuntime {
             let Some(snapshot) = session_handle.take_shutdown_deferred_snapshot().await else {
                 continue;
             };
-            let Some(turn_id) = snapshot.active_turn_id else {
+            let Some(legacy_turn_id) = snapshot.active_turn_id else {
                 continue;
             };
+            let turn_id = legacy_turn_id;
 
             // Stop the live turn writer before appending recovery / terminal
             // rollout lines. Otherwise a concurrent journal append can leave a
@@ -389,11 +488,11 @@ impl ServerRuntime {
                 tracing::warn!(%session_id, %error, "failed to save turn recovery state");
             }
 
-            if let Some(turn) = self.active_turns.active_turn_metadata(session_id).await
-                && turn.status == TurnStatus::WaitingApproval
+            if let Some(ref turn) = snapshot.active_turn
+                && turn.native.status == devo_protocol::native::turn::TurnStatus::WaitingApproval
             {
-                if snapshot.record.is_some()
-                    && let Err(error) = self.persist_turn_line_deduped(session_id, &turn).await
+                if snapshot.rollout_path.is_some()
+                    && let Err(error) = self.persist_turn_line_deduped(session_id, turn).await
                 {
                     tracing::warn!(
                         session_id = %session_id,
@@ -403,35 +502,50 @@ impl ServerRuntime {
                 }
                 tracing::info!(
                     session_id = %session_id,
-                    turn_id = %turn.turn_id,
+                    turn_id = %turn.turn_id(),
                     "preserved waiting-approval turn on shutdown"
                 );
                 continue;
             }
 
+            let active_turn = snapshot.active_turn.clone();
+            let native_session_id = if let Some(turn) = active_turn.as_ref() {
+                turn.native.session_id
+            } else if let Some(summary) = session_handle.summary().await {
+                summary.native.id
+            } else {
+                // boundary: legacy session id when summary unavailable
+                session_id
+            };
+            let native_turn_id = active_turn
+                .as_ref()
+                .map(|turn| turn.native.id)
+                .unwrap_or_else(|| {
+                    // boundary: shutdown snapshot legacy turn id without RuntimeTurn
+                    turn_id
+                });
             if let Some((item_id, item_seq, text)) = snapshot.deferred_assistant
                 && !text.trim().is_empty()
             {
-                self.complete_item(
-                    session_id,
-                    turn_id,
+                self.complete_native_item(
+                    native_session_id,
+                    native_turn_id,
                     item_id,
                     item_seq,
-                    ItemKind::AgentMessage,
-                    TurnItem::AgentMessage(TextItem { text: text.clone() }),
-                    serde_json::json!({ "title": "Assistant", "text": text }),
+                    Item::AssistantMessage { text: text.clone() },
                 )
                 .await;
             }
             if let Some((item_id, item_seq, text)) = snapshot.deferred_reasoning {
-                self.complete_item(
-                    session_id,
-                    turn_id,
+                self.complete_native_item(
+                    native_session_id,
+                    native_turn_id,
                     item_id,
                     item_seq,
-                    ItemKind::Reasoning,
-                    TurnItem::Reasoning(TextItem { text: text.clone() }),
-                    serde_json::json!({ "title": "Reasoning", "text": text }),
+                    Item::Reasoning {
+                        text: text.clone(),
+                        provider_payload_ref: None,
+                    },
                 )
                 .await;
             }
@@ -440,11 +554,11 @@ impl ServerRuntime {
             else {
                 continue;
             };
-            if interrupted_turn.turn_id != turn_id {
+            if interrupted_turn.turn_id() != turn_id {
                 continue;
             }
 
-            if snapshot.record.is_some()
+            if snapshot.rollout_path.is_some()
                 && let Err(error) = self
                     .persist_turn_line_deduped(session_id, &interrupted_turn)
                     .await
@@ -458,7 +572,7 @@ impl ServerRuntime {
 
             tracing::info!(
                 session_id = %session_id,
-                turn_id = %interrupted_turn.turn_id,
+                turn_id = %interrupted_turn.turn_id(),
                 "completed deferred items and interrupted turn on shutdown"
             );
         }
@@ -484,24 +598,22 @@ struct MaterializedSteerKeys {
     client_user_message_ids: HashSet<String>,
 }
 
-fn materialized_steer_keys(rollout_path: &Path) -> MaterializedSteerKeys {
+fn materialized_steer_keys(history: &devo_core::CanonicalHistory) -> MaterializedSteerKeys {
     let mut keys = MaterializedSteerKeys::default();
-    let Ok(history) = devo_core::read_canonical_history(rollout_path) else {
-        return keys;
-    };
-    for envelope in history.items {
+    for envelope in &history.items {
         let Item::UserMessage {
             entry: UserMessageEntry::Steer,
             content,
             client_user_message_id,
-        } = envelope.item
+        } = &envelope.item
         else {
             continue;
         };
         if let Some(client_user_message_id) = client_user_message_id {
-            keys.client_user_message_ids.insert(client_user_message_id);
+            keys.client_user_message_ids
+                .insert(client_user_message_id.clone());
         }
-        if let Some(text) = user_message_preview_text(&content) {
+        if let Some(text) = user_message_preview_text(content) {
             keys.texts.insert(text);
         }
     }
@@ -547,4 +659,60 @@ fn steer_already_materialized(item: &PendingInputItem, keys: &MaterializedSteerK
         return true;
     }
     pending_input_preview_text(item).is_some_and(|text| keys.texts.contains(&text))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    #[test]
+    fn stale_steer_restore_matches_the_materialized_client_message_id() {
+        let now = Utc::now();
+        let client_user_message_id = "turn/steer:retry-1";
+        let history = devo_core::CanonicalHistory {
+            items: vec![devo_protocol::native::item::ItemEnvelope {
+                id: devo_protocol::native::ids::ItemId::new(),
+                session_id: devo_protocol::native::ids::SessionId::new(),
+                turn_id: devo_protocol::native::ids::TurnId::new(),
+                seq: 1,
+                revision: 1,
+                created_at: now,
+                updated_at: now,
+                state: devo_protocol::native::item::ItemState::Completed,
+                item: Item::UserMessage {
+                    client_user_message_id: Some(client_user_message_id.to_string()),
+                    content: vec![UserInput::Text {
+                        text: "original steer".to_string(),
+                    }],
+                    entry: UserMessageEntry::Steer,
+                },
+                parent_id: None,
+            }],
+            ..Default::default()
+        };
+        let materialized = materialized_steer_keys(&history);
+        let retry = PendingInputItem::new(
+            PendingInputKind::UserText {
+                text: "retry with different text".to_string(),
+            },
+            Some(serde_json::json!({
+                "clientUserMessageId": client_user_message_id
+            })),
+            now,
+        );
+        let different_id = PendingInputItem::new(
+            PendingInputKind::UserText {
+                text: "retry with different text".to_string(),
+            },
+            Some(serde_json::json!({
+                "clientUserMessageId": "turn/steer:retry-2"
+            })),
+            now,
+        );
+
+        assert!(steer_already_materialized(&retry, &materialized));
+        assert!(!steer_already_materialized(&different_id, &materialized));
+    }
 }

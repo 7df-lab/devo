@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::collections::HashSet;
-use std::error::Error as StdError;
 use std::pin::Pin;
 
 use anyhow::Context;
@@ -21,14 +19,11 @@ use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_protocol::normalize_tool_result_messages;
 use futures::Stream;
-use futures::StreamExt;
 use reqwest::Client;
 use reqwest::header::ACCEPT_ENCODING;
 use reqwest::header::CACHE_CONTROL;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderValue;
-use reqwest_eventsource::Event;
-use reqwest_eventsource::EventSource;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Map;
@@ -37,16 +32,15 @@ use serde_json::json;
 use tracing::debug;
 
 use super::AnthropicAIRole;
-use super::stream_usage::AnthropicStreamUsage;
 use crate::ModelProviderSDK;
 use crate::ProviderAdapter;
 use crate::ProviderCapabilities;
 use crate::ProviderHttpOptions;
 use crate::dsml::DsmlToolCallHealer;
-use crate::error::ProviderError;
 use crate::hosted_tools::append_anthropic_hosted_tools;
 use crate::http::invalid_status_error;
 use crate::merge_extra_body;
+mod stream;
 
 /// <https://platform.claude.com/docs/en/api/messages>
 /// Anthropic provider backed by the official HTTP API.
@@ -55,6 +49,8 @@ pub struct AnthropicProvider {
     streaming_client: Client,
     base_url: String,
     api_key: Option<String>,
+    /// When true, authenticate with OAuth bearer + beta headers instead of x-api-key.
+    oauth: bool,
     http_options: ProviderHttpOptions,
 }
 
@@ -70,12 +66,21 @@ impl AnthropicProvider {
                 .unwrap_or_else(|_| Client::new()),
             base_url: base_url.into(),
             api_key: None,
+            oauth: false,
             http_options,
         }
     }
 
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
+        self.oauth = false;
+        self
+    }
+
+    /// Authenticate with a Claude Pro/Max OAuth access token (L2-DES-AUTH-001).
+    pub fn with_oauth_access(mut self, access_token: impl Into<String>) -> Self {
+        self.api_key = Some(access_token.into());
+        self.oauth = true;
         self
     }
 
@@ -105,9 +110,16 @@ impl AnthropicProvider {
             .apply_request_headers(self.http_options.apply_custom_headers(builder), headers);
 
         let builder = if let Some(api_key) = &self.api_key {
-            builder
-                .header("x-api-key", api_key)
-                .header("Authorization", format!("Bearer {}", api_key))
+            if self.oauth {
+                builder
+                    .header("Authorization", format!("Bearer {api_key}"))
+                    .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20")
+                    .header("x-app", "cli")
+            } else {
+                builder
+                    .header("x-api-key", api_key)
+                    .header("Authorization", format!("Bearer {api_key}"))
+            }
         } else {
             builder
         };
@@ -205,6 +217,15 @@ enum AnthropicInputContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
+    #[serde(rename = "image")]
+    Image { source: AnthropicImageSource },
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicImageSource {
+    r#type: &'static str,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -375,440 +396,7 @@ impl ModelProviderSDK for AnthropicProvider {
         &self,
         request: ModelRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        let body = build_request(&request, true);
-        debug!(
-            provider = "anthropic",
-            api_base = %self.base_url,
-            model = %request.model,
-            messages = request.messages.len(),
-            tools = request.tools.as_ref().map_or(0, Vec::len),
-            max_tokens = request.max_tokens,
-            "sending anthropic streaming request"
-        );
-
-        let dsml_healer = DsmlToolCallHealer::for_request(&request);
-        let event_source = EventSource::new(self.streaming_request_builder(
-            &body,
-            &crate::request_headers(request.extra_body.as_ref()),
-        ))
-        .context("failed to create anthropic event source")?;
-        let stream = async_stream::try_stream! {
-            let mut message_id = String::new();
-            let mut stream_usage = AnthropicStreamUsage::default();
-            let mut stop_reason: Option<StopReason> = None;
-            let mut content_blocks: BTreeMap<usize, ResponseContent> = BTreeMap::new();
-            let mut reasoning_blocks: BTreeMap<usize, String> = BTreeMap::new();
-            let mut provider_reasoning_blocks: BTreeMap<usize, Map<String, Value>> = BTreeMap::new();
-            let mut completed_reasoning_blocks: HashSet<usize> = HashSet::new();
-            let mut tool_json: HashMap<usize, String> = HashMap::new();
-            let mut hosted_tool_inputs: HashMap<String, Value> = HashMap::new();
-            let mut dsml_text_filters = BTreeMap::new();
-
-            futures::pin_mut!(event_source);
-            loop {
-                let event = match event_source.next().await {
-                    Some(event) => event,
-                    None => break,
-                };
-                let event = match event {
-                    Ok(event) => event,
-                    Err(reqwest_eventsource::Error::InvalidStatusCode(status, response)) => {
-                        Err(invalid_status_error(
-                            "anthropic",
-                            &request.model,
-                            "stream",
-                            status,
-                            response,
-                            &body,
-                        )
-                        .await)?
-                    }
-                    Err(error) => Err(stream_error(
-                        format!(
-                            "anthropic stream error for model {}: {}",
-                            request.model,
-                            format_eventsource_error(&error)
-                        )
-                    ))?,
-                };
-
-                match event {
-                    Event::Open => {}
-                    Event::Message(message) => {
-                        let data: Value = serde_json::from_str(&message.data)
-                            .map_err(|error| anyhow::anyhow!("failed to parse anthropic stream payload: {error}"))?;
-
-                        match message.event.as_str() {
-                            "message_start" => {
-                                if let Some(id) = data
-                                    .get("message")
-                                    .and_then(Value::as_object)
-                                    .and_then(|message| message.get("id"))
-                                    .and_then(Value::as_str)
-                                {
-                                    message_id = id.to_string();
-                                }
-                                if let Some(usage) = stream_usage.update_from_message_start(&data) {
-                                    yield StreamEvent::UsageDelta(usage);
-                                }
-                            }
-                            "content_block_start" => {
-                                let Some(index) = data.get("index").and_then(Value::as_u64) else {
-                                    continue;
-                                };
-                                let Some(content_block) = data.get("content_block") else {
-                                    continue;
-                                };
-                                let block: AnthropicResponseContentBlock =
-                                    serde_json::from_value(content_block.clone()).map_err(|error| {
-                                        anyhow::anyhow!(
-                                            "failed to parse anthropic content block start: {error}"
-                                        )
-                                    })?;
-                                match block.kind.as_str() {
-                                    "text" => {
-                                        if let Some(filter) = dsml_healer.text_stream_filter() {
-                                            dsml_text_filters.insert(index as usize, filter);
-                                        }
-                                        content_blocks.insert(
-                                            index as usize,
-                                            ResponseContent::Text(String::new()),
-                                        );
-                                        yield StreamEvent::TextStart {
-                                            index: index as usize,
-                                        };
-                                    }
-                                    "tool_use" => {
-                                        let Some(id) = block.id.clone() else {
-                                            continue;
-                                        };
-                                        let Some(name) = block.name.clone() else {
-                                            continue;
-                                        };
-                                        let input = block
-                                            .input
-                                            .clone()
-                                            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-                                        content_blocks.insert(
-                                            index as usize,
-                                            ResponseContent::ToolUse {
-                                                id: id.clone(),
-                                                name: name.clone(),
-                                                input: input.clone(),
-                                            },
-                                        );
-                                        tool_json.insert(index as usize, String::new());
-                                        yield StreamEvent::ToolCallStart {
-                                            index: index as usize,
-                                            id,
-                                            name,
-                                            input,
-                                        };
-                                    }
-                                    "server_tool_use" => {
-                                        let Some(id) = block.id.clone() else {
-                                            continue;
-                                        };
-                                        let name = block
-                                            .name
-                                            .clone()
-                                            .unwrap_or_else(|| "web_search".to_string());
-                                        let input = block
-                                            .input
-                                            .clone()
-                                            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-                                        content_blocks.insert(
-                                            index as usize,
-                                            ResponseContent::HostedToolUse {
-                                                id: id.clone(),
-                                                name: name.clone(),
-                                                input: input.clone(),
-                                                output: None,
-                                                status: None,
-                                            },
-                                        );
-                                        tool_json.insert(index as usize, String::new());
-                                    }
-                                    "web_search_tool_result" | "web_fetch_tool_result" => {
-                                        let id = block
-                                            .tool_use_id
-                                            .clone()
-                                            .or_else(|| block.id.clone())
-                                            .unwrap_or_default();
-                                        let name = hosted_result_tool_name(&block.kind);
-                                        let input = hosted_tool_inputs
-                                            .get(&id)
-                                            .cloned()
-                                            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-                                        let output = block.content.clone();
-                                        let status = Some(
-                                            block
-                                                .status
-                                                .clone()
-                                                .unwrap_or_else(|| "completed".to_string()),
-                                        );
-                                        content_blocks.insert(
-                                            index as usize,
-                                            ResponseContent::HostedToolUse {
-                                                id: id.clone(),
-                                                name: name.clone(),
-                                                input: input.clone(),
-                                                output: output.clone(),
-                                                status: status.clone(),
-                                            },
-                                        );
-                                        yield StreamEvent::HostedToolCallDone {
-                                            index: index as usize,
-                                            id,
-                                            name,
-                                            input,
-                                            output,
-                                            status,
-                                        };
-                                    }
-                                    "thinking" => {
-                                        reasoning_blocks.insert(index as usize, String::new());
-                                        provider_reasoning_blocks.insert(
-                                            index as usize,
-                                            anthropic_thinking_payload_map(&block),
-                                        );
-                                        yield StreamEvent::ReasoningStart {
-                                            index: index as usize,
-                                        };
-                                    }
-                                    _ => {}
-                                };
-                            }
-                            "content_block_delta" => {
-                                let Some(index) = data.get("index").and_then(Value::as_u64) else {
-                                    continue;
-                                };
-                                let Some(delta) = data.get("delta").and_then(Value::as_object)
-                                else {
-                                    continue;
-                                };
-                                match delta.get("type").and_then(Value::as_str) {
-                                    Some("text_delta") => {
-                                        let text = delta
-                                            .get("text")
-                                            .and_then(Value::as_str)
-                                            .unwrap_or_default();
-                                        if let Some(ResponseContent::Text(value)) =
-                                            content_blocks.get_mut(&(index as usize))
-                                        {
-                                            value.push_str(text);
-                                        }
-                                        let index = index as usize;
-                                        let text_chunks = if let Some(filter) =
-                                            dsml_text_filters.get_mut(&index)
-                                        {
-                                            filter.consume(text)
-                                        } else {
-                                            vec![text.to_string()]
-                                        };
-                                        for text in text_chunks {
-                                            yield StreamEvent::TextDelta {
-                                                index,
-                                                text,
-                                            };
-                                        }
-                                    }
-                                    Some("thinking_delta") => {
-                                        let text = delta
-                                            .get("thinking")
-                                            .or_else(|| delta.get("text"))
-                                            .and_then(Value::as_str)
-                                            .unwrap_or_default();
-                                        if let Some(value) = reasoning_blocks.get_mut(&(index as usize))
-                                        {
-                                            value.push_str(text);
-                                        }
-                                        append_json_string_field(
-                                            provider_reasoning_blocks
-                                                .entry(index as usize)
-                                                .or_insert_with(|| {
-                                                    let mut payload = Map::new();
-                                                    payload
-                                                        .insert("type".to_string(), json!("thinking"));
-                                                    payload
-                                                }),
-                                            "thinking",
-                                            text,
-                                        );
-                                        yield StreamEvent::ReasoningDelta {
-                                            index: index as usize,
-                                            text: text.to_string(),
-                                        };
-                                    }
-                                    Some("signature_delta") => {
-                                        let signature = delta
-                                            .get("signature")
-                                            .and_then(Value::as_str)
-                                            .unwrap_or_default();
-                                        append_json_string_field(
-                                            provider_reasoning_blocks
-                                                .entry(index as usize)
-                                                .or_insert_with(|| {
-                                                    let mut payload = Map::new();
-                                                    payload
-                                                        .insert("type".to_string(), json!("thinking"));
-                                                    payload
-                                                }),
-                                            "signature",
-                                            signature,
-                                        );
-                                    }
-                                    Some("input_json_delta") => {
-                                        let partial_json = delta
-                                            .get("partial_json")
-                                            .and_then(Value::as_str)
-                                            .unwrap_or_default();
-                                        if let Some(acc) = tool_json.get_mut(&(index as usize)) {
-                                            acc.push_str(partial_json);
-                                        }
-                                        yield StreamEvent::ToolCallInputDelta {
-                                            index: index as usize,
-                                            partial_json: partial_json.to_string(),
-                                        };
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            "content_block_stop" => {
-                                let index = data.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                                if let Some(mut filter) = dsml_text_filters.remove(&index) {
-                                    for text in filter.finish() {
-                                        yield StreamEvent::TextDelta {
-                                            index,
-                                            text,
-                                        };
-                                    }
-                                }
-                                if let Some(json_str) = tool_json.remove(&index)
-                                    && !json_str.is_empty()
-                                    && let Ok(parsed) = serde_json::from_str(&json_str)
-                                    && let Some(block) = content_blocks.get_mut(&index)
-                                {
-                                    match block {
-                                        ResponseContent::ToolUse { input, .. }
-                                        | ResponseContent::HostedToolUse { input, .. } => {
-                                            *input = parsed;
-                                        }
-                                        ResponseContent::Text(_)
-                                        | ResponseContent::ProviderReasoning { .. } => {}
-                                    }
-                                }
-                                if let Some(ResponseContent::HostedToolUse {
-                                    id,
-                                    name,
-                                    input,
-                                    output,
-                                    status,
-                                }) = content_blocks.get(&index)
-                                    && output.is_none()
-                                    && status.is_none()
-                                {
-                                    hosted_tool_inputs.insert(id.clone(), input.clone());
-                                    yield StreamEvent::HostedToolCallStart {
-                                        index,
-                                        id: id.clone(),
-                                        name: name.clone(),
-                                        input: input.clone(),
-                                    };
-                                }
-                                if reasoning_blocks.contains_key(&index)
-                                    && completed_reasoning_blocks.insert(index)
-                                {
-                                    yield StreamEvent::ReasoningDone { index };
-                                }
-                            }
-                            "message_delta" => {
-                                if let Some(delta) = data.get("delta").and_then(Value::as_object)
-                                    && let Some(reason) =
-                                        delta.get("stop_reason").and_then(Value::as_str)
-                                    {
-                                        stop_reason = Some(parse_stop_reason(reason));
-                                    }
-                                if let Some(usage) = stream_usage.update_from_message_delta(&data) {
-                                    yield StreamEvent::UsageDelta(usage);
-                                }
-                            }
-                            "message_stop" => {
-                                for (index, mut filter) in std::mem::take(&mut dsml_text_filters) {
-                                    for text in filter.finish() {
-                                        yield StreamEvent::TextDelta {
-                                            index,
-                                            text,
-                                        };
-                                    }
-                                }
-                                for index in reasoning_blocks.keys().copied().collect::<Vec<_>>() {
-                                    if completed_reasoning_blocks.insert(index) {
-                                        yield StreamEvent::ReasoningDone { index };
-                                    }
-                                }
-                                insert_provider_reasoning_blocks(
-                                    &mut content_blocks,
-                                    std::mem::take(&mut provider_reasoning_blocks),
-                                );
-                                let response = ModelResponse {
-                                    id: message_id.clone(),
-                                    content: dsml_healer
-                                        .heal_response_content(content_blocks.into_values().collect()),
-                                    stop_reason: stop_reason.clone(),
-                                    usage: stream_usage.snapshot(),
-                                    metadata: ResponseMetadata {
-                                        extras: reasoning_blocks
-                                            .values()
-                                            .filter(|text| !text.is_empty())
-                                            .cloned()
-                                            .map(|text| ResponseExtra::ReasoningText { text })
-                                            .collect(),
-                                    },
-                                };
-                                yield StreamEvent::MessageDone { response };
-                                return;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-
-            for (index, mut filter) in std::mem::take(&mut dsml_text_filters) {
-                for text in filter.finish() {
-                    yield StreamEvent::TextDelta {
-                        index,
-                        text,
-                    };
-                }
-            }
-            for index in reasoning_blocks.keys().copied().collect::<Vec<_>>() {
-                if completed_reasoning_blocks.insert(index) {
-                    yield StreamEvent::ReasoningDone { index };
-                }
-            }
-            insert_provider_reasoning_blocks(
-                &mut content_blocks,
-                provider_reasoning_blocks,
-            );
-            let response = ModelResponse {
-                id: message_id,
-                content: dsml_healer.heal_response_content(content_blocks.into_values().collect()),
-                stop_reason,
-                usage: stream_usage.snapshot(),
-                metadata: ResponseMetadata {
-                    extras: reasoning_blocks
-                        .into_values()
-                        .filter(|text| !text.is_empty())
-                        .map(|text| ResponseExtra::ReasoningText { text })
-                        .collect(),
-                },
-            };
-            yield StreamEvent::MessageDone { response };
-        };
-
-        Ok(Box::pin(stream))
+        stream::completion_stream(self, request).await
     }
 
     fn name(&self) -> &str {
@@ -827,97 +415,7 @@ impl ProviderAdapter for AnthropicProvider {
     }
 }
 
-/// Here is the documentation of the Anthropic Messages API request body.
-///
-/// Official reference:
-/// <https://platform.claude.com/docs/en/api/messages>
-///
-/// Create
-/// - `POST /v1/messages`
-///   Send a structured list of input messages with text and/or image content,
-///   and the model will generate the next message in the conversation.
-///   The Messages API can be used for either single queries or stateless
-///   multi-turn conversations.
-///
-/// Body Parameters
-/// - `max_tokens: number`
-///   The maximum number of tokens to generate before stopping.
-/// - `messages: array of MessageParam`
-///   Input messages. Anthropic models operate on alternating `user` and
-///   `assistant` turns, and consecutive turns with the same role are combined.
-///   Each input message has:
-///   - `role: "user" or "assistant"`
-///   - `content: string or array of ContentBlockParam`
-///     A string is shorthand for a single text block.
-///     Supported content block families documented by Anthropic include:
-///     - `TextBlockParam`
-///     - `ImageBlockParam`
-///     - `DocumentBlockParam`
-///     - `SearchResultBlockParam`
-///     - `ThinkingBlockParam`
-///     - `RedactedThinkingBlockParam`
-///     - `ToolUseBlockParam`
-///     - `ToolResultBlockParam`
-///     - `ServerToolUseBlockParam`
-///     - `WebSearchToolResultBlockParam`
-///     - `WebFetchToolResultBlockParam`
-///     - `CodeExecutionToolResultBlockParam`
-///     - `BashCodeExecutionToolResultBlockParam`
-///     - `TextEditorCodeExecutionToolResultBlockParam`
-///     - `ToolSearchToolResultBlockParam`
-///     - `ContainerUploadBlockParam`
-/// - `model: Model`
-///   The model slug/id that will complete the prompt.
-/// - `cache_control: optional CacheControlEphemeral`
-///   Top-level cache control that automatically applies a cache marker to the
-///   last cacheable block in the request.
-/// - `container: optional string`
-///   Container identifier for reuse across requests.
-/// - `inference_geo: optional string`
-///   Geographic region for inference processing.
-/// - `metadata: optional Metadata`
-///   Request metadata such as `user_id`.
-/// - `output_config: optional OutputConfig`
-///   Output configuration such as response format and effort.
-/// - `service_tier: optional "auto" or "standard_only"`
-///   Determines whether priority or standard capacity is used.
-/// - `stop_sequences: optional array of string`
-///   Custom sequences that stop generation.
-/// - `stream: optional boolean`
-///   Whether to stream the response using server-sent events.
-/// - `system: optional string or array of TextBlockParam`
-///   System prompt. Anthropic Messages uses a top-level `system` field rather
-///   than a `"system"` message role.
-/// - `temperature: optional number`
-///   Amount of randomness injected into the response.
-/// - `thinking: optional ThinkingConfigParam`
-///   Extended-thinking configuration.
-///   One of the following:
-///   - `ThinkingConfigEnabled = object { budget_tokens, type, display }`
-///   - `ThinkingConfigDisabled = object { type }`
-///   - `ThinkingConfigAdaptive = object { type, display }`
-///     This implementation sends `type: "enabled"` for enabled thinking and
-///     uses `output_config.effort` for effort control.
-/// - `tool_choice: optional ToolChoice`
-///   Controls how the model uses available tools.
-/// - `tools: optional array of ToolUnion`
-///   Tool definitions that the model may use.
-/// - `top_k: optional number`
-///   Limits sampling to the top K options.
-/// - `top_p: optional number`
-///   Uses nucleus sampling.
-///
-/// Notes about this implementation:
-/// - This builder currently emits the subset represented by the crate's
-///   `ModelRequest`: `model`, `max_tokens`, `stream`, `messages`, optional
-///   `system`, optional `tools`, optional `thinking`, optional
-///   `output_config.effort`, and any merged `extra_body`.
-/// - Request message content is currently serialized from shared IR blocks into
-///   Anthropic `text`, `tool_use`, and `tool_result` blocks.
-/// - More advanced Anthropic request features documented above, such as image
-///   blocks, document blocks, `tool_choice`, `cache_control`,
-///   `metadata`, `service_tier`, `stop_sequences`, `top_k`, and `top_p`, are
-///   not constructed directly here unless supplied through `extra_body`.
+/// Anthropic messages request body. See <https://platform.claude.com/docs/en/api/messages>.
 fn build_request(request: &ModelRequest, stream: bool) -> Value {
     let mut messages = request.messages.clone();
     normalize_tool_result_messages(&mut messages);
@@ -959,124 +457,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
     root
 }
 
-/// Here is the documentation of the Anthropic Messages API response body.
-///
-/// Returns
-/// - `Message = object`
-///   Generated assistant message returned by the Messages API.
-/// - `id: string`
-///   Unique object identifier.
-/// - `container: Container`
-///   Information about the container used in the request.
-///   - `id: string`
-///   - `expires_at: string`
-/// - `content: array of ContentBlock`
-///   Content generated by the model.
-///   Anthropic documents a large union of possible response block types,
-///   including:
-///   - `TextBlock`
-///   - `ThinkingBlock`
-///   - `RedactedThinkingBlock`
-///   - `ToolUseBlock`
-///   - `ServerToolUseBlock`
-///   - `WebSearchToolResultBlock`
-///   - `WebFetchToolResultBlock`
-///   - `CodeExecutionToolResultBlock`
-///   - `BashCodeExecutionToolResultBlock`
-///   - `TextEditorCodeExecutionToolResultBlock`
-///   - `ToolSearchToolResultBlock`
-///   - `ContainerUploadBlock`
-/// - `model: Model`
-///   The model that completed the prompt.
-/// - `role: "assistant"`
-///   The generated message role.
-/// - `stop_details: RefusalStopDetails`
-///   Structured refusal information when applicable.
-/// - `stop_reason: StopReason`
-///   One of:
-///   - `"end_turn"`
-///   - `"max_tokens"`
-///   - `"stop_sequence"`
-///   - `"tool_use"`
-///   - `"pause_turn"`
-///   - `"refusal"`
-/// - `stop_sequence: string`
-///   The matched custom stop sequence, if any.
-/// - `type: "message"`
-///   Object type for Messages API responses.
-/// - `usage: Usage`
-///   Billing and rate-limit usage.
-///   Includes fields such as:
-///   - `input_tokens`
-///   - `output_tokens`
-///   - `cache_creation_input_tokens`
-///   - `cache_read_input_tokens`
-///   - `cache_creation`
-///   - `inference_geo`
-///   - `server_tool_use`
-///   - `service_tier`
-///
-/// Notes about this implementation:
-/// - `parse_response` currently reads `id`, `content`, `stop_reason`, and
-///   `usage`.
-/// - Response content maps Anthropic `text`, local `tool_use`, hosted tool,
-///   and signed `thinking` blocks.
-/// - Other documented response fields such as `container`, `model`, `role`,
-///   `stop_details`, `stop_sequence`, `type`, citations, and the richer usage
-///   breakdown are not currently projected into shared `ModelResponse` fields.
-///   -------------------------- Below is an example -------------------------
-/// ```json
-/// {
-///  "id": "msg_013Zva2CMHLNnXjNJJKqJ2EF",
-///  "container": {
-///    "id": "id",
-///    "expires_at": "2019-12-27T18:11:19.117Z"
-///  },
-///  "content": [
-///    {
-///      "citations": [
-///        {
-///          "cited_text": "cited_text",
-///          "document_index": 0,
-///          "document_title": "document_title",
-///          "end_char_index": 0,
-///          "file_id": "file_id",
-///          "start_char_index": 0,
-///          "type": "char_location"
-///        }
-///      ],
-///      "text": "Hi! My name is Claude.",
-///      "type": "text"
-///    }
-///  ],
-///  "model": "claude-opus-4-6",
-///  "role": "assistant",
-///  "stop_details": {
-///    "category": "cyber",
-///    "explanation": "explanation",
-///    "type": "refusal"
-///  },
-///  "stop_reason": "end_turn",
-///  "stop_sequence": null,
-///  "type": "message",
-///  "usage": {
-///    "cache_creation": {
-///      "ephemeral_1h_input_tokens": 0,
-///      "ephemeral_5m_input_tokens": 0
-///    },
-///    "cache_creation_input_tokens": 2051,
-///    "cache_read_input_tokens": 2051,
-///    "inference_geo": "inference_geo",
-///    "input_tokens": 2095,
-///    "output_tokens": 503,
-///    "server_tool_use": {
-///      "web_fetch_requests": 2,
-///      "web_search_requests": 0
-///    },
-///    "service_tier": "standard"
-///  }
-///}
-/// ```
+/// Anthropic messages response body. See <https://platform.claude.com/docs/en/api/messages>.
 fn parse_response(value: Value, dsml_healer: &DsmlToolCallHealer) -> Result<ModelResponse> {
     let response: AnthropicMessageResponse = serde_json::from_value(value.clone())
         .context("failed to deserialize anthropic messages response")?;
@@ -1180,6 +561,16 @@ fn build_content_block(block: &RequestContent) -> Option<AnthropicInputContentBl
             content: content.clone(),
             is_error: *is_error,
         }),
+        RequestContent::Image {
+            mime_type,
+            data_base64,
+        } => Some(AnthropicInputContentBlock::Image {
+            source: AnthropicImageSource {
+                r#type: "base64",
+                media_type: mime_type.clone(),
+                data: data_base64.clone(),
+            },
+        }),
     }
 }
 
@@ -1270,15 +661,11 @@ fn parse_response_content_block(
             }
             Some(ResponseContent::ProviderReasoning {
                 provider: "anthropic".to_string(),
-                payload: anthropic_thinking_payload(block),
+                payload: Value::Object(anthropic_thinking_payload_map(block)),
             })
         }
         _ => None,
     }
-}
-
-fn anthropic_thinking_payload(block: &AnthropicResponseContentBlock) -> Value {
-    Value::Object(anthropic_thinking_payload_map(block))
 }
 
 fn anthropic_thinking_payload_map(block: &AnthropicResponseContentBlock) -> Map<String, Value> {
@@ -1380,24 +767,6 @@ fn parse_stop_reason(value: &str) -> StopReason {
         "stop_sequence" => StopReason::StopSequence,
         _ => StopReason::EndTurn,
     }
-}
-
-fn stream_error(message: String) -> ProviderError {
-    ProviderError::StreamError {
-        message,
-        bytes_received: None,
-    }
-}
-
-fn format_eventsource_error(error: &reqwest_eventsource::Error) -> String {
-    let mut message = format!("{error}; debug={error:?}");
-    let mut source = error.source();
-    while let Some(error) = source {
-        message.push_str("; source=");
-        message.push_str(&error.to_string());
-        source = error.source();
-    }
-    message
 }
 
 fn build_thinking(level: &str) -> Option<AnthropicThinkingConfig> {

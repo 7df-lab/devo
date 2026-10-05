@@ -5,6 +5,7 @@ use devo_protocol::ProviderWireApi;
 use devo_protocol::ReasoningCapability;
 use devo_protocol::ReasoningEffort;
 use devo_protocol::ReasoningImplementation;
+use devo_protocol::ThinkingLevelMap;
 use devo_protocol::TruncationPolicyConfig;
 use serde::Deserialize;
 use serde::Serialize;
@@ -174,6 +175,10 @@ pub struct ModelOverrideConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_capability: Option<ReasoningCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_level_map: Option<ThinkingLevelMap>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_implementation: Option<ReasoningImplementation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_reasoning_effort: Option<ReasoningEffort>,
@@ -234,18 +239,33 @@ impl Default for UserAuthConfigFile {
 }
 
 /// One secret value in user-scoped auth storage.
+///
+/// `api_key` credentials use `value`. `oauth` credentials use `access` plus
+/// optional refresh / expiry / account metadata; `value` is left empty and
+/// omitted from serialization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthCredentialConfig {
     pub kind: AuthCredentialKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enterprise_url: Option<String>,
 }
 
 /// Supported credential kinds in `auth.json`.
-/// TODO: support oauth in the near future.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthCredentialKind {
     ApiKey,
+    Oauth,
 }
 
 /// Provider-owned portion of app config, including active model selection.
@@ -523,6 +543,12 @@ impl ProviderConfigSection {
             if overlay_override.reasoning_capability.is_some() {
                 model_override.reasoning_capability = overlay_override.reasoning_capability;
             }
+            if overlay_override.reasoning.is_some() {
+                model_override.reasoning = overlay_override.reasoning;
+            }
+            if overlay_override.thinking_level_map.is_some() {
+                model_override.thinking_level_map = overlay_override.thinking_level_map;
+            }
             if overlay_override.reasoning_implementation.is_some() {
                 model_override.reasoning_implementation = overlay_override.reasoning_implementation;
             }
@@ -703,6 +729,8 @@ supports_image_detail_original = true
                     top_k: Some(40.0),
                     provider: Some(ProviderWireApi::OpenAIResponses),
                     reasoning_capability: Some(ReasoningCapability::Toggle),
+                    reasoning: None,
+                    thinking_level_map: None,
                     reasoning_implementation: Some(ReasoningImplementation::RequestParameter),
                     default_reasoning_effort: Some(ReasoningEffort::High),
                     base_instructions: Some("Be concise.".to_string()),

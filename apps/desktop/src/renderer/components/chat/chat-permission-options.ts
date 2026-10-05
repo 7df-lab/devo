@@ -13,28 +13,19 @@ export type ApprovalChoice =
 			label: string
 	  }
 
-const SCOPE_ALIASES: Record<string, PermissionResponse> = {
-	once: "once",
-	turn: "turn",
-	session: "session",
-	tool: "tool",
-	pathprefix: "pathPrefix",
-	path_prefix: "pathPrefix",
-	host: "host",
-	commandprefix: "commandPrefix",
-	command_prefix: "commandPrefix",
-	commandprefixpersist: "commandPrefixPersist",
-	command_prefix_persist: "commandPrefixPersist",
-}
+const KNOWN_SCOPES: PermissionResponse[] = [
+	"once",
+	"turn",
+	"session",
+	"pathPrefix",
+	"host",
+	"tool",
+	"commandPrefix",
+	"commandPrefixPersist",
+]
 
-function normalizeScopeToken(scope: unknown): PermissionResponse | null {
-	if (typeof scope !== "string") return null
-	const camel = scope.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase())
-	for (const candidate of [scope, camel]) {
-		const key = candidate.toLowerCase()
-		if (key in SCOPE_ALIASES) return SCOPE_ALIASES[key]
-	}
-	return null
+function isPermissionResponse(scope: unknown): scope is PermissionResponse {
+	return typeof scope === "string" && (KNOWN_SCOPES as string[]).includes(scope)
 }
 
 function hasScope(scopes: PermissionResponse[], target: PermissionResponse): boolean {
@@ -67,10 +58,7 @@ function availableScopesFor(permission: PermissionRequest): PermissionResponse[]
 	const raw = Array.isArray(permission.metadata?.availableScopes)
 		? permission.metadata.availableScopes
 		: ["once"]
-	const normalized = raw
-		.map(normalizeScopeToken)
-		.filter((scope): scope is PermissionResponse => scope !== null)
-	return Array.from(new Set(normalized))
+	return Array.from(new Set(raw.filter(isPermissionResponse)))
 }
 
 /**

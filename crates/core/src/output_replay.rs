@@ -6,9 +6,7 @@ use std::path::Path;
 use devo_tools::output_store::OutputArtifact;
 
 use crate::durable_execution::{ExecutionRecord, ExecutionReplay};
-use crate::{
-    InternalRecordV2, ParsedRolloutLine, RolloutLineReadError, RolloutLineV2, parse_rollout_line,
-};
+use crate::{InternalRecord, RolloutLine, RolloutLineReadError, parse_rollout_line};
 
 /// Manifests alone are not capabilities. Only committed session references,
 /// including explicitly inherited references, authorize restored artifact reads.
@@ -23,19 +21,18 @@ pub fn read_output_references(path: &Path) -> anyhow::Result<Vec<OutputArtifact>
             continue;
         }
         match parse_rollout_line(&line) {
-            Ok(ParsedRolloutLine::V2(line)) => {
-                if let RolloutLineV2::Internal {
+            Ok(line) => {
+                if let RolloutLine::Internal {
                     entry:
-                        InternalRecordV2::Execution {
+                        InternalRecord::Execution {
                             record: record @ ExecutionRecord::OutputArtifacts { .. },
                         },
                     ..
-                } = *line
+                } = line
                 {
                     replay.apply(&record)?;
                 }
             }
-            Ok(ParsedRolloutLine::Legacy(_)) => {}
             Err(RolloutLineReadError::TruncatedTail) => {
                 let only_blank_remain = {
                     let mut blank = true;

@@ -37,15 +37,14 @@ export function isChecklistPlanPart(metadata: Record<string, unknown> | undefine
 	return metadata?.["devo/itemKind"] === DEVO_PLAN_ITEM_KIND
 }
 
+/** Native camelCase plan statuses only — no snake_case aliases. */
 function normalizePlanStatus(status: string): string {
 	switch (status) {
 		case "completed":
-			return "completed"
-		case "in_progress":
 		case "inProgress":
-			return "in_progress"
 		case "cancelled":
-			return "cancelled"
+		case "pending":
+			return status
 		default:
 			return "pending"
 	}
@@ -72,7 +71,7 @@ function PlanStepIcon({ status }: { status: string }) {
 	switch (normalizePlanStatus(status)) {
 		case "completed":
 			return <CheckCircle2Icon className="size-3.5 text-emerald-500/80" />
-		case "in_progress":
+		case "inProgress":
 			return <Loader2Icon className="size-3.5 animate-spin text-blue-400/80" />
 		case "cancelled":
 			return <XCircleIcon className="size-3.5 text-muted-foreground/40" />

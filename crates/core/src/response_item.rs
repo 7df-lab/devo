@@ -120,6 +120,16 @@ impl From<ContentBlock> for ResponseItem {
                 content,
                 is_error,
             },
+            ContentBlock::Image {
+                mime_type,
+                data_base64,
+            } => Self::Message(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Image {
+                    mime_type,
+                    data_base64,
+                }],
+            }),
         }
     }
 }
@@ -297,6 +307,18 @@ pub fn message_to_response_items(msg: Message) -> Vec<ResponseItem> {
                     content,
                     is_error,
                 });
+            }
+            ContentBlock::Image {
+                mime_type,
+                data_base64,
+            } => {
+                items.push(ResponseItem::Message(Message {
+                    role,
+                    content: vec![ContentBlock::Image {
+                        mime_type,
+                        data_base64,
+                    }],
+                }));
             }
         }
     }

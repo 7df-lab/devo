@@ -8,23 +8,17 @@ use std::sync::atomic::Ordering;
 
 use chrono::Utc;
 use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use devo_core::ItemId;
 use devo_core::Message;
 use devo_core::ResponseItem;
-use devo_core::SessionId;
 use devo_core::SessionTitleFinalSource;
 use devo_core::SessionTitleState;
-use devo_core::TextItem;
 use devo_core::TokenInfo;
-use devo_core::TurnId;
-use devo_core::TurnItem;
 use devo_core::TurnStatus;
-use devo_core::TurnUsage;
-use devo_core::Worklog;
 use devo_core::history::compaction::CompactAction;
 use devo_core::history::compaction::CompactionConfig;
 use devo_core::history::compaction::CompactionKind;
@@ -36,10 +30,13 @@ use devo_core::tools::PermissionChecker;
 use devo_core::tools::PermissionGrant;
 use devo_core::tools::ToolCallError;
 use devo_core::tools::ToolPermissionRequest;
-use devo_protocol::{
-    SessionDeletedPayload, WorkspaceChangeAttribution, WorkspaceChangeScope, WorkspaceChangeView,
-    WorkspaceChangesReadParams, WorkspaceChangesUpdatedPayload, WorkspaceDiffDetail,
-};
+use devo_protocol::WorkspaceChangeAttribution;
+use devo_protocol::WorkspaceChangeScope;
+use devo_protocol::WorkspaceChangeView;
+use devo_protocol::WorkspaceChangesReadParams;
+use devo_protocol::WorkspaceDiffDetail;
+use devo_protocol::native::ids::SessionId;
+use devo_protocol::native::ids::TurnId;
 use devo_safety::PermissionMode;
 
 use crate::ApprovalDecisionValue;
@@ -47,40 +44,24 @@ use crate::ApprovalScopeValue;
 use crate::ClientTransportKind;
 use crate::ConnectionState;
 use crate::ErrorResponse;
-use crate::EventContext;
 use crate::InitializeResult;
-use crate::ItemDeltaKind;
-use crate::ItemEnvelope;
-use crate::ItemEventPayload;
-use crate::ItemKind;
 use crate::ProtocolError;
 use crate::ProtocolErrorCode;
 use crate::ProtocolExposurePolicy;
 use crate::ProtocolSet;
 use crate::RequestUserInputArgs;
-use crate::RequestUserInputPayload;
 use crate::RequestUserInputResponse;
-use crate::ServerEvent;
 use crate::ServerProtocol;
-use crate::ServerRequestResolvedPayload;
-use crate::SessionCompactionFailedPayload;
-use crate::SessionEventPayload;
 use crate::SessionForkResult;
-use crate::SessionMetadata;
 use crate::SessionResumeParams;
 use crate::SessionResumeResult;
-use crate::SessionRuntimeStatus;
 use crate::SessionStartParams;
 use crate::SessionStartResult;
-use crate::SessionStatusChangedPayload;
 use crate::SuccessResponse;
-use crate::TurnEventPayload;
 use crate::TurnInterruptParams;
 use crate::TurnInterruptResult;
-use crate::TurnMetadata;
 use crate::TurnStartParams;
 use crate::TurnStartResult;
-use crate::TurnUsageUpdatedPayload;
 use crate::approval_reviewer::build_approval_review_request;
 use crate::approval_reviewer::extend_approval_review_request;
 use crate::approval_reviewer::parse_reviewer_decision;
@@ -94,8 +75,6 @@ use crate::goal::GoalId;
 use crate::goal::GoalMutation;
 use crate::goal_durable::GoalDurableStore;
 use crate::persistence::RolloutStore;
-use crate::persistence::build_item_record;
-use crate::projection::history_item_from_turn_item;
 pub(crate) use crate::runtime::handlers::goal::GoalStore;
 use crate::subagent::AgentPath;
 use crate::subagent::AgentRegistry;
@@ -105,12 +84,14 @@ use crate::subagent::SubagentOutputBuffer;
 use crate::subagent::SubagentStatus;
 use crate::usage_ledger::UsageLedger;
 use crate::workspace_changes::ActiveWorkspaceBaseline;
+use devo_protocol::native::session::SessionStatus;
 
 mod acp_fs;
 mod active_turn;
 mod agents;
 mod approval;
 mod approval_checkpoint;
+mod auth_notifications;
 mod command_exec;
 mod compaction_persist;
 pub(crate) use compaction_persist::CompactionSummaryPersist;
@@ -118,7 +99,8 @@ pub(crate) use compaction_persist::append_compaction_summary_and_snapshot;
 pub(crate) use compaction_persist::build_compaction_snapshot_line;
 pub(crate) use compaction_persist::compaction_persisted_turn_item;
 pub(crate) use compaction_persist::preserved_item_ids_from_compacted;
-pub(crate) use compaction_persist::summary_turn_item_from_compacted;
+pub(crate) use compaction_persist::summary_item_from_compacted;
+pub(crate) mod compact_host;
 mod connection;
 pub(crate) mod context_occupancy;
 mod context_usage;
@@ -127,9 +109,15 @@ mod goal_accounting;
 mod goal_continuation;
 mod goal_handlers;
 mod handlers;
+mod history_cache;
 mod hooks;
 mod interaction_items;
 mod items;
+mod kernel_host;
+mod kernel_host_agent_message;
+mod kernel_host_bridge;
+mod kernel_host_heartbeat;
+mod kernel_idle_bash;
 mod lifecycle;
 mod mcp;
 mod model_api;
@@ -138,7 +126,10 @@ mod permission_decision;
 mod proposed_plan;
 mod provider_api;
 mod provider_discovery;
+pub(crate) mod python_cell_watch;
 mod reference_search;
+pub(crate) mod refine;
+pub(crate) mod refine_planner;
 mod session_actor;
 mod session_cache;
 mod session_interactive;
@@ -173,8 +164,9 @@ pub struct ServerRuntime {
     protocol_exposure: ProtocolExposurePolicy,
     deps: ServerRuntimeDependencies,
     rollout_store: RolloutStore,
+    history_cache: history_cache::HistoryCache,
     goal_durable_store: GoalDurableStore,
-    usage_ledger: UsageLedger,
+    pub(crate) usage_ledger: UsageLedger,
     /// Per-session actor handles; map lock must not be held across await.
     sessions: Mutex<HashMap<SessionId, SessionHandle>>,
     /// Interactive approval and user-input waits outside session actors.
@@ -206,8 +198,12 @@ pub struct ServerRuntime {
     /// Latest subagent turn usage grouped under the parent turn that requested the work.
     subagent_usage: Mutex<subagent_usage::SubagentUsageState>,
     /// Live client-owned reference search sessions.
-    reference_searches:
-        Mutex<HashMap<devo_protocol::ReferenceSearchId, reference_search::ReferenceSearchState>>,
+    reference_searches: Mutex<
+        HashMap<
+            devo_protocol::native::rpc_search::SearchId,
+            reference_search::ReferenceSearchState,
+        >,
+    >,
     /// Live client-owned shell/process sessions.
     command_exec_manager: command_exec::CommandExecManager,
     /// Turn-scoped workspace baselines captured at actual execution start.
@@ -238,6 +234,8 @@ pub struct ServerRuntime {
     title_generation_in_flight: Mutex<HashSet<SessionId>>,
     /// Sessions waiting for optional LLM title polish after a heuristic title.
     title_polish_pending: Mutex<HashMap<SessionId, TitlePolishPending>>,
+    /// Cap concurrent auxiliary model calls (title polish, refine, …) to 1.
+    auxiliary_model_slots: Arc<Semaphore>,
     /// Weak back-reference used when session actors need the owning runtime `Arc`.
     self_weak: std::sync::Weak<ServerRuntime>,
     /// LRU order for loaded root session actors.
@@ -253,6 +251,9 @@ pub struct ServerRuntime {
     sandbox_network_proxy: std::sync::Arc<
         std::sync::Mutex<Option<devo_sandbox_network_proxy::SharedSandboxNetworkProxyHandle>>,
     >,
+    /// Durable cron/heartbeat jobs (`$DEVO_HOME/schedules.json`).
+    schedule_store: crate::schedule_store::ScheduleStore,
+    schedule_wake_cancel: CancellationToken,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,11 +283,19 @@ pub(crate) struct TerminalTurnSnapshot {
 }
 
 impl TerminalTurnSnapshot {
-    pub(crate) fn from_turn(turn: &TurnMetadata) -> Self {
+    pub(crate) fn from_runtime_turn(turn: &crate::turn::RuntimeTurn) -> Self {
         Self {
-            status: turn.status.clone(),
-            stop_reason: turn.stop_reason.clone(),
-            failure_reason: turn.failure_reason,
+            status: match turn.native.status {
+                devo_protocol::native::turn::TurnStatus::InProgress => TurnStatus::Running,
+                devo_protocol::native::turn::TurnStatus::WaitingApproval => {
+                    TurnStatus::WaitingApproval
+                }
+                devo_protocol::native::turn::TurnStatus::Completed => TurnStatus::Completed,
+                devo_protocol::native::turn::TurnStatus::Interrupted => TurnStatus::Interrupted,
+                devo_protocol::native::turn::TurnStatus::Failed => TurnStatus::Failed,
+            },
+            stop_reason: turn.extras.stop_reason.clone(),
+            failure_reason: turn.extras.failure_reason,
         }
     }
 }
@@ -306,18 +315,24 @@ impl TurnInputMode {
     }
 }
 
-fn session_model_selection(session: &SessionMetadata) -> Option<&str> {
-    session
-        .model_binding_id
-        .as_deref()
-        .or_else(|| session.model.as_deref().filter(|model| model.contains('/')))
-        .or(session.model.as_deref())
+trait SessionModelSelection {
+    fn model_selection(&self) -> Option<&str>;
+}
+
+impl SessionModelSelection for crate::runtime_session_summary::RuntimeSessionSummary {
+    fn model_selection(&self) -> Option<&str> {
+        crate::runtime_session_summary::RuntimeSessionSummary::model_selection(self)
+    }
+}
+
+fn session_model_selection(session: &impl SessionModelSelection) -> Option<&str> {
+    session.model_selection()
 }
 
 fn requested_model_selection<'a>(
     model_binding_id: Option<&'a str>,
     model: Option<&'a str>,
-    session: &'a SessionMetadata,
+    session: &'a impl SessionModelSelection,
 ) -> Option<&'a str> {
     model_binding_id
         .or(model)
@@ -385,17 +400,18 @@ impl ServerRuntime {
                 "no tokio runtime available at ServerRuntime::new; sandbox network proxy not started"
             );
         }
-        Arc::new_cyclic(|self_weak| Self {
+        let runtime = Arc::new_cyclic(|self_weak| Self {
             metadata: InitializeResult {
                 server_name: "devo-server".into(),
                 server_version: env!("CARGO_PKG_VERSION").into(),
                 platform_family: std::env::consts::FAMILY.into(),
                 platform_os: std::env::consts::OS.into(),
-                server_home,
+                server_home: server_home.clone(),
             },
             protocol_exposure: ProtocolExposurePolicy::new(protocols),
             deps,
             rollout_store,
+            history_cache: history_cache::HistoryCache::default(),
             goal_durable_store,
             usage_ledger,
             sessions: Mutex::new(HashMap::new()),
@@ -428,6 +444,7 @@ impl ServerRuntime {
             restore_plans: Mutex::new(HashMap::new()),
             title_generation_in_flight: Mutex::new(HashSet::new()),
             title_polish_pending: Mutex::new(HashMap::new()),
+            auxiliary_model_slots: Arc::new(Semaphore::new(1)),
             self_weak: self_weak.clone(),
             session_lru: Mutex::new(session_cache::ParentSessionLru::new(
                 session_cache::PARENT_SESSION_LRU_CAPACITY,
@@ -438,7 +455,11 @@ impl ServerRuntime {
                 crate::exec_policy_store::load_user_exec_policy(),
             ),
             sandbox_network_proxy,
-        })
+            schedule_store: crate::schedule_store::ScheduleStore::new(server_home),
+            schedule_wake_cancel: CancellationToken::new(),
+        });
+        runtime.start_schedule_wake_loop();
+        runtime
     }
 
     pub async fn enabled_protocols(&self) -> ProtocolSet {

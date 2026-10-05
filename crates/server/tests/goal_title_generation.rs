@@ -8,13 +8,6 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
-use devo_protocol::Model;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::ResponseContent;
@@ -25,10 +18,8 @@ use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_protocol::native::rpc_session::GoalIfExists;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use futures::Stream;
 use futures::stream;
 use pretty_assertions::assert_eq;
@@ -220,35 +211,10 @@ fn build_runtime(
     data_root: &std::path::Path,
     provider: Arc<GoalTitleProvider>,
 ) -> Result<Arc<ServerRuntime>> {
-    let provider: Arc<dyn ModelProviderSDK> = provider;
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("goal_title.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::new(vec![Model {
-                slug: "test-model".to_string(),
-                display_name: "test-model".to_string(),
-                ..Model::default()
-            }])),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                None,
-            )?)),
-        ),
-    ))
+    Ok(devo_server::test_support::TestRuntime::new(provider)
+        .with_test_model()
+        .db_file("goal_title.db")
+        .runtime(data_root))
 }
 
 async fn initialize_connection(
@@ -308,7 +274,7 @@ async fn start_untitled_session(
     let response: devo_server::SuccessResponse<
         devo_protocol::native::rpc_session::SessionNewResult,
     > = serde_json::from_value(start_response)?;
-    Ok(SessionId::try_from(response.result.session.id.as_str())?)
+    Ok(SessionId::from(response.result.session.id.as_str()))
 }
 
 async fn wait_for_title_update(
@@ -344,7 +310,8 @@ fn title_request_contains(request: &ModelRequest, needle: &str) -> bool {
             devo_protocol::RequestContent::ProviderReasoning { .. }
             | devo_protocol::RequestContent::ToolUse { .. }
             | devo_protocol::RequestContent::HostedToolUse { .. }
-            | devo_protocol::RequestContent::ToolResult { .. } => false,
+            | devo_protocol::RequestContent::ToolResult { .. }
+            | devo_protocol::RequestContent::Image { .. } => false,
         })
     })
 }

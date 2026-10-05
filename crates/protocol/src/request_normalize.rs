@@ -47,7 +47,8 @@ fn tool_use_ids(message: &RequestMessage) -> Option<HashSet<&str>> {
             | RequestContent::Reasoning { .. }
             | RequestContent::ProviderReasoning { .. }
             | RequestContent::HostedToolUse { .. }
-            | RequestContent::ToolResult { .. } => {}
+            | RequestContent::ToolResult { .. }
+            | RequestContent::Image { .. } => {}
         }
     }
     ids
@@ -76,7 +77,8 @@ fn collect_tool_result_followup(
                 | RequestContent::Reasoning { .. }
                 | RequestContent::ProviderReasoning { .. }
                 | RequestContent::HostedToolUse { .. }
-                | RequestContent::ToolUse { .. } => {}
+                | RequestContent::ToolUse { .. }
+                | RequestContent::Image { .. } => {}
             }
         }
 
@@ -114,7 +116,8 @@ fn collect_tool_result_followup(
                 | RequestContent::Reasoning { .. }
                 | RequestContent::ProviderReasoning { .. }
                 | RequestContent::HostedToolUse { .. }
-                | RequestContent::ToolUse { .. } => other_content.push(content),
+                | RequestContent::ToolUse { .. }
+                | RequestContent::Image { .. } => other_content.push(content),
             }
         }
     }
@@ -148,7 +151,8 @@ fn reorder_user_tool_results(mut message: RequestMessage) -> RequestMessage {
             | RequestContent::Reasoning { .. }
             | RequestContent::ProviderReasoning { .. }
             | RequestContent::HostedToolUse { .. }
-            | RequestContent::ToolUse { .. } => other_content.push(content),
+            | RequestContent::ToolUse { .. }
+            | RequestContent::Image { .. } => other_content.push(content),
         }
     }
     tool_results.extend(other_content);

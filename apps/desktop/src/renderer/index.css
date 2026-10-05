@@ -34,6 +34,26 @@ body {
 	font-weight: 400;
 }
 
+/* Keep thinking text quiet and compact while reusing transcript Markdown/code styling. */
+.devo-message-response.devo-reasoning-response {
+	color: var(--muted-foreground);
+	font-size: 0.8125rem;
+	line-height: 1.5;
+}
+
+/* Compact, soft-wrap code shown in Python tool disclosures. */
+.devo-python-tool-code-block pre {
+	padding: 0.65rem 0.75rem;
+	font-size: 0.75rem;
+	line-height: 1.5;
+}
+
+.devo-python-tool-code-block code {
+	font-size: inherit;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
 /* Soft stream entrance: one-shot surface fade + feathered growing tail.
  * Avoids Streamdown character animation (too expensive mid-stream). */
 @keyframes devo-stream-surface-in {

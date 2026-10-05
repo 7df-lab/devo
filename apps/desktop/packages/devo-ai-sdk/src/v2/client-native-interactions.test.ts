@@ -14,8 +14,10 @@ class FakeNativeTransport implements DevoNativeTransport {
 	pendingControlRequests: unknown[] = []
 	subscriptionCursors: Array<{ streamId: string; seq: number }> = []
 	subscriptionSnapshots: unknown[] = []
+	subscriptionReplay: unknown[] = []
 	sessionItems: unknown[] = []
 	resumeSession?: unknown
+	resumeRecovery?: unknown
 
 	async request(method: string, params?: unknown, directory?: string): Promise<unknown> {
 		this.requests.push({ method, params, directory })
@@ -33,6 +35,7 @@ class FakeNativeTransport implements DevoNativeTransport {
 					cursors: this.subscriptionCursors,
 					pendingControlRequests: this.pendingControlRequests,
 					snapshots: this.subscriptionSnapshots,
+					replay: this.subscriptionReplay,
 				}
 			case "subscription/ack":
 				return { serverTimeMs: 1 }
@@ -82,14 +85,15 @@ class FakeNativeTransport implements DevoNativeTransport {
 				}
 			case "session/queue/remove":
 				return {}
-			case "session/queue/steer":
-				return { itemId: "item-steer-1" }
+			case "turn/steer":
+				return { outcome: "injected", itemId: "item-steer-1" }
 			case "session/message/edit":
 				return editedMessageResult
 			case "session/resume":
 				return {
 					session: this.resumeSession ?? nativeSession,
 					lastContextOccupancy: nativeOccupancy,
+					...(this.resumeRecovery ? { recovery: this.resumeRecovery } : {}),
 				}
 			case "session/items/list":
 				return { data: this.sessionItems, nextCursor: null }
@@ -134,11 +138,23 @@ const nativeWorkspaceView = {
 	scope: "uncommitted",
 	status: "ready",
 	workspaceRoot: "/repo",
+	base: { kind: "branch", baseBranch: "main", mergeBase: "abc123", head: "def456" },
 	coverage: "git_visible",
 	attribution: "git_working_tree",
 	changeSetStatus: "finalized",
-	files: [],
-	stats: { files_changed: 0, additions: 0, deletions: 0 },
+	files: [
+		{
+			path: "a",
+			status: "modified",
+			additions: 1,
+			deletions: 1,
+			binary: false,
+			diffTruncated: false,
+			oldText: "old\n",
+			newText: "new\n",
+		},
+	],
+	stats: { filesChanged: 1, additions: 1, deletions: 1 },
 	unifiedDiff: "diff --git a/a b/a\n",
 	warnings: [],
 	generatedAt: "2026-08-22T00:00:00Z",
@@ -364,7 +380,7 @@ describe("Native desktop SDK interactions", () => {
 		expect((await client.app.setSkillEnabled({ path: "/skills/review", enabled: false })).data).toEqual([
 			{ ...nativeSkill, enabled: false },
 		])
-		expect((await client.session.diff({ sessionID: "session-1" })).data).toEqual([
+		expect((await client.session.diff({ sessionId: "session-1" })).data).toEqual([
 			{ diff: "diff --git a/a b/a\n" },
 		])
 		expect(transport.requests.slice(1)).toEqual([
@@ -393,6 +409,18 @@ describe("Native desktop SDK interactions", () => {
 		])
 	})
 
+	test("returns canonical camelCase workspace views without reshaping", async () => {
+		const transport = new FakeNativeTransport()
+		const client = createDevoClient({ directory: "/repo", transport })
+
+		const result = await client.workspace.changes.read({
+			sessionId: "session-1",
+			scopes: ["uncommitted"],
+		})
+
+		expect(result.data).toEqual({ views: [nativeWorkspaceView] })
+	})
+
 	test("registers approval before the item event and responds to its JSON-RPC id", async () => {
 		const transport = new FakeNativeTransport()
 		const client = createDevoClient({ directory: "/repo", transport })
@@ -413,8 +441,7 @@ describe("Native desktop SDK interactions", () => {
 		const asked = await nextPayloadOfType(stream, "permission.asked")
 		expect(asked.properties).toEqual({
 			id: "approval-1",
-			requestID: "approval-1",
-			sessionID: "session-1",
+			sessionId: "session-1",
 			permission: "Run cargo test",
 			metadata: {
 				tool: "process",
@@ -427,11 +454,12 @@ describe("Native desktop SDK interactions", () => {
 				availableScopes: ["once", "session", "commandPrefixPersist"],
 				commandPattern: ["cargo", "test", "*"],
 				commandPrefix: ["cargo", "test"],
+				answerable: true,
 			},
 		})
 
 		await client.permission.reply({
-			requestID: "approval-1",
+			requestId: "approval-1",
 			reply: "commandPrefixPersist",
 		})
 		expect(transport.responses).toEqual([
@@ -465,8 +493,7 @@ describe("Native desktop SDK interactions", () => {
 		const asked = await nextPayloadOfType(stream, "question.asked")
 		expect(asked.properties).toEqual({
 			id: "input-1",
-			requestID: "input-1",
-			sessionID: "session-1",
+			sessionId: "session-1",
 			questions: [
 				{
 					id: "environment",
@@ -479,7 +506,7 @@ describe("Native desktop SDK interactions", () => {
 			],
 		})
 
-		await client.question.reply({ requestID: "input-1", answers: [["Local"]] })
+		await client.question.reply({ requestId: "input-1", answers: [["Local"]] })
 		expect(transport.responses).toEqual([
 			{
 				id: "rpc-input",
@@ -513,10 +540,10 @@ describe("Native desktop SDK interactions", () => {
 		})
 
 		expect((await nextPayloadOfType(stream, "question.replied")).properties).toEqual({
-			sessionID: "session-1",
-			requestID: "input-1",
+			sessionId: "session-1",
+			requestId: "input-1",
 		})
-		await client.question.reply({ requestID: "input-1", answers: [["Local"]] })
+		await client.question.reply({ requestId: "input-1", answers: [["Local"]] })
 		expect(transport.responses).toEqual([])
 	})
 
@@ -538,9 +565,9 @@ describe("Native desktop SDK interactions", () => {
 
 		await client.session.create()
 		const asked = await nextPayloadOfType(stream, "permission.asked")
-		expect(asked.properties.requestID).toBe("approval-1")
+		expect(asked.properties.id).toBe("approval-1")
 		expect(asked.properties.metadata.answerable).toBe(true)
-		await client.permission.reply({ requestID: "approval-1", reply: "once" })
+		await client.permission.reply({ requestId: "approval-1", reply: "once" })
 		expect(transport.responses[0]?.id).toBe("reissued-approval")
 	})
 
@@ -564,8 +591,7 @@ describe("Native desktop SDK interactions", () => {
 		const asked = await nextPayloadOfType(stream, "question.asked")
 		expect(asked.properties).toEqual({
 			id: "input-1",
-			requestID: "input-1",
-			sessionID: "session-1",
+			sessionId: "session-1",
 			questions: [
 				{
 					id: "environment",
@@ -577,7 +603,7 @@ describe("Native desktop SDK interactions", () => {
 				},
 			],
 		})
-		await client.question.reply({ requestID: "input-1", answers: [["Local"]] })
+		await client.question.reply({ requestId: "input-1", answers: [["Local"]] })
 		expect(transport.responses[0]?.id).toBe("reissued-input")
 	})
 
@@ -598,21 +624,21 @@ describe("Native desktop SDK interactions", () => {
 		const client = createDevoClient({ directory: "/repo", transport })
 		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
 
-		await client.session.messages({ sessionID: "session-1" })
+		await client.session.messages({ sessionId: "session-1" })
 		const asked = await nextPayloadOfType(stream, "permission.asked")
-		expect(asked.properties.requestID).toBe("approval-1")
-		expect(asked.properties.sessionID).toBe("session-1")
+		expect(asked.properties.id).toBe("approval-1")
+		expect(asked.properties.sessionId).toBe("session-1")
 		expect(asked.properties.metadata.availableScopes).toEqual([
 			"once",
 			"session",
 			"commandPrefixPersist",
 		])
 		expect(asked.properties.metadata.answerable).toBe(true)
-		await client.permission.reply({ requestID: "approval-1", reply: "once" })
+		await client.permission.reply({ requestId: "approval-1", reply: "once" })
 		expect(transport.responses[0]?.id).toBe("reissued-approval")
 	})
 
-	test("normalizes snake_case approval scopes from legacy rollout items", async () => {
+	test("ignores non-canonical snake_case approval scopes", async () => {
 		const transport = new FakeNativeTransport()
 		transport.sessionItems = [
 			{
@@ -626,13 +652,9 @@ describe("Native desktop SDK interactions", () => {
 		const client = createDevoClient({ directory: "/repo", transport })
 		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
 
-		await client.session.messages({ sessionID: "session-1" })
+		await client.session.messages({ sessionId: "session-1" })
 		const asked = await nextPayloadOfType(stream, "permission.asked")
-		expect(asked.properties.metadata.availableScopes).toEqual([
-			"once",
-			"pathPrefix",
-			"commandPrefixPersist",
-		])
+		expect(asked.properties.metadata.availableScopes).toEqual(["once"])
 	})
 
 	test("restores a waiting user-input item from session history after restart", async () => {
@@ -641,10 +663,10 @@ describe("Native desktop SDK interactions", () => {
 		const client = createDevoClient({ directory: "/repo", transport })
 		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
 
-		await client.session.messages({ sessionID: "session-1" })
+		await client.session.messages({ sessionId: "session-1" })
 		const asked = await nextPayloadOfType(stream, "question.asked")
-		expect(asked.properties.requestID).toBe("input-1")
-		expect(asked.properties.sessionID).toBe("session-1")
+		expect(asked.properties.id).toBe("input-1")
+		expect(asked.properties.sessionId).toBe("session-1")
 	})
 
 	test("disconnect clears stale interactions and creates a fresh event stream", async () => {
@@ -656,7 +678,7 @@ describe("Native desktop SDK interactions", () => {
 
 		transport.emit({ type: "closed", error: "transport stopped" })
 		expect((await oldStream.next()).done).toBe(true)
-		await client.permission.reply({ requestID: "approval-1", reply: "once" })
+		await client.permission.reply({ requestId: "approval-1", reply: "once" })
 		expect(transport.responses).toEqual([])
 
 		const newStream = (await client.global.event()).stream[Symbol.asyncIterator]()
@@ -703,7 +725,7 @@ describe("Native desktop SDK interactions", () => {
 			params: { item: { ...envelope, revision: 2, state: "completed" } },
 		})
 
-		const parts: string[] = []
+		const texts: string[] = []
 		const deadline = Date.now() + 1_000
 		while (Date.now() < deadline) {
 			const result = await Promise.race([
@@ -712,15 +734,19 @@ describe("Native desktop SDK interactions", () => {
 					setTimeout(() => resolve({ done: false, value: { payload: { type: "timeout" } } }), 25),
 				),
 			])
-			if (result.value?.payload?.type === "message.part.updated") {
-				const partText = result.value.payload.properties.part.text
-				if (typeof partText === "string") parts.push(partText)
+			if (result.value?.payload?.type === "item.updated") {
+				const info = result.value.payload.properties.info
+				const content = info?.item?.content
+				const partText = Array.isArray(content)
+					? content.map((part: any) => part?.text ?? "").join("\n")
+					: ""
+				if (partText) texts.push(partText)
 			}
-			if (result.value?.payload?.type === "timeout" && parts.length > 0) break
+			if (result.value?.payload?.type === "timeout" && texts.length > 0) break
 		}
 
-		expect(parts.at(-1)).toBe(text)
-		expect(parts.some((part) => part === `${text}${text}`)).toBe(false)
+		expect(texts.at(-1)).toBe(text)
+		expect(texts.some((part) => part === `${text}${text}`)).toBe(false)
 	})
 
 	test("completes a write tool when the matching FileChange item finishes", async () => {
@@ -784,10 +810,10 @@ describe("Native desktop SDK interactions", () => {
 				),
 			])
 			const payload = result.value?.payload
-			if (payload?.type === "message.part.updated") {
-				const part = payload.properties.part
-				if (part?.callID === callId || part?.tool === "write") {
-					status = part.state?.status ?? ""
+			if (payload?.type === "item.updated") {
+				const info = payload.properties.info
+				if (info?.item?.type === "fileChange" && info?.item?.callId === callId) {
+					status = info.state ?? ""
 					if (status === "completed") break
 				}
 			}
@@ -836,7 +862,7 @@ describe("Native desktop SDK interactions", () => {
 			},
 		})
 
-		let part: any
+		let info: any
 		const deadline = Date.now() + 1_000
 		while (Date.now() < deadline) {
 			const result = await Promise.race([
@@ -846,24 +872,24 @@ describe("Native desktop SDK interactions", () => {
 				),
 			])
 			const payload = result.value?.payload
-			if (payload?.type === "message.part.updated") {
-				const next = payload.properties.part
-				if (next?.callID === callId) {
-					part = next
-					if (next.state?.status === "completed") break
+			if (payload?.type === "item.updated") {
+				const next = payload.properties.info
+				if (next?.item?.callId === callId && next?.item?.type === "fileChange") {
+					info = next
+					if (next.state === "completed") break
 				}
 			}
-			if (payload?.type === "timeout" && part) break
+			if (payload?.type === "timeout" && info) break
 		}
 
 		expect({
-			tool: part?.tool,
-			status: part?.state?.status,
-			path: part?.state?.input?.path,
-			changeType: part?.state?.input?.changeType,
-			unifiedDiff: part?.state?.input?.unifiedDiff,
+			type: info?.item?.type,
+			status: info?.state,
+			path: info?.item?.changes?.[0]?.path,
+			changeType: info?.item?.changes?.[0]?.change?.type,
+			unifiedDiff: info?.item?.changes?.[0]?.change?.unifiedDiff,
 		}).toEqual({
-			tool: "edit",
+			type: "fileChange",
 			status: "completed",
 			path: "/repo/src/lib.rs",
 			changeType: "update",
@@ -928,7 +954,8 @@ describe("Native desktop SDK interactions", () => {
 			},
 		})
 
-		let part: any
+		let callInfo: any
+		let changeInfo: any
 		const deadline = Date.now() + 1_000
 		while (Date.now() < deadline) {
 			const result = await Promise.race([
@@ -938,22 +965,23 @@ describe("Native desktop SDK interactions", () => {
 				),
 			])
 			const payload = result.value?.payload
-			if (payload?.type === "message.part.updated") {
-				const next = payload.properties.part
-				if (next?.callID === callId) {
-					part = next
-					if (next.state?.status === "completed") break
+			if (payload?.type === "item.updated") {
+				const next = payload.properties.info
+				if (next?.item?.callId === callId && next?.item?.type === "toolCall") callInfo = next
+				if (next?.item?.callId === callId && next?.item?.type === "fileChange") {
+					changeInfo = next
+					if (next.state === "completed") break
 				}
 			}
-			if (payload?.type === "timeout" && part?.state?.status === "completed") break
+			if (payload?.type === "timeout" && changeInfo) break
 		}
 
 		expect({
-			tool: part?.tool,
-			oldString: part?.state?.input?.oldString,
-			newString: part?.state?.input?.newString,
-			unifiedDiff: part?.state?.input?.unifiedDiff,
-			changeType: part?.state?.input?.changeType,
+			tool: callInfo?.item?.toolName,
+			oldString: callInfo?.item?.input?.oldString,
+			newString: callInfo?.item?.input?.newString,
+			unifiedDiff: changeInfo?.item?.changes?.[0]?.change?.unifiedDiff,
+			changeType: changeInfo?.item?.changes?.[0]?.change?.type,
 		}).toEqual({
 			tool: "edit",
 			oldString: "old",
@@ -1013,7 +1041,7 @@ describe("Native desktop SDK interactions", () => {
 			},
 		})
 
-		let part: any
+		let info: any
 		const deadline = Date.now() + 1_000
 		while (Date.now() < deadline) {
 			const result = await Promise.race([
@@ -1023,30 +1051,26 @@ describe("Native desktop SDK interactions", () => {
 				),
 			])
 			const payload = result.value?.payload
-			if (payload?.type === "message.part.updated") {
-				const next = payload.properties.part
-				if (next?.callID === callId) {
-					part = next
-					if (next.state?.status === "completed") break
+			if (payload?.type === "item.updated") {
+				const next = payload.properties.info
+				if (next?.item?.callId === callId && next?.item?.type === "toolResult") {
+					info = next
+					if (next.state === "completed") break
 				}
 			}
-			if (payload?.type === "timeout" && part) break
+			if (payload?.type === "timeout" && info) break
 		}
 
 		expect({
-			tool: part?.tool,
-			path: part?.state?.input?.path,
-			changeType: part?.state?.input?.changeType,
-			oldString: part?.state?.input?.oldString,
-			newString: part?.state?.input?.newString,
-			unifiedDiff: part?.state?.input?.unifiedDiff,
+			type: info?.item?.type,
+			callId: info?.item?.callId,
+			diff: info?.item?.output?.diff,
+			filePath: info?.item?.output?.files?.[0]?.filePath,
 		}).toEqual({
-			tool: "edit",
-			path: "C:/Users/lenovo/Desktop/hello.py",
-			changeType: "update",
-			oldString: "old\n",
-			newString: "new\n",
-			unifiedDiff,
+			type: "toolResult",
+			callId,
+			diff: unifiedDiff,
+			filePath: "C:/Users/lenovo/Desktop/hello.py",
 		})
 	})
 
@@ -1084,7 +1108,7 @@ describe("Native desktop SDK interactions", () => {
 			},
 		})
 
-		let part: any
+		let info: any
 		const deadline = Date.now() + 1_000
 		while (Date.now() < deadline) {
 			const result = await Promise.race([
@@ -1094,20 +1118,21 @@ describe("Native desktop SDK interactions", () => {
 				),
 			])
 			const payload = result.value?.payload
-			if (payload?.type === "message.part.updated") {
-				const next = payload.properties.part
-				if (next?.callID === callId) {
-					part = next
-					if (next.state?.status === "completed") break
+			if (payload?.type === "item.updated") {
+				const next = payload.properties.info
+				if (next?.item?.callId === callId && next?.item?.type === "toolResult") {
+					info = next
+					if (next.state === "completed") break
 				}
 			}
-			if (payload?.type === "timeout" && part) break
+			if (payload?.type === "timeout" && info) break
 		}
 
 		expect({
-			output: part?.state?.output,
-			hasRealNewline: typeof part?.state?.output === "string" && part.state.output.includes("\n"),
-			notJsonBlob: typeof part?.state?.output === "string" && !part.state.output.trim().startsWith("{"),
+			output: info?.item?.displayContent,
+			hasRealNewline: typeof info?.item?.displayContent === "string" && info.item.displayContent.includes("\n"),
+			notJsonBlob:
+				typeof info?.item?.displayContent === "string" && !info.item.displayContent.trim().startsWith("{"),
 		}).toEqual({
 			output: displayContent,
 			hasRealNewline: true,
@@ -1121,7 +1146,7 @@ describe("Native desktop SDK interactions", () => {
 		await client.session.create()
 
 		await client.session.promptAsync({
-			sessionID: "session-1",
+			sessionId: "session-1",
 			parts: [{ type: "text", text: "hello" }],
 		})
 
@@ -1146,7 +1171,7 @@ describe("Native desktop SDK interactions", () => {
 		await client.session.create()
 
 		await client.session.promptAsync({
-			sessionID: "session-1",
+			sessionId: "session-1",
 			parts: [{ type: "text", text: "hello" }],
 		})
 
@@ -1159,7 +1184,7 @@ describe("Native desktop SDK interactions", () => {
 				delta: "partial",
 			},
 		})
-		await nextPayloadOfType(stream, "message.part.updated")
+		await nextPayloadOfType(stream, "item.updated")
 
 		transport.emit({
 			type: "notification",
@@ -1180,7 +1205,7 @@ describe("Native desktop SDK interactions", () => {
 
 		const errorEvent = await nextPayloadOfType(stream, "session.error")
 		expect(errorEvent.properties).toEqual({
-			sessionID: nativeSession.id,
+			sessionId: nativeSession.id,
 			error: {
 				name: "PROVIDER_TEMPORARY_FAILURE",
 				data: {
@@ -1190,16 +1215,16 @@ describe("Native desktop SDK interactions", () => {
 			},
 		})
 
-		const updated = await nextPayloadOfType(stream, "message.updated")
-		expect(updated.properties.info.role).toBe("assistant")
-		expect(updated.properties.info.error).toEqual({
+		const updated = await nextPayloadOfType(stream, "item.updated")
+		expect(updated.properties.info.item?.type).toBe("assistantMessage")
+		expect(updated.properties.info.state).toBe("failed")
+		expect(updated.properties.info.item?.error).toEqual({
 			name: "PROVIDER_TEMPORARY_FAILURE",
 			data: {
 				message: "HTTP 429: rate limit exceeded",
 				code: "PROVIDER_TEMPORARY_FAILURE",
 			},
 		})
-		expect(updated.properties.info.time?.completed).toEqual(expect.any(Number))
 
 		// Follow-up completed projection without error must not wipe the failure.
 		transport.emit({
@@ -1223,13 +1248,13 @@ describe("Native desktop SDK interactions", () => {
 		await client.session.create()
 
 		await client.session.promptAsync({
-			sessionID: "session-1",
+			sessionId: "session-1",
 			parts: [{ type: "text", text: "hello" }],
 		})
 		expect((await client.session.status()).data["session-1"]).toEqual({ type: "busy" })
 
 		await client.session.promptAsync({
-			sessionID: "session-1",
+			sessionId: "session-1",
 			parts: [{ type: "text", text: "queue me" }],
 		})
 
@@ -1270,7 +1295,7 @@ describe("Native desktop SDK interactions", () => {
 		const queueEvent = await nextPayloadOfType(stream, "session.queue.updated")
 		expect(queueEvent.properties).toEqual(
 			expect.objectContaining({
-				sessionID: "session-1",
+				sessionId: "session-1",
 				change: "sync",
 				entries: [
 					expect.objectContaining({
@@ -1282,10 +1307,51 @@ describe("Native desktop SDK interactions", () => {
 		)
 		const activeTurnEvent = await nextPayloadOfType(stream, "session.activeTurn")
 		expect(activeTurnEvent.properties).toEqual({
-			sessionID: "session-1",
-			turnID: nativeTurnInProgress.id,
+			sessionId: "session-1",
+			turnId: nativeTurnInProgress.id,
 		})
 		expect((await client.session.status()).data["session-1"]).toEqual({ type: "busy" })
+	})
+
+	test("subscription replay of turn/started does not busy idle snapshot", async () => {
+		const transport = new FakeNativeTransport()
+		transport.subscriptionSnapshots = [
+			{
+				streamId: "session:session-1",
+				barrierSeq: 2,
+				data: {
+					kind: "session",
+					session: { ...nativeSession, status: "idle", activeTurnId: null },
+					queue: [],
+					activeTurn: null,
+				},
+			},
+		]
+		transport.subscriptionReplay = [
+			{
+				event: {
+					eventId: "evt_orphan_started",
+					streamId: "session:session-1",
+					seq: 1,
+					emittedAt: "2026-08-30T07:00:00.000Z",
+					persisted: true,
+					schemaVersion: 1,
+				},
+				notification: {
+					method: "turn/started",
+					params: {
+						turn: {
+							...nativeTurnInProgress,
+							sessionId: "session-1",
+						},
+					},
+				},
+			},
+		]
+		const client = createDevoClient({ directory: "/repo", transport })
+		await client.session.create()
+
+		expect((await client.session.status()).data["session-1"]).toEqual({ type: "idle" })
 	})
 
 	test("session/list does not clear busy status while a turn is in flight", async () => {
@@ -1294,7 +1360,7 @@ describe("Native desktop SDK interactions", () => {
 		await client.session.create()
 
 		await client.session.promptAsync({
-			sessionID: "session-1",
+			sessionId: "session-1",
 			parts: [{ type: "text", text: "hello" }],
 		})
 		expect((await client.session.status()).data["session-1"]).toEqual({ type: "busy" })
@@ -1319,7 +1385,7 @@ describe("Native desktop SDK interactions", () => {
 		expect(await nextPayloadOfType(stream, "context.usage.updated")).toEqual({
 			type: "context.usage.updated",
 			properties: {
-				sessionID: nativeSession.id,
+				sessionId: nativeSession.id,
 				occupancy: nativeOccupancy,
 			},
 		})
@@ -1352,7 +1418,7 @@ describe("Native desktop SDK interactions", () => {
 		expect(await nextPayloadOfType(stream, "session.usage.updated")).toEqual({
 			type: "session.usage.updated",
 			properties: {
-				sessionID: nativeSession.id,
+				sessionId: nativeSession.id,
 				used: 48_000,
 				size: 190_000,
 				cost: 0,
@@ -1365,13 +1431,13 @@ describe("Native desktop SDK interactions", () => {
 		const client = createDevoClient({ directory: "/repo", transport })
 		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
 
-		const result = await client.context.usage.read({ sessionID: nativeSession.id })
+		const result = await client.context.usage.read({ sessionId: nativeSession.id })
 		expect(result.data).toEqual(nativeOccupancy)
 		expect(transport.requests.some((request) => request.method === "context/usage/read")).toBe(true)
 		expect(await nextPayloadOfType(stream, "context.usage.updated")).toEqual({
 			type: "context.usage.updated",
 			properties: {
-				sessionID: nativeSession.id,
+				sessionId: nativeSession.id,
 				occupancy: nativeOccupancy,
 			},
 		})
@@ -1411,14 +1477,14 @@ describe("Native desktop SDK interactions", () => {
 			},
 		]
 		const client = createDevoClient({ directory: "/repo", transport })
-		const { data } = await client.session.messages({ sessionID: nativeSession.id })
-		const user = data.find((entry) => entry.info.role === "user")
-		const assistant = data.find((entry) => entry.info.role === "assistant")
-		expect(user?.info.time.created).toBe(Date.parse("2026-08-24T00:00:00.000Z"))
-		expect(assistant?.info.time.created).toBe(Date.parse("2026-08-24T00:00:02.000Z"))
-		expect(assistant?.info.time.completed).toBe(Date.parse("2026-08-24T00:00:14.000Z"))
+		const { data } = await client.session.messages({ sessionId: nativeSession.id })
+		const user = data.find((entry) => entry.info.item?.type === "userMessage")
+		const assistant = data.find((entry) => entry.info.item?.type === "assistantMessage")
+		expect(Date.parse(String(user?.info.createdAt))).toBe(Date.parse("2026-08-24T00:00:00.000Z"))
+		expect(Date.parse(String(assistant?.info.createdAt))).toBe(Date.parse("2026-08-24T00:00:02.000Z"))
+		expect(Date.parse(String(assistant?.info.updatedAt))).toBe(Date.parse("2026-08-24T00:00:14.000Z"))
 		expect(
-			(assistant?.info.time.completed ?? 0) - (user?.info.time.created ?? 0),
+			Date.parse(String(assistant?.info.updatedAt)) - Date.parse(String(user?.info.createdAt)),
 		).toBe(14_000)
 	})
 
@@ -1456,14 +1522,13 @@ describe("Native desktop SDK interactions", () => {
 			},
 		]
 		const client = createDevoClient({ directory: "/repo", transport })
-		const { data } = await client.session.messages({ sessionID: nativeSession.id })
-		const reasoning = data.find((entry) =>
-			entry.parts.some((part) => part.type === "reasoning"),
-		)
-		const part = reasoning?.parts.find((candidate) => candidate.type === "reasoning")
-		expect(part?.time?.start).toBe(Date.parse("2026-08-24T01:00:01.000Z"))
-		expect(part?.time?.end).toBe(Date.parse("2026-08-24T01:00:15.000Z"))
-		expect((part?.time?.end ?? 0) - (part?.time?.start ?? 0)).toBe(14_000)
+		const { data } = await client.session.messages({ sessionId: nativeSession.id })
+		const reasoning = data.find((entry) => entry.info.item?.type === "reasoning")
+		expect(Date.parse(String(reasoning?.info.createdAt))).toBe(Date.parse("2026-08-24T01:00:01.000Z"))
+		expect(Date.parse(String(reasoning?.info.updatedAt))).toBe(Date.parse("2026-08-24T01:00:15.000Z"))
+		expect(
+			Date.parse(String(reasoning?.info.updatedAt)) - Date.parse(String(reasoning?.info.createdAt)),
+		).toBe(14_000)
 	})
 
 	test("closes reasoning part interval from live started to completed", async () => {
@@ -1506,13 +1571,12 @@ describe("Native desktop SDK interactions", () => {
 			},
 		})
 
-		const { data } = await client.session.messages({ sessionID: nativeSession.id })
+		const { data } = await client.session.messages({ sessionId: nativeSession.id })
 		const reasoning = data.find((entry) => entry.info.id === "item-reasoning-live")
-		const part = reasoning?.parts.find((candidate) => candidate.type === "reasoning")
-		expect(part?.text).toBe("done thinking")
-		expect(part?.time?.start).toBe(Date.parse("2026-08-24T02:00:00.000Z"))
-		expect(part?.time?.end).toBe(Date.parse("2026-08-24T02:00:08.000Z"))
-		expect(reasoning?.info.time.completed).toBe(Date.parse("2026-08-24T02:00:08.000Z"))
+		expect(reasoning?.info.item?.text).toBe("done thinking")
+		expect(Date.parse(String(reasoning?.info.createdAt))).toBe(Date.parse("2026-08-24T02:00:00.000Z"))
+		expect(Date.parse(String(reasoning?.info.updatedAt))).toBe(Date.parse("2026-08-24T02:00:08.000Z"))
+		expect(reasoning?.info.state).toBe("completed")
 	})
 
 	test("turn start/complete bumps lastActivity and emits session.updated for sidebar sync", async () => {
@@ -1521,7 +1585,7 @@ describe("Native desktop SDK interactions", () => {
 		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
 		await client.session.create()
 
-		const before = (await client.session.get({ sessionID: nativeSession.id })).data
+		const before = (await client.session.get({ sessionId: nativeSession.id })).data
 		expect(before?.time.lastActivity).toBe(Date.parse("2026-08-22T00:00:00Z"))
 
 		transport.emit({
@@ -1544,7 +1608,7 @@ describe("Native desktop SDK interactions", () => {
 			Date.parse("2026-08-24T00:00:08Z"),
 		)
 
-		const after = (await client.session.get({ sessionID: nativeSession.id })).data
+		const after = (await client.session.get({ sessionId: nativeSession.id })).data
 		expect(after?.time.lastActivity).toBe(Date.parse("2026-08-24T00:00:08Z"))
 		expect(after?.time.updated).toBe(Date.parse("2026-08-24T00:00:08Z"))
 	})
@@ -1558,7 +1622,7 @@ describe("Native desktop SDK interactions", () => {
 		}
 		const client = createDevoClient({ directory: "/repo", transport })
 		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
-		await client.session.messages({ sessionID: nativeSession.id })
+		await client.session.messages({ sessionId: nativeSession.id })
 
 		// The cold session/list snapshot carries the base model; resume is
 		// authoritative for persisted per-session selections, so its enriched
@@ -1575,8 +1639,8 @@ describe("Native desktop SDK interactions", () => {
 		const client = createDevoClient({ directory: "/repo", transport })
 		await client.session.create()
 		await client.session.editMessage({
-			sessionID: nativeSession.id,
-			itemID: "item-user-1",
+			sessionId: nativeSession.id,
+			itemId: "item-user-1",
 			text: "edited",
 		})
 		const request = transport.requests.find((entry) => entry.method === "session/message/edit")
@@ -1638,7 +1702,7 @@ describe("Native desktop SDK interactions", () => {
 			},
 		]
 		const client = createDevoClient({ directory: "/repo", transport })
-		const loaded = await client.session.messages({ sessionID: nativeSession.id })
+		const loaded = await client.session.messages({ sessionId: nativeSession.id })
 		expect(loaded.data.map((entry) => entry.info.id).sort()).toEqual([
 			"item-assistant-1",
 			"item-user-1",
@@ -1655,15 +1719,15 @@ describe("Native desktop SDK interactions", () => {
 				reason: "message_edit_previous",
 			},
 		})
-		expect(await nextPayloadOfType(stream, "message.removed")).toEqual({
-			type: "message.removed",
-			properties: { sessionID: nativeSession.id, messageID: "item-user-1" },
+		expect(await nextPayloadOfType(stream, "item.removed")).toEqual({
+			type: "item.removed",
+			properties: { sessionId: nativeSession.id, itemId: "item-user-1" },
 		})
-		expect(await nextPayloadOfType(stream, "message.removed")).toEqual({
-			type: "message.removed",
-			properties: { sessionID: nativeSession.id, messageID: "item-assistant-1" },
+		expect(await nextPayloadOfType(stream, "item.removed")).toEqual({
+			type: "item.removed",
+			properties: { sessionId: nativeSession.id, itemId: "item-assistant-1" },
 		})
-		const remaining = await client.session.messages({ sessionID: nativeSession.id })
+		const remaining = await client.session.messages({ sessionId: nativeSession.id })
 		expect(remaining.data).toEqual([])
 	})
 })

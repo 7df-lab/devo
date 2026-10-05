@@ -45,7 +45,7 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 		const client = getProjectClient(directory)
 		if (!client?.session?.queue?.list) return
 		try {
-			await client.session.queue.list({ sessionID: sessionId })
+			await client.session.queue.list({ sessionId: sessionId })
 		} catch (err) {
 			log.error("queue.list failed", { sessionId }, err)
 		}
@@ -92,18 +92,22 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 		async (item: ComposerQueueItem) => {
 			if (!directory || !clientSupportsQueue(directory)) return
 			const client = getProjectClient(directory)
-			if (!client?.session?.queue?.steer) return
+			if (!client?.session?.steer || !client?.session?.queue?.remove) return
 			setPending(item.id, "steering")
 			setItemError(item.id, null)
 			try {
-				await client.session.queue.steer({
-					sessionID: sessionId,
+				await client.session.steer({
+					sessionId: sessionId,
+					parts: [{ type: "text", text: item.text }],
+				})
+				await client.session.queue.remove({
+					sessionId: sessionId,
 					queueItemId: item.id,
 				})
 			} catch (err) {
 				const message = err instanceof Error ? err.message : "Steer failed"
 				setItemError(item.id, message)
-				log.error("queue.steer failed", { sessionId, queueItemId: item.id }, err)
+				log.error("session.steer failed", { sessionId, queueItemId: item.id }, err)
 			} finally {
 				setPending(item.id, null)
 			}
@@ -120,7 +124,7 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 			setItemError(item.id, null)
 			try {
 				await client.session.queue.remove({
-					sessionID: sessionId,
+					sessionId: sessionId,
 					queueItemId: item.id,
 				})
 			} catch (err) {
@@ -153,7 +157,7 @@ export function useComposerQueue(sessionId: string, directory: string | null) {
 			if (!item) return
 			try {
 				await client.session.queue.update({
-					sessionID: sessionId,
+					sessionId: sessionId,
 					queueItemId: item.queueItemId,
 					position: toIndex,
 				})

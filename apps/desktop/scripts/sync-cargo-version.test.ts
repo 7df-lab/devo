@@ -9,7 +9,10 @@ import {
 } from "./sync-cargo-version";
 
 async function tempDesktopDir(): Promise<string> {
-	return mkdtemp(join(tmpdir(), "devo-desktop-version-"));
+	const repoRoot = await mkdtemp(join(tmpdir(), "devo-desktop-version-"));
+	const desktopDir = join(repoRoot, "apps", "desktop");
+	await mkdir(desktopDir, { recursive: true });
+	return desktopDir;
 }
 
 describe("desktop Cargo version sync", () => {

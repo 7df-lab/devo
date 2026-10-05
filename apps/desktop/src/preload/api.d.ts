@@ -17,6 +17,12 @@ export interface NativeTrafficLogState {
 	path: string | null
 }
 
+export interface ProviderOAuthUpdate {
+	url?: string
+	instructions: string
+	userCode?: string
+}
+
 export interface ModelRef {
 	providerID: string
 	modelID: string
@@ -475,6 +481,11 @@ export interface DevoAPI {
 	}
 	nativeTraffic: {
 		getState: () => Promise<NativeTrafficLogState>
+	}
+	providerOAuth: {
+		login: (providerId: string, enterpriseUrl?: string) => Promise<void>
+		cancel: () => Promise<void>
+		onUpdate: (callback: (update: ProviderOAuthUpdate) => void) => () => void
 	}
 	terminal: {
 		create: (options: { cwd?: string; cols?: number; rows?: number }) => Promise<TerminalSessionInfo>

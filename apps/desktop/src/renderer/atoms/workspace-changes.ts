@@ -90,8 +90,8 @@ function emptyWorkspaceChangesState(): WorkspaceChangesState {
 
 function eventSummary(event: WorkspaceChangesUpdatedEventProperties): WorkspaceChangesSummary {
 	return {
-		sessionId: event.sessionID,
-		turnId: event.turnID,
+		sessionId: event.sessionId,
+		turnId: event.turnId,
 		scope: event.scope,
 		status: event.status,
 		coverage: event.coverage,
@@ -193,14 +193,14 @@ export const applyWorkspaceChangesUpdatedAtom = atom(
 	(get, set, event: WorkspaceChangesUpdatedEventProperties) => {
 		const summary = eventSummary(event)
 		if (event.scope === "turn") {
-			set(latestWorkspaceTurnIdFamily(event.sessionID), event.turnID)
+			set(latestWorkspaceTurnIdFamily(event.sessionId), event.turnId)
 		}
-		const cwd = get(sessionWorkspaceDirectoryFamily(event.sessionID))
+		const cwd = get(sessionWorkspaceDirectoryFamily(event.sessionId))
 		const key = workspaceChangesKey({
 			cwd,
-			sessionId: event.sessionID,
+			sessionId: event.sessionId,
 			scope: event.scope,
-			turnId: event.scope === "turn" ? event.turnID : undefined,
+			turnId: event.scope === "turn" ? event.turnId : undefined,
 		})
 		const current = get(workspaceChangesStateFamily(key))
 		set(workspaceChangesStateFamily(key), {
@@ -212,12 +212,12 @@ export const applyWorkspaceChangesUpdatedAtom = atom(
 		if (event.scope === "turn") {
 			// A finished turn changes the working tree, so every git-backed
 			// scope cache for this workspace is potentially stale.
-			const workspace = cwd || event.sessionID
+			const workspace = cwd || event.sessionId
 			for (const scope of GIT_SCOPES) {
 				for (const ignoreWhitespace of [false, true]) {
 					const scopeKey = workspaceChangesKey({
 						cwd: workspace,
-						sessionId: event.sessionID,
+						sessionId: event.sessionId,
 						scope,
 						ignoreWhitespace,
 					})

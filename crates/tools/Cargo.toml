@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 devo-protocol = { workspace = true }
+devo-kernel = { workspace = true }
 
 sha2 = { workspace = true }
 uuid = { workspace = true }

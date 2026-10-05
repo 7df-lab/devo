@@ -6,7 +6,6 @@
 use devo_protocol::GoalCreateParams;
 use devo_protocol::GoalSetParams;
 use devo_protocol::SessionId;
-use devo_protocol::ThreadGoalStatus;
 use devo_protocol::validate_thread_goal_objective;
 use devo_protocol::validate_thread_goal_token_budget;
 use serde::{Deserialize, Serialize};
@@ -46,29 +45,53 @@ impl GoalStore {
         Ok(result)
     }
 
+    /// Legacy v1 wire `goal/set`: ThreadGoalStatus is converted at this
+    /// boundary only. Native in-place edits use [`Self::patch`].
     pub fn set(&mut self, params: GoalSetParams) -> Result<Goal, GoalError> {
-        validate_thread_goal_token_budget(params.token_budget)
-            .map_err(GoalError::InvalidObjective)?;
+        self.patch(
+            params.objective,
+            params.status.map(crate::goal::goal_status_from_thread),
+            params.token_budget,
+            /*allow_create*/ true,
+            params.session_id,
+        )
+    }
 
-        if let Some(objective) = params.objective.as_deref() {
+    /// In-place goal edit on live `GoalStatus` (Native `session/goal/update`).
+    /// When `allow_create` is false, missing goals fail with NotFound.
+    pub fn patch(
+        &mut self,
+        objective: Option<String>,
+        status: Option<GoalStatus>,
+        token_budget: Option<i64>,
+        allow_create: bool,
+        session_id: SessionId,
+    ) -> Result<Goal, GoalError> {
+        validate_thread_goal_token_budget(token_budget).map_err(GoalError::InvalidObjective)?;
+
+        if let Some(objective) = objective.as_deref() {
             let objective = objective.trim();
             validate_thread_goal_objective(objective).map_err(GoalError::InvalidObjective)?;
 
             if let Some(goal) = self.active_goal.as_mut() {
-                goal.prompt = objective.to_string();
-                apply_goal_update(goal, params.status, params.token_budget);
+                goal.objective = objective.to_string();
+                apply_goal_update(goal, status, token_budget);
                 goal.updated_at = chrono::Utc::now();
                 return Ok(goal.clone());
             }
 
+            if !allow_create {
+                return Err(GoalError::NotFound("current".to_string()));
+            }
+
             let mut goal = Goal::from_create_params(GoalCreateParams {
-                session_id: params.session_id,
+                session_id,
                 objective: objective.to_string(),
-                token_budget: params.token_budget,
+                token_budget,
                 replace_existing: false,
             })?;
-            if let Some(status) = params.status {
-                goal.status = GoalStatus::from_thread_goal_status(status);
+            if let Some(status) = status {
+                goal.status = status;
                 apply_goal_budget_limit(&mut goal);
             }
             let result = goal.clone();
@@ -79,23 +102,23 @@ impl GoalStore {
         let Some(goal) = self.active_goal.as_mut() else {
             return Err(GoalError::NotFound("current".to_string()));
         };
-        if params.status.is_none() && params.token_budget.is_none() {
+        if status.is_none() && token_budget.is_none() {
             return Err(GoalError::InvalidTransition);
         }
-        apply_goal_update(goal, params.status, params.token_budget);
+        apply_goal_update(goal, status, token_budget);
         goal.updated_at = chrono::Utc::now();
         Ok(goal.clone())
     }
 
     pub fn mutate(&mut self, mutation: GoalMutation) -> Result<Goal, GoalError> {
         if self.active_goal.is_none() {
-            return Err(GoalError::NotFound(mutation.goal_id.0.clone()));
+            return Err(GoalError::NotFound(mutation.goal_id.to_string()));
         }
         let mut goal = self.active_goal.take().unwrap();
 
         if goal.goal_id != mutation.goal_id {
             self.active_goal = Some(goal);
-            return Err(GoalError::NotFound(mutation.goal_id.0.clone()));
+            return Err(GoalError::NotFound(mutation.goal_id.to_string()));
         }
 
         match mutation.action {
@@ -155,11 +178,11 @@ impl GoalStore {
         Ok(result)
     }
 
-    pub fn set_status(&mut self, status: ThreadGoalStatus) -> Result<Goal, GoalError> {
+    pub fn set_status(&mut self, status: GoalStatus) -> Result<Goal, GoalError> {
         let Some(goal) = self.active_goal.as_mut() else {
             return Err(GoalError::NotFound("current".to_string()));
         };
-        goal.status = GoalStatus::from_thread_goal_status(status);
+        goal.status = status;
         goal.updated_at = chrono::Utc::now();
         Ok(goal.clone())
     }
@@ -169,12 +192,12 @@ impl GoalStore {
     }
 }
 
-fn apply_goal_update(goal: &mut Goal, status: Option<ThreadGoalStatus>, token_budget: Option<i64>) {
+fn apply_goal_update(goal: &mut Goal, status: Option<GoalStatus>, token_budget: Option<i64>) {
     if let Some(token_budget) = token_budget {
-        goal.budget.max_tokens = Some(token_budget);
+        goal.budget.token_budget = Some(token_budget);
     }
     if let Some(status) = status {
-        goal.status = GoalStatus::from_thread_goal_status(status);
+        goal.status = status;
     }
     apply_goal_budget_limit(goal);
 }
@@ -183,7 +206,7 @@ fn apply_goal_budget_limit(goal: &mut Goal) {
     if goal.status == GoalStatus::Active
         && goal
             .budget
-            .max_tokens
+            .token_budget
             .is_some_and(|budget| goal.usage.tokens_used >= budget)
     {
         goal.status = GoalStatus::BudgetLimited;
@@ -232,7 +255,7 @@ pub struct GoalStatusResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalProjection {
     pub goal_id: String,
-    pub prompt: String,
+    pub objective: String,
     pub status: String,
     pub turns_used: u32,
     pub tokens_used: i64,
@@ -242,8 +265,8 @@ pub struct GoalProjection {
 impl From<&Goal> for GoalProjection {
     fn from(g: &Goal) -> Self {
         Self {
-            goal_id: g.goal_id.0.clone(),
-            prompt: g.prompt.clone(),
+            goal_id: g.goal_id.to_string(),
+            objective: g.objective.clone(),
             status: format!("{:?}", g.status).to_lowercase(),
             turns_used: g.usage.turns_used,
             tokens_used: g.usage.tokens_used,
@@ -258,6 +281,45 @@ impl From<&Goal> for GoalProjection {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    /// Trace: L2-DES-GOAL-001
+    /// Verifies: kernel `goal.create` refuses to displace a pending goal
+    /// (active/paused/blocked/limited) — the SKILL contract — and replaces a
+    /// terminal goal.
+    #[tokio::test]
+    async fn kernel_goal_create_guard() -> anyhow::Result<()> {
+        let data_root = tempfile::tempdir()?;
+        let runtime = crate::test_support::TestRuntime::noop()
+            .db_file("kernel_goal_create_guard.db")
+            .runtime(data_root.path());
+        let sid = SessionId::new();
+        {
+            let mut stores = runtime.goal_stores.lock().await;
+            stores
+                .entry(sid)
+                .or_insert_with(GoalStore::new)
+                .create(GoalCreateParams {
+                    session_id: sid,
+                    objective: "first goal".into(),
+                    token_budget: None,
+                    replace_existing: true,
+                })?;
+        }
+        let reply = runtime
+            .host_goal_create(
+                sid.as_ref(),
+                &serde_json::json!({ "objective": "second goal" }),
+            )
+            .await;
+        assert_eq!(reply["status"], "error");
+        assert!(
+            reply["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("pending")),
+            "expected pending refusal, got {reply}"
+        );
+        Ok(())
+    }
 
     fn make_params() -> GoalCreateParams {
         GoalCreateParams {
@@ -288,11 +350,11 @@ mod tests {
             ..make_params()
         };
         let goal = store.create(params).expect("create");
-        let goal_id = goal.goal_id.clone();
+        let goal_id = goal.goal_id;
 
         store
             .mutate(GoalMutation {
-                goal_id: goal_id.clone(),
+                goal_id,
                 action: GoalAction::Pause,
             })
             .expect("pause");
@@ -315,11 +377,11 @@ mod tests {
             ..make_params()
         };
         let goal = store.create(params).expect("create");
-        let goal_id = goal.goal_id.clone();
+        let goal_id = goal.goal_id;
 
         store
             .mutate(GoalMutation {
-                goal_id: goal_id.clone(),
+                goal_id,
                 action: GoalAction::Complete { summary: None },
             })
             .expect("complete");
@@ -341,7 +403,7 @@ mod tests {
             ..make_params()
         };
         let goal = store.create(params).expect("create");
-        let goal_id = goal.goal_id.clone();
+        let goal_id = goal.goal_id;
 
         store
             .mutate(GoalMutation {
@@ -361,13 +423,9 @@ mod tests {
             ..make_params()
         };
         store.create(params).expect("create");
-        store
-            .set_status(ThreadGoalStatus::Complete)
-            .expect("complete");
+        store.set_status(GoalStatus::Completed).expect("complete");
 
-        let goal = store
-            .set_status(ThreadGoalStatus::Active)
-            .expect("reactivate");
+        let goal = store.set_status(GoalStatus::Active).expect("reactivate");
 
         assert_eq!(goal.status, GoalStatus::Active);
         assert_eq!(store.get(), Some(&goal));
@@ -412,28 +470,28 @@ mod tests {
             .expect("create");
         let goal = store.active_goal.as_mut().expect("goal");
         goal.usage.tokens_used = 1_500;
-        goal.usage.duration_seconds = 42;
+        goal.usage.time_used_seconds = 42;
 
         let updated = store
             .set(GoalSetParams {
                 session_id,
                 objective: Some("Refactor auth and payments".into()),
-                status: Some(ThreadGoalStatus::Paused),
+                status: Some(devo_protocol::ThreadGoalStatus::Paused),
                 token_budget: Some(80_000),
             })
             .expect("set");
 
         let expected = Goal {
-            prompt: "Refactor auth and payments".into(),
+            objective: "Refactor auth and payments".into(),
             status: GoalStatus::Paused,
             budget: GoalBudget {
-                max_tokens: Some(80_000),
+                token_budget: Some(80_000),
                 ..GoalBudget::default()
             },
             usage: GoalUsage {
                 turns_used: 0,
                 tokens_used: 1_500,
-                duration_seconds: 42,
+                time_used_seconds: 42,
             },
             ..updated.clone()
         };
@@ -442,12 +500,10 @@ mod tests {
 
     #[test]
     fn goal_projection_from_goal() {
-        let durable_goal_id = devo_core::GoalId::new();
         let goal = Goal {
-            goal_id: GoalId::from_durable(durable_goal_id),
-            durable_goal_id,
+            goal_id: GoalId::new(),
             session_id: SessionId::new(),
-            prompt: "test".into(),
+            objective: "test".into(),
             description: None,
             status: GoalStatus::Active,
             created_turn_id: None,
@@ -457,7 +513,7 @@ mod tests {
             usage: GoalUsage {
                 turns_used: 3,
                 tokens_used: 1500,
-                duration_seconds: 0,
+                time_used_seconds: 0,
             },
             progress_summary: Some("making progress".into()),
             blocker_summary: None,

@@ -1,0 +1,17 @@
+[package]
+description = "Continual Harness state types and file IO (L2-DES-HARNESS-001)"
+edition.workspace = true
+license.workspace = true
+name = "devo-harness"
+version.workspace = true
+
+[dependencies]
+chrono = { workspace = true, features = ["serde"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

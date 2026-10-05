@@ -25,15 +25,17 @@ pub use devo_protocol::{
     AcpToolCallLocation, AcpToolCallStatus, AcpToolKind, AgentInfo, AgentListParams,
     AgentListResult, AgentMailboxMessage, AgentMessageParams, AgentMessageResult, AgentOutputEvent,
     AgentStatusParams, ClientNotification, ClientRequest, CloseAgentParams, CloseAgentResult,
-    DEVO_SESSION_META, DEVO_SESSION_RESUME_META, ErrorResponse, ModelCatalogEntry,
-    NotificationEnvelope, ProtocolError, ProtocolErrorCode, ReferenceSearchFailedPayload,
-    ReferenceSearchId, ReferenceSearchResult, ReferenceSearchResultKind, ReferenceSearchSnapshot,
-    ReferenceSearchStartParams, ReferenceSearchStartResult, ReferenceSearchUpdateParams,
-    ReferenceSearchUpdateResult, RequestUserInputAnswer, RequestUserInputArgs,
-    RequestUserInputOption, RequestUserInputQuestion, RequestUserInputResponse,
-    ServerRequestEnvelope, SessionHistoryMetadata, SessionPlanStepStatus, SkillDependencies,
+    DEVO_SESSION_META, ErrorResponse, ModelCatalogEntry, NotificationEnvelope, ProtocolError,
+    ProtocolErrorCode, RequestUserInputAnswer, RequestUserInputArgs, RequestUserInputOption,
+    RequestUserInputQuestion, RequestUserInputResponse, ServerRequestEnvelope, SkillDependencies,
     SkillInterface, SkillRecord, SkillScope, SkillSource, SkillToolDependency, SpawnAgentParams,
     SpawnAgentResult, SuccessResponse, WaitAgentParams, WaitAgentResult,
-    acp_auth_required_response, acp_error_response, acp_notification_from_server_event,
-    acp_session_info_from_metadata, acp_success_response, input_items_from_acp_prompt,
+    acp_auth_required_response, acp_error_response, acp_notification_from_server_notification,
+    acp_session_info_from_native_session, acp_success_response, user_inputs_from_acp_prompt,
+};
+
+pub use devo_protocol::native::rpc_search::{
+    SearchCancelParams, SearchCancelResult, SearchFailedPayload, SearchId, SearchResult,
+    SearchResultKind, SearchSnapshot, SearchStartParams, SearchStartResult, SearchUpdateParams,
+    SearchUpdateResult,
 };

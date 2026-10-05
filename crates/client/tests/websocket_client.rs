@@ -55,7 +55,7 @@ async fn websocket_client_initializes_sends_requests_and_receives_notifications(
 
     client
         .turn_start_native(
-            SessionId::try_from(session.id.as_str())?,
+            session.id,
             vec![devo_protocol::native::item::UserInput::Text {
                 text: "hello".to_string(),
             }],

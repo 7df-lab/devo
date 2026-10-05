@@ -17,9 +17,7 @@ use std::path::Path;
 use anyhow::Context;
 use anyhow::Result;
 
-use devo_core::legacy_projector::LegacyProjector;
 use devo_core::parse_rollout_line;
-use devo_core::{ParsedRolloutLine, RolloutLineV2};
 
 use crate::db::Database;
 use crate::persistence::RolloutStore;
@@ -79,9 +77,6 @@ fn reconcile_file(rollout_path: &Path, db: &Database) -> Result<FileOutcome> {
     let file = std::fs::File::open(rollout_path)
         .with_context(|| format!("open rollout file {}", rollout_path.display()))?;
     let reader = std::io::BufReader::new(file);
-    // Legacy rows are projected forward so every log row derives from v2
-    // facts only, exactly like the write path.
-    let mut projector = LegacyProjector::new();
     let mut inserted = 0u64;
     // Rows are flushed per line and the watermark advances with them, so
     // progress up to a damaged line survives for the next startup.
@@ -96,11 +91,8 @@ fn reconcile_file(rollout_path: &Path, db: &Database) -> Result<FileOutcome> {
         if watermark.is_some_and(|watermark| line_index <= watermark) {
             continue;
         }
-        let v2_lines: Vec<RolloutLineV2> = match parse_rollout_line(&line) {
-            Ok(ParsedRolloutLine::Legacy(legacy)) => projector
-                .project_line(&legacy)
-                .with_context(|| format!("project legacy line in {}", rollout_path.display()))?,
-            Ok(ParsedRolloutLine::V2(v2)) => vec![*v2],
+        let rollout_line = match parse_rollout_line(&line) {
+            Ok(line) => line,
             Err(devo_core::RolloutLineReadError::TruncatedTail) => {
                 let only_blank_remain = {
                     let mut blank = true;
@@ -146,15 +138,12 @@ fn reconcile_file(rollout_path: &Path, db: &Database) -> Result<FileOutcome> {
                 });
             }
         };
-        let mut rows = Vec::new();
-        for (sub_index, v2_line) in v2_lines.iter().enumerate() {
-            rows.extend(crate::persistence::event_log_rows_for_v2_line(
-                rollout_path,
-                line_index,
-                sub_index as u64,
-                v2_line,
-            )?);
-        }
+        let rows = crate::persistence::event_log_rows_for_rollout_line(
+            rollout_path,
+            line_index,
+            0,
+            &rollout_line,
+        )?;
         inserted += db.insert_event_log_rows(&rows)? as u64;
         db.set_projection_watermark(rollout_path, line_index)?;
     }
@@ -174,7 +163,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::persistence::{RolloutStore, build_item_record, build_turn_record};
+    use crate::persistence::{RolloutStore, build_item_record};
 
     /// Writes one session file (meta + turn + item = 3 physical rows) with a
     /// store that has NO event-log sink, simulating facts that were fsynced
@@ -195,37 +184,37 @@ mod tests {
         );
         store.append_session_meta(&record).expect("append meta");
         let turn_id = TurnId::new();
-        let turn = build_turn_record(
-            &crate::turn::TurnMetadata {
-                turn_id,
-                session_id: record.id,
-                sequence: 1,
-                status: TurnStatus::Completed,
-                kind: devo_core::TurnKind::Regular,
-                model: "test-model".into(),
-                model_binding_id: None,
-                reasoning_effort_selection: None,
-                reasoning_effort: None,
-                request_model: "test-model".into(),
-                request_thinking: None,
-                started_at: Utc::now(),
-                completed_at: Some(Utc::now()),
-                usage: None,
-                stop_reason: None,
-                failure_reason: None,
-            },
-            None,
-            None,
-            None,
-            None,
-        );
+        let turn = devo_core::TurnRecord {
+            id: turn_id,
+            session_id: record.id,
+            sequence: 1,
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            status: TurnStatus::Completed,
+            kind: devo_core::TurnKind::Regular,
+            model: "test-model".into(),
+            model_binding_id: None,
+            reasoning_effort_selection: None,
+            request_model: "test-model".into(),
+            request_thinking: None,
+            input_token_estimate: None,
+            usage: None,
+            latest_query_usage: None,
+            context_occupancy: None,
+            stop_reason: None,
+            failure_reason: None,
+            error: None,
+            session_context: None,
+            turn_context: None,
+            schema_version: 4,
+        };
         store.append_turn(&record, turn).expect("append turn");
         let item = build_item_record(
             record.id,
             turn_id,
             ItemId::new(),
             1,
-            TurnItem::AgentMessage(TextItem { text: "hi".into() }),
+            TurnItem::AgentMessage(TextItem::text("hi")),
             Some(TurnStatus::Running),
             None,
             None,

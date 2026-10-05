@@ -150,7 +150,7 @@ export async function sendPrompt(
 	},
 ): Promise<void> {
 	await client.session.promptAsync({
-		sessionID: sessionId,
+		sessionId: sessionId,
 		parts: [{ type: "text", text }],
 		model:
 			options?.providerID && options?.modelID
@@ -166,7 +166,7 @@ export async function sendPrompt(
  * Abort a running session.
  */
 export async function abortSession(client: DevoClient, sessionId: string): Promise<void> {
-	await client.session.abort({ sessionID: sessionId })
+	await client.session.abort({ sessionId: sessionId })
 }
 
 /**
@@ -177,14 +177,14 @@ export async function renameSession(
 	sessionId: string,
 	title: string,
 ): Promise<void> {
-	await client.session.update({ sessionID: sessionId, title })
+	await client.session.update({ sessionId: sessionId, title })
 }
 
 /**
  * Delete a session.
  */
 export async function deleteSession(client: DevoClient, sessionId: string): Promise<void> {
-	await client.session.delete({ sessionID: sessionId })
+	await client.session.delete({ sessionId: sessionId })
 }
 
 /**
@@ -193,7 +193,7 @@ export async function deleteSession(client: DevoClient, sessionId: string): Prom
  */
 export async function getSession(client: DevoClient, sessionId: string): Promise<Session | null> {
 	try {
-		const result = await client.session.get({ sessionID: sessionId })
+		const result = await client.session.get({ sessionId: sessionId })
 		return (result.data as Session) ?? null
 	} catch {
 		return null
@@ -238,11 +238,11 @@ export async function getWorkspaceChanges(
 	},
 ): Promise<WorkspaceChangesReadResult> {
 	const result = await client.workspace.changes.read({
-		sessionID: params.sessionId,
+		sessionId: params.sessionId,
 		scopes: params.scopes,
 		cwd: params.cwd,
 		baseBranch: params.baseBranch,
-		turnID: params.turnId,
+		turnId: params.turnId,
 		diffDetail: params.diffDetail,
 		maxDiffBytes: params.maxDiffBytes,
 		ignoreWhitespace: params.ignoreWhitespace,
@@ -262,8 +262,8 @@ export async function respondToPermission(
 	response: PermissionResponse,
 ): Promise<void> {
 	await client.permission.respond({
-		sessionID: sessionId,
-		permissionID: permissionId,
+		sessionId: sessionId,
+		permissionId: permissionId,
 		response,
 	})
 }
@@ -276,14 +276,14 @@ export async function replyToQuestion(
 	requestId: string,
 	answers: QuestionAnswer[],
 ): Promise<void> {
-	await client.question.reply({ requestID: requestId, answers })
+	await client.question.reply({ requestId: requestId, answers })
 }
 
 /**
  * Reject a question request from the AI assistant.
  */
 export async function rejectQuestion(client: DevoClient, requestId: string): Promise<void> {
-	await client.question.reject({ requestID: requestId })
+	await client.question.reject({ requestId: requestId })
 }
 
 /**
@@ -328,19 +328,12 @@ export async function subscribeToGlobalEvents(
 	return result.stream as AsyncIterable<GlobalEvent>
 }
 
-/**
- * Revert a session to a specific message (undo).
- * Rolls back filesystem changes and marks messages after the revert point.
- */
+/** Request a session revert to its current server-selected undo point. */
 export async function revertSession(
 	client: DevoClient,
 	sessionId: string,
-	messageId: string,
 ): Promise<Session> {
-	const result = await client.session.revert({
-		sessionID: sessionId,
-		messageID: messageId,
-	})
+	const result = await client.session.revert({ sessionId: sessionId })
 	return result.data as Session
 }
 
@@ -349,8 +342,7 @@ export async function revertSession(
  * Restores previously reverted messages and filesystem state.
  */
 export async function unrevertSession(client: DevoClient, sessionId: string): Promise<Session> {
-	const result = await client.session.unrevert({
-		sessionID: sessionId,
+	const result = await client.session.unrevert({ sessionId: sessionId,
 	})
 	return result.data as Session
 }
@@ -366,7 +358,7 @@ export async function executeCommand(
 	args: string,
 ): Promise<void> {
 	await client.session.command({
-		sessionID: sessionId,
+		sessionId: sessionId,
 		command,
 		arguments: args,
 	})
@@ -408,7 +400,7 @@ export async function forkSession(
 	options?: { atTurnId?: string; cut?: "through" | "before" },
 ): Promise<Session> {
 	const result = await client.session.fork({
-		sessionID: sessionId,
+		sessionId: sessionId,
 		atTurnId: options?.atTurnId,
 		cut: options?.cut,
 	})
@@ -419,7 +411,7 @@ export async function forkSession(
  * Summarize/compact a session conversation.
  */
 export async function summarizeSession(client: DevoClient, sessionId: string): Promise<void> {
-	await client.session.summarize({ sessionID: sessionId })
+	await client.session.summarize({ sessionId: sessionId })
 }
 
 /**
@@ -427,7 +419,7 @@ export async function summarizeSession(client: DevoClient, sessionId: string): P
  */
 export async function getSessionMessages(client: DevoClient, sessionId: string) {
 	const result = await client.session.messages({
-		sessionID: sessionId,
+		sessionId: sessionId,
 	})
 	return result.data ?? []
 }

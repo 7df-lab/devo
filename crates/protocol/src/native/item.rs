@@ -48,6 +48,10 @@ pub struct ItemEnvelope {
     pub updated_at: DateTime<Utc>,
     pub state: ItemState,
     pub item: Item,
+    /// Parent in the session transcript tree (`None` = root). Legacy lines
+    /// omit the field; readers infer a linear chain by `seq` when missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<ItemId>,
 }
 
 /// Common delivery lifecycle of an item, owned by the envelope. Variants must
@@ -92,8 +96,6 @@ pub enum Item {
     },
     AssistantMessage {
         text: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        phase: Option<AssistantPhase>,
     },
     /// The provider's encrypted reasoning payload is stored by reference and
     /// re-attached when building outbound context.
@@ -107,7 +109,18 @@ pub enum Item {
     /// Typed projection of the `update_plan` tool: the tool call/result pair
     /// remains the replay truth (hidden from display); this variant is the
     /// single UI-facing plan truth and evolves over the whole turn.
-    Plan { entries: Vec<PlanEntry> },
+    Plan {
+        /// Tool-call id when this plan item came from an `update_plan` call.
+        /// Clients key the running tool row by call id; without it the plan
+        /// completion cannot be correlated and the row stays open forever.
+        /// `None` for proposed-plan markdown (plan mode) and legacy persisted
+        /// items written before the field existed.
+        #[schemars(rename = "callId")]
+        #[ts(rename = "callId")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        entries: Vec<PlanEntry>,
+    },
 
     // ── Local tools (call/result pairing + approval/sandbox) ──
     ToolCall {
@@ -299,6 +312,12 @@ pub enum Item {
         #[ts(rename = "exitCode")]
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+        /// User `!` shell command text when `task_kind` is `Shell`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        /// Retained stdout/stderr tail for resume / task reads.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
     },
 
     // ── System ──
@@ -318,12 +337,33 @@ pub enum Item {
         goal_id: GoalId,
         summary: String,
     },
+    /// Continual Harness refine outcome (L2-DES-HARNESS-001). Not a memory browser.
+    Refinement {
+        #[schemars(rename = "refinementId")]
+        #[ts(rename = "refinementId")]
+        refinement_id: String,
+        trigger: String,
+        summary: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        changes: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<String>,
+    },
     /// Non-fatal events (model retry, capability downgrade, quota pressure)
     /// that must leave a trace without failing the turn.
     Warning {
         code: String,
         message: String,
         retryable: bool,
+    },
+    /// Summary of an abandoned branch after in-session tree navigate
+    /// (`branch_summary` item). Tree-visible; parent is the new leaf.
+    BranchSummary {
+        summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
     },
 }
 
@@ -372,7 +412,7 @@ pub enum InternalEntry {
 // ---------------------------------------------------------------------------
 
 /// One submission = one `UserMessage` item whose content is a list of parts.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -431,13 +471,6 @@ pub enum UserMessageEntry {
     Queue,
     /// Injected into a running turn (including promotion from the queue).
     Steer,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-pub enum AssistantPhase {
-    Commentary,
-    Final,
 }
 
 // ---------------------------------------------------------------------------
@@ -574,6 +607,8 @@ pub enum ApprovalScope {
     Tool,
     CommandPrefix,
     CommandPrefixPersist,
+    PathPrefixPersist,
+    HostPersist,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -641,6 +676,8 @@ pub enum CompactionTrigger {
     AutoThreshold,
     Manual,
     ProviderRetry,
+    /// Agent scheduled via `compact.run` / `host_request` (turn-end).
+    AgentRequested,
 }
 
 /// Context-window occupancy snapshot (distinct from billing usage, see the

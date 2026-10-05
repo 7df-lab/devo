@@ -1,10 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { processEvent } from "./actions/event-processor"
-import { partsFamily, partStorageKey } from "./parts"
 import { sessionNativeFamily } from "./session-native"
 import { sessionFamily, upsertSessionAtom } from "./sessions"
 import { appStore } from "./store"
-import { streamingVersionFamily, updateStreamingPart, flushStreamingParts } from "./streaming"
+import { streamingVersionFamily } from "./streaming"
 
 describe("Native session renderer state", () => {
 	test("deduplicates replayed Native approvals by approval id", () => {
@@ -17,8 +16,7 @@ describe("Native session renderer state", () => {
 			type: "permission.asked",
 			properties: {
 				id: "approval-1",
-				requestID: "approval-1",
-				sessionID,
+				sessionId: sessionID,
 				permission: "Run command",
 			},
 		} as const
@@ -35,28 +33,28 @@ describe("Native session renderer state", () => {
 		processEvent({
 			type: "session.commands.updated",
 			properties: {
-				sessionID,
+				sessionId: sessionID,
 				commands: [{ name: "compact", description: "Compact session" }],
 			},
 		})
 		processEvent({
 			type: "session.config.updated",
 			properties: {
-				sessionID,
+				sessionId: sessionID,
 				configOptions: [{ id: "model", currentValue: "test-model" }],
 			},
 		})
 		processEvent({
 			type: "session.mode.updated",
 			properties: {
-				sessionID,
+				sessionId: sessionID,
 				modeID: "plan",
 			},
 		})
 		processEvent({
 			type: "session.usage.updated",
 			properties: {
-				sessionID,
+				sessionId: sessionID,
 				used: 42,
 				size: 100,
 				cost: { amount: 1, currency: "USD" },
@@ -65,7 +63,7 @@ describe("Native session renderer state", () => {
 		processEvent({
 			type: "context.usage.updated",
 			properties: {
-				sessionID,
+				sessionId: sessionID,
 				occupancy: {
 					totalTokens: 48_000,
 					contextWindowTokens: 190_000,
@@ -102,7 +100,7 @@ describe("Native session renderer state", () => {
 		processEvent({
 			type: "context.usage.updated",
 			properties: {
-				sessionID,
+				sessionId: sessionID,
 				occupancy: {
 					totalTokens: 16_700,
 					contextWindowTokens: 190_000,
@@ -116,7 +114,7 @@ describe("Native session renderer state", () => {
 		processEvent({
 			type: "session.usage.updated",
 			properties: {
-				sessionID,
+				sessionId: sessionID,
 				used: 48_000,
 				size: 250_000,
 			},
@@ -135,7 +133,7 @@ describe("Native session renderer state", () => {
 		processEvent({
 			type: "context.usage.updated",
 			properties: {
-				sessionID,
+				sessionId: sessionID,
 				occupancy: {
 					totalTokens: 50_000,
 					contextWindowTokens: 190_000,
@@ -146,7 +144,7 @@ describe("Native session renderer state", () => {
 		processEvent({
 			type: "context.usage.updated",
 			properties: {
-				sessionID,
+				sessionId: sessionID,
 				occupancy: {
 					totalTokens: 52_000,
 					contextWindowTokens: 1_000_000,
@@ -161,62 +159,52 @@ describe("Native session renderer state", () => {
 		expect(native.usage?.size).toBe(1_000_000)
 	})
 
-	test("notifies session chat renders when text parts update", () => {
+	test("notifies session chat renders when Native items update", () => {
 		const sessionID = "session-text-part-update"
-		const messageID = "message-text-part-update"
 		const initialVersion = appStore.get(streamingVersionFamily(sessionID))
 
 		processEvent({
-			type: "message.part.updated",
+			type: "item.updated",
 			properties: {
-				part: {
-					id: "message-text-part-update-text",
-					sessionID,
-					messageID,
-					type: "text",
-					text: "streamed text",
-					time: { start: 1, end: 1 },
+				info: {
+					id: "message-text-part-update",
+					sessionId: sessionID,
+					turnId: "turn-1",
+					seq: 1,
+					revision: 1,
+					createdAt: "2026-01-01T00:00:01.000Z",
+					updatedAt: "2026-01-01T00:00:01.000Z",
+					state: "running",
+					item: { type: "assistantMessage", text: "streamed text" },
 				},
 			},
 		})
 
-		expect(appStore.get(partsFamily(partStorageKey(sessionID, messageID)))).toEqual([
-			{
-				id: "message-text-part-update-text",
-				sessionID,
-				messageID,
-				type: "text",
-				text: "streamed text",
-				time: { start: 1, end: 1 },
-			},
-		])
 		expect(appStore.get(streamingVersionFamily(sessionID))).toBe(initialVersion + 1)
 	})
 
-	test("skips version bump when text part is already in the streaming buffer", () => {
+	test("bumps version on every Native item upsert", () => {
 		const sessionID = "session-buffered-text-part"
-		const messageID = "message-buffered-text-part"
-		const part = {
-			id: "buffered-text",
-			sessionID,
-			messageID,
-			type: "text" as const,
-			text: "hello",
-			time: { start: 1 },
-		}
-		updateStreamingPart(part)
-		const versionAfterBuffer = appStore.get(streamingVersionFamily(sessionID))
+		const versionBefore = appStore.get(streamingVersionFamily(sessionID))
 
 		processEvent({
-			type: "message.part.updated",
-			properties: { part: { ...part, text: "hello world" } },
+			type: "item.updated",
+			properties: {
+				info: {
+					id: "buffered-text",
+					sessionId: sessionID,
+					turnId: "turn-1",
+					seq: 1,
+					revision: 1,
+					createdAt: "2026-01-01T00:00:01.000Z",
+					updatedAt: "2026-01-01T00:00:01.000Z",
+					state: "running",
+					item: { type: "assistantMessage", text: "hello world" },
+				},
+			},
 		})
 
-		expect(appStore.get(streamingVersionFamily(sessionID))).toBe(versionAfterBuffer)
-		expect(appStore.get(partsFamily(partStorageKey(sessionID, messageID)))).toEqual([
-			{ ...part, text: "hello world" },
-		])
-		flushStreamingParts()
+		expect(appStore.get(streamingVersionFamily(sessionID))).toBe(versionBefore + 1)
 	})
 
 	test("stores scheduled retries, clears resumed retries, and reports transient failures", () => {
@@ -229,8 +217,8 @@ describe("Native session renderer state", () => {
 		processEvent({
 			type: "turn.provider_retry_status",
 			properties: {
-				sessionID,
-				turnID: "turn-1",
+				sessionId: sessionID,
+				turnId: "turn-1",
 				attempt: 2,
 				backoffMs: 1000,
 				provider: "openai",
@@ -266,8 +254,8 @@ describe("Native session renderer state", () => {
 		processEvent({
 			type: "turn.provider_retry_status",
 			properties: {
-				sessionID,
-				turnID: "turn-1",
+				sessionId: sessionID,
+				turnId: "turn-1",
 				attempt: 2,
 				backoffMs: 0,
 				provider: "openai",
@@ -279,7 +267,7 @@ describe("Native session renderer state", () => {
 		processEvent({
 			type: "session.error",
 			properties: {
-				sessionID,
+				sessionId: sessionID,
 				error: {
 					name: "PROVIDER_SERVER_ERROR",
 					data: { message: "Internal server error" },

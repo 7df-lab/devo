@@ -56,7 +56,7 @@ describe("session.summarize", () => {
 		})
 
 		const client = createDevoClient({ directory: "/repo", transport })
-		await client.session.summarize({ sessionID: "session-1" })
+		await client.session.summarize({ sessionId: "session-1" })
 
 		expect(transport.requests.map((request) => request.method)).toEqual([
 			"initialize",
@@ -181,30 +181,10 @@ describe("session.summarize", () => {
 			},
 		})
 
-		const { data } = await client.session.messages({ sessionID: "session-1" })
-		const texts = data.flatMap((entry) =>
-			entry.parts
-				.filter((part) => part.type === "text")
-				.map((part) => ({
-					id: entry.info.id,
-					text: part.text,
-					status: (part as { metadata?: Record<string, unknown> }).metadata?.[
-						"devo/compactionStatus"
-					],
-				})),
-		)
-
-		expect(texts).toEqual([
-			{
-				id: "compaction-item-compact-1-started",
-				text: "Compacting context",
-				status: "started",
-			},
-			{
-				id: "compaction-item-compact-1-completed",
-				text: "Context compacted",
-				status: "completed",
-			},
-		])
+		const { data } = await client.session.messages({ sessionId: "session-1" })
+		const compaction = data.find((entry) => entry.info.item?.type === "contextCompaction")
+		expect(compaction?.info.id).toBe("item-compact-1")
+		expect(compaction?.info.state).toBe("completed")
+		expect(compaction?.info.item?.summary).toBe("Context compacted")
 	})
 })

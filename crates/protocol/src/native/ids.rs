@@ -4,21 +4,72 @@
 //! form (`ses_` / `turn_` / `item_` / ...); legacy bare UUIDs from pre-v2
 //! rollouts remain valid, must round-trip unchanged, and are accepted anywhere
 //! an ID is expected. Clients must not parse IDs.
+//!
+//! Internally each ID is an interned handle (`Copy`). Pass them by value;
+//! do not clone.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::hash::Hash;
 use std::str::FromStr;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
+use serde::Serializer;
 use ts_rs::TS;
 use uuid::Uuid;
 
+struct Interner {
+    to_id: HashMap<&'static str, u32>,
+    to_str: Vec<&'static str>,
+}
+
+fn interner() -> &'static Mutex<Interner> {
+    static INTERNER: OnceLock<Mutex<Interner>> = OnceLock::new();
+    INTERNER.get_or_init(|| {
+        Mutex::new(Interner {
+            to_id: HashMap::new(),
+            to_str: Vec::new(),
+        })
+    })
+}
+
+fn intern(s: &str) -> u32 {
+    let mut pool = interner().lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(&id) = pool.to_id.get(s) {
+        return id;
+    }
+    let leaked: &'static str = Box::leak(s.to_owned().into_boxed_str());
+    let id = pool.to_str.len() as u32;
+    pool.to_id.insert(leaked, id);
+    pool.to_str.push(leaked);
+    id
+}
+
+fn interned(id: u32) -> &'static str {
+    let pool = interner().lock().unwrap_or_else(|error| error.into_inner());
+    pool.to_str[id as usize]
+}
+
+/// Shared behavior for Native opaque IDs (`SessionId`, `TurnId`, `ItemId`, …).
+///
+/// All implementors are interned and [`Copy`]. Functions should take `T` by
+/// value (or `impl OpaqueId` when the concrete type does not matter).
+pub trait OpaqueId:
+    Copy + Eq + Ord + Hash + fmt::Display + fmt::Debug + AsRef<str> + 'static
+{
+    /// Interned textual form. Stable for the process lifetime.
+    fn as_str(&self) -> &'static str;
+}
+
 macro_rules! define_opaque_id {
     ($name:ident, $prefix:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-        #[serde(transparent)]
-        pub struct $name(String);
+        #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+        pub struct $name(u32);
 
         impl JsonSchema for $name {
             fn schema_name() -> String {
@@ -52,22 +103,28 @@ macro_rules! define_opaque_id {
         impl $name {
             /// Generates a new prefixed ID (`<prefix><uuid-v7>`).
             pub fn new() -> Self {
-                Self(format!("{}{}", $prefix, Uuid::now_v7().simple()))
+                Self(intern(&format!("{}{}", $prefix, Uuid::now_v7().simple())))
             }
 
             /// Wraps a legacy bare UUID from pre-v2 rollout files, preserving
             /// the original textual form so it round-trips unchanged.
             pub fn from_legacy_uuid(value: Uuid) -> Self {
-                Self(value.to_string())
+                Self(intern(&value.to_string()))
             }
 
             /// Wraps an ID string received over the wire without interpreting it.
             pub fn from_string(value: String) -> Self {
-                Self(value)
+                Self(intern(&value))
             }
 
-            pub fn as_str(&self) -> &str {
-                &self.0
+            pub fn as_str(&self) -> &'static str {
+                interned(self.0)
+            }
+        }
+
+        impl OpaqueId for $name {
+            fn as_str(&self) -> &'static str {
+                interned(self.0)
             }
         }
 
@@ -79,19 +136,56 @@ macro_rules! define_opaque_id {
 
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(&self.0)
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl PartialOrd for $name {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl Ord for $name {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                self.as_str().cmp(other.as_str())
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let value = String::deserialize(deserializer)?;
+                Ok(Self(intern(&value)))
+            }
+        }
+
+        impl From<Uuid> for $name {
+            fn from(value: Uuid) -> Self {
+                Self::from_legacy_uuid(value)
             }
         }
 
         impl From<String> for $name {
             fn from(value: String) -> Self {
-                Self(value)
+                Self(intern(&value))
             }
         }
 
         impl From<&str> for $name {
             fn from(value: &str) -> Self {
-                Self(value.to_owned())
+                Self(intern(value))
             }
         }
 
@@ -99,7 +193,7 @@ macro_rules! define_opaque_id {
             type Err = std::convert::Infallible;
 
             fn from_str(s: &str) -> Result<Self, Self::Err> {
-                Ok(Self(s.to_owned()))
+                Ok(Self(intern(s)))
             }
         }
     };
@@ -114,6 +208,7 @@ define_opaque_id!(RunId, "run_");
 define_opaque_id!(SubscriptionId, "sub_");
 define_opaque_id!(QueueItemId, "qit_");
 define_opaque_id!(RestorePlanId, "rpl_");
+define_opaque_id!(JobId, "job_");
 
 #[cfg(test)]
 mod tests {
@@ -138,5 +233,28 @@ mod tests {
         assert_eq!(json, format!("\"{uuid}\""));
         let back: SessionId = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, id);
+    }
+
+    #[test]
+    fn ids_are_copy_and_intern_equal() {
+        let left = SessionId::from_string("ses_shared".into());
+        let right = SessionId::from_string("ses_shared".into());
+        let copied = left;
+        assert_eq!(left, right);
+        assert_eq!(left, copied);
+        assert_eq!(left.as_str(), "ses_shared");
+    }
+
+    #[test]
+    fn opaque_id_trait_is_implemented() {
+        fn as_text(id: impl OpaqueId) -> &'static str {
+            id.as_str()
+        }
+        let session = SessionId::from_string("ses_trait".into());
+        assert_eq!(as_text(session), "ses_trait");
+        assert_eq!(
+            as_text(TurnId::from_string("turn_trait".into())),
+            "turn_trait"
+        );
     }
 }
