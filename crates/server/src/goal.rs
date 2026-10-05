@@ -2,6 +2,11 @@
 //!
 //! Implements L3-BEH-SERVER-004. Tracks active goal state with budget
 //! accounting, continuation triggers, and status transitions.
+//!
+//! Live field names match Native (`objective` / `token_budget` /
+//! `tokens_used` / `time_used_seconds`). Durable GoalCreated still stores
+//! `prompt`; GoalBudget JSON accepts legacy `max_tokens`. Projection to
+//! Native is ID bridges + Cleared→Canceled only.
 
 use chrono::{DateTime, Utc};
 use devo_protocol::GoalCreateParams;
@@ -12,15 +17,20 @@ use devo_protocol::validate_thread_goal_objective;
 use devo_protocol::validate_thread_goal_token_budget;
 use serde::{Deserialize, Serialize};
 
+pub use devo_core::GoalBudget;
+pub use devo_core::GoalStatus;
+pub use devo_protocol::native::ids::GoalId;
+
 // ── Goal State ──────────────────────────────────────────────────────
 
 /// Active goal tracked per-session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Goal {
     pub goal_id: GoalId,
-    pub durable_goal_id: devo_core::GoalId,
     pub session_id: SessionId,
-    pub prompt: String,
+    /// Native-aligned; primary GoalState snapshots accept legacy `prompt`.
+    #[serde(alias = "prompt")]
+    pub objective: String,
     pub description: Option<String>,
     pub status: GoalStatus,
     pub created_turn_id: Option<TurnRef>,
@@ -33,94 +43,46 @@ pub struct Goal {
     pub verification_summary: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct GoalId(pub String);
-
-impl Default for GoalId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl GoalId {
-    pub fn new() -> Self {
-        Self::from_durable(devo_core::GoalId::new())
-    }
-
-    pub fn from_durable(goal_id: devo_core::GoalId) -> Self {
-        Self(format!("goal-{}", goal_id.0))
-    }
-}
-
-impl std::fmt::Display for GoalId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 /// Reference to a turn by its id and sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnRef {
     pub turn_id: devo_protocol::TurnId,
     pub sequence: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalStatus {
-    Active,
-    Paused,
-    BudgetLimited,
-    Completed,
-    Failed,
-    Blocked,
-    Canceled,
-    Cleared,
-}
-
-impl GoalStatus {
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::BudgetLimited | Self::Completed | Self::Failed | Self::Canceled | Self::Cleared
-        )
-    }
-
-    pub fn as_thread_goal_status(self) -> ThreadGoalStatus {
-        match self {
-            Self::Active => ThreadGoalStatus::Active,
-            Self::Paused | Self::Blocked => ThreadGoalStatus::Paused,
-            Self::BudgetLimited => ThreadGoalStatus::BudgetLimited,
-            Self::Completed | Self::Failed | Self::Canceled | Self::Cleared => {
-                ThreadGoalStatus::Complete
-            }
+/// Legacy ThreadGoalStatus adapters (v1 / ACP / core-session wire only).
+/// Native `session/goal/*` must use live [`GoalStatus`] identity — do not
+/// collapse Blocked→Paused (or similar) on the Native path.
+pub fn thread_goal_status_from_goal(status: GoalStatus) -> ThreadGoalStatus {
+    match status {
+        GoalStatus::Active => ThreadGoalStatus::Active,
+        GoalStatus::Paused | GoalStatus::Blocked | GoalStatus::UsageLimited => {
+            ThreadGoalStatus::Paused
         }
-    }
-
-    pub fn from_thread_goal_status(status: ThreadGoalStatus) -> Self {
-        match status {
-            ThreadGoalStatus::Active => Self::Active,
-            ThreadGoalStatus::Paused => Self::Paused,
-            ThreadGoalStatus::BudgetLimited => Self::BudgetLimited,
-            ThreadGoalStatus::Complete => Self::Completed,
+        GoalStatus::BudgetLimited => ThreadGoalStatus::BudgetLimited,
+        GoalStatus::Completed | GoalStatus::Failed | GoalStatus::Canceled | GoalStatus::Cleared => {
+            ThreadGoalStatus::Complete
         }
     }
 }
 
-// ── Budget ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct GoalBudget {
-    pub max_turns: Option<u32>,
-    pub max_tokens: Option<i64>,
-    pub max_duration_seconds: Option<u64>,
+/// Inverse of [`thread_goal_status_from_goal`] for legacy v1 params only.
+pub fn goal_status_from_thread(status: ThreadGoalStatus) -> GoalStatus {
+    match status {
+        ThreadGoalStatus::Active => GoalStatus::Active,
+        ThreadGoalStatus::Paused => GoalStatus::Paused,
+        ThreadGoalStatus::BudgetLimited => GoalStatus::BudgetLimited,
+        ThreadGoalStatus::Complete => GoalStatus::Completed,
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GoalUsage {
     pub turns_used: u32,
     pub tokens_used: i64,
-    pub duration_seconds: u64,
+    /// Native-aligned; primary GoalState snapshots accept legacy `duration_seconds`.
+    #[serde(alias = "duration_seconds")]
+    pub time_used_seconds: u64,
 }
 
 impl GoalUsage {
@@ -169,12 +131,10 @@ impl Goal {
         validate_thread_goal_token_budget(params.token_budget)
             .map_err(GoalError::InvalidObjective)?;
         let now = Utc::now();
-        let durable_goal_id = devo_core::GoalId::new();
         Ok(Self {
-            goal_id: GoalId::from_durable(durable_goal_id),
-            durable_goal_id,
+            goal_id: GoalId::new(),
             session_id: params.session_id,
-            prompt: objective,
+            objective,
             description: None,
             status: GoalStatus::Active,
             created_turn_id: None,
@@ -182,7 +142,7 @@ impl Goal {
             updated_at: now,
             budget: GoalBudget {
                 max_turns: None,
-                max_tokens: params.token_budget,
+                token_budget: params.token_budget,
                 max_duration_seconds: None,
             },
             usage: GoalUsage::default(),
@@ -192,16 +152,49 @@ impl Goal {
         })
     }
 
+    /// Project to legacy ThreadGoal (v1 / ACP / core-session prompts).
+    /// Status collapse (Blocked→Paused, …) is intentional for that wire only.
     pub fn to_thread_goal(&self) -> ThreadGoal {
         ThreadGoal {
             thread_id: self.session_id,
-            objective: self.prompt.clone(),
-            status: self.status.as_thread_goal_status(),
-            token_budget: self.budget.max_tokens,
+            objective: self.objective.clone(),
+            status: thread_goal_status_from_goal(self.status),
+            token_budget: self.budget.token_budget,
             tokens_used: self.usage.tokens_used,
-            time_used_seconds: i64::try_from(self.usage.duration_seconds).unwrap_or(i64::MAX),
+            time_used_seconds: i64::try_from(self.usage.time_used_seconds).unwrap_or(i64::MAX),
             created_at: self.created_at.timestamp(),
             updated_at: self.updated_at.timestamp(),
+        }
+    }
+
+    /// Native live surface: status identity except Cleared→Canceled, plus ID bridges.
+    /// First-party field names already match Native.
+    pub fn to_native_goal(&self) -> devo_protocol::native::goal::Goal {
+        use devo_protocol::native::goal::GoalStatus as NativeStatus;
+        let status = match self.status {
+            GoalStatus::Active => NativeStatus::Active,
+            GoalStatus::Paused => NativeStatus::Paused,
+            GoalStatus::Blocked => NativeStatus::Blocked,
+            GoalStatus::UsageLimited => NativeStatus::UsageLimited,
+            GoalStatus::BudgetLimited => NativeStatus::BudgetLimited,
+            GoalStatus::Completed => NativeStatus::Completed,
+            GoalStatus::Failed => NativeStatus::Failed,
+            GoalStatus::Canceled | GoalStatus::Cleared => NativeStatus::Canceled,
+        };
+        devo_protocol::native::goal::Goal {
+            id: self.goal_id,
+            session_id: self.session_id,
+            objective: self.objective.clone(),
+            status,
+            token_budget: self
+                .budget
+                .token_budget
+                .and_then(|budget| u64::try_from(budget).ok()),
+            tokens_used: u64::try_from(self.usage.tokens_used).unwrap_or(0),
+            time_used_seconds: self.usage.time_used_seconds,
+            progress_summary: self.progress_summary.clone(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
         }
     }
 
@@ -211,8 +204,8 @@ impl Goal {
 
     pub fn token_budget_exhausted(&self) -> bool {
         self.budget
-            .max_tokens
-            .is_some_and(|max_tokens| self.usage.tokens_used >= max_tokens)
+            .token_budget
+            .is_some_and(|token_budget| self.usage.tokens_used >= token_budget)
     }
 
     /// Check whether this goal should trigger a continuation turn.
@@ -273,12 +266,10 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     fn make_active_goal() -> Goal {
-        let durable_goal_id = devo_core::GoalId::new();
         Goal {
-            goal_id: GoalId::from_durable(durable_goal_id),
-            durable_goal_id,
+            goal_id: GoalId::new(),
             session_id: SessionId::new(),
-            prompt: "Refactor auth module".into(),
+            objective: "Refactor auth module".into(),
             description: Some("Make it more testable".into()),
             status: GoalStatus::Active,
             created_turn_id: None,
@@ -318,7 +309,7 @@ mod tests {
     fn token_budget_exhausted_allows_budget_wrap_up_continuation() {
         // Trace: L2-DES-GOAL-001
         let mut goal = make_active_goal();
-        goal.budget.max_tokens = Some(1000);
+        goal.budget.token_budget = Some(1000);
         goal.usage.tokens_used = 1000;
         assert_eq!(
             goal.check_continuation().reason,
@@ -331,15 +322,15 @@ mod tests {
     fn continuation_prompt_escapes_untrusted_objective_xml() {
         // Trace: L2-DES-GOAL-001
         let mut goal = make_active_goal();
-        goal.prompt = "finish <goal> & report \"done\"".into();
-        goal.budget.max_tokens = Some(100);
+        goal.objective = "finish <goal> & report \"done\"".into();
+        goal.budget.token_budget = Some(100);
         goal.usage.tokens_used = 17;
 
         let prompt = goal.continuation_prompt().expect("active goal prompt");
 
         assert!(prompt.contains("finish &lt;goal&gt; &amp; report &quot;done&quot;"));
         assert!(!prompt.contains("finish <goal> & report \"done\""));
-        assert!(prompt.contains("Completion audit:"));
+        assert!(prompt.contains("await goal.complete()"));
     }
 
     #[test]
@@ -349,19 +340,21 @@ mod tests {
 
         let prompt = goal.continuation_prompt().expect("active goal prompt");
 
-        assert!(prompt.contains("- Token budget: none"));
-        assert!(prompt.contains("- Tokens remaining: unlimited"));
+        assert!(prompt.contains("- token budget: none"));
+        assert!(prompt.contains("- remaining tokens: unlimited"));
     }
 
     #[test]
     fn goal_status_is_terminal() {
         assert!(GoalStatus::BudgetLimited.is_terminal());
+        assert!(GoalStatus::UsageLimited.is_terminal());
         assert!(GoalStatus::Completed.is_terminal());
         assert!(GoalStatus::Failed.is_terminal());
         assert!(GoalStatus::Canceled.is_terminal());
         assert!(GoalStatus::Cleared.is_terminal());
         assert!(!GoalStatus::Active.is_terminal());
         assert!(!GoalStatus::Paused.is_terminal());
+        assert!(!GoalStatus::Blocked.is_terminal());
     }
 
     #[test]
@@ -369,10 +362,11 @@ mod tests {
         for status in &[
             GoalStatus::Active,
             GoalStatus::Paused,
+            GoalStatus::Blocked,
+            GoalStatus::UsageLimited,
             GoalStatus::BudgetLimited,
             GoalStatus::Completed,
             GoalStatus::Failed,
-            GoalStatus::Blocked,
             GoalStatus::Canceled,
             GoalStatus::Cleared,
         ] {
@@ -390,5 +384,29 @@ mod tests {
         assert_eq!(usage.turns_used, 1);
         usage.record_tokens(500);
         assert_eq!(usage.tokens_used, 500);
+    }
+
+    #[test]
+    fn primary_snapshot_accepts_legacy_prompt_and_duration_fields() {
+        let json = serde_json::json!({
+            "goal_id": GoalId::new(),
+
+            "session_id": SessionId::new(),
+            "prompt": "legacy objective",
+            "description": null,
+            "status": "active",
+            "created_turn_id": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "budget": { "max_tokens": 42 },
+            "usage": { "turns_used": 0, "tokens_used": 0, "duration_seconds": 9 },
+            "progress_summary": null,
+            "blocker_summary": null,
+            "verification_summary": null,
+        });
+        let goal: Goal = serde_json::from_value(json).expect("legacy snapshot");
+        assert_eq!(goal.objective, "legacy objective");
+        assert_eq!(goal.budget.token_budget, Some(42));
+        assert_eq!(goal.usage.time_used_seconds, 9);
     }
 }

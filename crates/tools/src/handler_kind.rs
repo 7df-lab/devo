@@ -13,8 +13,8 @@ pub enum ToolHandlerKind {
     WebSearch,
     Skill,
     Lsp,
-    Invalid,
     ExecCommand,
     WriteStdin,
     ToolSearch,
+    Ipython,
 }

@@ -10,12 +10,12 @@ mod provider_retry;
 mod stream_consumer;
 mod turn_continuation;
 
+pub use devo_protocol::native::event::ModelQueryRetryPhase;
 pub use event::EventCallback;
 pub use event::LiveTurnSettings;
 pub use event::ProviderRetryStatus;
 pub use event::QueryEvent;
 pub use event::QueryOptions;
-pub use event::QueryProviderRetryPhase;
 pub use event::SharedLastModelRequest;
 pub use event::SharedLiveTurnSettings;
 
@@ -47,6 +47,7 @@ use devo_protocol::HostedToolDefinition;
 use devo_protocol::HostedWebFetchTool;
 use devo_protocol::HostedWebSearchTool;
 use devo_protocol::ModelRequest;
+use devo_protocol::ProviderWireApi;
 use devo_protocol::RequestContent;
 use devo_protocol::RequestMessage;
 use devo_protocol::ResolvedReasoningRequest;
@@ -65,7 +66,6 @@ use crate::tools::ToolAgentScope;
 use crate::tools::ToolContent;
 use crate::tools::ToolRegistry;
 use crate::tools::ToolRuntime;
-use crate::tools::deferred_loading::is_subagent_agent_coordination_tool;
 use devo_provider::ModelProviderSDK;
 
 use crate::AgentError;
@@ -95,12 +95,22 @@ use crate::response_item::message_to_response_items;
 
 const SUBAGENT_MODE_REMINDER: &str = include_str!("../../prompts/subagent_mode_reminder.md");
 
+fn supports_provider_hosted_web_search(wire_api: ProviderWireApi) -> bool {
+    matches!(
+        wire_api,
+        ProviderWireApi::AnthropicMessages | ProviderWireApi::OpenAIResponses
+    )
+}
+
 fn hosted_tools_for_web_capabilities(
     web_search: &devo_config::ResolvedWebSearchConfig,
     web_fetch: devo_config::ResolvedWebFetchConfig,
+    wire_api: ProviderWireApi,
 ) -> Vec<HostedToolDefinition> {
     let mut hosted_tools = Vec::new();
-    if matches!(web_search, devo_config::ResolvedWebSearchConfig::Provider) {
+    if matches!(web_search, devo_config::ResolvedWebSearchConfig::Provider)
+        && supports_provider_hosted_web_search(wire_api)
+    {
         hosted_tools.push(HostedToolDefinition::WebSearch(HostedWebSearchTool::new()));
     }
     if web_fetch.is_provider() {
@@ -113,7 +123,11 @@ fn hosted_tools_for_web_capabilities(
 fn hosted_tools_for_web_search(
     web_search: &devo_config::ResolvedWebSearchConfig,
 ) -> Vec<HostedToolDefinition> {
-    hosted_tools_for_web_capabilities(web_search, devo_config::ResolvedWebFetchConfig::Disabled)
+    hosted_tools_for_web_capabilities(
+        web_search,
+        devo_config::ResolvedWebFetchConfig::Disabled,
+        ProviderWireApi::AnthropicMessages,
+    )
 }
 
 /// Compact session messages using LLM-backed summarization.
@@ -230,10 +244,12 @@ async fn summarize_and_compact(
 const TOOL_RESULT_TRUNCATION_MARKER: &str = "\n...[truncated]";
 
 /// Tools that store the model-facing payload in Mixed `text` and put UI/protocol
-/// metadata in `json` (shell exit/cwd; read preview/truncated). Omit JSON from
-/// the prompt so the stream is not duplicated.
+/// metadata in `json` (read preview/truncated). Omit JSON from the prompt so the
+/// stream is not duplicated. Shell results are NOT omitted: their `json` holds
+/// no copy of the output stream and carries `duration_ms`/exit/cwd, which the
+/// model needs to reason about slow, hung, or interrupted commands.
 fn tool_result_omits_mixed_json_for_model(tool_name: Option<&str>) -> bool {
-    matches!(tool_name, Some("shell_command" | "bash" | "read"))
+    matches!(tool_name, Some("read"))
 }
 
 fn serialize_tool_content_for_model(content: ToolContent, tool_name: Option<&str>) -> String {
@@ -319,6 +335,19 @@ fn insert_goal_context_message(messages: &mut Vec<RequestMessage>, goal_context:
     );
 }
 
+/// Inject Continual Harness digest after skills prefix, before hidden goal.
+fn insert_harness_digest_message(messages: &mut Vec<RequestMessage>, digest: &str) {
+    let insert_at = if messages.last().is_some_and(is_visible_user_text_message) {
+        messages.len().saturating_sub(1)
+    } else {
+        messages.len()
+    };
+    messages.splice(
+        insert_at..insert_at,
+        [request_text_message(digest.to_string())],
+    );
+}
+
 fn request_text_message(text: String) -> RequestMessage {
     RequestMessage {
         role: Role::User.as_str().to_string(),
@@ -349,12 +378,15 @@ fn is_injected_context_message(message: &RequestMessage) -> bool {
                     || trimmed.starts_with("<context_changes>")
                     || trimmed.starts_with("<user_instructions_updates>")
                     || trimmed.starts_with("<user_instructions>")
+                    || trimmed.contains("[harness-digest]")
+                    || trimmed.starts_with("## Continual harness")
             }
             RequestContent::Reasoning { .. }
             | RequestContent::ProviderReasoning { .. }
             | RequestContent::HostedToolUse { .. }
             | RequestContent::ToolUse { .. }
-            | RequestContent::ToolResult { .. } => false,
+            | RequestContent::ToolResult { .. }
+            | RequestContent::Image { .. } => false,
         })
 }
 
@@ -407,24 +439,14 @@ pub async fn query(
         .as_ref()
         .unwrap_or(&provider)
         .clone();
+    let restricted_runtime = registry.model_tool_allowlist().map(|names| {
+        let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+        runtime.restricted_to_specs(&names)
+    });
+    let model_runtime = restricted_runtime.as_ref().unwrap_or(runtime);
     let agents_md_manager = AgentsMdManager::new(session.config.agents_md.clone());
     let current_agents_snapshot = load_workspace_instructions(&session.cwd, &agents_md_manager);
     let agent_scope = runtime.agent_scope();
-    let mut request_tools = registry.tool_definitions();
-    if agent_scope == ToolAgentScope::Subagent {
-        request_tools.retain(|tool| !is_subagent_agent_coordination_tool(&tool.name));
-    }
-    if !turn_config.web_search.is_local() {
-        request_tools.retain(|tool| tool.name != "web_search");
-    }
-    if !turn_config.web_fetch.is_local() {
-        request_tools.retain(|tool| tool.name != "webfetch");
-    }
-    // Non-OpenAI models often emit malformed apply_patch input, so only expose
-    // the tool to OpenAI-channel models (see Model::supports_apply_patch).
-    if !turn_config.model.supports_apply_patch() {
-        request_tools.retain(|tool| tool.name != "apply_patch");
-    }
 
     if session.session_context.is_none() {
         session.session_context = Some(SessionContext::capture(
@@ -460,6 +482,14 @@ pub async fn query(
     let mut retry_count: usize = 0;
     let mut context_compacted = false;
     let mut budget_steer_injected = false;
+    // Loop guard: a model emitting the same tool batch over and over
+    // (observed in the wild: 100+ identical ToolSearch calls in one turn)
+    // burns provider calls indefinitely. Count consecutive identical batches
+    // and inject a visible steering note every IDENTICAL_BATCH_NOTICE_INTERVAL
+    // of them so the loop breaks without hard-aborting legitimate retries.
+    let mut last_batch_signature: Option<u64> = None;
+    let mut identical_batch_streak: u32 = 0;
+    const IDENTICAL_BATCH_NOTICE_INTERVAL: u32 = 5;
     let mut continuation_policy =
         TurnContinuationPolicy::for_models(&turn_config.model.slug, &turn_config.request_model);
     // Live settings override (L2-DES-CONV-002 Phase 4): the active config
@@ -590,17 +620,34 @@ pub async fn query(
         let _turn_guard = turn_span.enter();
         info!("starting turn");
 
-        // Build model request from the session-locked prefix.
+        // Build system instructions from session-locked context plus the active mode.
         let request_system = {
-            let mut system = session_context.build_system_prompt();
-            if !matches!(
-                &turn_config.web_search,
-                devo_config::ResolvedWebSearchConfig::Disabled
-            ) {
+            let mut system = session_context.build_system_prompt(session.collaboration_mode);
+            if turn_config.web_search.is_provider() {
                 if !system.trim().is_empty() {
                     system.push_str("\n\n");
                 }
                 system.push_str(&crate::tools::websearch_prompt::web_search_prompt());
+            } else if turn_config.web_search.is_local() {
+                if !system.trim().is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str(
+                    "Local web search is available through Python as `await rlm.web_search(query)`. Use it for current information when needed.",
+                );
+            }
+            if turn_config.web_fetch.is_local() {
+                if !system.trim().is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str(
+                    "Local web fetch is available through Python as `await rlm.web_fetch(url)`. Use it to retrieve a specific URL when needed.",
+                );
+            } else if turn_config.web_fetch.is_provider() {
+                if !system.trim().is_empty() {
+                    system.push_str("\n\n");
+                }
+                system.push_str("Provider-hosted web fetch is available to retrieve a specific URL when needed.");
             }
             Some(system).filter(|system| !system.trim().is_empty())
         };
@@ -658,6 +705,19 @@ pub async fn query(
             &prefetched_user_inputs,
             &active_turn_config.model.input_modalities,
         );
+        // Internal registries may retain handlers for server-side operations, but
+        // only the Python kernel schema is ever sent to a model provider.
+        let model_registry = registry.restricted_to_specs(&["ipython"]);
+        let request_tools = model_registry.tool_definitions();
+        // Continual Harness digest: after skills (prefix), before hidden goal.
+        if let Some(digest) = options
+            .harness_digest
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+        {
+            insert_harness_digest_message(&mut messages, digest);
+        }
         if let Some(goal_context) = session.goal_context_prompt() {
             insert_goal_context_message(&mut messages, &goal_context);
         }
@@ -665,8 +725,11 @@ pub async fn query(
             insert_subagent_request_reminders(&mut messages);
         }
 
-        let hosted_tools =
-            hosted_tools_for_web_capabilities(&turn_config.web_search, turn_config.web_fetch);
+        let hosted_tools = hosted_tools_for_web_capabilities(
+            &turn_config.web_search,
+            turn_config.web_fetch,
+            active_turn_config.model.provider,
+        );
         let request = ModelRequest {
             model_slug: devo_protocol::ModelProfileKey::CatalogSlug(catalog_request_model),
             model: provider_request_model,
@@ -678,7 +741,7 @@ pub async fn query(
                 .map_or(session.config.token_budget.max_output_tokens, |value| {
                     value as usize
                 }),
-            tools: Some(request_tools.clone()),
+            tools: (!request_tools.is_empty()).then(|| request_tools.clone()),
             hosted_tools: hosted_tools.clone(),
             sampling: SamplingControls {
                 temperature: active_turn_config.model.temperature,
@@ -690,6 +753,11 @@ pub async fn query(
             extra_body,
         };
         let breakdown = estimate_request_context_breakdown(&request);
+        tracing::debug!(
+            tool_count = request_tools.len(),
+            names = ?request_tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+            "provider request tools"
+        );
         session.prompt_token_estimate = breakdown.total().try_into().unwrap_or(usize::MAX);
         session.raw_context_breakdown = Some(breakdown);
         emit_query_event(&on_event, QueryEvent::ContextEstimate { breakdown }).await;
@@ -818,6 +886,17 @@ pub async fn query(
                         continue;
                     }
                     ProviderRetryDecision::Fail => {
+                        if retry_count > 0 {
+                            emit_query_event(
+                                &on_event,
+                                QueryEvent::ProviderQueryFailed {
+                                    attempt: retry_count,
+                                    max_attempts: provider_retry::max_provider_retries(),
+                                    message: retry_error.to_string(),
+                                },
+                            )
+                            .await;
+                        }
                         return Err(AgentError::Provider(retry_error));
                     }
                 }
@@ -979,7 +1058,7 @@ pub async fn query(
             let completion_error = Arc::clone(&journal_error);
             let completion_events = Arc::clone(&progress_events);
             let metadata = Arc::new(tool_result_metadata.clone());
-            runtime
+            model_runtime
                 .execute_batch_streaming_with_completion(
                     &tool_calls,
                     move |tool_use_id, progress| {
@@ -1036,7 +1115,7 @@ pub async fn query(
                 )
                 .await
         } else {
-            runtime.execute_batch(&tool_calls).await
+            model_runtime.execute_batch(&tool_calls).await
         };
         if let Some(error) = journal_error.lock().expect("journal error lock").take() {
             return Err(AgentError::Provider(error));
@@ -1080,12 +1159,14 @@ pub async fn query(
             "tool batch completed"
         );
 
-        // Build tool result message (user role, per Anthropic API convention)
+        // Build tool result message (user role, per Anthropic API convention).
+        // Vision attachments from tools (e.g. attach-image via ipython) are
+        // sibling Image blocks so providers receive real multimodal input.
         let truncation_policy = TruncationPolicy::from(turn_config.model.truncation_policy);
         let mut artifacts = Vec::new();
         let result_content: Vec<ContentBlock> = results
             .into_iter()
-            .map(|r| {
+            .flat_map(|r| {
                 artifacts.extend(r.output_artifacts.clone());
                 let tool_name = tool_result_metadata
                     .get(r.tool_use_id.as_str())
@@ -1114,11 +1195,18 @@ pub async fn query(
                 } else {
                     truncate_tool_result_for_model(content_str, tool_name, truncation_policy)
                 };
-                ContentBlock::ToolResult {
+                let mut blocks = vec![ContentBlock::ToolResult {
                     tool_use_id: r.tool_use_id,
                     content,
                     is_error: r.is_error,
+                }];
+                for image in r.images {
+                    blocks.push(ContentBlock::Image {
+                        mime_type: image.mime_type,
+                        data_base64: image.data_base64,
+                    });
                 }
+                blocks
             })
             .collect();
 
@@ -1132,6 +1220,41 @@ pub async fn query(
             role: Role::User,
             content: result_content,
         });
+        // Loop guard (see declaration site): nudges the model when the same
+        // batch repeats. Placed after the tool-result message so the note sits
+        // above the results in the next request.
+        {
+            use std::hash::Hasher;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for call in &tool_calls {
+                std::hash::Hash::hash(&call.name, &mut hasher);
+                std::hash::Hash::hash(&call.input.to_string(), &mut hasher);
+            }
+            let batch_signature = hasher.finish();
+            identical_batch_streak = if Some(batch_signature) == last_batch_signature {
+                identical_batch_streak.saturating_add(1)
+            } else {
+                1
+            };
+            last_batch_signature = Some(batch_signature);
+            if identical_batch_streak > 0
+                && identical_batch_streak.is_multiple_of(IDENTICAL_BATCH_NOTICE_INTERVAL)
+            {
+                warn!(
+                    streak = identical_batch_streak,
+                    first_tool = tool_calls.first().map(|call| call.name.as_str()),
+                    "identical tool batch repeated; injecting steering note"
+                );
+                session.push_message(Message::user(format!(
+                    "Note: the previous tool call(s) were repeated {} times in a row with \
+                     identical arguments. If the results are also unchanged, the repetition \
+                     is not making progress: change the approach — call the tool with \
+                     different arguments, use a different tool, or end the turn with a reply \
+                     to the user.",
+                    identical_batch_streak
+                )));
+            }
+        }
         if let Some(journal) = &options.journal {
             journal
                 .commit(

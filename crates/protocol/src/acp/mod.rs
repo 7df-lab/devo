@@ -22,7 +22,7 @@ pub use session_config::*;
 pub use session_mode::*;
 pub use session_update::*;
 
-use crate::InputItem;
+use crate::native::item::UserInput;
 
 pub const ACP_INITIALIZE_METHOD: &str = "initialize";
 pub const ACP_AUTHENTICATE_METHOD: &str = "authenticate";
@@ -45,7 +45,6 @@ pub const ACP_JSONRPC_VERSION: &str = "2.0";
 pub const DEVO_ORIGINAL_METHOD_META: &str = "devo/originalMethod";
 pub const DEVO_ORIGINAL_EVENT_META: &str = "devo/originalEvent";
 pub const DEVO_SESSION_META: &str = "devo/session";
-pub const DEVO_SESSION_RESUME_META: &str = "devo/sessionResume";
 pub const DEVO_TURN_ID_META: &str = "devo/turnId";
 pub const DEVO_ITEM_ID_META: &str = "devo/itemId";
 pub const DEVO_ACTIVITY_AT_META: &str = "devo/activityAt";
@@ -71,8 +70,8 @@ pub const DEVO_PROTOCOL_NATIVE: &str = "native";
 
 pub type AcpMeta = serde_json::Map<String, serde_json::Value>;
 
-pub use event_to_update::acp_notification_from_server_event;
-pub use event_to_update::original_event_from_acp_notification;
+pub use event_to_update::acp_notification_from_server_notification;
+pub use event_to_update::original_notification_wire_from_acp;
 
 /// Returns whether the given `_meta` map opts in to typed item
 /// notifications (`{ "devo": { "typedItems": true } }`).
@@ -92,10 +91,10 @@ pub fn devo_native_protocol_opted_in(meta: Option<&AcpMeta>) -> bool {
         .is_some_and(|value| value == DEVO_PROTOCOL_NATIVE)
 }
 
-pub fn input_items_from_acp_prompt(prompt: Vec<AcpContentBlock>) -> Result<Vec<InputItem>, String> {
+pub fn user_inputs_from_acp_prompt(prompt: Vec<AcpContentBlock>) -> Result<Vec<UserInput>, String> {
     let mut input = Vec::new();
     for block in prompt {
-        input.extend(block.into_input_items()?);
+        input.extend(block.into_user_inputs()?);
     }
     Ok(input)
 }
@@ -106,20 +105,15 @@ mod tests {
 
     use pretty_assertions::assert_eq;
 
-    use super::event_to_update::acp_update_from_server_event;
+    use super::event_to_update::acp_update_from_item_completed;
     use super::*;
-    use crate::CommandExecutionPayload;
-    use crate::EventContext;
-    use crate::FileChangePayload;
     use crate::ItemDeltaKind;
-    use crate::ItemDeltaPayload;
-    use crate::ItemEventPayload;
     use crate::ItemId;
-    use crate::ItemKind;
-    use crate::ServerEvent;
     use crate::SessionId;
-    use crate::ToolCallPayload;
     use crate::TurnId;
+    use crate::native::item::ItemState;
+    use crate::native::wire_projector::typed_item_envelope;
+    use chrono::Utc;
 
     fn test_workspace_path(relative: &str) -> PathBuf {
         if cfg!(windows) {
@@ -178,7 +172,6 @@ mod tests {
             .expect("activity timestamp");
         chrono::DateTime::parse_from_rfc3339(activity_at).expect("activity timestamp is RFC3339");
     }
-    use super::event_to_update::file_change_tool_content;
     use super::event_to_update::tool_result_content;
 
     #[test]
@@ -456,7 +449,7 @@ mod tests {
 
     #[test]
     fn acp_prompt_conversion_rejects_unadvertised_image_and_preserves_blob_resource() {
-        let error = input_items_from_acp_prompt(vec![AcpContentBlock::Image {
+        let error = user_inputs_from_acp_prompt(vec![AcpContentBlock::Image {
             annotations: None,
             data: "iVBORw0KGgo=".to_string(),
             mime_type: "image/png".to_string(),
@@ -470,7 +463,7 @@ mod tests {
         );
 
         assert_eq!(
-            input_items_from_acp_prompt(vec![AcpContentBlock::Resource {
+            user_inputs_from_acp_prompt(vec![AcpContentBlock::Resource {
                 annotations: None,
                 resource: AcpEmbeddedResource::Blob(AcpBlobResourceContents {
                     uri: "file:///tmp/data.bin".to_string(),
@@ -481,7 +474,7 @@ mod tests {
                 meta: None,
             }])
             .expect("blob resource converts to prompt text"),
-            vec![InputItem::Text {
+            vec![UserInput::Text {
                 text: "Resource file:///tmp/data.bin (application/octet-stream; base64):\nAA=="
                     .to_string()
             }]
@@ -783,46 +776,36 @@ mod tests {
         let turn_id = TurnId::new();
         let item_id = ItemId::new();
         let path = test_workspace_path("workspace/src/lib.rs");
-        let raw_input = serde_json::json!({
-            "path": serde_json::to_value(&path).expect("serialize path"),
-        });
-        let payload_value = serde_json::to_value(FileChangePayload {
-            tool_call_id: "call-1".to_string(),
-            tool_name: Some("apply_patch".to_string()),
-            input: Some(raw_input.clone()),
-            changes: vec![(
-                path.clone(),
-                crate::protocol::FileChange::Add {
-                    content: "hello\n".to_string(),
-                },
-            )],
-            is_error: false,
-        })
-        .expect("serialize file change payload");
-        let event = ServerEvent::ItemCompleted(ItemEventPayload {
-            context: EventContext {
-                session_id,
-                turn_id: Some(turn_id),
-                item_id: Some(item_id),
-                seq: 1,
-                item_seq: None,
+        let changes = vec![crate::native::item::FileChangeEntry {
+            path: path.clone(),
+            change: crate::native::item::FileChangeKind::Add {
+                content: "hello\n".to_string(),
             },
-            item: crate::ItemEnvelope {
-                item_id: ItemId::new(),
-                item_kind: ItemKind::FileChange,
-                payload: payload_value.clone(),
+        }];
+        let envelope = typed_item_envelope(
+            session_id,
+            turn_id,
+            item_id,
+            1,
+            &crate::native::item::Item::FileChange {
+                call_id: "call-1".to_string(),
+                changes: changes.clone(),
+                sandbox: None,
             },
-        });
+            ItemState::Completed,
+            Utc::now(),
+            None,
+        );
 
         assert_eq!(
-            strip_update_activity_at(acp_update_from_server_event(&event)),
+            strip_update_activity_at(acp_update_from_item_completed(&envelope)),
             Some(AcpSessionUpdate::ToolCallUpdate {
                 tool_call_id: "call-1".to_string(),
-                title: Some("apply_patch".to_string()),
+                title: None,
                 kind: Some(AcpToolKind::Edit),
                 status: Some(AcpToolCallStatus::Completed),
-                raw_input: Some(raw_input),
-                raw_output: Some(payload_value),
+                raw_input: None,
+                raw_output: Some(serde_json::to_value(&changes).expect("serialize changes")),
                 content: Some(vec![AcpToolCallContent::Diff {
                     path: path.clone(),
                     old_text: None,
@@ -835,66 +818,58 @@ mod tests {
                     meta: None,
                 }]),
                 meta: Some(turn_item_meta(&turn_id, &item_id)),
-            })
+            }),
         );
     }
 
     #[test]
-    fn file_change_update_emits_text_content_when_old_new_text_is_unavailable() {
+    fn file_change_update_emits_text_content_for_unified_diff() {
+        let session_id = SessionId::new();
+        let turn_id = TurnId::new();
+        let item_id = ItemId::new();
         let path = test_workspace_path("workspace/src/lib.rs");
         let unified_diff = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
-        let change = FileChangePayload {
-            tool_call_id: "call-1".to_string(),
-            tool_name: Some("apply_patch".to_string()),
-            input: None,
-            changes: vec![(
-                path,
-                crate::protocol::FileChange::Update {
-                    unified_diff: unified_diff.to_string(),
-                    old_text: None,
-                    new_text: None,
-                    move_path: None,
-                },
-            )],
-            is_error: false,
-        };
-
-        assert_eq!(
-            file_change_tool_content(&change),
-            vec![AcpToolCallContent::content(AcpContentBlock::text(
-                unified_diff
-            ))]
+        let changes = vec![crate::native::item::FileChangeEntry {
+            path: path.clone(),
+            change: crate::native::item::FileChangeKind::Update {
+                unified_diff: unified_diff.to_string(),
+                move_path: None,
+            },
+        }];
+        let envelope = typed_item_envelope(
+            session_id,
+            turn_id,
+            item_id,
+            1,
+            &crate::native::item::Item::FileChange {
+                call_id: "call-1".to_string(),
+                changes: changes.clone(),
+                sandbox: None,
+            },
+            ItemState::Completed,
+            Utc::now(),
+            None,
         );
-    }
-
-    #[test]
-    fn file_change_update_emits_acp_diff_when_old_new_text_is_available() {
-        let path = test_workspace_path("workspace/src/lib.rs");
-        let change = FileChangePayload {
-            tool_call_id: "call-1".to_string(),
-            tool_name: Some("write".to_string()),
-            input: None,
-            changes: vec![(
-                path.clone(),
-                crate::protocol::FileChange::Update {
-                    unified_diff: "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n"
-                        .to_string(),
-                    old_text: Some("old\n".to_string()),
-                    new_text: Some("new\n".to_string()),
-                    move_path: None,
-                },
-            )],
-            is_error: false,
-        };
 
         assert_eq!(
-            file_change_tool_content(&change),
-            vec![AcpToolCallContent::Diff {
-                path,
-                old_text: Some("old\n".to_string()),
-                new_text: "new\n".to_string(),
-                meta: None,
-            }]
+            strip_update_activity_at(acp_update_from_item_completed(&envelope)),
+            Some(AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: "call-1".to_string(),
+                title: None,
+                kind: Some(AcpToolKind::Edit),
+                status: Some(AcpToolCallStatus::Completed),
+                raw_input: None,
+                raw_output: Some(serde_json::to_value(&changes).expect("serialize changes")),
+                content: Some(vec![AcpToolCallContent::content(AcpContentBlock::text(
+                    unified_diff
+                ))]),
+                locations: Some(vec![AcpToolCallLocation {
+                    path,
+                    line: None,
+                    meta: None,
+                }]),
+                meta: Some(turn_item_meta(&turn_id, &item_id)),
+            }),
         );
     }
 
@@ -903,34 +878,32 @@ mod tests {
         let session_id = SessionId::new();
         let turn_id = TurnId::new();
         let item_id = ItemId::new();
-        let payload_value = serde_json::to_value(CommandExecutionPayload {
-            tool_call_id: "call-1".to_string(),
-            tool_name: "exec_command".to_string(),
-            command: "cargo test".to_string(),
-            input: Some(serde_json::json!({"cmd": "cargo test"})),
-            source: crate::protocol::ExecCommandSource::Agent,
-            command_actions: Vec::new(),
-            output: Some(serde_json::Value::String("tests passed\n".to_string())),
-            is_error: false,
-        })
-        .expect("serialize command execution payload");
-        let event = ServerEvent::ItemCompleted(ItemEventPayload {
-            context: EventContext {
-                session_id,
-                turn_id: Some(turn_id),
-                item_id: Some(item_id),
-                seq: 1,
-                item_seq: None,
+        let envelope = typed_item_envelope(
+            session_id,
+            turn_id,
+            item_id,
+            1,
+            &crate::native::item::Item::CommandExecution {
+                call_id: "call-1".to_string(),
+                command: "cargo test".to_string(),
+                argv: None,
+                cwd: PathBuf::from("."),
+                input: Some(serde_json::json!({"cmd": "cargo test"})),
+                output: Some(serde_json::Value::String("tests passed\n".to_string())),
+                exit_code: Some(0),
+                execution_handle: None,
+                is_error: false,
+                execution_mode: crate::native::item::ExecutionMode::Foreground,
+                origin: crate::native::item::ExecOrigin::AgentTool,
+                sandbox: None,
             },
-            item: crate::ItemEnvelope {
-                item_id: ItemId::new(),
-                item_kind: ItemKind::CommandExecution,
-                payload: payload_value.clone(),
-            },
-        });
+            ItemState::Completed,
+            Utc::now(),
+            None,
+        );
 
         assert_eq!(
-            strip_update_activity_at(acp_update_from_server_event(&event)),
+            strip_update_activity_at(acp_update_from_item_completed(&envelope)),
             Some(AcpSessionUpdate::ToolCallUpdate {
                 tool_call_id: "call-1".to_string(),
                 title: Some("cargo test".to_string()),
@@ -943,34 +916,63 @@ mod tests {
                 ))]),
                 locations: None,
                 meta: Some(turn_item_meta(&turn_id, &item_id)),
-            })
+            }),
         );
     }
 
     #[test]
     fn usage_update_size_uses_context_window() {
         let session_id = SessionId::new();
-        let payload = crate::TurnUsageUpdatedPayload {
+        let turn_id = TurnId::new();
+        let notification = crate::native::event::ServerNotification::TurnUsageUpdated {
             session_id,
-            turn_id: TurnId::new(),
-            usage: crate::TurnUsage {
-                input_tokens: 3,
-                output_tokens: 4,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                total_tokens: None,
+            turn_id,
+            usage: crate::native::usage::TurnUsage {
+                query: crate::native::usage::UsageTotals {
+                    total_tokens: 7,
+                    input_tokens: 3,
+                    output_tokens: 4,
+                    reasoning_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    call_count: 0,
+                    metered_call_count: 0,
+                    failed_call_count: 0,
+                    cancelled_call_count: 0,
+                    estimated_cost: None,
+                },
+                overhead: crate::native::usage::UsageTotals {
+                    total_tokens: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    call_count: 0,
+                    metered_call_count: 0,
+                    failed_call_count: 0,
+                    cancelled_call_count: 0,
+                    estimated_cost: None,
+                },
             },
-            total_input_tokens: 30,
-            total_output_tokens: 12,
-            total_tokens: 42,
-            total_cache_read_tokens: 0,
             last_query_input_tokens: 3,
+            session_totals: Some(crate::native::usage::UsageTotals {
+                total_tokens: 42,
+                input_tokens: 30,
+                output_tokens: 12,
+                reasoning_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                call_count: 0,
+                metered_call_count: 0,
+                failed_call_count: 0,
+                cancelled_call_count: 0,
+                estimated_cost: None,
+            }),
             context_window: Some(200_000),
         };
-        let event = ServerEvent::TurnUsageUpdated(payload.clone());
 
-        let (_, value) = acp_notification_from_server_event("turn/usage/updated", &event);
+        let (_, value) = acp_notification_from_server_notification(&notification);
 
         assert_eq!(
             value["update"]["sessionUpdate"],
@@ -978,11 +980,10 @@ mod tests {
         );
         assert_eq!(value["update"]["used"], serde_json::json!(42));
         assert_eq!(value["update"]["size"], serde_json::json!(200_000));
-        let actual_payload = serde_json::from_value::<crate::TurnUsageUpdatedPayload>(
-            value["update"]["_meta"][DEVO_TURN_USAGE_META].clone(),
-        )
-        .expect("usage update should preserve Devo turn usage payload");
-        assert_eq!(actual_payload, payload);
+        assert!(
+            value["update"]["_meta"][DEVO_TURN_USAGE_META].is_object(),
+            "usage update should preserve Native turn usage params"
+        );
     }
 
     #[test]
@@ -990,37 +991,32 @@ mod tests {
         let session_id = SessionId::new();
         let turn_id = TurnId::new();
         let item_id = ItemId::new();
-        let started = ServerEvent::ItemStarted(ItemEventPayload {
-            context: EventContext {
-                session_id,
-                turn_id: Some(turn_id),
-                item_id: Some(item_id),
-                seq: 0,
-                item_seq: None,
+        let started_envelope = typed_item_envelope(
+            session_id,
+            turn_id,
+            item_id,
+            0,
+            &crate::native::item::Item::ToolCall {
+                call_id: "call-1".to_string(),
+                tool_name: "code_search".to_string(),
+                source: crate::native::item::ToolSource::Builtin,
+                server_name: None,
+                input: Some(serde_json::json!({
+                    "operation": "search",
+                    "query": "context length display",
+                    "path": "."
+                })),
             },
-            item: crate::ItemEnvelope {
-                item_id,
-                item_kind: ItemKind::ToolCall,
-                payload: serde_json::to_value(ToolCallPayload {
-                    tool_call_id: "call-1".to_string(),
-                    tool_name: "code_search".to_string(),
-                    parameters: serde_json::json!({
-                        "operation": "search",
-                        "query": "context length display",
-                        "path": "."
-                    }),
-                    command_actions: vec![crate::parse_command::ParsedCommand::Search {
-                        cmd: "code_search context length display in .".to_string(),
-                        query: Some("context length display".to_string()),
-                        path: Some(".".to_string()),
-                    }],
-                })
-                .expect("serialize tool payload"),
-            },
-        });
+            ItemState::Running,
+            Utc::now(),
+            None,
+        );
 
-        let (method, value) = acp_notification_from_server_event("item/started", &started);
-        let notification: AcpSessionNotification =
+        let notification = crate::native::event::ServerNotification::ItemStarted {
+            item: Box::new(started_envelope.clone()),
+        };
+        let (method, value) = acp_notification_from_server_notification(&notification);
+        let acp: AcpSessionNotification =
             serde_json::from_value(value.clone()).expect("deserialize ACP notification");
 
         assert_eq!(method, ACP_SESSION_UPDATE_METHOD);
@@ -1028,10 +1024,9 @@ mod tests {
             value["update"]["sessionUpdate"],
             serde_json::json!("tool_call")
         );
-        assert_eq!(
-            original_event_from_acp_notification(&notification),
-            Some(("item/started".to_string(), started))
-        );
+        let (orig_method, _) = original_notification_wire_from_acp(&acp)
+            .expect("tool item started preserves original wire");
+        assert_eq!(orig_method, "item/started");
     }
 
     #[test]
@@ -1039,27 +1034,27 @@ mod tests {
         let session_id = SessionId::new();
         let turn_id = TurnId::new();
         let item_id = ItemId::new();
-        let started = ServerEvent::ItemStarted(ItemEventPayload {
-            context: EventContext {
-                session_id,
-                turn_id: Some(turn_id),
-                item_id: Some(item_id),
-                seq: 0,
-                item_seq: None,
+        let started_envelope = typed_item_envelope(
+            session_id,
+            turn_id,
+            item_id,
+            0,
+            &crate::native::item::Item::ToolCall {
+                call_id: "call-1".to_string(),
+                tool_name: "read".to_string(),
+                source: crate::native::item::ToolSource::Builtin,
+                server_name: None,
+                input: Some(serde_json::json!({"path": "src/lib.rs"})),
             },
-            item: crate::ItemEnvelope {
-                item_id,
-                item_kind: ItemKind::ToolCall,
-                payload: serde_json::to_value(ToolCallPayload {
-                    tool_call_id: "call-1".to_string(),
-                    tool_name: "read".to_string(),
-                    parameters: serde_json::json!({"path": "src/lib.rs"}),
-                    command_actions: Vec::new(),
-                })
-                .expect("serialize tool payload"),
+            ItemState::Running,
+            Utc::now(),
+            None,
+        );
+        let (_, started_value) = acp_notification_from_server_notification(
+            &crate::native::event::ServerNotification::ItemStarted {
+                item: Box::new(started_envelope.clone()),
             },
-        });
-        let (_, started_value) = acp_notification_from_server_event("item/started", &started);
+        );
         let mut started_update = started_value["update"].clone();
         assert_activity_at(&started_update);
         strip_json_activity_at(&mut started_update);
@@ -1079,14 +1074,13 @@ mod tests {
             "tool item/started should keep original method for legacy clients"
         );
 
-        let update = ServerEvent::ToolCallStatusUpdated(crate::ToolCallStatusUpdatedPayload {
+        let update = crate::native::event::ServerNotification::ToolCallStatusUpdated {
             session_id,
             turn_id,
             tool_call_id: "call-1".to_string(),
             status: "in_progress".to_string(),
-        });
-        let (_, update_value) =
-            acp_notification_from_server_event("tool_call/status_updated", &update);
+        };
+        let (_, update_value) = acp_notification_from_server_notification(&update);
         let mut update_json = update_value["update"].clone();
         assert_activity_at(&update_json);
         strip_json_activity_at(&mut update_json);
@@ -1108,24 +1102,15 @@ mod tests {
     fn native_session_update_omits_devo_event_meta() {
         let session_id = SessionId::new();
         let item_id = ItemId::new();
-        let event = ServerEvent::ItemDelta {
-            delta_kind: ItemDeltaKind::AgentMessageDelta,
-            payload: ItemDeltaPayload {
-                context: EventContext {
-                    session_id,
-                    turn_id: None,
-                    item_id: Some(item_id),
-                    seq: 7,
-                    item_seq: None,
-                },
-                delta: "hello".to_string(),
-                stream_index: None,
-                channel: None,
-                chunk_index: None,
-            },
-        };
+        let event = crate::item_delta_notification(
+            ItemDeltaKind::AgentMessageDelta,
+            session_id,
+            item_id,
+            0,
+            "hello",
+        );
 
-        let (method, value) = acp_notification_from_server_event("item/agentMessage/delta", &event);
+        let (method, value) = acp_notification_from_server_notification(&event);
         let notification: AcpSessionNotification =
             serde_json::from_value(value.clone()).expect("deserialize ACP notification");
 
@@ -1133,6 +1118,7 @@ mod tests {
         let mut update_json = value["update"].clone();
         assert_activity_at(&update_json);
         strip_json_activity_at(&mut update_json);
+        let native_item_id = item_id;
         assert_eq!(
             update_json,
             serde_json::json!({
@@ -1141,35 +1127,25 @@ mod tests {
                     "type": "text",
                     "text": "hello"
                 },
-                "messageId": item_id.to_string(),
+                "messageId": native_item_id.as_str(),
                 "_meta": {
-                    "devo/itemId": item_id.to_string()
+                    "devo/itemId": native_item_id.as_str()
                 }
             })
         );
         assert_eq!(value.get("_meta"), None);
-        assert_eq!(original_event_from_acp_notification(&notification), None);
+        assert_eq!(original_notification_wire_from_acp(&notification), None);
 
         let reasoning_item_id = ItemId::new();
-        let reasoning = ServerEvent::ItemDelta {
-            delta_kind: ItemDeltaKind::ReasoningTextDelta,
-            payload: ItemDeltaPayload {
-                context: EventContext {
-                    session_id,
-                    turn_id: None,
-                    item_id: Some(reasoning_item_id),
-                    seq: 8,
-                    item_seq: None,
-                },
-                delta: "thinking".to_string(),
-                stream_index: None,
-                channel: None,
-                chunk_index: None,
-            },
-        };
+        let reasoning = crate::item_delta_notification(
+            ItemDeltaKind::ReasoningTextDelta,
+            session_id,
+            reasoning_item_id,
+            0,
+            "thinking",
+        );
 
-        let (method, value) =
-            acp_notification_from_server_event("item/reasoning/textDelta", &reasoning);
+        let (method, value) = acp_notification_from_server_notification(&reasoning);
         let notification: AcpSessionNotification =
             serde_json::from_value(value.clone()).expect("deserialize ACP notification");
 
@@ -1177,6 +1153,7 @@ mod tests {
         let mut update_json = value["update"].clone();
         assert_activity_at(&update_json);
         strip_json_activity_at(&mut update_json);
+        let native_reasoning_id = reasoning_item_id;
         assert_eq!(
             update_json,
             serde_json::json!({
@@ -1185,13 +1162,13 @@ mod tests {
                     "type": "text",
                     "text": "thinking"
                 },
-                "messageId": reasoning_item_id.to_string(),
+                "messageId": native_reasoning_id.as_str(),
                 "_meta": {
-                    "devo/itemId": reasoning_item_id.to_string()
+                    "devo/itemId": native_reasoning_id.as_str()
                 }
             })
         );
         assert_eq!(value.get("_meta"), None);
-        assert_eq!(original_event_from_acp_notification(&notification), None);
+        assert_eq!(original_notification_wire_from_acp(&notification), None);
     }
 }

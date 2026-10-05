@@ -5,12 +5,7 @@ use std::sync::Mutex;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
 use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
 use devo_protocol::Model;
 use devo_protocol::ModelProfileKey;
 use devo_protocol::ModelRequest;
@@ -37,7 +32,7 @@ use tokio::time::timeout;
 
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
+use devo_server::test_support::TestRuntime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FirstStreamBehavior {
@@ -209,43 +204,25 @@ fn build_runtime(
     data_root: &std::path::Path,
     router: Arc<RecordingRouter>,
 ) -> Result<Arc<ServerRuntime>> {
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("model-selection-regression.db"),
-    )?);
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(UnusedProvider);
-    let provider_router: Arc<dyn ProviderRouter> = router;
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            provider,
-            provider_router,
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            "default/vendor/default-model".to_string(),
-            Arc::new(PresetModelCatalog::new(vec![
-                Model {
-                    slug: "default/vendor/default-model".to_string(),
-                    display_name: "Default Model".to_string(),
-                    ..Model::default()
-                },
-                Model {
-                    slug: "alternate/vendor/alt-model".to_string(),
-                    display_name: "Alt Model".to_string(),
-                    ..Model::default()
-                },
-            ])),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                /*workspace_root*/ None,
-            )?)),
-        ),
-    ))
+    Ok(TestRuntime::new(Arc::new(UnusedProvider))
+        .router(router)
+        .default_model("default/vendor/default-model")
+        .catalog(Arc::new(PresetModelCatalog::new(vec![
+            Model {
+                slug: "default/vendor/default-model".to_string(),
+                display_name: "Default Model".to_string(),
+                reasoning_capability: devo_protocol::ReasoningCapability::Toggle,
+                ..Model::default()
+            },
+            Model {
+                slug: "alternate/vendor/alt-model".to_string(),
+                display_name: "Alt Model".to_string(),
+                reasoning_capability: devo_protocol::ReasoningCapability::Toggle,
+                ..Model::default()
+            },
+        ])))
+        .db_file("model-selection-regression.db")
+        .runtime(data_root))
 }
 
 async fn initialize_connection(
@@ -306,7 +283,7 @@ async fn start_session(
         devo_protocol::native::rpc_session::SessionNewResult,
     > = serde_json::from_value(response)
         .with_context(|| format!("decode session/new response: {response_value}"))?;
-    Ok(SessionId::try_from(response.result.session.id.as_str())?)
+    Ok(SessionId::from(response.result.session.id.as_str()))
 }
 
 async fn update_model(
@@ -547,7 +524,10 @@ async fn cold_session_model_update_survives_resume_and_turn() -> Result<()> {
 /// express — through metadata/update responses, resume, read, and the cold
 /// list snapshot. Parsing the selection through the enum on any read path
 /// silently dropped the value and clients restored the default effort.
-async fn effort_selection_round_trips_through_all_reads(effort: &str) -> Result<()> {
+async fn effort_selection_round_trips_through_all_reads(
+    effort: &str,
+    expected: &str,
+) -> Result<()> {
     let data_root = TempDir::new()?;
     write_provider_config(data_root.path())?;
 
@@ -592,7 +572,7 @@ async fn effort_selection_round_trips_through_all_reads(effort: &str) -> Result<
         .with_context(|| format!("decode metadata/update response: {update}"))?;
     assert_eq!(
         update.result.session.settings.reasoning_effort.as_deref(),
-        Some(effort),
+        Some(expected),
         "metadata/update response must echo the normalized selection"
     );
     drop(initial_runtime);
@@ -621,7 +601,7 @@ async fn effort_selection_round_trips_through_all_reads(effort: &str) -> Result<
         .context("session/resume response")?;
     assert_eq!(
         resume["result"]["session"]["settings"]["reasoningEffort"].as_str(),
-        Some(effort),
+        Some(expected),
         "session/resume must return the persisted selection"
     );
     let read: serde_json::Value = read_json("session/read", 23)
@@ -629,7 +609,7 @@ async fn effort_selection_round_trips_through_all_reads(effort: &str) -> Result<
         .context("session/read response")?;
     assert_eq!(
         read["result"]["session"]["settings"]["reasoningEffort"].as_str(),
-        Some(effort),
+        Some(expected),
         "session/read must return the persisted selection"
     );
     let list: serde_json::Value = runtime
@@ -652,25 +632,25 @@ async fn effort_selection_round_trips_through_all_reads(effort: &str) -> Result<
         .clone();
     assert_eq!(
         listed["settings"]["reasoningEffort"].as_str(),
-        Some(effort),
+        Some(expected),
         "cold session/list snapshot must return the persisted selection"
     );
     Ok(())
 }
 
 /// Trace: L2-DES-CONV-002 DD-10
-/// Verifies: toggle-keyword selections (variant/toggle-style models) survive
-/// every read path after a restart.
+/// Verifies: toggle-keyword selections normalize against the selected model
+/// and the canonical value survives every read path after restart.
 #[tokio::test]
 async fn metadata_update_toggle_selection_round_trips_through_all_reads() -> Result<()> {
-    effort_selection_round_trips_through_all_reads("on").await
+    effort_selection_round_trips_through_all_reads("on", "off").await
 }
 
 /// Trace: L2-DES-CONV-002 DD-10
-/// Verifies: typed-level selections survive the same read paths.
+/// Verifies: unsupported typed levels clamp and survive the same read paths.
 #[tokio::test]
 async fn metadata_update_levels_selection_round_trips_through_all_reads() -> Result<()> {
-    effort_selection_round_trips_through_all_reads("xhigh").await
+    effort_selection_round_trips_through_all_reads("xhigh", "off").await
 }
 
 /// Trace: L2-DES-CONV-002 DD-4
@@ -709,7 +689,7 @@ async fn repeated_identical_effort_patch_does_not_append_field_line() -> Result<
     let second: serde_json::Value = send_patch(32).await.context("second patch")?;
     assert_eq!(
         first["result"]["session"]["settings"]["reasoningEffort"].as_str(),
-        Some("on")
+        Some("off")
     );
     let first_version = first["result"]["session"]["version"].as_u64();
     let second_version = second["result"]["session"]["version"].as_u64();

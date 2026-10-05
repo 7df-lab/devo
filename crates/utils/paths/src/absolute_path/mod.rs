@@ -11,6 +11,9 @@ use std::path::Path;
 use std::path::PathBuf;
 
 mod absolutize;
+mod path_uri;
+
+pub use path_uri::PathUri;
 
 /// A path that is guaranteed to be absolute and normalized (though it is not
 /// guaranteed to be canonicalized or exist on the filesystem).

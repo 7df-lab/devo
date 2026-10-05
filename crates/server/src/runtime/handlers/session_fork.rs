@@ -5,15 +5,16 @@
 //! `parent_session_id`.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use chrono::Utc;
+use devo_protocol::native::item::ItemState;
+use devo_protocol::native::wire_projector::typed_item_envelope;
 
 use super::super::*;
 use crate::execution::PersistedTurnItem;
-use crate::persistence::build_item_record;
+use crate::replay_hydrate::ReplayedTurn;
 use crate::runtime::handlers::session::RuntimeSessionTurnCutOptions;
-use devo_core::SessionRecord;
-use devo_core::TurnRecord;
 use devo_protocol::native::rpc_session::RollbackMode;
 use devo_protocol::native::rpc_session::SessionForkCut;
 
@@ -56,29 +57,24 @@ impl ServerRuntime {
             .await?;
 
         // User forks are independent sessions — never reuse parent_session_id.
-        forked_runtime.summary.parent_session_id = None;
+        forked_runtime.summary.parent = None;
         forked_runtime.summary.fork_from_id = Some(options.source_session_id);
-        forked_runtime.summary.fork_at_turn_id = options.fork_at_turn_id;
+        forked_runtime.summary.at_turn_id = options.fork_at_turn_id;
 
         if forked_runtime.summary.ephemeral {
             return Ok(forked_runtime);
         }
 
-        let mut record = self.rollout_store.create_session_record_with_fork(
-            forked_id,
-            now,
-            forked_runtime.summary.cwd.clone(),
-            forked_runtime.summary.additional_directories.clone(),
-            forked_runtime.summary.title.clone(),
-            forked_runtime.summary.model.clone(),
-            forked_runtime.summary.model_binding_id.clone(),
-            forked_runtime.summary.reasoning_effort_selection.clone(),
-            forked_runtime.runtime_context.provider.name().to_string(),
-            /*parent_session_id*/ None,
-            Some(options.source_session_id),
-            options.fork_at_turn_id,
-        );
-        if let Err(error) = self.rollout_store.append_session_meta(&record) {
+        let mut invented = self
+            .rollout_store
+            .invent_session_persistence(&forked_id.clone());
+        invented.extras.collaboration_mode = Some(forked_runtime.summary.collaboration_mode);
+        invented.extras.permission_preset = forked_runtime.summary.permission_preset();
+        if let Err(error) = self.rollout_store.append_session_meta_at(
+            &invented.rollout_path,
+            &forked_runtime.summary.native,
+            Some(invented.extras.clone()),
+        ) {
             return Err(format!(
                 "failed to persist forked session metadata: {error}"
             ));
@@ -88,10 +84,11 @@ impl ServerRuntime {
             let core = forked_runtime.core_session.lock().await;
             core.session_context.clone()
         } {
-            if let Err(error) = self
-                .rollout_store
-                .append_session_context_updated(&record, session_context)
-            {
+            if let Err(error) = self.rollout_store.append_session_context_updated_at(
+                &invented.rollout_path,
+                forked_id,
+                session_context,
+            ) {
                 tracing::warn!(
                     session_id = %forked_id,
                     error = %error,
@@ -104,43 +101,35 @@ impl ServerRuntime {
 
         write_kept_history_to_rollout(
             &self.rollout_store,
-            &mut record,
+            &invented.rollout_path,
             forked_id,
             &forked_runtime.persisted_turn_items,
-            &forked_runtime.turn_records_by_id,
+            &forked_runtime.turns_by_id,
             forked_runtime.latest_compaction_snapshot.as_ref(),
         )?;
 
-        if let Some(source_record) = &source.record {
+        if let Some(source_path) = &source.rollout_path {
             let kept_calls = forked_runtime
                 .persisted_turn_items
                 .iter()
-                .filter_map(|item| match &item.turn_item {
-                    TurnItem::ToolCall(call) => Some(call.tool_call_id.as_str()),
-                    TurnItem::ToolResult(result) => Some(result.tool_call_id.as_str()),
-                    TurnItem::CommandExecution(command) => Some(command.tool_call_id.as_str()),
-                    _ => None,
-                })
+                .filter_map(|item| crate::persisted_native_item::tool_call_id(&item.item))
                 .collect::<HashSet<_>>();
-            let references =
-                devo_core::output_replay::read_output_references(&source_record.rollout_path)
-                    .map_err(|error| format!("failed to read fork output references: {error}"))?;
+            let references = devo_core::output_replay::read_output_references(source_path)
+                .map_err(|error| format!("failed to read fork output references: {error}"))?;
             let artifacts = references
                 .into_iter()
                 .filter(|artifact| kept_calls.contains(artifact.call_id.as_str()))
                 .collect();
             self.rollout_store
-                .append_v2_lines(
-                    &record.rollout_path,
-                    vec![devo_core::RolloutLineV2::Internal {
+                .append_rollout_lines(
+                    &invented.rollout_path,
+                    vec![devo_core::RolloutLine::Internal {
                         v: 2,
                         timestamp: now,
-                        session_id: devo_protocol::native::ids::SessionId::from_legacy_uuid(
-                            forked_id.into(),
-                        ),
+                        session_id: forked_id,
                         turn_id: None,
                         seq: 0,
-                        entry: devo_core::InternalRecordV2::Execution {
+                        entry: devo_core::InternalRecord::Execution {
                             record:
                                 devo_core::durable_execution::ExecutionRecord::OutputArtifacts {
                                     artifacts,
@@ -151,43 +140,51 @@ impl ServerRuntime {
                 .map_err(|error| format!("failed to persist fork output references: {error}"))?;
         }
 
-        forked_runtime.record = Some(record);
+        forked_runtime.rollout_path = Some(invented.rollout_path);
         Ok(forked_runtime)
     }
 }
 
+/// Writes kept history as Native Turn + ItemEnvelope lines (path-first).
+///
+/// Turns come from live [`ReplayedTurn`] snapshots; items are already Native
+/// payloads on [`PersistedNativeItem`].
 fn write_kept_history_to_rollout(
     rollout_store: &crate::persistence::RolloutStore,
-    record: &mut SessionRecord,
+    rollout_path: &Path,
     forked_id: SessionId,
     kept_items: &[PersistedTurnItem],
-    turn_records_by_id: &std::collections::HashMap<TurnId, TurnRecord>,
+    turns_by_id: &std::collections::HashMap<devo_core::TurnId, ReplayedTurn>,
     latest_compaction: Option<&devo_core::CompactionSnapshotLine>,
 ) -> Result<(), String> {
+    let native_session_id = forked_id;
     let mut written_turns = HashSet::new();
     let mut item_seq = 1u64;
     for item in kept_items {
         if written_turns.insert(item.turn_id)
-            && let Some(source_turn) = turn_records_by_id.get(&item.turn_id)
+            && let Some(legacy_turn_id) = item.legacy_turn_id()
+            && let Some(source_turn) = turns_by_id.get(&legacy_turn_id)
         {
-            let mut turn = source_turn.clone();
-            turn.session_id = forked_id;
-            if let Err(error) = rollout_store.append_turn(record, turn) {
+            let mut turn = source_turn.native.clone();
+            turn.session_id = native_session_id;
+            if let Err(error) =
+                rollout_store.append_turn_at(rollout_path, &turn, Some(source_turn.extras.clone()))
+            {
                 return Err(format!("failed to persist forked turn: {error}"));
             }
         }
-        let item_record = build_item_record(
-            forked_id,
+        let envelope = typed_item_envelope(
+            native_session_id,
             item.turn_id,
             item.item_id,
             item_seq,
-            item.turn_item.clone(),
-            Some(devo_core::TurnStatus::Completed),
-            None,
-            None,
+            &item.item,
+            ItemState::Completed,
+            Utc::now(),
+            /*created_at*/ None,
         );
         item_seq = item_seq.saturating_add(1);
-        if let Err(error) = rollout_store.append_item(record, item_record) {
+        if let Err(error) = rollout_store.append_canonical_item_at(rollout_path, envelope) {
             return Err(format!("failed to persist forked item: {error}"));
         }
     }
@@ -197,7 +194,7 @@ fn write_kept_history_to_rollout(
     {
         let mut snapshot = snapshot.clone();
         snapshot.session_id = forked_id;
-        if let Err(error) = rollout_store.append_compaction_snapshot(record, snapshot) {
+        if let Err(error) = rollout_store.append_compaction_snapshot_at(rollout_path, snapshot) {
             tracing::warn!(
                 session_id = %forked_id,
                 error = %error,

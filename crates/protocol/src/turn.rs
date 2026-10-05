@@ -7,88 +7,13 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use ts_rs::TS;
 
-use crate::{
-    ItemId, PendingInputId, ReasoningEffort, SessionId, StopReason, TurnId, TurnStatus, TurnUsage,
-};
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-pub struct TurnMetadata {
-    pub turn_id: TurnId,
-    pub session_id: SessionId,
-    pub sequence: u32,
-    pub status: TurnStatus,
-    pub kind: TurnKind,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_binding_id: Option<String>,
-    #[serde(default, alias = "thinking", skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort_selection: Option<String>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    pub request_model: String,
-    pub request_thinking: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub usage: Option<TurnUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<StopReason>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_reason: Option<TurnFailureReason>,
-}
+use crate::native::item::UserInput;
+use crate::{ItemId, QueueItemId, SessionId, TurnId, TurnStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnFailureReason {
     MaxTurnRequests,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema, TS)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum InputItem {
-    Text { text: String },
-    Skill { name: String, path: PathBuf },
-    LocalImage { path: PathBuf },
-    Mention { path: String, name: Option<String> },
-}
-
-impl<'de> Deserialize<'de> for InputItem {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(tag = "type", rename_all = "snake_case")]
-        enum WireInputItem {
-            Text {
-                text: String,
-            },
-            Skill {
-                name: Option<String>,
-                path: Option<PathBuf>,
-                id: Option<String>,
-            },
-            LocalImage {
-                path: PathBuf,
-            },
-            Mention {
-                path: String,
-                name: Option<String>,
-            },
-        }
-
-        match WireInputItem::deserialize(deserializer)? {
-            WireInputItem::Text { text } => Ok(Self::Text { text }),
-            WireInputItem::Skill { name, path, id } => {
-                let name = name
-                    .or(id)
-                    .ok_or_else(|| serde::de::Error::missing_field("name"))?;
-                Ok(Self::Skill {
-                    name,
-                    path: path.unwrap_or_default(),
-                })
-            }
-            WireInputItem::LocalImage { path } => Ok(Self::LocalImage { path }),
-            WireInputItem::Mention { path, name } => Ok(Self::Mention { path, name }),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS, Default)]
@@ -113,7 +38,8 @@ fn is_default_turn_execution_mode(mode: &TurnExecutionMode) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct TurnStartParams {
     pub session_id: SessionId,
-    pub input: Vec<InputItem>,
+    /// Canonical Native user input.
+    pub input: Vec<UserInput>,
     /// Legacy model selector retained for compatibility with older clients.
     /// New clients should send [`Self::model_binding_id`] instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,7 +77,7 @@ pub enum TurnStartResult {
     },
     Queued {
         active_turn_id: TurnId,
-        queued_input_id: PendingInputId,
+        queued_input_id: QueueItemId,
         status: TurnStatus,
         accepted_at: DateTime<Utc>,
     },
@@ -254,7 +180,7 @@ impl<'de> Deserialize<'de> for TurnKind {
 pub struct SteerInputRecord {
     pub item_id: ItemId,
     pub received_at: DateTime<Utc>,
-    pub input: Vec<InputItem>,
+    pub input: Vec<UserInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -267,7 +193,7 @@ pub struct ActiveTurnSteeringState {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PendingInputItem {
     #[serde(default)]
-    pub id: PendingInputId,
+    pub id: QueueItemId,
     pub kind: PendingInputKind,
     pub metadata: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
@@ -280,12 +206,18 @@ impl PendingInputItem {
         created_at: DateTime<Utc>,
     ) -> Self {
         Self {
-            id: PendingInputId::new(),
+            id: QueueItemId::new(),
             kind,
             metadata,
             created_at,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PromptImagePart {
+    pub mime_type: String,
+    pub data_base64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -295,11 +227,13 @@ pub enum PendingInputKind {
         text: String,
     },
     UserInput {
-        input: Vec<InputItem>,
+        input: Vec<UserInput>,
         display_text: String,
         prompt_text: String,
         #[serde(default)]
         prompt_messages: Vec<String>,
+        #[serde(default)]
+        prompt_images: Vec<PromptImagePart>,
     },
     ToolCallBlockedByHook {
         tool_use_id: String,
@@ -314,39 +248,6 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
-
-    #[test]
-    fn turn_metadata_roundtrips_with_logical_and_request_fields() {
-        let metadata = TurnMetadata {
-            turn_id: TurnId::new(),
-            session_id: SessionId::new(),
-            sequence: 1,
-            status: TurnStatus::Completed,
-            kind: TurnKind::Regular,
-            model: "logical-model".to_string(),
-            model_binding_id: Some("provider-binding".to_string()),
-            reasoning_effort_selection: Some("high".to_string()),
-            reasoning_effort: Some(ReasoningEffort::High),
-            request_model: "provider-model".to_string(),
-            request_thinking: Some("medium".to_string()),
-            started_at: Utc::now(),
-            completed_at: Some(Utc::now()),
-            usage: Some(TurnUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                total_tokens: None,
-            }),
-            stop_reason: Some(StopReason::EndTurn),
-            failure_reason: None,
-        };
-
-        let json = serde_json::to_string(&metadata).expect("serialize");
-        let restored: TurnMetadata = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored, metadata);
-    }
 
     #[test]
     fn turn_start_params_default_to_build_collaboration_mode() {
@@ -371,7 +272,7 @@ mod tests {
         let session_id = SessionId::new();
         let params = TurnStartParams {
             session_id,
-            input: vec![InputItem::Text {
+            input: vec![UserInput::Text {
                 text: "hello".to_string(),
             }],
             model: None,
@@ -416,7 +317,7 @@ mod tests {
             restored,
             TurnStartParams {
                 session_id,
-                input: vec![InputItem::Text {
+                input: vec![UserInput::Text {
                     text: "hello".to_string(),
                 }],
                 model: Some("glm-4.5".to_string()),
@@ -436,7 +337,7 @@ mod tests {
         // Verifies: regular remains the default turn/start execution mode.
         let params = TurnStartParams {
             session_id: SessionId::new(),
-            input: vec![InputItem::Text {
+            input: vec![UserInput::Text {
                 text: "hello".into(),
             }],
             model: None,

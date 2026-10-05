@@ -128,6 +128,7 @@ async fn context_limit_error_compacts_and_retries_query() {
             QueryEvent::ContextCompactionCompleted { .. } => Some(CompactionEvent::Completed),
             QueryEvent::ContextCompactionFailed { .. }
             | QueryEvent::ProviderRetryStatus(_)
+            | QueryEvent::ProviderQueryFailed { .. }
             | QueryEvent::TextDelta(_)
             | QueryEvent::ReasoningDelta(_)
             | QueryEvent::ReasoningCompleted

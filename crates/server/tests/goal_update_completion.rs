@@ -60,12 +60,12 @@ impl ModelProviderSDK for CompletingGoalProvider {
 
         match request_number {
             1 => {
-                let input = serde_json::json!({ "status": "complete" });
+                let input = serde_json::json!({ "code": "import goal; await goal.complete()" });
                 Ok(Box::pin(stream::iter(vec![
                     Ok(StreamEvent::ToolCallStart {
                         index: 0,
                         id: "complete-goal".to_string(),
-                        name: "update_goal".to_string(),
+                        name: "ipython".to_string(),
                         input: input.clone(),
                     }),
                     Ok(StreamEvent::MessageDone {
@@ -73,7 +73,7 @@ impl ModelProviderSDK for CompletingGoalProvider {
                             id: "update-goal-response".to_string(),
                             content: vec![ResponseContent::ToolUse {
                                 id: "complete-goal".to_string(),
-                                name: "update_goal".to_string(),
+                                name: "ipython".to_string(),
                                 input,
                             }],
                             stop_reason: Some(StopReason::ToolUse),
@@ -105,7 +105,7 @@ impl ModelProviderSDK for CompletingGoalProvider {
 }
 
 #[tokio::test]
-async fn update_goal_completion_finishes_current_turn_without_another_continuation() -> Result<()> {
+async fn goal_complete_finishes_current_turn_without_another_continuation() -> Result<()> {
     let data_root = TempDir::new()?;
     let provider = Arc::new(CompletingGoalProvider::default());
     let runtime = build_runtime_with_registry(
@@ -120,7 +120,7 @@ async fn update_goal_completion_finishes_current_turn_without_another_continuati
         &runtime,
         connection_id,
         session_id,
-        "complete the goal with update_goal",
+        "complete the goal from Python",
         None,
         GoalIfExists::Reject,
         "goal-update-completion",
@@ -147,11 +147,11 @@ async fn update_goal_completion_finishes_current_turn_without_another_continuati
                     matches!(
                         content,
                         devo_protocol::RequestContent::ToolResult { content, .. }
-                            if content.contains("Goal marked complete")
+                            if content.contains("complete")
                     )
                 })
             }),
-            "the follow-up request should contain the successful update_goal result"
+            "the follow-up request should contain the successful goal.complete result"
         );
     }
 

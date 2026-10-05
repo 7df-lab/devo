@@ -7,6 +7,7 @@ use crate::tool_spec::ToolSpec;
 ///
 /// Per L3-BEH-TOOLS-001, this trait uses `ToolContext` for execution context
 /// and returns `ToolResult` (struct-based output) instead of trait objects.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
     /// Return the tool's specification.

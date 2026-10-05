@@ -1,3 +1,5 @@
+// Shared test-support module: each including binary exercises only part of it.
+#![allow(dead_code)]
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -9,11 +11,6 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
 use devo_core::tools::AgentToolCoordinator;
 use devo_core::tools::create_default_tool_registry;
 use devo_protocol::AgentListParams;
@@ -34,10 +31,8 @@ use devo_protocol::WaitAgentParams;
 use devo_protocol::WaitAgentResult;
 use devo_protocol::native::rpc_turn::TurnStartResult;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use pretty_assertions::assert_eq;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -96,102 +91,22 @@ impl ScriptedProvider {
         StreamScript::Events(events)
     }
 
-    pub fn spawn_agent_tool_call(message: &str, fork_turns: &str) -> StreamScript {
-        let input = serde_json::json!({
-            "message": message,
-            "fork_turns": fork_turns,
-        });
-        let tool_call_id = "spawn-agent-call".to_string();
+    pub fn ipython_code_tool_call(code: &str) -> StreamScript {
+        let input = serde_json::json!({ "code": code });
+        let tool_call_id = "ipython-code-call".to_string();
         StreamScript::Events(vec![
             StreamEvent::ToolCallStart {
                 index: 0,
                 id: tool_call_id.clone(),
-                name: "spawn_agent".to_string(),
+                name: "ipython".to_string(),
                 input: input.clone(),
             },
             StreamEvent::MessageDone {
                 response: ModelResponse {
-                    id: "spawn-agent-response".to_string(),
+                    id: "ipython-code-response".to_string(),
                     content: vec![ResponseContent::ToolUse {
                         id: tool_call_id,
-                        name: "spawn_agent".to_string(),
-                        input,
-                    }],
-                    stop_reason: Some(StopReason::ToolUse),
-                    usage: Usage::default(),
-                    metadata: ResponseMetadata::default(),
-                },
-            },
-        ])
-    }
-
-    pub fn dual_spawn_agent_tool_calls(
-        first_message: &str,
-        second_message: &str,
-        fork_turns: &str,
-    ) -> StreamScript {
-        let first_input = serde_json::json!({
-            "message": first_message,
-            "fork_turns": fork_turns,
-        });
-        let second_input = serde_json::json!({
-            "message": second_message,
-            "fork_turns": fork_turns,
-        });
-        let first_id = "spawn-agent-call-1".to_string();
-        let second_id = "spawn-agent-call-2".to_string();
-        StreamScript::Events(vec![
-            StreamEvent::ToolCallStart {
-                index: 0,
-                id: first_id.clone(),
-                name: "spawn_agent".to_string(),
-                input: first_input.clone(),
-            },
-            StreamEvent::ToolCallStart {
-                index: 1,
-                id: second_id.clone(),
-                name: "spawn_agent".to_string(),
-                input: second_input.clone(),
-            },
-            StreamEvent::MessageDone {
-                response: ModelResponse {
-                    id: "dual-spawn-agent-response".to_string(),
-                    content: vec![
-                        ResponseContent::ToolUse {
-                            id: first_id,
-                            name: "spawn_agent".to_string(),
-                            input: first_input,
-                        },
-                        ResponseContent::ToolUse {
-                            id: second_id,
-                            name: "spawn_agent".to_string(),
-                            input: second_input,
-                        },
-                    ],
-                    stop_reason: Some(StopReason::ToolUse),
-                    usage: Usage::default(),
-                    metadata: ResponseMetadata::default(),
-                },
-            },
-        ])
-    }
-
-    pub fn wait_agent_tool_call(timeout_secs: u64) -> StreamScript {
-        let input = serde_json::json!({ "timeout_secs": timeout_secs });
-        let tool_call_id = "wait-agent-call".to_string();
-        StreamScript::Events(vec![
-            StreamEvent::ToolCallStart {
-                index: 0,
-                id: tool_call_id.clone(),
-                name: "wait_agent".to_string(),
-                input: input.clone(),
-            },
-            StreamEvent::MessageDone {
-                response: ModelResponse {
-                    id: "wait-agent-response".to_string(),
-                    content: vec![ResponseContent::ToolUse {
-                        id: tool_call_id,
-                        name: "wait_agent".to_string(),
+                        name: "ipython".to_string(),
                         input,
                     }],
                     stop_reason: Some(StopReason::ToolUse),
@@ -266,28 +181,10 @@ pub fn build_runtime(
     data_root: &std::path::Path,
     provider: Arc<dyn ModelProviderSDK>,
 ) -> Result<Arc<ServerRuntime>> {
-    let db_path = data_root.join("subagent_lifecycle.db");
-    let db = Arc::new(devo_server::db::Database::open(db_path).expect("open test database"));
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(create_default_tool_registry()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(
-                AppConfigStore::load(data_root.to_path_buf(), None).expect("load app config store"),
-            )),
-        ),
-    ))
+    Ok(devo_server::test_support::TestRuntime::new(provider)
+        .registry(Arc::new(create_default_tool_registry()))
+        .db_file("subagent_lifecycle.db")
+        .runtime(data_root))
 }
 
 pub async fn initialize_connection(
@@ -344,7 +241,7 @@ pub async fn start_parent_session(
         )
         .await
         .context("session/new")?;
-    Ok(devo_protocol::SessionId::try_from(
+    Ok(devo_protocol::SessionId::from(
         serde_json::from_value::<
             devo_server::SuccessResponse<devo_protocol::native::rpc_session::SessionNewResult>,
         >(response)?
@@ -352,7 +249,7 @@ pub async fn start_parent_session(
         .session
         .id
         .as_str(),
-    )?)
+    ))
 }
 
 pub async fn spawn_child(
@@ -377,6 +274,17 @@ pub async fn spawn_child_with(
     message: &str,
     fork_turns: Option<&str>,
 ) -> Result<SpawnAgentResult> {
+    spawn_child_named(runtime, parent_session_id, message, fork_turns, None).await
+}
+
+/// Spawn with an explicit RLM-style requested nickname (kernel `rlm.spawn` path).
+pub async fn spawn_child_named(
+    runtime: &Arc<ServerRuntime>,
+    parent_session_id: devo_protocol::SessionId,
+    message: &str,
+    fork_turns: Option<&str>,
+    nickname: Option<&str>,
+) -> Result<SpawnAgentResult> {
     Ok(Arc::clone(runtime)
         .spawn_agent(SpawnAgentParams {
             session_id: parent_session_id,
@@ -385,6 +293,7 @@ pub async fn spawn_child_with(
             max_turns: None,
             tool_policy: devo_protocol::AgentToolPolicy::Inherit,
             ephemeral: false,
+            nickname: nickname.map(str::to_string),
         })
         .await?)
 }
@@ -596,7 +505,8 @@ pub fn message_texts(request: &ModelRequest) -> Vec<String> {
                 | RequestContent::ProviderReasoning { .. }
                 | RequestContent::ToolUse { .. }
                 | RequestContent::HostedToolUse { .. }
-                | RequestContent::ToolResult { .. } => None,
+                | RequestContent::ToolResult { .. }
+                | RequestContent::Image { .. } => None,
             })
         })
         .collect()

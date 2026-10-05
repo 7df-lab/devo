@@ -10,46 +10,27 @@ use std::sync::Mutex as StdMutex;
 
 use anyhow::Context;
 use anyhow::Result;
-use chrono::Datelike;
-use chrono::SecondsFormat;
 use chrono::Utc;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
-use devo_core::CommandExecutionItem;
 use devo_core::CompactionSnapshotLine;
-use devo_core::ContentBlock;
 use devo_core::ItemId;
-use devo_core::ItemLine;
 use devo_core::ItemRecord;
+use devo_core::LegacyRolloutLine;
 use devo_core::Message;
-use devo_core::MessageEditRecordedLine;
 use devo_core::MessageEditRecordedRecord;
-use devo_core::ParsedRolloutLine;
-use devo_core::Role;
-use devo_core::RolloutLine;
 use devo_core::RolloutLineReadError;
 use devo_core::SessionContext;
-use devo_core::SessionContextUpdatedLine;
 use devo_core::SessionId;
-use devo_core::SessionMetaLine;
 use devo_core::SessionRecord;
 use devo_core::SessionRollbackLine;
 use devo_core::SessionSettingsField;
-use devo_core::SessionSettingsLine;
 use devo_core::SessionTitleFinalSource;
 use devo_core::SessionTitleState;
-use devo_core::SessionTitleUpdatedLine;
-use devo_core::TextItem;
-use devo_core::ToolCallItem;
-use devo_core::ToolResultItem;
 use devo_core::TurnId;
 use devo_core::TurnItem;
-use devo_core::TurnKind;
-use devo_core::TurnLine;
 use devo_core::TurnRecord;
 use devo_core::TurnStatus;
-use devo_core::TurnSupersededLine;
 use devo_core::TurnSupersededRecord;
 use devo_core::TurnWorkspaceChangeRecordedLine;
 use devo_core::TurnWorkspaceChangeRecordedRecord;
@@ -59,27 +40,63 @@ use devo_core::TurnWorkspaceRestoreCompletedLine;
 use devo_core::TurnWorkspaceRestoreCompletedRecord;
 use devo_core::TurnWorkspaceRestoreStartedLine;
 use devo_core::TurnWorkspaceRestoreStartedRecord;
-use devo_core::V2InverseProjector;
 use devo_core::Worklog;
-use devo_core::legacy_projector::LegacyProjector;
+use devo_core::legacy_compaction_line_from_native;
+use devo_core::legacy_lines_from_internal;
+use devo_core::legacy_rollback_line_from_native;
+use devo_core::legacy_title_line_from_native;
 use devo_core::parse_rollout_line;
-use devo_core::rollout_v2::RolloutLineV2;
-use devo_core::{EVENT_SCHEMA_VERSION, events_from_v2_line, source_fact_id};
+use devo_core::read_canonical_history;
+use devo_core::rollout::InternalRecord;
+use devo_core::rollout::SessionPersistenceExtras;
+use devo_core::rollout::TurnPersistenceExtras;
+use devo_core::rollout::{ROLLOUT_FORMAT_VERSION, RolloutLine};
+use devo_core::rollout_write_state::RolloutWriteState;
+use devo_core::session_record_from_native;
+use devo_core::{EVENT_SCHEMA_VERSION, events_from_rollout_line, source_fact_id};
 use devo_protocol::native::event::{EventEnvelope, EventMeta};
 use devo_protocol::native::ids::EventId;
+use devo_protocol::native::ids::{ItemId as NativeItemId, TurnId as NativeTurnId};
+use devo_protocol::native::item::Item as NativeItem;
+use devo_protocol::native::turn::TurnKind;
 
 use crate::db::{Database, NewEventLogRow};
 use crate::execution::PersistedTurnItem;
 use crate::execution::RuntimeSession;
 use crate::execution::ServerRuntimeDependencies;
-use crate::projection::history_item_from_turn_item;
-use crate::session::SessionMetadata;
-use crate::session::SessionRuntimeStatus;
-use crate::turn::TurnMetadata;
+use crate::persisted_native_item::PersistedNativeItem;
+use crate::persisted_native_item::prompt_visible_persisted_item;
+use crate::prompt_from_native_item::apply_native_item;
+use crate::prompt_from_native_item::apply_prompt_native_item;
+use crate::replay_hydrate::{ReplayedSession, ReplayedTurn};
+use devo_protocol::native::item::ItemEnvelope;
+
+/// Rollout path + persistence extras invented at session create origin.
+///
+/// Native [`devo_protocol::native::session::Session`] is invented by the
+/// caller (create / fork / agent-spawn); this type never builds a
+/// [`SessionRecord`].
+#[derive(Debug, Clone)]
+pub(crate) struct InventedSessionPersistence {
+    pub rollout_path: PathBuf,
+    pub extras: SessionPersistenceExtras,
+}
+
+/// Invents [`SessionPersistenceExtras`] at origin (not from a SessionRecord).
+pub(crate) fn invent_session_persistence_extras() -> SessionPersistenceExtras {
+    SessionPersistenceExtras {
+        session_context: None,
+        cli_version: env!("CARGO_PKG_VERSION").into(),
+        source: "cli".into(),
+        collaboration_mode: None,
+        permission_preset: None,
+        kernel_snapshot_path: None,
+    }
+}
 
 /// Owns canonical append-only rollout persistence rooted at the server data directory.
 pub(crate) struct RolloutStore {
-    /// Root data directory that contains the `sessions/` hierarchy.
+    /// Root data directory that contains `sessions/` and `session-artifacts/`.
     data_root: PathBuf,
     /// Per-file locks that serialise concurrent writes to the same rollout file,
     /// preventing interleaved JSON lines.
@@ -95,10 +112,11 @@ pub(crate) struct RolloutStore {
     event_log: Option<Arc<Database>>,
 }
 
-/// Per-file write-path state: the forward projector plus the index of the
-/// next JSONL row to be written (used as the `source_fact_id` line index).
+/// Per-file write-path state: seq/approval/settings tracking plus the index
+/// of the next JSONL row to be written (used as the `source_fact_id` line
+/// index).
 pub(crate) struct WritePathState {
-    projector: LegacyProjector,
+    write_state: RolloutWriteState,
     next_line_index: u64,
 }
 
@@ -132,7 +150,93 @@ impl RolloutStore {
         }
     }
 
-    /// Constructs a canonical durable session record for a newly created session.
+    /// Allocates the on-disk rollout path for a new **root** (or fork) session.
+    ///
+    /// Layout: `sessions/<session_id>.jsonl`.
+    pub(crate) fn allocate_rollout_path(
+        &self,
+        session_id: &devo_protocol::native::ids::SessionId,
+    ) -> PathBuf {
+        self.root_rollout_path(session_id)
+    }
+
+    /// Allocates a nested subagent rollout under the parent's artifact tree.
+    ///
+    /// Roots nest under `session-artifacts/<root_id>/sub-xxxxxxxx/<child_id>.jsonl`.
+    /// Children nest further: `…/sub-xxxxxxxx/sub-yyyyyyyy/<grandchild_id>.jsonl`.
+    pub(crate) fn allocate_child_rollout_path(
+        &self,
+        parent_rollout_path: Option<&Path>,
+        parent_session_id: &devo_protocol::native::ids::SessionId,
+        child_session_id: &devo_protocol::native::ids::SessionId,
+    ) -> Result<PathBuf> {
+        let nest_dir = self.nesting_dir_for_parent(parent_rollout_path, parent_session_id)?;
+        std::fs::create_dir_all(&nest_dir)
+            .with_context(|| format!("create session nest dir {}", nest_dir.display()))?;
+        let child_dir = create_unique_sub_dir(&nest_dir)?;
+        Ok(child_dir.join(format!("{child_session_id}.jsonl")))
+    }
+
+    /// Invents rollout path + [`SessionPersistenceExtras`] at origin for a root/fork.
+    ///
+    /// Live create / fork invent Native [`Session`] (and
+    /// [`crate::runtime_session_summary::RuntimeSessionSummary`]) separately,
+    /// then persist via [`Self::append_session_meta_at`]. Do not build a
+    /// [`SessionRecord`] first.
+    pub(crate) fn invent_session_persistence(
+        &self,
+        session_id: &devo_protocol::native::ids::SessionId,
+    ) -> InventedSessionPersistence {
+        InventedSessionPersistence {
+            rollout_path: self.allocate_rollout_path(session_id),
+            extras: invent_session_persistence_extras(),
+        }
+    }
+
+    /// Invents a nested subagent rollout path + extras (session-artifacts tree).
+    pub(crate) fn invent_child_session_persistence(
+        &self,
+        parent_rollout_path: Option<&Path>,
+        parent_session_id: &devo_protocol::native::ids::SessionId,
+        child_session_id: &devo_protocol::native::ids::SessionId,
+    ) -> Result<InventedSessionPersistence> {
+        Ok(InventedSessionPersistence {
+            rollout_path: self.allocate_child_rollout_path(
+                parent_rollout_path,
+                parent_session_id,
+                child_session_id,
+            )?,
+            extras: invent_session_persistence_extras(),
+        })
+    }
+
+    /// Appends the mandatory session header line (path-first Native).
+    pub(crate) fn append_session_meta_at(
+        &self,
+        rollout_path: &Path,
+        session: &devo_protocol::native::session::Session,
+        extras: Option<devo_core::SessionPersistenceExtras>,
+    ) -> Result<()> {
+        self.append_rollout_lines(
+            rollout_path,
+            vec![devo_core::session_line(session.clone(), extras, Utc::now())],
+        )
+    }
+
+    /// Test / migrate boundary: SessionRecord → Native SessionMeta append.
+    /// Live create paths must use [`Self::append_session_meta_at`].
+    #[cfg(test)]
+    pub(crate) fn append_session_meta(&self, record: &SessionRecord) -> Result<()> {
+        self.append_session_meta_at(
+            &record.rollout_path,
+            &devo_core::native_session_from_record(record)
+                .context("build native session from record")?,
+            Some(devo_core::session_persistence_extras_from_record(record)),
+        )
+    }
+
+    /// Test / index / migrate factory only — not for live create/fork/spawn.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_session_record(
         &self,
@@ -163,6 +267,8 @@ impl RolloutStore {
         )
     }
 
+    /// Test / index / migrate factory only — not for live create/fork/spawn.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_session_record_with_fork(
         &self,
@@ -179,7 +285,8 @@ impl RolloutStore {
         fork_from_id: Option<SessionId>,
         fork_at_turn_id: Option<TurnId>,
     ) -> SessionRecord {
-        let rollout_path = self.rollout_path(created_at, id);
+        let native_session_id = id;
+        let rollout_path = self.root_rollout_path(&native_session_id);
         let title_state = title
             .as_ref()
             .map(|_| SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate))
@@ -223,107 +330,158 @@ impl RolloutStore {
         }
     }
 
-    /// Appends the mandatory session header line to a durable rollout file.
-    pub(crate) fn append_session_meta(&self, record: &SessionRecord) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::SessionMeta(Box::new(SessionMetaLine {
-                timestamp: Utc::now(),
-                session: record.clone(),
-            })),
-        )
-    }
-
-    /// Appends one field-level session settings line without requiring the
-    /// actor-owned session record (L2-DES-CONV-002 Phase 2 persist-first
-    /// path: the handler must not wait on the actor mailbox to persist).
     /// Appends a settings patch as one locked rollout batch. Keeping all
     /// changed fields under the same file lock prevents concurrent metadata
     /// updates from interleaving their field lines and splitting one logical
     /// patch across settings epochs.
+    ///
+    /// `settings_epoch` is a caller placeholder; the per-file write state
+    /// allocates the authoritative epoch (same as the former projector).
     pub(crate) fn append_session_settings_batch_at(
         &self,
         rollout_path: &Path,
         session_id: SessionId,
-        settings_epoch: u64,
+        _settings_epoch: u64,
         settings: &[(SessionSettingsField, serde_json::Value)],
     ) -> Result<()> {
-        let lines = settings
-            .iter()
-            .map(|(field, value)| {
-                RolloutLine::SessionSettings(SessionSettingsLine {
-                    timestamp: Utc::now(),
-                    session_id,
-                    field: *field,
-                    value: value.clone(),
-                    epoch: settings_epoch,
-                })
-            })
-            .collect::<Vec<_>>();
-        let line_refs = lines.iter().collect::<Vec<_>>();
-        self.append_lines(rollout_path, &line_refs)
+        self.append_rollout_lines_with(rollout_path, |state| {
+            let native_session_id = devo_core::native_session_id(session_id)
+                .context("native session id for settings")?;
+            let mut lines = Vec::with_capacity(settings.len());
+            for (field, value) in settings {
+                let epoch = state.write_state.allocate_settings_epoch();
+                lines.push(devo_core::settings_line(
+                    Utc::now(),
+                    native_session_id,
+                    *field,
+                    value.clone(),
+                    epoch,
+                ));
+            }
+            Ok(lines)
+        })
     }
 
-    /// Appends one turn line to the durable rollout journal.
+    /// Appends one turn line (path-first Native).
+    pub(crate) fn append_turn_at(
+        &self,
+        rollout_path: &Path,
+        turn: &devo_protocol::native::turn::Turn,
+        extras: Option<TurnPersistenceExtras>,
+    ) -> Result<()> {
+        self.append_rollout_lines(
+            rollout_path,
+            vec![devo_core::turn_line(turn.clone(), extras, Utc::now())],
+        )
+    }
+
+    /// Thin SessionRecord + TurnRecord wrapper for migrate / tests that only hold records.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn append_turn(&self, record: &SessionRecord, turn: TurnRecord) -> Result<()> {
-        self.append_line(
+        self.append_turn_at(
             &record.rollout_path,
-            &RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: Utc::now(),
-                turn,
-            })),
+            &devo_core::canonical_turn_from_record(&turn)
+                .context("build native turn from record")?,
+            Some(devo_core::turn_persistence_extras_from_record(&turn)),
         )
     }
 
-    /// Appends one item line to the durable rollout journal.
+    /// Appends packed legacy [`ItemRecord`] payloads (path-first). Expands under
+    /// the write lock via migrate/test-only [`RolloutWriteState::item_lines_from_record`].
+    ///
+    /// **Not the live or fork write path** — those use
+    /// [`Self::append_canonical_item_at`]. Remaining callers: legacy migrate and
+    /// server tests/fixtures that still feed packed records.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn append_item_at(&self, rollout_path: &Path, item: ItemRecord) -> Result<()> {
+        self.append_rollout_lines_with(rollout_path, |state| {
+            state
+                .write_state
+                .item_lines_from_record(&item, Utc::now())
+                .context("expand item record to v2 lines")
+        })
+    }
+
+    /// Narrow packed-ItemRecord helper for migrate / tests that still hold a SessionRecord.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn append_item(&self, record: &SessionRecord, item: ItemRecord) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::Item(Box::new(ItemLine {
-                timestamp: Utc::now(),
-                item,
-            })),
-        )
+        self.append_item_at(&record.rollout_path, item)
     }
 
     /// Appends one session-title update line to the durable rollout journal.
+    pub(crate) fn append_title_update_at(
+        &self,
+        rollout_path: &Path,
+        session_id: SessionId,
+        title: String,
+        previous_title: Option<String>,
+    ) -> Result<()> {
+        let session_id =
+            devo_core::native_session_id(session_id).context("native session id for title")?;
+        self.append_rollout_lines(
+            rollout_path,
+            vec![devo_core::title_line(
+                Utc::now(),
+                session_id,
+                title,
+                previous_title,
+            )],
+        )
+    }
+
+    /// Thin SessionRecord wrapper for callers that still hold a record.
+    #[cfg(test)]
     pub(crate) fn append_title_update(
         &self,
         record: &SessionRecord,
         title: String,
-        title_state: SessionTitleState,
+        _title_state: SessionTitleState,
         previous_title: Option<String>,
     ) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::SessionTitleUpdated(SessionTitleUpdatedLine {
-                timestamp: Utc::now(),
-                session_id: record.id,
-                title,
-                title_state,
-                previous_title,
-            }),
-        )
+        self.append_title_update_at(&record.rollout_path, record.id, title, previous_title)
     }
 
-    /// Appends the locked session context once to the durable rollout journal.
-    pub(crate) fn append_session_context_updated(
+    /// Appends the locked session context once (path-first).
+    pub(crate) fn append_session_context_updated_at(
         &self,
-        record: &SessionRecord,
+        rollout_path: &Path,
+        session_id: SessionId,
         session_context: SessionContext,
     ) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::SessionContextUpdated(Box::new(SessionContextUpdatedLine {
-                timestamp: Utc::now(),
-                session_id: record.id,
+        let native_session_id =
+            devo_core::native_session_id(session_id).context("native session id for context")?;
+        self.append_rollout_lines(
+            rollout_path,
+            vec![devo_core::session_context_line(
+                Utc::now(),
+                native_session_id,
                 session_context,
-                schema_version: 1,
-            })),
+            )],
         )
     }
 
-    /// Appends one turn line, recording session context separately when needed.
+    /// Appends one turn line, recording session context separately when needed
+    /// (path-first Native).
+    pub(crate) fn append_turn_deduped_at(
+        &self,
+        rollout_path: &Path,
+        session_id: SessionId,
+        session_context_recorded: &mut bool,
+        turn: &devo_protocol::native::turn::Turn,
+        extras: Option<TurnPersistenceExtras>,
+        session_context: Option<SessionContext>,
+    ) -> Result<()> {
+        if let Some(session_context) = session_context
+            && !*session_context_recorded
+        {
+            self.append_session_context_updated_at(rollout_path, session_id, session_context)?;
+            *session_context_recorded = true;
+        }
+        self.append_turn_at(rollout_path, turn, extras)
+    }
+
+    /// Thin SessionRecord + TurnRecord wrapper for migrate / test turn dedupe appends.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn append_turn_deduped(
         &self,
         record: &SessionRecord,
@@ -331,143 +489,168 @@ impl RolloutStore {
         turn: TurnRecord,
         session_context: Option<SessionContext>,
     ) -> Result<()> {
-        if let Some(session_context) = session_context
-            && !*session_context_recorded
-        {
-            self.append_session_context_updated(record, session_context)?;
-            *session_context_recorded = true;
-        }
-        self.append_turn(record, turn)
+        self.append_turn_deduped_at(
+            &record.rollout_path,
+            record.id,
+            session_context_recorded,
+            &devo_core::canonical_turn_from_record(&turn)
+                .context("build native turn from record")?,
+            Some(devo_core::turn_persistence_extras_from_record(&turn)),
+            session_context,
+        )
     }
 
     /// Appends one compaction snapshot line to the durable rollout journal.
-    pub(crate) fn append_compaction_snapshot(
+    pub(crate) fn append_compaction_snapshot_at(
         &self,
-        record: &SessionRecord,
+        rollout_path: &Path,
         snapshot: CompactionSnapshotLine,
     ) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::CompactionSnapshot(Box::new(snapshot)),
+        let timestamp = snapshot.timestamp;
+        let line = devo_core::compaction_snapshot_line(timestamp, &snapshot)
+            .context("build compaction snapshot v2 line")?;
+        self.append_rollout_lines(rollout_path, vec![line])
+    }
+
+    /// Appends a compaction summary item, its tree edge, its snapshot, and the
+    /// advanced session-leaf pointer in one journal write so a mid-persist
+    /// failure cannot strand the item without its snapshot or tree linkage.
+    pub(crate) fn append_compaction_summary_and_snapshot_lines_at(
+        &self,
+        rollout_path: &Path,
+        item: devo_protocol::native::item::ItemEnvelope,
+        snapshot: CompactionSnapshotLine,
+        parent_id: Option<devo_protocol::native::ids::ItemId>,
+        leaf_epoch: u64,
+    ) -> Result<()> {
+        let session_id = item.session_id;
+        let item_id = item.id;
+        let tree_edge_line = devo_core::tree_edge_line(Utc::now(), session_id, item_id, parent_id);
+        let item_line = RolloutLine::Item {
+            v: ROLLOUT_FORMAT_VERSION,
+            timestamp: Utc::now(),
+            item,
+        };
+        let snapshot_line = devo_core::compaction_snapshot_line(snapshot.timestamp, &snapshot)
+            .context("build compaction snapshot v2 line")?;
+        let session_leaf_line =
+            devo_core::session_leaf_line(Utc::now(), session_id, Some(item_id), leaf_epoch);
+        self.append_rollout_lines(
+            rollout_path,
+            vec![tree_edge_line, item_line, snapshot_line, session_leaf_line],
         )
     }
 
     /// Appends one accepted message-edit record to the durable rollout journal.
-    #[allow(dead_code)]
-    pub(crate) fn append_message_edit_recorded(
+    pub(crate) fn append_message_edit_recorded_at(
         &self,
-        record: &SessionRecord,
+        rollout_path: &Path,
         edit: MessageEditRecordedRecord,
     ) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::MessageEditRecorded(Box::new(MessageEditRecordedLine {
-                timestamp: Utc::now(),
-                record: edit,
-            })),
-        )
+        let line = devo_core::message_edit_line(Utc::now(), &edit)
+            .context("build message edit v2 line")?;
+        self.append_rollout_lines(rollout_path, vec![line])
     }
 
     /// Appends one turn-superseded marker to the durable rollout journal.
-    #[allow(dead_code)]
-    pub(crate) fn append_turn_superseded(
+    pub(crate) fn append_turn_superseded_at(
         &self,
-        record: &SessionRecord,
+        rollout_path: &Path,
         superseded: TurnSupersededRecord,
     ) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::TurnSuperseded(Box::new(TurnSupersededLine {
-                timestamp: Utc::now(),
-                record: superseded,
-            })),
-        )
+        let line = devo_core::turn_superseded_line(Utc::now(), &superseded)
+            .context("build turn superseded v2 line")?;
+        self.append_rollout_lines(rollout_path, vec![line])
     }
 
     /// Appends one workspace-restore-start record to the durable rollout journal.
-    #[allow(dead_code)]
-    pub(crate) fn append_workspace_restore_started(
+    pub(crate) fn append_workspace_restore_started_at(
         &self,
-        record: &SessionRecord,
+        rollout_path: &Path,
         restore: TurnWorkspaceRestoreStartedRecord,
     ) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::TurnWorkspaceRestoreStarted(Box::new(TurnWorkspaceRestoreStartedLine {
-                timestamp: Utc::now(),
-                record: restore,
-            })),
+        self.append_rollout_lines(
+            rollout_path,
+            vec![devo_core::workspace_restore_started_line(
+                Utc::now(),
+                restore,
+            )],
         )
     }
 
     /// Appends one workspace-checkpoint record to the durable rollout journal.
-    pub(crate) fn append_workspace_checkpoint_recorded(
+    pub(crate) fn append_workspace_checkpoint_recorded_at(
         &self,
-        record: &SessionRecord,
+        rollout_path: &Path,
         checkpoint: TurnWorkspaceCheckpointRecordedRecord,
     ) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::TurnWorkspaceCheckpointRecorded(Box::new(
-                TurnWorkspaceCheckpointRecordedLine {
-                    timestamp: Utc::now(),
-                    record: checkpoint,
-                },
-            )),
+        self.append_rollout_lines(
+            rollout_path,
+            vec![devo_core::workspace_checkpoint_line(Utc::now(), checkpoint)],
         )
     }
 
     /// Appends one workspace-change record to the durable rollout journal.
-    pub(crate) fn append_workspace_change_recorded(
+    pub(crate) fn append_workspace_change_recorded_at(
         &self,
-        record: &SessionRecord,
+        rollout_path: &Path,
         change: TurnWorkspaceChangeRecordedRecord,
     ) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::TurnWorkspaceChangeRecorded(Box::new(TurnWorkspaceChangeRecordedLine {
-                timestamp: Utc::now(),
-                record: change,
-            })),
+        self.append_rollout_lines(
+            rollout_path,
+            vec![devo_core::workspace_change_line(Utc::now(), change)],
         )
     }
 
     /// Appends one workspace-restore-completed record to the durable rollout journal.
-    #[allow(dead_code)]
-    pub(crate) fn append_workspace_restore_completed(
+    pub(crate) fn append_workspace_restore_completed_at(
         &self,
-        record: &SessionRecord,
+        rollout_path: &Path,
         restore: TurnWorkspaceRestoreCompletedRecord,
     ) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::TurnWorkspaceRestoreCompleted(Box::new(
-                TurnWorkspaceRestoreCompletedLine {
-                    timestamp: Utc::now(),
-                    record: restore,
-                },
-            )),
+        self.append_rollout_lines(
+            rollout_path,
+            vec![devo_core::workspace_restore_completed_line(
+                Utc::now(),
+                restore,
+            )],
         )
     }
 
     /// Appends one rollback marker to the durable rollout journal.
-    pub(crate) fn append_session_rollback(
+    pub(crate) fn append_session_rollback_at(
         &self,
-        record: &SessionRecord,
+        rollout_path: &Path,
+        session_id: SessionId,
         retained_turn_ids: Vec<TurnId>,
         retained_item_ids: Vec<ItemId>,
         latest_turn_id: Option<TurnId>,
     ) -> Result<()> {
-        self.append_line(
-            &record.rollout_path,
-            &RolloutLine::SessionRollback(Box::new(SessionRollbackLine {
-                timestamp: Utc::now(),
-                session_id: record.id,
-                retained_turn_ids,
-                retained_item_ids,
-                latest_turn_id,
-                schema_version: 1,
-            })),
+        let session_id =
+            devo_core::native_session_id(session_id).context("native session id for rollback")?;
+        let retained_turns = retained_turn_ids
+            .into_iter()
+            .map(devo_core::native_turn_id)
+            .collect::<Result<Vec<_>, _>>()
+            .context("native retained turn ids")?;
+        let retained_items = retained_item_ids
+            .into_iter()
+            .map(devo_core::native_item_id)
+            .collect::<Result<Vec<_>, _>>()
+            .context("native retained item ids")?;
+        let latest = latest_turn_id
+            .map(devo_core::native_turn_id)
+            .transpose()
+            .context("native latest turn id")?;
+        self.append_rollout_lines(
+            rollout_path,
+            vec![devo_core::session_rollback_line(
+                Utc::now(),
+                session_id,
+                retained_turns,
+                retained_items,
+                latest,
+            )],
         )
     }
 
@@ -475,12 +658,12 @@ impl RolloutStore {
     pub(crate) async fn load_sessions(
         &self,
         deps: &ServerRuntimeDependencies,
-    ) -> Result<HashMap<SessionId, RuntimeSession>> {
+    ) -> Result<HashMap<devo_protocol::native::ids::SessionId, RuntimeSession>> {
         let mut sessions = HashMap::new();
         for rollout_path in self.rollout_paths()? {
             match self.load_session_from_rollout(&rollout_path, deps).await {
                 Ok(recovered) => {
-                    sessions.insert(recovered.summary.session_id, recovered);
+                    sessions.insert(recovered.summary.session_id(), recovered);
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -534,9 +717,9 @@ impl RolloutStore {
         }
 
         for (session_id, (last_activity_at, rollout_path, record)) in canonical {
-            let metadata = session_metadata_from_record(&record, last_activity_at);
+            let index_row = session_index_row_from_record(&record, last_activity_at);
             if let Err(error) =
-                db.upsert_rollout_index_session(&metadata, Some(rollout_path.as_path()))
+                db.upsert_rollout_index_session(index_row, Some(rollout_path.as_path()))
             {
                 tracing::warn!(
                     session_id = %session_id,
@@ -548,17 +731,17 @@ impl RolloutStore {
         Ok(())
     }
 
-    /// Finds a rollout file by session id suffix when the SQLite index is stale.
+    /// Finds a rollout file by session id when the SQLite index is stale.
     pub(crate) fn find_rollout_by_session_id(
         &self,
-        session_id: &SessionId,
+        session_id: &devo_protocol::native::ids::SessionId,
     ) -> Result<Option<PathBuf>> {
-        let suffix = format!("-{session_id}.jsonl");
+        let exact = format!("{session_id}.jsonl");
         for rollout_path in self.rollout_paths()? {
             let Some(file_name) = rollout_path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if file_name.ends_with(&suffix) {
+            if file_name == exact {
                 return Ok(Some(rollout_path));
             }
         }
@@ -569,10 +752,10 @@ impl RolloutStore {
     pub(crate) fn resolve_indexed_session_cwd(
         &self,
         db: &crate::db::Database,
-        session_id: &SessionId,
+        session_id: &devo_protocol::native::ids::SessionId,
     ) -> Result<Option<PathBuf>> {
         if let Some(index) = db.get_session_index(session_id)? {
-            return Ok(Some(index.metadata.cwd));
+            return Ok(Some(index.session.cwd));
         }
         if let Some(rollout_path) = self.find_rollout_by_session_id(session_id)? {
             let (record, _) = read_rollout_index_fields(&rollout_path)?;
@@ -582,15 +765,17 @@ impl RolloutStore {
     }
 
     /// Deletes canonical rollout files for a session.
+    ///
+    /// Root sessions also remove `session-artifacts/<session_id>/` (nested children).
     pub(crate) fn delete_session_rollouts(&self, session_id: &SessionId) -> Result<bool> {
-        let suffix = format!("-{session_id}.jsonl");
+        let exact = format!("{session_id}.jsonl");
         let mut deleted = false;
         let mut output_candidates = Vec::new();
         for rollout_path in self.rollout_paths()? {
             let Some(file_name) = rollout_path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if !file_name.ends_with(&suffix) {
+            if file_name != exact {
                 continue;
             }
             output_candidates.extend(devo_core::output_replay::read_output_references(
@@ -616,6 +801,21 @@ impl RolloutStore {
                 }
             }
         }
+        let artifacts = self
+            .data_root
+            .join("session-artifacts")
+            .join(session_id.to_string());
+        if artifacts.is_dir() {
+            match std::fs::remove_dir_all(&artifacts) {
+                Ok(()) => deleted = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("delete session artifacts {}", artifacts.display())
+                    });
+                }
+            }
+        }
         if let Err(error) = self.collect_unreferenced_outputs(&output_candidates) {
             tracing::warn!(%error, "output cleanup deferred to preserve session references");
         }
@@ -627,56 +827,29 @@ impl RolloutStore {
         rollout_path: &Path,
         deps: &ServerRuntimeDependencies,
     ) -> Result<RuntimeSession> {
-        let file = File::open(rollout_path)
-            .with_context(|| format!("open rollout file {}", rollout_path.display()))?;
-        let reader = BufReader::new(file);
-        let mut replay = ReplayState::default();
-        // Dual read (05 §2.2): legacy lines replay directly, v2 lines are
-        // projected back into legacy lines by the per-load inverse.
-        let inverse = V2InverseProjector::new();
-        let mut lines = reader.lines().enumerate().peekable();
+        self.load_session_from_rollout_with_history(rollout_path, deps, /*history*/ None)
+            .await
+    }
 
-        while let Some((line_index, line)) = lines.next() {
-            let line =
-                line.with_context(|| format!("read line from {}", rollout_path.display()))?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let parsed = match parse_rollout_line(&line) {
-                Ok(parsed) => parsed,
-                // A truncated final line is a crash tail: the write never
-                // completed, nothing was acknowledged. Trailing blank lines
-                // after a crash do not make it mid-file damage.
-                Err(RolloutLineReadError::TruncatedTail)
-                    if rollout_remainder_is_crash_tail(&mut lines) =>
-                {
-                    break;
-                }
-                // Fail closed: a damaged or unsupported mid-file line means
-                // the session's history is unreadable past this point; the
-                // session refuses to resume rather than silently dropping
-                // history and appending onto a fork.
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "rollout {} is damaged at line {}; refusing to resume",
-                            rollout_path.display(),
-                            line_index + 1
-                        )
-                    });
-                }
-            };
-            match parsed {
-                ParsedRolloutLine::Legacy(legacy) => replay.apply_line(*legacy)?,
-                ParsedRolloutLine::V2(v2) => {
-                    for legacy_line in inverse.project_line(&v2).with_context(|| {
-                        format!("project v2 line from {}", rollout_path.display())
-                    })? {
-                        replay.apply_line(legacy_line)?;
-                    }
-                }
-            }
-        }
+    /// [`Self::load_session_from_rollout`] with a caller-provided canonical
+    /// history: hydrate reads the journal once and feeds both the
+    /// active-path scoping here and the downstream restores. `None` performs
+    /// the history read internally (callers that hold no history yet).
+    pub(crate) async fn load_session_from_rollout_with_history(
+        &self,
+        rollout_path: &Path,
+        deps: &ServerRuntimeDependencies,
+        history: Option<&devo_core::CanonicalHistory>,
+    ) -> Result<RuntimeSession> {
+        let mut replay = ReplayState::default();
+        visit_rollout_lines(rollout_path, "resume", |v2| {
+            replay
+                .apply_rollout_line(v2)
+                .with_context(|| format!("apply v2 line from {}", rollout_path.display()))
+        })?;
+        // Captured before `into_runtime_session` consumes the replay state:
+        // the path-scoping block below needs it to keep the compacted prompt.
+        let compaction_snapshot = replay.latest_compaction_snapshot.clone();
 
         let mut recovered = replay
             .into_runtime_session(deps)
@@ -684,19 +857,63 @@ impl RolloutStore {
             .with_context(|| format!("replay rollout {}", rollout_path.display()))?;
         if let Some(turn) = &recovered.latest_turn {
             let execution =
-                devo_core::durable_execution::read_execution_replay(rollout_path, turn.turn_id)?;
+                devo_core::durable_execution::read_execution_replay(rollout_path, &turn.turn_id())?;
             if execution.has_checkpoint {
                 recovered.core_session.lock().await.set_prompt_messages(
                     devo_core::history::response_items_to_messages(&execution.items),
                 );
             }
         }
-        // Inverse-projected (v2) session records carry an empty rollout_path
-        // by design; the real location is always the file being read.
-        if let Some(record) = recovered.record.as_mut()
-            && record.rollout_path.as_os_str().is_empty()
-        {
-            record.rollout_path = rollout_path.to_path_buf();
+        // Absolute path is actor-owned; Native Session does not expose it.
+        recovered.rollout_path = Some(rollout_path.to_path_buf());
+        // Restrict model context to the active transcript-tree path (root→leaf).
+        let owned_history;
+        let scoped_history = match history {
+            Some(history) => Some(history),
+            None => {
+                owned_history = read_canonical_history(rollout_path).ok();
+                owned_history.as_ref()
+            }
+        };
+        if let Some(history) = scoped_history {
+            let path_ids = devo_core::active_path_item_ids(history);
+            if !path_ids.is_empty() {
+                recovered.persisted_turn_items.retain(|item| {
+                    path_ids.contains(&item.item_id) || !devo_core::is_tree_visible_item(&item.item)
+                });
+                let mut rebuilt_messages = Vec::new();
+                let mut rebuilt_history = Vec::new();
+                let mut tool_names = std::collections::HashMap::new();
+                for item in &recovered.persisted_turn_items {
+                    crate::prompt_from_native_item::apply_native_item(
+                        &mut rebuilt_messages,
+                        &mut rebuilt_history,
+                        &mut tool_names,
+                        item.item.clone(),
+                    );
+                }
+                recovered.history_items = rebuilt_history;
+                // A live compaction snapshot must survive path scoping: the
+                // snapshot rebuild positions its summary anchor inside the
+                // scoped path, so it both compacts and scopes. The linear
+                // rebuild is only the fallback for a snapshot that no longer
+                // resolves (e.g. a rollback dropped the summary item) — the
+                // same degradation `into_runtime_session` applies unscoped.
+                let prompt_messages = compaction_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| {
+                        build_prompt_messages_from_snapshot(
+                            &recovered.persisted_turn_items,
+                            snapshot,
+                        )
+                    })
+                    .unwrap_or(rebuilt_messages);
+                recovered
+                    .core_session
+                    .lock()
+                    .await
+                    .set_prompt_messages(prompt_messages);
+            }
         }
         Ok(recovered)
     }
@@ -704,98 +921,143 @@ impl RolloutStore {
     /// Reads durable workspace checkpoints without reconstructing runtime state.
     ///
     /// P4d rollback plans need the pre-turn ghost commit plus its untracked
-    /// manifest. This follows the same dual-read and fail-closed rules as
+    /// manifest. This follows the same versioned parse and fail-closed rules as
     /// `load_session_from_rollout`.
-    pub(crate) fn workspace_checkpoints(
+    pub(crate) fn workspace_checkpoints_at(
         &self,
-        record: &SessionRecord,
+        rollout_path: &Path,
     ) -> Result<Vec<TurnWorkspaceCheckpointRecordedRecord>> {
-        let file = File::open(&record.rollout_path)
-            .with_context(|| format!("open rollout file {}", record.rollout_path.display()))?;
-        let reader = BufReader::new(file);
-        let inverse = V2InverseProjector::new();
         let mut checkpoints = Vec::new();
-        let mut lines = reader.lines().enumerate().peekable();
-        while let Some((line_index, line)) = lines.next() {
-            let line =
-                line.with_context(|| format!("read line from {}", record.rollout_path.display()))?;
-            if line.trim().is_empty() {
-                continue;
+        visit_rollout_lines(rollout_path, "checkpoint read", |v2| {
+            if let RolloutLine::WorkspaceCheckpoint { record, .. } = v2 {
+                checkpoints.push(record);
             }
-            let parsed = match parse_rollout_line(&line) {
-                Ok(parsed) => parsed,
-                Err(RolloutLineReadError::TruncatedTail)
-                    if rollout_remainder_is_crash_tail(&mut lines) =>
-                {
-                    break;
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "rollout {} is damaged at line {}; refusing checkpoint read",
-                            record.rollout_path.display(),
-                            line_index + 1
-                        )
-                    });
-                }
-            };
-            let legacy_lines = match parsed {
-                ParsedRolloutLine::Legacy(legacy) => vec![*legacy],
-                ParsedRolloutLine::V2(v2) => inverse.project_line(&v2).with_context(|| {
-                    format!(
-                        "project v2 checkpoint line from {}",
-                        record.rollout_path.display()
-                    )
-                })?,
-            };
-            for legacy in legacy_lines {
-                if let RolloutLine::TurnWorkspaceCheckpointRecorded(line) = legacy {
-                    checkpoints.push(line.record);
-                }
-            }
-        }
+            Ok(())
+        })?;
         Ok(checkpoints)
     }
 
     pub(crate) fn rollout_paths(&self) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
-        let root = self.data_root.join("sessions");
-        if !root.exists() {
-            return Ok(files);
+        let sessions = self.data_root.join("sessions");
+        if sessions.exists() {
+            collect_rollout_files(&sessions, &mut files)?;
         }
-        collect_rollout_files(&root, &mut files)?;
+        let artifacts = self.data_root.join("session-artifacts");
+        if artifacts.exists() {
+            collect_rollout_files(&artifacts, &mut files)?;
+        }
         files.sort();
         Ok(files)
     }
 
-    fn rollout_path(&self, created_at: chrono::DateTime<Utc>, session_id: SessionId) -> PathBuf {
-        let partition = self
-            .data_root
+    fn root_rollout_path(&self, session_id: &devo_protocol::native::ids::SessionId) -> PathBuf {
+        self.data_root
             .join("sessions")
-            .join(format!("{:04}", created_at.year()))
-            .join(format!("{:02}", created_at.month()))
-            .join(format!("{:02}", created_at.day()));
-        let timestamp = created_at
-            .to_rfc3339_opts(SecondsFormat::Secs, true)
-            .replace(':', "-");
-        partition.join(format!("rollout-{timestamp}-{session_id}.jsonl"))
+            .join(format!("{session_id}.jsonl"))
     }
 
-    /// Appends one legacy-shaped line to the rollout file. The write path is
-    /// single-write v2 (05 §2.2): the line is projected through the per-file
-    /// [`LegacyProjector`] and every resulting v2 line becomes its own JSONL
-    /// row. Legacy callers (the typed wrappers above) are unchanged.
+    /// RLM session artifact directory for harness / refine.
+    ///
+    /// Root rollouts live at `sessions/<id>.jsonl`; harness state must not sit
+    /// beside them (that would share one store across all roots). Instead use
+    /// `session-artifacts/<id>/` — the same tree child sessions nest under.
+    /// Nested child rollouts already live under `session-artifacts/…/sub-…/`,
+    /// so their parent directory is the artifact dir.
+    pub(crate) fn rlm_session_dir_for_rollout(rollout_path: &Path) -> Option<PathBuf> {
+        let parent = rollout_path.parent()?;
+        let stem = rollout_path.file_stem()?.to_str()?;
+        if parent.file_name().and_then(|s| s.to_str()) == Some("sessions") {
+            let data_root = parent.parent()?;
+            return Some(data_root.join("session-artifacts").join(stem));
+        }
+        Some(parent.to_path_buf())
+    }
+
+    /// Directory under which the next `sub-xxxxxxxx/` child folder is created.
+    fn nesting_dir_for_parent(
+        &self,
+        parent_rollout_path: Option<&Path>,
+        parent_session_id: &devo_protocol::native::ids::SessionId,
+    ) -> Result<PathBuf> {
+        let Some(parent_rollout_path) = parent_rollout_path else {
+            // Ephemeral parent (no file): still nest under artifacts by parent id.
+            return Ok(self
+                .data_root
+                .join("session-artifacts")
+                .join(parent_session_id.to_string()));
+        };
+        let sessions_dir = self.data_root.join("sessions");
+        let parent_dir = parent_rollout_path.parent().ok_or_else(|| {
+            anyhow::anyhow!(
+                "parent rollout path has no directory: {}",
+                parent_rollout_path.display()
+            )
+        })?;
+        if parent_dir == sessions_dir {
+            // Root session file → session-artifacts/<root_id>
+            let stem = parent_rollout_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid root rollout file name: {}",
+                        parent_rollout_path.display()
+                    )
+                })?;
+            return Ok(self.data_root.join("session-artifacts").join(stem));
+        }
+        // Already under session-artifacts/…/sub-xxx/ → nest further in that dir.
+        Ok(parent_dir.to_path_buf())
+    }
+
+    /// Appends one canonical Native item envelope as a v2 rollout line
+    /// (path-first).
+    pub(crate) fn append_canonical_item_at(
+        &self,
+        rollout_path: &Path,
+        item: devo_protocol::native::item::ItemEnvelope,
+    ) -> Result<()> {
+        let line = RolloutLine::Item {
+            v: 2,
+            timestamp: Utc::now(),
+            item,
+        };
+        self.append_rollout_lines(rollout_path, vec![line])
+    }
+
+    /// Appends a transcript-tree leaf pointer (last-wins on read).
+    pub(crate) fn append_session_leaf_at(
+        &self,
+        rollout_path: &Path,
+        session_id: SessionId,
+        leaf_id: Option<devo_protocol::native::ids::ItemId>,
+        epoch: u64,
+    ) -> Result<()> {
+        let line = devo_core::session_leaf_line(Utc::now(), session_id, leaf_id, epoch);
+        self.append_rollout_lines(rollout_path, vec![line])
+    }
+
+    /// Appends a transcript-tree parent edge for one item.
+    pub(crate) fn append_tree_edge_at(
+        &self,
+        rollout_path: &Path,
+        session_id: SessionId,
+        child_id: devo_protocol::native::ids::ItemId,
+        parent_id: Option<devo_protocol::native::ids::ItemId>,
+    ) -> Result<()> {
+        let line = devo_core::tree_edge_line(Utc::now(), session_id, child_id, parent_id);
+        self.append_rollout_lines(rollout_path, vec![line])
+    }
+
+    /// Thin SessionRecord wrapper for canonical item appends.
+    #[cfg(test)]
     pub(crate) fn append_canonical_item(
         &self,
         record: &SessionRecord,
         item: devo_protocol::native::item::ItemEnvelope,
     ) -> Result<()> {
-        let line = RolloutLineV2::Item {
-            v: 2,
-            timestamp: Utc::now(),
-            item,
-        };
-        self.append_v2_lines(&record.rollout_path, vec![line])
+        self.append_canonical_item_at(&record.rollout_path, item)
     }
 
     pub(crate) fn append_goal_state(
@@ -804,19 +1066,42 @@ impl RolloutStore {
         session_id: SessionId,
         goal: Option<serde_json::Value>,
     ) -> Result<()> {
-        self.append_v2_lines(
+        self.append_rollout_lines(
             rollout_path,
-            vec![RolloutLineV2::Internal {
+            vec![RolloutLine::Internal {
                 v: 2,
                 timestamp: Utc::now(),
-                session_id: devo_protocol::native::ids::SessionId::from_legacy_uuid(Uuid::from(
-                    session_id,
-                )),
+                session_id,
                 turn_id: None,
                 seq: 0,
-                entry: devo_core::InternalRecordV2::GoalState {
+                entry: devo_core::InternalRecord::GoalState {
                     schema_version: 1,
                     goal,
+                },
+            }],
+        )
+    }
+
+    /// RLM kernel fence outcome at spawn (design doc §5.3): audit trail for
+    /// fenced/downgraded-unfenced kernels. Only downgrades need to be audited,
+    /// but recording fenced spawns keeps the trail complete.
+    pub(crate) fn append_kernel_fence_state(
+        &self,
+        rollout_path: &Path,
+        session_id: SessionId,
+        state: &str,
+    ) -> Result<()> {
+        self.append_rollout_lines(
+            rollout_path,
+            vec![RolloutLine::Internal {
+                v: 2,
+                timestamp: Utc::now(),
+                session_id,
+                turn_id: None,
+                seq: 0,
+                entry: devo_core::InternalRecord::KernelFence {
+                    schema_version: 1,
+                    state: state.to_string(),
                 },
             }],
         )
@@ -828,17 +1113,15 @@ impl RolloutStore {
         session_id: SessionId,
         record: devo_protocol::native::usage::UsageRecord,
     ) -> Result<()> {
-        self.append_v2_lines(
+        self.append_rollout_lines(
             rollout_path,
-            vec![RolloutLineV2::Internal {
+            vec![RolloutLine::Internal {
                 v: 2,
                 timestamp: record.recorded_at,
-                session_id: devo_protocol::native::ids::SessionId::from_legacy_uuid(Uuid::from(
-                    session_id,
-                )),
-                turn_id: record.turn_id.clone(),
+                session_id,
+                turn_id: record.turn_id,
                 seq: 0,
-                entry: devo_core::InternalRecordV2::UsageRecord { record },
+                entry: devo_core::InternalRecord::UsageRecord { record },
             }],
         )
     }
@@ -848,36 +1131,29 @@ impl RolloutStore {
         rollout_path: &Path,
         checkpoint: &devo_core::TurnApprovalCheckpointRecordedRecord,
     ) -> Result<()> {
-        self.append_v2_lines(
+        self.append_rollout_lines(
             rollout_path,
-            vec![RolloutLineV2::Internal {
+            vec![RolloutLine::Internal {
                 v: 2,
                 timestamp: checkpoint.created_at,
-                session_id: devo_protocol::native::ids::SessionId::from_legacy_uuid(Uuid::from(
-                    checkpoint.session_id,
-                )),
-                turn_id: Some(devo_protocol::native::ids::TurnId::from_legacy_uuid(
-                    Uuid::from(checkpoint.turn_id),
-                )),
+                session_id: checkpoint.session_id,
+                turn_id: Some(checkpoint.turn_id),
                 seq: 0,
-                entry: devo_core::InternalRecordV2::TurnApprovalCheckpoint(Box::new(
+                entry: devo_core::InternalRecord::TurnApprovalCheckpoint(Box::new(
                     checkpoint.clone(),
                 )),
             }],
         )
     }
 
-    fn append_line(&self, rollout_path: &Path, line: &RolloutLine) -> Result<()> {
-        self.append_lines(rollout_path, std::slice::from_ref(&line))
-    }
-
-    fn append_lines(&self, rollout_path: &Path, lines: &[&RolloutLine]) -> Result<()> {
+    fn append_rollout_lines_with<F>(&self, rollout_path: &Path, build: F) -> Result<()>
+    where
+        F: FnOnce(&mut WritePathState) -> Result<Vec<RolloutLine>>,
+    {
         if let Some(parent) = rollout_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create rollout directory {}", parent.display()))?;
         }
-        // Acquire a per-file lock so concurrent writes to the same rollout file
-        // do not interleave their JSON payloads.
         let file_lock = {
             let mut locks = self
                 .file_locks
@@ -889,7 +1165,6 @@ impl RolloutStore {
                 .clone()
         };
         let _guard = file_lock.lock().expect("rollout per-file lock poisoned");
-
         let mut write_states = self
             .write_states
             .lock()
@@ -903,61 +1178,26 @@ impl RolloutStore {
                     .or_insert(state)
             }
         };
-        let mut v2_lines = Vec::new();
-        for line in lines {
-            v2_lines.extend(
-                state.projector.project_line(line).with_context(|| {
-                    format!("project rollout line for {}", rollout_path.display())
-                })?,
-            );
+        let rollout_lines = build(state)?;
+        for line in &rollout_lines {
+            state.write_state.observe_rollout_line(line);
         }
-        self.write_v2_lines(rollout_path, state, &v2_lines)
+        self.write_rollout_lines(rollout_path, state, &rollout_lines)
     }
 
-    pub(crate) fn append_v2_lines(
+    pub(crate) fn append_rollout_lines(
         &self,
         rollout_path: &Path,
-        v2_lines: Vec<RolloutLineV2>,
+        rollout_lines: Vec<RolloutLine>,
     ) -> Result<()> {
-        if let Some(parent) = rollout_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create rollout directory {}", parent.display()))?;
-        }
-        let file_lock = {
-            let mut locks = self
-                .file_locks
-                .lock()
-                .expect("rollout file-locks table poisoned");
-            locks
-                .entry(rollout_path.to_path_buf())
-                .or_insert_with(|| Arc::new(StdMutex::new(())))
-                .clone()
-        };
-        let _guard = file_lock.lock().expect("rollout per-file lock poisoned");
-        let mut write_states = self
-            .write_states
-            .lock()
-            .expect("rollout write-state table poisoned");
-        let state = match write_states.get_mut(rollout_path) {
-            Some(state) => state,
-            None => {
-                let state = hydrate_write_state(rollout_path)?;
-                write_states
-                    .entry(rollout_path.to_path_buf())
-                    .or_insert(state)
-            }
-        };
-        for line in &v2_lines {
-            state.projector.observe_v2_line(line);
-        }
-        self.write_v2_lines(rollout_path, state, &v2_lines)
+        self.append_rollout_lines_with(rollout_path, |_| Ok(rollout_lines))
     }
 
-    fn write_v2_lines(
+    fn write_rollout_lines(
         &self,
         rollout_path: &Path,
         state: &mut WritePathState,
-        v2_lines: &[RolloutLineV2],
+        rollout_lines: &[RolloutLine],
     ) -> Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -965,8 +1205,8 @@ impl RolloutStore {
             .open(rollout_path)
             .with_context(|| format!("open rollout file {}", rollout_path.display()))?;
         let first_line_index = state.next_line_index;
-        for v2_line in v2_lines {
-            serde_json::to_writer(&mut file, v2_line)
+        for rollout_line in rollout_lines {
+            serde_json::to_writer(&mut file, rollout_line)
                 .with_context(|| format!("serialize rollout line {}", rollout_path.display()))?;
             file.write_all(b"\n")
                 .with_context(|| format!("write rollout newline {}", rollout_path.display()))?;
@@ -979,7 +1219,7 @@ impl RolloutStore {
         // event-log requirement).
         file.sync_data()
             .with_context(|| format!("fsync rollout file {}", rollout_path.display()))?;
-        state.next_line_index += v2_lines.len() as u64;
+        state.next_line_index += rollout_lines.len() as u64;
 
         // Outbox projection (08 §5/§7): derive delivery-log events from the
         // fsynced facts. Best effort — a failure here is backfilled by the
@@ -987,7 +1227,7 @@ impl RolloutStore {
         // or duplicate it.
         if let Some(db) = &self.event_log
             && let Err(error) =
-                project_events_into_log(db, rollout_path, first_line_index, v2_lines)
+                project_events_into_log(db, rollout_path, first_line_index, rollout_lines)
         {
             tracing::warn!(
                 rollout = %rollout_path.display(),
@@ -1005,22 +1245,22 @@ fn project_events_into_log(
     db: &Database,
     rollout_path: &Path,
     first_line_index: u64,
-    v2_lines: &[RolloutLineV2],
+    rollout_lines: &[RolloutLine],
 ) -> Result<()> {
     let mut rows = Vec::new();
     let mut last_line_index = first_line_index;
-    for (offset, v2_line) in v2_lines.iter().enumerate() {
+    for (offset, rollout_line) in rollout_lines.iter().enumerate() {
         let line_index = first_line_index + offset as u64;
         last_line_index = line_index;
-        rows.extend(event_log_rows_for_v2_line(
+        rows.extend(event_log_rows_for_rollout_line(
             rollout_path,
             line_index,
             0,
-            v2_line,
+            rollout_line,
         )?);
     }
     db.insert_event_log_rows(&rows)?;
-    if !v2_lines.is_empty() {
+    if !rollout_lines.is_empty() {
         db.set_projection_watermark(rollout_path, last_line_index)?;
     }
     Ok(())
@@ -1029,15 +1269,15 @@ fn project_events_into_log(
 /// Builds the delivery-log rows derived from one v2 rollout fact (also used
 /// by the startup reconciler, which passes a nonzero `sub_index` for v2
 /// lines expanded from a packed legacy row).
-pub(crate) fn event_log_rows_for_v2_line(
+pub(crate) fn event_log_rows_for_rollout_line(
     rollout_path: &Path,
     line_index: u64,
     sub_index: u64,
-    v2_line: &RolloutLineV2,
+    rollout_line: &RolloutLine,
 ) -> Result<Vec<NewEventLogRow>> {
-    let timestamp = v2_line_timestamp(v2_line);
+    let timestamp = rollout_line_timestamp(rollout_line);
     let mut rows = Vec::new();
-    for derived in events_from_v2_line(v2_line) {
+    for derived in events_from_rollout_line(rollout_line) {
         let envelope = EventEnvelope {
             meta: EventMeta {
                 event_id: EventId::new(),
@@ -1065,20 +1305,66 @@ pub(crate) fn event_log_rows_for_v2_line(
 }
 
 /// The wall-clock timestamp carried by any v2 line variant.
-fn v2_line_timestamp(line: &RolloutLineV2) -> chrono::DateTime<Utc> {
+fn rollout_line_timestamp(line: &RolloutLine) -> chrono::DateTime<Utc> {
     match line {
-        RolloutLineV2::SessionMeta { timestamp, .. }
-        | RolloutLineV2::Turn { timestamp, .. }
-        | RolloutLineV2::Item { timestamp, .. }
-        | RolloutLineV2::Internal { timestamp, .. }
-        | RolloutLineV2::SessionTitleUpdated { timestamp, .. }
-        | RolloutLineV2::CompactionSnapshot { timestamp, .. }
-        | RolloutLineV2::SessionRollback { timestamp, .. }
-        | RolloutLineV2::WorkspaceCheckpoint { timestamp, .. }
-        | RolloutLineV2::WorkspaceChange { timestamp, .. }
-        | RolloutLineV2::WorkspaceRestoreStarted { timestamp, .. }
-        | RolloutLineV2::WorkspaceRestoreCompleted { timestamp, .. } => *timestamp,
+        RolloutLine::SessionMeta { timestamp, .. }
+        | RolloutLine::Turn { timestamp, .. }
+        | RolloutLine::Item { timestamp, .. }
+        | RolloutLine::Internal { timestamp, .. }
+        | RolloutLine::SessionTitleUpdated { timestamp, .. }
+        | RolloutLine::CompactionSnapshot { timestamp, .. }
+        | RolloutLine::SessionRollback { timestamp, .. }
+        | RolloutLine::WorkspaceCheckpoint { timestamp, .. }
+        | RolloutLine::WorkspaceChange { timestamp, .. }
+        | RolloutLine::WorkspaceRestoreStarted { timestamp, .. }
+        | RolloutLine::WorkspaceRestoreCompleted { timestamp, .. } => *timestamp,
     }
+}
+
+/// Walks a rollout JSONL file, skipping blanks and stopping at a crash tail.
+/// Returns whether a truncated final line was seen.
+fn visit_rollout_lines(
+    rollout_path: &Path,
+    refuse_verb: &str,
+    mut visit: impl FnMut(RolloutLine) -> Result<()>,
+) -> Result<bool> {
+    let file = File::open(rollout_path)
+        .with_context(|| format!("open rollout file {}", rollout_path.display()))?;
+    visit_open_rollout_lines(rollout_path, file, refuse_verb, &mut visit)
+}
+
+fn visit_open_rollout_lines(
+    rollout_path: &Path,
+    file: File,
+    refuse_verb: &str,
+    visit: &mut impl FnMut(RolloutLine) -> Result<()>,
+) -> Result<bool> {
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines().enumerate().peekable();
+    while let Some((line_index, line)) = lines.next() {
+        let line = line.with_context(|| format!("read line from {}", rollout_path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match parse_rollout_line(&line) {
+            Ok(line) => visit(line)?,
+            Err(RolloutLineReadError::TruncatedTail)
+                if rollout_remainder_is_crash_tail(&mut lines) =>
+            {
+                return Ok(true);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "rollout {} is damaged at line {}; refusing to {refuse_verb}",
+                        rollout_path.display(),
+                        line_index + 1
+                    )
+                });
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// True when every remaining JSONL row is blank (or there are none). Used so a
@@ -1125,16 +1411,7 @@ fn discard_rollout_crash_tail(rollout_path: &Path) -> Result<()> {
             match parse_rollout_line(line) {
                 Ok(_) => keep_len = idx + 1,
                 Err(RolloutLineReadError::TruncatedTail) => {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(rollout_path)
-                        .with_context(|| {
-                            format!("open rollout for truncate {}", rollout_path.display())
-                        })?
-                        .set_len(keep_len as u64)
-                        .with_context(|| {
-                            format!("truncate rollout crash tail {}", rollout_path.display())
-                        })?;
+                    truncate_rollout(rollout_path, keep_len as u64)?;
                     return Ok(());
                 }
                 Err(_) => return Ok(()),
@@ -1149,35 +1426,37 @@ fn discard_rollout_crash_tail(rollout_path: &Path) -> Result<()> {
             Err(RolloutLineReadError::TruncatedTail)
         )
     {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(rollout_path)
-            .with_context(|| format!("open rollout for truncate {}", rollout_path.display()))?
-            .set_len(keep_len as u64)
-            .with_context(|| format!("truncate rollout crash tail {}", rollout_path.display()))?;
+        truncate_rollout(rollout_path, keep_len as u64)?;
     }
     Ok(())
 }
 
+fn truncate_rollout(rollout_path: &Path, keep_len: u64) -> Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(rollout_path)
+        .with_context(|| format!("open rollout for truncate {}", rollout_path.display()))?
+        .set_len(keep_len)
+        .with_context(|| format!("truncate rollout crash tail {}", rollout_path.display()))
+}
+
 /// Builds the write-path state for an existing rollout file by replaying its
-/// current contents: legacy lines go through the forward projector (so the
-/// seq counter and approval folds advance exactly as if the file had been
-/// written through the v2 path), v2 lines re-sync that state via
-/// [`LegacyProjector::observe_v2_line`]. Bounded per path: runs once, on the
-/// first append, and the result is cached in the store. Also returns the next
-/// JSONL row index, which becomes the `source_fact_id` line index of every
-/// subsequent append.
+/// current v2 contents through [`RolloutWriteState::observe_rollout_line`] (seq
+/// counter, approval folds, settings epochs, cwd). Bounded per path: runs
+/// once, on the first append, and the result is cached in the store. Also
+/// returns the next JSONL row index, which becomes the `source_fact_id` line
+/// index of every subsequent append.
 ///
 /// Fails closed on any damaged or unsupported line: appending onto history
-/// the projector could not fully read would fork the session's history.
+/// the write state could not fully read would fork the session's history.
 fn hydrate_write_state(rollout_path: &Path) -> Result<WritePathState> {
-    let mut projector = LegacyProjector::new();
+    let mut write_state = RolloutWriteState::new();
     let mut next_line_index = 0u64;
     let file = match File::open(rollout_path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(WritePathState {
-                projector,
+                write_state,
                 next_line_index,
             });
         }
@@ -1186,41 +1465,11 @@ fn hydrate_write_state(rollout_path: &Path) -> Result<WritePathState> {
                 .with_context(|| format!("open rollout file {}", rollout_path.display()));
         }
     };
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines().enumerate().peekable();
-    let mut saw_crash_tail = false;
-    while let Some((line_index, line)) = lines.next() {
-        let line = line.with_context(|| format!("read line from {}", rollout_path.display()))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match parse_rollout_line(&line) {
-            Ok(ParsedRolloutLine::Legacy(legacy)) => {
-                projector.project_line(&legacy).with_context(|| {
-                    format!("hydrate projector from {}", rollout_path.display())
-                })?;
-            }
-            Ok(ParsedRolloutLine::V2(v2)) => projector.observe_v2_line(&v2),
-            Err(RolloutLineReadError::TruncatedTail)
-                if rollout_remainder_is_crash_tail(&mut lines) =>
-            {
-                saw_crash_tail = true;
-                break;
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "rollout {} is damaged at line {}; refusing to append",
-                        rollout_path.display(),
-                        line_index + 1
-                    )
-                });
-            }
-        }
-        // The line index counts physical JSONL rows regardless of format.
+    let saw_crash_tail = visit_open_rollout_lines(rollout_path, file, "append", &mut |v2| {
+        write_state.observe_rollout_line(&v2);
         next_line_index += 1;
-    }
-    drop(lines);
+        Ok(())
+    })?;
     if saw_crash_tail {
         // Drop the unacked crash-tail bytes so a later append cannot turn this
         // into mid-file truncation for loaders. Must run after the read handle
@@ -1228,19 +1477,21 @@ fn hydrate_write_state(rollout_path: &Path) -> Result<WritePathState> {
         discard_rollout_crash_tail(rollout_path)?;
     }
     Ok(WritePathState {
-        projector,
+        write_state,
         next_line_index,
     })
 }
 
+/// Resume hydrate state. Session/Turn lines are stored as Native (+ extras).
+/// `into_runtime_session` installs `rollout_path` + Native summary and keeps
+/// [`ReplayedTurn`] maps on `RuntimeSession::turns_by_id` for fork/cuts.
 #[derive(Default)]
 struct ReplayState {
-    session: Option<SessionRecord>,
-    latest_turn: Option<TurnRecord>,
-    latest_turn_metadata: Option<TurnMetadata>,
-    latest_query_usage: Option<devo_protocol::TurnUsage>,
+    session: Option<ReplayedSession>,
+    latest_turn: Option<ReplayedTurn>,
+    latest_query_usage: Option<devo_protocol::native::usage::TurnUsage>,
     latest_context_occupancy: Option<devo_protocol::native::item::ContextOccupancy>,
-    turn_records_by_id: HashMap<TurnId, TurnRecord>,
+    turns_by_id: HashMap<NativeTurnId, ReplayedTurn>,
     loaded_item_count: u64,
     next_item_seq: u64,
     turns_seen: u32,
@@ -1259,7 +1510,7 @@ struct ReplayState {
     session_context_recorded: bool,
     turn_kinds_by_id: HashMap<TurnId, TurnKind>,
     messages: Vec<Message>,
-    history_items: Vec<crate::SessionHistoryItem>,
+    history_items: Vec<crate::SessionHistoryEntry>,
     pending_items: Vec<ReplayHistoryItem>,
     latest_compaction_snapshot: Option<CompactionSnapshotLine>,
     turn_order: Vec<TurnId>,
@@ -1271,31 +1522,11 @@ struct ReplayState {
     /// clears the explicit `SandboxProfile` override (the preset re-implies
     /// the sandbox), matching the approved patch-interaction rule.
     session_settings: HashMap<SessionSettingsField, serde_json::Value>,
-}
-
-/// Applies an optional-string settings field line onto a record field,
-/// logging divergence from the whole-record `SessionMeta` value.
-fn apply_optional_string_setting(
-    target: &mut Option<String>,
-    value: serde_json::Value,
-    session_id: SessionId,
-    field_name: &str,
-) {
-    let parsed = match serde_json::from_value::<Option<String>>(value) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            tracing::warn!(session_id = %session_id, field = field_name, %error, "ignoring damaged settings line");
-            return;
-        }
-    };
-    if target.as_ref() != parsed.as_ref() {
-        tracing::warn!(
-            session_id = %session_id,
-            field = field_name,
-            "settings field line disagrees with SessionMeta value; field line wins"
-        );
-    }
-    *target = parsed;
+    /// Transcript-tree tip folded from `SessionLeaf` lines.
+    transcript_leaf_id: Option<devo_protocol::native::ids::ItemId>,
+    leaf_epoch: u64,
+    tree_edges:
+        HashMap<devo_protocol::native::ids::ItemId, Option<devo_protocol::native::ids::ItemId>>,
 }
 
 /// Auto-compact / status pressure restored on resume.
@@ -1305,203 +1536,134 @@ fn apply_optional_string_setting(
 /// latest-query display total, then the reconstituted prompt estimate.
 fn resume_context_pressure_tokens(
     occupancy: Option<&devo_protocol::native::item::ContextOccupancy>,
-    latest_query_usage: Option<&devo_protocol::TurnUsage>,
+    latest_query_usage: Option<&devo_protocol::native::usage::TurnUsage>,
     prompt_token_estimate: usize,
 ) -> (usize, usize) {
     let last_turn_tokens = occupancy
         .map(|occupancy| occupancy.total_tokens as usize)
-        .or_else(|| latest_query_usage.map(devo_protocol::TurnUsage::display_total_tokens))
+        .or_else(|| latest_query_usage.map(|usage| usage.display_total_tokens() as usize))
         .unwrap_or(prompt_token_estimate);
     let last_input_tokens = latest_query_usage
-        .map(|usage| usage.input_tokens as usize)
+        .map(|usage| usage.query.input_tokens as usize)
         .or_else(|| occupancy.map(|occupancy| occupancy.total_tokens as usize))
         .unwrap_or(prompt_token_estimate);
     (last_turn_tokens, last_input_tokens)
 }
 
-impl ReplayState {
-    fn apply_line(&mut self, line: RolloutLine) -> Result<()> {
-        match line {
-            RolloutLine::SessionMeta(line) => {
-                let mut session = line.session;
-                if session.last_activity_at.is_none() {
-                    session.last_activity_at = Some(session.created_at);
-                }
-                self.last_activity_at = session.last_activity_at;
-                self.session = Some(session);
-            }
-            RolloutLine::Turn(line) => {
-                // Insert turn summary for the previous turn before processing the new turn
-                if let Some(prev_turn) = self.latest_turn.clone() {
-                    self.enqueue_terminal_history_items(&prev_turn);
-                }
+fn parse_optional_string_setting(
+    session_id: SessionId,
+    field: &str,
+    value: serde_json::Value,
+) -> Option<Option<String>> {
+    match serde_json::from_value(value) {
+        Ok(parsed) => Some(parsed),
+        Err(error) => {
+            tracing::warn!(session_id = %session_id, field, %error, "ignoring damaged settings line");
+            None
+        }
+    }
+}
 
-                let turn = line.turn;
-                if self.superseded_turn_ids.contains(&turn.id) {
-                    return Ok(());
+fn warn_settings_disagree(session_id: SessionId, field: &str, disagreed: bool) {
+    if disagreed {
+        tracing::warn!(
+            session_id = %session_id,
+            field,
+            "settings field line disagrees with SessionMeta value; field line wins"
+        );
+    }
+}
+
+impl ReplayState {
+    fn apply_line(&mut self, line: LegacyRolloutLine) -> Result<()> {
+        match line {
+            // Legacy-shaped Session/Turn lines (unit tests) convert once via
+            // persistence-boundary helpers, then share the Native apply path.
+            LegacyRolloutLine::SessionMeta(line) => {
+                let agent_path = line.session.agent_path.clone();
+                let agent_nickname = line.session.agent_nickname.clone();
+                let v2 = devo_core::session_line_from_record(&line.session, line.timestamp)?;
+                self.apply_rollout_line(v2)?;
+                if let Some(session) = self.session.as_mut() {
+                    session.agent_path = agent_path;
+                    session.agent_nickname = agent_nickname;
                 }
-                self.apply_activity_timestamp(
-                    turn.session_id,
-                    turn.completed_at.unwrap_or(turn.started_at),
-                    "turn line",
-                )?;
-                if !self.turn_records_by_id.contains_key(&turn.id) {
-                    self.turn_order.push(turn.id);
-                }
-                self.turns_seen = self.turns_seen.max(turn.sequence);
-                if let Some(usage) = &turn.usage {
-                    self.total_input_tokens += usage.input_tokens as usize;
-                    self.total_output_tokens += usage.output_tokens as usize;
-                    self.total_tokens += usage.display_total_tokens();
-                    self.total_cache_creation_tokens +=
-                        usage.cache_creation_input_tokens.unwrap_or(0) as usize;
-                    self.total_cache_read_tokens +=
-                        usage.cache_read_input_tokens.unwrap_or(0) as usize;
-                }
-                if let Some(usage) = &turn.latest_query_usage {
-                    self.last_input_tokens = usage.input_tokens as usize;
-                    self.last_turn_tokens = usage.display_total_tokens();
-                    self.latest_query_usage = Some(usage.clone());
-                } else if turn.usage.is_some() {
-                    // Older rollout records only contain aggregate turn usage.
-                    // Do not mistake it for the latest model query.
-                    self.last_input_tokens = 0;
-                    self.last_turn_tokens = 0;
-                    self.latest_query_usage = None;
-                }
-                if let Some(occupancy) = turn.context_occupancy.clone() {
-                    self.latest_context_occupancy = Some(occupancy);
-                }
-                self.latest_turn_metadata = Some(turn_metadata_from_record(&turn));
-                self.turn_kinds_by_id.insert(turn.id, turn.kind.clone());
-                if let Some(session_context) = turn.session_context.clone() {
-                    self.session_context = Some(session_context);
-                    self.session_context_recorded = true;
-                }
-                if let Some(turn_context) = turn.turn_context.clone() {
-                    self.latest_turn_context = Some(turn_context);
-                }
-                self.turn_records_by_id.insert(turn.id, turn.clone());
-                self.latest_turn = Some(turn);
+                Ok(())
             }
-            RolloutLine::Item(line) => {
-                if !self.superseded_turn_ids.contains(&line.item.turn_id) {
-                    self.apply_activity_timestamp(
-                        line.item.session_id,
-                        line.item.timestamp,
-                        "item line",
-                    )?;
-                    self.loaded_item_count += 1;
-                    self.next_item_seq = self.next_item_seq.max(line.item.seq + 1);
-                    self.collect_item_line(line.item);
-                }
+            LegacyRolloutLine::Turn(line) => {
+                let v2 = devo_core::turn_line_from_record(&line.turn, line.timestamp)?;
+                self.apply_rollout_line(v2)
             }
-            RolloutLine::SessionTitleUpdated(line) => {
+            LegacyRolloutLine::Item(line) => self.apply_item_record(line.item),
+            LegacyRolloutLine::SessionTitleUpdated(line) => {
                 let session = self
                     .session
                     .as_mut()
                     .context("title update without session header")?;
-                session.title = Some(line.title);
-                session.title_state = line.title_state;
+                session.native.title = Some(line.title);
+                session.native.title_state = line.title_state;
                 session.updated_at = line.timestamp;
+                Ok(())
             }
-            RolloutLine::SessionContextUpdated(line) => {
+            LegacyRolloutLine::SessionContextUpdated(line) => {
                 let line = *line;
-                if let Some(session) = self.session.as_mut() {
-                    if session.id != line.session_id {
-                        anyhow::bail!(
-                            "session context update session id does not match session header"
-                        );
-                    }
+                if let Some(session) =
+                    self.matching_session_mut(line.session_id, "session context update")?
+                {
                     session.updated_at = line.timestamp;
                 }
                 self.recorded_session_context = Some(line.session_context.clone());
                 self.session_context = Some(line.session_context);
                 self.session_context_recorded = true;
+                Ok(())
             }
-            RolloutLine::CompactionSnapshot(line) => {
+            LegacyRolloutLine::CompactionSnapshot(line) => {
                 if let Some(occupancy) = line.context_occupancy.clone() {
                     self.latest_context_occupancy = Some(occupancy);
                 }
                 self.latest_compaction_snapshot = Some(*line);
+                Ok(())
             }
-            RolloutLine::MessageEditRecorded(line) => {
-                self.apply_record_timestamp(
-                    line.record.session_id,
-                    line.timestamp,
-                    "message edit line",
-                )?;
-                self.apply_activity_timestamp(
-                    line.record.session_id,
-                    line.timestamp,
-                    "message edit line",
-                )?;
-            }
-            RolloutLine::TurnSuperseded(line) => {
-                self.apply_record_timestamp(
-                    line.record.session_id,
-                    line.timestamp,
-                    "turn superseded line",
-                )?;
-                self.apply_activity_timestamp(
+            LegacyRolloutLine::MessageEditRecorded(line) => self.apply_timestamped_session_record(
+                line.record.session_id,
+                line.timestamp,
+                "message edit line",
+            ),
+            LegacyRolloutLine::TurnSuperseded(line) => {
+                self.apply_timestamped_session_record(
                     line.record.session_id,
                     line.timestamp,
                     "turn superseded line",
                 )?;
                 self.apply_turn_superseded(line.record);
+                Ok(())
             }
-            RolloutLine::TurnWorkspaceCheckpointRecorded(line) => {
-                self.apply_record_timestamp(
+            LegacyRolloutLine::TurnWorkspaceCheckpointRecorded(line) => self
+                .apply_timestamped_session_record(
                     line.record.session_id,
                     line.timestamp,
                     "workspace checkpoint line",
-                )?;
-                self.apply_activity_timestamp(
-                    line.record.session_id,
-                    line.timestamp,
-                    "workspace checkpoint line",
-                )?;
-            }
-            RolloutLine::TurnWorkspaceChangeRecorded(line) => {
-                self.apply_record_timestamp(
+                ),
+            LegacyRolloutLine::TurnWorkspaceChangeRecorded(line) => self
+                .apply_timestamped_session_record(
                     line.record.session_id,
                     line.timestamp,
                     "workspace change line",
-                )?;
-                self.apply_activity_timestamp(
-                    line.record.session_id,
-                    line.timestamp,
-                    "workspace change line",
-                )?;
-            }
-            RolloutLine::TurnWorkspaceRestoreStarted(line) => {
-                self.apply_record_timestamp(
+                ),
+            LegacyRolloutLine::TurnWorkspaceRestoreStarted(line) => self
+                .apply_timestamped_session_record(
                     line.record.session_id,
                     line.timestamp,
                     "workspace restore started line",
-                )?;
-                self.apply_activity_timestamp(
-                    line.record.session_id,
-                    line.timestamp,
-                    "workspace restore started line",
-                )?;
-            }
-            RolloutLine::TurnWorkspaceRestoreCompleted(line) => {
-                self.apply_record_timestamp(
+                ),
+            LegacyRolloutLine::TurnWorkspaceRestoreCompleted(line) => self
+                .apply_timestamped_session_record(
                     line.record.session_id,
                     line.timestamp,
                     "workspace restore completed line",
-                )?;
-                self.apply_activity_timestamp(
-                    line.record.session_id,
-                    line.timestamp,
-                    "workspace restore completed line",
-                )?;
-            }
-            RolloutLine::SessionRollback(line) => {
-                self.apply_session_rollback(*line)?;
-            }
-            RolloutLine::SessionSettings(line) => {
+                ),
+            LegacyRolloutLine::SessionRollback(line) => self.apply_session_rollback(*line),
+            LegacyRolloutLine::SessionSettings(line) => {
                 // Approved patch-interaction rule: a preset change re-implies
                 // the sandbox, so it clears any explicit override seen so far.
                 if line.field == SessionSettingsField::PermissionPreset {
@@ -1509,67 +1671,348 @@ impl ReplayState {
                         .remove(&SessionSettingsField::SandboxProfile);
                 }
                 self.session_settings.insert(line.field, line.value);
+                Ok(())
             }
+        }
+    }
+
+    fn apply_native_session(
+        &mut self,
+        session: devo_protocol::native::session::Session,
+        extras: Option<SessionPersistenceExtras>,
+        updated_at: chrono::DateTime<Utc>,
+    ) {
+        let mut replayed = ReplayedSession::from_native(session, extras, updated_at);
+        if replayed.native.last_activity_at == chrono::DateTime::<Utc>::UNIX_EPOCH {
+            replayed.native.last_activity_at = replayed.native.created_at;
+        }
+        self.last_activity_at = Some(replayed.native.last_activity_at);
+        if let Some(context) = replayed.extras.session_context.clone() {
+            self.session_context = Some(context);
+            self.session_context_recorded = true;
+        }
+        self.session = Some(replayed);
+    }
+
+    fn apply_native_turn(
+        &mut self,
+        turn: devo_protocol::native::turn::Turn,
+        extras: Option<TurnPersistenceExtras>,
+    ) -> Result<()> {
+        let replayed = ReplayedTurn::from_native(turn, extras);
+        let turn_id = replayed.legacy_turn_id();
+
+        // Insert turn summary for the previous turn before processing the new turn.
+        if let Some(prev_turn) = self.latest_turn.clone() {
+            self.enqueue_terminal_history_items(&prev_turn);
+        }
+
+        if self.superseded_turn_ids.contains(&turn_id) {
+            return Ok(());
+        }
+        let session_id: SessionId = replayed
+            .native
+            .session_id
+            .as_str()
+            .parse()
+            .map_err(|error| anyhow::anyhow!("invalid turn session id: {error}"))?;
+        self.apply_activity_timestamp(
+            session_id,
+            replayed
+                .native
+                .completed_at
+                .unwrap_or(replayed.native.started_at),
+            "turn line",
+        )?;
+        if !self.turns_by_id.contains_key(&turn_id) {
+            self.turn_order.push(turn_id);
+        }
+        self.turns_seen = self.turns_seen.max(replayed.native.sequence);
+        self.apply_turn_usage(&replayed);
+        self.turn_kinds_by_id.insert(turn_id, replayed.native.kind);
+        if let Some(session_context) = replayed.extras.session_context.clone() {
+            self.session_context = Some(session_context);
+            self.session_context_recorded = true;
+        }
+        if let Some(turn_context) = replayed.extras.turn_context.clone() {
+            self.latest_turn_context = Some(turn_context);
+        }
+        self.turns_by_id.insert(turn_id, replayed.clone());
+        self.latest_turn = Some(replayed);
+        Ok(())
+    }
+
+    fn apply_item_record(&mut self, item: ItemRecord) -> Result<()> {
+        if !self.superseded_turn_ids.contains(&item.turn_id) {
+            self.apply_activity_timestamp(item.session_id, item.timestamp, "item line")?;
+            self.loaded_item_count += 1;
+            self.next_item_seq = self.next_item_seq.max(item.seq + 1);
+            self.collect_item_line(item);
         }
         Ok(())
     }
 
-    /// Applies accumulated field-level settings onto the replayed session
-    /// record, ahead of the derivations in `into_runtime_session`. Field lines
+    fn apply_native_item_envelope(&mut self, envelope: ItemEnvelope) -> Result<()> {
+        let turn_id = envelope.turn_id;
+        let legacy_turn_id = turn_id;
+        if self.superseded_turn_ids.contains(&legacy_turn_id) {
+            return Ok(());
+        }
+        let session_id: SessionId = envelope
+            .session_id
+            .as_str()
+            .parse()
+            .map_err(|error| anyhow::anyhow!("invalid session id on item envelope: {error}"))?;
+        let item_id = envelope.id;
+        self.apply_activity_timestamp(session_id, envelope.updated_at, "item envelope")?;
+        self.loaded_item_count += 1;
+        self.next_item_seq = self.next_item_seq.max(envelope.seq + 1);
+        let turn_kind = self
+            .turn_kinds_by_id
+            .get(&legacy_turn_id)
+            .cloned()
+            .unwrap_or_default();
+        self.pending_items.push(ReplayHistoryItem {
+            turn_id,
+            turn_kind,
+            item_id,
+            seq: envelope.seq,
+            timestamp: envelope.updated_at,
+            record_timestamp: envelope.created_at,
+            line_timestamp: envelope.updated_at,
+            bucket_priority: 0,
+            intra_record_order: 0,
+            payload: ReplayHistoryItemPayload::NativeItem(envelope.item),
+        });
+        Ok(())
+    }
+
+    /// Applies one v2 rollout line. Native Session/Turn/Item update replay state
+    /// directly; compatibility-only kinds still adapt to frozen legacy records.
+    fn apply_rollout_line(&mut self, line: RolloutLine) -> Result<()> {
+        match line {
+            RolloutLine::SessionMeta {
+                timestamp,
+                session,
+                extras,
+                ..
+            } => {
+                self.apply_native_session(*session, extras.map(|extras| *extras), timestamp);
+                Ok(())
+            }
+            RolloutLine::Turn { turn, extras, .. } => {
+                self.apply_native_turn(turn, extras.map(|extras| *extras))
+            }
+            RolloutLine::Item { item, .. } => {
+                self.apply_native_item_envelope(item)?;
+                Ok(())
+            }
+            RolloutLine::WorkspaceCheckpoint {
+                timestamp, record, ..
+            } => self.apply_line(LegacyRolloutLine::TurnWorkspaceCheckpointRecorded(
+                Box::new(TurnWorkspaceCheckpointRecordedLine { timestamp, record }),
+            )),
+            RolloutLine::WorkspaceChange {
+                timestamp, record, ..
+            } => self.apply_line(LegacyRolloutLine::TurnWorkspaceChangeRecorded(Box::new(
+                TurnWorkspaceChangeRecordedLine { timestamp, record },
+            ))),
+            RolloutLine::WorkspaceRestoreStarted {
+                timestamp, record, ..
+            } => self.apply_line(LegacyRolloutLine::TurnWorkspaceRestoreStarted(Box::new(
+                TurnWorkspaceRestoreStartedLine { timestamp, record },
+            ))),
+            RolloutLine::WorkspaceRestoreCompleted {
+                timestamp, record, ..
+            } => self.apply_line(LegacyRolloutLine::TurnWorkspaceRestoreCompleted(Box::new(
+                TurnWorkspaceRestoreCompletedLine { timestamp, record },
+            ))),
+            RolloutLine::Internal {
+                timestamp,
+                session_id,
+                turn_id,
+                seq,
+                entry,
+                ..
+            } => {
+                match &entry {
+                    InternalRecord::SessionLeaf { epoch, leaf_id } => {
+                        if *epoch >= self.leaf_epoch {
+                            self.leaf_epoch = *epoch;
+                            self.transcript_leaf_id = *leaf_id;
+                        }
+                    }
+                    InternalRecord::TreeEdge {
+                        child_id,
+                        parent_id,
+                    } => {
+                        self.tree_edges.insert(*child_id, *parent_id);
+                    }
+                    _ => {}
+                }
+                for legacy in legacy_lines_from_internal(
+                    timestamp,
+                    &session_id,
+                    turn_id.as_ref(),
+                    seq,
+                    &entry,
+                )? {
+                    self.apply_line(legacy)?;
+                }
+                Ok(())
+            }
+            RolloutLine::SessionTitleUpdated {
+                timestamp,
+                session_id,
+                title,
+                previous_title,
+                ..
+            } => self.apply_line(legacy_title_line_from_native(
+                timestamp,
+                &session_id,
+                title,
+                previous_title,
+            )?),
+            RolloutLine::CompactionSnapshot {
+                timestamp,
+                session_id,
+                turn_id,
+                summary_item_id,
+                preserved_item_ids,
+                context_occupancy,
+                ..
+            } => self.apply_line(legacy_compaction_line_from_native(
+                timestamp,
+                &session_id,
+                &turn_id,
+                &summary_item_id,
+                &preserved_item_ids,
+                context_occupancy,
+            )?),
+            RolloutLine::SessionRollback {
+                timestamp,
+                session_id,
+                retained_turn_ids,
+                retained_item_ids,
+                latest_turn_id,
+                ..
+            } => self.apply_line(legacy_rollback_line_from_native(
+                timestamp,
+                &session_id,
+                &retained_turn_ids,
+                &retained_item_ids,
+                latest_turn_id.as_ref(),
+            )?),
+        }
+    }
+
+    /// Applies accumulated field-level settings onto the replayed Native
+    /// session, ahead of the derivations in `into_runtime_session`. Field lines
     /// win over the whole-record `SessionMeta` values; a disagreement between
     /// the two is logged because it indicates a missed dual-write.
-    fn apply_session_settings(&mut self, record: &mut SessionRecord) {
+    fn apply_session_settings(&mut self, session: &mut ReplayedSession) {
         let fields = std::mem::take(&mut self.session_settings);
+        let session_id = session.legacy_session_id();
         for (field, value) in fields {
             match field {
                 SessionSettingsField::PermissionPreset => {
                     match serde_json::from_value::<devo_protocol::PermissionPreset>(value) {
                         Ok(preset) => {
-                            if record.permission_preset.is_some_and(|p| p != preset) {
+                            let profile = match preset {
+                                devo_protocol::PermissionPreset::Default => {
+                                    devo_protocol::native::model::PermissionProfile::Default
+                                }
+                                devo_protocol::PermissionPreset::AutoReview => {
+                                    devo_protocol::native::model::PermissionProfile::AutoReview
+                                }
+                                devo_protocol::PermissionPreset::FullAccess => {
+                                    devo_protocol::native::model::PermissionProfile::FullAccess
+                                }
+                            };
+                            if session
+                                .extras
+                                .permission_preset
+                                .is_some_and(|p| p != preset)
+                                || session.native.settings.permission_profile != profile
+                            {
                                 tracing::warn!(
-                                    session_id = %record.id,
+                                    session_id = %session_id,
                                     "settings field line disagrees with SessionMeta permission_preset; field line wins"
                                 );
                             }
-                            record.permission_preset = Some(preset);
+                            session.extras.permission_preset = Some(preset);
+                            session.native.settings.permission_profile = profile;
                         }
                         Err(error) => {
-                            tracing::warn!(session_id = %record.id, %error, "ignoring damaged permissionPreset settings line");
+                            tracing::warn!(session_id = %session_id, %error, "ignoring damaged permissionPreset settings line");
                         }
                     }
                 }
                 SessionSettingsField::Model => {
-                    apply_optional_string_setting(&mut record.model, value, record.id, "model");
+                    let Some(parsed) = parse_optional_string_setting(session_id, "model", value)
+                    else {
+                        continue;
+                    };
+                    warn_settings_disagree(
+                        session_id,
+                        "model",
+                        (!session.native.model.model.is_empty())
+                            .then(|| session.native.model.model.clone())
+                            != parsed,
+                    );
+                    session.native.model.model = parsed.unwrap_or_default();
                 }
                 SessionSettingsField::ModelBindingId => {
-                    apply_optional_string_setting(
-                        &mut record.model_binding_id,
-                        value,
-                        record.id,
+                    let Some(parsed) =
+                        parse_optional_string_setting(session_id, "model_binding_id", value)
+                    else {
+                        continue;
+                    };
+                    warn_settings_disagree(
+                        session_id,
                         "model_binding_id",
+                        (session.native.model.provider != "unknown"
+                            && !session.native.model.provider.is_empty())
+                        .then(|| session.native.model.provider.clone())
+                            != parsed,
                     );
+                    session.native.model.provider = parsed.unwrap_or_else(|| "unknown".to_string());
                 }
                 SessionSettingsField::ReasoningEffortSelection => {
-                    apply_optional_string_setting(
-                        &mut record.reasoning_effort_selection,
-                        value,
-                        record.id,
+                    let Some(parsed) = parse_optional_string_setting(
+                        session_id,
                         "reasoning_effort_selection",
+                        value,
+                    ) else {
+                        continue;
+                    };
+                    warn_settings_disagree(
+                        session_id,
+                        "reasoning_effort_selection",
+                        session.native.settings.reasoning_effort != parsed,
                     );
+                    session.native.settings.reasoning_effort = parsed.clone();
+                    session.native.model.reasoning_effort = parsed
+                        .as_deref()
+                        .and_then(|selection| selection.parse().ok());
                 }
                 SessionSettingsField::CollaborationMode => {
                     match serde_json::from_value::<devo_protocol::CollaborationMode>(value) {
                         Ok(mode) => {
-                            if record.collaboration_mode.is_some_and(|m| m != mode) {
+                            if session.extras.collaboration_mode.is_some_and(|m| m != mode) {
                                 tracing::warn!(
-                                    session_id = %record.id,
+                                    session_id = %session_id,
                                     "settings field line disagrees with SessionMeta collaboration_mode; field line wins"
                                 );
                             }
-                            record.collaboration_mode = Some(mode);
+                            session.extras.collaboration_mode = Some(mode);
+                            session.native.settings.mode = Some(match mode {
+                                devo_protocol::CollaborationMode::Build => "build".to_string(),
+                                devo_protocol::CollaborationMode::Plan => "plan".to_string(),
+                            });
                         }
                         Err(error) => {
-                            tracing::warn!(session_id = %record.id, %error, "ignoring damaged collaborationMode settings line");
+                            tracing::warn!(session_id = %session_id, %error, "ignoring damaged collaborationMode settings line");
                         }
                     }
                 }
@@ -1578,6 +2021,22 @@ impl ReplayState {
                 // profile name field).
                 SessionSettingsField::SandboxProfile => {
                     self.session_settings.insert(field, value);
+                }
+                // Auto-refine and Python wait budget live on the Native session snapshot.
+                SessionSettingsField::AutoRefineEnabled => {
+                    if let Ok(enabled) = serde_json::from_value::<bool>(value) {
+                        session.native.settings.auto_refine_enabled = Some(enabled);
+                    }
+                }
+                SessionSettingsField::AutoRefineTurnInterval => {
+                    if let Ok(interval) = serde_json::from_value::<u32>(value) {
+                        session.native.settings.auto_refine_turn_interval = Some(interval.max(1));
+                    }
+                }
+                SessionSettingsField::PythonCellFirstWaitMs => {
+                    if let Ok(ms) = serde_json::from_value::<u64>(value) {
+                        session.native.settings.python_cell_first_wait_ms = Some(ms);
+                    }
                 }
             }
         }
@@ -1608,15 +2067,14 @@ impl ReplayState {
             self.enqueue_terminal_history_items(&last_turn);
         }
 
-        let mut record = self
+        let mut replayed = self
             .session
             .take()
             .context("missing SessionMetaLine in rollout")?;
         let last_activity_at = self
             .last_activity_at
-            .or(record.last_activity_at)
-            .unwrap_or(record.updated_at);
-        record.last_activity_at = Some(last_activity_at);
+            .unwrap_or(replayed.native.last_activity_at);
+        replayed.native.last_activity_at = last_activity_at;
         // Field-level settings lines win over the whole-record SessionMeta
         // values (L2-DES-CONV-002 Phase 1); apply before the derivations below.
         let has_model_setting = self
@@ -1625,13 +2083,14 @@ impl ReplayState {
         let has_model_binding_setting = self
             .session_settings
             .contains_key(&SessionSettingsField::ModelBindingId);
-        self.apply_session_settings(&mut record);
+        self.apply_session_settings(&mut replayed);
         let sandbox_profile_override = self.sandbox_profile_override();
-        let runtime_context = deps.context_for_workspace(&record.cwd).await?;
+        let session_id = replayed.legacy_session_id();
+        let runtime_context = deps.context_for_workspace(&replayed.native.cwd).await?;
         let mut core_session = runtime_context.new_session_state(
-            record.id,
-            record.cwd.clone(),
-            record.additional_directories.clone(),
+            session_id,
+            replayed.native.cwd.clone(),
+            replayed.native.additional_directories.clone(),
         );
         let mut ordered_items = self.pending_items;
         ordered_items.sort_by(|left, right| {
@@ -1650,20 +2109,19 @@ impl ReplayState {
         let mut tool_names_by_id = HashMap::new();
         for pending_item in ordered_items {
             match pending_item.payload {
-                ReplayHistoryItemPayload::TurnItem(turn_item) => {
-                    apply_turn_item(
+                ReplayHistoryItemPayload::NativeItem(native_item) => {
+                    apply_native_item(
                         &mut replayed_messages,
                         &mut replayed_history_items,
                         &mut tool_names_by_id,
-                        &pending_item.turn_kind,
-                        turn_item.clone(),
+                        native_item.clone(),
                     );
-                    replayed_persisted_turn_items.push(PersistedTurnItem {
-                        turn_id: pending_item.turn_id,
-                        turn_kind: pending_item.turn_kind,
-                        item_id: pending_item.item_id,
-                        turn_item,
-                    });
+                    replayed_persisted_turn_items.push(PersistedNativeItem::new(
+                        pending_item.turn_id,
+                        pending_item.turn_kind,
+                        pending_item.item_id,
+                        native_item,
+                    ));
                 }
                 ReplayHistoryItemPayload::HistoryOnly(history_item) => {
                     replayed_history_items.push(history_item);
@@ -1680,17 +2138,25 @@ impl ReplayState {
                 });
         core_session.session_context = self
             .session_context
-            .or_else(|| record.session_context.clone());
-        core_session.latest_turn_context = self
-            .latest_turn_context
-            .or_else(|| record.latest_turn_context.clone());
+            .or_else(|| replayed.extras.session_context.clone());
+        // Skills are environment state, not conversation content: a restart
+        // must re-advertise what is actually on disk (bundle updates, user
+        // edits). Without this, a session restored from its rollout keeps
+        // advertising the skills snapshot captured when it was created —
+        // forever, across every restart. Refresh only the skills block from
+        // the freshly built session config; the rest of the snapshot stays
+        // locked per session (prompt-cache stability).
+        if let Some(context) = core_session.session_context.as_mut() {
+            context.available_skills = core_session.config.available_skills_instructions.clone();
+        }
+        core_session.latest_turn_context = self.latest_turn_context.clone();
         if let Some(latest_turn_context) = core_session.latest_turn_context.as_ref() {
             core_session.collaboration_mode = latest_turn_context.collaboration_mode;
         }
-        if let Some(mode) = record.collaboration_mode {
+        if let Some(mode) = replayed.extras.collaboration_mode {
             core_session.collaboration_mode = mode;
         }
-        if let Some(preset) = record.permission_preset {
+        if let Some(preset) = replayed.extras.permission_preset {
             let safety_preset = match preset {
                 devo_protocol::PermissionPreset::Default => devo_safety::PermissionPreset::Default,
                 devo_protocol::PermissionPreset::AutoReview => {
@@ -1702,9 +2168,9 @@ impl ReplayState {
             };
             let profile = devo_safety::RuntimePermissionProfile::from_preset(
                 safety_preset,
-                record.cwd.clone(),
+                replayed.native.cwd.clone(),
             )
-            .with_additional_roots(record.additional_directories.clone());
+            .with_additional_roots(replayed.native.additional_directories.clone());
             let sandbox = Some(profile.implied_sandbox_profile().to_string());
             core_session.config.permission_mode = profile.permission_mode();
             core_session.config.permission_profile = profile;
@@ -1739,6 +2205,12 @@ impl ReplayState {
         core_session.last_turn_tokens = last_turn_tokens;
         let pending_turn_queue = std::sync::Arc::clone(&core_session.pending_turn_queue);
         let steer_input_queue = std::sync::Arc::clone(&core_session.steer_input_queue);
+
+        let session_model =
+            (!replayed.native.model.model.is_empty()).then(|| replayed.native.model.model.clone());
+        let session_binding = (replayed.native.model.provider != "unknown"
+            && !replayed.native.model.provider.is_empty())
+        .then(|| replayed.native.model.provider.clone());
         // A session-level model update supersedes the binding captured by an
         // older turn. With no explicit binding line, use the slug directly;
         // this also repairs rollouts written before slug updates cleared the
@@ -1747,24 +2219,24 @@ impl ReplayState {
         // paired model slug).
         let summary_model_selection = if has_model_setting || has_model_binding_setting {
             if has_model_binding_setting {
-                record
-                    .model_binding_id
-                    .clone()
-                    .or_else(|| record.model.clone())
+                session_binding.clone().or_else(|| session_model.clone())
             } else {
-                record.model.clone()
+                session_model.clone()
             }
         } else {
-            self.latest_turn_metadata
+            self.latest_turn
                 .as_ref()
-                .and_then(|turn| turn.model_binding_id.clone())
-                .or_else(|| {
-                    self.latest_turn_metadata
-                        .as_ref()
-                        .map(|turn| turn.model.clone())
+                .and_then(|turn| {
+                    (turn.native.model.provider != "unknown")
+                        .then(|| turn.native.model.provider.clone())
                 })
-                .or_else(|| record.model_binding_id.clone())
-                .or_else(|| record.model.clone())
+                .or_else(|| {
+                    self.latest_turn
+                        .as_ref()
+                        .map(|turn| turn.native.model.model.clone())
+                })
+                .or_else(|| session_binding.clone())
+                .or_else(|| session_model.clone())
         }
         .unwrap_or_else(|| runtime_context.default_model.clone());
         let turn_config = runtime_context.resolve_turn_config(Some(&summary_model_selection), None);
@@ -1775,11 +2247,20 @@ impl ReplayState {
                 .filter(|selection| !selection.eq_ignore_ascii_case("default"))
                 .map(str::to_ascii_lowercase)
         };
-        let explicit_reasoning_effort_selection = self
-            .latest_turn_metadata
-            .as_ref()
-            .and_then(|turn| concrete_selection(turn.reasoning_effort_selection.as_deref()))
-            .or_else(|| concrete_selection(record.reasoning_effort_selection.as_deref()));
+        let latest_turn_effort = self.latest_turn.as_ref().and_then(|turn| {
+            turn.native
+                .model
+                .reasoning_effort
+                .map(|effort| effort.to_string())
+                .or_else(|| {
+                    turn.extras.turn_context.as_ref().and_then(|ctx| {
+                        ctx.reasoning_effort
+                            .map(|effort| effort.label().to_lowercase())
+                    })
+                })
+        });
+        let explicit_reasoning_effort_selection = concrete_selection(latest_turn_effort.as_deref())
+            .or_else(|| concrete_selection(replayed.native.settings.reasoning_effort.as_deref()));
         let context_reasoning_effort_selection = core_session
             .latest_turn_context
             .as_ref()
@@ -1801,9 +2282,6 @@ impl ReplayState {
             .model
             .resolve_reasoning_effort_selection(summary_reasoning_effort_selection.as_deref())
             .effective_reasoning_effort;
-        record.model = Some(turn_config.model.slug.clone());
-        record.model_binding_id = turn_config.model_binding_id.clone();
-        record.reasoning_effort_selection = summary_reasoning_effort_selection.clone();
 
         let applied_compaction_limit =
             crate::runtime::context_occupancy::resolved_compaction_limit(&turn_config.model);
@@ -1814,64 +2292,89 @@ impl ReplayState {
             applied_compaction_limit as usize,
         );
 
-        let summary = SessionMetadata {
-            session_id: record.id,
-            cwd: record.cwd.clone(),
-            additional_directories: record.additional_directories.clone(),
-            created_at: record.created_at,
-            updated_at: record.updated_at,
-            last_activity_at,
-            title: record.title.clone(),
-            title_state: record.title_state.clone(),
-            parent_session_id: record.parent_session_id,
-            fork_from_id: record.fork_from_id,
-            fork_at_turn_id: record.fork_at_turn_id,
-            agent_path: record.agent_path.clone(),
-            agent_nickname: record.agent_nickname.clone(),
-            agent_role: record.agent_role.clone(),
-            ephemeral: false,
-            model: Some(turn_config.model.slug),
-            model_binding_id: turn_config.model_binding_id.clone(),
-            reasoning_effort_selection: summary_reasoning_effort_selection,
-            reasoning_effort: summary_reasoning_effort,
-            total_input_tokens: self.total_input_tokens,
-            total_output_tokens: self.total_output_tokens,
-            total_tokens: self.total_tokens,
-            total_cache_creation_tokens: self.total_cache_creation_tokens,
-            total_cache_read_tokens: self.total_cache_read_tokens,
+        use devo_protocol::native::session::SessionStatus;
+        use devo_protocol::native::usage::{SessionUsage, UsageTotals};
+
+        let last_query_total_tokens = self
+            .latest_context_occupancy
+            .as_ref()
+            .map(|occupancy| occupancy.total_tokens as usize)
+            .or_else(|| {
+                self.latest_query_usage
+                    .as_ref()
+                    .map(|usage| usage.display_total_tokens() as usize)
+            })
+            .unwrap_or(0);
+
+        // Native session is the hydrate source of truth; overlay resolved model
+        // / idle status / usage totals for the actor summary.
+        let mut native = replayed.native.clone();
+        native.status = SessionStatus::Idle;
+        native.active_turn_id = None;
+        native.queued_count = 0;
+        native.last_activity_at = last_activity_at;
+        native.model.provider = turn_config
+            .model_binding_id
+            .unwrap_or_else(|| "unknown".into());
+        native.model.model = turn_config.model.slug.clone();
+        native.model.reasoning_effort = summary_reasoning_effort;
+        native.settings.reasoning_effort = summary_reasoning_effort_selection.clone();
+        native.settings.mode = Some(match core_session.collaboration_mode {
+            devo_protocol::CollaborationMode::Build => "build".to_string(),
+            devo_protocol::CollaborationMode::Plan => "plan".to_string(),
+        });
+        native.settings.effective_context_window = Some(applied_compaction_limit);
+        native.usage = SessionUsage {
+            total: UsageTotals {
+                total_tokens: self.total_tokens as u64,
+                input_tokens: self.total_input_tokens as u64,
+                output_tokens: self.total_output_tokens as u64,
+                reasoning_tokens: 0,
+                cache_read_input_tokens: self.total_cache_read_tokens as u64,
+                cache_creation_input_tokens: self.total_cache_creation_tokens as u64,
+                call_count: 0,
+                metered_call_count: 0,
+                failed_call_count: 0,
+                cancelled_call_count: 0,
+                estimated_cost: None,
+            },
+            by_purpose: Vec::new(),
+            legacy: None,
+            updated_at: replayed.updated_at,
+        };
+        native.sync_activity();
+
+        let summary = crate::runtime_session_summary::RuntimeSessionSummary {
+            native: native.clone(),
+            updated_at: replayed.updated_at,
+            agent_path: replayed.agent_path.clone(),
+            agent_nickname: replayed.agent_nickname.clone(),
+            agent_role: replayed.agent_role(),
             prompt_token_estimate: core_session.prompt_token_estimate,
             last_query_usage: self.latest_query_usage.clone(),
-            last_query_total_tokens: self
-                .latest_context_occupancy
-                .as_ref()
-                .map(|occupancy| occupancy.total_tokens as usize)
-                .or_else(|| {
-                    self.latest_query_usage
-                        .as_ref()
-                        .map(devo_protocol::TurnUsage::display_total_tokens)
-                })
-                .unwrap_or(0),
+            last_query_total_tokens,
             last_context_occupancy: self.latest_context_occupancy.clone(),
-            status: SessionRuntimeStatus::Idle,
             collaboration_mode: core_session.collaboration_mode,
-            effective_context_window: Some(applied_compaction_limit),
-            permission_preset: record.permission_preset,
         };
+
+        // Native turn map is the resume/fork source of truth — no TurnRecord bridge.
+        let turns_by_id = self.turns_by_id;
 
         let config = core_session.config.clone();
         Ok(RuntimeSession {
             runtime_context,
-            record: Some(record),
+            // Caller (`load_session_from_rollout`) fills the absolute path.
+            rollout_path: None,
             summary,
             config,
             core_session: std::sync::Arc::new(Mutex::new(core_session)),
             active_turn: None,
-            latest_turn: self.latest_turn_metadata,
+            latest_turn: self.latest_turn.map(ReplayedTurn::into_runtime_turn),
             loaded_item_count: self.loaded_item_count,
             history_items: replayed_history_items,
             persisted_turn_items: replayed_persisted_turn_items,
             latest_compaction_snapshot: self.latest_compaction_snapshot,
-            turn_records_by_id: self.turn_records_by_id,
+            turns_by_id,
             pending_turn_queue,
             steer_input_queue,
             agent_tool_policy: Default::default(),
@@ -1888,16 +2391,37 @@ impl ReplayState {
         })
     }
 
+    fn apply_timestamped_session_record(
+        &mut self,
+        session_id: SessionId,
+        timestamp: chrono::DateTime<Utc>,
+        line_kind: &str,
+    ) -> Result<()> {
+        self.apply_record_timestamp(session_id, timestamp, line_kind)?;
+        self.apply_activity_timestamp(session_id, timestamp, line_kind)
+    }
+
+    fn matching_session_mut(
+        &mut self,
+        session_id: SessionId,
+        line_kind: &str,
+    ) -> Result<Option<&mut ReplayedSession>> {
+        match self.session.as_mut() {
+            Some(session) if session.legacy_session_id() != session_id => {
+                anyhow::bail!("{line_kind} session id does not match session header")
+            }
+            Some(session) => Ok(Some(session)),
+            None => Ok(None),
+        }
+    }
+
     fn apply_record_timestamp(
         &mut self,
         session_id: SessionId,
         timestamp: chrono::DateTime<Utc>,
         line_kind: &str,
     ) -> Result<()> {
-        if let Some(session) = self.session.as_mut() {
-            if session.id != session_id {
-                anyhow::bail!("{line_kind} session id does not match session header");
-            }
+        if let Some(session) = self.matching_session_mut(session_id, line_kind)? {
             session.updated_at = timestamp;
         }
         Ok(())
@@ -1909,47 +2433,75 @@ impl ReplayState {
         timestamp: chrono::DateTime<Utc>,
         line_kind: &str,
     ) -> Result<()> {
+        if self.matching_session_mut(session_id, line_kind)?.is_none() {
+            return Ok(());
+        }
+        let last_activity_at = self
+            .last_activity_at
+            .map(|current| current.max(timestamp))
+            .unwrap_or(timestamp);
+        self.last_activity_at = Some(last_activity_at);
         if let Some(session) = self.session.as_mut() {
-            if session.id != session_id {
-                anyhow::bail!("{line_kind} session id does not match session header");
-            }
-            let last_activity_at = self
-                .last_activity_at
-                .map(|current| current.max(timestamp))
-                .unwrap_or(timestamp);
-            self.last_activity_at = Some(last_activity_at);
-            session.last_activity_at = Some(last_activity_at);
+            session.native.last_activity_at = last_activity_at;
         }
         Ok(())
     }
 
+    fn apply_turn_usage(&mut self, turn: &ReplayedTurn) {
+        if let Some(usage) = turn.native.usage.as_ref() {
+            self.total_input_tokens += usage.query.input_tokens as usize;
+            self.total_output_tokens += usage.query.output_tokens as usize;
+            self.total_tokens += usage.query.total_tokens as usize;
+            self.total_cache_creation_tokens += usage.query.cache_creation_input_tokens as usize;
+            self.total_cache_read_tokens += usage.query.cache_read_input_tokens as usize;
+        }
+        match &turn.extras.latest_query_usage {
+            Some(usage) => {
+                self.last_input_tokens = usage.query.input_tokens as usize;
+                self.last_turn_tokens = usage.display_total_tokens() as usize;
+                self.latest_query_usage = Some(usage.clone());
+            }
+            None if turn.native.usage.is_some() => {
+                // Older rollout records only contain aggregate turn usage.
+                // Do not mistake it for the latest model query.
+                self.last_input_tokens = 0;
+                self.last_turn_tokens = 0;
+                self.latest_query_usage = None;
+            }
+            None => {}
+        }
+        if let Some(occupancy) = turn.extras.context_occupancy.clone() {
+            self.latest_context_occupancy = Some(occupancy);
+        }
+    }
+
     fn apply_turn_superseded(&mut self, record: TurnSupersededRecord) {
         self.superseded_turn_ids.insert(record.superseded_turn_id);
+        let superseded_native_turn = record.superseded_turn_id;
         let removed_item_ids = self
             .pending_items
             .iter()
-            .filter(|item| item.turn_id == record.superseded_turn_id)
+            .filter(|item| item.turn_id == superseded_native_turn)
             .map(|item| item.item_id)
             .collect::<HashSet<_>>();
 
         self.pending_items
-            .retain(|item| item.turn_id != record.superseded_turn_id);
+            .retain(|item| item.turn_id != superseded_native_turn);
         self.turn_order
             .retain(|turn_id| *turn_id != record.superseded_turn_id);
-        self.turn_records_by_id.remove(&record.superseded_turn_id);
+        self.turns_by_id.remove(&record.superseded_turn_id);
         self.turn_kinds_by_id.remove(&record.superseded_turn_id);
 
         if self
-            .latest_turn_metadata
+            .latest_turn
             .as_ref()
-            .is_some_and(|turn| turn.turn_id == record.superseded_turn_id)
+            .is_some_and(|turn| turn.legacy_turn_id() == record.superseded_turn_id)
         {
             self.latest_turn = self
                 .turn_order
                 .iter()
                 .rev()
-                .find_map(|turn_id| self.turn_records_by_id.get(turn_id).cloned());
-            self.latest_turn_metadata = self.latest_turn.as_ref().map(turn_metadata_from_record);
+                .find_map(|turn_id| self.turns_by_id.get(turn_id).cloned());
         }
 
         if self
@@ -1971,7 +2523,7 @@ impl ReplayState {
 
     fn apply_session_rollback(&mut self, line: SessionRollbackLine) -> Result<()> {
         if let Some(session) = self.session.as_mut() {
-            if session.id != line.session_id {
+            if session.legacy_session_id() != line.session_id {
                 anyhow::bail!("rollback line session id does not match session header");
             }
             session.updated_at = line.timestamp;
@@ -1981,12 +2533,12 @@ impl ReplayState {
         let retained_turn_ids = line
             .retained_turn_ids
             .iter()
-            .copied()
+            .cloned()
             .collect::<HashSet<_>>();
         let retained_item_ids = line
             .retained_item_ids
             .iter()
-            .copied()
+            .cloned()
             .collect::<HashSet<_>>();
 
         self.pending_items.retain(|item| {
@@ -1996,7 +2548,7 @@ impl ReplayState {
         });
         self.turn_order
             .retain(|turn_id| retained_turn_ids.contains(turn_id));
-        self.turn_records_by_id
+        self.turns_by_id
             .retain(|turn_id, _| retained_turn_ids.contains(turn_id));
         self.turn_kinds_by_id
             .retain(|turn_id, _| retained_turn_ids.contains(turn_id));
@@ -2007,8 +2559,7 @@ impl ReplayState {
 
         self.latest_turn = line
             .latest_turn_id
-            .and_then(|turn_id| self.turn_records_by_id.get(&turn_id).cloned());
-        self.latest_turn_metadata = self.latest_turn.as_ref().map(turn_metadata_from_record);
+            .and_then(|turn_id| self.turns_by_id.get(&turn_id).cloned());
         // Prefer the dedicated SessionContextUpdated side-channel. Rollback prunes
         // turn records but must not drop locked session context that was recorded
         // once for the rollout file.
@@ -2018,22 +2569,22 @@ impl ReplayState {
             .or_else(|| {
                 self.latest_turn
                     .as_ref()
-                    .and_then(|turn| turn.session_context.clone())
+                    .and_then(|turn| turn.extras.session_context.clone())
             })
             .or_else(|| {
                 self.session
                     .as_ref()
-                    .and_then(|session| session.session_context.clone())
+                    .and_then(|session| session.extras.session_context.clone())
             });
         self.session_context_recorded = self.recorded_session_context.is_some()
             || self
                 .latest_turn
                 .as_ref()
-                .is_some_and(|turn| turn.session_context.is_some())
+                .is_some_and(|turn| turn.extras.session_context.is_some())
             || self
                 .session
                 .as_ref()
-                .is_some_and(|session| session.session_context.is_some());
+                .is_some_and(|session| session.extras.session_context.is_some());
         self.latest_turn_context = None;
         self.loaded_item_count = u64::try_from(retained_item_ids.len()).unwrap_or(u64::MAX);
         self.next_item_seq = self
@@ -2072,31 +2623,14 @@ impl ReplayState {
         self.latest_query_usage = None;
         self.latest_context_occupancy = None;
 
-        for turn_id in &self.turn_order {
-            let Some(turn) = self.turn_records_by_id.get(turn_id) else {
-                continue;
-            };
-            self.turns_seen = self.turns_seen.max(turn.sequence);
-            if let Some(usage) = &turn.usage {
-                self.total_input_tokens += usage.input_tokens as usize;
-                self.total_output_tokens += usage.output_tokens as usize;
-                self.total_tokens += usage.display_total_tokens();
-                self.total_cache_creation_tokens +=
-                    usage.cache_creation_input_tokens.unwrap_or(0) as usize;
-                self.total_cache_read_tokens += usage.cache_read_input_tokens.unwrap_or(0) as usize;
-            }
-            if let Some(usage) = &turn.latest_query_usage {
-                self.last_input_tokens = usage.input_tokens as usize;
-                self.last_turn_tokens = usage.display_total_tokens();
-                self.latest_query_usage = Some(usage.clone());
-            } else if turn.usage.is_some() {
-                self.last_input_tokens = 0;
-                self.last_turn_tokens = 0;
-                self.latest_query_usage = None;
-            }
-            if let Some(occupancy) = turn.context_occupancy.clone() {
-                self.latest_context_occupancy = Some(occupancy);
-            }
+        let turns: Vec<_> = self
+            .turn_order
+            .iter()
+            .filter_map(|turn_id| self.turns_by_id.get(turn_id).cloned())
+            .collect();
+        for turn in &turns {
+            self.turns_seen = self.turns_seen.max(turn.native.sequence);
+            self.apply_turn_usage(turn);
         }
         if let Some(occupancy) = self
             .latest_compaction_snapshot
@@ -2119,121 +2653,116 @@ impl ReplayState {
             .unwrap_or_default();
         let mut intra_record_order = 0usize;
 
-        for turn_item in item.output_items {
-            self.pending_items.push(ReplayHistoryItem {
-                turn_id: item.turn_id,
-                turn_kind: turn_kind.clone(),
-                item_id,
-                seq,
-                timestamp: record_timestamp,
-                record_timestamp,
-                line_timestamp,
-                bucket_priority: 0,
-                intra_record_order,
-                payload: ReplayHistoryItemPayload::TurnItem(turn_item),
-            });
-            intra_record_order += 1;
-        }
-
-        for turn_item in item.input_items {
-            self.pending_items.push(ReplayHistoryItem {
-                turn_id: item.turn_id,
-                turn_kind: turn_kind.clone(),
-                item_id,
-                seq,
-                timestamp: record_timestamp,
-                record_timestamp,
-                line_timestamp,
-                bucket_priority: 1,
-                intra_record_order,
-                payload: ReplayHistoryItemPayload::TurnItem(turn_item),
-            });
-            intra_record_order += 1;
+        for (bucket_priority, items) in [(0u8, item.output_items), (1, item.input_items)] {
+            for turn_item in items {
+                self.push_legacy_turn_item_payload(
+                    item.turn_id,
+                    turn_kind,
+                    item_id,
+                    seq,
+                    record_timestamp,
+                    line_timestamp,
+                    bucket_priority,
+                    &mut intra_record_order,
+                    turn_item,
+                );
+            }
         }
     }
 
-    fn enqueue_terminal_history_items(&mut self, turn: &TurnRecord) {
-        let outcome = match turn.status {
-            TurnStatus::Failed => "failed",
-            TurnStatus::Interrupted => "interrupted",
-            TurnStatus::Completed => "",
-            TurnStatus::Pending | TurnStatus::Running | TurnStatus::WaitingApproval => return,
+    /// Migrate/resume boundary: packed legacy ItemRecord payloads → Native journal.
+    #[allow(clippy::too_many_arguments)]
+    fn push_legacy_turn_item_payload(
+        &mut self,
+        turn_id: NativeTurnId,
+        turn_kind: TurnKind,
+        item_id: NativeItemId,
+        seq: u64,
+        record_timestamp: chrono::DateTime<Utc>,
+        line_timestamp: chrono::DateTime<Utc>,
+        bucket_priority: u8,
+        intra_record_order: &mut usize,
+        turn_item: TurnItem,
+    ) {
+        use crate::projection::history_entry_from_turn_item;
+
+        let payload = match &turn_item {
+            TurnItem::TurnSummary(_) => {
+                history_entry_from_turn_item(&turn_item).map(ReplayHistoryItemPayload::HistoryOnly)
+            }
+            other => devo_core::native_item_from_turn_item(other)
+                .map(ReplayHistoryItemPayload::NativeItem),
         };
-        if self.superseded_turn_ids.contains(&turn.id) || !self.summarized_turn_ids.insert(turn.id)
+        let Some(payload) = payload else {
+            return;
+        };
+        self.pending_items.push(ReplayHistoryItem {
+            turn_id,
+            turn_kind,
+            item_id,
+            seq,
+            timestamp: record_timestamp,
+            record_timestamp,
+            line_timestamp,
+            bucket_priority,
+            intra_record_order: *intra_record_order,
+            payload,
+        });
+        *intra_record_order += 1;
+    }
+
+    fn enqueue_terminal_history_items(&mut self, turn: &ReplayedTurn) {
+        let legacy_turn_id = turn.legacy_turn_id();
+        let native_turn_id = turn.native.id;
+        let status = turn.legacy_status();
+        // Native Turn status/timing is the turn-summary source. Only terminal
+        // failures leave a history row (as Item::Warning). Do not synthesize
+        // SessionHistoryEntry::TurnSummary / ::Error on the resume path.
+        if !matches!(status, TurnStatus::Failed) {
+            return;
+        }
+        if self.superseded_turn_ids.contains(&legacy_turn_id)
+            || !self.summarized_turn_ids.insert(legacy_turn_id)
         {
             return;
         }
+        let Some(error) = &turn.native.error else {
+            return;
+        };
 
         let seq = self
             .pending_items
             .iter()
-            .filter(|item| item.turn_id == turn.id)
+            .filter(|item| item.turn_id == native_turn_id)
             .map(|item| item.seq)
             .max()
             .unwrap_or(0);
-        let timestamp = turn.completed_at.unwrap_or(turn.started_at);
-        let duration_secs = turn.completed_at.and_then(|completed| {
-            let seconds = (completed - turn.started_at).num_seconds();
-            (seconds > 0).then_some(seconds as u64)
-        });
-        let mut intra_record_order = 0;
-
-        if matches!(turn.status, TurnStatus::Failed)
-            && let Some(error) = &turn.error
-        {
-            self.pending_items.push(ReplayHistoryItem {
-                turn_id: turn.id,
-                turn_kind: turn.kind.clone(),
-                item_id: ItemId::new(),
-                seq,
-                timestamp,
-                record_timestamp: timestamp,
-                line_timestamp: timestamp,
-                bucket_priority: 2,
-                intra_record_order,
-                payload: ReplayHistoryItemPayload::HistoryOnly(crate::SessionHistoryItem::new(
-                    None,
-                    crate::SessionHistoryItemKind::Error,
-                    error.code.clone(),
-                    error.message.clone(),
-                )),
-            });
-            intra_record_order += 1;
-        }
-
-        let collaboration_mode = turn
-            .turn_context
-            .as_ref()
-            .map(|context| context.collaboration_mode)
-            .unwrap_or_default();
+        let timestamp = turn.native.completed_at.unwrap_or(turn.native.started_at);
         self.pending_items.push(ReplayHistoryItem {
-            turn_id: turn.id,
-            turn_kind: turn.kind.clone(),
-            item_id: ItemId::new(),
+            turn_id: native_turn_id,
+            turn_kind: turn.native.kind,
+            item_id: devo_protocol::native::ids::ItemId::new(),
             seq,
             timestamp,
             record_timestamp: timestamp,
             line_timestamp: timestamp,
             bucket_priority: 2,
-            intra_record_order,
-            payload: ReplayHistoryItemPayload::HistoryOnly(crate::SessionHistoryItem {
-                tool_call_id: None,
-                kind: crate::SessionHistoryItemKind::TurnSummary,
-                title: turn.model.clone(),
-                body: outcome.to_string(),
-                tool_io: None,
-                metadata: Some(crate::SessionHistoryMetadata::TurnSummary { collaboration_mode }),
-                duration_ms: duration_secs,
-            }),
+            intra_record_order: 0,
+            payload: ReplayHistoryItemPayload::HistoryOnly(
+                crate::persisted_native_item::turn_failure_history_entry(
+                    error.error_code.clone(),
+                    error.message.clone(),
+                ),
+            ),
         });
     }
 }
 
 #[derive(Debug, Clone)]
 struct ReplayHistoryItem {
-    turn_id: TurnId,
+    turn_id: NativeTurnId,
     turn_kind: TurnKind,
-    item_id: ItemId,
+    item_id: NativeItemId,
     seq: u64,
     timestamp: chrono::DateTime<Utc>,
     record_timestamp: chrono::DateTime<Utc>,
@@ -2245,8 +2774,8 @@ struct ReplayHistoryItem {
 
 #[derive(Debug, Clone)]
 enum ReplayHistoryItemPayload {
-    TurnItem(TurnItem),
-    HistoryOnly(crate::SessionHistoryItem),
+    NativeItem(NativeItem),
+    HistoryOnly(crate::SessionHistoryEntry),
 }
 
 pub(crate) fn build_prompt_messages_from_snapshot(
@@ -2255,16 +2784,19 @@ pub(crate) fn build_prompt_messages_from_snapshot(
 ) -> Option<Vec<Message>> {
     let ordered_items = persisted_turn_items
         .iter()
-        .filter(|item| prompt_visible_persisted_turn_item(item))
+        .filter(|item| prompt_visible_persisted_item(item))
         .collect::<Vec<_>>();
-    let summary_index = ordered_items
-        .iter()
-        .position(|item| item.item_id == snapshot.summary_item_id)?;
+    let summary_index = ordered_items.iter().position(|item| {
+        item.legacy_item_id()
+            .is_some_and(|id| id == snapshot.summary_item_id)
+    })?;
 
     let mut by_item_id: HashMap<ItemId, PersistedTurnItem> = ordered_items
         .iter()
-        .cloned()
-        .map(|item| (item.item_id, item.clone()))
+        .filter_map(|item| {
+            item.legacy_item_id()
+                .map(|legacy_id| (legacy_id, (*item).clone()))
+        })
         .collect();
 
     let mut rebuilt = Vec::new();
@@ -2282,284 +2814,99 @@ pub(crate) fn build_prompt_messages_from_snapshot(
         ordered_items
             .iter()
             .skip(summary_index + 1)
-            .filter(|item| item.item_id != snapshot.summary_item_id)
-            .filter(|item| !snapshot.preserved_item_ids.contains(&item.item_id))
+            .filter(|item| {
+                item.legacy_item_id()
+                    .is_none_or(|id| id != snapshot.summary_item_id)
+            })
+            .filter(|item| {
+                item.legacy_item_id()
+                    .is_none_or(|id| !snapshot.preserved_item_ids.contains(&id))
+            })
             .map(|item| (*item).clone()),
     );
 
     let mut messages = Vec::new();
     let mut tool_names_by_id = HashMap::new();
     for item in rebuilt {
-        apply_prompt_turn_item(&mut messages, &mut tool_names_by_id, item.turn_item.clone());
+        apply_prompt_native_item(&mut messages, &mut tool_names_by_id, item.item);
     }
     Some(messages)
 }
 
-pub(crate) fn prompt_visible_persisted_turn_item(item: &PersistedTurnItem) -> bool {
-    prompt_visible_turn_item(&item.turn_item)
-}
-
-fn prompt_visible_turn_item(item: &TurnItem) -> bool {
-    matches!(
-        item,
-        TurnItem::ContextCompaction(_)
-            | TurnItem::UserMessage(_)
-            | TurnItem::SteerInput(_)
-            | TurnItem::AgentMessage(_)
-            | TurnItem::Reasoning(_)
-            | TurnItem::ToolCall(_)
-            | TurnItem::ToolResult(_)
-            | TurnItem::CommandExecution(_)
-            | TurnItem::Plan(_)
-            | TurnItem::WebSearch(_)
-            | TurnItem::ImageGeneration(_)
-            | TurnItem::HookPrompt(_)
-    )
-}
-
-pub(crate) fn apply_turn_item(
-    messages: &mut Vec<Message>,
-    history_items: &mut Vec<crate::SessionHistoryItem>,
-    tool_names_by_id: &mut HashMap<String, String>,
-    _turn_kind: &TurnKind,
-    item: TurnItem,
-) {
-    let item = match item {
-        TurnItem::ToolCall(ToolCallItem {
-            tool_call_id,
-            tool_name,
-            input,
-        }) => {
-            tool_names_by_id.insert(tool_call_id.clone(), tool_name.clone());
-            TurnItem::ToolCall(ToolCallItem {
-                tool_call_id,
-                tool_name,
-                input,
-            })
-        }
-        TurnItem::ToolResult(ToolResultItem {
-            tool_call_id,
-            tool_name,
-            output,
-            display_content,
-            is_error,
-        }) => TurnItem::ToolResult(ToolResultItem {
-            tool_call_id: tool_call_id.clone(),
-            tool_name: tool_name.or_else(|| tool_names_by_id.get(&tool_call_id).cloned()),
-            output,
-            display_content,
-            is_error,
-        }),
-        TurnItem::CommandExecution(CommandExecutionItem {
-            tool_call_id,
-            tool_name,
-            command,
-            input,
-            output,
-            is_error,
-        }) => {
-            tool_names_by_id.insert(tool_call_id.clone(), tool_name.clone());
-            TurnItem::CommandExecution(CommandExecutionItem {
-                tool_call_id,
-                tool_name,
-                command,
-                input,
-                output,
-                is_error,
-            })
-        }
-        other => other,
-    };
-
-    if let Some(history_item) = history_item_from_turn_item(&item) {
-        history_items.push(history_item);
-    }
-
-    if prompt_visible_turn_item(&item) {
-        apply_prompt_turn_item(messages, tool_names_by_id, item);
-    }
-}
-
-fn apply_prompt_turn_item(
-    messages: &mut Vec<Message>,
-    tool_names_by_id: &mut HashMap<String, String>,
-    item: TurnItem,
-) {
-    let item = match item {
-        TurnItem::ToolCall(ToolCallItem {
-            tool_call_id,
-            tool_name,
-            input,
-        }) => {
-            tool_names_by_id.insert(tool_call_id.clone(), tool_name.clone());
-            TurnItem::ToolCall(ToolCallItem {
-                tool_call_id,
-                tool_name,
-                input,
-            })
-        }
-        TurnItem::ToolResult(ToolResultItem {
-            tool_call_id,
-            tool_name,
-            output,
-            display_content,
-            is_error,
-        }) => TurnItem::ToolResult(ToolResultItem {
-            tool_call_id: tool_call_id.clone(),
-            tool_name: tool_name.or_else(|| tool_names_by_id.get(&tool_call_id).cloned()),
-            output,
-            display_content,
-            is_error,
-        }),
-        TurnItem::CommandExecution(CommandExecutionItem {
-            tool_call_id,
-            tool_name,
-            command,
-            input,
-            output,
-            is_error,
-        }) => {
-            tool_names_by_id.insert(tool_call_id.clone(), tool_name.clone());
-            TurnItem::CommandExecution(CommandExecutionItem {
-                tool_call_id,
-                tool_name,
-                command,
-                input,
-                output,
-                is_error,
-            })
-        }
-        other => other,
-    };
-
-    match item {
-        TurnItem::UserMessage(TextItem { text }) | TurnItem::SteerInput(TextItem { text }) => {
-            messages.push(Message::user(text));
-        }
-        TurnItem::AgentMessage(TextItem { text }) if text.trim().is_empty() => {}
-        TurnItem::AgentMessage(TextItem { text })
-        | TurnItem::Plan(TextItem { text })
-        | TurnItem::WebSearch(TextItem { text })
-        | TurnItem::ImageGeneration(TextItem { text })
-        | TurnItem::ContextCompaction(TextItem { text })
-        | TurnItem::HookPrompt(TextItem { text }) => {
-            messages.push(Message::assistant_text(text));
-        }
-        TurnItem::ToolCall(ToolCallItem {
-            tool_call_id,
-            tool_name,
-            input,
-        }) => match messages.last_mut() {
-            Some(message) if message.role == Role::Assistant => {
-                message.content.push(ContentBlock::ToolUse {
-                    id: tool_call_id,
-                    name: tool_name,
-                    input,
-                });
-            }
-            _ => {
-                messages.push(Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: tool_call_id,
-                        name: tool_name,
-                        input,
-                    }],
-                });
-            }
-        },
-        TurnItem::ToolResult(ToolResultItem {
-            tool_call_id,
-            tool_name: _,
-            output,
-            display_content: _,
-            is_error,
-        }) => {
-            let content = match output {
-                serde_json::Value::String(text) => text,
-                other => other.to_string(),
-            };
-            match messages.last_mut() {
-                Some(message)
-                    if message.role == Role::User
-                        && message
-                            .content
-                            .iter()
-                            .all(|block| matches!(block, ContentBlock::ToolResult { .. })) =>
-                {
-                    message.content.push(ContentBlock::ToolResult {
-                        tool_use_id: tool_call_id,
-                        content,
-                        is_error,
-                    });
-                }
-                _ => {
-                    messages.push(Message {
-                        role: Role::User,
-                        content: vec![ContentBlock::ToolResult {
-                            tool_use_id: tool_call_id,
-                            content,
-                            is_error,
-                        }],
-                    });
-                }
-            }
-        }
-        TurnItem::CommandExecution(CommandExecutionItem {
-            tool_call_id,
-            tool_name,
-            input,
-            output,
-            is_error,
+/// Latest compaction snapshot recorded in a rollout. Live rebuilds that
+/// re-scope the transcript (tree navigate) read this so the compacted prompt
+/// survives the scope; a damaged or unreadable rollout yields `None` and the
+/// caller falls back to the linear rebuild.
+pub(crate) fn latest_compaction_snapshot_from_rollout(
+    rollout_path: &Path,
+) -> Option<CompactionSnapshotLine> {
+    let mut latest: Option<CompactionSnapshotLine> = None;
+    match visit_rollout_lines(rollout_path, "compaction snapshot scan", |line| {
+        if let RolloutLine::CompactionSnapshot {
+            timestamp,
+            session_id,
+            turn_id,
+            summary_item_id,
+            preserved_item_ids,
+            context_occupancy,
             ..
-        }) => {
-            match messages.last_mut() {
-                Some(message) if message.role == Role::Assistant => {
-                    message.content.push(ContentBlock::ToolUse {
-                        id: tool_call_id.clone(),
-                        name: tool_name,
-                        input,
-                    });
-                }
-                _ => {
-                    messages.push(Message {
-                        role: Role::Assistant,
-                        content: vec![ContentBlock::ToolUse {
-                            id: tool_call_id.clone(),
-                            name: tool_name,
-                            input,
-                        }],
-                    });
-                }
-            }
-            let content = match output {
-                serde_json::Value::String(text) => text,
-                other => other.to_string(),
-            };
-            messages.push(Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: tool_call_id,
-                    content,
-                    is_error,
-                }],
+        } = line
+        {
+            latest = legacy_compaction_line_from_native(
+                timestamp,
+                &session_id,
+                &turn_id,
+                &summary_item_id,
+                &preserved_item_ids,
+                context_occupancy,
+            )
+            .ok()
+            .and_then(|line| match line {
+                LegacyRolloutLine::CompactionSnapshot(boxed) => Some(*boxed),
+                _ => None,
             });
         }
-        TurnItem::Reasoning(TextItem { text }) => match messages.last_mut() {
-            Some(message) if message.role == Role::Assistant => {
-                message.content.push(ContentBlock::Reasoning { text });
+        Ok(())
+    }) {
+        Ok(_) => latest,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                rollout = %rollout_path.display(),
+                "compaction snapshot scan failed; continuing without a snapshot"
+            );
+            None
+        }
+    }
+}
+
+pub(crate) fn prompt_visible_persisted_turn_item(item: &PersistedTurnItem) -> bool {
+    prompt_visible_persisted_item(item)
+}
+
+#[cfg(test)]
+use crate::projection::history_entry_from_turn_item;
+
+/// Migrate/tests: packed [`TurnItem`] → Native prompt/history apply.
+#[cfg(test)]
+pub(crate) fn apply_turn_item(
+    messages: &mut Vec<Message>,
+    history_items: &mut Vec<crate::SessionHistoryEntry>,
+    tool_names_by_id: &mut HashMap<String, String>,
+    item: TurnItem,
+) {
+    match &item {
+        TurnItem::TurnSummary(_) => {
+            if let Some(history_item) = history_entry_from_turn_item(&item) {
+                history_items.push(history_item);
             }
-            _ => {
-                messages.push(Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::Reasoning { text }],
-                });
-            }
-        },
-        TurnItem::ToolProgress(_)
-        | TurnItem::ApprovalRequest(_)
-        | TurnItem::ApprovalDecision(_)
-        | TurnItem::TurnSummary(_) => {}
+        }
+        other => {
+            let Some(native_item) = devo_core::native_item_from_turn_item(other) else {
+                return;
+            };
+            apply_native_item(messages, history_items, tool_names_by_id, native_item);
+        }
     }
 }
 
@@ -2568,56 +2915,51 @@ fn read_rollout_index_fields(path: &Path) -> Result<(SessionRecord, chrono::Date
     let reader = BufReader::new(file);
     let mut session: Option<SessionRecord> = None;
     let mut last_activity_at: Option<chrono::DateTime<Utc>> = None;
-    // Dual read for the index path (05 §2.2/§2.3). The index is a rebuildable
-    // cache, so — unlike resume — unreadable lines are skipped, not fatal.
-    let inverse = V2InverseProjector::new();
-
+    // The index is a rebuildable cache, so unreadable or unmappable lines are skipped.
     for line in reader.lines() {
         let line = line.with_context(|| format!("read line from {}", path.display()))?;
         if line.trim().is_empty() {
             continue;
         }
-        let legacy_lines: Vec<RolloutLine> = match parse_rollout_line(&line) {
-            Ok(ParsedRolloutLine::Legacy(legacy)) => vec![*legacy],
-            Ok(ParsedRolloutLine::V2(v2)) => {
-                // Always advance activity from the line wall-clock, even when
-                // inverse projection fails — otherwise the sidebar ages
-                // sessions from created_at instead of last turn/item write.
-                last_activity_at = Some(match last_activity_at {
-                    Some(current) => current.max(rollout_line_v2_timestamp(&v2)),
-                    None => rollout_line_v2_timestamp(&v2),
-                });
-                match inverse.project_line(&v2) {
-                    Ok(lines) => lines,
-                    Err(_) => continue,
-                }
-            }
-            Err(_) => continue,
+        let Ok(line) = parse_rollout_line(&line) else {
+            continue;
         };
-        for parsed in legacy_lines {
-            if let Some(timestamp) = rollout_line_timestamp(&parsed) {
-                last_activity_at = Some(match last_activity_at {
-                    Some(current) => current.max(timestamp),
-                    None => timestamp,
-                });
-            }
-            match parsed {
-                RolloutLine::SessionMeta(meta_line) => {
-                    let mut record = meta_line.session;
-                    if record.last_activity_at.is_none() {
-                        record.last_activity_at = Some(record.created_at);
-                    }
-                    session = Some(record);
+        let timestamp = rollout_line_timestamp(&line);
+        last_activity_at =
+            Some(last_activity_at.map_or(timestamp, |current| current.max(timestamp)));
+        match line {
+            RolloutLine::SessionMeta {
+                session: native,
+                extras,
+                ..
+            } => {
+                let Ok(mut record) = session_record_from_native(&native, extras.as_deref()) else {
+                    continue;
+                };
+                if record.last_activity_at.is_none() {
+                    record.last_activity_at = Some(record.created_at);
                 }
-                RolloutLine::SessionTitleUpdated(line) => {
-                    if let Some(record) = session.as_mut() {
-                        record.title = Some(line.title);
-                        record.title_state = line.title_state;
-                        record.updated_at = line.timestamp;
-                    }
-                }
-                _ => {}
+                session = Some(record);
             }
+            RolloutLine::SessionTitleUpdated {
+                timestamp, title, ..
+            } => {
+                if let Some(record) = session.as_mut() {
+                    record.title = Some(title);
+                    record.title_state =
+                        SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate);
+                    record.updated_at = timestamp;
+                }
+            }
+            RolloutLine::Turn { .. }
+            | RolloutLine::Item { .. }
+            | RolloutLine::Internal { .. }
+            | RolloutLine::CompactionSnapshot { .. }
+            | RolloutLine::SessionRollback { .. }
+            | RolloutLine::WorkspaceCheckpoint { .. }
+            | RolloutLine::WorkspaceChange { .. }
+            | RolloutLine::WorkspaceRestoreStarted { .. }
+            | RolloutLine::WorkspaceRestoreCompleted { .. } => {}
         }
     }
 
@@ -2629,46 +2971,11 @@ fn read_rollout_index_fields(path: &Path) -> Result<(SessionRecord, chrono::Date
     Ok((session, last_activity_at))
 }
 
-fn rollout_line_timestamp(line: &RolloutLine) -> Option<chrono::DateTime<Utc>> {
-    Some(match line {
-        RolloutLine::SessionMeta(line) => line.timestamp,
-        RolloutLine::Turn(line) => line.timestamp,
-        RolloutLine::Item(line) => line.timestamp,
-        RolloutLine::SessionTitleUpdated(line) => line.timestamp,
-        RolloutLine::SessionContextUpdated(line) => line.timestamp,
-        RolloutLine::CompactionSnapshot(line) => line.timestamp,
-        RolloutLine::MessageEditRecorded(line) => line.timestamp,
-        RolloutLine::TurnSuperseded(line) => line.timestamp,
-        RolloutLine::TurnWorkspaceCheckpointRecorded(line) => line.timestamp,
-        RolloutLine::TurnWorkspaceChangeRecorded(line) => line.timestamp,
-        RolloutLine::TurnWorkspaceRestoreStarted(line) => line.timestamp,
-        RolloutLine::TurnWorkspaceRestoreCompleted(line) => line.timestamp,
-        RolloutLine::SessionRollback(line) => line.timestamp,
-        RolloutLine::SessionSettings(line) => line.timestamp,
-    })
-}
-
-fn rollout_line_v2_timestamp(line: &RolloutLineV2) -> chrono::DateTime<Utc> {
-    match line {
-        RolloutLineV2::SessionMeta { timestamp, .. }
-        | RolloutLineV2::Turn { timestamp, .. }
-        | RolloutLineV2::Item { timestamp, .. }
-        | RolloutLineV2::Internal { timestamp, .. }
-        | RolloutLineV2::SessionTitleUpdated { timestamp, .. }
-        | RolloutLineV2::CompactionSnapshot { timestamp, .. }
-        | RolloutLineV2::SessionRollback { timestamp, .. }
-        | RolloutLineV2::WorkspaceCheckpoint { timestamp, .. }
-        | RolloutLineV2::WorkspaceChange { timestamp, .. }
-        | RolloutLineV2::WorkspaceRestoreStarted { timestamp, .. }
-        | RolloutLineV2::WorkspaceRestoreCompleted { timestamp, .. } => *timestamp,
-    }
-}
-
-pub(crate) fn session_metadata_from_record(
+pub(crate) fn session_index_row_from_record(
     record: &SessionRecord,
     last_activity_at: chrono::DateTime<Utc>,
-) -> SessionMetadata {
-    SessionMetadata {
+) -> crate::db::SessionIndexRow {
+    crate::db::SessionIndexRow {
         session_id: record.id,
         cwd: record.cwd.clone(),
         additional_directories: record.additional_directories.clone(),
@@ -2681,36 +2988,9 @@ pub(crate) fn session_metadata_from_record(
         fork_from_id: record.fork_from_id,
         fork_at_turn_id: record.fork_at_turn_id,
         agent_path: record.agent_path.clone(),
-        agent_nickname: record.agent_nickname.clone(),
-        agent_role: record.agent_role.clone(),
         ephemeral: false,
         model: record.model.clone(),
-        model_binding_id: record.model_binding_id.clone(),
         reasoning_effort_selection: record.reasoning_effort_selection.clone(),
-        reasoning_effort: None,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_tokens: 0,
-        total_cache_creation_tokens: 0,
-        total_cache_read_tokens: 0,
-        prompt_token_estimate: 0,
-        last_query_usage: None,
-        last_query_total_tokens: 0,
-        last_context_occupancy: None,
-        status: SessionRuntimeStatus::Idle,
-        collaboration_mode: record
-            .collaboration_mode
-            .or_else(|| {
-                record
-                    .latest_turn_context
-                    .as_ref()
-                    .map(|context| context.collaboration_mode)
-            })
-            .unwrap_or_default(),
-        // Do not revive legacy session-record overrides. Applied window comes
-        // from AppConfig when the session is hydrated into a RuntimeSession.
-        effective_context_window: None,
-        permission_preset: record.permission_preset,
     }
 }
 
@@ -2722,6 +3002,14 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
             .file_type()
             .with_context(|| format!("read file type for {}", path.display()))?;
         if file_type.is_dir() {
+            // `session-artifacts/<id>/harness/` holds refine sidecar state
+            // (harness_state.json, refinements.jsonl), not rollouts. Skip the
+            // whole directory: feeding those files to the boot-time
+            // index/reconcile scans logs "missing SessionMeta" warnings on
+            // every server start.
+            if path.file_name().and_then(|s| s.to_str()) == Some("harness") {
+                continue;
+            }
             collect_rollout_files(&path, files)?;
         } else if file_type.is_file()
             && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
@@ -2732,70 +3020,50 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Creates one canonical persisted turn record from the transport-facing runtime state.
-pub(crate) fn build_turn_record(
-    turn: &TurnMetadata,
-    session_context: Option<devo_core::SessionContext>,
-    turn_context: Option<devo_core::TurnContext>,
-    latest_query_usage: Option<devo_core::TurnUsage>,
-    context_occupancy: Option<devo_protocol::native::item::ContextOccupancy>,
-) -> TurnRecord {
-    TurnRecord {
-        id: turn.turn_id,
-        session_id: turn.session_id,
-        sequence: turn.sequence,
-        started_at: turn.started_at,
-        completed_at: turn.completed_at,
-        status: turn.status.clone(),
-        kind: turn.kind.clone(),
-        model: turn.model.clone(),
-        model_binding_id: turn.model_binding_id.clone(),
-        reasoning_effort_selection: turn.reasoning_effort_selection.clone(),
-        request_model: turn.request_model.clone(),
-        request_thinking: turn.request_thinking.clone(),
-        input_token_estimate: None,
-        usage: turn.usage.clone(),
-        latest_query_usage,
-        context_occupancy,
-        stop_reason: turn.stop_reason.clone(),
-        failure_reason: turn.failure_reason,
-        error: None,
-        session_context,
-        turn_context,
-        schema_version: 4,
+/// Creates `sub-<8 hex chars>/` under `parent_dir` (RLM child dirs).
+fn create_unique_sub_dir(parent_dir: &Path) -> Result<PathBuf> {
+    for _ in 0..100 {
+        let name = format!("sub-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let child_dir = parent_dir.join(name);
+        match std::fs::create_dir(&child_dir) {
+            Ok(()) => return Ok(child_dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("create child session dir {}", child_dir.display()));
+            }
+        }
     }
+    anyhow::bail!(
+        "unable to create unique subagent session directory under {}",
+        parent_dir.display()
+    )
 }
 
-fn turn_metadata_from_record(turn: &TurnRecord) -> TurnMetadata {
-    TurnMetadata {
-        turn_id: turn.id,
-        session_id: turn.session_id,
-        sequence: turn.sequence,
-        status: turn.status.clone(),
-        kind: turn.kind.clone(),
-        model: turn.model.clone(),
-        model_binding_id: turn.model_binding_id.clone(),
-        reasoning_effort_selection: turn.reasoning_effort_selection.clone(),
-        reasoning_effort: turn
-            .turn_context
-            .as_ref()
-            .and_then(|context| context.reasoning_effort)
-            .or_else(|| {
-                turn.session_context
-                    .as_ref()
-                    .and_then(|context| context.reasoning_effort)
-            }),
-        request_model: turn.request_model.clone(),
-        request_thinking: turn.request_thinking.clone(),
-        started_at: turn.started_at,
-        completed_at: turn.completed_at,
-        usage: turn.usage.clone(),
-        stop_reason: turn.stop_reason.clone(),
-        failure_reason: turn.failure_reason,
+/// Builds path-first turn persistence extras from Native-first runtime state.
+pub(crate) fn turn_persistence_extras_from_runtime(
+    turn: &crate::turn::RuntimeTurn,
+    session_context: Option<devo_core::SessionContext>,
+    turn_context: Option<devo_core::TurnContext>,
+    latest_query_usage: Option<devo_protocol::native::usage::TurnUsage>,
+    context_occupancy: Option<devo_protocol::native::item::ContextOccupancy>,
+) -> TurnPersistenceExtras {
+    TurnPersistenceExtras {
+        session_context,
+        turn_context,
+        request_thinking: turn.extras.request_thinking.clone(),
+        input_token_estimate: None,
+        latest_query_usage,
+        context_occupancy,
+        stop_reason: turn.extras.stop_reason.clone(),
+        failure_reason: turn.extras.failure_reason,
     }
 }
 
 /// Creates one canonical persisted item record from a normalized turn item payload.
+///
+/// Migrate / fixture boundary only — live and fork writes Native ItemEnvelope.
+#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_item_record(
     session_id: SessionId,
@@ -2825,2515 +3093,12 @@ pub(crate) fn build_item_record(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    use chrono::TimeZone;
-    use chrono::Utc;
-    use pretty_assertions::assert_eq;
-
-    use super::ParsedRolloutLine;
-    use super::ReplayHistoryItemPayload;
-    use super::ReplayState;
-    use super::build_prompt_messages_from_snapshot;
-    use super::parse_rollout_line;
-    use crate::execution::PersistedTurnItem;
-    use crate::execution::ServerRuntimeDependencies;
-    use crate::persistence::apply_turn_item;
-    use devo_core::CompactionSnapshotLine;
-    use devo_core::ContentPart;
-    use devo_core::EditId;
-    use devo_core::EditState;
-    use devo_core::EnvironmentContext;
-    use devo_core::ItemId;
-    use devo_core::ItemLine;
-    use devo_core::ItemRecord;
-    use devo_core::LanguageContext;
-    use devo_core::Message;
-    use devo_core::MessageEditRecordedLine;
-    use devo_core::MessageEditRecordedRecord;
-    use devo_core::Model;
-    use devo_core::Persona;
-    use devo_core::RolloutLine;
-    use devo_core::SessionContext;
-    use devo_core::SessionId;
-    use devo_core::SessionMetaLine;
-    use devo_core::SessionRecord;
-    use devo_core::SessionRollbackLine;
-    use devo_core::SessionTitleState;
-    use devo_core::TextItem;
-    use devo_core::ToolCallItem;
-    use devo_core::ToolResultItem;
-    use devo_core::TurnContext;
-    use devo_core::TurnId;
-    use devo_core::TurnItem;
-    use devo_core::TurnKind;
-    use devo_core::TurnLine;
-    use devo_core::TurnRecord;
-    use devo_core::TurnStatus;
-    use devo_core::TurnSupersededLine;
-    use devo_core::TurnSupersededRecord;
-    use devo_core::WorkspaceRestorePolicy;
-
-    #[test]
-    fn replay_orders_items_by_sequence_before_timestamp() {
-        let session_id = SessionId::new();
-        let turn_id = TurnId::new();
-        let earlier = Utc.with_ymd_and_hms(2026, 4, 6, 8, 0, 0).unwrap();
-        let later = Utc.with_ymd_and_hms(2026, 4, 6, 8, 0, 1).unwrap();
-        let mut replay = ReplayState::default();
-
-        replay
-            .apply_line(RolloutLine::Item(Box::new(ItemLine {
-                timestamp: earlier,
-                item: ItemRecord {
-                    id: ItemId::new(),
-                    session_id,
-                    turn_id,
-                    seq: 2,
-                    timestamp: earlier,
-                    started_at: None,
-                    attempt_placement: None,
-                    turn_status: None,
-                    sibling_turn_ids: Vec::new(),
-                    input_items: Vec::new(),
-                    output_items: vec![TurnItem::ToolCall(ToolCallItem {
-                        tool_call_id: "call-1".to_string(),
-                        tool_name: "bash".to_string(),
-                        input: serde_json::json!({"command":"date"}),
-                    })],
-                    worklog: None,
-                    error: None,
-                    schema_version: 1,
-                },
-            })))
-            .expect("replay later-seq line");
-        replay
-            .apply_line(RolloutLine::Item(Box::new(ItemLine {
-                timestamp: later,
-                item: ItemRecord {
-                    id: ItemId::new(),
-                    session_id,
-                    turn_id,
-                    seq: 1,
-                    timestamp: later,
-                    started_at: None,
-                    attempt_placement: None,
-                    turn_status: None,
-                    sibling_turn_ids: Vec::new(),
-                    output_items: vec![TurnItem::AgentMessage(TextItem {
-                        text: "assistant 1".to_string(),
-                    })],
-                    input_items: Vec::new(),
-                    worklog: None,
-                    error: None,
-                    schema_version: 1,
-                },
-            })))
-            .expect("replay earlier-seq line");
-
-        let mut items = replay.pending_items;
-        items.sort_by(|left, right| {
-            left.seq
-                .cmp(&right.seq)
-                .then_with(|| left.timestamp.cmp(&right.timestamp))
-                .then_with(|| left.intra_record_order.cmp(&right.intra_record_order))
-        });
-
-        let titles = items
-            .into_iter()
-            .map(|item| match item.payload {
-                ReplayHistoryItemPayload::TurnItem(TurnItem::AgentMessage(TextItem { text })) => {
-                    text
-                }
-                ReplayHistoryItemPayload::TurnItem(TurnItem::ToolCall(ToolCallItem {
-                    input,
-                    ..
-                })) => input["command"].as_str().unwrap().to_string(),
-                other => format!("{other:?}"),
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(titles, vec!["assistant 1", "date"]);
-    }
-
-    #[test]
-    fn replay_prefers_compaction_occupancy_over_prior_turn() {
-        use devo_protocol::TurnUsage;
-        use pretty_assertions::assert_eq;
-
-        let now = Utc.with_ymd_and_hms(2026, 7, 8, 10, 0, 0).unwrap();
-        let session_id = SessionId::new();
-        let turn_id = TurnId::new();
-        let mut replay = ReplayState::default();
-        let turn_occupancy = devo_protocol::native::item::ContextOccupancy::from_category_tokens(
-            /*context_window_tokens*/ 100_000, /*base*/ 10_000, /*skills*/ 0,
-            /*tools_builtin*/ 0, /*tools_mcp*/ 0, /*conversation*/ 40_000,
-        );
-        let compact_occupancy = devo_protocol::native::item::ContextOccupancy::from_category_tokens(
-            /*context_window_tokens*/ 100_000, /*base*/ 10_000, /*skills*/ 0,
-            /*tools_builtin*/ 0, /*tools_mcp*/ 0, /*conversation*/ 8_000,
-        );
-
-        replay
-            .apply_line(RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: now,
-                turn: TurnRecord {
-                    id: turn_id,
-                    session_id,
-                    sequence: 1,
-                    started_at: now,
-                    completed_at: Some(now),
-                    status: TurnStatus::Completed,
-                    kind: TurnKind::Regular,
-                    model: "test-model".into(),
-                    model_binding_id: None,
-                    reasoning_effort_selection: None,
-                    request_model: "test-model".into(),
-                    request_thinking: None,
-                    input_token_estimate: None,
-                    usage: None,
-                    latest_query_usage: Some(TurnUsage {
-                        input_tokens: 50,
-                        output_tokens: 5,
-                        cache_creation_input_tokens: None,
-                        cache_read_input_tokens: None,
-                        reasoning_output_tokens: None,
-                        total_tokens: Some(55),
-                    }),
-                    context_occupancy: Some(turn_occupancy.clone()),
-                    stop_reason: None,
-                    failure_reason: None,
-                    error: None,
-                    session_context: None,
-                    turn_context: None,
-                    schema_version: 4,
-                },
-            })))
-            .expect("turn");
-        assert_eq!(replay.latest_context_occupancy, Some(turn_occupancy));
-        replay
-            .apply_line(RolloutLine::CompactionSnapshot(Box::new(
-                CompactionSnapshotLine {
-                    timestamp: now,
-                    session_id,
-                    turn_id,
-                    summary_item_id: ItemId::new(),
-                    preserved_item_ids: Vec::new(),
-                    context_occupancy: Some(compact_occupancy.clone()),
-                },
-            )))
-            .expect("compaction");
-        assert_eq!(replay.latest_context_occupancy, Some(compact_occupancy));
-    }
-
-    #[test]
-    fn resume_context_pressure_prefers_compaction_occupancy_over_large_query() {
-        use pretty_assertions::assert_eq;
-
-        use devo_protocol::TurnUsage;
-        use devo_protocol::native::item::ContextOccupancy;
-
-        let occupancy = ContextOccupancy::from_category_tokens(
-            /*context_window_tokens*/ 250_000, /*base*/ 10_000, /*skills*/ 0,
-            /*tools_builtin*/ 0, /*tools_mcp*/ 0, /*conversation*/ 40_000,
-        );
-        let usage = TurnUsage {
-            input_tokens: 300_000,
-            output_tokens: 20_000,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-            reasoning_output_tokens: None,
-            total_tokens: Some(320_000),
-        };
-
-        let (last_turn, last_input) = super::resume_context_pressure_tokens(
-            Some(&occupancy),
-            Some(&usage),
-            /*prompt_token_estimate*/ 12_000,
-        );
-        assert_eq!(last_turn, 50_000);
-        assert_eq!(last_input, 300_000);
-
-        let (last_turn, last_input) = super::resume_context_pressure_tokens(
-            /*occupancy*/ None,
-            Some(&usage),
-            /*prompt_token_estimate*/ 12_000,
-        );
-        assert_eq!(last_turn, 320_000);
-        assert_eq!(last_input, 300_000);
-
-        let (last_turn, last_input) = super::resume_context_pressure_tokens(
-            /*occupancy*/ None, /*latest_query_usage*/ None,
-            /*prompt_token_estimate*/ 12_000,
-        );
-        assert_eq!(last_turn, 12_000);
-        assert_eq!(last_input, 12_000);
-    }
-
-    #[test]
-    fn replay_preserves_latest_query_usage_when_latest_turn_has_no_usage() {
-        use devo_protocol::TurnUsage;
-
-        let now = Utc.with_ymd_and_hms(2026, 7, 8, 10, 0, 0).unwrap();
-        let session_id = SessionId::new();
-        let mut replay = ReplayState::default();
-        let usage = TurnUsage {
-            input_tokens: 30,
-            output_tokens: 12,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-            reasoning_output_tokens: None,
-            total_tokens: Some(42),
-        };
-
-        replay
-            .apply_line(RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: now,
-                turn: TurnRecord {
-                    id: TurnId::new(),
-                    session_id,
-                    sequence: 1,
-                    started_at: now,
-                    completed_at: Some(now),
-                    status: TurnStatus::Completed,
-                    kind: TurnKind::Regular,
-                    model: "model-a".into(),
-                    model_binding_id: None,
-                    reasoning_effort_selection: None,
-                    request_model: "model-a".into(),
-                    request_thinking: None,
-                    input_token_estimate: None,
-                    usage: Some(usage.clone()),
-                    latest_query_usage: Some(usage.clone()),
-                    context_occupancy: None,
-                    stop_reason: None,
-                    failure_reason: None,
-                    error: None,
-                    session_context: None,
-                    turn_context: None,
-                    schema_version: 2,
-                },
-            })))
-            .expect("apply usage turn");
-        replay
-            .apply_line(RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: now,
-                turn: TurnRecord {
-                    id: TurnId::new(),
-                    session_id,
-                    sequence: 2,
-                    started_at: now,
-                    completed_at: Some(now),
-                    status: TurnStatus::Failed,
-                    kind: TurnKind::Regular,
-                    model: "model-a".into(),
-                    model_binding_id: None,
-                    reasoning_effort_selection: None,
-                    request_model: "model-a".into(),
-                    request_thinking: None,
-                    input_token_estimate: None,
-                    usage: None,
-                    latest_query_usage: None,
-                    context_occupancy: None,
-                    stop_reason: None,
-                    failure_reason: Some(devo_protocol::TurnFailureReason::MaxTurnRequests),
-                    error: None,
-                    session_context: None,
-                    turn_context: None,
-                    schema_version: 2,
-                },
-            })))
-            .expect("apply terminal turn without usage");
-
-        assert_eq!(replay.latest_query_usage, Some(usage));
-        assert_eq!(replay.last_turn_tokens, 42);
-        assert_eq!(replay.last_input_tokens, 30);
-    }
-
-    #[test]
-    fn replay_does_not_promote_aggregate_turn_usage_to_latest_query_usage() {
-        use devo_protocol::TurnUsage;
-
-        let now = Utc.with_ymd_and_hms(2026, 7, 8, 10, 0, 0).unwrap();
-        let session_id = SessionId::new();
-        let aggregate_usage = TurnUsage {
-            input_tokens: 10_000,
-            output_tokens: 2_000,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-            reasoning_output_tokens: None,
-            total_tokens: Some(12_000),
-        };
-        let mut replay = ReplayState::default();
-
-        replay
-            .apply_line(RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: now,
-                turn: TurnRecord {
-                    id: TurnId::new(),
-                    session_id,
-                    sequence: 1,
-                    started_at: now,
-                    completed_at: Some(now),
-                    status: TurnStatus::Completed,
-                    kind: TurnKind::Regular,
-                    model: "model-a".into(),
-                    model_binding_id: None,
-                    reasoning_effort_selection: None,
-                    request_model: "model-a".into(),
-                    request_thinking: None,
-                    input_token_estimate: None,
-                    usage: Some(aggregate_usage),
-                    latest_query_usage: None,
-                    context_occupancy: None,
-                    stop_reason: None,
-                    failure_reason: None,
-                    error: None,
-                    session_context: None,
-                    turn_context: None,
-                    schema_version: 2,
-                },
-            })))
-            .expect("apply legacy aggregate-only turn");
-
-        assert_eq!(replay.latest_query_usage, None);
-        assert_eq!(replay.last_turn_tokens, 0);
-        assert_eq!(replay.last_input_tokens, 0);
-    }
-
-    #[test]
-    fn replay_prunes_superseded_turn_from_rollout_projection() {
-        let now = Utc.with_ymd_and_hms(2026, 6, 18, 8, 0, 0).unwrap();
-        let session_id = SessionId::new();
-        let original_turn_id = TurnId::new();
-        let replacement_turn_id = TurnId::new();
-        let original_item_id = ItemId::new();
-        let replacement_item_id = ItemId::new();
-        let edit_id = EditId::new();
-        let mut replay = ReplayState::default();
-
-        replay
-            .apply_line(RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: now,
-                turn: TurnRecord {
-                    id: original_turn_id,
-                    session_id,
-                    sequence: 1,
-                    started_at: now,
-                    completed_at: Some(now),
-                    status: TurnStatus::Completed,
-                    kind: TurnKind::Regular,
-                    model: "model-a".into(),
-                    model_binding_id: None,
-                    reasoning_effort_selection: None,
-                    request_model: "model-a".into(),
-                    request_thinking: None,
-                    input_token_estimate: None,
-                    usage: None,
-                    latest_query_usage: None,
-                    context_occupancy: None,
-                    stop_reason: None,
-                    failure_reason: None,
-                    error: None,
-                    session_context: None,
-                    turn_context: None,
-                    schema_version: 2,
-                },
-            })))
-            .expect("apply original turn");
-        replay
-            .apply_line(RolloutLine::Item(Box::new(ItemLine {
-                timestamp: now,
-                item: ItemRecord {
-                    id: original_item_id,
-                    session_id,
-                    turn_id: original_turn_id,
-                    seq: 1,
-                    timestamp: now,
-                    started_at: None,
-                    attempt_placement: None,
-                    turn_status: Some(TurnStatus::Completed),
-                    sibling_turn_ids: Vec::new(),
-                    input_items: vec![TurnItem::UserMessage(TextItem {
-                        text: "original".into(),
-                    })],
-                    output_items: Vec::new(),
-                    worklog: None,
-                    error: None,
-                    schema_version: 1,
-                },
-            })))
-            .expect("apply original item");
-        replay
-            .apply_line(RolloutLine::MessageEditRecorded(Box::new(
-                MessageEditRecordedLine {
-                    timestamp: now,
-                    record: MessageEditRecordedRecord {
-                        schema_version: 1,
-                        session_id,
-                        edit_id,
-                        target_message_id: original_item_id,
-                        replacement_message_id: replacement_item_id,
-                        target_turn_id: Some(original_turn_id),
-                        replacement_turn_id: Some(replacement_turn_id),
-                        queue_item_id: None,
-                        edited_content_parts: vec![ContentPart::Text("edited".into())],
-                        edited_mentions: Vec::new(),
-                        workspace_restore_policy: WorkspaceRestorePolicy::Skip,
-                        edit_state: EditState::Accepted,
-                        requested_by_client_id: None,
-                        created_at: now,
-                    },
-                },
-            )))
-            .expect("apply message edit line");
-        replay
-            .apply_line(RolloutLine::TurnSuperseded(Box::new(TurnSupersededLine {
-                timestamp: now,
-                record: TurnSupersededRecord {
-                    schema_version: 1,
-                    session_id,
-                    superseded_turn_id: original_turn_id,
-                    replacement_turn_id,
-                    edit_id,
-                    restore_id: None,
-                    reason: "message_edit_previous".into(),
-                    created_at: now,
-                },
-            })))
-            .expect("apply superseded line");
-        replay
-            .apply_line(RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: now,
-                turn: TurnRecord {
-                    id: replacement_turn_id,
-                    session_id,
-                    sequence: 2,
-                    started_at: now,
-                    completed_at: None,
-                    status: TurnStatus::Running,
-                    kind: TurnKind::Regular,
-                    model: "model-a".into(),
-                    model_binding_id: None,
-                    reasoning_effort_selection: None,
-                    request_model: "model-a".into(),
-                    request_thinking: None,
-                    input_token_estimate: None,
-                    usage: None,
-                    latest_query_usage: None,
-                    context_occupancy: None,
-                    stop_reason: None,
-                    failure_reason: None,
-                    error: None,
-                    session_context: None,
-                    turn_context: None,
-                    schema_version: 2,
-                },
-            })))
-            .expect("apply replacement turn");
-        replay
-            .apply_line(RolloutLine::Item(Box::new(ItemLine {
-                timestamp: now,
-                item: ItemRecord {
-                    id: replacement_item_id,
-                    session_id,
-                    turn_id: replacement_turn_id,
-                    seq: 2,
-                    timestamp: now,
-                    started_at: None,
-                    attempt_placement: None,
-                    turn_status: Some(TurnStatus::Running),
-                    sibling_turn_ids: Vec::new(),
-                    input_items: vec![TurnItem::UserMessage(TextItem {
-                        text: "edited".into(),
-                    })],
-                    output_items: Vec::new(),
-                    worklog: None,
-                    error: None,
-                    schema_version: 1,
-                },
-            })))
-            .expect("apply replacement item");
-
-        let projected_items = replay
-            .pending_items
-            .iter()
-            .filter_map(|item| match &item.payload {
-                ReplayHistoryItemPayload::TurnItem(turn_item) => Some(turn_item.clone()),
-                ReplayHistoryItemPayload::HistoryOnly(_) => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            projected_items,
-            vec![TurnItem::UserMessage(TextItem {
-                text: "edited".into(),
-            })]
-        );
-        assert_eq!(replay.turn_order, vec![replacement_turn_id]);
-        assert_eq!(
-            replay
-                .latest_turn_metadata
-                .as_ref()
-                .map(|turn| turn.turn_id),
-            Some(replacement_turn_id)
-        );
-    }
-
-    #[test]
-    fn index_rollout_metadata_reads_session_meta_only() {
-        use chrono::Utc;
-        use pretty_assertions::assert_eq;
-        use std::io::Write;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let data_root = dir.path().to_path_buf();
-        let session_id = SessionId::new();
-        let now = Utc::now();
-        let rollout_store = super::RolloutStore::new(data_root.clone(), None);
-        let record = rollout_store.create_session_record(
-            session_id,
-            now,
-            data_root.clone(),
-            Vec::new(),
-            Some("Indexed session".into()),
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&record.rollout_path)
-            .expect("open rollout")
-            .write_all(b"{\"type\":\"turn\",\"payload\":{}}\n")
-            .expect("append non-meta line");
-
-        let db = crate::db::Database::open(data_root.join("index.db")).expect("open db");
-        rollout_store
-            .index_rollout_metadata(&db)
-            .expect("index rollout metadata");
-
-        let index = db
-            .get_session_index(&session_id)
-            .expect("get index")
-            .expect("indexed session");
-        assert_eq!(index.metadata.title.as_deref(), Some("Indexed session"));
-        assert_eq!(index.rollout_path, Some(record.rollout_path));
-        assert_eq!(index.metadata.parent_session_id, None);
-
-        let roots = db.list_root_sessions().expect("list roots");
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0].session_id, session_id);
-    }
-
-    #[test]
-    fn index_rollout_metadata_uses_latest_item_timestamp_as_last_activity() {
-        use chrono::Duration;
-        use chrono::Utc;
-        use pretty_assertions::assert_eq;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let data_root = dir.path().to_path_buf();
-        let session_id = SessionId::new();
-        let created_at = Utc::now() - Duration::hours(2);
-        let rollout_store = super::RolloutStore::new(data_root.clone(), None);
-        let mut record = rollout_store.create_session_record(
-            session_id,
-            created_at,
-            data_root.clone(),
-            Vec::new(),
-            Some("Active session".into()),
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        record.created_at = created_at;
-        record.updated_at = created_at;
-        record.last_activity_at = Some(created_at);
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        let before_item = Utc::now();
-        rollout_store
-            .append_item(
-                &record,
-                ItemRecord {
-                    id: ItemId::new(),
-                    session_id,
-                    turn_id: TurnId::new(),
-                    seq: 1,
-                    timestamp: before_item,
-                    started_at: Some(before_item),
-                    attempt_placement: None,
-                    turn_status: Some(TurnStatus::Completed),
-                    sibling_turn_ids: Vec::new(),
-                    input_items: Vec::new(),
-                    output_items: vec![TurnItem::AgentMessage(TextItem {
-                        text: "reply".into(),
-                    })],
-                    worklog: None,
-                    error: None,
-                    schema_version: 1,
-                },
-            )
-            .expect("append item");
-
-        let db = crate::db::Database::open(data_root.join("index.db")).expect("open db");
-        rollout_store
-            .index_rollout_metadata(&db)
-            .expect("index rollout metadata");
-
-        let index = db
-            .get_session_index(&session_id)
-            .expect("get index")
-            .expect("indexed session");
-        assert_eq!(
-            index.metadata.created_at.timestamp(),
-            created_at.timestamp()
-        );
-        assert!(
-            index.metadata.last_activity_at.timestamp() >= before_item.timestamp(),
-            "last_activity_at={:?} before_item={:?}",
-            index.metadata.last_activity_at,
-            before_item
-        );
-        assert!(index.metadata.last_activity_at > index.metadata.created_at);
-    }
-
-    #[test]
-    fn index_rollout_metadata_overwrites_stale_sqlite_title_when_rollout_has_title() {
-        use chrono::Utc;
-        use devo_protocol::SessionMetadata;
-        use devo_protocol::SessionRuntimeStatus;
-        use devo_protocol::SessionTitleState;
-        use pretty_assertions::assert_eq;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let data_root = dir.path().to_path_buf();
-        let session_id = SessionId::new();
-        let now = Utc::now();
-        let rollout_store = super::RolloutStore::new(data_root.clone(), None);
-        let record = rollout_store.create_session_record(
-            session_id,
-            now,
-            data_root.clone(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        rollout_store
-            .append_title_update(
-                &record,
-                "Canonical rollout title".into(),
-                SessionTitleState::Final(devo_core::SessionTitleFinalSource::ModelGenerated),
-                None,
-            )
-            .expect("append title update");
-
-        let db = crate::db::Database::open(data_root.join("index.db")).expect("open db");
-        db.upsert_session(
-            &SessionMetadata {
-                session_id,
-                cwd: data_root.clone(),
-                additional_directories: Vec::new(),
-                created_at: now,
-                updated_at: now,
-                last_activity_at: now,
-                title: Some("Existing title".into()),
-                title_state: SessionTitleState::Final(
-                    devo_core::SessionTitleFinalSource::ModelGenerated,
-                ),
-                parent_session_id: None,
-                fork_from_id: None,
-                fork_at_turn_id: None,
-                agent_path: None,
-                agent_nickname: None,
-                agent_role: None,
-                ephemeral: false,
-                model: Some("test-model".into()),
-                model_binding_id: None,
-                reasoning_effort_selection: None,
-                reasoning_effort: None,
-                total_input_tokens: 0,
-                total_output_tokens: 0,
-                total_tokens: 0,
-                total_cache_creation_tokens: 0,
-                total_cache_read_tokens: 0,
-                prompt_token_estimate: 0,
-                last_query_usage: None,
-                last_query_total_tokens: 0,
-                last_context_occupancy: None,
-                status: SessionRuntimeStatus::Idle,
-                collaboration_mode: Default::default(),
-                effective_context_window: None,
-                permission_preset: None,
-            },
-            None,
-        )
-        .expect("seed sqlite title");
-
-        rollout_store
-            .index_rollout_metadata(&db)
-            .expect("index rollout metadata");
-
-        let index = db
-            .get_session_index(&session_id)
-            .expect("get index")
-            .expect("indexed session");
-        assert_eq!(
-            index.metadata.title.as_deref(),
-            Some("Canonical rollout title")
-        );
-    }
-
-    #[test]
-    fn index_rollout_metadata_reads_session_title_updates() {
-        use chrono::Utc;
-        use devo_core::SessionTitleFinalSource;
-        use devo_core::SessionTitleState;
-        use pretty_assertions::assert_eq;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let data_root = dir.path().to_path_buf();
-        let session_id = SessionId::new();
-        let now = Utc::now();
-        let rollout_store = super::RolloutStore::new(data_root.clone(), None);
-        let record = rollout_store.create_session_record(
-            session_id,
-            now,
-            data_root.clone(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        rollout_store
-            .append_title_update(
-                &record,
-                "Updated from rollout".into(),
-                SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated),
-                None,
-            )
-            .expect("append title update");
-
-        let db = crate::db::Database::open(data_root.join("index.db")).expect("open db");
-        rollout_store
-            .index_rollout_metadata(&db)
-            .expect("index rollout metadata");
-
-        let index = db
-            .get_session_index(&session_id)
-            .expect("get index")
-            .expect("indexed session");
-        assert_eq!(
-            index.metadata.title.as_deref(),
-            Some("Updated from rollout")
-        );
-    }
-
-    #[test]
-    fn replay_omits_empty_agent_messages_from_history_and_prompt() {
-        let mut messages = Vec::new();
-        let mut history_items = Vec::new();
-        let mut tool_names_by_id = HashMap::new();
-
-        for item in [
-            TurnItem::UserMessage(TextItem {
-                text: "hello".to_string(),
-            }),
-            TurnItem::AgentMessage(TextItem {
-                text: String::new(),
-            }),
-            TurnItem::AgentMessage(TextItem {
-                text: "  \n\t".to_string(),
-            }),
-            TurnItem::AgentMessage(TextItem {
-                text: "visible answer".to_string(),
-            }),
-        ] {
-            apply_turn_item(
-                &mut messages,
-                &mut history_items,
-                &mut tool_names_by_id,
-                &TurnKind::Regular,
-                item,
-            );
-        }
-
-        assert_eq!(
-            history_items
-                .iter()
-                .map(|item| (item.kind.clone(), item.body.clone()))
-                .collect::<Vec<_>>(),
-            vec![
-                (crate::SessionHistoryItemKind::User, "hello".to_string()),
-                (
-                    crate::SessionHistoryItemKind::Assistant,
-                    "visible answer".to_string(),
-                ),
-            ]
-        );
-        assert_eq!(
-            messages,
-            vec![
-                Message::user("hello"),
-                Message::assistant_text("visible answer"),
-            ]
-        );
-    }
-
-    #[test]
-    fn replay_backfills_tool_result_name_from_prior_tool_call() {
-        let mut messages = Vec::new();
-        let mut history_items = Vec::new();
-        let mut tool_names_by_id = HashMap::new();
-
-        apply_turn_item(
-            &mut messages,
-            &mut history_items,
-            &mut tool_names_by_id,
-            &TurnKind::Regular,
-            TurnItem::ToolCall(ToolCallItem {
-                tool_call_id: "call-1".to_string(),
-                tool_name: "read".to_string(),
-                input: serde_json::json!({"filePath":"/tmp/test.txt"}),
-            }),
-        );
-        apply_turn_item(
-            &mut messages,
-            &mut history_items,
-            &mut tool_names_by_id,
-            &TurnKind::Regular,
-            TurnItem::ToolResult(ToolResultItem {
-                tool_call_id: "call-1".to_string(),
-                tool_name: None,
-                output: serde_json::Value::String("hello".to_string()),
-                display_content: None,
-                is_error: false,
-            }),
-        );
-
-        assert_eq!(history_items.len(), 2);
-        assert_eq!(history_items[0].title, "read /tmp/test.txt");
-        assert_eq!(history_items[1].title, "read output");
-    }
-
-    #[test]
-    fn replay_nameless_edit_tool_result_still_emits_edited_metadata() {
-        // edit is LiveOnly: start is not persisted, so resume only sees ToolResult
-        // with tool_name lost by the v2 canonical schema. Structured output must
-        // still produce Edited metadata for transcript restore.
-        let mut messages = Vec::new();
-        let mut history_items = Vec::new();
-        let mut tool_names_by_id = HashMap::new();
-
-        apply_turn_item(
-            &mut messages,
-            &mut history_items,
-            &mut tool_names_by_id,
-            &TurnKind::Regular,
-            TurnItem::ToolResult(ToolResultItem {
-                tool_call_id: "call-edit".to_string(),
-                tool_name: None,
-                output: serde_json::json!({
-                    "diff": "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n",
-                    "files": [{
-                        "path": "foo.txt",
-                        "kind": "update",
-                        "diff": "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n",
-                        "oldContent": "old\n",
-                        "postContent": "new\n",
-                        "additions": 1,
-                        "deletions": 1
-                    }],
-                    "output": "edited foo.txt"
-                }),
-                display_content: Some("edited foo.txt".to_string()),
-                is_error: false,
-            }),
-        );
-
-        assert_eq!(history_items.len(), 1);
-        assert_eq!(history_items[0].body, "edited foo.txt");
-        let Some(devo_protocol::SessionHistoryMetadata::Edited { changes }) =
-            &history_items[0].metadata
-        else {
-            panic!(
-                "expected Edited metadata, got {:?}",
-                history_items[0].metadata
-            );
-        };
-        assert!(changes.contains_key(&PathBuf::from("foo.txt")));
-    }
-
-    #[test]
-    fn replay_uses_display_content_for_history_but_canonical_output_for_prompt() {
-        let mut messages = Vec::new();
-        let mut history_items = Vec::new();
-        let mut tool_names_by_id = HashMap::new();
-
-        apply_turn_item(
-            &mut messages,
-            &mut history_items,
-            &mut tool_names_by_id,
-            &TurnKind::Regular,
-            TurnItem::ToolCall(ToolCallItem {
-                tool_call_id: "call-1".to_string(),
-                tool_name: "read".to_string(),
-                input: serde_json::json!({"filePath":"/tmp/test.txt"}),
-            }),
-        );
-        apply_turn_item(
-            &mut messages,
-            &mut history_items,
-            &mut tool_names_by_id,
-            &TurnKind::Regular,
-            TurnItem::ToolResult(ToolResultItem {
-                tool_call_id: "call-1".to_string(),
-                tool_name: Some("read".to_string()),
-                output: serde_json::Value::String("<content>canonical</content>".to_string()),
-                display_content: Some("canonical".to_string()),
-                is_error: false,
-            }),
-        );
-
-        assert_eq!(history_items[1].body, "canonical");
-        assert_eq!(
-            messages.last(),
-            Some(&Message {
-                role: devo_core::Role::User,
-                content: vec![devo_core::ContentBlock::ToolResult {
-                    tool_use_id: "call-1".to_string(),
-                    content: "<content>canonical</content>".to_string(),
-                    is_error: false,
-                }],
-            })
-        );
-    }
-
-    #[test]
-    fn prompt_messages_rebuild_from_compaction_snapshot_without_trimming_transcript() {
-        let summary_item_id = ItemId::new();
-        let preserved_item_id = ItemId::new();
-        let later_item_id = ItemId::new();
-
-        let persisted_turn_items = vec![
-            PersistedTurnItem {
-                turn_id: TurnId::new(),
-                turn_kind: TurnKind::Regular,
-                item_id: ItemId::new(),
-                turn_item: TurnItem::UserMessage(TextItem {
-                    text: "older user".to_string(),
-                }),
-            },
-            PersistedTurnItem {
-                turn_id: TurnId::new(),
-                turn_kind: TurnKind::Regular,
-                item_id: summary_item_id,
-                turn_item: TurnItem::ContextCompaction(TextItem {
-                    text: "<compaction_summary>summary</compaction_summary>".to_string(),
-                }),
-            },
-            PersistedTurnItem {
-                turn_id: TurnId::new(),
-                turn_kind: TurnKind::Regular,
-                item_id: preserved_item_id,
-                turn_item: TurnItem::UserMessage(TextItem {
-                    text: "latest user".to_string(),
-                }),
-            },
-            PersistedTurnItem {
-                turn_id: TurnId::new(),
-                turn_kind: TurnKind::Regular,
-                item_id: later_item_id,
-                turn_item: TurnItem::AgentMessage(TextItem {
-                    text: "latest assistant".to_string(),
-                }),
-            },
-        ];
-
-        let prompt_messages = build_prompt_messages_from_snapshot(
-            &persisted_turn_items,
-            &CompactionSnapshotLine {
-                timestamp: Utc::now(),
-                session_id: SessionId::new(),
-                turn_id: TurnId::new(),
-                summary_item_id,
-                preserved_item_ids: vec![preserved_item_id],
-                context_occupancy: None,
-            },
-        )
-        .expect("prompt messages");
-
-        assert_eq!(
-            prompt_messages,
-            vec![
-                Message::assistant_text("<compaction_summary>summary</compaction_summary>"),
-                Message::user("latest user"),
-                Message::assistant_text("latest assistant"),
-            ]
-        );
-    }
-
-    #[test]
-    fn replay_restores_context_snapshots_from_turn_records() {
-        let session_id = SessionId::new();
-        let turn_id = TurnId::new();
-        let now = Utc.with_ymd_and_hms(2026, 4, 27, 8, 0, 0).unwrap();
-        let session_context = SessionContext {
-            base_instructions: "base".into(),
-            available_skills: None,
-            workspace_instructions: Some("workspace".into()),
-            locked_agents_snapshot: None,
-            environment: EnvironmentContext {
-                cwd: PathBuf::from("/tmp/root"),
-                shell: "bash".into(),
-                current_date: "2026-04-27".into(),
-                timezone: "UTC".into(),
-            },
-            language: LanguageContext::default(),
-            persona: Persona::Default,
-            model: Model {
-                slug: "model-a".into(),
-                ..Model::default()
-            },
-            reasoning_effort_selection: None,
-            reasoning_effort: None,
-            system_prompt_mode: devo_core::SystemPromptMode::CodingAgent,
-        };
-        let turn_context = TurnContext {
-            environment: EnvironmentContext {
-                cwd: PathBuf::from("/tmp/next"),
-                shell: "bash".into(),
-                current_date: "2026-04-28".into(),
-                timezone: "UTC".into(),
-            },
-            persona: Persona::Default,
-            model: Model {
-                slug: "model-b".into(),
-                ..Model::default()
-            },
-            reasoning_effort_selection: Some("enabled".into()),
-            reasoning_effort: None,
-            observed_agents_snapshot: None,
-            collaboration_mode: devo_core::CollaborationMode::Build,
-        };
-        let mut replay = ReplayState::default();
-
-        replay
-            .apply_line(RolloutLine::SessionMeta(Box::new(SessionMetaLine {
-                timestamp: now,
-                session: SessionRecord {
-                    id: session_id,
-                    rollout_path: PathBuf::from("rollout.jsonl"),
-                    created_at: now,
-                    updated_at: now,
-                    last_activity_at: Some(now),
-                    source: "cli".into(),
-                    agent_nickname: None,
-                    agent_role: None,
-                    agent_path: None,
-                    model_provider: "test".into(),
-                    model: Some("model-a".into()),
-                    model_binding_id: None,
-                    reasoning_effort_selection: None,
-                    cwd: PathBuf::from("/tmp/root"),
-                    additional_directories: Vec::new(),
-                    cli_version: "0.1.0".into(),
-                    title: None,
-                    title_state: SessionTitleState::Unset,
-                    sandbox_policy: "workspace-write".into(),
-                    approval_mode: "on-request".into(),
-                    effective_context_window: None,
-                    tokens_used: 0,
-                    first_user_message: None,
-                    archived_at: None,
-                    git_sha: None,
-                    git_branch: None,
-                    git_origin_url: None,
-                    parent_session_id: None,
-                    fork_from_id: None,
-                    fork_at_turn_id: None,
-                    session_context: None,
-                    latest_turn_context: None,
-                    collaboration_mode: None,
-                    permission_preset: None,
-                    schema_version: 2,
-                },
-            })))
-            .expect("apply session meta");
-        replay
-            .apply_line(RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: now,
-                turn: TurnRecord {
-                    id: turn_id,
-                    session_id,
-                    sequence: 1,
-                    started_at: now,
-                    completed_at: Some(now),
-                    status: TurnStatus::Completed,
-                    kind: devo_core::TurnKind::Regular,
-                    model: "model-b".into(),
-                    model_binding_id: None,
-                    reasoning_effort_selection: Some("enabled".into()),
-                    request_model: "model-b".into(),
-                    request_thinking: Some("enabled".into()),
-                    input_token_estimate: None,
-                    usage: None,
-                    latest_query_usage: None,
-                    context_occupancy: None,
-                    stop_reason: None,
-                    failure_reason: None,
-                    error: None,
-                    session_context: Some(session_context.clone()),
-                    turn_context: Some(turn_context.clone()),
-                    schema_version: 2,
-                },
-            })))
-            .expect("apply turn line");
-
-        assert_eq!(replay.session_context, Some(session_context));
-        assert_eq!(replay.latest_turn_context, Some(turn_context));
-        assert!(replay.session_context_recorded);
-    }
-
-    fn sample_session_context(base_instructions: &str) -> SessionContext {
-        SessionContext {
-            base_instructions: base_instructions.into(),
-            available_skills: None,
-            workspace_instructions: Some("workspace".into()),
-            locked_agents_snapshot: None,
-            environment: EnvironmentContext {
-                cwd: PathBuf::from("/tmp/root"),
-                shell: "bash".into(),
-                current_date: "2026-04-27".into(),
-                timezone: "UTC".into(),
-            },
-            language: LanguageContext::default(),
-            persona: Persona::Default,
-            model: Model {
-                slug: "model-a".into(),
-                ..Model::default()
-            },
-            reasoning_effort_selection: None,
-            reasoning_effort: None,
-            system_prompt_mode: devo_core::SystemPromptMode::CodingAgent,
-        }
-    }
-
-    #[test]
-    fn replay_restores_context_from_session_context_updated_line() {
-        let session_id = SessionId::new();
-        let turn_id = TurnId::new();
-        let now = Utc.with_ymd_and_hms(2026, 4, 27, 8, 0, 0).unwrap();
-        let session_context = sample_session_context("base");
-        let turn_context = TurnContext {
-            environment: EnvironmentContext {
-                cwd: PathBuf::from("/tmp/next"),
-                shell: "bash".into(),
-                current_date: "2026-04-28".into(),
-                timezone: "UTC".into(),
-            },
-            persona: Persona::Default,
-            model: Model {
-                slug: "model-b".into(),
-                ..Model::default()
-            },
-            reasoning_effort_selection: Some("enabled".into()),
-            reasoning_effort: None,
-            observed_agents_snapshot: None,
-            collaboration_mode: devo_core::CollaborationMode::Build,
-        };
-        let mut replay = ReplayState::default();
-
-        replay
-            .apply_line(RolloutLine::SessionMeta(Box::new(SessionMetaLine {
-                timestamp: now,
-                session: SessionRecord {
-                    id: session_id,
-                    rollout_path: PathBuf::from("rollout.jsonl"),
-                    created_at: now,
-                    updated_at: now,
-                    last_activity_at: Some(now),
-                    source: "cli".into(),
-                    agent_nickname: None,
-                    agent_role: None,
-                    agent_path: None,
-                    model_provider: "test".into(),
-                    model: Some("model-a".into()),
-                    model_binding_id: None,
-                    reasoning_effort_selection: None,
-                    cwd: PathBuf::from("/tmp/root"),
-                    additional_directories: Vec::new(),
-                    cli_version: "0.1.0".into(),
-                    title: None,
-                    title_state: SessionTitleState::Unset,
-                    sandbox_policy: "workspace-write".into(),
-                    approval_mode: "on-request".into(),
-                    effective_context_window: None,
-                    tokens_used: 0,
-                    first_user_message: None,
-                    archived_at: None,
-                    git_sha: None,
-                    git_branch: None,
-                    git_origin_url: None,
-                    parent_session_id: None,
-                    fork_from_id: None,
-                    fork_at_turn_id: None,
-                    session_context: None,
-                    latest_turn_context: None,
-                    collaboration_mode: None,
-                    permission_preset: None,
-                    schema_version: 2,
-                },
-            })))
-            .expect("apply session meta");
-        replay
-            .apply_line(RolloutLine::SessionContextUpdated(Box::new(
-                devo_core::SessionContextUpdatedLine {
-                    timestamp: now,
-                    session_id,
-                    session_context: session_context.clone(),
-                    schema_version: 1,
-                },
-            )))
-            .expect("apply session context");
-        replay
-            .apply_line(RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: now,
-                turn: TurnRecord {
-                    id: turn_id,
-                    session_id,
-                    sequence: 1,
-                    started_at: now,
-                    completed_at: Some(now),
-                    status: TurnStatus::Completed,
-                    kind: devo_core::TurnKind::Regular,
-                    model: "model-b".into(),
-                    model_binding_id: None,
-                    reasoning_effort_selection: Some("enabled".into()),
-                    request_model: "model-b".into(),
-                    request_thinking: Some("enabled".into()),
-                    input_token_estimate: None,
-                    usage: None,
-                    latest_query_usage: None,
-                    context_occupancy: None,
-                    stop_reason: None,
-                    failure_reason: None,
-                    error: None,
-                    session_context: None,
-                    turn_context: Some(turn_context.clone()),
-                    schema_version: 2,
-                },
-            })))
-            .expect("apply turn line");
-
-        assert_eq!(replay.session_context, Some(session_context));
-        assert_eq!(replay.latest_turn_context, Some(turn_context));
-        assert!(replay.session_context_recorded);
-    }
-
-    #[test]
-    fn replay_preserves_session_context_updated_across_rollback() {
-        let session_id = SessionId::new();
-        let turn_id = TurnId::new();
-        let now = Utc.with_ymd_and_hms(2026, 4, 27, 8, 0, 0).unwrap();
-        let session_context = sample_session_context("base");
-        let turn_context = TurnContext {
-            environment: EnvironmentContext {
-                cwd: PathBuf::from("/tmp/next"),
-                shell: "bash".into(),
-                current_date: "2026-04-28".into(),
-                timezone: "UTC".into(),
-            },
-            persona: Persona::Default,
-            model: Model {
-                slug: "model-b".into(),
-                ..Model::default()
-            },
-            reasoning_effort_selection: Some("enabled".into()),
-            reasoning_effort: None,
-            observed_agents_snapshot: None,
-            collaboration_mode: devo_core::CollaborationMode::Build,
-        };
-        let mut replay = ReplayState::default();
-
-        replay
-            .apply_line(RolloutLine::SessionMeta(Box::new(SessionMetaLine {
-                timestamp: now,
-                session: SessionRecord {
-                    id: session_id,
-                    rollout_path: PathBuf::from("rollout.jsonl"),
-                    created_at: now,
-                    updated_at: now,
-                    last_activity_at: Some(now),
-                    source: "cli".into(),
-                    agent_nickname: None,
-                    agent_role: None,
-                    agent_path: None,
-                    model_provider: "test".into(),
-                    model: Some("model-a".into()),
-                    model_binding_id: None,
-                    reasoning_effort_selection: None,
-                    cwd: PathBuf::from("/tmp/root"),
-                    additional_directories: Vec::new(),
-                    cli_version: "0.1.0".into(),
-                    title: None,
-                    title_state: SessionTitleState::Unset,
-                    sandbox_policy: "workspace-write".into(),
-                    approval_mode: "on-request".into(),
-                    effective_context_window: None,
-                    tokens_used: 0,
-                    first_user_message: None,
-                    archived_at: None,
-                    git_sha: None,
-                    git_branch: None,
-                    git_origin_url: None,
-                    parent_session_id: None,
-                    fork_from_id: None,
-                    fork_at_turn_id: None,
-                    session_context: None,
-                    latest_turn_context: None,
-                    collaboration_mode: None,
-                    permission_preset: None,
-                    schema_version: 2,
-                },
-            })))
-            .expect("apply session meta");
-        replay
-            .apply_line(RolloutLine::SessionContextUpdated(Box::new(
-                devo_core::SessionContextUpdatedLine {
-                    timestamp: now,
-                    session_id,
-                    session_context: session_context.clone(),
-                    schema_version: 1,
-                },
-            )))
-            .expect("apply session context");
-        replay
-            .apply_line(RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: now,
-                turn: TurnRecord {
-                    id: turn_id,
-                    session_id,
-                    sequence: 1,
-                    started_at: now,
-                    completed_at: Some(now),
-                    status: TurnStatus::Completed,
-                    kind: TurnKind::Regular,
-                    model: "model-b".into(),
-                    model_binding_id: None,
-                    reasoning_effort_selection: Some("enabled".into()),
-                    request_model: "model-b".into(),
-                    request_thinking: Some("enabled".into()),
-                    input_token_estimate: None,
-                    usage: None,
-                    latest_query_usage: None,
-                    context_occupancy: None,
-                    stop_reason: None,
-                    failure_reason: None,
-                    error: None,
-                    session_context: None,
-                    turn_context: Some(turn_context),
-                    schema_version: 2,
-                },
-            })))
-            .expect("apply turn line");
-        replay
-            .apply_line(RolloutLine::SessionRollback(Box::new(
-                SessionRollbackLine {
-                    timestamp: now,
-                    session_id,
-                    retained_turn_ids: Vec::new(),
-                    retained_item_ids: Vec::new(),
-                    latest_turn_id: None,
-                    schema_version: 1,
-                },
-            )))
-            .expect("apply rollback");
-
-        assert_eq!(replay.session_context, Some(session_context));
-        assert!(replay.session_context_recorded);
-        assert!(replay.latest_turn.is_none());
-    }
-
-    #[test]
-    fn append_turn_deduped_writes_session_context_once() {
-        use crate::turn::TurnMetadata;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let data_root = dir.path().to_path_buf();
-        let session_id = SessionId::new();
-        let now = Utc::now();
-        let rollout_store = super::RolloutStore::new(data_root.clone(), None);
-        let record = rollout_store.create_session_record(
-            session_id,
-            now,
-            data_root.clone(),
-            Vec::new(),
-            Some("dedupe test".into()),
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-
-        let session_context = sample_session_context("unique-base-instruction-marker");
-        let mut session_context_recorded = false;
-        let turn_metadata = |sequence: u32| TurnMetadata {
-            turn_id: TurnId::new(),
-            session_id,
-            sequence,
-            status: TurnStatus::Completed,
-            kind: TurnKind::Regular,
-            model: "test-model".into(),
-            model_binding_id: None,
-            reasoning_effort_selection: None,
-            reasoning_effort: None,
-            request_model: "test-model".into(),
-            request_thinking: None,
-            started_at: now,
-            completed_at: Some(now),
-            usage: None,
-            stop_reason: None,
-            failure_reason: None,
-        };
-
-        for sequence in 1..=2 {
-            let metadata = turn_metadata(sequence);
-            rollout_store
-                .append_turn_deduped(
-                    &record,
-                    &mut session_context_recorded,
-                    super::build_turn_record(&metadata, None, None, None, None),
-                    Some(session_context.clone()),
-                )
-                .expect("append deduped turn");
-        }
-
-        assert!(session_context_recorded);
-        let rollout = std::fs::read_to_string(&record.rollout_path).expect("read rollout");
-        assert_eq!(rollout.matches("unique-base-instruction-marker").count(), 1);
-        // v2 write path: the locked context travels as an internal line.
-        assert!(rollout.contains("\"sessionContext\""));
-    }
-
-    // ── v2 write switch / dual read (P3b) ─────────────────────────────
-
-    struct NoopProvider;
-
-    #[async_trait::async_trait]
-    impl devo_provider::ModelProviderSDK for NoopProvider {
-        async fn completion(
-            &self,
-            _request: devo_protocol::ModelRequest,
-        ) -> anyhow::Result<devo_protocol::ModelResponse> {
-            anyhow::bail!("noop provider does not support completion")
-        }
-
-        async fn completion_stream(
-            &self,
-            _request: devo_protocol::ModelRequest,
-        ) -> anyhow::Result<
-            std::pin::Pin<
-                Box<dyn futures::Stream<Item = anyhow::Result<devo_protocol::StreamEvent>> + Send>,
-            >,
-        > {
-            anyhow::bail!("noop provider does not support streaming")
-        }
-
-        fn name(&self) -> &str {
-            "noop-provider"
-        }
-    }
-
-    fn test_deps(data_root: &std::path::Path) -> ServerRuntimeDependencies {
-        let provider: Arc<dyn devo_provider::ModelProviderSDK> = Arc::new(NoopProvider);
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(devo_provider::SingleProviderRouter::new(provider)),
-            Arc::new(devo_core::tools::ToolRegistry::new()),
-            crate::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(devo_core::PresetModelCatalog::default()),
-            Box::new(devo_core::FileSystemSkillCatalog::new(
-                devo_core::SkillsConfig {
-                    bundled: Some(devo_core::BundledSkillsConfig { enabled: false }),
-                    ..devo_core::SkillsConfig::default()
-                },
-            )),
-            devo_core::AgentsMdConfig::default(),
-            Arc::new(
-                crate::db::Database::open(data_root.join("test.db")).expect("open test database"),
-            ),
-            Arc::new(std::sync::Mutex::new(
-                devo_core::AppConfigStore::load(data_root.to_path_buf(), None)
-                    .expect("load app config store"),
-            )),
-        )
-    }
-
-    fn write_raw_lines(path: &std::path::Path, raw_lines: &[String]) {
-        use std::io::Write;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create rollout directory");
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .expect("open rollout for raw append");
-        for raw in raw_lines {
-            file.write_all(raw.as_bytes()).expect("write raw line");
-            file.write_all(b"\n").expect("write newline");
-        }
-    }
-
-    fn raw_rollout_lines(path: &std::path::Path) -> Vec<String> {
-        std::fs::read_to_string(path)
-            .expect("read rollout")
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(str::to_owned)
-            .collect()
-    }
-
-    fn test_turn_metadata(session_id: SessionId, turn_id: TurnId) -> crate::turn::TurnMetadata {
-        crate::turn::TurnMetadata {
-            turn_id,
-            session_id,
-            sequence: 1,
-            status: TurnStatus::Completed,
-            kind: TurnKind::Regular,
-            model: "test-model".into(),
-            model_binding_id: None,
-            reasoning_effort_selection: None,
-            reasoning_effort: None,
-            request_model: "test-model".into(),
-            request_thinking: None,
-            started_at: Utc::now(),
-            completed_at: Some(Utc::now()),
-            usage: None,
-            stop_reason: None,
-            failure_reason: None,
-        }
-    }
-
-    #[test]
-    fn write_path_appends_only_v2_lines() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let rollout_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        let record = rollout_store.create_session_record(
-            SessionId::new(),
-            Utc::now(),
-            dir.path().to_path_buf(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        let metadata = test_turn_metadata(record.id, TurnId::new());
-        let turn = super::build_turn_record(&metadata, None, None, None, None);
-        rollout_store
-            .append_turn(&record, turn)
-            .expect("append turn");
-        let item = super::build_item_record(
-            record.id,
-            metadata.turn_id,
-            ItemId::new(),
-            1,
-            TurnItem::AgentMessage(TextItem { text: "hi".into() }),
-            Some(TurnStatus::Running),
-            None,
-            None,
-        );
-        rollout_store
-            .append_item(&record, item)
-            .expect("append item");
-
-        let raw_lines = raw_rollout_lines(&record.rollout_path);
-        assert_eq!(raw_lines.len(), 3);
-        for raw in &raw_lines {
-            assert!(raw.contains("\"v\":2"), "line is v2: {raw}");
-            match parse_rollout_line(raw).expect("line parses") {
-                ParsedRolloutLine::V2(_) => {}
-                ParsedRolloutLine::Legacy(_) => panic!("freshly written line parsed as legacy"),
-            }
-        }
-    }
-
-    #[test]
-    fn hydration_folds_approval_decision_onto_request_across_restart() {
-        use devo_core::ApprovalDecisionItem;
-        use devo_core::ApprovalRequestItem;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let rollout_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        let record = rollout_store.create_session_record(
-            SessionId::new(),
-            Utc::now(),
-            dir.path().to_path_buf(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        let metadata = test_turn_metadata(record.id, TurnId::new());
-        let turn = super::build_turn_record(&metadata, None, None, None, None);
-        rollout_store
-            .append_turn(&record, turn)
-            .expect("append turn");
-        let request_record_id = ItemId::new();
-        rollout_store
-            .append_item(
-                &record,
-                super::build_item_record(
-                    record.id,
-                    metadata.turn_id,
-                    request_record_id,
-                    1,
-                    TurnItem::ApprovalRequest(ApprovalRequestItem {
-                        approval_id: "appr-1".into(),
-                        action_summary: "Run ls".into(),
-                        justification: "listing".into(),
-                        resource: Some("ShellExec".into()),
-                        available_scopes: vec!["once".into()],
-                        command_pattern: None,
-                        command_prefix: None,
-                        path: None,
-                        host: None,
-                        target: Some("ls".into()),
-                    }),
-                    Some(TurnStatus::Running),
-                    None,
-                    None,
-                ),
-            )
-            .expect("append approval request");
-
-        // "Restart": a brand-new store must hydrate its projector from the
-        // on-disk v2 history before appending.
-        let restarted_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        restarted_store
-            .append_item(
-                &record,
-                super::build_item_record(
-                    record.id,
-                    metadata.turn_id,
-                    ItemId::new(),
-                    2,
-                    TurnItem::ApprovalDecision(ApprovalDecisionItem {
-                        approval_id: "appr-1".into(),
-                        decision: "approve".into(),
-                        scope: "once".into(),
-                        decision_source: None,
-                    }),
-                    Some(TurnStatus::Running),
-                    None,
-                    None,
-                ),
-            )
-            .expect("append approval decision");
-
-        let approvals: Vec<devo_core::RolloutLineV2> = raw_rollout_lines(&record.rollout_path)
-            .iter()
-            .map(|raw| match parse_rollout_line(raw).expect("line parses") {
-                ParsedRolloutLine::V2(line) => *line,
-                ParsedRolloutLine::Legacy(_) => panic!("line parsed as legacy"),
-            })
-            .filter(|line| {
-                matches!(
-                    line,
-                    devo_core::RolloutLineV2::Item { item, .. }
-                        if matches!(item.item, devo_protocol::native::item::Item::Approval { .. })
-                )
-            })
-            .collect();
-        assert_eq!(approvals.len(), 2);
-        let devo_core::RolloutLineV2::Item { item: request, .. } = &approvals[0] else {
-            panic!("request line");
-        };
-        let devo_core::RolloutLineV2::Item { item: decision, .. } = &approvals[1] else {
-            panic!("decision line");
-        };
-        // The decision folded onto the request's item id and seq — not an
-        // orphan Warning with a fresh id.
-        assert_eq!(request.id.as_str(), request_record_id.to_string());
-        assert_eq!(decision.id, request.id);
-        assert_eq!(decision.seq, request.seq);
-        assert_eq!((request.revision, decision.revision), (1, 2));
-        assert_eq!(
-            decision.state,
-            devo_protocol::native::item::ItemState::Completed
-        );
-        assert!(
-            matches!(&decision.item, devo_protocol::native::item::Item::Approval { decision: Some(d), .. }
-                if d.decision == devo_protocol::native::item::ApprovalDecisionKind::Approved
-                    && d.scope == devo_protocol::native::item::ApprovalScope::Once)
-        );
-    }
-
-    #[test]
-    fn canonical_only_interaction_and_file_change_items_round_trip() {
-        use devo_protocol::native::ids::{
-            ItemId as CanonicalItemId, SessionId as CanonicalSessionId, TurnId as CanonicalTurnId,
-        };
-        use devo_protocol::native::item::{
-            FileChangeEntry, FileChangeKind, Item, ItemEnvelope, ItemState,
-        };
-        use tempfile::TempDir;
-        use uuid::Uuid;
-
-        let dir = TempDir::new().expect("temp dir");
-        let store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        let record = store.create_session_record(
-            SessionId::new(),
-            Utc::now(),
-            dir.path().to_path_buf(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        let turn_id = TurnId::new();
-        let metadata = test_turn_metadata(record.id, turn_id);
-        store
-            .append_turn(
-                &record,
-                super::build_turn_record(&metadata, None, None, None, None),
-            )
-            .expect("append turn");
-        let now = Utc::now();
-        let session_id = CanonicalSessionId::from_legacy_uuid(Uuid::from(record.id));
-        let turn_id = CanonicalTurnId::from_legacy_uuid(Uuid::from(turn_id));
-        let question_item_id = CanonicalItemId::from_legacy_uuid(Uuid::now_v7());
-        let waiting = ItemEnvelope {
-            id: question_item_id.clone(),
-            session_id: session_id.clone(),
-            turn_id: turn_id.clone(),
-            seq: 1,
-            revision: 1,
-            created_at: now,
-            updated_at: now,
-            state: ItemState::Waiting,
-            item: Item::UserInputRequest {
-                request_id: "question-1".into(),
-                target_item_id: None,
-                questions: Vec::new(),
-                answers: None,
-            },
-        };
-        let file_change = ItemEnvelope {
-            id: CanonicalItemId::from_legacy_uuid(Uuid::now_v7()),
-            session_id,
-            turn_id,
-            seq: 2,
-            revision: 1,
-            created_at: now,
-            updated_at: now,
-            state: ItemState::Completed,
-            item: Item::FileChange {
-                call_id: "edit-1".into(),
-                changes: vec![FileChangeEntry {
-                    path: PathBuf::from("src/lib.rs"),
-                    change: FileChangeKind::Update {
-                        unified_diff: "@@ -1 +1 @@".into(),
-                        move_path: None,
-                    },
-                }],
-                sandbox: None,
-            },
-        };
-        store
-            .append_canonical_item(&record, waiting.clone())
-            .expect("append waiting item");
-        store
-            .append_canonical_item(&record, file_change.clone())
-            .expect("append file change");
-
-        let history =
-            devo_core::read_canonical_history(&record.rollout_path).expect("read history");
-        assert_eq!(history.items, vec![waiting, file_change]);
-    }
-
-    #[test]
-    fn hydration_fails_closed_on_damaged_history() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let rollout_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        let record = rollout_store.create_session_record(
-            SessionId::new(),
-            Utc::now(),
-            dir.path().to_path_buf(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        write_raw_lines(
-            &record.rollout_path,
-            &[r#"{"v":2,"kind":"nope"}"#.to_string()],
-        );
-
-        let restarted_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        let metadata = test_turn_metadata(record.id, TurnId::new());
-        let turn = super::build_turn_record(&metadata, None, None, None, None);
-        let error = restarted_store
-            .append_turn(&record, turn)
-            .expect_err("append onto damaged history must fail");
-        assert!(
-            format!("{error:#}").contains("refusing to append"),
-            "unexpected error: {error:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn hydration_tolerates_truncated_final_line() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let rollout_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        let record = rollout_store.create_session_record(
-            SessionId::new(),
-            Utc::now(),
-            dir.path().to_path_buf(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        write_raw_lines(
-            &record.rollout_path,
-            &[r#"{"v":2,"kind":"item","timestamp":"2026"#.to_string()],
-        );
-
-        let restarted_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        let metadata = test_turn_metadata(record.id, TurnId::new());
-        let turn = super::build_turn_record(&metadata, None, None, None, None);
-        restarted_store
-            .append_turn(&record, turn)
-            .expect("crash tail is tolerated");
-        let deps = test_deps(dir.path());
-        restarted_store
-            .load_session_from_rollout(&record.rollout_path, &deps)
-            .await
-            .expect("append after crash tail must remain loadable");
-    }
-
-    #[tokio::test]
-    async fn load_tolerates_truncated_crash_tail_with_trailing_blank_lines() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let deps = test_deps(dir.path());
-        let rollout_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        let record = rollout_store.create_session_record(
-            SessionId::new(),
-            Utc::now(),
-            dir.path().to_path_buf(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        write_raw_lines(
-            &record.rollout_path,
-            &[
-                r#"{"v":2,"kind":"item","timestamp":"2026"#.to_string(),
-                String::new(),
-            ],
-        );
-
-        let recovered = rollout_store
-            .load_session_from_rollout(&record.rollout_path, &deps)
-            .await
-            .expect("truncated crash tail with trailing blank must load");
-        assert_eq!(recovered.summary.session_id, record.id);
-    }
-
-    #[tokio::test]
-    async fn dual_read_fails_closed_on_mid_file_damage_but_tolerates_crash_tail() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let deps = test_deps(dir.path());
-        let rollout_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        let record = rollout_store.create_session_record(
-            SessionId::new(),
-            Utc::now(),
-            dir.path().to_path_buf(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        // Damaged middle line, then a valid line after it.
-        write_raw_lines(
-            &record.rollout_path,
-            &[r#"{"v":2,"kind":"nope"}"#.to_string()],
-        );
-        let metadata = test_turn_metadata(record.id, TurnId::new());
-        let turn = super::build_turn_record(&metadata, None, None, None, None);
-        rollout_store
-            .append_turn(&record, turn)
-            .expect("append turn");
-
-        let error = rollout_store
-            .load_session_from_rollout(&record.rollout_path, &deps)
-            .await
-            .err()
-            .expect("damaged mid-file line must fail the load");
-        assert!(
-            format!("{error:#}").contains("refusing to resume"),
-            "unexpected error: {error:#}"
-        );
-
-        // A truncated final line (crash tail) is tolerated instead.
-        let tail_record = rollout_store.create_session_record(
-            SessionId::new(),
-            Utc::now(),
-            dir.path().to_path_buf(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&tail_record)
-            .expect("append session meta");
-        write_raw_lines(
-            &tail_record.rollout_path,
-            &[r#"{"v":2,"kind":"item","timestamp":"2026"#.to_string()],
-        );
-        let recovered = rollout_store
-            .load_session_from_rollout(&tail_record.rollout_path, &deps)
-            .await
-            .expect("crash tail is tolerated");
-        assert_eq!(recovered.summary.session_id, tail_record.id);
-    }
-
-    #[tokio::test]
-    async fn mixed_v1_v2_file_resumes_with_reconciled_next_seq() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let deps = test_deps(dir.path());
-        let rollout_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        let record = rollout_store.create_session_record(
-            SessionId::new(),
-            Utc::now(),
-            dir.path().to_path_buf(),
-            Vec::new(),
-            Some("Mixed session".into()),
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        let metadata = test_turn_metadata(record.id, TurnId::new());
-
-        // v1 portion: hand-written legacy lines, as produced before the v2
-        // write switch (never rewritten afterwards).
-        let legacy_lines = [
-            RolloutLine::SessionMeta(Box::new(SessionMetaLine {
-                timestamp: Utc::now(),
-                session: record.clone(),
-            })),
-            RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: Utc::now(),
-                turn: super::build_turn_record(&metadata, None, None, None, None),
-            })),
-            RolloutLine::Item(Box::new(ItemLine {
-                timestamp: Utc::now(),
-                item: super::build_item_record(
-                    record.id,
-                    metadata.turn_id,
-                    ItemId::new(),
-                    1,
-                    TurnItem::UserMessage(TextItem {
-                        text: "legacy hello".into(),
-                    }),
-                    Some(TurnStatus::Running),
-                    None,
-                    None,
-                ),
-            })),
-        ];
-        write_raw_lines(
-            &record.rollout_path,
-            &legacy_lines
-                .iter()
-                .map(|line| serde_json::to_string(line).expect("serialize legacy line"))
-                .collect::<Vec<_>>(),
-        );
-
-        // The v2 write path appends onto the legacy file (hydrating first).
-        rollout_store
-            .append_item(
-                &record,
-                super::build_item_record(
-                    record.id,
-                    metadata.turn_id,
-                    ItemId::new(),
-                    2,
-                    TurnItem::AgentMessage(TextItem {
-                        text: "v2 reply".into(),
-                    }),
-                    Some(TurnStatus::Running),
-                    None,
-                    None,
-                ),
-            )
-            .expect("append v2 item");
-
-        // The file mixes both formats; every line dispatches cleanly.
-        let raw_lines = raw_rollout_lines(&record.rollout_path);
-        assert_eq!(raw_lines.len(), 4);
-        for (index, raw) in raw_lines.iter().enumerate() {
-            let parsed = parse_rollout_line(raw).expect("line dispatches");
-            if index < 3 {
-                assert!(
-                    matches!(parsed, ParsedRolloutLine::Legacy(_)),
-                    "line {index} must be legacy"
-                );
-            } else {
-                assert!(
-                    matches!(parsed, ParsedRolloutLine::V2(_)),
-                    "line {index} must be v2"
-                );
-            }
-        }
-
-        // Dual read: the resumed session holds the union of both histories,
-        // and the next runtime seq matches the write-path projector's (the
-        // v1 item took seq 1, the v2 item seq 2 — no collision).
-        let recovered = rollout_store
-            .load_session_from_rollout(&record.rollout_path, &deps)
-            .await
-            .expect("mixed file resumes");
-        assert_eq!(recovered.summary.session_id, record.id);
-        assert_eq!(recovered.summary.title.as_deref(), Some("Mixed session"));
-        assert_eq!(recovered.loaded_item_count, 2);
-        assert_eq!(recovered.next_item_seq, 3);
-        let texts: Vec<&str> = recovered
-            .history_items
-            .iter()
-            .map(|item| item.body.as_str())
-            .collect();
-        assert!(texts.contains(&"legacy hello"), "history: {texts:?}");
-        assert!(texts.contains(&"v2 reply"), "history: {texts:?}");
-    }
-
-    fn append_basic_session_lines(
-        rollout_store: &super::RolloutStore,
-        data_root: &std::path::Path,
-    ) -> devo_core::SessionRecord {
-        let record = rollout_store.create_session_record(
-            SessionId::new(),
-            Utc::now(),
-            data_root.to_path_buf(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        rollout_store
-            .append_session_meta(&record)
-            .expect("append session meta");
-        let metadata = test_turn_metadata(record.id, TurnId::new());
-        let turn = super::build_turn_record(&metadata, None, None, None, None);
-        rollout_store
-            .append_turn(&record, turn)
-            .expect("append turn");
-        let item = super::build_item_record(
-            record.id,
-            metadata.turn_id,
-            ItemId::new(),
-            1,
-            TurnItem::AgentMessage(TextItem { text: "hi".into() }),
-            Some(TurnStatus::Running),
-            None,
-            None,
-        );
-        rollout_store
-            .append_item(&record, item)
-            .expect("append item");
-        record
-    }
-
-    #[test]
-    fn append_projects_events_into_event_log() {
-        use pretty_assertions::assert_eq;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let db = std::sync::Arc::new(
-            crate::db::Database::open(dir.path().join("devo.db")).expect("open db"),
-        );
-        let rollout_store =
-            super::RolloutStore::new(dir.path().to_path_buf(), Some(std::sync::Arc::clone(&db)));
-        let record = append_basic_session_lines(&rollout_store, dir.path());
-
-        // session/created lands on both the session stream and the per-cwd
-        // sessions stream; turn and item facts land on the session stream.
-        assert_eq!(db.event_log_len().expect("count"), 4);
-        let session_stream = devo_core::session_stream_id(
-            &devo_protocol::native::ids::SessionId::from_string(record.id.to_string()),
-        );
-        let rows = db
-            .event_log_rows(&session_stream, 0)
-            .expect("session stream");
-        let kinds: Vec<&str> = rows.iter().map(|row| row.event_kind.as_str()).collect();
-        assert_eq!(
-            kinds,
-            vec!["session/created", "turn/completed", "item/completed"]
-        );
-        let seqs: Vec<u64> = rows.iter().map(|row| row.seq).collect();
-        assert_eq!(seqs, vec![1, 2, 3]);
-        // Three physical rows written; watermark is the last line index.
-        assert_eq!(
-            db.projection_watermark(&record.rollout_path)
-                .expect("watermark"),
-            Some(2)
-        );
-
-        // The stored envelope payload parses as a typed EventEnvelope whose
-        // meta.seq is hydrated from the row at replay time.
-        let envelope: devo_protocol::native::event::EventEnvelope =
-            serde_json::from_str(&rows[2].payload).expect("envelope payload parses");
-        assert_eq!(envelope.meta.seq, None);
-        assert!(envelope.meta.persisted);
-    }
-
-    #[test]
-    fn event_log_insert_is_idempotent_by_source_fact() {
-        use pretty_assertions::assert_eq;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().expect("temp dir");
-        let db = std::sync::Arc::new(
-            crate::db::Database::open(dir.path().join("devo.db")).expect("open db"),
-        );
-        let rollout_store =
-            super::RolloutStore::new(dir.path().to_path_buf(), Some(std::sync::Arc::clone(&db)));
-        let record = append_basic_session_lines(&rollout_store, dir.path());
-        assert_eq!(db.event_log_len().expect("count"), 4);
-
-        // Re-deriving the same facts (simulated crash recovery) inserts nothing.
-        let raw_lines = raw_rollout_lines(&record.rollout_path);
-        let mut rows = Vec::new();
-        for (index, raw) in raw_lines.iter().enumerate() {
-            let ParsedRolloutLine::V2(v2) = parse_rollout_line(raw).expect("parse") else {
-                panic!("v2 line expected");
-            };
-            rows.extend(
-                super::event_log_rows_for_v2_line(&record.rollout_path, index as u64, 0, &v2)
-                    .expect("derive rows"),
-            );
-        }
-        assert_eq!(rows.len(), 4);
-        let inserted = db.insert_event_log_rows(&rows).expect("re-insert");
-        assert_eq!(inserted, 0);
-        assert_eq!(db.event_log_len().expect("count"), 4);
-    }
-
-    // ── Field-level session settings log (L2-DES-CONV-002 Phase 1) ──
-
-    fn settings_test_record() -> (tempfile::TempDir, super::RolloutStore, SessionRecord) {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let rollout_store = super::RolloutStore::new(dir.path().to_path_buf(), None);
-        let record = rollout_store.create_session_record(
-            SessionId::new(),
-            Utc::now(),
-            dir.path().to_path_buf(),
-            Vec::new(),
-            None,
-            Some("test-model".into()),
-            None,
-            None,
-            "test-provider".into(),
-            None,
-        );
-        (dir, rollout_store, record)
-    }
-
-    fn settings_line(
-        record: &SessionRecord,
-        field: devo_core::SessionSettingsField,
-        value: serde_json::Value,
-    ) -> RolloutLine {
-        RolloutLine::SessionSettings(devo_core::SessionSettingsLine {
-            timestamp: Utc::now(),
-            session_id: record.id,
-            field,
-            value,
-            epoch: 0,
-        })
-    }
-
-    /// Trace: L2-DES-CONV-002
-    /// Verifies: a field-level settings line wins over the whole-record
-    /// SessionMeta value during replay (DD-4).
-    #[test]
-    fn session_settings_field_line_wins_over_session_meta_preset() {
-        let (_dir, _store, mut record) = settings_test_record();
-        record.permission_preset = Some(devo_protocol::PermissionPreset::Default);
-        let mut replay = ReplayState::default();
-        replay
-            .apply_line(RolloutLine::SessionMeta(Box::new(SessionMetaLine {
-                timestamp: Utc::now(),
-                session: record.clone(),
-            })))
-            .expect("apply session meta");
-        replay
-            .apply_line(settings_line(
-                &record,
-                devo_core::SessionSettingsField::PermissionPreset,
-                serde_json::to_value(devo_protocol::PermissionPreset::FullAccess)
-                    .expect("serialize preset"),
-            ))
-            .expect("apply settings line");
-
-        let mut replayed = replay.session.take().expect("session record");
-        replay.apply_session_settings(&mut replayed);
-        assert_eq!(
-            replayed.permission_preset,
-            Some(devo_protocol::PermissionPreset::FullAccess)
-        );
-    }
-
-    /// Trace: L2-DES-CONV-002
-    /// Verifies: a PermissionPreset line clears the explicit SandboxProfile
-    /// override accumulated so far (approved patch-interaction rule).
-    #[test]
-    fn session_settings_preset_line_clears_explicit_sandbox_override() {
-        let (_dir, _store, record) = settings_test_record();
-        let mut replay = ReplayState::default();
-        replay
-            .apply_line(settings_line(
-                &record,
-                devo_core::SessionSettingsField::SandboxProfile,
-                serde_json::Value::String("strict".into()),
-            ))
-            .expect("apply sandbox line");
-        replay
-            .apply_line(settings_line(
-                &record,
-                devo_core::SessionSettingsField::PermissionPreset,
-                serde_json::to_value(devo_protocol::PermissionPreset::Default)
-                    .expect("serialize preset"),
-            ))
-            .expect("apply preset line");
-
-        assert_eq!(replay.sandbox_profile_override(), None);
-    }
-
-    /// Trace: L2-DES-CONV-002
-    /// Verifies: an explicit SandboxProfile line written after the preset line
-    /// survives replay as the effective override.
-    #[test]
-    fn session_settings_explicit_sandbox_survives_when_written_after_preset() {
-        let (_dir, _store, record) = settings_test_record();
-        let mut replay = ReplayState::default();
-        replay
-            .apply_line(settings_line(
-                &record,
-                devo_core::SessionSettingsField::PermissionPreset,
-                serde_json::to_value(devo_protocol::PermissionPreset::Default)
-                    .expect("serialize preset"),
-            ))
-            .expect("apply preset line");
-        replay
-            .apply_line(settings_line(
-                &record,
-                devo_core::SessionSettingsField::SandboxProfile,
-                serde_json::Value::String("strict".into()),
-            ))
-            .expect("apply sandbox line");
-
-        assert_eq!(
-            replay.sandbox_profile_override(),
-            Some("strict".to_string())
-        );
-    }
-
-    /// Trace: L2-DES-CONV-002
-    /// Verifies: model-family field lines override the corresponding record
-    /// fields during replay.
-    #[test]
-    fn session_settings_model_fields_override_record() {
-        let (_dir, _store, mut record) = settings_test_record();
-        record.model = Some("old-model".into());
-        let mut replay = ReplayState::default();
-        replay
-            .apply_line(RolloutLine::SessionMeta(Box::new(SessionMetaLine {
-                timestamp: Utc::now(),
-                session: record.clone(),
-            })))
-            .expect("apply session meta");
-        replay
-            .apply_line(settings_line(
-                &record,
-                devo_core::SessionSettingsField::Model,
-                serde_json::to_value(Some("new-model".to_string())).expect("serialize model"),
-            ))
-            .expect("apply model line");
-        replay
-            .apply_line(settings_line(
-                &record,
-                devo_core::SessionSettingsField::ReasoningEffortSelection,
-                serde_json::to_value(Some("high".to_string())).expect("serialize effort"),
-            ))
-            .expect("apply effort line");
-
-        let mut replayed = replay.session.take().expect("session record");
-        replay.apply_session_settings(&mut replayed);
-        assert_eq!(replayed.model, Some("new-model".to_string()));
-        assert_eq!(
-            replayed.reasoning_effort_selection,
-            Some("high".to_string())
-        );
-    }
-
-    /// Trace: L2-DES-CONV-002
-    /// Verifies: a settings line written through RolloutStore lands on disk as
-    /// a v2 Internal SessionSettings record and inverse-projects back to the
-    /// same legacy line (write path + both projectors).
-    #[test]
-    fn session_settings_line_roundtrips_through_store_and_projectors() {
-        let (_dir, store, record) = settings_test_record();
-        store.append_session_meta(&record).expect("append meta");
-        store
-            .append_session_settings_batch_at(
-                &record.rollout_path,
-                record.id,
-                1,
-                &[(
-                    devo_core::SessionSettingsField::SandboxProfile,
-                    serde_json::Value::String("workspace".into()),
-                )],
-            )
-            .expect("append settings line");
-
-        let raw_lines = std::fs::read_to_string(&record.rollout_path)
-            .expect("read rollout")
-            .lines()
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        assert_eq!(raw_lines.len(), 2);
-        let ParsedRolloutLine::V2(v2) =
-            parse_rollout_line(raw_lines.last().expect("settings raw line")).expect("parse")
-        else {
-            panic!("settings line must parse as v2");
-        };
-        let devo_core::rollout_v2::RolloutLineV2::Internal { entry, .. } = &*v2 else {
-            panic!("settings line must be a v2 Internal record");
-        };
-        assert_eq!(
-            entry,
-            &devo_core::InternalRecordV2::SessionSettings {
-                schema_version: 1,
-                field: devo_core::SessionSettingsField::SandboxProfile,
-                value: serde_json::Value::String("workspace".into()),
-                epoch: 1,
-            }
-        );
-
-        let inverse = devo_core::V2InverseProjector::new();
-        let legacy_lines = inverse.project_line(&v2).expect("inverse project");
-        let [RolloutLine::SessionSettings(line)] = legacy_lines.as_slice() else {
-            panic!("inverse must yield exactly one SessionSettings legacy line");
-        };
-        assert_eq!(line.session_id, record.id);
-        assert_eq!(line.field, devo_core::SessionSettingsField::SandboxProfile);
-        assert_eq!(line.value, serde_json::Value::String("workspace".into()));
-    }
-}
-
 mod output_gc;
+
+#[cfg(test)]
+#[path = "persistence_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "persistence/index_probe.rs"]
+mod index_probe;

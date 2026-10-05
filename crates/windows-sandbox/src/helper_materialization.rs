@@ -192,23 +192,29 @@ fn sibling_source_path(kind: HelperExecutable) -> Result<PathBuf> {
 }
 
 pub(crate) fn bundled_executable_path_for_exe(exe: &Path, file_name: &str) -> Option<PathBuf> {
-    let dir = exe.parent()?;
-    let direct_candidate = dir.join(file_name);
-    if direct_candidate.is_file() {
-        return Some(direct_candidate);
-    }
-
-    if dir.file_name() == Some(OsStr::new(BIN_DIRNAME))
-        && let Some(package_dir) = dir.parent()
-    {
-        let package_resource_candidate = package_dir.join(RESOURCES_DIRNAME).join(file_name);
-        if package_resource_candidate.is_file() {
-            return Some(package_resource_candidate);
+    let find = |exe: &Path| -> Option<PathBuf> {
+        let dir = exe.parent()?;
+        let direct_candidate = dir.join(file_name);
+        if direct_candidate.is_file() {
+            return Some(direct_candidate);
         }
-    }
 
-    let resource_candidate = dir.join(RESOURCES_DIRNAME).join(file_name);
-    resource_candidate.is_file().then_some(resource_candidate)
+        if dir.file_name() == Some(OsStr::new(BIN_DIRNAME))
+            && let Some(package_dir) = dir.parent()
+        {
+            let package_resource_candidate = package_dir.join(RESOURCES_DIRNAME).join(file_name);
+            if package_resource_candidate.is_file() {
+                return Some(package_resource_candidate);
+            }
+        }
+
+        let resource_candidate = dir.join(RESOURCES_DIRNAME).join(file_name);
+        resource_candidate.is_file().then_some(resource_candidate)
+    };
+
+    // Installer bin directories can be junctions, so retry beside the real
+    // (canonicalized) executable once (upstream fix).
+    find(exe).or_else(|| find(&dunce::canonicalize(exe).ok()?))
 }
 
 fn helper_destination_for_source(

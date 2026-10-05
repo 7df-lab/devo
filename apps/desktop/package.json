@@ -52,7 +52,7 @@
 		"rebuild": "electron-rebuild",
 		"lint": "biome check .",
 		"check-types": "bun run gen:protocol-types && tsc --noEmit",
-		"test": "bun run gen:protocol-types && bun test",
+		"test": "bun run gen:protocol-types && bun test --isolate",
 		"clean": "rm -rf out release dist node_modules .turbo packages/devo-ai-sdk/src/v2/generated"
 	},
 	"dependencies": {

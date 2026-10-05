@@ -184,6 +184,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
         proxy_enforced,
         proxy_settings_mode,
     };
+    // PROBE: elevated backend transport — must fire for elevated spawns
     let transport = spawn_runner_transport_task(sandbox_creds, request).await?;
     let (pipe_write, pipe_read) = transport.into_files();
 

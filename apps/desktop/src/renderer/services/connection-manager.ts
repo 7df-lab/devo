@@ -2,7 +2,6 @@ import type { DevoClient } from "@devo-ai/sdk/v2/client"
 import { processEvent } from "../atoms/actions/event-processor"
 import { authHeaderAtom, serverConnectedAtom, serverUrlAtom } from "../atoms/connection"
 import { discoveryAtom } from "../atoms/discovery"
-import { batchUpsertPartsAtom } from "../atoms/parts"
 import {
 	SESSIONS_PAGE_SIZE,
 	projectPaginationFamily,
@@ -15,14 +14,6 @@ import {
 	updateProjectPaginationAtom,
 } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
-import {
-	applyStreamingDelta,
-	flushStreamingParts,
-	isStreamingField,
-	isStreamingPartType,
-	streamingVersionFamily,
-	updateStreamingPart,
-} from "../atoms/streaming"
 import { createLogger } from "../lib/logger"
 import { directoriesMatch } from "../lib/directory-path"
 import type { Event, Session } from "../lib/types"
@@ -83,13 +74,13 @@ const projectEventBridgeDirs = new Set<string>()
 let eventLoopGeneration = 0
 
 /**
- * Global reference to the Native event AbortController that survives Vite HMR
- * module replacement. When HMR replaces this module, the old module's
- * `connection` variable is lost, but the old event loop keeps running
- * with an unreachable AbortController. By storing it on `window`, the
- * new module can abort the stale loop on reconnect.
+ * Global reference to the Native event AbortController that survives Vite HMR.
+ * The dispose hook normally stops the old module's loop and clients before
+ * replacement; this reference also lets recovery abort a loop from an older
+ * module instance that did not run the cleanup hook.
  */
 const NATIVE_ABORT_KEY = "__devo_native_abort__" as const
+const NATIVE_CLIENTS_KEY = "__devo_native_clients__" as const
 
 function getGlobalAbort(): AbortController | undefined {
 	// biome-ignore lint/suspicious/noExplicitAny: accessing dynamic window property for Native event abort controller
@@ -101,9 +92,85 @@ function setGlobalAbort(controller: AbortController | null) {
 	;(window as any)[NATIVE_ABORT_KEY] = controller
 }
 
+function getGlobalClientRegistry(): Set<DevoClient> {
+	// biome-ignore lint/suspicious/noExplicitAny: accessing dynamic window property for Native SDK client registry
+	const globals = window as any
+	const current = globals[NATIVE_CLIENTS_KEY]
+	if (current instanceof Set) return current as Set<DevoClient>
+	const clients = new Set<DevoClient>()
+	globals[NATIVE_CLIENTS_KEY] = clients
+	return clients
+}
+
+function createManagedClient(
+	url: string,
+	options?: Parameters<typeof connectToServer>[1],
+): DevoClient {
+	const client = connectToServer(url, options)
+	getGlobalClientRegistry().add(client)
+	return client
+}
+
+/** Detach this SDK client's event subscription without closing the shared transport. */
+function disposeClient(client: DevoClient, scope: string): void {
+	getGlobalClientRegistry().delete(client)
+	try {
+		client.dispose()
+	} catch (err) {
+		log.warn("Failed to dispose Native SDK client", { scope }, err)
+	}
+}
+
+function disposeRegisteredClients(): void {
+	for (const client of [...getGlobalClientRegistry()]) {
+		disposeClient(client, "stale HMR")
+	}
+}
+
+function disposeStaleModuleState(): void {
+	const staleAbort = getGlobalAbort()
+	if (staleAbort && !staleAbort.signal.aborted) {
+		log.info("Aborting stale Native event loop from previous module")
+		staleAbort.abort()
+	}
+	disposeRegisteredClients()
+	setGlobalAbort(null)
+}
+
+function disposeProjectClients(directory: string): void {
+	for (const [cachedDirectory, client] of [...projectClients]) {
+		if (!directoriesMatch(cachedDirectory, directory)) continue
+		projectClients.delete(cachedDirectory)
+		projectEventBridgeDirs.delete(cachedDirectory)
+		disposeClient(client, cachedDirectory)
+	}
+}
+
 function clearProjectClients(): void {
+	for (const [directory, client] of projectClients) {
+		disposeClient(client, directory)
+	}
 	projectClients.clear()
 	projectEventBridgeDirs.clear()
+}
+
+function disposeConnectionResources(): void {
+	const active = connection
+	connection = null
+
+	if (active) {
+		active.abortController.abort()
+		disposeClient(active.baseClient, "base")
+	}
+	clearProjectClients()
+	disposeStaleModuleState()
+	eventLoopGeneration++
+}
+
+if (import.meta.hot) {
+	import.meta.hot.dispose(() => {
+		disposeConnectionResources()
+	})
 }
 
 function clearDiscoverySessionCache(): void {
@@ -120,7 +187,7 @@ function filterDiscoveredSessions(
 		return directoriesMatch(session.directory, directory)
 	})
 	if (options?.roots) {
-		filtered = filtered.filter((session) => !session.parentID)
+		filtered = filtered.filter((session) => !session.parentId)
 	}
 	if (options?.search) {
 		const query = options.search.toLowerCase()
@@ -169,21 +236,10 @@ export async function connectToDevo(url: string, authHeader?: string | null): Pr
 	// Disconnect existing connection if any
 	if (connection) {
 		log.info("Disconnecting previous connection", { url: connection.url })
-		connection.abortController.abort()
-		clearProjectClients()
-		clearDiscoverySessionCache()
 	}
+	disposeConnectionResources()
+	clearDiscoverySessionCache()
 
-	// Also abort any stale Native event loop from a previous HMR module that we can't
-	// reach through the module-level `connection` variable.
-	const staleAbort = getGlobalAbort()
-	if (staleAbort && !staleAbort.signal.aborted) {
-		log.info("Aborting stale Native event loop from previous module")
-		staleAbort.abort()
-	}
-
-	// Bump generation — any previous event loop will see it's stale and exit
-	eventLoopGeneration++
 	const gen = eventLoopGeneration
 
 	const resolvedAuth = authHeader ?? null
@@ -191,7 +247,7 @@ export async function connectToDevo(url: string, authHeader?: string | null): Pr
 	appStore.set(authHeaderAtom, resolvedAuth)
 
 	// Base client has no directory — used for events that cover all projects.
-	const baseClient = connectToServer(url, { authHeader: resolvedAuth ?? undefined })
+	const baseClient = createManagedClient(url, { authHeader: resolvedAuth ?? undefined })
 	const abortController = new AbortController()
 
 	connection = { url, authHeader: resolvedAuth, baseClient, abortController }
@@ -452,6 +508,7 @@ export async function deleteProjectSessions(projectDirectory: string): Promise<v
 	})
 
 	appStore.set(resetProjectPaginationAtom, [projectDirectory])
+	disposeProjectClients(projectDirectory)
 }
 
 /**
@@ -467,15 +524,9 @@ export function getProjectClient(directory: string): DevoClient | null {
 		if (storeUrl) {
 			log.warn("Connection lost (likely HMR), reconnecting to", { url: storeUrl })
 
-			// Abort any stale Native event loop from the previous module
-			const staleAbort = getGlobalAbort()
-			if (staleAbort && !staleAbort.signal.aborted) {
-				log.info("Aborting stale Native event connection from previous module")
-				staleAbort.abort()
-			}
-
+			disposeStaleModuleState()
 			const storeAuth = appStore.get(authHeaderAtom)
-			const baseClient = connectToServer(storeUrl, { authHeader: storeAuth ?? undefined })
+			const baseClient = createManagedClient(storeUrl, { authHeader: storeAuth ?? undefined })
 			const abortController = new AbortController()
 			eventLoopGeneration++
 			connection = { url: storeUrl, authHeader: storeAuth, baseClient, abortController }
@@ -489,7 +540,7 @@ export function getProjectClient(directory: string): DevoClient | null {
 
 	let client = projectClients.get(directory)
 	if (!client) {
-		client = connectToServer(connection.url, {
+		client = createManagedClient(connection.url, {
 			directory,
 			authHeader: connection.authHeader ?? undefined,
 		})
@@ -526,7 +577,8 @@ export function getBaseClient(): DevoClient | null {
 		const storeUrl = appStore.get(serverUrlAtom)
 		if (storeUrl) {
 			const storeAuth = appStore.get(authHeaderAtom)
-			const baseClient = connectToServer(storeUrl, { authHeader: storeAuth ?? undefined })
+			disposeStaleModuleState()
+			const baseClient = createManagedClient(storeUrl, { authHeader: storeAuth ?? undefined })
 			const abortController = new AbortController()
 			eventLoopGeneration++
 			connection = { url: storeUrl, authHeader: storeAuth, baseClient, abortController }
@@ -590,13 +642,7 @@ export async function reloadConfig(): Promise<void> {
  */
 export function disconnect(): void {
 	log.info("Disconnecting from Devo server")
-	if (connection) {
-		connection.abortController.abort()
-		connection = null
-		clearProjectClients()
-	}
-	setGlobalAbort(null)
-	eventLoopGeneration++
+	disposeConnectionResources()
 	appStore.set(serverConnectedAtom, false)
 }
 
@@ -608,16 +654,12 @@ const FRAME_BUDGET_MS = 16
 
 function coalescingKey(event: Event): string | undefined {
 	switch (event.type) {
-		case "message.part.updated": {
-			const part = event.properties.part
-			return `part:${part.messageID}:${part.id}`
-		}
-		case "message.part.delta":
-			return `part:${event.properties.messageID}:${event.properties.partID}`
 		case "session.status":
-			return `status:${event.properties.sessionID}`
+			return `status:${event.properties.sessionId}`
 		case "context.usage.updated":
-			return `context-usage:${event.properties.sessionID}`
+			return `context-usage:${event.properties.sessionId}`
+		case "item.updated":
+			return `item:${event.properties.info.sessionId}:${event.properties.info.id}`
 		default:
 			return undefined
 	}
@@ -638,13 +680,6 @@ function createEventBatcher() {
 
 		if (events.length === 0) return
 
-		// Collect non-streaming parts across all events in the batch so we can
-		// write them in a single batchUpsertPartsAtom call instead of N individual
-		// upsertPartAtom calls. This significantly reduces Jotai atom writes and
-		// React reconciliation passes during heavy tool-call activity.
-		const batchedParts: import("../lib/types").Part[] = []
-		const batchedPartSessionIds = new Set<string>()
-
 		for (const event of events) {
 			if (event.type === "session.deleted") {
 				const deletedId = event.properties.info?.id
@@ -652,72 +687,11 @@ function createEventBatcher() {
 					discoveredSessions = discoveredSessions.filter((session) => session.id !== deletedId)
 				}
 			}
-			if (event.type === "message.part.updated" && !isStreamingPartType(event.properties.part)) {
-				batchedParts.push(event.properties.part)
-				batchedPartSessionIds.add(event.properties.part.sessionID)
-			} else {
-				processEvent(event)
-			}
-		}
-
-		// Flush collected non-streaming parts in a single batch write
-		if (batchedParts.length > 0) {
-			appStore.set(batchUpsertPartsAtom, batchedParts)
-			// Bump per-session streaming version so the UI picks up the new parts
-			for (const sid of batchedPartSessionIds) {
-				appStore.set(streamingVersionFamily(sid), (v: number) => v + 1)
-			}
+			processEvent(event)
 		}
 	}
 
 	function enqueue(event: Event) {
-		// Fast path: route high-frequency text/reasoning part updates to streaming buffer
-		if (event.type === "message.part.updated") {
-			const part = event.properties.part
-			if (isStreamingPartType(part)) {
-				updateStreamingPart(part)
-				const key = coalescingKey(event)
-				if (key) coalesced.set(key, event)
-				if (scheduled !== undefined) return
-				const elapsed = performance.now() - lastFlush
-				if (elapsed < FRAME_BUDGET_MS) {
-					scheduled = requestAnimationFrame(flush)
-				} else {
-					flush()
-				}
-				return
-			}
-		}
-
-		// Fast path: route incremental text/reasoning deltas to streaming buffer
-		if (event.type === "message.part.delta") {
-			const { messageID, partID, field, delta, sessionID } = event.properties
-			if (isStreamingField(field)) {
-				const applied = applyStreamingDelta(messageID, partID, field, delta, sessionID)
-				if (applied) {
-					const key = coalescingKey(event)
-					if (key) coalesced.set(key, event)
-					if (scheduled !== undefined) return
-					const elapsed = performance.now() - lastFlush
-					if (elapsed < FRAME_BUDGET_MS) {
-						scheduled = requestAnimationFrame(flush)
-					} else {
-						flush()
-					}
-					return
-				}
-				// Part not in streaming buffer yet, fall through to normal processing
-			}
-		}
-
-		// When a session goes idle, flush streaming parts to main store
-		if (event.type === "session.status" && event.properties.status.type === "idle") {
-			const flushedParts = flushStreamingParts()
-			if (flushedParts.length > 0) {
-				appStore.set(batchUpsertPartsAtom, flushedParts)
-			}
-		}
-
 		const key = coalescingKey(event)
 		if (key) {
 			coalesced.set(key, event)

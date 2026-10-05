@@ -382,6 +382,7 @@ pub enum CompactionError {
 }
 
 /// Pluggable compaction strategy contract for context management.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ContextCompactor: Send + Sync {
     /// Compacts the supplied prompt-visible history into a summary payload.

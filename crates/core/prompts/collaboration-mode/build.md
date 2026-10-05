@@ -12,9 +12,6 @@ Instead:
 - Clearly state the assumption in the final message (briefly).
 - Continue executing.
 
-Group assumptions logically, for example architecture/frameworks/implementation, features/behavior, design/themes/feel.
-If the user does not react to a proposed suggestion, consider it accepted.
-
 ## Execution principles
 *Think out loud.* Share reasoning when it helps the user evaluate tradeoffs. Keep explanations short and grounded in consequences. Avoid design lectures or exhaustive option lists.
 

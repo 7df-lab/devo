@@ -13,36 +13,28 @@ use lru::LruCache;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
-use devo_core::AgentsMdConfig;
 use devo_core::McpManager;
 use devo_core::ModelCatalog;
 use devo_core::SessionConfig;
-use devo_core::SessionRecord;
 use devo_core::SessionState;
-use devo_core::SkillCatalog;
 use devo_core::SkillError;
 #[cfg(test)]
 use devo_core::TurnConfig;
-use devo_core::TurnId;
-use devo_core::TurnRecord;
 use devo_core::tools::ToolRegistry;
 use devo_protocol::ApprovalDecisionValue;
 use devo_protocol::PendingInputItem;
 use devo_protocol::RequestUserInputResponse;
-use devo_protocol::SessionId;
-use devo_provider::ModelProviderSDK;
+use devo_protocol::native::ids::{SessionId, TurnId};
 use devo_provider::ProviderRouter;
 
-#[cfg(test)]
-use crate::InputItem;
 use crate::SkillRecord;
 use crate::db::Database;
-use crate::session::SessionHistoryItem;
-use crate::session::SessionMetadata;
+use crate::session::SessionHistoryEntry;
 #[cfg(test)]
 use crate::session_context::ResolvedInput;
 use crate::session_context::SessionRuntimeContext;
-use crate::turn::TurnMetadata;
+#[cfg(test)]
+use devo_protocol::native::item::UserInput;
 
 /// Mirrors parent-session LRU capacity so workspace contexts stay bounded.
 const WORKSPACE_CONTEXT_CACHE_CAPACITY: usize = 16;
@@ -57,13 +49,7 @@ fn canonicalize_workspace_root(path: &Path) -> PathBuf {
     normalize_native_path(canonical)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PersistedTurnItem {
-    pub(crate) turn_id: TurnId,
-    pub(crate) turn_kind: devo_core::TurnKind,
-    pub(crate) item_id: devo_core::ItemId,
-    pub(crate) turn_item: devo_core::TurnItem,
-}
+pub(crate) use crate::persisted_native_item::PersistedTurnItem;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SandboxBypassKey {
@@ -84,7 +70,7 @@ pub(crate) fn sandbox_bypass_key_from_pending(
 }
 
 pub(crate) struct PendingApproval {
-    pub(crate) owner_session_id: devo_protocol::SessionId,
+    pub(crate) owner_session_id: SessionId,
     pub(crate) turn_id: TurnId,
     pub(crate) tool_name: String,
     pub(crate) resource: Option<devo_safety::ResourceKind>,
@@ -168,37 +154,12 @@ pub fn empty_mcp_manager() -> Arc<dyn McpManager> {
 
 impl ServerRuntimeDependencies {
     /// Creates a new bundle of runtime dependencies for the transport server.
-    /// TODO: Should fix the clippy::too_many_arguments, decrease the arguments count.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        provider: Arc<dyn ModelProviderSDK>,
-        provider_router: Arc<dyn ProviderRouter>,
-        registry: Arc<ToolRegistry>,
-        mcp_manager: Arc<dyn McpManager>,
-        default_model: String,
-        model_catalog: Arc<dyn ModelCatalog>,
-        skill_catalog: Box<dyn SkillCatalog + Send>,
-        agents_md: AgentsMdConfig,
-        db: Arc<Database>,
-        config_store: Arc<std::sync::Mutex<AppConfigStore>>,
-    ) -> Self {
-        let skill_catalog = Arc::new(StdMutex::new(skill_catalog));
-        let process_context = Arc::new(SessionRuntimeContext::from_parts(
-            Arc::clone(&provider),
-            Arc::clone(&provider_router),
-            Arc::clone(&registry),
-            mcp_manager,
-            default_model.clone(),
-            Arc::clone(&model_catalog),
-            Arc::clone(&skill_catalog),
-            agents_md.clone(),
-            Arc::clone(&config_store),
-        ));
+    pub(crate) fn new(process_context: Arc<SessionRuntimeContext>, db: Arc<Database>) -> Self {
         Self {
-            provider_router,
-            model_catalog,
+            provider_router: process_context.provider_router(),
+            model_catalog: Arc::clone(&process_context.model_catalog),
             db,
-            config_store,
+            config_store: Arc::clone(&process_context.config_store),
             process_context,
             workspace_contexts: StdMutex::new(workspace_context_cache(
                 WORKSPACE_CONTEXT_CACHE_CAPACITY,
@@ -299,7 +260,7 @@ impl ServerRuntimeDependencies {
     #[cfg(test)]
     pub(crate) fn resolve_input_items(
         &self,
-        input: &[InputItem],
+        input: &[UserInput],
         workspace_root: Option<&Path>,
     ) -> Result<Option<ResolvedInput>, SkillError> {
         self.process_context
@@ -311,28 +272,39 @@ impl ServerRuntimeDependencies {
 pub(crate) struct RuntimeSession {
     /// Workspace-scoped runtime dependencies resolved when this session was created.
     pub(crate) runtime_context: Arc<SessionRuntimeContext>,
-    /// Canonical persisted session metadata when the session is durable.
-    pub(crate) record: Option<SessionRecord>,
-    /// Transport-facing metadata exposed over the API.
-    pub(crate) summary: SessionMetadata,
+    /// Absolute rollout JSONL path for durable sessions (`None` when ephemeral).
+    ///
+    /// This is the actor/runtime source of truth for persistence location.
+    /// Legacy [`SessionRecord`] is no longer owned here — build it only at
+    /// fork/test/fixture boundaries that still speak packed-record APIs.
+    pub(crate) rollout_path: Option<PathBuf>,
+    /// Legacy/ACP compatibility metadata plus runtime accounting not yet
+    /// represented by Native `Session`.
+    ///
+    /// First-party reads and fan-out must ask the session actor for its
+    /// canonical Native snapshot instead of exposing this bag directly.
+    pub(crate) summary: crate::runtime_session_summary::RuntimeSessionSummary,
     /// Lock-free snapshot of the session configuration for server coordination paths.
     pub(crate) config: SessionConfig,
     /// Canonical core session state used by the query loop.
     pub(crate) core_session: Arc<Mutex<SessionState>>,
     /// Currently active turn, if any.
-    pub(crate) active_turn: Option<TurnMetadata>,
+    pub(crate) active_turn: Option<crate::turn::RuntimeTurn>,
     /// Latest terminal turn metadata for the session.
-    pub(crate) latest_turn: Option<TurnMetadata>,
+    pub(crate) latest_turn: Option<crate::turn::RuntimeTurn>,
     /// Number of items loaded or appended for the session.
     pub(crate) loaded_item_count: u64,
     /// Replay-friendly ordered history used by interactive clients during session resume.
-    pub(crate) history_items: Vec<SessionHistoryItem>,
+    pub(crate) history_items: Vec<SessionHistoryEntry>,
     /// Canonical persisted turn items in prompt order for replay/compaction bookkeeping.
     pub(crate) persisted_turn_items: Vec<PersistedTurnItem>,
     /// Latest compaction snapshot used to rebuild the model-facing prompt view.
     pub(crate) latest_compaction_snapshot: Option<devo_core::CompactionSnapshotLine>,
-    /// Completed turn records keyed by turn id (for fork/rollback occupancy cuts).
-    pub(crate) turn_records_by_id: HashMap<TurnId, TurnRecord>,
+    /// Completed Native turns keyed by turn id (plus persistence extras).
+    ///
+    /// Used by fork/rollback cuts and fork history copy (`append_turn_at`).
+    /// Live status still prefers [`Self::active_turn`] / [`Self::latest_turn`].
+    pub(crate) turns_by_id: HashMap<TurnId, crate::replay_hydrate::ReplayedTurn>,
     /// Shared handle to the pending-turn queue owned by `core_session`.
     pub(crate) pending_turn_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
     /// Shared handle to the active-turn steer queue owned by `core_session`.
@@ -343,9 +315,9 @@ pub(crate) struct RuntimeSession {
     pub(crate) max_turns: Option<u32>,
     /// Deferred completion info for in-progress assistant text item.
     /// Cleared when the item is completed; used for crash/interrupt recovery.
-    pub(crate) deferred_assistant: Option<(devo_core::ItemId, u64, String)>,
+    pub(crate) deferred_assistant: Option<(devo_protocol::native::ids::ItemId, u64, String)>,
     /// Deferred completion info for in-progress reasoning text item.
-    pub(crate) deferred_reasoning: Option<(devo_core::ItemId, u64, String)>,
+    pub(crate) deferred_reasoning: Option<(devo_protocol::native::ids::ItemId, u64, String)>,
     /// Monotonic session-scoped item sequence counter.
     pub(crate) next_item_seq: u64,
     /// First user input captured from the session's first turn, used for title generation.
@@ -365,53 +337,17 @@ pub(crate) struct RuntimeSession {
 
 #[cfg(test)]
 mod tests {
-    use std::pin::Pin;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering;
 
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use devo_core::AppConfigStore;
-    use devo_core::BundledSkillsConfig;
-    use devo_core::FileSystemSkillCatalog;
     use devo_core::Model;
     use devo_core::PresetModelCatalog;
-    use devo_core::SkillsConfig;
-    use devo_core::tools::ToolRegistry;
-    use devo_protocol::InputItem;
-    use devo_protocol::ModelRequest;
-    use devo_protocol::ModelResponse;
     use devo_protocol::ProviderInfo;
     use devo_protocol::ProviderWireApi;
-    use devo_protocol::StreamEvent;
-    use devo_provider::ModelProviderSDK;
     use devo_provider::ProviderRoute;
-    use devo_provider::SingleProviderRouter;
-    use futures::Stream;
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::db::Database;
-
-    struct NoopProvider;
-
-    #[async_trait]
-    impl ModelProviderSDK for NoopProvider {
-        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-            unreachable!("not used by turn config resolution tests")
-        }
-
-        async fn completion_stream(
-            &self,
-            _request: ModelRequest,
-        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-            unreachable!("not used by turn config resolution tests")
-        }
-
-        fn name(&self) -> &str {
-            "noop"
-        }
-    }
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -427,16 +363,9 @@ mod tests {
         let root = unique_temp_dir("turn-config-model-name");
         std::fs::create_dir_all(&root).expect("create root");
         std::fs::write(root.join("config.toml"), config).expect("write config");
-        let provider: Arc<dyn ModelProviderSDK> = Arc::new(NoopProvider);
-        let db = Arc::new(Database::open(root.join("test.db")).expect("open db"));
-
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(ToolRegistry::new()),
-            empty_mcp_manager(),
-            "catalog-slug".to_string(),
-            Arc::new(PresetModelCatalog::new(vec![
+        crate::test_support::TestRuntime::noop()
+            .default_model("catalog-slug")
+            .catalog(Arc::new(PresetModelCatalog::new(vec![
                 Model {
                     slug: "catalog-slug".to_string(),
                     display_name: "Catalog Model".to_string(),
@@ -447,17 +376,8 @@ mod tests {
                     display_name: "Catalog Thinking Model".to_string(),
                     ..Model::default()
                 },
-            ])),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(
-                AppConfigStore::load(root, /*workspace_root*/ None).expect("load config"),
-            )),
-        )
+            ])))
+            .deps(&root)
     }
 
     #[test]
@@ -466,10 +386,10 @@ mod tests {
         let resolved = deps
             .resolve_input_items(
                 &[
-                    InputItem::Text {
+                    UserInput::Text {
                         text: "first question".to_string(),
                     },
-                    InputItem::Text {
+                    UserInput::Text {
                         text: "second context".to_string(),
                     },
                 ],
@@ -483,7 +403,43 @@ mod tests {
             ResolvedInput {
                 prompt_text: "first question\nsecond context".to_string(),
                 prompt_messages: vec!["first question".to_string(), "second context".to_string()],
+                images: Vec::new(),
+                image_paths: Vec::new(),
             }
+        );
+    }
+
+    #[test]
+    fn resolve_input_items_reads_local_image_into_resolved_images() {
+        use base64::Engine;
+
+        let deps = test_deps("");
+        let root = unique_temp_dir("session-context-local-image");
+        let image_path = root.join("photo.png");
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        let image_bytes = b"\x89PNG\r\n\x1a\n";
+        std::fs::write(&image_path, image_bytes).expect("write png stub");
+
+        let resolved = deps
+            .resolve_input_items(
+                &[UserInput::LocalImage {
+                    path: image_path.clone(),
+                    detail: None,
+                }],
+                None,
+            )
+            .expect("resolve input")
+            .expect("resolved input");
+
+        assert_eq!(resolved.prompt_text, "[image:photo.png]");
+        assert_eq!(resolved.images.len(), 1);
+        assert_eq!(resolved.image_paths, vec![image_path]);
+        assert_eq!(resolved.images[0].mime_type, "image/png");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&resolved.images[0].data_base64)
+                .expect("decode image"),
+            image_bytes
         );
     }
 
@@ -616,8 +572,8 @@ invocation_method = "openai_chat_completions"
             &deps.process_context.provider
         ));
         assert!(Arc::ptr_eq(
-            &context.provider_router,
-            &deps.process_context.provider_router
+            &context.provider_router(),
+            &deps.process_context.provider_router()
         ));
         assert_eq!(
             context
@@ -722,9 +678,73 @@ invocation_method = "openai_chat_completions"
             .await
             .expect("load updated workspace context");
         assert!(!Arc::ptr_eq(
-            &initial.provider_router,
-            &updated.provider_router
+            &initial.provider_router(),
+            &updated.provider_router()
         ));
+
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    /// Trace: provider connections can change while the server is running
+    /// (provider/upsert, OAuth login writing auth.json). Sessions capture
+    /// their router at creation, so a connection added after session start
+    /// failed every turn with "provider route not configured" until a server
+    /// restart. `reload_provider_router` must materialize the new connection
+    /// on an already-live context.
+    #[tokio::test]
+    async fn reload_provider_router_picks_up_new_connection_without_restart() {
+        let deps = test_deps("");
+        let workspace = unique_temp_dir("provider-router-reload");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+
+        let context = deps
+            .context_for_workspace(&workspace)
+            .await
+            .expect("load workspace context");
+        let codex_route =
+            ProviderRoute::connection("openai-codex", ProviderWireApi::OpenAIResponses);
+
+        let before = context
+            .reload_provider_router()
+            .await
+            .expect("reload router before connect");
+        assert!(
+            !before.has_route(&codex_route),
+            "precondition: codex route absent before the connection exists"
+        );
+
+        let builtin = devo_core::builtin_provider_config().expect("builtin provider catalog");
+        let baseline = builtin
+            .providers
+            .get("openai-codex")
+            .cloned()
+            .expect("builtin codex entry");
+        deps.config_store
+            .lock()
+            .expect("config store")
+            .upsert_provider_connection_with_baseline(
+                ProviderInfo {
+                    id: "openai-codex".to_string(),
+                    name: "Codex".to_string(),
+                    wire_apis: vec![ProviderWireApi::OpenAIResponses],
+                    enabled: true,
+                    ..ProviderInfo::default()
+                },
+                None,
+                None,
+                None,
+                Some(&baseline),
+            )
+            .expect("persist codex connection");
+
+        let after = context
+            .reload_provider_router()
+            .await
+            .expect("reload router after connect");
+        assert!(
+            after.has_route(&codex_route),
+            "codex route must appear after connect without a restart"
+        );
 
         let _ = std::fs::remove_dir_all(workspace);
     }

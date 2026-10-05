@@ -80,12 +80,12 @@ impl ProtocolSet {
     /// Extends this set monotonically and returns whether it changed.
     pub fn enable(&mut self, requested: &Self) -> bool {
         let previous_len = self.protocols.len();
-        self.protocols.extend(requested.protocols.iter().copied());
+        self.protocols.extend(requested.protocols.iter().cloned());
         self.protocols.len() != previous_len
     }
 
     pub fn iter(&self) -> impl Iterator<Item = ServerProtocol> + '_ {
-        self.protocols.iter().copied()
+        self.protocols.iter().cloned()
     }
 
     pub fn names(&self) -> Vec<&'static str> {

@@ -5,7 +5,6 @@ use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
-use devo_protocol::native::ids;
 use devo_protocol::native::model::ModelBinding;
 use devo_protocol::native::usage::{
     CallContext, TokenUsage, UsageCallOutcome, UsagePurpose, UsageRecord,
@@ -74,8 +73,8 @@ impl UsageLedger {
         };
         let record = UsageRecord {
             call_id: Uuid::now_v7().to_string(),
-            session_id: context.call.session_id.clone(),
-            turn_id: context.call.turn_id.clone(),
+            session_id: context.call.session_id,
+            turn_id: context.call.turn_id,
             purpose: context.call.purpose,
             model: ModelBinding {
                 provider: provider.to_owned(),
@@ -113,8 +112,8 @@ impl RuntimeCallContext {
         Self {
             session_id,
             call: CallContext {
-                session_id: ids::SessionId::from_legacy_uuid(Uuid::from(session_id)),
-                turn_id: turn_id.map(Uuid::from).map(ids::TurnId::from_legacy_uuid),
+                session_id,
+                turn_id,
                 purpose,
             },
         }
@@ -253,8 +252,7 @@ impl Stream for MeteredStream {
 
 #[cfg(test)]
 mod tests {
-    use devo_core::ParsedRolloutLine;
-    use devo_core::RolloutLineV2;
+    use devo_core::RolloutLine;
     use devo_core::parse_rollout_line;
     use devo_protocol::ModelProfileKey;
     use devo_protocol::SamplingControls;
@@ -284,11 +282,11 @@ mod tests {
         rollout_store
             .append_session_meta(&session_record)
             .expect("append session metadata");
-        let metadata = crate::persistence::session_metadata_from_record(
+        let index_row = crate::persistence::session_index_row_from_record(
             &session_record,
             session_record.created_at,
         );
-        db.upsert_session(&metadata, Some(session_record.rollout_path.as_path()))
+        db.upsert_session(index_row, Some(session_record.rollout_path.as_path()))
             .expect("index session");
         let ledger = UsageLedger::new(rollout_store, db);
         let request = ModelRequest {
@@ -323,14 +321,11 @@ mod tests {
 
         let raw = std::fs::read_to_string(&session_record.rollout_path).expect("read rollout");
         let last = raw.lines().last().expect("usage line");
-        let ParsedRolloutLine::V2(line) = parse_rollout_line(last).expect("parse usage line")
-        else {
-            panic!("usage must use v2");
-        };
-        let RolloutLineV2::Internal {
-            entry: devo_core::InternalRecordV2::UsageRecord { record },
+        let line = parse_rollout_line(last).expect("parse usage line");
+        let RolloutLine::Internal {
+            entry: devo_core::InternalRecord::UsageRecord { record },
             ..
-        } = *line
+        } = line
         else {
             panic!("usage must use the internal usage record");
         };
@@ -338,7 +333,7 @@ mod tests {
             record,
             UsageRecord {
                 call_id: record.call_id.clone(),
-                session_id: ids::SessionId::from_legacy_uuid(Uuid::from(session_id)),
+                session_id,
                 turn_id: None,
                 purpose: UsagePurpose::TitleGeneration,
                 model: ModelBinding {

@@ -5,11 +5,11 @@ use anyhow::Context;
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use crate::otel_stub::StatsigMetricsSettings;
 use devo_windows_sandbox::SETUP_VERSION;
 use devo_windows_sandbox::SetupErrorCode;
 use devo_windows_sandbox::SetupErrorReport;
 use devo_windows_sandbox::SetupFailure;
+use devo_windows_sandbox::StatsigMetricsSettings;
 use devo_windows_sandbox::add_deny_write_ace;
 use devo_windows_sandbox::canonicalize_path;
 use devo_windows_sandbox::convert_string_sid_to_sid;
@@ -59,7 +59,6 @@ use windows_sys::Win32::Security::CONTAINER_INHERIT_ACE;
 use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Security::OBJECT_INHERIT_ACE;
 use windows_sys::Win32::Storage::FileSystem::DELETE;
-use windows_sys::Win32::Storage::FileSystem::FILE_DELETE_CHILD;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_EXECUTE;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE;
@@ -162,20 +161,11 @@ fn workspace_write_cap_sids_for_path(
 }
 
 fn write_root_needs_refresh(root: &Path, psid: *mut c_void) -> Result<bool> {
-    if !path_mask_allows(
-        root,
-        &[psid],
-        WRITE_ROOT_ALLOW_MASK,
-        /*require_all_bits*/ true,
-    )? {
-        return Ok(true);
-    }
-    path_mask_allows(
-        root,
-        &[psid],
-        FILE_DELETE_CHILD,
-        /*require_all_bits*/ false,
-    )
+    // Explicit-scope refresh predicate (upstream fix): an inherited
+    // FILE_DELETE_CHILD grant must not keep reporting "needs refresh" forever,
+    // because SET_ACCESS cannot replace an inherited ACE — the previous
+    // effective-scope check caused perpetual DACL rewrites on every refresh.
+    devo_windows_sandbox::path_write_aces_need_refresh(root, &[psid])
 }
 
 fn spawn_read_acl_helper(payload: &Payload, _log: &mut dyn Write) -> Result<()> {
@@ -636,6 +626,7 @@ fn configure_offline_sandbox_network(
         )));
     }
     let firewall_result = firewall::ensure_offline_outbound_block(offline_sid_str, log);
+
     if let Err(err) = firewall_result {
         if extract_setup_failure(&err).is_some() {
             return Err(err);
@@ -1063,7 +1054,7 @@ mod tests {
     use super::convert_string_sid_to_sid;
     use super::workspace_write_cap_sids_for_path;
     use super::write_root_needs_refresh;
-    use crate::otel_stub::StatsigMetricsSettings;
+    use devo_windows_sandbox::StatsigMetricsSettings;
     use devo_windows_sandbox::ensure_allow_mask_aces;
     use devo_windows_sandbox::ensure_allow_write_aces;
     use devo_windows_sandbox::load_or_create_cap_sids;

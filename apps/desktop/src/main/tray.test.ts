@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events"
 import path from "node:path"
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
@@ -7,6 +8,9 @@ const templateImageFlags: boolean[] = []
 const trayInstances: FakeElectronTray[] = []
 const serverReadyListeners: Array<() => void> = []
 const sessionListParams: unknown[] = []
+const nativeEventEmitter = new EventEmitter()
+let nativeTransportSubscribeCount = 0
+let nativeTransportUnsubscribeCount = 0
 
 let serverUrl: string | null = null
 let discoveredSessions: unknown[] = []
@@ -24,12 +28,22 @@ const fakeNativeTransport = {
 		if (method === "session/list") {
 			sessionListParams.push(params)
 			if (sessionListGate) await sessionListGate
-			return { sessions: discoveredSessions }
+			return { data: discoveredSessions, nextCursor: null }
 		}
 		throw new Error(`unexpected request ${method}`)
 	},
 	respond: async () => {},
-	subscribe: () => () => {},
+	subscribe: (listener: (...args: unknown[]) => void) => {
+		nativeTransportSubscribeCount += 1
+		nativeEventEmitter.on("native-event", listener)
+		let subscribed = true
+		return () => {
+			if (!subscribed) return
+			subscribed = false
+			nativeEventEmitter.off("native-event", listener)
+			nativeTransportUnsubscribeCount += 1
+		}
+	},
 	connected: () => true,
 }
 
@@ -137,6 +151,9 @@ beforeEach(() => {
 	trayInstances.length = 0
 	serverReadyListeners.length = 0
 	sessionListParams.length = 0
+	nativeEventEmitter.removeAllListeners("native-event")
+	nativeTransportSubscribeCount = 0
+	nativeTransportUnsubscribeCount = 0
 	serverUrl = null
 	discoveredSessions = []
 	sessionListGate = null
@@ -229,10 +246,38 @@ describe("createTray", () => {
 		const { createTray } = await import("./tray")
 		discoveredSessions = [
 			{
-				sessionId: "ready-session",
+				id: "ready-session",
+				version: 1,
 				title: "Ready from server",
+				titleState: "unset",
 				cwd: "/repo",
-				updatedAt: "1970-01-01T00:00:02.000Z",
+				ephemeral: false,
+				createdAt: "1970-01-01T00:00:01.000Z",
+				lastActivityAt: "1970-01-01T00:00:02.000Z",
+				status: "idle",
+				flags: [],
+				archived: false,
+				activity: "idle",
+				queuedCount: 0,
+				model: { provider: "", model: "" },
+				settings: { permissionProfile: "default" },
+				preview: "",
+				usage: {
+					total: {
+						totalTokens: 0,
+						inputTokens: 0,
+						outputTokens: 0,
+						reasoningTokens: 0,
+						cacheReadInputTokens: 0,
+						cacheCreationInputTokens: 0,
+						callCount: 0,
+						meteredCallCount: 0,
+						failedCallCount: 0,
+						cancelledCallCount: 0,
+					},
+					byPurpose: [],
+					updatedAt: "1970-01-01T00:00:02.000Z",
+				},
 			},
 		]
 
@@ -245,6 +290,66 @@ describe("createTray", () => {
 		expect(
 			(trayInstances[0].contextMenu as Array<{ label?: string }>).map((item) => item.label),
 		).toContain("Ready from server")
+	})
+
+	test("disposes each transient discovery client after its refresh", async () => {
+		serverUrl = "stdio://local"
+		const { createTray } = await import("./tray")
+
+		createTray(() => undefined)
+		await new Promise((resolve) => setTimeout(resolve, 0))
+		expect(nativeTransportSubscribeCount).toBe(1)
+		expect(nativeTransportUnsubscribeCount).toBe(1)
+
+		serverReadyListeners[0]?.()
+		await new Promise((resolve) => setTimeout(resolve, 0))
+		expect(nativeTransportSubscribeCount).toBe(2)
+		expect(nativeTransportUnsubscribeCount).toBe(2)
+	})
+
+	test("does not accumulate Native listeners across scheduled discovery refreshes", async () => {
+		serverUrl = "stdio://local"
+		const { createTray, destroyTray } = await import("./tray")
+		const originalSetInterval = globalThis.setInterval
+		const originalClearInterval = globalThis.clearInterval
+		const intervalCallbacks: Array<Parameters<typeof setInterval>[0]> = []
+		globalThis.setInterval = ((callback: Parameters<typeof setInterval>[0]) => {
+			intervalCallbacks.push(callback)
+			return 1 as unknown as ReturnType<typeof setInterval>
+		}) as typeof setInterval
+		globalThis.clearInterval = (() => {}) as typeof clearInterval
+		const warnings: Error[] = []
+		const onWarning = (warning: Error) => {
+			if (warning.name === "MaxListenersExceededWarning") warnings.push(warning)
+		}
+		process.on("warning", onWarning)
+		const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+		try {
+			expect(nativeEventEmitter.getMaxListeners()).toBe(10)
+			createTray(() => undefined)
+			await tick()
+			const refreshInterval = intervalCallbacks[0]
+			expect(typeof refreshInterval).toBe("function")
+			if (typeof refreshInterval !== "function") throw new Error("Tray refresh interval was not registered")
+
+			for (let refresh = 0; refresh < 12; refresh++) {
+				refreshInterval()
+				await tick()
+				expect(nativeEventEmitter.listenerCount("native-event")).toBe(0)
+			}
+			await tick()
+
+			expect(nativeTransportSubscribeCount).toBe(13)
+			expect(nativeTransportUnsubscribeCount).toBe(13)
+			expect(nativeEventEmitter.listenerCount("native-event")).toBe(0)
+			expect(warnings).toEqual([])
+		} finally {
+			destroyTray()
+			process.off("warning", onWarning)
+			globalThis.setInterval = originalSetInterval
+			globalThis.clearInterval = originalClearInterval
+		}
 	})
 
 	test("does not overlap server-ready tray discovery refreshes", async () => {

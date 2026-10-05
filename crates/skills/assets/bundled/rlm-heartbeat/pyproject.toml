@@ -1,0 +1,17 @@
+# Kernel-side package for the bundled RLM heartbeat skill. It only talks to the
+# host through rlm.host_request; the kernel runtime is always installed in the
+# kernel venv before skills, so it is intentionally not declared as a
+# dependency (it is not published on PyPI).
+[project]
+name = "rlm-heartbeat"
+version = "0.1.0"
+description = "Agent RLM heartbeat skill: internal recurring session checks over the host bridge"
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rlm_heartbeat"]

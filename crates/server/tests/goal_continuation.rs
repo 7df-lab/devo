@@ -81,7 +81,7 @@ async fn goal_token_budget_reached_after_turn_enters_budget_limited() -> Result<
     let requests = provider.captured_requests.lock().expect("lock requests");
     assert!(
         request_contains_text(&requests[1], "has reached its token budget")
-            && request_contains_text(&requests[1], "do not start new substantive work"),
+            && request_contains_text(&requests[1], "Do not start new substantive work"),
         "budget-limited goal should receive a wrap-up prompt"
     );
     Ok(())
@@ -453,13 +453,15 @@ async fn goal_set_starts_hidden_continuation_turn() -> Result<()> {
 
     let requests = provider.requests.lock().expect("lock requests");
     assert!(requests.len() >= 2);
+    // Anchors from crates/core/prompts/goals/continuation.md: the objective
+    // rides inside the <objective> wrapper of the hidden continuation prompt.
     assert!(
-        request_contains_text(&requests[1], "Completion audit:")
+        request_contains_text(&requests[1], "<objective>")
             && request_contains_text(&requests[1], "write a benchmark note"),
         "goal continuation request should include hidden goal context"
     );
     assert!(
-        request_last_message_contains_text(&requests[1], "Completion audit:"),
+        request_last_message_contains_text(&requests[1], "<objective>"),
         "autonomous goal context should be the latest request message"
     );
 

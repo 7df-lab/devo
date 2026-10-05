@@ -27,7 +27,6 @@ export function useSessionController(sessionId: string, isActive = true) {
 		replyToQuestion,
 		rejectQuestion,
 		forkSession,
-		deletePart,
 		editMessage,
 	} = useAgentActions()
 
@@ -179,14 +178,6 @@ export function useSessionController(sessionId: string, isActive = true) {
 		[agent, forkSession, projectSlug, navigate],
 	)
 
-	const handleDeletePart = useCallback(
-		async (targetSessionId: string, messageId: string, partId: string) => {
-			if (!agent) return
-			await deletePart(agent.directory, targetSessionId, messageId, partId)
-		},
-		[agent, deletePart],
-	)
-
 	const handleEditUserMessage = useCallback(
 		async (messageId: string, text: string) => {
 			if (!agent) return
@@ -259,7 +250,6 @@ export function useSessionController(sessionId: string, isActive = true) {
 		handleRejectQuestion,
 		handleRenameSession,
 		handleForkFromTurn,
-		handleDeletePart,
 		handleEditUserMessage,
 		handleSendMessage,
 	}

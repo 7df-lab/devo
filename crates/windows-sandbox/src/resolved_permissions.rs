@@ -328,27 +328,19 @@ mod tests {
             permissions.file_system,
             FileSystemSandboxPolicy::restricted(vec![
                 FileSystemSandboxEntry {
-                    path: FileSystemPath::Path {
-                        path: first.clone(),
-                    },
+                    path: FileSystemPath::from_path(first.clone()),
                     access: FileSystemAccessMode::Write,
                 },
                 FileSystemSandboxEntry {
-                    path: FileSystemPath::Path {
-                        path: second.clone(),
-                    },
+                    path: FileSystemPath::from_path(second.clone()),
                     access: FileSystemAccessMode::Write,
                 },
                 FileSystemSandboxEntry {
-                    path: FileSystemPath::Path {
-                        path: first.join(".git"),
-                    },
+                    path: FileSystemPath::from_path(first.join(".git")),
                     access: FileSystemAccessMode::Deny,
                 },
                 FileSystemSandboxEntry {
-                    path: FileSystemPath::Path {
-                        path: second.join(".git"),
-                    },
+                    path: FileSystemPath::from_path(second.join(".git")),
                     access: FileSystemAccessMode::Deny,
                 },
                 FileSystemSandboxEntry {

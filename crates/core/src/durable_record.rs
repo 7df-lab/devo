@@ -1030,6 +1030,8 @@ pub struct GoalContextSnapshotRecordedRecord {
     pub recorded_at: DateTime<Utc>,
 }
 
+pub use devo_protocol::native::ids::GoalId;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GoalClearedRecord {
     pub schema_version: u32,
@@ -1039,38 +1041,52 @@ pub struct GoalClearedRecord {
     pub cleared_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct GoalId(pub uuid::Uuid);
-
-impl Default for GoalId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl GoalId {
-    pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
-    }
-}
-
+/// Durable / live goal status vocabulary aligned with Native
+/// (`devo_protocol::native::goal::GoalStatus`) plus durable-only `Cleared`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
     Active,
     Paused,
+    Blocked,
+    UsageLimited,
+    BudgetLimited,
     Completed,
     Failed,
-    Blocked,
     Canceled,
+    /// Durable-only: goal removed; Native projects this as absence / canceled.
     Cleared,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct GoalBudget {
     pub max_turns: Option<u32>,
-    pub max_tokens: Option<i64>,
+    /// Native-aligned name; durable JSON still accepts legacy `max_tokens`.
+    #[serde(default, alias = "max_tokens")]
+    pub token_budget: Option<i64>,
     pub max_duration_seconds: Option<u64>,
+}
+
+impl GoalBudget {
+    pub fn is_unbounded(&self) -> bool {
+        self.max_turns.is_none()
+            && self.token_budget.is_none()
+            && self.max_duration_seconds.is_none()
+    }
+}
+
+impl GoalStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::BudgetLimited
+                | Self::UsageLimited
+                | Self::Completed
+                | Self::Failed
+                | Self::Canceled
+                | Self::Cleared
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1374,34 +1390,15 @@ impl ExecutionPhase {
         match (self, next) {
             // Legal transitions per L3-BEH-CORE-001 turn state machine
             (Admitted, AssemblingContext) => Ok(()),
-            (Admitted, Failed) => Ok(()),
             (AssemblingContext, ModelInvocation) => Ok(()),
-            (AssemblingContext, Failed) => Ok(()),
-            (ModelInvocation, ToolDispatch) => Ok(()),
-            (ModelInvocation, Finalizing) => Ok(()),
-            (ModelInvocation, Failed) => Ok(()),
-            (ToolDispatch, ModelInvocation) => Ok(()),
-            (ToolDispatch, WaitingApproval) => Ok(()),
-            (ToolDispatch, Finalizing) => Ok(()),
-            (ToolDispatch, Failed) => Ok(()),
-            (WaitingApproval, ToolDispatch) => Ok(()),
-            (WaitingApproval, Finalizing) => Ok(()),
-            (WaitingApproval, Failed) => Ok(()),
+            (ModelInvocation, ToolDispatch | Finalizing) => Ok(()),
+            (ToolDispatch, ModelInvocation | WaitingApproval | Finalizing) => Ok(()),
+            (WaitingApproval, ToolDispatch | Finalizing) => Ok(()),
             (Finalizing, Completed) => Ok(()),
-            (Finalizing, Failed) => Ok(()),
-
-            // Interrupt can happen from any non-terminal phase
-            (Admitted, Interrupted) => Ok(()),
-            (AssemblingContext, Interrupted) => Ok(()),
-            (ModelInvocation, Interrupted) => Ok(()),
-            (ToolDispatch, Interrupted) => Ok(()),
-            (WaitingApproval, Interrupted) => Ok(()),
-            (Finalizing, Interrupted) => Ok(()),
-
+            // Failed/Interrupted are reachable from any non-terminal phase.
             // Interrupted turns are terminal; resume creates a new turn.
             (Interrupted, _) => Err("interrupted turns are terminal"),
-
-            // All other transitions are illegal.
+            (_, Failed | Interrupted) if !self.is_terminal() => Ok(()),
             _ => Err("illegal transition"),
         }
     }
@@ -1419,23 +1416,24 @@ mod tests {
         Utc::now()
     }
 
-    #[test]
-    fn session_created_roundtrip() {
-        let record = DurableRecord::SessionCreated(SessionCreatedRecord {
-            schema_version: 1,
-            session_id: SessionId::new(),
-            workspace_root: "/home/user/project".into(),
-            created_at: now(),
-        });
+    fn kind_rt(record: DurableRecord, kind: &str) {
+        assert_eq!(record.record_kind(), kind);
         let json = serde_json::to_string(&record).expect("serialize");
         let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(record.record_kind(), restored.record_kind());
-        assert_eq!(record.record_kind(), "session_created");
+        assert_eq!(restored.record_kind(), kind);
     }
 
-    #[test]
-    fn turn_started_roundtrip() {
-        let record = DurableRecord::TurnStarted(TurnStartedRecord {
+    fn serde_rt<T>(value: &T)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_string(value).expect("serialize");
+        let restored: T = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, *value);
+    }
+
+    fn sample_turn_started() -> TurnStartedRecord {
+        TurnStartedRecord {
             schema_version: 1,
             session_id: SessionId::new(),
             turn_id: TurnId::new(),
@@ -1448,28 +1446,111 @@ mod tests {
             reasoning_effort_selection: Some("high".into()),
             reasoning_effort: Some(devo_protocol::ReasoningEffort::High),
             started_at: now(),
-        });
-        let json = serde_json::to_string(&record).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(record.record_kind(), restored.record_kind());
+        }
+    }
+
+    #[test]
+    fn durable_record_kinds_roundtrip() {
+        let t = now();
+        let samples = [
+            (
+                DurableRecord::SessionCreated(SessionCreatedRecord {
+                    schema_version: 1,
+                    session_id: SessionId::new(),
+                    workspace_root: "/home/user/project".into(),
+                    created_at: t,
+                }),
+                "session_created",
+            ),
+            (
+                DurableRecord::TurnStarted(sample_turn_started()),
+                "turn_started",
+            ),
+            (
+                DurableRecord::ItemStarted(ItemStartedRecord {
+                    schema_version: 1,
+                    session_id: SessionId::new(),
+                    turn_id: TurnId::new(),
+                    item_id: ItemId::new(),
+                    kind: ItemRecordKind::AssistantText,
+                    role: RecordRole::Assistant,
+                    content_parts: vec![],
+                    mentions: vec![],
+                    visibility: ItemVisibility::Visible,
+                    created_at: t,
+                }),
+                "item_started",
+            ),
+            (
+                DurableRecord::ItemContentAppended(ItemContentAppendedRecord {
+                    schema_version: 1,
+                    item_id: ItemId::new(),
+                    content_part_index: 0,
+                    offset: 0,
+                    content_kind: ContentAppendKind::Text,
+                    content: "Hello, world!".into(),
+                    byte_count: 13,
+                }),
+                "item_content_appended",
+            ),
+            (
+                DurableRecord::TurnCompleted(TurnCompletedRecord {
+                    schema_version: 1,
+                    terminal: TurnTerminalFields {
+                        turn_id: TurnId::new(),
+                        session_id: SessionId::new(),
+                        status: TurnStatus::Completed,
+                        usage: Some(TurnUsage {
+                            input_tokens: 100,
+                            output_tokens: 50,
+                            cache_creation_input_tokens: Some(0),
+                            cache_read_input_tokens: Some(0),
+                            reasoning_output_tokens: None,
+                            total_tokens: None,
+                        }),
+                        workspace_change_set_id: None,
+                        completed_at: t,
+                    },
+                }),
+                "turn_completed",
+            ),
+            (
+                DurableRecord::ItemFailed(ItemFailedRecord {
+                    schema_version: 1,
+                    item_id: ItemId::new(),
+                    turn_id: TurnId::new(),
+                    final_status: ItemStatus::Failed,
+                    error: Some("permission denied".into()),
+                    completed_at: t,
+                }),
+                "item_failed",
+            ),
+            (
+                DurableRecord::ItemCompleted(ItemCompletedRecord {
+                    schema_version: 1,
+                    item_id: ItemId::new(),
+                    turn_id: TurnId::new(),
+                    final_status: ItemStatus::Completed,
+                    content_hash: None,
+                    completed_at: t,
+                }),
+                "item_completed",
+            ),
+        ];
+        let mut kinds = Vec::new();
+        for (record, kind) in samples {
+            kind_rt(record, kind);
+            kinds.push(kind);
+        }
+        let mut deduped = kinds.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(kinds.len(), deduped.len(), "record kinds must be unique");
     }
 
     #[test]
     fn turn_started_reads_legacy_thinking_field() {
-        let expected = TurnStartedRecord {
-            schema_version: 1,
-            session_id: SessionId::new(),
-            turn_id: TurnId::new(),
-            sequence: 0,
-            status: TurnStatus::Running,
-            kind: TurnKind::Regular,
-            resume_of_turn_id: None,
-            submitted_by_client_id: Some("tui-1".into()),
-            model: Some("deepseek-v4-pro".into()),
-            reasoning_effort_selection: Some("high".into()),
-            reasoning_effort: Some(devo_protocol::ReasoningEffort::High),
-            started_at: now(),
-        };
+        let expected = sample_turn_started();
         let mut value =
             serde_json::to_value(DurableRecord::TurnStarted(expected.clone())).expect("serialize");
         let object = value.as_object_mut().expect("turn-started json object");
@@ -1489,267 +1570,18 @@ mod tests {
     }
 
     #[test]
-    fn item_started_roundtrip() {
-        let record = DurableRecord::ItemStarted(ItemStartedRecord {
-            schema_version: 1,
-            session_id: SessionId::new(),
-            turn_id: TurnId::new(),
-            item_id: ItemId::new(),
-            kind: ItemRecordKind::AssistantText,
-            role: RecordRole::Assistant,
-            content_parts: vec![],
-            mentions: vec![],
-            visibility: ItemVisibility::Visible,
-            created_at: now(),
-        });
-        let json = serde_json::to_string(&record).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(record.record_kind(), restored.record_kind());
-        assert_eq!(record.record_kind(), "item_started");
-    }
-
-    #[test]
-    fn item_content_appended_roundtrip() {
-        let record = DurableRecord::ItemContentAppended(ItemContentAppendedRecord {
-            schema_version: 1,
-            item_id: ItemId::new(),
-            content_part_index: 0,
-            offset: 0,
-            content_kind: ContentAppendKind::Text,
-            content: "Hello, world!".into(),
-            byte_count: 13,
-        });
-        let json = serde_json::to_string(&record).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(record.record_kind(), restored.record_kind());
-    }
-
-    #[test]
-    fn turn_completed_with_usage_roundtrip() {
-        let usage = TurnUsage {
-            input_tokens: 100,
-            output_tokens: 50,
-            cache_creation_input_tokens: Some(0),
-            cache_read_input_tokens: Some(0),
-            reasoning_output_tokens: None,
-            total_tokens: None,
-        };
-        let record = DurableRecord::TurnCompleted(TurnCompletedRecord {
-            schema_version: 1,
-            terminal: TurnTerminalFields {
-                turn_id: TurnId::new(),
-                session_id: SessionId::new(),
-                status: TurnStatus::Completed,
-                usage: Some(usage),
-                workspace_change_set_id: None,
-                completed_at: now(),
-            },
-        });
-        let json = serde_json::to_string(&record).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(record.record_kind(), "turn_completed");
-        assert_eq!(restored.record_kind(), "turn_completed");
-    }
-
-    #[test]
-    fn item_failed_with_error_roundtrip() {
-        let record = DurableRecord::ItemFailed(ItemFailedRecord {
-            schema_version: 1,
-            item_id: ItemId::new(),
-            turn_id: TurnId::new(),
-            final_status: ItemStatus::Failed,
-            error: Some("permission denied".into()),
-            completed_at: now(),
-        });
-        let json = serde_json::to_string(&record).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(record.record_kind(), "item_failed");
-        assert_eq!(restored.record_kind(), "item_failed");
-    }
-
-    #[test]
-    fn all_record_kinds_unique() {
-        let kinds = vec![
-            DurableRecord::SessionCreated(SessionCreatedRecord {
-                schema_version: 1,
-                session_id: SessionId::new(),
-                workspace_root: "/tmp".into(),
-                created_at: now(),
-            })
-            .record_kind(),
-            DurableRecord::TurnStarted(TurnStartedRecord {
-                schema_version: 1,
-                session_id: SessionId::new(),
-                turn_id: TurnId::new(),
-                sequence: 0,
-                status: TurnStatus::Running,
-                kind: TurnKind::Regular,
-                resume_of_turn_id: None,
-                submitted_by_client_id: None,
-                model: None,
-                reasoning_effort_selection: None,
-                reasoning_effort: None,
-                started_at: now(),
-            })
-            .record_kind(),
-            DurableRecord::ItemStarted(ItemStartedRecord {
-                schema_version: 1,
-                session_id: SessionId::new(),
-                turn_id: TurnId::new(),
-                item_id: ItemId::new(),
-                kind: ItemRecordKind::UserInput,
-                role: RecordRole::User,
-                content_parts: vec![],
-                mentions: vec![],
-                visibility: ItemVisibility::Visible,
-                created_at: now(),
-            })
-            .record_kind(),
-            DurableRecord::ItemContentAppended(ItemContentAppendedRecord {
-                schema_version: 1,
-                item_id: ItemId::new(),
-                content_part_index: 0,
-                offset: 0,
-                content_kind: ContentAppendKind::Text,
-                content: String::new(),
-                byte_count: 0,
-            })
-            .record_kind(),
-            DurableRecord::TurnCompleted(TurnCompletedRecord {
-                schema_version: 1,
-                terminal: TurnTerminalFields {
-                    turn_id: TurnId::new(),
-                    session_id: SessionId::new(),
-                    status: TurnStatus::Completed,
-                    usage: None,
-                    workspace_change_set_id: None,
-                    completed_at: now(),
-                },
-            })
-            .record_kind(),
-            DurableRecord::ItemCompleted(ItemCompletedRecord {
-                schema_version: 1,
-                item_id: ItemId::new(),
-                turn_id: TurnId::new(),
-                final_status: ItemStatus::Completed,
-                content_hash: None,
-                completed_at: now(),
-            })
-            .record_kind(),
-        ];
-
-        let mut deduped = kinds.clone();
-        deduped.sort();
-        deduped.dedup();
-        assert_eq!(kinds.len(), deduped.len(), "record kinds must be unique");
-    }
-
-    #[test]
-    fn item_status_serde() {
-        let statuses = [
+    fn enum_and_part_serde_roundtrips() {
+        for status in [
             ItemStatus::Completed,
             ItemStatus::Failed,
             ItemStatus::Interrupted,
             ItemStatus::Denied,
             ItemStatus::Blocked,
             ItemStatus::Canceled,
-        ];
-        for status in &statuses {
-            let json = serde_json::to_string(status).expect("serialize");
-            let restored: ItemStatus = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(restored, *status);
-        }
-    }
-
-    // ── ExecutionPhase state machine tests ──
-
-    #[test]
-    fn admitted_to_assembling_context_is_legal() {
-        assert!(
-            ExecutionPhase::Admitted
-                .can_transition_to(ExecutionPhase::AssemblingContext)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn admitted_to_model_invocation_is_illegal() {
-        assert!(
-            ExecutionPhase::Admitted
-                .can_transition_to(ExecutionPhase::ModelInvocation)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn model_invocation_to_tool_dispatch_is_legal() {
-        assert!(
-            ExecutionPhase::ModelInvocation
-                .can_transition_to(ExecutionPhase::ToolDispatch)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn tool_dispatch_back_to_model_invocation_is_legal() {
-        assert!(
-            ExecutionPhase::ToolDispatch
-                .can_transition_to(ExecutionPhase::ModelInvocation)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn finalizing_to_completed_is_legal() {
-        assert!(
-            ExecutionPhase::Finalizing
-                .can_transition_to(ExecutionPhase::Completed)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn completed_is_terminal() {
-        assert!(ExecutionPhase::Completed.is_terminal());
-        assert!(ExecutionPhase::Failed.is_terminal());
-        assert!(!ExecutionPhase::Admitted.is_terminal());
-        assert!(!ExecutionPhase::ModelInvocation.is_terminal());
-    }
-
-    #[test]
-    fn completed_cannot_transition() {
-        assert!(
-            ExecutionPhase::Completed
-                .can_transition_to(ExecutionPhase::Admitted)
-                .is_err()
-        );
-        assert!(
-            ExecutionPhase::Failed
-                .can_transition_to(ExecutionPhase::Completed)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn interrupt_from_any_non_terminal_phase() {
-        for phase in &[
-            ExecutionPhase::Admitted,
-            ExecutionPhase::AssemblingContext,
-            ExecutionPhase::ModelInvocation,
-            ExecutionPhase::ToolDispatch,
-            ExecutionPhase::WaitingApproval,
-            ExecutionPhase::Finalizing,
         ] {
-            assert!(
-                phase.can_transition_to(ExecutionPhase::Interrupted).is_ok(),
-                "interrupt should be legal from {phase:?}"
-            );
+            serde_rt(&status);
         }
-    }
-
-    #[test]
-    fn execution_phase_serde_roundtrip() {
-        let phases = [
+        for phase in [
             ExecutionPhase::Admitted,
             ExecutionPhase::AssemblingContext,
             ExecutionPhase::ModelInvocation,
@@ -1759,19 +1591,10 @@ mod tests {
             ExecutionPhase::Completed,
             ExecutionPhase::Failed,
             ExecutionPhase::Interrupted,
-        ];
-        for phase in &phases {
-            let json = serde_json::to_string(phase).expect("serialize");
-            let restored: ExecutionPhase = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(restored, *phase);
+        ] {
+            serde_rt(&phase);
         }
-    }
-
-    // ── ContentPart & Mention ─────────────────────────────────────
-
-    #[test]
-    fn content_part_all_variants_roundtrip() {
-        let parts = vec![
+        for part in [
             ContentPart::Text("hello".into()),
             ContentPart::ImageRef {
                 artifact_id: "img-1".into(),
@@ -1783,252 +1606,299 @@ mod tests {
             ContentPart::ToolCallJson(serde_json::json!({"name": "read"})),
             ContentPart::ToolResultText("file content".into()),
             ContentPart::ProviderMetadata(serde_json::json!({"model": "opus"})),
-        ];
-        for part in &parts {
-            let json = serde_json::to_string(part).expect("serialize");
-            let restored: ContentPart = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(restored, *part);
+        ] {
+            serde_rt(&part);
+        }
+        for status in [
+            GoalStatus::Active,
+            GoalStatus::Paused,
+            GoalStatus::Blocked,
+            GoalStatus::UsageLimited,
+            GoalStatus::BudgetLimited,
+            GoalStatus::Completed,
+            GoalStatus::Failed,
+            GoalStatus::Canceled,
+            GoalStatus::Cleared,
+        ] {
+            serde_rt(&status);
+        }
+        for status in [
+            SubagentRunStatus::Spawning,
+            SubagentRunStatus::Running,
+            SubagentRunStatus::WaitingForInput,
+            SubagentRunStatus::Completed,
+            SubagentRunStatus::Failed,
+            SubagentRunStatus::Interrupted,
+        ] {
+            serde_rt(&status);
+        }
+        for status in [
+            BackgroundProcessStatus::Running,
+            BackgroundProcessStatus::Completed,
+            BackgroundProcessStatus::Failed,
+            BackgroundProcessStatus::Stopped,
+            BackgroundProcessStatus::Detached,
+        ] {
+            serde_rt(&status);
+        }
+        for (source, confidence, inclusion) in [
+            (
+                MetricSource::ProviderReported,
+                MetricConfidence::High,
+                MetricInclusion::Included,
+            ),
+            (
+                MetricSource::LocallyEstimated,
+                MetricConfidence::Medium,
+                MetricInclusion::Excluded,
+            ),
+            (
+                MetricSource::Unavailable,
+                MetricConfidence::Unknown,
+                MetricInclusion::Unknown,
+            ),
+        ] {
+            serde_rt(&UsageMetric {
+                metric_kind: UsageMetricKind::InputTokens,
+                value: 100,
+                source,
+                confidence,
+                inclusion,
+            });
         }
     }
 
     #[test]
-    fn mention_all_kinds_and_statuses_roundtrip() {
-        let mention = Mention {
-            mention_id: "m1".into(),
-            kind: MentionKind::File,
-            display_text: "src/main.rs".into(),
-            target: "src/main.rs".into(),
-            source_range: Some(SourceRange { start: 0, end: 12 }),
-            resolution_status: MentionResolutionStatus::Resolved,
-            visibility: MentionVisibility::Visible,
-        };
-        let json = serde_json::to_string(&mention).expect("serialize");
-        let restored: Mention = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.mention_id, "m1");
-        assert_eq!(restored.kind, MentionKind::File);
-        assert_eq!(
-            restored.resolution_status,
-            MentionResolutionStatus::Resolved
-        );
+    fn execution_phase_transitions() {
+        let legal = [
+            (ExecutionPhase::Admitted, ExecutionPhase::AssemblingContext),
+            (
+                ExecutionPhase::ModelInvocation,
+                ExecutionPhase::ToolDispatch,
+            ),
+            (
+                ExecutionPhase::ToolDispatch,
+                ExecutionPhase::ModelInvocation,
+            ),
+            (ExecutionPhase::Finalizing, ExecutionPhase::Completed),
+        ];
+        for (from, to) in legal {
+            assert!(from.can_transition_to(to).is_ok(), "{from:?} -> {to:?}");
+        }
+        for (from, to) in [
+            (ExecutionPhase::Admitted, ExecutionPhase::ModelInvocation),
+            (ExecutionPhase::Completed, ExecutionPhase::Admitted),
+            (ExecutionPhase::Failed, ExecutionPhase::Completed),
+        ] {
+            assert!(from.can_transition_to(to).is_err(), "{from:?} -> {to:?}");
+        }
+        for (phase, terminal) in [
+            (ExecutionPhase::Completed, true),
+            (ExecutionPhase::Failed, true),
+            (ExecutionPhase::Admitted, false),
+            (ExecutionPhase::ModelInvocation, false),
+        ] {
+            assert_eq!(phase.is_terminal(), terminal, "{phase:?}");
+        }
+        for phase in [
+            ExecutionPhase::Admitted,
+            ExecutionPhase::AssemblingContext,
+            ExecutionPhase::ModelInvocation,
+            ExecutionPhase::ToolDispatch,
+            ExecutionPhase::WaitingApproval,
+            ExecutionPhase::Finalizing,
+        ] {
+            assert!(phase.can_transition_to(ExecutionPhase::Interrupted).is_ok());
+            assert!(phase.can_transition_to(ExecutionPhase::Failed).is_ok());
+        }
     }
 
     #[test]
-    fn mention_unresolved_is_preserved() {
-        let mention = Mention {
-            mention_id: "m2".into(),
-            kind: MentionKind::Skill,
-            display_text: "unknown-skill".into(),
-            target: "unknown-skill".into(),
-            source_range: None,
-            resolution_status: MentionResolutionStatus::Unresolved,
-            visibility: MentionVisibility::Visible,
-        };
-        let json = serde_json::to_string(&mention).expect("serialize");
-        let restored: Mention = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(
-            restored.resolution_status,
-            MentionResolutionStatus::Unresolved
-        );
-    }
-
-    // ── New DurableRecord variants ────────────────────────────────
-
-    #[test]
-    fn plan_created_roundtrip() {
-        let record = DurableRecord::PlanCreated(PlanCreatedRecord {
-            schema_version: 1,
-            plan_id: PlanId::new(),
-            session_id: SessionId::new(),
-            turn_id: TurnId::new(),
-            objective: "Implement feature X".into(),
-            items: vec![PlanItemRecord {
-                plan_item_id: "1".into(),
-                text: "Write tests".into(),
-                status: PlanItemStatus::Pending,
-                details: None,
-                parent_item_id: None,
-                parallel_group_id: None,
-                source_turn_id: TurnId::new(),
-                updated_at: now(),
-            }],
-            created_at: now(),
-        });
-        let json = serde_json::to_string(&record).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(record.record_kind(), restored.record_kind());
-        assert_eq!(restored.record_kind(), "plan_created");
-    }
-
-    #[test]
-    fn goal_created_roundtrip() {
-        let record = DurableRecord::GoalCreated(GoalCreatedRecord {
-            schema_version: 1,
-            goal_id: GoalId::new(),
-            session_id: SessionId::new(),
-            turn_id: TurnId::new(),
-            prompt: "Refactor the auth module".into(),
-            description: Some("Make it more testable".into()),
-            max_iterations: Some(10),
-            budget: Some(GoalBudget {
-                max_turns: Some(5),
-                max_tokens: Some(100000),
-                max_duration_seconds: None,
-            }),
-            created_at: now(),
-        });
-        let json = serde_json::to_string(&record).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.record_kind(), "goal_created");
-    }
-
-    #[test]
-    fn subagent_spawned_roundtrip() {
-        let record = DurableRecord::SubagentSpawned(SubagentSpawnedRecord {
-            schema_version: 1,
-            parent_session_id: SessionId::new(),
-            child_session_id: SessionId::new(),
-            agent_nickname: "code-reviewer".into(),
-            agent_role: "reviewer".into(),
-            agent_path: Some("builtin".into()),
-            spawned_at: now(),
-        });
-        let json = serde_json::to_string(&record).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.record_kind(), "subagent_spawned");
-    }
-
-    #[test]
-    fn context_compaction_records_roundtrip() {
-        let started = DurableRecord::ContextCompactionStarted(ContextCompactionStartedRecord {
-            schema_version: 1,
-            session_id: SessionId::new(),
-            turn_id: TurnId::new(),
-            compaction_id: "comp-1".into(),
-            pre_compaction_context_size: 100000,
-            threshold_ratio: 0.8,
-            started_at: now(),
-        });
-        let json = serde_json::to_string(&started).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.record_kind(), "context_compaction_started");
-
-        let completed =
-            DurableRecord::ContextCompactionCompleted(ContextCompactionCompletedRecord {
-                schema_version: 1,
-                session_id: SessionId::new(),
-                compaction_id: "comp-1".into(),
-                summary_item_id: ItemId::new(),
-                post_compaction_context_size: 30000,
-                preserved_item_ids: vec![ItemId::new(), ItemId::new()],
-                completed_at: now(),
-            });
-        let json = serde_json::to_string(&completed).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.record_kind(), "context_compaction_completed");
-    }
-
-    #[test]
-    fn usage_recorded_with_metrics_roundtrip() {
-        let record = DurableRecord::UsageRecorded(UsageRecordedRecord {
-            schema_version: 1,
-            session_id: SessionId::new(),
-            turn_id: TurnId::new(),
-            invocation_id: InvocationId::new(),
-            model_binding_id: ModelBindingId::new(),
-            canonical_model_slug: "claude-sonnet-4-6".into(),
-            provider_id: ProviderId::new(),
-            invocation_method: InvocationMethod::AnthropicMessages,
-            reasoning_effort: Some(devo_protocol::ReasoningEffort::High),
-            metrics: vec![
-                UsageMetric {
-                    metric_kind: UsageMetricKind::InputTokens,
-                    value: 5000,
-                    source: MetricSource::ProviderReported,
-                    confidence: MetricConfidence::High,
-                    inclusion: MetricInclusion::Included,
-                },
-                UsageMetric {
-                    metric_kind: UsageMetricKind::OutputTokens,
-                    value: 800,
-                    source: MetricSource::ProviderReported,
-                    confidence: MetricConfidence::High,
-                    inclusion: MetricInclusion::Included,
-                },
-            ],
-            context_pressure: ContextPressure {
-                context_size: 5000,
-                effective_limit: 200000,
-                pressure_state: ContextPressureState::Normal,
-                compaction_status: CompactionStatus::NotNeeded,
+    fn mention_roundtrips() {
+        for mention in [
+            Mention {
+                mention_id: "m1".into(),
+                kind: MentionKind::File,
+                display_text: "src/main.rs".into(),
+                target: "src/main.rs".into(),
+                source_range: Some(SourceRange { start: 0, end: 12 }),
+                resolution_status: MentionResolutionStatus::Resolved,
+                visibility: MentionVisibility::Visible,
             },
-            recorded_at: now(),
-        });
-        let json = serde_json::to_string(&record).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.record_kind(), "usage_recorded");
+            Mention {
+                mention_id: "m2".into(),
+                kind: MentionKind::Skill,
+                display_text: "unknown-skill".into(),
+                target: "unknown-skill".into(),
+                source_range: None,
+                resolution_status: MentionResolutionStatus::Unresolved,
+                visibility: MentionVisibility::Visible,
+            },
+        ] {
+            serde_rt(&mention);
+        }
     }
 
     #[test]
-    fn message_edit_recorded_roundtrip() {
-        let record = DurableRecord::MessageEditRecorded(MessageEditRecordedRecord {
-            schema_version: 1,
-            session_id: SessionId::new(),
-            edit_id: EditId::new(),
-            target_message_id: ItemId::new(),
-            replacement_message_id: ItemId::new(),
-            target_turn_id: Some(TurnId::new()),
-            replacement_turn_id: None,
-            queue_item_id: None,
-            edited_content_parts: vec![ContentPart::Text("fixed message".into())],
-            edited_mentions: vec![],
-            workspace_restore_policy: WorkspaceRestorePolicy::Safe,
-            edit_state: EditState::Accepted,
-            requested_by_client_id: Some("tui-1".into()),
-            created_at: now(),
-        });
-        let json = serde_json::to_string(&record).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.record_kind(), "message_edit_recorded");
-    }
-
-    #[test]
-    fn workspace_restore_records_roundtrip() {
+    fn later_durable_record_kinds_roundtrip() {
+        let t = now();
         let restore_id = RestoreId::new();
-        let started =
-            DurableRecord::TurnWorkspaceRestoreStarted(TurnWorkspaceRestoreStartedRecord {
-                schema_version: 1,
-                session_id: SessionId::new(),
-                turn_id: TurnId::new(),
-                restore_id,
-                candidate_files: vec!["src/main.rs".into()],
-                policy: WorkspaceRestorePolicy::Safe,
-                started_at: now(),
-            });
-        let json = serde_json::to_string(&started).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.record_kind(), "turn_workspace_restore_started");
-
-        let completed =
-            DurableRecord::TurnWorkspaceRestoreCompleted(TurnWorkspaceRestoreCompletedRecord {
-                schema_version: 1,
-                session_id: SessionId::new(),
-                restore_id,
-                outcomes: vec![FileRestoreOutcome {
-                    file_path: "src/main.rs".into(),
-                    status: RestoreFileStatus::Restored,
-                }],
-                completed_at: now(),
-            });
-        let json = serde_json::to_string(&completed).expect("serialize");
-        let restored: DurableRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.record_kind(), "turn_workspace_restore_completed");
+        for (record, kind) in [
+            (
+                DurableRecord::PlanCreated(PlanCreatedRecord {
+                    schema_version: 1,
+                    plan_id: PlanId::new(),
+                    session_id: SessionId::new(),
+                    turn_id: TurnId::new(),
+                    objective: "Implement feature X".into(),
+                    items: vec![PlanItemRecord {
+                        plan_item_id: "1".into(),
+                        text: "Write tests".into(),
+                        status: PlanItemStatus::Pending,
+                        details: None,
+                        parent_item_id: None,
+                        parallel_group_id: None,
+                        source_turn_id: TurnId::new(),
+                        updated_at: t,
+                    }],
+                    created_at: t,
+                }),
+                "plan_created",
+            ),
+            (
+                DurableRecord::GoalCreated(GoalCreatedRecord {
+                    schema_version: 1,
+                    goal_id: GoalId::new(),
+                    session_id: SessionId::new(),
+                    turn_id: TurnId::new(),
+                    prompt: "Refactor the auth module".into(),
+                    description: Some("Make it more testable".into()),
+                    max_iterations: Some(10),
+                    budget: Some(GoalBudget {
+                        max_turns: Some(5),
+                        token_budget: Some(100000),
+                        max_duration_seconds: None,
+                    }),
+                    created_at: t,
+                }),
+                "goal_created",
+            ),
+            (
+                DurableRecord::SubagentSpawned(SubagentSpawnedRecord {
+                    schema_version: 1,
+                    parent_session_id: SessionId::new(),
+                    child_session_id: SessionId::new(),
+                    agent_nickname: "code-reviewer".into(),
+                    agent_role: "reviewer".into(),
+                    agent_path: Some("builtin".into()),
+                    spawned_at: t,
+                }),
+                "subagent_spawned",
+            ),
+            (
+                DurableRecord::ContextCompactionStarted(ContextCompactionStartedRecord {
+                    schema_version: 1,
+                    session_id: SessionId::new(),
+                    turn_id: TurnId::new(),
+                    compaction_id: "comp-1".into(),
+                    pre_compaction_context_size: 100000,
+                    threshold_ratio: 0.8,
+                    started_at: t,
+                }),
+                "context_compaction_started",
+            ),
+            (
+                DurableRecord::ContextCompactionCompleted(ContextCompactionCompletedRecord {
+                    schema_version: 1,
+                    session_id: SessionId::new(),
+                    compaction_id: "comp-1".into(),
+                    summary_item_id: ItemId::new(),
+                    post_compaction_context_size: 30000,
+                    preserved_item_ids: vec![ItemId::new(), ItemId::new()],
+                    completed_at: t,
+                }),
+                "context_compaction_completed",
+            ),
+            (
+                DurableRecord::UsageRecorded(UsageRecordedRecord {
+                    schema_version: 1,
+                    session_id: SessionId::new(),
+                    turn_id: TurnId::new(),
+                    invocation_id: InvocationId::new(),
+                    model_binding_id: ModelBindingId::new(),
+                    canonical_model_slug: "claude-sonnet-4-6".into(),
+                    provider_id: ProviderId::new(),
+                    invocation_method: InvocationMethod::AnthropicMessages,
+                    reasoning_effort: Some(devo_protocol::ReasoningEffort::High),
+                    metrics: vec![UsageMetric {
+                        metric_kind: UsageMetricKind::InputTokens,
+                        value: 5000,
+                        source: MetricSource::ProviderReported,
+                        confidence: MetricConfidence::High,
+                        inclusion: MetricInclusion::Included,
+                    }],
+                    context_pressure: ContextPressure {
+                        context_size: 5000,
+                        effective_limit: 200000,
+                        pressure_state: ContextPressureState::Normal,
+                        compaction_status: CompactionStatus::NotNeeded,
+                    },
+                    recorded_at: t,
+                }),
+                "usage_recorded",
+            ),
+            (
+                DurableRecord::MessageEditRecorded(MessageEditRecordedRecord {
+                    schema_version: 1,
+                    session_id: SessionId::new(),
+                    edit_id: EditId::new(),
+                    target_message_id: ItemId::new(),
+                    replacement_message_id: ItemId::new(),
+                    target_turn_id: Some(TurnId::new()),
+                    replacement_turn_id: None,
+                    queue_item_id: None,
+                    edited_content_parts: vec![ContentPart::Text("fixed message".into())],
+                    edited_mentions: vec![],
+                    workspace_restore_policy: WorkspaceRestorePolicy::Safe,
+                    edit_state: EditState::Accepted,
+                    requested_by_client_id: Some("tui-1".into()),
+                    created_at: t,
+                }),
+                "message_edit_recorded",
+            ),
+            (
+                DurableRecord::TurnWorkspaceRestoreStarted(TurnWorkspaceRestoreStartedRecord {
+                    schema_version: 1,
+                    session_id: SessionId::new(),
+                    turn_id: TurnId::new(),
+                    restore_id,
+                    candidate_files: vec!["src/main.rs".into()],
+                    policy: WorkspaceRestorePolicy::Safe,
+                    started_at: t,
+                }),
+                "turn_workspace_restore_started",
+            ),
+            (
+                DurableRecord::TurnWorkspaceRestoreCompleted(TurnWorkspaceRestoreCompletedRecord {
+                    schema_version: 1,
+                    session_id: SessionId::new(),
+                    restore_id,
+                    outcomes: vec![FileRestoreOutcome {
+                        file_path: "src/main.rs".into(),
+                        status: RestoreFileStatus::Restored,
+                    }],
+                    completed_at: t,
+                }),
+                "turn_workspace_restore_completed",
+            ),
+        ] {
+            kind_rt(record, kind);
+        }
     }
 
-    // ── WorkspaceChangeSet & FileChange ───────────────────────────
-
     #[test]
-    fn workspace_change_set_roundtrip() {
-        let cs = WorkspaceChangeSet {
+    fn workspace_and_fork_structs_roundtrip() {
+        serde_rt(&WorkspaceChangeSet {
             change_set_id: "cs-1".into(),
             session_id: SessionId::new(),
             turn_id: TurnId::new(),
@@ -2039,29 +1909,21 @@ mod tests {
             display_diff_ref: Some("diff-1".into()),
             restore_data_ref: None,
             change_set_status: ChangeSetStatus::Finalized,
-        };
-        let json = serde_json::to_string(&cs).expect("serialize");
-        let restored: WorkspaceChangeSet = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.change_set_id, "cs-1");
-        assert_eq!(restored.change_set_status, ChangeSetStatus::Finalized);
-    }
-
-    #[test]
-    fn file_change_all_kinds_roundtrip() {
-        for kind in &[
+        });
+        for kind in [
             FileChangeKind::Create,
             FileChangeKind::Modify,
             FileChangeKind::Delete,
             FileChangeKind::Rename,
             FileChangeKind::ModeChange,
         ] {
-            let fc = FileChange {
+            serde_rt(&FileChange {
                 file_change_id: "fc-1".into(),
                 turn_id: TurnId::new(),
                 tool_call_id: "call-1".into(),
                 tool_name: "write".into(),
                 path: "src/lib.rs".into(),
-                change_kind: *kind,
+                change_kind: kind,
                 pre_state_ref: None,
                 pre_state_hash: None,
                 post_state_ref: Some("ref-1".into()),
@@ -2069,18 +1931,9 @@ mod tests {
                 inverse_ref: None,
                 display_diff_hunk_ref: Some("diff-1".into()),
                 attribution_confidence: AttributionConfidence::Exact,
-            };
-            let json = serde_json::to_string(&fc).expect("serialize");
-            let restored: FileChange = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(restored.change_kind, *kind);
+            });
         }
-    }
-
-    // ── ForkOrigin & InheritedHistory ─────────────────────────────
-
-    #[test]
-    fn fork_origin_roundtrip() {
-        let origin = ForkOrigin {
+        serde_rt(&ForkOrigin {
             parent_session_id: SessionId::new(),
             fork_turn_id: TurnId::new(),
             fork_created_at: now(),
@@ -2089,16 +1942,8 @@ mod tests {
             fork_turn_digest: "Added tests for auth".into(),
             origin_snapshot_hash: "abc123def".into(),
             parent_availability: ParentAvailability::Available,
-        };
-        let json = serde_json::to_string(&origin).expect("serialize");
-        let restored: ForkOrigin = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.parent_display_label, "Main session");
-        assert_eq!(restored.parent_availability, ParentAvailability::Available);
-    }
-
-    #[test]
-    fn inherited_history_segment_roundtrip() {
-        let segment = InheritedHistorySegmentDescriptor {
+        });
+        serde_rt(&InheritedHistorySegmentDescriptor {
             inherited_segment_id: "seg-1".into(),
             source_parent_session_id: SessionId::new(),
             source_range: SegmentSourceRange {
@@ -2117,92 +1962,6 @@ mod tests {
             segment_hash: "seg-hash".into(),
             availability_state: SegmentAvailability::Available,
             created_at: now(),
-        };
-        let json = serde_json::to_string(&segment).expect("serialize");
-        let restored: InheritedHistorySegmentDescriptor =
-            serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(restored.inherited_segment_id, "seg-1");
-        assert_eq!(
-            restored.storage_strategy,
-            StorageStrategy::ProtectedSharedSegment
-        );
-    }
-
-    // ── Enum serde coverage ───────────────────────────────────────
-
-    #[test]
-    fn all_new_enums_serde_roundtrip() {
-        // Usage metric enums
-        for (src, conf, incl) in [
-            (
-                MetricSource::ProviderReported,
-                MetricConfidence::High,
-                MetricInclusion::Included,
-            ),
-            (
-                MetricSource::LocallyEstimated,
-                MetricConfidence::Medium,
-                MetricInclusion::Excluded,
-            ),
-            (
-                MetricSource::Unavailable,
-                MetricConfidence::Unknown,
-                MetricInclusion::Unknown,
-            ),
-        ] {
-            let m = UsageMetric {
-                metric_kind: UsageMetricKind::InputTokens,
-                value: 100,
-                source: src,
-                confidence: conf,
-                inclusion: incl,
-            };
-            let json = serde_json::to_string(&m).expect("serialize");
-            let restored: UsageMetric = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(restored.source, src);
-        }
-
-        // Goal statuses
-        for status in &[
-            GoalStatus::Active,
-            GoalStatus::Paused,
-            GoalStatus::Completed,
-            GoalStatus::Failed,
-            GoalStatus::Blocked,
-            GoalStatus::Canceled,
-            GoalStatus::Cleared,
-        ] {
-            let json = serde_json::to_string(status).expect("serialize");
-            let restored: GoalStatus = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(restored, *status);
-        }
-
-        // Subagent statuses
-        for status in &[
-            SubagentRunStatus::Spawning,
-            SubagentRunStatus::Running,
-            SubagentRunStatus::WaitingForInput,
-            SubagentRunStatus::Completed,
-            SubagentRunStatus::Failed,
-            SubagentRunStatus::Interrupted,
-        ] {
-            let json = serde_json::to_string(status).expect("serialize");
-            let restored: SubagentRunStatus = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(restored, *status);
-        }
-
-        // Background process statuses
-        for status in &[
-            BackgroundProcessStatus::Running,
-            BackgroundProcessStatus::Completed,
-            BackgroundProcessStatus::Failed,
-            BackgroundProcessStatus::Stopped,
-            BackgroundProcessStatus::Detached,
-        ] {
-            let json = serde_json::to_string(status).expect("serialize");
-            let restored: BackgroundProcessStatus =
-                serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(restored, *status);
-        }
+        });
     }
 }

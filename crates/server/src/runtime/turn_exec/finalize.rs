@@ -1,19 +1,16 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use devo_core::{SessionId, TurnError, TurnStatus, TurnUsage};
-use devo_protocol::{
-    SessionHistoryItem, SessionHistoryItemKind, SessionHistoryMetadata, TurnFailedPayload,
-};
+use devo_core::{SessionId, TurnError};
+use devo_protocol::native::usage::TurnUsage;
 
 use super::super::ServerRuntime;
 use super::super::subagent_usage::ParentUsageSnapshot;
-use super::failure::{turn_error_payload_from_error, turn_failure_reason_from_error};
+use super::failure::{turn_agent_error_from_error, turn_failure_reason_from_error};
 use super::types::{TurnEventStreamSummary, TurnQueryOutcome};
 use crate::db::{QueueType, SessionStats};
-use crate::persistence::build_turn_record;
 use crate::runtime::session_actor::SessionActorState;
-use crate::{SessionRuntimeStatus, SessionStatusChangedPayload, TurnEventPayload};
+use devo_protocol::native::session::SessionStatus;
 
 fn terminal_usages(
     event_summary: Option<&TurnEventStreamSummary>,
@@ -43,7 +40,7 @@ fn reported_usage(usage: TurnUsage) -> Option<TurnUsage> {
 pub(crate) struct FinalizeTurnParams<'a> {
     pub state: &'a mut SessionActorState,
     pub session_id: SessionId,
-    pub turn: crate::TurnMetadata,
+    pub turn: crate::turn::RuntimeTurn,
     pub query_outcome: TurnQueryOutcome,
     pub event_summary: Option<TurnEventStreamSummary>,
     pub usage_parent_session_id: Option<SessionId>,
@@ -76,11 +73,11 @@ impl ServerRuntime {
             // Completed legs were already accumulated by the event stream.
             // Only fold any trailing in-flight delta (e.g. interrupted mid-stream).
             let _ = self
-                .commit_subagent_inflight_usage(session_id, turn.turn_id)
+                .commit_subagent_inflight_usage(session_id, turn.turn_id())
                 .await;
         }
         let usage_snapshot = if usage_parent_session_id.is_none() {
-            self.parent_usage_snapshot(session_id, turn.turn_id).await
+            self.parent_usage_snapshot(session_id, turn.turn_id()).await
         } else {
             None
         };
@@ -90,11 +87,16 @@ impl ServerRuntime {
             .as_ref()
             .err()
             .filter(|error| !matches!(error, devo_core::AgentError::Aborted))
-            .map(turn_error_payload_from_error)
+            .map(turn_agent_error_from_error)
             .map(|error| TurnError {
-                code: error.code,
+                code: error.error_code,
                 message: error.message,
-                recovery_hint: error.recovery_hint,
+                recovery_hint: error.details.as_ref().and_then(|details| {
+                    details
+                        .get("recoveryHint")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned)
+                }),
             });
         if let Some(snapshot) = usage_snapshot {
             session_total_input_tokens = snapshot.session_totals.input_tokens;
@@ -157,12 +159,12 @@ impl ServerRuntime {
                 session_prompt_token_estimate,
             )
             .await;
-        if final_turn.status == TurnStatus::Failed
-            && final_turn.failure_reason.is_none()
+        if final_turn.native.status == devo_protocol::native::turn::TurnStatus::Failed
+            && final_turn.extras.failure_reason.is_none()
             && let Err(error) = self
                 .persist_recovery_disposition(
                     session_id,
-                    final_turn.turn_id,
+                    final_turn.native.id,
                     devo_core::durable_execution::RecoveryDisposition::Available,
                     "This turn ended with a program or provider error.",
                 )
@@ -170,7 +172,7 @@ impl ServerRuntime {
         {
             tracing::warn!(%session_id, %error, "failed to save recovery state");
         }
-        if matches!(final_turn.status, TurnStatus::Interrupted) {
+        if final_turn.native.status == devo_protocol::native::turn::TurnStatus::Interrupted {
             state.core.mark_last_turn_interrupted();
         } else {
             state.core.last_turn_interrupted = false;
@@ -184,7 +186,7 @@ impl ServerRuntime {
             terminal_error.clone(),
         )
         .await;
-        append_terminal_history_items(state, &final_turn, terminal_error.as_ref());
+        append_terminal_history_items(state, terminal_error.as_ref());
         self.finalize_turn_workspace_changes(session_id, &final_turn)
             .await;
         self.emit_terminal_turn_events(
@@ -196,8 +198,8 @@ impl ServerRuntime {
         )
         .await;
         self.record_terminal_turn_status(
-            final_turn.turn_id,
-            super::super::TerminalTurnSnapshot::from_turn(&final_turn),
+            final_turn.turn_id(),
+            super::super::TerminalTurnSnapshot::from_runtime_turn(&final_turn),
         )
         .await;
     }
@@ -207,10 +209,10 @@ impl ServerRuntime {
         self: &Arc<Self>,
         state: &mut SessionActorState,
         session_id: SessionId,
-        turn: &crate::TurnMetadata,
+        turn: &crate::turn::RuntimeTurn,
         result: &Result<(), devo_core::AgentError>,
-        turn_usage: Option<devo_core::TurnUsage>,
-        latest_query_usage: Option<devo_core::TurnUsage>,
+        turn_usage: Option<TurnUsage>,
+        latest_query_usage: Option<TurnUsage>,
         terminal_stop_reason: Option<devo_core::StopReason>,
         session_total_input_tokens: usize,
         session_total_output_tokens: usize,
@@ -219,48 +221,52 @@ impl ServerRuntime {
         session_total_cache_read_tokens: usize,
         session_last_input_tokens: usize,
         session_prompt_token_estimate: usize,
-    ) -> crate::TurnMetadata {
+    ) -> crate::turn::RuntimeTurn {
         let mut final_turn = turn.clone();
-        final_turn.completed_at = Some(Utc::now());
-        final_turn.status = match result {
-            Ok(()) => TurnStatus::Completed,
-            Err(devo_core::AgentError::Aborted) => TurnStatus::Interrupted,
-            Err(_) => TurnStatus::Failed,
+        final_turn.native.completed_at = Some(Utc::now());
+        final_turn.native.status = match result {
+            Ok(()) => devo_protocol::native::turn::TurnStatus::Completed,
+            Err(devo_core::AgentError::Aborted) => {
+                devo_protocol::native::turn::TurnStatus::Interrupted
+            }
+            Err(_) => devo_protocol::native::turn::TurnStatus::Failed,
         };
-        final_turn.usage = turn_usage;
-        final_turn.stop_reason = terminal_stop_reason;
-        final_turn.failure_reason = result
+        final_turn.native.usage = turn_usage;
+        final_turn.extras.stop_reason = terminal_stop_reason;
+        final_turn.extras.failure_reason = result
             .as_ref()
             .err()
             .and_then(turn_failure_reason_from_error);
         state.latest_turn = Some(final_turn.clone());
         state.active_turn = None;
-        state.summary.status = SessionRuntimeStatus::Idle;
+        state.summary.set_status(SessionStatus::Idle);
         state.summary.updated_at = Utc::now();
         state.summary.last_activity_at = state.summary.updated_at;
-        state.summary.total_input_tokens = session_total_input_tokens;
-        state.summary.total_output_tokens = session_total_output_tokens;
-        state.summary.total_tokens = session_total_tokens;
-        state.summary.total_cache_creation_tokens = session_total_cache_creation_tokens;
-        state.summary.total_cache_read_tokens = session_total_cache_read_tokens;
+        state.summary.set_cumulative_usage(
+            session_total_input_tokens,
+            session_total_output_tokens,
+            session_total_tokens,
+            session_total_cache_creation_tokens,
+            session_total_cache_read_tokens,
+        );
         state.summary.prompt_token_estimate = session_prompt_token_estimate;
         let last_input_for_stats = latest_query_usage
             .as_ref()
-            .map(|usage| usage.input_tokens as usize)
+            .map(|usage| usage.query.input_tokens as usize)
             .unwrap_or(session_last_input_tokens);
         if let Some(usage) = latest_query_usage {
             // Context length uses latest-query display total, not session
             // cumulative total_input/output/tokens.
             state.summary.last_query_usage = Some(usage.clone());
-            state.summary.last_query_total_tokens = usage.display_total_tokens();
-            state.core.last_input_tokens = usage.input_tokens as usize;
-            state.core.last_turn_tokens = usage.display_total_tokens();
+            state.summary.last_query_total_tokens = usage.display_total_tokens() as usize;
+            state.core.last_input_tokens = usage.query.input_tokens as usize;
+            state.core.last_turn_tokens = usage.display_total_tokens() as usize;
             if let Some(raw) = state.core.raw_context_breakdown {
                 let window = effective_context_window_tokens(state, self);
                 let occupancy = super::super::context_occupancy::occupancy_from_raw(
                     window,
                     raw,
-                    usage.display_total_tokens() as u64,
+                    usage.display_total_tokens(),
                 );
                 state.core.last_turn_tokens = occupancy.total_tokens as usize;
                 state.summary.last_context_occupancy = Some(occupancy);
@@ -327,7 +333,7 @@ impl ServerRuntime {
             // drained by follow-up scheduling was consumed into its next turn;
             // retaining or moving its steer row would leave an orphan and make
             // a restart resurrect a duplicate. Every other steer row is dropped.
-            let queued_ids: std::collections::HashSet<devo_core::PendingInputId> = state
+            let queued_ids: std::collections::HashSet<devo_core::QueueItemId> = state
                 .pending_turn_queue
                 .lock()
                 .expect("pending turn queue mutex should not be poisoned")
@@ -366,9 +372,7 @@ impl ServerRuntime {
             self.broadcast_queue_updated(
                 session_id,
                 devo_protocol::native::queue::QueueChange::Added,
-                devo_protocol::native::ids::QueueItemId::from_legacy_uuid(uuid::Uuid::from(
-                    item.id,
-                )),
+                item.id,
                 None,
             )
             .await;
@@ -379,29 +383,45 @@ impl ServerRuntime {
         self: &Arc<Self>,
         state: &mut SessionActorState,
         session_id: SessionId,
-        final_turn: &crate::TurnMetadata,
-        latest_query_usage: Option<devo_core::TurnUsage>,
+        final_turn: &crate::turn::RuntimeTurn,
+        latest_query_usage: Option<TurnUsage>,
         terminal_error: Option<TurnError>,
     ) {
-        let record = state.record.clone();
+        let rollout_path = state.rollout_path.clone();
         let turn_context = state.core.latest_turn_context.clone();
         let session_context = state.core.session_context.clone();
-        let mut turn_record = build_turn_record(
+        let extras = crate::persistence::turn_persistence_extras_from_runtime(
             final_turn,
-            None,
+            /*session_context*/ None,
             turn_context,
             latest_query_usage,
             state.summary.last_context_occupancy.clone(),
         );
-        turn_record.error = terminal_error;
-        state
-            .turn_records_by_id
-            .insert(turn_record.id, turn_record.clone());
-        if let Some(record) = record
-            && let Err(error) = self.rollout_store.append_turn_deduped(
-                &record,
+        let mut native_turn = final_turn.native.clone();
+        native_turn.error = terminal_error.as_ref().map(|error| {
+            let mut agent_error = devo_protocol::native::error::AgentError::new(
+                error.code.clone(),
+                error.message.clone(),
+            );
+            if let Some(hint) = &error.recovery_hint {
+                agent_error.details = Some(serde_json::json!({ "recoveryHint": hint }));
+            }
+            agent_error
+        });
+        state.turns_by_id.insert(
+            final_turn.turn_id(),
+            crate::replay_hydrate::ReplayedTurn::from_native(
+                native_turn.clone(),
+                Some(extras.clone()),
+            ),
+        );
+        if let Some(rollout_path) = rollout_path
+            && let Err(error) = self.rollout_store.append_turn_deduped_at(
+                &rollout_path,
+                session_id,
                 &mut state.session_context_recorded,
-                turn_record,
+                &native_turn,
+                Some(extras),
                 session_context,
             )
         {
@@ -413,7 +433,7 @@ impl ServerRuntime {
         self: &Arc<Self>,
         state: &SessionActorState,
         session_id: SessionId,
-        final_turn: &crate::TurnMetadata,
+        final_turn: &crate::turn::RuntimeTurn,
         result: &Result<(), devo_core::AgentError>,
         terminal_error: Option<&TurnError>,
     ) {
@@ -421,65 +441,61 @@ impl ServerRuntime {
             if matches!(error, devo_core::AgentError::Aborted) {
                 tracing::info!(
                     session_id = %session_id,
-                    turn_id = %final_turn.turn_id,
-                    status = ?final_turn.status,
+                    turn_id = %final_turn.turn_id(),
+                    status = ?final_turn.native.status,
                     "turn execution interrupted"
                 );
-                self.broadcast_event(crate::ServerEvent::TurnInterrupted(TurnEventPayload {
-                    session_id,
-                    turn: final_turn.clone(),
-                }))
-                .await;
             } else {
                 tracing::warn!(
                     session_id = %session_id,
-                    turn_id = %final_turn.turn_id,
-                    status = ?final_turn.status,
+                    turn_id = %final_turn.turn_id(),
+                    status = ?final_turn.native.status,
                     error = %error,
                     "turn execution failed"
                 );
-                self.broadcast_event(crate::ServerEvent::TurnFailed(TurnFailedPayload {
-                    session_id,
-                    turn: final_turn.clone(),
-                    error: terminal_error.map(|error| devo_protocol::TurnErrorPayload {
-                        code: error.code.clone(),
-                        message: error.message.clone(),
-                        recovery_hint: error.recovery_hint.clone(),
-                    }),
-                }))
-                .await;
             }
         } else {
             tracing::info!(
                 session_id = %session_id,
-                turn_id = %final_turn.turn_id,
-                status = ?final_turn.status,
-                total_input_tokens = final_turn.usage.as_ref().map(|usage| usage.input_tokens),
-                total_output_tokens = final_turn.usage.as_ref().map(|usage| usage.output_tokens),
+                turn_id = %final_turn.turn_id(),
+                status = ?final_turn.native.status,
+                total_input_tokens = final_turn.native.usage.as_ref().map(|usage| usage.query.input_tokens),
+                total_output_tokens = final_turn.native.usage.as_ref().map(|usage| usage.query.output_tokens),
                 "turn execution completed"
             );
         }
         self.handle_subagent_turn_completed_for_actor_state(state, session_id, final_turn)
             .await;
-        self.broadcast_event(crate::ServerEvent::TurnCompleted(TurnEventPayload {
-            session_id,
-            turn: final_turn.clone(),
-        }))
-        .await;
-        self.broadcast_event(crate::ServerEvent::SessionStatusChanged(
-            SessionStatusChangedPayload {
-                session_id,
-                status: SessionRuntimeStatus::Idle,
+        let mut completed_turn = final_turn.native.clone();
+        if let Err(error) = result
+            && !matches!(error, devo_core::AgentError::Aborted)
+        {
+            completed_turn.error = terminal_error.as_ref().map(|error| {
+                let mut agent_error = devo_protocol::native::error::AgentError::new(
+                    error.code.clone(),
+                    error.message.clone(),
+                );
+                if let Some(hint) = &error.recovery_hint {
+                    agent_error.details = Some(serde_json::json!({ "recoveryHint": hint }));
+                }
+                agent_error
+            });
+        }
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::TurnCompleted {
+                turn: Box::new(completed_turn),
             },
-        ))
+        )
         .await;
+        self.broadcast_notification(state.summary.status_changed_notification())
+            .await;
         if let Some(occupancy) = state.summary.last_context_occupancy.clone() {
-            self.broadcast_event(crate::ServerEvent::ContextUsageUpdated(
-                crate::ContextUsageUpdatedPayload {
-                    session_id,
+            self.broadcast_notification(
+                devo_protocol::native::event::ServerNotification::ContextUsageUpdated {
+                    session_id: state.summary.native.id,
                     occupancy,
                 },
-            ))
+            )
             .await;
         }
     }
@@ -494,8 +510,7 @@ fn effective_context_window_tokens(state: &SessionActorState, runtime: &ServerRu
         .or_else(|| {
             state
                 .summary
-                .model
-                .as_deref()
+                .model_name()
                 .and_then(|slug| runtime.deps.model_catalog.get(slug))
         });
     super::super::context_occupancy::occupancy_window_tokens(model)
@@ -503,75 +518,54 @@ fn effective_context_window_tokens(state: &SessionActorState, runtime: &ServerRu
 
 fn append_terminal_history_items(
     state: &mut SessionActorState,
-    final_turn: &crate::TurnMetadata,
     terminal_error: Option<&TurnError>,
 ) {
+    // Native Turn status/timing is the turn-summary source for first-party
+    // clients. Only terminal failures leave a history row, as Item::Warning.
     if let Some(error) = terminal_error {
-        let title = error
+        let code = error
             .recovery_hint
             .clone()
             .unwrap_or_else(|| error.code.clone());
-        state.history_items.push(SessionHistoryItem::new(
-            None,
-            SessionHistoryItemKind::Error,
-            title,
-            error.message.clone(),
-        ));
+        state
+            .history_items
+            .push(crate::persisted_native_item::turn_failure_history_entry(
+                code,
+                error.message.clone(),
+            ));
     }
-
-    let outcome = match final_turn.status {
-        TurnStatus::Failed => "failed",
-        TurnStatus::Interrupted => "interrupted",
-        TurnStatus::Completed => "",
-        TurnStatus::Pending | TurnStatus::Running | TurnStatus::WaitingApproval => return,
-    };
-    let duration_secs = final_turn.completed_at.and_then(|completed| {
-        let seconds = (completed - final_turn.started_at).num_seconds();
-        (seconds > 0).then_some(seconds as u64)
-    });
-    state.history_items.push(SessionHistoryItem {
-        tool_call_id: None,
-        kind: SessionHistoryItemKind::TurnSummary,
-        title: final_turn.model.clone(),
-        body: outcome.to_string(),
-        tool_io: None,
-        metadata: Some(SessionHistoryMetadata::TurnSummary {
-            collaboration_mode: state.core.collaboration_mode,
-        }),
-        duration_ms: duration_secs,
-    });
 }
 
 #[cfg(test)]
 mod tests {
-    use devo_core::{SessionId, TurnId, TurnUsage};
+    use devo_protocol::native::ids::{SessionId, TurnId};
+    use devo_protocol::native::usage::{TurnUsage, UsageTotals as NativeUsageTotals};
     use pretty_assertions::assert_eq;
 
     use super::super::super::subagent_usage::{ParentUsageSnapshot, UsageTotals};
     use super::super::types::TurnEventStreamSummary;
     use super::terminal_usages;
 
+    fn query_usage(input_tokens: u64, output_tokens: u64, total_tokens: u64) -> TurnUsage {
+        TurnUsage {
+            query: NativeUsageTotals {
+                total_tokens,
+                input_tokens,
+                output_tokens,
+                metered_call_count: 1,
+                ..NativeUsageTotals::default()
+            },
+            overhead: NativeUsageTotals::default(),
+        }
+    }
+
     #[test]
     fn terminal_usage_keeps_turn_total_separate_from_latest_query() {
         let session_id = SessionId::new();
         let turn_id = TurnId::new();
         let summary = TurnEventStreamSummary {
-            turn_usage: Some(TurnUsage {
-                input_tokens: 1_300,
-                output_tokens: 80,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                total_tokens: Some(1_380),
-            }),
-            latest_query_usage: Some(TurnUsage {
-                input_tokens: 700,
-                output_tokens: 30,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                total_tokens: Some(730),
-            }),
+            turn_usage: Some(query_usage(1_300, 80, 1_380)),
+            latest_query_usage: Some(query_usage(700, 30, 730)),
             stop_reason: None,
         };
         let snapshot = ParentUsageSnapshot {
@@ -621,22 +615,8 @@ mod tests {
     #[test]
     fn terminal_usage_falls_back_to_reported_event_when_snapshot_is_empty() {
         let summary = TurnEventStreamSummary {
-            turn_usage: Some(TurnUsage {
-                input_tokens: 500,
-                output_tokens: 20,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                total_tokens: Some(520),
-            }),
-            latest_query_usage: Some(TurnUsage {
-                input_tokens: 300,
-                output_tokens: 10,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                reasoning_output_tokens: None,
-                total_tokens: Some(310),
-            }),
+            turn_usage: Some(query_usage(500, 20, 520)),
+            latest_query_usage: Some(query_usage(300, 10, 310)),
             stop_reason: None,
         };
         let snapshot = ParentUsageSnapshot {

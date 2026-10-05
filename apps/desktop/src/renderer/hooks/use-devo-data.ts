@@ -93,11 +93,44 @@ export function getModelVariants(
 ): string[] {
 	for (const provider of providers) {
 		if (provider.id !== providerID) continue
-		const model = provider.models[modelID]
-		if (model?.variants) {
+		const model = provider.models[modelID] as
+			| {
+					variants?: Record<string, unknown>
+					thinkingLevelMap?: Record<string, string | null>
+					reasoningCapability?: unknown
+					reasoning?: boolean
+			  }
+			| undefined
+		if (!model) continue
+		if (model.variants && Object.keys(model.variants).length > 0) {
 			return Object.keys(model.variants)
 		}
+		const fromMap = effortLevelsFromThinkingMap(model.thinkingLevelMap, model.reasoning)
+		if (fromMap.length > 0) return fromMap
+		const fromCapability = effortLevelsFromReasoningCapability(model.reasoningCapability)
+		if (fromCapability.length > 0) return fromCapability
 	}
+	return []
+}
+
+function effortLevelsFromThinkingMap(
+	map: Record<string, string | null> | undefined,
+	reasoning: boolean | undefined,
+): string[] {
+	if (reasoning === false) return []
+	if (!map || typeof map !== "object") return []
+	const order = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+	return order.filter((level) => map[level] != null)
+}
+
+function effortLevelsFromReasoningCapability(capability: unknown): string[] {
+	if (capability === "toggle") return ["off", "on"]
+	if (!capability || typeof capability !== "object") return []
+	const record = capability as { levels?: unknown; type?: unknown }
+	if (Array.isArray(record.levels)) {
+		return record.levels.filter((level): level is string => typeof level === "string")
+	}
+	if (record.type === "toggle") return ["off", "on"]
 	return []
 }
 

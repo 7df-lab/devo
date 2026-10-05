@@ -7,7 +7,7 @@
 //! window left (event committed just before the barrier read, delivered
 //! right after registration) is at worst a benign redelivery.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use devo_core::event_projection::{session_stream_id, sessions_stream_id};
@@ -19,14 +19,12 @@ use devo_protocol::native::event::{
     SubscriptionCreateResult, SubscriptionUnsubscribeParams, SubscriptionUpdateParams,
 };
 use devo_protocol::native::ids::{
-    ItemId as NativeItemId, QueueItemId, SessionId as NativeSessionId, SubscriptionId,
-    TurnId as NativeTurnId,
+    SessionId as NativeSessionId, SubscriptionId, TurnId as NativeTurnId,
 };
 use devo_protocol::native::item::{ApprovalTarget, Item, ItemEnvelope, ItemState, UserInput};
 use devo_protocol::native::queue::QueueEntry;
 use devo_protocol::native::rpc_admin::RuntimePingResult;
-use devo_protocol::native::turn::TurnStatus;
-use uuid::Uuid;
+use devo_protocol::native::session::SessionStatus;
 
 use super::super::*;
 use super::queue::native_queue_entries;
@@ -54,32 +52,29 @@ pub(crate) fn selector_stream_id(selector: &StreamSelector) -> String {
     }
 }
 
-/// Whether a live server event matches any of the connection's new-style
-/// subscription selectors. Unioned with the legacy subscription filter at
-/// the fan-out (legacy clients are unaffected).
-pub(crate) fn event_matches_selectors(
+/// Whether a live server notification matches any of the connection's
+/// new-style subscription selectors. Unioned with the legacy subscription
+/// filter at the fan-out (legacy clients are unaffected).
+pub(crate) fn notification_matches_selectors(
     selectors: &[StreamSelector],
-    event: &ServerEvent,
+    notification: &devo_protocol::native::event::ServerNotification,
     event_cwd: Option<&std::path::Path>,
 ) -> bool {
+    use devo_protocol::native::event::ServerNotification;
+    use devo_protocol::native::notification_bus::notification_native_session_id;
+
     selectors.iter().any(|selector| match selector {
-        StreamSelector::Session { session_id } => event
-            .session_id()
-            .is_some_and(|id| id.to_string() == session_id.as_str()),
+        StreamSelector::Session { session_id } => notification_native_session_id(notification)
+            .is_some_and(|id| id.as_str() == session_id.as_str()),
         StreamSelector::SessionsByCwd { cwd } => {
-            // The sessions:<cwd> stream carries session-list changes only
-            // (08 §2): created/archived/deleted/metadata updates.
             matches!(
-                event,
-                ServerEvent::SessionStarted(_)
-                    | ServerEvent::SessionArchived(_)
-                    | ServerEvent::SessionUnarchived(_)
-                    | ServerEvent::SessionDeleted(_)
-                    | ServerEvent::SessionTitleUpdated(_)
+                notification,
+                ServerNotification::SessionCreated { .. }
+                    | ServerNotification::SessionArchived { .. }
+                    | ServerNotification::SessionDeleted { .. }
+                    | ServerNotification::SessionMetadataUpdated { .. }
             ) && event_cwd == Some(cwd.as_path())
         }
-        // No legacy wire event is task-scoped yet; `task:*` stream events
-        // are derived from unified-exec items in a later phase.
         StreamSelector::BackgroundTask { .. } => false,
     })
 }
@@ -109,13 +104,13 @@ impl ServerRuntime {
         // the barrier read and the registration — events with seq ≤ barrier
         // are covered by snapshot+replay, later events arrive live.
         let mut connections = self.connections.lock().await;
-        let Some(connection) = connections.get_mut(&connection_id) else {
+        if !connections.contains_key(&connection_id) {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::NotInitialized,
                 "connection is not registered",
             );
-        };
+        }
         let mut result =
             match self.prepare_subscription(&request_id, &params.selectors, &params.after) {
                 Ok(result) => result,
@@ -143,22 +138,37 @@ impl ServerRuntime {
             }
         }
         result.pending_control_requests = self.pending_control_requests(&params.selectors).await;
-        // TODO(P4-followup): recovery_snapshots for in-flight items. The
-        // runtime tracks accumulated stream text (deferred_assistant /
-        // deferred_reasoning) but not per-channel chunk indices, so an
-        // honest `nextChunkIndex` cannot be produced yet; v1 returns none
-        // (clients refetch items via session/items/list when in doubt).
+        if !params.after.is_empty() {
+            result.recovery_snapshots = self.recovery_snapshots(&params.selectors).await;
+        }
 
+        // Seed the ack floor with the create-time barriers: create already
+        // handed the client everything up to `cursors`, so a later ack below
+        // that floor would move the durable ack cursor backward (replay
+        // duplication after reconnect). Monotonic by the struct contract.
+        let acked = result
+            .cursors
+            .iter()
+            .map(|cursor| (cursor.stream_id.clone(), cursor.seq))
+            .collect();
         self.event_subscriptions.lock().await.insert(
             subscription_id.as_str().to_owned(),
             EventSubscription {
                 connection_id,
                 selectors: params.selectors.clone(),
-                acked: HashMap::new(),
+                acked,
                 last_ack_at: None,
             },
         );
-        connection.event_selectors = params.selectors;
+        // The connection's cached selector view must stay the UNION of all
+        // its live subscriptions. Replacing it with just this subscription's
+        // selectors silently stranded approvals: the TUI's session
+        // subscription was clobbered by the roster's SessionsByCwd
+        // subscription, after which `controlling_connection_ids` no longer
+        // routed permission requests to it ("no client connection is
+        // available for permission request").
+        self.refresh_connection_selectors(&mut connections, connection_id)
+            .await;
         self.refresh_cwd_selector_count().await;
         drop(connections);
         result.pending_control_requests = self
@@ -213,12 +223,14 @@ impl ServerRuntime {
             Ok(result) => result,
             Err(response) => return response,
         };
-        result.subscription_id = params.subscription_id.clone();
+        result.subscription_id = params.subscription_id;
         subscription.selectors = params.selectors.clone();
-        if let Some(connection) = connections.get_mut(&connection_id) {
-            connection.event_selectors = params.selectors;
-        }
         drop(subscriptions);
+        // Same union rule as subscription/create: the cached view must
+        // reflect every live subscription of this connection, not just the
+        // one being updated.
+        self.refresh_connection_selectors(&mut connections, connection_id)
+            .await;
         self.refresh_cwd_selector_count().await;
         drop(connections);
 
@@ -288,7 +300,7 @@ impl ServerRuntime {
             let acked = subscription
                 .acked
                 .get(&cursor.stream_id)
-                .copied()
+                .cloned()
                 .unwrap_or(0);
             if cursor.seq < acked || cursor.seq > barrier {
                 return self.cursor_expired_response(
@@ -366,6 +378,58 @@ impl ServerRuntime {
             .await
             .retain(|_, subscription| subscription.connection_id != connection_id);
         self.refresh_cwd_selector_count().await;
+    }
+
+    /// Full in-flight item text for reconnect. `nextChunkIndex` is 0 because
+    /// the snapshot replaces accumulated channel text rather than resuming
+    /// a lost delta sequence.
+    async fn recovery_snapshots(
+        &self,
+        selectors: &[StreamSelector],
+    ) -> Vec<devo_protocol::native::event::LiveItemSnapshot> {
+        use devo_protocol::native::event::DeltaChannel;
+
+        let mut snapshots = Vec::new();
+        for selector in selectors {
+            let StreamSelector::Session { session_id } = selector else {
+                continue;
+            };
+            let Some(handle) = self.session(*session_id).await else {
+                continue;
+            };
+            let Some(deferred) = handle.take_shutdown_deferred_snapshot().await else {
+                continue;
+            };
+            let Some(turn_id) = deferred.active_turn_id else {
+                continue;
+            };
+            if let Some((item_id, seq, text)) = deferred.deferred_assistant {
+                snapshots.push(super::native_surface::live_item_snapshot(
+                    *session_id,
+                    turn_id,
+                    item_id,
+                    seq,
+                    Item::AssistantMessage { text: text.clone() },
+                    DeltaChannel::AssistantMessage,
+                    text,
+                ));
+            }
+            if let Some((item_id, seq, text)) = deferred.deferred_reasoning {
+                snapshots.push(super::native_surface::live_item_snapshot(
+                    *session_id,
+                    turn_id,
+                    item_id,
+                    seq,
+                    Item::Reasoning {
+                        text: text.clone(),
+                        provider_payload_ref: None,
+                    },
+                    DeltaChannel::Reasoning,
+                    text,
+                ));
+            }
+        }
+        snapshots
     }
 
     /// Computes barriers, validates `after` cursors, and collects replay for
@@ -479,16 +543,27 @@ impl ServerRuntime {
                 };
                 let history = devo_core::read_canonical_history(&rollout_path)
                     .map_err(|error| format!("failed to read session history: {error}"))?;
-                let Some(session) = history.session else {
+                let Some(mut session) = history.session else {
                     return Ok(None);
                 };
-                let active_turn = history
-                    .turns
-                    .iter()
-                    .rev()
-                    .find(|turn| turn.status == TurnStatus::InProgress)
-                    .cloned()
+                // Durable history may still say InProgress after a crash; live
+                // ownership is ActiveTurnRegistry only (same rule as session/read).
+                let active_turn = self
+                    .active_turns
+                    .active_turn(*session_id)
+                    .await
                     .map(Box::new);
+                match active_turn.as_ref() {
+                    Some(turn) => {
+                        session.status = SessionStatus::Active;
+                        session.active_turn_id = Some(turn.id);
+                    }
+                    None => {
+                        session.status = SessionStatus::Idle;
+                        session.active_turn_id = None;
+                    }
+                }
+                session.sync_activity();
                 let queue = self
                     .snapshot_queue_entries(session_id)
                     .await
@@ -546,7 +621,7 @@ impl ServerRuntime {
     /// Mailbox-free rollout-path resolution for the subscription critical
     /// section. `handle_subscription_create` holds the `connections` lock
     /// across `build_snapshot`, and the session actor may be parked
-    /// broadcasting into that same lock (`broadcast_event` takes it on every
+    /// broadcasting into that same lock (`broadcast_notification` takes it on every
     /// turn event), so waiting on the actor mailbox here — as
     /// `resolve_rollout_path` does — is an ABBA deadlock. The in-flight
     /// turn's inline record is read under `try_lock` only: on contention we
@@ -557,21 +632,21 @@ impl ServerRuntime {
         &self,
         session_id: &NativeSessionId,
     ) -> Option<std::path::PathBuf> {
-        let legacy_id = SessionId::try_from(session_id.as_str()).ok()?;
-        if let Some(stream) = self.active_stream_state(legacy_id).await
+        let session_id = *session_id;
+        if let Some(stream) = self.active_stream_state(session_id).await
             && let Ok(stream) = stream.try_lock()
             && let Some(inline) = stream.turn_inline.as_ref()
-            && let Some(record) = inline.record.clone()
+            && let Some(path) = inline.rollout_path.clone()
         {
-            return Some(record.rollout_path);
+            return Some(path);
         }
-        if let Ok(Some(index)) = self.deps.db.get_session_index(&legacy_id)
+        if let Ok(Some(index)) = self.deps.db.get_session_index(&session_id)
             && let Some(path) = index.rollout_path
         {
             return Some(path);
         }
         self.rollout_store
-            .find_rollout_by_session_id(&legacy_id)
+            .find_rollout_by_session_id(&session_id)
             .ok()
             .flatten()
     }
@@ -592,29 +667,26 @@ impl ServerRuntime {
         &self,
         session_id: &NativeSessionId,
     ) -> anyhow::Result<Vec<QueueEntry>> {
-        let legacy_id = SessionId::try_from(session_id.as_str())
-            .map_err(|error| anyhow::anyhow!("invalid session id: {error}"))?;
-        if let Some(spawn) = self.active_spawn_snapshot_for_session(legacy_id).await {
+        let session_id = *session_id;
+        if let Some(spawn) = self.active_spawn_snapshot_for_session(session_id).await {
             let queue = spawn
                 .pending_turn_queue
                 .lock()
                 .expect("pending turn queue mutex should not be poisoned");
             return Ok(native_queue_entries(&queue));
         }
-        self.queue_entries(session_id)
+        self.queue_entries(&session_id)
     }
 
     fn queue_entries(&self, session_id: &NativeSessionId) -> anyhow::Result<Vec<QueueEntry>> {
-        let legacy_id = SessionId::try_from(session_id.as_str())
-            .map_err(|error| anyhow::anyhow!("invalid session id: {error}"))?;
-        let pending = self.deps.db.list_pending(&legacy_id, QueueType::Turn)?;
+        let pending = self.deps.db.list_pending(session_id, QueueType::Turn)?;
         Ok(pending
             .into_iter()
             .enumerate()
             .map(|(index, item)| {
                 let (input, preview) = queue_entry_content(&item);
                 QueueEntry {
-                    queue_item_id: QueueItemId::from_legacy_uuid(Uuid::from(item.id)),
+                    queue_item_id: item.id,
                     // 1-based, matching `native_queue_entries` (in-memory
                     // path) and `session/queue/list`.
                     position: (index + 1) as u32,
@@ -637,12 +709,13 @@ impl ServerRuntime {
             let StreamSelector::Session { session_id } = selector else {
                 continue;
             };
-            let Ok(legacy_id) = SessionId::try_from(session_id.as_str()) else {
-                continue;
-            };
-            let snapshot = self.session_interactive.pending_snapshot(legacy_id).await;
+            let snapshot = self.session_interactive.pending_snapshot(*session_id).await;
             for approval in snapshot.approvals {
-                let kind = if approval.command.is_some() {
+                let (native_session_id, native_turn_id) = self
+                    .native_session_turn_ids(approval.owner_session_id, approval.turn_id)
+                    .await;
+                let command = approval.command.clone();
+                let kind = if command.is_some() {
                     ControlRequestKind::ApprovalCommand
                 } else if matches!(
                     approval.resource,
@@ -657,8 +730,7 @@ impl ServerRuntime {
                 } else if let Some(host) = &approval.host {
                     Some(ApprovalTarget::Host { host: host.clone() })
                 } else {
-                    approval
-                        .command
+                    command
                         .clone()
                         .map(|command| ApprovalTarget::Command { command })
                 };
@@ -666,16 +738,13 @@ impl ServerRuntime {
                     request_id: approval.approval_id.clone(),
                     kind,
                     item: waiting_item_envelope(
-                        &NativeSessionId::from_legacy_uuid(Uuid::from(approval.owner_session_id)),
-                        approval.turn_id,
+                        &native_session_id,
+                        native_turn_id,
                         approval.persisted.as_ref(),
                         Item::Approval {
                             approval_id: approval.approval_id.clone(),
                             target_item_id: None,
-                            action_summary: approval
-                                .command
-                                .clone()
-                                .unwrap_or_else(|| approval.tool_name.clone()),
+                            action_summary: command.unwrap_or_else(|| approval.tool_name.clone()),
                             justification: String::new(),
                             resource: approval.resource.map(|resource| format!("{resource:?}")),
                             available_scopes: approval.available_scopes.clone(),
@@ -688,12 +757,15 @@ impl ServerRuntime {
                 });
             }
             for user_input in snapshot.user_inputs {
+                let (native_session_id, native_turn_id) = self
+                    .native_session_turn_ids(user_input.owner_session_id, user_input.turn_id)
+                    .await;
                 out.push(PendingControlRequest {
                     request_id: user_input.request_id.clone(),
                     kind: ControlRequestKind::UserInput,
                     item: waiting_item_envelope(
-                        &NativeSessionId::from_legacy_uuid(Uuid::from(user_input.owner_session_id)),
-                        user_input.turn_id,
+                        &native_session_id,
+                        native_turn_id,
                         user_input.persisted.as_ref(),
                         Item::UserInputRequest {
                             request_id: user_input.request_id.clone(),
@@ -748,6 +820,29 @@ impl ServerRuntime {
             .flat_map(|subscription| subscription.selectors.clone())
             .collect();
         if let Some(connection) = connections.get_mut(&connection_id) {
+            // A live session-kind subscription now declares this connection's
+            // delivery scope explicitly. Prune legacy implicit filters for
+            // sessions it no longer covers: the implicit filters pushed by
+            // session/resume|new|fork are otherwise never removed, so a client
+            // that resumed session A and later switched to B kept receiving
+            // (and rendering) A's entire item stream forever. Connections
+            // without any live session selector (pure legacy ACP) keep every
+            // implicit filter.
+            let covered: HashSet<SessionId> = selectors
+                .iter()
+                .filter_map(|selector| match selector {
+                    StreamSelector::Session { session_id } => Some(*session_id),
+                    _ => None,
+                })
+                .collect();
+            if !covered.is_empty() {
+                connection.subscriptions.retain(|filter| {
+                    filter
+                        .session_id
+                        .as_ref()
+                        .is_none_or(|id| covered.contains(id))
+                });
+            }
             connection.event_selectors = selectors;
         }
     }
@@ -770,23 +865,24 @@ impl ServerRuntime {
 /// Builds the waiting-state envelope for a pending control request. The
 fn waiting_item_envelope(
     session_id: &NativeSessionId,
-    turn_id: devo_core::TurnId,
+    turn_id: NativeTurnId,
     persisted: Option<&crate::execution::PersistedLivingItem>,
     item: Item,
 ) -> ItemEnvelope {
     let now = Utc::now();
     ItemEnvelope {
         id: persisted
-            .map(|persisted| persisted.item_id.clone())
-            .unwrap_or_else(|| NativeItemId::from_legacy_uuid(Uuid::now_v7())),
-        session_id: session_id.clone(),
-        turn_id: NativeTurnId::from_legacy_uuid(Uuid::from(turn_id)),
+            .map(|persisted| persisted.item_id)
+            .unwrap_or_default(),
+        session_id: *session_id,
+        turn_id,
         seq: persisted.map_or(0, |persisted| persisted.seq),
         revision: 1,
         created_at: persisted.map_or(now, |persisted| persisted.created_at),
         updated_at: now,
         state: ItemState::Waiting,
         item,
+        parent_id: None,
     }
 }
 

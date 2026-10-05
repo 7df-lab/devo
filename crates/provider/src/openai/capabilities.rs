@@ -125,6 +125,20 @@ const DEFAULT_RESPONSES: OpenAIRequestProfile = OpenAIRequestProfile::new(
 
 const OPENAI_PROFILE_RULES: &[ProfileRule] = &[
     ProfileRule {
+        matcher: ModelMatcher::Prefix("gpt-5"),
+        transport: OpenAITransport::Responses,
+        profile: OpenAIRequestProfile::new(
+            OpenAIReasoningMode::Effort,
+            RESPONSES_ROLES,
+            // GPT-5-class Responses backends (codex included) reject sampling
+            // overrides; only the reasoning effort is configurable.
+            false,
+            false,
+            false,
+            false,
+        ),
+    },
+    ProfileRule {
         matcher: ModelMatcher::Prefix("glm-"),
         transport: OpenAITransport::ChatCompletions,
         profile: OpenAIRequestProfile::new(

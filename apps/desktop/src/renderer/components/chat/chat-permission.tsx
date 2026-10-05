@@ -69,9 +69,9 @@ export const ChatPermissionFlow = memo(function ChatPermissionFlow({
 		setResponding(true)
 		try {
 			if (selectedChoice.kind === "deny") {
-				await onDeny?.(agent, permission.sessionID, permission.id, denyNote.trim() || undefined)
+				await onDeny?.(agent, permission.sessionId, permission.id, denyNote.trim() || undefined)
 			} else {
-				await onApprove?.(agent, permission.sessionID, permission.id, selectedChoice.scope)
+				await onApprove?.(agent, permission.sessionId, permission.id, selectedChoice.scope)
 			}
 		} finally {
 			setResponding(false)
@@ -84,7 +84,7 @@ export const ChatPermissionFlow = memo(function ChatPermissionFlow({
 		onApprove,
 		onDeny,
 		permission.id,
-		permission.sessionID,
+		permission.sessionId,
 		responding,
 		selectedChoice,
 	])

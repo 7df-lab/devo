@@ -1,7 +1,6 @@
 import { atom } from "jotai"
 import { atomFamily } from "jotai/utils"
 import type { ModelRef } from "../hooks/use-devo-data"
-import type { Message } from "../lib/types"
 import type { PersistedModelRef } from "./preferences"
 
 export interface SessionComposerState {
@@ -67,51 +66,20 @@ export function composerFromSessionModel(
 	}
 }
 
-export function composerFromMessages(messages: Message[]): SessionComposerState | null {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index]
-		if (message.role !== "user") continue
-		const dynamic = message as Message & Record<string, unknown>
-		let model: ModelRef | null = null
-		if ("model" in message && message.model) {
-			const raw = message.model as { providerID: string; modelID: string }
-			if (raw.providerID && raw.modelID) {
-				model = { providerID: raw.providerID, modelID: raw.modelID }
-			}
-		}
-		const variant =
-			typeof dynamic.variant === "string" && dynamic.variant.length > 0
-				? dynamic.variant
-				: undefined
-		const agentName =
-			typeof dynamic.agent === "string" && dynamic.agent.length > 0 ? dynamic.agent : null
-		if (model || variant || agentName) {
-			return {
-				model,
-				variant,
-				agent: agentName,
-				hasUserOverride: false,
-			}
-		}
-	}
-	return null
-}
-
+/**
+ * Hydrate composer from session seed / project default.
+ * Native transcripts do not carry per-message composer metadata.
+ */
 export function hydrateSessionComposerState(
 	current: SessionComposerState,
-	messages: Message[],
+	itemCount: number,
 	projectDefault: PersistedModelRef | undefined,
 	/** Persisted per-session turn settings from the wire session (server restores them). */
 	sessionSeed?: SessionComposerState | null,
 ): SessionComposerState {
 	if (current.hasUserOverride) return current
-	// The session snapshot is the current "next turn" configuration. It is
-	// newer and authoritative over model metadata from an older history item;
-	// history remains the fallback for legacy sessions without a snapshot seed.
 	if (sessionSeed) return sessionSeed
-	const fromMessages = composerFromMessages(messages)
-	if (fromMessages) return fromMessages
-	if (messages.length > 0) return current
+	if (itemCount > 0) return current
 	return composerFromPersistedModel(projectDefault)
 }
 

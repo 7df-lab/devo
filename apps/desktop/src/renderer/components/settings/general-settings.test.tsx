@@ -57,13 +57,12 @@ describe("GeneralSettings", () => {
 
 		expect({
 			hasAppearance: markup.includes(">Appearance</h3>"),
-			hasTheme: markup.includes(">Theme</label>"),
+			hasTheme: markup.includes(">Theme<"),
 			hasDarkMode: markup.includes(">Dark</button>") || markup.includes(">Dark</"),
-			hasDisplayMode: markup.includes(">Display mode</label>"),
+			hasDisplayMode: markup.includes("Display mode"),
 			hasVerboseMode: markup.includes(">Verbose</div>") || markup.includes(">Verbose<"),
 			hasConversation: markup.includes(">Conversation</h3>"),
-			hasHideThinking: markup.includes(">Hide thinking while working</label>"),
-			hasHomepageTitle: markup.includes("text-[32px] font-normal leading-tight tracking-[-0.03em]"),
+			hasHideThinking: markup.includes("Hide thinking while working"),
 		}).toEqual({
 			hasAppearance: true,
 			hasTheme: true,
@@ -72,7 +71,6 @@ describe("GeneralSettings", () => {
 			hasVerboseMode: true,
 			hasConversation: true,
 			hasHideThinking: true,
-			hasHomepageTitle: true,
 		})
 	})
 })

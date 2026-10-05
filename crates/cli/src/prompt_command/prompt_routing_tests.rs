@@ -147,6 +147,7 @@ fn prompt_turn_config_routes_requested_connection_model_to_provider_route() {
         &model_catalog,
         Some("anthropic-provider/alt/fast"),
         "default-provider/main",
+        None,
     );
 
     assert_eq!(turn_config.model.slug, "anthropic-provider/alt");

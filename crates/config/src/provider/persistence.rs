@@ -12,6 +12,8 @@ use super::ProviderConfigFile;
 
 pub const CONFIG_FILE_NAME: &str = "config.toml";
 pub const PROVIDER_CONFIG_FILE_NAME: &str = "providers.json";
+/// User-owned custom providers/models (separate from Connection overlays).
+pub const CUSTOM_PROVIDER_CONFIG_FILE_NAME: &str = "custom-providers.json";
 
 pub fn read_provider_catalog_config(
     config_file: &Path,

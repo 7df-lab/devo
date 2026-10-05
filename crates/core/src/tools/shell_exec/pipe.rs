@@ -83,6 +83,11 @@ pub(crate) async fn run_with_pipes(
     };
     plan.schedule_placeholder_cleanup();
 
+    // Wall-clock timing so the model can reason about slow or hung commands
+    // (start/end instants plus elapsed); the TUI shows the same span as
+    // "Took …" but the tool result itself previously carried no timing.
+    let started_at = std::time::Instant::now();
+
     let stdout_task = spawn_stream_reader(
         child.0.stdout().take(),
         progress.clone(),
@@ -106,6 +111,9 @@ pub(crate) async fn run_with_pipes(
         _ = cancel_token.cancelled() => WaitOutcome::Cancelled,
         _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => WaitOutcome::TimedOut,
     };
+    // Measure at the moment the outcome was decided, before teardown waits
+    // (kill-and-wait) inflate the span the model is told about.
+    let duration_ms = started_at.elapsed().as_millis() as u64;
 
     match &outcome {
         WaitOutcome::Cancelled | WaitOutcome::TimedOut => {
@@ -121,11 +129,20 @@ pub(crate) async fn run_with_pipes(
 
     match outcome {
         WaitOutcome::Cancelled => Ok(FunctionToolOutput::error(format!(
-            "command cancelled\n{result_text}"
+            "command cancelled after {duration_ms}ms\n{result_text}"
         ))),
-        WaitOutcome::TimedOut => Ok(FunctionToolOutput::error(format!(
-            "command timed out after {timeout_ms}ms\n{result_text}"
-        ))),
+        WaitOutcome::TimedOut => Ok(FunctionToolOutput::error_with_metadata(
+            format!("command timed out after {timeout_ms}ms\n{result_text}"),
+            json!({
+                "command": command_to_run,
+                "exit": serde_json::Value::Null,
+                "description": description,
+                "cwd": workdir,
+                "yield_time_ms": yield_time_ms,
+                "timeout_ms": timeout_ms,
+                "duration_ms": duration_ms,
+            }),
+        )),
         WaitOutcome::WaitError(error) => Ok(FunctionToolOutput::error(format!(
             "failed to spawn process: {error}"
         ))),
@@ -139,6 +156,7 @@ pub(crate) async fn run_with_pipes(
                         "description": description,
                         "cwd": workdir,
                         "yield_time_ms": yield_time_ms,
+                        "duration_ms": duration_ms,
                     }),
                 ))
             } else {
@@ -157,7 +175,20 @@ pub(crate) async fn run_with_pipes(
                     &stderr,
                     &result_text,
                 );
-                Ok(FunctionToolOutput::error(error_message))
+                // Failed runs keep the structured metadata (exit, duration) so
+                // the model can reason about failing/hung commands, matching
+                // the success path.
+                Ok(FunctionToolOutput::error_with_metadata(
+                    error_message,
+                    json!({
+                        "command": command_to_run,
+                        "exit": status.code(),
+                        "description": description,
+                        "cwd": workdir,
+                        "yield_time_ms": yield_time_ms,
+                        "duration_ms": duration_ms,
+                    }),
+                ))
             }
         }
     }

@@ -23,6 +23,27 @@ const FS_MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 const FS_MAX_TEXT_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const FS_MAX_HASH_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Directory names the manifest scan never recurses into: VCS internals and
+/// dependency/build artifact trees. These routinely hold 10⁵–10⁶ entries in a
+/// real workspace — exhausting the [`FS_MAX_FILES`] budget with reads of
+/// build blobs before any source file is seen — and the model never edits
+/// them as workspace source, so edit attribution does not need their
+/// contents. The pruned directory itself is still recorded (kind Directory)
+/// so parent-relative diffs stay consistent; only recursion is skipped.
+const PRUNED_DIR_NAMES: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    ".next",
+    ".cache",
+];
+
 #[derive(Debug, Clone)]
 pub(crate) struct FileWorkspaceBaseline {
     pub session_id: SessionId,
@@ -236,8 +257,48 @@ fn scan_dir(root: &Path, dir: &Path, manifest: &mut FileManifest) {
             manifest.warnings.push("read_dir_entry_failed".to_string());
             continue;
         };
-        scan_path(root, entry.path(), manifest);
+        let path = entry.path();
+        if is_pruned_dir(&entry, &path) {
+            // Record the pruned directory itself without recursing into it
+            // (see `PRUNED_DIR_NAMES`).
+            let modified_ms = entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| {
+                    modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|duration| duration.as_millis() as i64)
+                });
+            manifest.entries.insert(
+                relative_path(root, &path),
+                FileManifestEntry {
+                    kind: FileEntryKind::Directory,
+                    size: 0,
+                    modified_ms,
+                    hash: None,
+                    text_content: None,
+                    link_target: None,
+                },
+            );
+            continue;
+        }
+        scan_path(root, path, manifest);
     }
+}
+
+/// Whether a read_dir entry names a [`PRUNED_DIR_NAMES`] directory (never a
+/// regular file or symlink that happens to share the name).
+fn is_pruned_dir(entry: &fs::DirEntry, path: &Path) -> bool {
+    entry
+        .file_type()
+        .map(|file_type| file_type.is_dir())
+        .unwrap_or(false)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| PRUNED_DIR_NAMES.contains(&name))
 }
 
 fn scan_path(root: &Path, path: PathBuf, manifest: &mut FileManifest) {
@@ -396,4 +457,72 @@ fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256:{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_fs_manifest_prunes_vcs_and_dependency_dirs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("src")).expect("create src");
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write source");
+        std::fs::create_dir_all(root.join(".git/objects/pack")).expect("create .git tree");
+        std::fs::write(root.join(".git/objects/pack/pack-abc.pack"), b"packdata")
+            .expect("write pack");
+        std::fs::create_dir_all(root.join("target/debug")).expect("create target tree");
+        std::fs::write(root.join("target/debug/devo.bin"), vec![0u8; 4096])
+            .expect("write build artifact");
+        std::fs::create_dir_all(root.join("node_modules/left-pad")).expect("create node_modules");
+        std::fs::write(
+            root.join("node_modules/left-pad/index.js"),
+            "module.exports = 1;\n",
+        )
+        .expect("write dependency");
+
+        let manifest = scan_file_manifest(root);
+
+        // Source files are scanned...
+        assert!(manifest.entries.contains_key("src/main.rs"));
+        assert_eq!(manifest.scanned_files, 1);
+        // ...while VCS/dependency/build dirs are recorded without recursion:
+        // the pruned directory itself stays visible, its children do not.
+        assert_eq!(
+            manifest.entries.get("target").map(|entry| entry.kind),
+            Some(FileEntryKind::Directory)
+        );
+        assert!(!manifest.entries.contains_key("target/debug"));
+        assert!(!manifest.entries.contains_key("target/debug/devo.bin"));
+        assert_eq!(
+            manifest.entries.get(".git").map(|entry| entry.kind),
+            Some(FileEntryKind::Directory)
+        );
+        assert!(!manifest.entries.contains_key(".git/objects"));
+        assert!(
+            !manifest
+                .entries
+                .contains_key(".git/objects/pack/pack-abc.pack")
+        );
+        assert!(
+            !manifest
+                .entries
+                .contains_key("node_modules/left-pad/index.js")
+        );
+        assert!(manifest.warnings.is_empty());
+
+        // The prune rule matches directories only: a regular file named like
+        // a pruned entry is still scanned.
+        std::fs::write(root.join("dist"), b"plain file\n").expect("write file named dist");
+        let manifest_with_file = scan_file_manifest(root);
+        assert!(manifest_with_file.entries.contains_key("dist"));
+        assert_eq!(
+            manifest_with_file
+                .entries
+                .get("dist")
+                .map(|entry| entry.kind),
+            Some(FileEntryKind::File)
+        );
+    }
 }

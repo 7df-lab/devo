@@ -9,9 +9,8 @@ use super::*;
 pub(in crate::runtime) fn subagent_item_from_agent_info(
     info: &devo_protocol::AgentInfo,
 ) -> devo_protocol::native::item::ItemEnvelope {
-    use devo_protocol::native::ids::{ItemId, SessionId as NativeSessionId, TurnId};
+    use devo_protocol::native::ids::{ItemId, TurnId};
     use devo_protocol::native::item::{Item, ItemEnvelope, ItemState, SpawnedWorkState};
-    use uuid::Uuid;
 
     let state = match info.status.as_str() {
         "spawning" | "running" => SpawnedWorkState::Running,
@@ -27,14 +26,11 @@ pub(in crate::runtime) fn subagent_item_from_agent_info(
         SpawnedWorkState::Cancelled | SpawnedWorkState::Lost => ItemState::Interrupted,
     };
     let now = chrono::Utc::now();
+    // boundary: legacy AgentInfo has no Native session/turn ids (DD-7 v2)
     ItemEnvelope {
-        id: ItemId::from_legacy_uuid(Uuid::from(info.session_id)),
-        session_id: NativeSessionId::from_legacy_uuid(
-            info.parent_session_id
-                .map(Uuid::from)
-                .unwrap_or_else(|| Uuid::from(info.session_id)),
-        ),
-        turn_id: TurnId::from_legacy_uuid(Uuid::from(info.session_id)),
+        id: ItemId::from_string(info.session_id.to_string()),
+        session_id: info.parent_session_id.unwrap_or(info.session_id),
+        turn_id: TurnId::from_string(info.session_id.to_string()),
         seq: 0,
         revision: 1,
         created_at: now,
@@ -42,11 +38,8 @@ pub(in crate::runtime) fn subagent_item_from_agent_info(
         state: item_state,
         item: Item::SubAgent {
             origin_call_id: None,
-            agent_session_id: NativeSessionId::from_legacy_uuid(Uuid::from(info.session_id)),
-            parent_session_id: info
-                .parent_session_id
-                .map(|parent| NativeSessionId::from_legacy_uuid(Uuid::from(parent)))
-                .unwrap_or_else(|| NativeSessionId::from_legacy_uuid(Uuid::from(info.session_id))),
+            agent_session_id: info.session_id,
+            parent_session_id: info.parent_session_id.unwrap_or(info.session_id),
             role: (!info.agent_role.is_empty()).then(|| info.agent_role.clone()),
             task: info
                 .last_task_message
@@ -54,6 +47,7 @@ pub(in crate::runtime) fn subagent_item_from_agent_info(
                 .unwrap_or_else(|| info.agent_nickname.clone()),
             state,
         },
+        parent_id: None,
     }
 }
 
@@ -80,20 +74,7 @@ impl ServerRuntime {
                     );
                 }
             };
-        let legacy_session_id = match &params.session_id {
-            Some(session_id) => match SessionId::try_from(session_id.as_str()) {
-                Ok(session_id) => Some(session_id),
-                Err(_) => {
-                    return self.error_response(
-                        request_id,
-                        ProtocolErrorCode::SessionNotFound,
-                        "session id is not addressable by this server",
-                    );
-                }
-            },
-            None => None,
-        };
-        let Some(legacy_session_id) = legacy_session_id else {
+        let Some(legacy_session_id) = params.session_id else {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::InvalidParams,
@@ -251,7 +232,7 @@ impl ServerRuntime {
             );
         };
         match self
-            .agent_info(parent_session_id, &child_session_id.to_string())
+            .agent_info(parent_session_id, child_session_id.as_ref())
             .await
         {
             Ok(info) => success_response(
@@ -273,11 +254,11 @@ impl ServerRuntime {
         item_id: &str,
     ) -> Option<(SessionId, SessionId)> {
         let child_str = item_id.strip_prefix("item_").unwrap_or(item_id);
-        let child = SessionId::try_from(child_str).ok()?;
+        let child = SessionId::from_string(child_str.to_owned());
         let registries = self.agent_registries.lock().await;
         registries.values().find_map(|registry| {
             registry
-                .get(child)
+                .get(&child)
                 .map(|meta| (meta.parent_session_id, child))
         })
     }

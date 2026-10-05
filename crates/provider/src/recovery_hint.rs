@@ -79,6 +79,10 @@ pub fn recovery_hint_for_message(message: &str) -> Option<String> {
         || msg.contains("credential")
         || msg.contains("invalid api key")
         || msg.contains("missing credential")
+        || msg.contains("run /login")
+        || msg.contains("re-authenticate")
+        || msg.contains("oauth refresh failed")
+        || msg.contains("oauth credential")
         || (msg.contains("401") && !msg.contains("1401"))
         || msg.contains("403")
     {
@@ -185,6 +189,13 @@ mod tests {
         assert_eq!(
             recovery_hint_for_message("model not found: gpt-missing").as_deref(),
             Some(MODEL_NOT_FOUND_HINT)
+        );
+        assert_eq!(
+            recovery_hint_for_message(
+                "oauth credential `anthropic_oauth` for provider `anthropic` is expired; run /login to re-authenticate"
+            )
+            .as_deref(),
+            Some(AUTH_HINT)
         );
         assert_eq!(recovery_hint_for_message("quota exceeded"), None);
     }

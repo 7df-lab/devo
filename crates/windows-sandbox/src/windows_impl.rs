@@ -159,6 +159,13 @@ pub fn run_windows_sandbox_capture(
     cancellation: Option<WindowsSandboxCancellationToken>,
     use_private_desktop: bool,
 ) -> Result<CaptureResult> {
+    crate::logging::log_note(
+        "PROBE-WINDOWS-IMPL run_windows_sandbox_capture called",
+        std::env::var("USERPROFILE")
+            .ok()
+            .map(|h| std::path::PathBuf::from(h).join(".devo/.sandbox"))
+            .as_deref(),
+    );
     run_windows_sandbox_capture_with_filesystem_overrides(
         permission_profile,
         workspace_roots,
@@ -222,8 +229,13 @@ pub fn run_windows_sandbox_capture_with_filesystem_overrides(
     }
     let capability_roots =
         legacy_session_capability_roots(&permissions, &current_dir, &env_map, devo_home);
-    let security =
-        prepare_legacy_session_security(uses_write_capabilities, devo_home, cwd, capability_roots)?;
+    let security = prepare_legacy_session_security(
+        uses_write_capabilities,
+        devo_home,
+        cwd,
+        capability_roots,
+        /*session_credential_sid*/ None,
+    )?;
     allow_null_device_for_workspace_write(uses_write_capabilities);
     apply_legacy_session_acl_rules(
         &permissions,
@@ -423,6 +435,13 @@ pub fn run_windows_sandbox_legacy_preflight(
     cwd: &Path,
     env_map: &HashMap<String, String>,
 ) -> Result<()> {
+    crate::logging::log_note(
+        "PROBE-WINDOWS-IMPL legacy_preflight called",
+        std::env::var("USERPROFILE")
+            .ok()
+            .map(|h| std::path::PathBuf::from(h).join(".devo/.sandbox"))
+            .as_deref(),
+    );
     let Ok(permissions) = super::resolved_permissions::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
             permission_profile,
             workspace_roots,

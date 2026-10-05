@@ -19,6 +19,7 @@ use std::process::Command;
 
 const MARKER: &str = "wrap-e2e-marker-7c2b9d";
 const SCENARIO_ENV: &str = "WRAP_E2E_SCENARIO";
+const PROBE_PORT_ENV: &str = "WRAP_E2E_PROBE_PORT";
 
 /// `--bind / / -- true` proves both that bwrap exists and that this kernel
 /// allows the namespace creation bwrap needs (some CI containers deny it).
@@ -28,6 +29,20 @@ fn bwrap_usable() -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn bwrap_user_namespace_unavailable(stderr: &str) -> bool {
+    [
+        "bwrap: unshare user ns: Permission denied",
+        "bwrap: unshare user ns: Operation not permitted",
+        "bwrap: unshare user ns: No space left on device",
+        "bwrap: setting up uid map: Permission denied",
+        "bwrap: setting up uid map: Operation not permitted",
+        "bwrap: setting up uid map: No space left on device",
+    ]
+    .iter()
+    .any(|message| stderr.contains(message))
 }
 
 fn temp_workspace(tag: &str, profile_toml: &str) -> PathBuf {
@@ -53,24 +68,30 @@ impl Drop for TempDirGuard {
     }
 }
 
+struct PlaceholderDirGuard(Option<PathBuf>);
+
+impl Drop for PlaceholderDirGuard {
+    fn drop(&mut self) {
+        if let Some(directory) = &self.0 {
+            devo_sandbox::remove_placeholder_dir(directory);
+        }
+    }
+}
+
 /// Run `shell_command` (via `sh -c`) inside the wrapped sandbox and return its
-/// output, then clean up the launch's placeholder directory (the child has
-/// exited, so the mounts are gone).
+/// output. The caller keeps the launch placeholders alive across invocations and
+/// removes them after the wrapped command is no longer reused.
 fn run_wrapped(
     wrapped: &devo_sandbox::WrappedCommand,
     shell_command: &str,
 ) -> std::process::Output {
-    let output = Command::new(&wrapped.program)
+    Command::new(&wrapped.program)
         .args(&wrapped.prefix_args)
         .arg("sh")
         .arg("-c")
         .arg(shell_command)
         .output()
-        .expect("spawn wrapped sh");
-    if let Some(directory) = &wrapped.placeholder_dir {
-        devo_sandbox::remove_placeholder_dir(directory);
-    }
-    output
+        .expect("spawn wrapped sh")
 }
 
 /// Decide the wrap for `profile`, skipping the test (returning `None`) when no
@@ -97,8 +118,14 @@ fn wrap_or_skip(
 }
 
 fn assert_deny_enforced(workspace: &Path, wrapped: &devo_sandbox::WrappedCommand, tag: &str) {
+    let _placeholder_guard = PlaceholderDirGuard(wrapped.placeholder_dir.clone());
     let secret = workspace.join("secret.txt");
     let read = run_wrapped(wrapped, &format!("cat '{}'", secret.display()));
+    #[cfg(target_os = "linux")]
+    if bwrap_user_namespace_unavailable(&String::from_utf8_lossy(&read.stderr)) {
+        eprintln!("skipping: Bubblewrap user-namespace creation is unavailable");
+        return;
+    }
     assert!(
         !String::from_utf8_lossy(&read.stdout).contains(MARKER),
         "[{tag}] wrapped child read a denied path\nstdout: {}\nstderr: {}",
@@ -188,23 +215,35 @@ fn pty_wrap_blocks_network_for_restrict_network_profile() {
         return;
     };
 
+    let _placeholder_guard = PlaceholderDirGuard(wrapped.placeholder_dir.clone());
+    let _host_listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind host loopback probe listener");
+    let probe_port = _host_listener
+        .local_addr()
+        .expect("read host loopback probe address")
+        .port();
     let exe = std::env::current_exe().expect("current_exe");
     let output = Command::new(&wrapped.program)
         .args(&wrapped.prefix_args)
         .arg(exe)
         .env(SCENARIO_ENV, "net_probe")
+        .env(PROBE_PORT_ENV, probe_port.to_string())
         .arg("--ignored")
         .arg("--exact")
         .arg("--nocapture")
         .arg("subprocess_entry")
         .output()
         .expect("spawn wrapped network probe");
-    if let Some(directory) = &wrapped.placeholder_dir {
-        devo_sandbox::remove_placeholder_dir(directory);
+    #[cfg(target_os = "linux")]
+    if !output.status.success()
+        && bwrap_user_namespace_unavailable(&String::from_utf8_lossy(&output.stderr))
+    {
+        eprintln!("skipping: Bubblewrap user-namespace creation is unavailable");
+        return;
     }
     assert!(
         output.status.success(),
-        "network must be unreachable inside the wrap\nstderr: {}",
+        "network must not reach the host listener inside the wrap\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -218,33 +257,25 @@ fn subprocess_entry() {
         return;
     };
     match scenario.as_str() {
-        "net_probe" => match std::net::TcpStream::connect(("127.0.0.1", 9_u16)) {
-            Err(error) if is_network_unreachable(&error) => {
-                eprintln!("OK: network unreachable inside wrap");
-                std::process::exit(0);
+        "net_probe" => {
+            let port = std::env::var(PROBE_PORT_ENV)
+                .expect(PROBE_PORT_ENV)
+                .parse::<u16>()
+                .expect("valid loopback probe port");
+            match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Err(error) => {
+                    eprintln!("OK: restricted network cannot reach host listener: {error}");
+                    std::process::exit(0);
+                }
+                Ok(_) => {
+                    eprintln!("FAIL: TCP connect reached host listener despite restrict_network");
+                    std::process::exit(1);
+                }
             }
-            Err(error) => {
-                eprintln!("FAIL: unexpected connect error (network reachable?): {error}");
-                std::process::exit(1);
-            }
-            Ok(_) => {
-                eprintln!("FAIL: TCP connect succeeded despite restrict_network");
-                std::process::exit(1);
-            }
-        },
+        }
         other => {
             eprintln!("unknown scenario: {other}");
             std::process::exit(99);
         }
     }
-}
-
-/// Inside an unshared network namespace the loopback interface is down, so a
-/// connect fails with ENETUNREACH/ENETDOWN/EHOSTUNREACH — never ECONNREFUSED
-/// (which would prove a working loopback, i.e. no restriction).
-fn is_network_unreachable(error: &std::io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(libc::ENETUNREACH) | Some(libc::ENETDOWN) | Some(libc::EHOSTUNREACH)
-    )
 }

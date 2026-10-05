@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
+use futures::StreamExt;
 use futures::stream;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -23,19 +23,7 @@ use tokio::time::Duration;
 use tokio::time::timeout;
 
 use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
 use devo_core::SkillsConfig;
-use devo_core::tools::ToolCallError;
-use devo_core::tools::ToolRegistry;
-use devo_core::tools::ToolResult;
-use devo_core::tools::ToolResultContent;
-use devo_core::tools::json_schema::JsonSchema;
-use devo_core::tools::registry::ToolRegistryBuilder;
-use devo_core::tools::tool_handler::ToolHandler;
-use devo_core::tools::tool_spec::ToolExecutionMode;
-use devo_core::tools::tool_spec::ToolOutputMode;
-use devo_core::tools::tool_spec::ToolSpec;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::RequestContent;
@@ -45,23 +33,23 @@ use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use devo_server::SuccessResponse;
+use devo_server::test_support::TestRuntime;
 
 const QUEUED_TEXT: &str = "queued follow-up message";
 
-/// First stream request triggers the blocking tool; every later request ends
-/// the turn with plain text. All requests are captured for content asserts.
-#[derive(Default)]
-struct BlockingThenDoneProvider {
+/// First stream request issues an `ipython` tool call; request 2 blocks in the
+/// provider until released, then ends the turn with plain text. Later
+/// requests end immediately. All requests are captured for content asserts.
+struct ToolCallThenGatedDoneProvider {
     stream_requests: Mutex<Vec<ModelRequest>>,
+    release: Arc<Notify>,
 }
 
 #[async_trait]
-impl ModelProviderSDK for BlockingThenDoneProvider {
+impl ModelProviderSDK for ToolCallThenGatedDoneProvider {
     async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
         Ok(ModelResponse {
             id: "title-1".into(),
@@ -81,33 +69,7 @@ impl ModelProviderSDK for BlockingThenDoneProvider {
             requests.push(request);
             requests.len()
         };
-        let events = if request_number == 1 {
-            vec![
-                Ok(StreamEvent::ToolCallStart {
-                    index: 0,
-                    id: "tool-1".into(),
-                    name: "blocking_wait".into(),
-                    input: json!({}),
-                }),
-                Ok(StreamEvent::ToolCallInputDelta {
-                    index: 0,
-                    partial_json: "{}".into(),
-                }),
-                Ok(StreamEvent::MessageDone {
-                    response: ModelResponse {
-                        id: "resp-1".into(),
-                        content: vec![ResponseContent::ToolUse {
-                            id: "tool-1".into(),
-                            name: "blocking_wait".into(),
-                            input: json!({}),
-                        }],
-                        stop_reason: Some(StopReason::ToolUse),
-                        usage: Usage::default(),
-                        metadata: ResponseMetadata::default(),
-                    },
-                }),
-            ]
-        } else {
+        let done_events = || {
             vec![
                 Ok(StreamEvent::TextDelta {
                     index: 0,
@@ -124,84 +86,63 @@ impl ModelProviderSDK for BlockingThenDoneProvider {
                 }),
             ]
         };
+        let events = if request_number == 1 {
+            vec![
+                Ok(StreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "tool-1".into(),
+                    name: "ipython".into(),
+                    input: json!({ "code": "print('queue-drain-probe')" }),
+                }),
+                Ok(StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: "resp-1".into(),
+                        content: vec![ResponseContent::ToolUse {
+                            id: "tool-1".into(),
+                            name: "ipython".into(),
+                            input: json!({ "code": "print('queue-drain-probe')" }),
+                        }],
+                        stop_reason: Some(StopReason::ToolUse),
+                        usage: Usage::default(),
+                        metadata: ResponseMetadata::default(),
+                    },
+                }),
+            ]
+        } else if request_number == 2 {
+            let release = Arc::clone(&self.release);
+            let mut events = done_events().into_iter();
+            let first = events.next().expect("text delta event");
+            let stream = futures::stream::once(async move {
+                release.notified().await;
+                first
+            })
+            .chain(futures::stream::iter(events.collect::<Vec<_>>()))
+            .boxed();
+            return Ok(Box::pin(stream));
+        } else {
+            done_events()
+        };
         Ok(Box::pin(stream::iter(events)))
     }
 
     fn name(&self) -> &str {
-        "blocking-then-done-provider"
+        "tool-call-then-gated-done-provider"
     }
 }
 
-struct BlockingTool {
-    started: Arc<Notify>,
-    release: Arc<Notify>,
-}
-
-#[async_trait]
-impl ToolHandler for BlockingTool {
-    fn spec(&self) -> &ToolSpec {
-        Box::leak(Box::new(ToolSpec {
-            name: "blocking_wait".into(),
-            description: "Blocks until the test releases it.".into(),
-            input_schema: JsonSchema::object(Default::default(), None, None),
-            output_mode: ToolOutputMode::Text,
-            execution_mode: ToolExecutionMode::ReadOnly,
-            capability_tags: vec![],
-            supports_parallel: true,
-            preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        }))
-    }
-
-    async fn handle(
-        &self,
-        _ctx: devo_core::tools::ToolContext,
-        _input: serde_json::Value,
-        _progress: Option<devo_core::tools::ToolProgressSender>,
-    ) -> std::result::Result<ToolResult, ToolCallError> {
-        self.started.notify_one();
-        self.release.notified().await;
-        Ok(ToolResult::success(
-            ToolResultContent::Text("released".into()),
-            "released",
-        ))
-    }
-}
-
-fn build_runtime(
-    data_root: &Path,
-    provider: Arc<dyn ModelProviderSDK>,
-    registry: Arc<ToolRegistry>,
-) -> Arc<ServerRuntime> {
-    let db_path = data_root.join("test_queue_drain.db");
-    let db = Arc::new(devo_server::db::Database::open(db_path).expect("open test database"));
-    ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            registry,
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                enabled: false,
-                user_roots: Vec::new(),
-                workspace_roots: Vec::new(),
-                watch_for_changes: false,
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                include_instructions: Some(false),
-                config: Vec::new(),
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(
-                AppConfigStore::load(data_root.to_path_buf(), None).expect("load app config store"),
-            )),
-        ),
-    )
+fn build_runtime(data_root: &Path, provider: Arc<dyn ModelProviderSDK>) -> Arc<ServerRuntime> {
+    TestRuntime::new(provider)
+        .skills(SkillsConfig {
+            enabled: false,
+            user_roots: Vec::new(),
+            workspace_roots: Vec::new(),
+            watch_for_changes: false,
+            bundled: Some(BundledSkillsConfig { enabled: false }),
+            include_instructions: Some(false),
+            config: Vec::new(),
+        })
+        .db_file("test_queue_drain.db")
+        .runtime(data_root)
 }
 
 async fn initialize_connection(
@@ -246,7 +187,8 @@ fn all_user_request_texts(request: &ModelRequest) -> Vec<String> {
                 RequestContent::ProviderReasoning { .. }
                 | RequestContent::ToolUse { .. }
                 | RequestContent::HostedToolUse { .. }
-                | RequestContent::ToolResult { .. } => None,
+                | RequestContent::ToolResult { .. }
+                | RequestContent::Image { .. } => None,
             })
         })
         .collect()
@@ -293,6 +235,14 @@ async fn recv_until(
     }
 }
 
+/// True when a tool result for `call_id` reports an actual execution.
+fn executed_tool_result(value: &serde_json::Value, call_id: &str) -> bool {
+    let item = &value["params"]["item"]["item"];
+    item.get("type") == Some(&serde_json::json!("toolResult"))
+        && item["callId"] == serde_json::json!(call_id)
+        && item["isError"] != serde_json::json!(true)
+}
+
 fn is_turn_completed(value: &serde_json::Value) -> bool {
     value.get("method").and_then(serde_json::Value::as_str) == Some("turn/completed")
         || value
@@ -309,31 +259,12 @@ async fn queued_input_drains_into_followup_turn_and_broadcasts_empty_queue() -> 
     let workspace_root = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace_root)?;
 
-    let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let mut builder = ToolRegistryBuilder::new();
-    builder.register_handler(
-        "blocking_wait",
-        Arc::new(BlockingTool {
-            started: Arc::clone(&started),
-            release: Arc::clone(&release),
-        }),
-    );
-    builder.push_spec(ToolSpec {
-        name: "blocking_wait".into(),
-        description: "Blocks until the test releases it.".into(),
-        input_schema: JsonSchema::object(Default::default(), None, None),
-        output_mode: ToolOutputMode::Text,
-        execution_mode: ToolExecutionMode::ReadOnly,
-        capability_tags: vec![],
-        supports_parallel: true,
-        preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-        display_name: None,
-        supports_cancellation: None,
-        supports_streaming: None,
+    let provider = Arc::new(ToolCallThenGatedDoneProvider {
+        stream_requests: Mutex::new(Vec::new()),
+        release: Arc::clone(&release),
     });
-    let provider = Arc::new(BlockingThenDoneProvider::default());
-    let runtime = build_runtime(temp_dir.path(), provider.clone(), Arc::new(builder.build()));
+    let runtime = build_runtime(temp_dir.path(), provider.clone());
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
 
     let session_response = runtime
@@ -353,7 +284,7 @@ async fn queued_input_drains_into_followup_turn_and_broadcasts_empty_queue() -> 
     let session_result: SuccessResponse<devo_protocol::native::rpc_session::SessionNewResult> =
         serde_json::from_value(session_response.clone())
             .with_context(|| format!("session/new response: {session_response}"))?;
-    let session_id = devo_protocol::SessionId::try_from(session_result.result.session.id.as_str())?;
+    let session_id = devo_protocol::SessionId::from(session_result.result.session.id.as_str());
 
     // Subscribe exactly like the TUI does so `event_selectors` is populated
     // and `queue/updated` broadcasts target this connection.
@@ -400,9 +331,18 @@ async fn queued_input_drains_into_followup_turn_and_broadcasts_empty_queue() -> 
         turn_response.get("error").is_none(),
         "turn/start failed: {turn_response}"
     );
-    timeout(Duration::from_secs(5), started.notified())
-        .await
-        .context("timed out waiting for blocking tool to start")?;
+    // The Python probe executes; request 2 is then parked inside the
+    // provider, keeping the turn in flight deterministically.
+    timeout(Duration::from_secs(10), async {
+        while let Some(value) = notifications_rx.recv().await {
+            if executed_tool_result(&value, "tool-1") {
+                return;
+            }
+        }
+        panic!("notification channel closed before the probe executed");
+    })
+    .await
+    .context("timed out waiting for the ipython probe to execute")?;
 
     // Turn is running: push the message onto the queue (TUI Enter behavior).
     let push_response = runtime

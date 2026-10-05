@@ -10,16 +10,23 @@
 pub mod error;
 pub mod event;
 pub mod goal;
+pub mod id_bridge;
 pub mod ids;
+pub use ids::{
+    EventId, GoalId, ItemId, JobId, OpaqueId, QueueItemId, RestorePlanId, RunId, SessionId,
+    SubscriptionId, TurnId,
+};
 pub mod item;
-pub mod legacy_projector;
 pub mod methods;
 pub mod model;
+pub mod notification_bus;
 pub mod page;
 pub mod patch;
+pub mod pi;
 pub mod plan_parse;
 pub mod queue;
 pub mod rpc_admin;
+pub mod rpc_schedule;
 pub mod rpc_search;
 pub mod rpc_session;
 pub mod rpc_turn;
@@ -29,7 +36,12 @@ pub mod turn;
 pub mod usage;
 pub mod wire_projector;
 
-pub use legacy_projector::legacy_wire_from_native_item;
+pub use id_bridge::{uuid_from_item_id, uuid_from_session_id, uuid_from_turn_id};
+pub use notification_bus::{
+    notification_legacy_session_id, notification_method_name, notification_native_session_id,
+    notification_touches_session_activity,
+};
+
 pub use plan_parse::{
     plan_entries_from_plan_text, plan_entries_from_plan_text_or_single,
     plan_entries_from_update_plan_json, plan_entry_from_json, plan_step_status_from_str,

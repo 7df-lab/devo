@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
-use devo_core::SessionId;
 use devo_protocol::native::ids::RestorePlanId;
 use devo_protocol::native::rpc_session::{
     RestorePlan, SessionRollbackCommitParams, SessionRollbackCommitResult,
@@ -70,13 +69,7 @@ impl ServerRuntime {
                 );
             }
         };
-        let Ok(session_id) = SessionId::try_from(params.session_id.as_str()) else {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::InvalidParams,
-                "invalid session id",
-            );
-        };
+        let session_id = params.session_id;
         if self.runtime_active_turn_id(session_id).await.is_some() {
             return self.error_response(
                 request_id,
@@ -127,18 +120,19 @@ impl ServerRuntime {
         };
         let dropped_turn_ids =
             dropped_turn_ids(&source.persisted_turn_items, &rebuilt.persisted_turn_items);
-        let checkpoint = match source.record.as_ref() {
-            Some(record) => {
+        let checkpoint = match source.rollout_path.as_ref() {
+            Some(path) => {
                 let rollout_store = self.rollout_store.clone();
-                let record = record.clone();
+                let path = path.clone();
                 let checkpoints = tokio::task::spawn_blocking(move || {
-                    rollout_store.workspace_checkpoints(&record)
+                    rollout_store.workspace_checkpoints_at(&path)
                 })
                 .await;
                 match checkpoints {
                     Ok(Ok(checkpoints)) => dropped_turn_ids.first().and_then(|turn_id| {
+                        let legacy_turn_id = turn_id;
                         checkpoints.into_iter().rev().find(|checkpoint| {
-                            checkpoint.turn_id == *turn_id
+                            checkpoint.turn_id == *legacy_turn_id
                                 && checkpoint.backend.as_deref() == Some("git_ghost_commit")
                                 && checkpoint.workspace_root.is_some()
                         })
@@ -189,7 +183,7 @@ impl ServerRuntime {
         };
         let restore_plan_id = RestorePlanId::new();
         let public_plan = RestorePlan {
-            restore_plan_id: restore_plan_id.clone(),
+            restore_plan_id,
             affected_files,
             dropped_turn_count: u32::try_from(dropped_turn_ids.len()).unwrap_or(u32::MAX),
             workspace_version,
@@ -569,7 +563,7 @@ impl ServerRuntime {
                     next_status: retry_status.clone(),
                 })
             })?;
-        let record = source.record.clone();
+        let rollout_path = source.rollout_path.clone();
         let restored_file_count = match action {
             CommitAction::HistoryPending {
                 restored_file_count,
@@ -587,7 +581,7 @@ impl ServerRuntime {
                     plan.public_plan.restore_plan_id.as_str(),
                     checkpoint.turn_id,
                     &completed,
-                    record.as_ref(),
+                    rollout_path.as_deref(),
                 )
                 .await
                 .map_err(|response| {
@@ -608,7 +602,7 @@ impl ServerRuntime {
                         plan.public_plan.restore_plan_id.as_str(),
                         checkpoint,
                         &plan.public_plan.affected_files,
-                        record.as_ref(),
+                        rollout_path.as_deref(),
                     )
                     .await
                     .map_err(|failure| {
@@ -638,10 +632,13 @@ impl ServerRuntime {
             }
         };
         let (retained_turn_ids, retained_item_ids) = retained_ids(&rebuilt.persisted_turn_items);
-        let latest_turn_id = rebuilt.latest_turn.as_ref().map(|turn| turn.turn_id);
-        if let Some(record) = record.as_ref()
-            && let Err(error) = self.rollout_store.append_session_rollback(
-                record,
+        let retained_turn_ids: Vec<_> = retained_turn_ids.to_vec();
+        let retained_item_ids: Vec<_> = retained_item_ids.to_vec();
+        let latest_turn_id = rebuilt.latest_turn.as_ref().map(|turn| turn.turn_id());
+        if let Some(rollout_path) = rollout_path.as_ref()
+            && let Err(error) = self.rollout_store.append_session_rollback_at(
+                rollout_path,
+                plan.session_id,
                 retained_turn_ids,
                 retained_item_ids,
                 latest_turn_id,
@@ -658,7 +655,32 @@ impl ServerRuntime {
                 },
             }));
         }
-        rebuilt.record = record;
+        // The rollback moved the effective transcript tip back to the
+        // retained cut point, but the file's last sessionLeaf still names
+        // the pre-rollback tip — now a dropped item. Every file-derived tip
+        // (actor replace_state, resume) would adopt that dangling leaf, so
+        // the first post-rollback write parented onto a dropped item and
+        // the tree fragmented. Record the retained tip with a bumped epoch,
+        // exactly like session/tree/navigate does.
+        if let Some(rollout_path) = rollout_path.as_ref() {
+            let retained_tip = rebuilt.persisted_turn_items.last().map(|item| item.item_id);
+            let epoch = devo_core::read_canonical_history(rollout_path)
+                .map(|history| history.leaf_epoch.saturating_add(1))
+                .unwrap_or(1);
+            if let Err(error) = self.rollout_store.append_session_leaf_at(
+                rollout_path,
+                plan.session_id,
+                retained_tip,
+                epoch,
+            ) {
+                tracing::warn!(
+                    session_id = %plan.session_id,
+                    %error,
+                    "failed to persist post-rollback session leaf; file-derived tips stay on the pre-rollback leaf"
+                );
+            }
+        }
+        rebuilt.rollout_path = rollout_path;
         session_handle
             .replace_state(SessionActorState::from_runtime_session(rebuilt))
             .await;

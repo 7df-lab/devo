@@ -5,14 +5,13 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use devo_core::TurnApprovalCheckpointRecordedRecord;
-use devo_core::TurnId;
 use devo_core::tools::{
     AdditionalSandboxPermissions, NetworkPermission, SandboxPermissionRequest,
     ToolPermissionRequest,
 };
 use devo_core::{ContentBlock, Message, Role, read_canonical_history};
 use devo_protocol::CollaborationMode;
-use devo_protocol::SessionId;
+use devo_protocol::native::ids::{SessionId, TurnId};
 use devo_safety::ResourceKind;
 use serde::{Deserialize, Serialize};
 
@@ -25,8 +24,8 @@ pub(crate) struct StoredToolPermissionRequest {
     pub tool_name: String,
     pub input: serde_json::Value,
     pub cwd: String,
-    pub session_id: String,
-    pub turn_id: Option<String>,
+    pub session_id: SessionId,
+    pub turn_id: Option<TurnId>,
     pub resource: ResourceKind,
     pub action_summary: String,
     pub justification: Option<String>,
@@ -113,8 +112,8 @@ impl From<&ToolPermissionRequest> for StoredToolPermissionRequest {
             tool_name: request.tool_name.clone(),
             input: request.input.clone(),
             cwd: request.cwd.display().to_string(),
-            session_id: request.session_id.clone(),
-            turn_id: request.turn_id.clone(),
+            session_id: request.session_id,
+            turn_id: request.turn_id,
             resource: request.resource.clone(),
             action_summary: request.action_summary.clone(),
             justification: request.justification.clone(),
@@ -223,8 +222,8 @@ pub(crate) fn permission_request_from_messages(
                 tool_name: name.clone(),
                 input: input.clone(),
                 cwd: cwd.to_path_buf(),
-                session_id: owner_session_id.to_string(),
-                turn_id: Some(turn_id.to_string()),
+                session_id: owner_session_id,
+                turn_id: Some(turn_id),
                 resource: devo_safety::ResourceKind::Custom(name.clone()),
                 action_summary: format!("Resume tool call {name}"),
                 justification: None,
@@ -288,26 +287,15 @@ impl ServerRuntime {
             pending_tool_index,
             created_at: Utc::now(),
         };
-        let record = self
-            .rollout_session_record(owner_session_id)
+        let rollout_path = self
+            .session_rollout_path(owner_session_id)
             .await
-            .ok_or_else(|| "session rollout record unavailable".to_string())?;
+            .ok_or_else(|| "session rollout path unavailable".to_string())?;
         self.rollout_store
-            .append_approval_checkpoint(&record.rollout_path, &checkpoint)
+            .append_approval_checkpoint(&rollout_path, &checkpoint)
             .map_err(|error| format!("append approval checkpoint: {error}"))?;
         let _ = handle.mark_active_turn_waiting_approval(turn_id).await;
         Ok(checkpoint)
-    }
-
-    async fn rollout_session_record(
-        &self,
-        session_id: SessionId,
-    ) -> Option<devo_core::SessionRecord> {
-        let handle = self.session(session_id).await?;
-        match handle.record().await {
-            Some(Some(record)) => Some(record),
-            _ => None,
-        }
     }
 }
 
@@ -343,8 +331,8 @@ mod tests {
             tool_name: "shell".to_string(),
             input: serde_json::json!({"command": "echo hi"}),
             cwd: PathBuf::from("/repo"),
-            session_id: "ses_1".to_string(),
-            turn_id: Some("turn_1".to_string()),
+            session_id: "ses_1".into(),
+            turn_id: Some("turn_1".into()),
             resource: devo_safety::ResourceKind::ShellExec,
             action_summary: "run echo".to_string(),
             justification: None,

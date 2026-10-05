@@ -9,10 +9,10 @@ function baseView(overrides: Partial<WorkspaceChangeView> = {}): WorkspaceChange
 	return {
 		scope: "uncommitted",
 		status: "ready",
-		workspace_root: "/repo",
+		workspaceRoot: "/repo",
 		coverage: "git_visible",
 		attribution: "git_working_tree",
-		change_set_status: "accumulating",
+		changeSetStatus: "accumulating",
 		files: [
 			{
 				path: "src/a.ts",
@@ -20,18 +20,18 @@ function baseView(overrides: Partial<WorkspaceChangeView> = {}): WorkspaceChange
 				additions: 1n,
 				deletions: 1n,
 				binary: false,
-				diff_truncated: false,
+				diffTruncated: false,
 			},
 		],
-		stats: { files_changed: 1n, additions: 1n, deletions: 1n },
+		stats: { filesChanged: 1n, additions: 1n, deletions: 1n },
 		warnings: [],
-		generated_at: "2026-06-26T00:00:00Z",
+		generatedAt: "2026-06-26T00:00:00Z",
 		...overrides,
 	} as WorkspaceChangeView
 }
 
 describe("mergePathFullIntoView", () => {
-	test("merges old_text/new_text from path-scoped Full", () => {
+	test("merges oldText/newText from path-scoped Full", () => {
 		const base = baseView()
 		const patch = baseView({
 			files: [
@@ -41,12 +41,12 @@ describe("mergePathFullIntoView", () => {
 					additions: 1n,
 					deletions: 1n,
 					binary: false,
-					diff_truncated: false,
-					old_text: "old body\n",
-					new_text: "new body\n",
+					diffTruncated: false,
+					oldText: "old body\n",
+					newText: "new body\n",
 				},
 			],
-			unified_diff: [
+			unifiedDiff: [
 				"diff --git a/src/a.ts b/src/a.ts",
 				"--- a/src/a.ts",
 				"+++ b/src/a.ts",
@@ -59,11 +59,11 @@ describe("mergePathFullIntoView", () => {
 		const merged = mergePathFullIntoView(base, patch)
 		expect(merged.files[0]).toEqual(
 			expect.objectContaining({
-				old_text: "old body\n",
-				new_text: "new body\n",
+				oldText: "old body\n",
+				newText: "new body\n",
 			}),
 		)
-		expect(merged.unified_diff).toContain("+new body")
+		expect(merged.unifiedDiff).toContain("+new body")
 	})
 })
 
@@ -77,12 +77,12 @@ describe("mergeSummaryPreservingExpandState", () => {
 					additions: 1n,
 					deletions: 1n,
 					binary: false,
-					diff_truncated: false,
-					old_text: "old\n",
-					new_text: "new\n",
+					diffTruncated: false,
+					oldText: "old\n",
+					newText: "new\n",
 				},
 			],
-			unified_diff: "diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n",
+			unifiedDiff: "diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n",
 		})
 		const summary = baseView({
 			files: [
@@ -92,20 +92,20 @@ describe("mergeSummaryPreservingExpandState", () => {
 					additions: 2n,
 					deletions: 2n,
 					binary: false,
-					diff_truncated: false,
+					diffTruncated: false,
 				},
 			],
-			unified_diff: undefined,
+			unifiedDiff: undefined,
 		})
 
 		const merged = mergeSummaryPreservingExpandState(previous, summary)
 		expect(merged.files[0]).toEqual(
 			expect.objectContaining({
 				additions: 2n,
-				old_text: "old\n",
-				new_text: "new\n",
+				oldText: "old\n",
+				newText: "new\n",
 			}),
 		)
-		expect(merged.unified_diff).toContain("+new")
+		expect(merged.unifiedDiff).toContain("+new")
 	})
 })

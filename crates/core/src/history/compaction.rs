@@ -90,6 +90,7 @@ pub enum CompactionError {
 ///
 /// Implementations are provided by the caller (e.g. the query loop) so that
 /// this module does not depend directly on a specific provider SDK.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait HistorySummarizer: Send + Sync {
     /// Send `messages` (to-compact history followed by a developer compaction
@@ -350,7 +351,9 @@ fn split_by_user_message_budget(
 }
 
 fn summarizer_request_messages(to_compact: &[ResponseItem]) -> Vec<RequestMessage> {
-    let mut messages: Vec<RequestMessage> = to_compact.iter().map(RequestMessage::from).collect();
+    let without_digests = super::harness_digest_strip::exclude_harness_digests(to_compact);
+    let mut messages: Vec<RequestMessage> =
+        without_digests.iter().map(RequestMessage::from).collect();
     merge_consecutive_assistant_messages(&mut messages);
     normalize_tool_result_messages(&mut messages);
     messages.push(RequestMessage {
@@ -435,7 +438,8 @@ fn estimate_item_tokens(item: &ResponseItem) -> usize {
                     devo_protocol::ContentBlock::ProviderReasoning { .. }
                     | devo_protocol::ContentBlock::ToolUse { .. }
                     | devo_protocol::ContentBlock::HostedToolUse { .. }
-                    | devo_protocol::ContentBlock::ToolResult { .. } => continue,
+                    | devo_protocol::ContentBlock::ToolResult { .. }
+                    | devo_protocol::ContentBlock::Image { .. } => continue,
                 };
                 if text_blocks > 0 {
                     bytes += 1;

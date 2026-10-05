@@ -4,89 +4,25 @@
 //! `/permissions` (and Session Mode) for interactive clients.
 
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
-use async_trait::async_trait;
-use devo_core::AgentsMdConfig;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
-use devo_protocol::ModelRequest;
-use devo_protocol::ModelResponse;
-use devo_protocol::ResponseContent;
-use devo_protocol::ResponseMetadata;
 use devo_protocol::SessionId;
-use devo_protocol::StopReason;
-use devo_protocol::StreamEvent;
-use devo_protocol::Usage;
-use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use devo_server::SuccessResponse;
-use futures::Stream;
+use devo_server::test_support::NoopProvider;
+use devo_server::test_support::TestRuntime;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
-struct NoopProvider;
-
-#[async_trait]
-impl ModelProviderSDK for NoopProvider {
-    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        Ok(ModelResponse {
-            id: "noop-response".to_string(),
-            content: vec![ResponseContent::Text("noop".to_string())],
-            stop_reason: Some(StopReason::EndTurn),
-            usage: Usage::default(),
-            metadata: ResponseMetadata::default(),
-        })
-    }
-
-    async fn completion_stream(
-        &self,
-        _request: ModelRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        Ok(Box::pin(futures::stream::empty()))
-    }
-
-    fn name(&self) -> &str {
-        "noop-sandbox-profile-provider"
-    }
-}
-
 fn build_runtime(data_root: &Path) -> Result<Arc<ServerRuntime>> {
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(NoopProvider);
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("sandbox_profile.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                /*workspace_root*/ None,
-            )?)),
-        ),
+    Ok(TestRuntime::new(Arc::new(
+        NoopProvider::text().named("noop-sandbox-profile-provider"),
     ))
+    .db_file("sandbox_profile.db")
+    .runtime(data_root))
 }
 
 #[derive(Clone, Copy)]
@@ -157,7 +93,7 @@ async fn start_session(
         .context("session/new response")?;
     let response: SuccessResponse<devo_protocol::native::rpc_session::SessionNewResult> =
         serde_json::from_value(response)?;
-    Ok(SessionId::try_from(response.result.session.id.as_str())?)
+    Ok(SessionId::from(response.result.session.id.as_str()))
 }
 
 async fn new_acp_session(

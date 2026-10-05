@@ -31,6 +31,7 @@ const PROXY_ENFORCED_FLAG: &str = "--proxy-enforced";
 const READ_ROOTS_INCLUDE_PLATFORM_DEFAULTS_FLAG: &str = "--read-roots-include-platform-defaults";
 const READ_ROOTS_JSON_FLAG: &str = "--read-roots-json";
 const SANDBOX_LEVEL_FLAG: &str = "--windows-sandbox-level";
+const SESSION_CREDENTIAL_SID_FLAG: &str = "--session-credential-sid";
 const WRITE_ROOTS_JSON_FLAG: &str = "--write-roots-json";
 const WORKSPACE_ROOT_FLAG: &str = "--workspace-root";
 
@@ -51,6 +52,7 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
     deny_read_paths_override: &[AbsolutePathBuf],
     deny_write_paths_override: &[AbsolutePathBuf],
     devo_home: &Path,
+    session_credential_sid: Option<&str>,
 ) -> Vec<String> {
     let permission_profile_json = serde_json::to_string(permission_profile)
         .unwrap_or_else(|err| panic!("failed to serialize permission profile: {err}"));
@@ -110,6 +112,10 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
             &deny_write_paths_override,
         );
     }
+    if let Some(sid) = session_credential_sid {
+        args.push(SESSION_CREDENTIAL_SID_FLAG.to_string());
+        args.push(sid.to_string());
+    }
     args.push("--".to_string());
     args.extend(command);
     args
@@ -124,6 +130,10 @@ fn push_json_arg<T: serde::Serialize>(args: &mut Vec<String>, flag: &str, value:
 }
 
 pub fn run_windows_sandbox_wrapper_main() -> ! {
+    let _probe_dir = std::env::var("USERPROFILE")
+        .map(|h| std::path::PathBuf::from(h).join(".devo/.sandbox"))
+        .ok();
+    crate::logging::log_note("PROBE-WRAPPER-MAIN reached", _probe_dir.as_deref());
     let args = std::env::args().skip(2).collect::<Vec<_>>();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -165,6 +175,7 @@ struct WindowsSandboxWrapperRequest {
     write_roots_override: Option<Vec<PathBuf>>,
     deny_read_paths_override: Vec<AbsolutePathBuf>,
     deny_write_paths_override: Vec<AbsolutePathBuf>,
+    session_credential_sid: Option<String>,
     command: Vec<String>,
 }
 
@@ -189,6 +200,7 @@ async fn run_windows_sandbox_wrapper_request(request: WindowsSandboxWrapperReque
             write_roots_override: request.write_roots_override.as_deref(),
             deny_read_paths_override: request.deny_read_paths_override.as_slice(),
             deny_write_paths_override: request.deny_write_paths_override.as_slice(),
+            session_credential_sid: request.session_credential_sid.as_deref(),
             tty: false,
             stdin_open: true,
             use_private_desktop: request.windows_sandbox_private_desktop,
@@ -197,6 +209,8 @@ async fn run_windows_sandbox_wrapper_request(request: WindowsSandboxWrapperReque
 
     Ok(crate::forward_sandbox_session_stdio(spawned).await)
 }
+
+pub(crate) fn probe_wrapper_main_reached() {}
 
 fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandboxWrapperRequest> {
     let mut args = args.into_iter();
@@ -214,6 +228,7 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
     let mut write_roots_override = None;
     let mut deny_read_paths_override = Vec::new();
     let mut deny_write_paths_override = Vec::new();
+    let mut session_credential_sid = None;
     let mut command = None;
 
     while let Some(arg) = args.next() {
@@ -252,6 +267,9 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
                 proxy_settings_mode = crate::WindowsSandboxProxySettingsMode::Preserve;
             }
             PROXY_ENFORCED_FLAG => proxy_enforced = true,
+            SESSION_CREDENTIAL_SID_FLAG => {
+                session_credential_sid = Some(next_flag_value(&mut args, &arg)?);
+            }
             READ_ROOTS_INCLUDE_PLATFORM_DEFAULTS_FLAG => {
                 read_roots_include_platform_defaults = true;
             }
@@ -296,6 +314,7 @@ fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandbo
         write_roots_override,
         deny_read_paths_override,
         deny_write_paths_override,
+        session_credential_sid,
         command: command.ok_or_else(|| anyhow!("missing sandboxed command separator --"))?,
     })
 }

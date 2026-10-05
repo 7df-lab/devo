@@ -3,7 +3,7 @@
  *
  * Supports multi-step flows: method selection -> authentication.
  * For multi-env providers, shows either a structured credential form
- * (when auth.set + config options can cover all fields) or improved
+ * (when provider/upsert can cover all fields) or improved
  * env-var instructions with copy buttons and docs links.
  */
 
@@ -38,7 +38,9 @@ import type {
 import { createLogger } from "../../lib/logger"
 import { PROVIDER_KEY_URLS, ZEN_PROVIDER_ID, ZEN_SIGNUP_URL } from "../../lib/providers"
 import { getBaseClient } from "../../services/connection-manager"
+import { isDesktopOAuthProvider, resolveProviderAuthMethods } from "./desktop-oauth-providers"
 import { ProviderIcon } from "./provider-icon"
+import { connectProviderWithApiKey } from "./provider-api-key-connect"
 
 const log = createLogger("connect-provider-dialog")
 
@@ -72,7 +74,7 @@ type DialogState =
 
 /** A field in the provider configuration form */
 interface ProviderField {
-	/** Unique key -- used as the config option key or "apiKey" for auth.set */
+	/** Unique key -- used as the config option key or "apiKey" for provider/upsert */
 	key: string
 	/** Display label */
 	label: string
@@ -99,7 +101,7 @@ interface ConfigurableProvider {
 }
 
 /**
- * Providers that can be fully configured via auth.set() + config.update().
+ * Providers that can be fully configured via provider/upsert.
  * These show a multi-field form instead of env-var instructions.
  */
 const CONFIGURABLE_PROVIDERS: ConfigurableProvider[] = [
@@ -221,7 +223,7 @@ const ALTERNATIVE_ENV_PROVIDERS = new Set(["google"])
 
 /**
  * Determines the setup type for a multi-env provider:
- * - "configure": can be fully set up via auth.set() + config options
+ * - "configure": can be fully set up via provider/upsert with config options
  * - "env-setup": must use environment variables (at least partially)
  * - null: not a multi-env provider
  */
@@ -251,7 +253,11 @@ export function ConnectProviderDialog({
 
 	// Use plugin methods if available, otherwise default to API key
 	const authMethods =
-		pluginAuthMethods && pluginAuthMethods.length > 0 ? pluginAuthMethods : DEFAULT_API_KEY_METHOD
+		provider && isDesktopOAuthProvider(provider.id)
+			? resolveProviderAuthMethods(provider.id)
+			: pluginAuthMethods && pluginAuthMethods.length > 0
+				? pluginAuthMethods
+				: DEFAULT_API_KEY_METHOD
 
 	// Reset state when dialog opens/closes
 	useEffect(() => {
@@ -330,11 +336,7 @@ export function ConnectProviderDialog({
 							try {
 								const client = getBaseClient()
 								if (!client) throw new Error("Not connected to server")
-								await client.auth.set({
-									providerID: provider.id,
-									auth: { type: "api", key: apiKey },
-								})
-								await client.global.dispose()
+								await connectProviderWithApiKey(client, provider, apiKey)
 								setState({ status: "success" })
 							} catch (err) {
 								const message = err instanceof Error ? err.message : "Failed to connect"
@@ -371,11 +373,7 @@ export function ConnectProviderDialog({
 							try {
 								const client = getBaseClient()
 								if (!client) throw new Error("Not connected to server")
-								await client.auth.set({
-									providerID: provider.id,
-									auth: { type: "api", key: apiKey },
-								})
-								await client.global.dispose()
+								await connectProviderWithApiKey(client, provider, apiKey)
 								setState({ status: "success" })
 							} catch (err) {
 								const message = err instanceof Error ? err.message : "Failed to connect"
@@ -562,36 +560,22 @@ function ConfigureProviderView({
 				const client = getBaseClient()
 				if (!client) throw new Error("Not connected to server")
 
-				// Separate auth fields from config fields
-				const authField = config.fields.find((f) => f.persist === "auth")
-				const configFields = config.fields.filter(
-					(f) => f.persist === "config" && values[f.key]?.trim(),
-				)
-
-				// Set the API key / credential via auth.json
-				if (authField && values[authField.key]?.trim()) {
-					await client.auth.set({
-						providerID: provider.id,
-						auth: { type: "api", key: values[authField.key].trim() },
-					})
-				}
-
-				// Set config options via global config
-				if (configFields.length > 0) {
-					const options: Record<string, string> = {}
-					for (const field of configFields) {
+				// provider/upsert stores the credential in the native auth store and
+				// saves the additional options in one Connection update.
+				const authField = config.fields.find((field) => field.persist === "auth")
+				const options: Record<string, string> = {}
+				for (const field of config.fields) {
+					if (field.persist === "config" && values[field.key]?.trim()) {
 						options[field.key] = values[field.key].trim()
 					}
-					await client.global.config.update({
-						config: {
-							provider: {
-								[provider.id]: { options },
-							},
-						},
-					})
 				}
+				await connectProviderWithApiKey(
+					client,
+					provider,
+					authField ? values[authField.key] ?? "" : "",
+					options,
+				)
 
-				await client.global.dispose()
 				setState({ status: "success" })
 			} catch (err) {
 				const message = err instanceof Error ? err.message : "Failed to connect"
@@ -848,43 +832,20 @@ function OAuthView({
 	// Start OAuth flow on mount
 	useEffect(() => {
 		let cancelled = false
+		const unsubscribe = window.devo.providerOAuth.onUpdate((update) => {
+			if (cancelled) return
+			setAuthUrl(update.url ?? null)
+			setOauthMethod("auto")
+			setAuthInstructions(update.instructions)
+			setState({ status: "idle" })
+		})
 
 		async function startOAuth() {
 			setState({ status: "loading" })
 			try {
-				const client = getBaseClient()
-				if (!client) throw new Error("Not connected to server")
-				const result = await client.provider.oauth.authorize({
-					providerID: provider.id,
-					method: methodIndex,
-				})
+				await window.devo.providerOAuth.login(provider.id)
 				if (cancelled) return
-
-					const data = result.data as unknown as
-					| {
-							url: string
-							method: "auto" | "code"
-							instructions: string
-					  }
-					| undefined
-
-				if (!data?.url) {
-					throw new Error("No authorization URL returned")
-				}
-
-				setAuthUrl(data.url)
-				setOauthMethod(data.method)
-				setAuthInstructions(data.instructions)
-
-				// Open the URL in the browser (Electron intercepts via setWindowOpenHandler)
-				window.open(data.url, "_blank")
-
-				setState({ status: "idle" })
-
-				// For auto method, start polling
-				if (data.method === "auto") {
-					pollForCompletion(client, provider.id, methodIndex, setState, onSuccess, () => cancelled)
-				}
+				onSuccess()
 			} catch (err) {
 				if (cancelled) return
 				const message = err instanceof Error ? err.message : "Failed to start OAuth"
@@ -896,6 +857,8 @@ function OAuthView({
 		startOAuth()
 		return () => {
 			cancelled = true
+			unsubscribe()
+			void window.devo.providerOAuth.cancel()
 		}
 	}, [provider.id, methodIndex, setState, onSuccess])
 
@@ -903,27 +866,9 @@ function OAuthView({
 		async (e: React.FormEvent) => {
 			e.preventDefault()
 			if (!code.trim()) return
-			setState({ status: "loading" })
-			try {
-				const client = getBaseClient()
-				if (!client) throw new Error("Not connected to server")
-				await client.provider.oauth.callback({
-					providerID: provider.id,
-					method: methodIndex,
-					code: code.trim(),
-				})
-				await client.global.dispose()
-				onSuccess()
-			} catch (err) {
-				const message = err instanceof Error ? err.message : "Failed to complete OAuth"
-				log.error("Failed to complete OAuth callback", {
-					provider: provider.id,
-					error: err,
-				})
-				setState({ status: "error", message })
-			}
+			setState({ status: "error", message: "This OAuth flow completes in the browser." })
 		},
-		[code, provider.id, methodIndex, setState, onSuccess],
+		[code, setState],
 	)
 
 	if (oauthMethod === "code" && authUrl) {
@@ -1187,45 +1132,6 @@ function SuccessView({ provider, onDone }: { provider: CatalogProvider; onDone: 
 // ============================================================
 // Helpers
 // ============================================================
-
-async function pollForCompletion(
-	client: ReturnType<typeof getBaseClient>,
-	providerID: string,
-	methodIndex: number,
-	setState: (state: DialogState) => void,
-	onSuccess: () => void,
-	isCancelled: () => boolean,
-) {
-	if (!client) return
-
-	const maxAttempts = 60
-	const intervalMs = 2000
-
-	for (let attempt = 0; attempt < maxAttempts; attempt++) {
-		if (isCancelled()) return
-
-		await new Promise((resolve) => setTimeout(resolve, intervalMs))
-		if (isCancelled()) return
-
-		try {
-			await client.provider.oauth.callback({
-				providerID,
-				method: methodIndex,
-			})
-			// If no error, OAuth completed
-			if (isCancelled()) return
-			await client.global.dispose()
-			onSuccess()
-			return
-		} catch {
-			// Expected to fail while user hasn't completed OAuth yet
-		}
-	}
-
-	if (!isCancelled()) {
-		setState({ status: "error", message: "Authentication timed out. Please try again." })
-	}
-}
 
 function extractDeviceCode(instructions: string | null): string | null {
 	if (!instructions) return null

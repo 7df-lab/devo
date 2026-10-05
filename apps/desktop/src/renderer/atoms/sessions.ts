@@ -1,8 +1,7 @@
 import { atom } from "jotai"
 import { atomFamily } from "jotai-family"
 import type { PermissionRequest, QuestionRequest, Session, SessionStatus } from "../lib/types"
-import { messagesFamily } from "./messages"
-import { partsFamily, partStorageKey } from "./parts"
+import { itemsFamily } from "./messages"
 import { viewedSessionIdAtom } from "./ui"
 
 // ============================================================
@@ -144,17 +143,8 @@ export const upsertSessionAtom = atom(
 )
 
 export const removeSessionAtom = atom(null, (get, set, sessionId: string) => {
-	// Clean up message and part atoms to prevent memory leaks.
-	// messagesFamily/partsFamily create atoms on demand and never remove them,
-	// so we must explicitly clear and remove entries for deleted sessions.
-	const messages = get(messagesFamily(sessionId))
-	if (messages && messages.length > 0) {
-		for (const msg of messages) {
-			partsFamily.remove(partStorageKey(sessionId, msg.id))
-			partsFamily.remove(msg.id)
-		}
-	}
-	messagesFamily.remove(sessionId)
+	// Clean up item atoms to prevent memory leaks.
+	itemsFamily.remove(sessionId)
 
 	sessionFamily.remove(sessionId)
 

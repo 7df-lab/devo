@@ -12,6 +12,7 @@ use crate::response_item::ResponseItem;
 use crate::tools::ToolContent;
 use devo_protocol::ModelRequest;
 use devo_protocol::StopReason;
+use devo_protocol::native::event::ModelQueryRetryPhase;
 use devo_provider::ModelProviderSDK;
 
 /// Events emitted during a query for the caller (CLI/UI) to observe.
@@ -19,6 +20,12 @@ use devo_provider::ModelProviderSDK;
 pub enum QueryEvent {
     /// Provider request retry status.
     ProviderRetryStatus(ProviderRetryStatus),
+    /// Provider retries were exhausted; terminal failure follows.
+    ProviderQueryFailed {
+        attempt: usize,
+        max_attempts: usize,
+        message: String,
+    },
     /// Context compaction is about to begin.
     ContextCompactionStarted,
     /// Context compaction replaced the current prompt history.
@@ -119,14 +126,8 @@ pub struct ProviderRetryStatus {
     /// canonical `model/queryRetrying` notification).
     pub max_attempts: usize,
     pub backoff_ms: u64,
-    pub phase: QueryProviderRetryPhase,
+    pub phase: ModelQueryRetryPhase,
     pub message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueryProviderRetryPhase {
-    Scheduled,
-    Resumed,
 }
 
 #[derive(Clone, Default)]
@@ -146,6 +147,9 @@ pub struct QueryOptions {
     /// Slot written before each provider attempt so in-turn callers (auto-review)
     /// can reuse the same request prefix for prompt-cache hits.
     pub last_model_request: Option<SharedLastModelRequest>,
+    /// Continual Harness digest (after skills, before goal). Empty/None skips.
+    /// Host loads via `devo_harness::HarnessDigestInjector` at turn start.
+    pub harness_digest: Option<String>,
 }
 
 /// Live per-session settings shared with a running turn. The server writes
@@ -161,6 +165,9 @@ pub struct LiveTurnSettings {
     /// check (mirrors the session-level `ApplyEffectiveContextWindow`
     /// semantics: both the context window and the compact limit move).
     pub auto_compact_token_limit: Option<usize>,
+    /// Python cell first-wait override (ms). Decision point: next `ipython`
+    /// cell wait after the patch applies (L2-DES-CONV-002 DD-6).
+    pub python_cell_first_wait_ms: Option<u64>,
     /// Bumped by the writer on every change; the loop re-applies only when
     /// the generation advances.
     pub generation: u64,
@@ -191,6 +198,13 @@ impl std::fmt::Debug for QueryOptions {
             .field(
                 "last_model_request",
                 &self.last_model_request.as_ref().map(|_| "<shared>"),
+            )
+            .field(
+                "harness_digest",
+                &self
+                    .harness_digest
+                    .as_ref()
+                    .map(|d| if d.is_empty() { "<empty>" } else { "<set>" }),
             )
             .finish()
     }

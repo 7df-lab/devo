@@ -25,7 +25,7 @@ import {
 	SparklesIcon,
 } from "lucide-react"
 import { useCallback, useMemo, useState } from "react"
-import { messagesFamily } from "../../atoms/messages"
+import { itemsFamily } from "../../atoms/messages"
 import type {
 	CompactionConfig,
 	ModelRef,
@@ -656,7 +656,7 @@ function ContextUsageIndicator({
 	providers?: ProvidersData | null
 	compaction?: CompactionConfig
 }) {
-	const messages = useAtomValue(messagesFamily(sessionId))
+	const messages = useAtomValue(itemsFamily(sessionId))
 
 	const getModelLimit = useCallback(
 		(providerID: string, modelID: string): ModelLimitInfo | undefined => {

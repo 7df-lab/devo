@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Permission-policy configuration loaded from the `[permission]` TOML section.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PermissionConfig {
     /// Rules evaluated by the permission-policy runtime in declaration order.
@@ -19,6 +19,31 @@ pub struct PermissionConfig {
     /// permission preset (`off` disables the OS sandbox).
     #[serde(default)]
     pub sandbox_profile: Option<String>,
+    /// Whether the conversation-visible Warning item fires when the RLM kernel
+    /// must run unfenced (explicit downgrade, design doc §5.3). Default true
+    /// ("ask"); set false for "don't remind". The rollout `kernelFence` audit
+    /// event is recorded regardless of this setting.
+    #[serde(default = "default_warn_unfenced_kernel")]
+    pub warn_unfenced_kernel: bool,
+}
+
+fn default_warn_unfenced_kernel() -> bool {
+    true
+}
+
+/// Manual `Default` must agree with the serde defaults: the app-config merge
+/// serializes `AppConfig::default()` as its base TOML, so a derived
+/// `bool: false` here would silently override the serde default (`true`) for
+/// any key the user's files do not mention.
+impl Default for PermissionConfig {
+    fn default() -> Self {
+        Self {
+            rules: Vec::new(),
+            prompt_policy: PromptPolicy::default(),
+            sandbox_profile: None,
+            warn_unfenced_kernel: default_warn_unfenced_kernel(),
+        }
+    }
 }
 
 /// A single permission-policy rule.

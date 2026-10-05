@@ -1,10 +1,10 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use devo_core::ItemId;
 use devo_core::tools::tool_spec::ToolPreparationFeedback;
+use devo_protocol::native::item::{ExecOrigin, ExecutionMode, Item, PlanEntry, ToolSource};
 
 use super::types::{PendingToolCall, ToolDisplayKind, ToolStartItem};
-use crate::{CommandExecutionPayload, FileChangePayload, ItemKind, ToolCallPayload};
 
 pub(super) fn is_unified_exec_tool(name: &str) -> bool {
     matches!(name, "exec_command" | "write_stdin")
@@ -18,77 +18,64 @@ pub(super) fn is_plan_tool(name: &str) -> bool {
     matches!(name, "update_plan")
 }
 
-fn tool_start_item_kind(
-    tool_name: &str,
-    display_kind: ToolDisplayKind,
-    preparation_feedback: ToolPreparationFeedback,
-) -> ItemKind {
-    if preparation_feedback == ToolPreparationFeedback::LiveOnly {
-        ItemKind::ToolCall
-    } else if is_file_change_tool(tool_name) {
-        ItemKind::FileChange
-    } else if display_kind.is_command_execution() {
-        ItemKind::CommandExecution
-    } else if is_plan_tool(tool_name) {
-        ItemKind::Plan
-    } else {
-        ItemKind::ToolCall
-    }
-}
-
-fn tool_start_item(
+fn tool_start_native_item(
     tool_call_id: &str,
     tool_name: &str,
     command: &str,
     input: &serde_json::Value,
     display_kind: ToolDisplayKind,
     preparation_feedback: ToolPreparationFeedback,
-    command_actions: Vec<devo_protocol::parse_command::ParsedCommand>,
-) -> ToolStartItem {
-    let item_kind = tool_start_item_kind(tool_name, display_kind, preparation_feedback);
-    let payload = match item_kind {
-        ItemKind::ToolCall => serde_json::to_value(ToolCallPayload {
-            tool_call_id: tool_call_id.to_string(),
+) -> Item {
+    if preparation_feedback == ToolPreparationFeedback::LiveOnly {
+        return Item::ToolCall {
+            call_id: tool_call_id.to_string(),
             tool_name: tool_name.to_string(),
-            parameters: input.clone(),
-            command_actions,
-        })
-        .expect("serialize tool call payload"),
-        ItemKind::FileChange => serde_json::to_value(FileChangePayload {
-            tool_call_id: tool_call_id.to_string(),
-            tool_name: Some(tool_name.to_string()),
+            source: ToolSource::Builtin,
+            server_name: None,
             input: Some(input.clone()),
-            changes: Vec::new(),
-            is_error: false,
-        })
-        .expect("serialize file change payload"),
-        ItemKind::CommandExecution => serde_json::to_value(CommandExecutionPayload {
-            tool_call_id: tool_call_id.to_string(),
+        };
+    }
+    if is_file_change_tool(tool_name) {
+        // Live row needs path/edits in ToolCall args. FileChange items with empty
+        // `changes` hide the running editor call from the TUI; emit ToolCall and
+        // let completion produce FileChange when diffs exist.
+        return Item::ToolCall {
+            call_id: tool_call_id.to_string(),
             tool_name: tool_name.to_string(),
+            source: ToolSource::Builtin,
+            server_name: None,
+            input: Some(input.clone()),
+        };
+    }
+    if display_kind.is_command_execution() {
+        return Item::CommandExecution {
+            call_id: tool_call_id.to_string(),
             command: command.to_string(),
+            argv: None,
+            cwd: PathBuf::new(),
             input: Some(input.clone()),
-            source: devo_protocol::protocol::ExecCommandSource::Agent,
-            command_actions,
             output: None,
+            exit_code: None,
+            execution_handle: None,
             is_error: false,
-        })
-        .expect("serialize command execution payload"),
-        ItemKind::Plan => serde_json::json!({
-            "title": "Plan",
-            "text": ""
-        }),
-        ItemKind::UserMessage
-        | ItemKind::AgentMessage
-        | ItemKind::Reasoning
-        | ItemKind::ToolResult
-        | ItemKind::McpToolCall
-        | ItemKind::WebSearch
-        | ItemKind::ImageView
-        | ItemKind::ContextCompaction
-        | ItemKind::ApprovalRequest
-        | ItemKind::ApprovalDecision => unreachable!("tool start item kind must be tool-like"),
-    };
-    ToolStartItem { item_kind, payload }
+            execution_mode: ExecutionMode::Foreground,
+            origin: ExecOrigin::AgentTool,
+            sandbox: None,
+        };
+    }
+    if is_plan_tool(tool_name) {
+        return Item::Plan {
+            call_id: Some(tool_call_id.to_string()),
+            entries: Vec::<PlanEntry>::new(),
+        };
+    }
+    Item::ToolCall {
+        call_id: tool_call_id.to_string(),
+        tool_name: tool_name.to_string(),
+        source: ToolSource::Builtin,
+        server_name: None,
+        input: Some(input.clone()),
+    }
 }
 
 pub(super) fn tool_start_item_from_input(
@@ -99,15 +86,16 @@ pub(super) fn tool_start_item_from_input(
     display_kind: ToolDisplayKind,
     preparation_feedback: ToolPreparationFeedback,
 ) -> ToolStartItem {
-    tool_start_item(
-        tool_call_id,
-        tool_name,
-        command,
-        input,
-        display_kind,
-        preparation_feedback,
-        command_actions_from_tool_input(tool_name, command, input),
-    )
+    ToolStartItem {
+        native_item: tool_start_native_item(
+            tool_call_id,
+            tool_name,
+            command,
+            input,
+            display_kind,
+            preparation_feedback,
+        ),
+    }
 }
 
 pub(super) fn tool_start_item_from_result(
@@ -117,17 +105,18 @@ pub(super) fn tool_start_item_from_result(
     input: &serde_json::Value,
     display_kind: ToolDisplayKind,
     preparation_feedback: ToolPreparationFeedback,
-    summary: &str,
+    _summary: &str,
 ) -> ToolStartItem {
-    tool_start_item(
-        tool_call_id,
-        tool_name,
-        command,
-        input,
-        display_kind,
-        preparation_feedback,
-        command_actions_from_tool_result(tool_name, command, input, summary),
-    )
+    ToolStartItem {
+        native_item: tool_start_native_item(
+            tool_call_id,
+            tool_name,
+            command,
+            input,
+            display_kind,
+            preparation_feedback,
+        ),
+    }
 }
 
 pub(super) fn command_display_from_input(tool_name: &str, input: &serde_json::Value) -> String {
@@ -199,14 +188,6 @@ pub(super) fn command_display_from_input(tool_name: &str, input: &serde_json::Va
     }
 }
 
-pub(super) fn command_actions_from_tool_input(
-    tool_name: &str,
-    command: &str,
-    input: &serde_json::Value,
-) -> Vec<devo_protocol::parse_command::ParsedCommand> {
-    crate::tool_actions::exploration_actions_from_tool_input(tool_name, command, input)
-}
-
 fn code_search_display_from_input(input: &serde_json::Value) -> String {
     match input
         .get("operation")
@@ -244,28 +225,10 @@ fn code_search_display_from_input(input: &serde_json::Value) -> String {
     }
 }
 
-pub(super) fn command_actions_from_tool_result(
-    tool_name: &str,
-    command: &str,
-    input: &serde_json::Value,
-    summary: &str,
-) -> Vec<devo_protocol::parse_command::ParsedCommand> {
-    let actions = command_actions_from_tool_input(tool_name, command, input);
-    if !actions.is_empty() {
-        return actions;
-    }
-    match tool_name {
-        "read" => crate::tool_actions::read_action_from_tool_summary(summary)
-            .into_iter()
-            .collect(),
-        _ => actions,
-    }
-}
-
 pub(super) fn command_execution_item_id_for_progress(
     pending_tool_calls: &HashMap<String, PendingToolCall>,
     tool_use_id: &str,
-) -> Option<ItemId> {
+) -> Option<devo_protocol::native::ids::ItemId> {
     pending_tool_calls
         .get(tool_use_id)
         .and_then(|pending| pending.item_id)
@@ -302,73 +265,36 @@ pub(super) fn without_agent_coordination_tools(
 #[cfg(test)]
 mod tests {
     use devo_core::{ToolCallItem, TurnItem};
-    use devo_protocol::SessionHistoryMetadata;
+    use devo_protocol::SessionHistoryEntry;
+    use devo_protocol::native::item::Item;
     use pretty_assertions::assert_eq;
 
-    use super::{command_actions_from_tool_input, command_display_from_input};
-    use crate::projection::history_item_from_turn_item;
+    use super::command_display_from_input;
+    use crate::projection::history_entry_from_turn_item;
 
     #[test]
-    fn live_and_replayed_exploration_actions_are_identical() {
-        let cases = [
-            (
-                "read",
-                serde_json::json!({
-                    "filePath": "crates/server/src/projection.rs",
-                    "offset": 20,
-                    "limit": 10
-                }),
-            ),
-            (
-                "glob",
-                serde_json::json!({
-                    "pattern": "**/*.rs",
-                    "path": "crates/server/src"
-                }),
-            ),
-            (
-                "grep",
-                serde_json::json!({
-                    "pattern": "SessionHistoryMetadata",
-                    "path": "crates/server/src"
-                }),
-            ),
-            (
-                "code_search",
-                serde_json::json!({
-                    "operation": "search",
-                    "query": "restored exploration metadata",
-                    "path": "crates/server/src"
-                }),
-            ),
-            (
-                "code_search",
-                serde_json::json!({
-                    "operation": "find_related",
-                    "file_path": "crates/server/src/projection.rs",
-                    "line": 214
-                }),
-            ),
-        ];
-
-        for (tool_name, input) in cases {
-            let projected = history_item_from_turn_item(&TurnItem::ToolCall(ToolCallItem {
-                tool_call_id: "call-1".to_string(),
-                tool_name: tool_name.to_string(),
-                input: input.clone(),
-            }))
-            .expect("history item");
-            let replay_actions = match projected.metadata.expect("explored metadata") {
-                SessionHistoryMetadata::Explored { actions } => actions,
-                other => panic!("unexpected metadata: {other:?}"),
-            };
-
-            assert_eq!(
-                command_actions_from_tool_input(tool_name, &projected.title, &input),
-                replay_actions,
-                "live and replay actions differ for {tool_name}"
-            );
-        }
+    fn history_entry_preserves_native_tool_call_input() {
+        let input = serde_json::json!({
+            "filePath": "crates/server/src/projection.rs",
+            "offset": 20,
+            "limit": 10
+        });
+        let projected = history_entry_from_turn_item(&TurnItem::ToolCall(ToolCallItem {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "read".to_string(),
+            input: input.clone(),
+        }))
+        .expect("history entry");
+        assert_eq!(
+            projected,
+            SessionHistoryEntry::item(Item::ToolCall {
+                call_id: "call-1".to_string(),
+                tool_name: "read".to_string(),
+                source: devo_protocol::native::item::ToolSource::Builtin,
+                server_name: None,
+                input: Some(input),
+            })
+        );
     }
 
     #[test]

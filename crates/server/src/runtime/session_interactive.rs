@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
-use devo_core::TurnId;
 use devo_protocol::ApprovalDecisionValue;
-use devo_protocol::SessionId;
+use devo_protocol::native::ids::{SessionId, TurnId};
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
@@ -152,7 +151,7 @@ impl SessionInteractiveLanes {
             .await
             .iter()
             .any(|(host_session_id, state)| {
-                (*host_session_id == session_id
+                (host_session_id == &session_id
                     && (!state.pending_approvals.is_empty()
                         || !state.pending_user_inputs.is_empty()))
                     || state
@@ -181,6 +180,17 @@ impl SessionInteractiveLanes {
                     .values()
                     .any(|pending| pending.owner_session_id == owner_session_id)
             })
+    }
+
+    /// Whether any approval wait is registered under this host session, for
+    /// any owner — the host's own turn or a sub-agent routing its permission
+    /// request through the host.
+    pub(crate) async fn has_pending_approval_for_host(&self, host_session_id: SessionId) -> bool {
+        self.inner
+            .lock()
+            .await
+            .get(&host_session_id)
+            .is_some_and(|state| !state.pending_approvals.is_empty())
     }
 
     pub(crate) async fn approval_controller(
@@ -236,7 +246,7 @@ impl SessionInteractiveLanes {
     pub(crate) async fn clear_owner_session(&self, owner_session_id: SessionId) {
         let mut lanes = self.inner.lock().await;
         lanes.retain(|host_session_id, state| {
-            if *host_session_id == owner_session_id {
+            if host_session_id == &owner_session_id {
                 return false;
             }
             state
@@ -260,7 +270,7 @@ impl SessionInteractiveLanes {
                 .pending_user_inputs
                 .iter()
                 .filter(|(_, pending)| {
-                    *host_session_id == session_id || pending.owner_session_id == session_id
+                    host_session_id == &session_id || pending.owner_session_id == session_id
                 })
                 .map(|(request_id, _)| request_id.clone())
                 .collect::<Vec<_>>();
@@ -292,7 +302,7 @@ impl SessionInteractiveLanes {
                     .pending_approvals
                     .iter()
                     .filter(|(_, pending)| {
-                        *host_session_id == session_id || pending.owner_session_id == session_id
+                        host_session_id == &session_id || pending.owner_session_id == session_id
                     })
                     .map(|(approval_id, pending)| PendingApprovalSnapshot {
                         owner_session_id: pending.owner_session_id,
@@ -318,7 +328,7 @@ impl SessionInteractiveLanes {
                     .pending_user_inputs
                     .iter()
                     .filter(|(_, pending)| {
-                        *host_session_id == session_id || pending.owner_session_id == session_id
+                        host_session_id == &session_id || pending.owner_session_id == session_id
                     })
                     .map(|(request_id, pending)| PendingUserInputSnapshot {
                         owner_session_id: pending.owner_session_id,
@@ -342,7 +352,7 @@ pub(crate) struct PendingSnapshot {
 pub(crate) struct PendingApprovalSnapshot {
     pub(crate) owner_session_id: SessionId,
     pub(crate) approval_id: String,
-    pub(crate) turn_id: devo_core::TurnId,
+    pub(crate) turn_id: TurnId,
     pub(crate) tool_name: String,
     pub(crate) resource: Option<devo_safety::ResourceKind>,
     pub(crate) path: Option<std::path::PathBuf>,
@@ -357,7 +367,7 @@ pub(crate) struct PendingApprovalSnapshot {
 pub(crate) struct PendingUserInputSnapshot {
     pub(crate) owner_session_id: SessionId,
     pub(crate) request_id: String,
-    pub(crate) turn_id: devo_core::TurnId,
+    pub(crate) turn_id: TurnId,
     pub(crate) questions: Vec<devo_protocol::RequestUserInputQuestion>,
     pub(crate) persisted: Option<crate::execution::PersistedLivingItem>,
 }
@@ -420,13 +430,13 @@ mod tests {
 
         assert_eq!(
             lanes
-                .has_pending_approval_for_session(parent_session_id, child_session_id)
+                .has_pending_approval_for_session(parent_session_id, child_session_id,)
                 .await,
             true
         );
         assert_eq!(
             lanes
-                .has_pending_approval_for_session(parent_session_id, parent_session_id)
+                .has_pending_approval_for_session(parent_session_id, parent_session_id,)
                 .await,
             false
         );

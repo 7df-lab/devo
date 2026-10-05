@@ -176,6 +176,26 @@ pub fn normalize_reasoning_effort_literal(raw: &str) -> String {
     }
 }
 
+/// Maps toggle aliases onto a concrete thinking level for UI / session
+/// selection: `on`/`enabled` become the first non-`off` available level, or
+/// `"medium"` when none exist.
+pub fn normalize_model_thinking_level_selection(
+    raw: &str,
+    available: &[crate::ModelThinkingLevel],
+) -> String {
+    let normalized = normalize_reasoning_effort_literal(raw);
+    match normalized.as_str() {
+        "on" => available
+            .iter()
+            .copied()
+            .find(|level| *level != crate::ModelThinkingLevel::Off)
+            .map(|level| level.as_str().to_string())
+            .unwrap_or_else(|| String::from("medium")),
+        "none" => String::from("off"),
+        other => other.to_string(),
+    }
+}
+
 /// Maps a canonical logical toggle/effort selection onto the wire value expected
 /// by built-in adapters that still speak `disabled`/`enabled` for thinking.
 pub fn adapter_request_thinking_wire(selection: &str) -> String {
@@ -571,6 +591,29 @@ mod tests {
         assert_eq!(
             super::normalize_reasoning_effort_literal(" medium "),
             "medium"
+        );
+    }
+
+    /// Trace: L2-DES-MODEL-003
+    /// Verifies: on/enabled select first non-off available thinking level.
+    #[test]
+    fn normalize_model_thinking_level_selection_maps_on_to_first_non_off() {
+        use crate::ModelThinkingLevel;
+
+        assert_eq!(
+            super::normalize_model_thinking_level_selection(
+                "enabled",
+                &[ModelThinkingLevel::Off, ModelThinkingLevel::High]
+            ),
+            "high"
+        );
+        assert_eq!(
+            super::normalize_model_thinking_level_selection("on", &[ModelThinkingLevel::Off]),
+            "medium"
+        );
+        assert_eq!(
+            super::normalize_model_thinking_level_selection("none", &[]),
+            "off"
         );
     }
 

@@ -103,7 +103,7 @@ describe("session.messages soft-handles missing sessions", () => {
 			}
 		})()
 
-		const result = await client.session.messages({ sessionID: "missing-session" })
+		const result = await client.session.messages({ sessionId: "missing-session" })
 		expect(result.data).toEqual([])
 		await consumer
 		expect(deletedIds).toEqual(["missing-session"])
@@ -153,7 +153,7 @@ describe("session.queue.list resumes cold historical sessions", () => {
 		})
 
 		const client = createDevoClient({ directory: "/repo", transport })
-		const result = await client.session.queue.list({ sessionID: "missing-session" })
+		const result = await client.session.queue.list({ sessionId: "missing-session" })
 		expect(resumed).toBe(true)
 		expect(result.data.entries).toHaveLength(1)
 		expect(result.data.entries[0]?.queueItemId).toBe("q1")
@@ -178,7 +178,7 @@ describe("session.queue.list resumes cold historical sessions", () => {
 		})
 
 		const client = createDevoClient({ directory: "/repo", transport })
-		const result = await client.session.queue.list({ sessionID: "missing-session" })
+		const result = await client.session.queue.list({ sessionId: "missing-session" })
 		expect(result.data.entries).toEqual([])
 	})
 })

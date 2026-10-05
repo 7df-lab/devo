@@ -8,8 +8,8 @@ describe("chat permission options", () => {
 	test("matches TUI once + deny for minimal scopes", () => {
 		const choices = buildApprovalChoices({
 			id: "approval-1",
-			requestID: "approval-1",
-			sessionID: "session-1",
+			requestId: "approval-1",
+			sessionId: "session-1",
 			permission: "write: src/main.rs",
 			metadata: { availableScopes: ["once"] },
 		})
@@ -19,8 +19,8 @@ describe("chat permission options", () => {
 	test("includes contextual session and prefix-persist options", () => {
 		const choices = buildApprovalChoices({
 			id: "approval-1",
-			requestID: "approval-1",
-			sessionID: "session-1",
+			requestId: "approval-1",
+			sessionId: "session-1",
 			permission: "run git add file.txt",
 			metadata: {
 				availableScopes: ["once", "session", "commandPrefixPersist"],
@@ -40,8 +40,8 @@ describe("chat permission options", () => {
 	test("does not surface turn or tool scopes in the picker", () => {
 		const choices = buildApprovalChoices({
 			id: "approval-1",
-			requestID: "approval-1",
-			sessionID: "session-1",
+			requestId: "approval-1",
+			sessionId: "session-1",
 			permission: "write: hello.txt",
 			metadata: {
 				availableScopes: ["once", "turn", "tool", "session"],
@@ -59,11 +59,11 @@ describe("chat permission options", () => {
 	test("session scope label uses exact filepath for file tools", () => {
 		const choices = buildApprovalChoices({
 			id: "approval-1",
-			requestID: "approval-1",
-			sessionID: "session-1",
+			requestId: "approval-1",
+			sessionId: "session-1",
 			permission: "write: C:\\Users\\hello.txt",
 			metadata: {
-				availableScopes: ["once", "session", "path_prefix"],
+				availableScopes: ["once", "session", "pathPrefix"],
 				path: "C:\\Users\\lenovo\\Desktop\\hello.txt",
 			},
 		})
@@ -78,11 +78,11 @@ describe("chat permission options", () => {
 	test("uses parent directory for file path prefix labels", () => {
 		const choices = buildApprovalChoices({
 			id: "approval-1",
-			requestID: "approval-1",
-			sessionID: "session-1",
+			requestId: "approval-1",
+			sessionId: "session-1",
 			permission: "write: C:\\Users\\hello.txt",
 			metadata: {
-				availableScopes: ["once", "path_prefix"],
+				availableScopes: ["once", "pathPrefix"],
 				path: "C:\\Users\\lenovo\\Desktop\\hello.txt",
 			},
 		})
@@ -93,30 +93,26 @@ describe("chat permission options", () => {
 		])
 	})
 
-	test("normalizes legacy snake_case scopes", () => {
+	test("ignores non-canonical snake_case scopes", () => {
 		const choices = buildApprovalChoices({
 			id: "approval-1",
-			requestID: "approval-1",
-			sessionID: "session-1",
+			requestId: "approval-1",
+			sessionId: "session-1",
 			permission: "write: hello.txt",
 			metadata: {
 				availableScopes: ["once", "path_prefix"],
 				path: "C:\\Users\\hello.txt",
 			},
 		})
-		expect(choices.map((choice) => choice.label)).toEqual([
-			"Allow once",
-			"Allow files under `C:\\Users`",
-			"Deny",
-		])
+		expect(choices.map((choice) => choice.label)).toEqual(["Allow once", "Deny"])
 	})
 
 	test("shows only action summary and agent reason", () => {
 		expect(
 			permissionSummaryLines({
 				id: "approval-1",
-				requestID: "approval-1",
-				sessionID: "session-1",
+				requestId: "approval-1",
+				sessionId: "session-1",
 				permission: "write: C:\\Users\\hello.txt",
 				metadata: {
 					tool: "FileWrite",

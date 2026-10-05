@@ -42,11 +42,13 @@ The server runtime uses **one session actor per session**. Durable session state
 
 ### Session persistence layers
 
-- **Rollout JSONL** under `~/.devo/sessions/` is the canonical conversation history.
+- **Rollout JSONL** is the canonical conversation history (agent layout):
+  - Roots/forks: `~/.devo/sessions/<session_id>.jsonl`
+  - Subagents: `~/.devo/session-artifacts/<root_id>/sub-xxxxxxxx/<child_id>.jsonl` (nested `sub-…` dirs for deeper children)
 - **SQLite** (`devo.db` `sessions` table) stores a lightweight index (`rollout_path`, `parent_session_id`, title, cwd, timestamps) used by `session/list` and resume decisions.
 - **In-memory session actors** are loaded on demand via `get_or_load_parent_session`; root sessions are LRU-evicted (capacity 16) when unpinned.
 - **`session/list`** returns durable user-visible sessions only (non-ephemeral, no `agent_path`; includes forks with `parent_session_id`); subagent rows are indexed but hidden from list.
-- **`session/resume`** loads parent sessions lazily from rollout files. Subagent session ids cannot be resumed directly; missing rollout files fail with an explicit restore error.
+- **`session/resume`** loads sessions lazily from rollout files (roots and subagents). Subagent actors stay off the root LRU. Missing rollout files fail with an explicit restore error.
 - **Startup** runs `index_rollout_metadata` in the background instead of replaying every rollout into memory.
 
 ### Session title generation

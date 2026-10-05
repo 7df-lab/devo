@@ -7,7 +7,6 @@ use devo_core::durable_execution::{
     ExecutionRecord, ExecutionReplay, RecoveryDisposition, RecoveryState, ToolIntentJournal,
     read_execution_replay,
 };
-use devo_core::{SessionId, TurnId, TurnStatus};
 use devo_protocol::native::rpc_turn::{
     TurnRecovery, TurnRecoveryReadParams, TurnRecoveryReadResult, TurnResumeParams,
     TurnResumeResult,
@@ -16,15 +15,18 @@ use devo_protocol::native::rpc_turn::{
 use super::super::*;
 use super::journal::RolloutToolJournal;
 
-struct SavedTurn {
-    recovery: TurnRecovery,
-    turn: crate::TurnMetadata,
-    record: devo_core::SessionRecord,
-    execution: ExecutionReplay,
+pub(crate) struct SavedTurn {
+    pub(crate) recovery: TurnRecovery,
+    turn: crate::turn::RuntimeTurn,
+    rollout_path: std::path::PathBuf,
+    pub(crate) execution: ExecutionReplay,
 }
 
 impl ServerRuntime {
-    async fn saved_turn(&self, session_id: SessionId) -> anyhow::Result<Option<SavedTurn>> {
+    pub(crate) async fn saved_turn(
+        &self,
+        session_id: SessionId,
+    ) -> anyhow::Result<Option<SavedTurn>> {
         if self.active_turns.has_session(session_id).await {
             return Ok(None);
         }
@@ -41,27 +43,29 @@ impl ServerRuntime {
             return Ok(None);
         };
         if matches!(
-            turn.status,
-            TurnStatus::Completed | TurnStatus::WaitingApproval
-        ) || turn.kind == devo_core::TurnKind::ManualCompaction
+            turn.native.status,
+            devo_protocol::native::turn::TurnStatus::Completed
+                | devo_protocol::native::turn::TurnStatus::WaitingApproval
+        ) || turn.native.kind == devo_protocol::native::turn::TurnKind::Compaction
             || matches!(
-                turn.failure_reason,
+                turn.extras.failure_reason,
                 Some(devo_protocol::TurnFailureReason::MaxTurnRequests)
             )
         {
             return Ok(None);
         }
-        let Some(record) = handle
+        let Some(path) = handle
             .turn_persistence_snapshot()
             .await
-            .and_then(|value| value.record)
+            .and_then(|value| value.rollout_path)
         else {
             return Ok(None);
         };
-        let path = record.rollout_path.clone();
-        let turn_id = turn.turn_id;
+        let turn_id = turn.turn_id();
+        let path_for_read = path.clone();
         let execution =
-            tokio::task::spawn_blocking(move || read_execution_replay(&path, turn_id)).await??;
+            tokio::task::spawn_blocking(move || read_execution_replay(&path_for_read, &turn_id))
+                .await??;
         if execution
             .recovery
             .as_ref()
@@ -69,7 +73,9 @@ impl ServerRuntime {
         {
             return Ok(None);
         }
-        if turn.status == TurnStatus::Interrupted && execution.recovery.is_none() {
+        if turn.native.status == devo_protocol::native::turn::TurnStatus::Interrupted
+            && execution.recovery.is_none()
+        {
             return Ok(None);
         }
         let (revision, attempt, reason) = execution.recovery.as_ref().map_or_else(
@@ -78,13 +84,13 @@ impl ServerRuntime {
         );
         Ok(Some(SavedTurn {
             recovery: TurnRecovery {
-                turn_id: devo_protocol::native::ids::TurnId::from_legacy_uuid(turn_id.into()),
+                turn_id: turn.native.id,
                 revision,
                 attempt,
                 reason,
             },
             turn,
-            record,
+            rollout_path: path,
             execution,
         }))
     }
@@ -106,7 +112,7 @@ impl ServerRuntime {
     ) -> serde_json::Value {
         let result = async {
             let params: TurnRecoveryReadParams = serde_json::from_value(params)?;
-            let session_id = SessionId::try_from(params.session_id.as_str())?;
+            let session_id = params.session_id;
             Ok::<_, anyhow::Error>(TurnRecoveryReadResult {
                 recovery: self.turn_recovery(session_id).await?,
             })
@@ -144,9 +150,9 @@ impl ServerRuntime {
         };
         let journal = RolloutToolJournal::new(
             Arc::clone(self),
-            saved.record.rollout_path,
+            saved.rollout_path,
             session_id,
-            saved.turn.turn_id,
+            saved.turn.turn_id(),
         );
         journal
             .commit(ExecutionRecord::Recovery {
@@ -159,22 +165,25 @@ impl ServerRuntime {
                 },
             })
             .await?;
-        saved.turn.status = TurnStatus::Interrupted;
-        saved.turn.completed_at = Some(chrono::Utc::now());
-        self.persist_turn_line_deduped(session_id, &saved.turn)
+        saved.turn.native.status = devo_protocol::native::turn::TurnStatus::Interrupted;
+        saved.turn.native.completed_at = Some(chrono::Utc::now());
+        self.persist_runtime_turn_line_deduped(session_id, &saved.turn)
             .await?;
         if let Some(handle) = self.session(session_id).await {
-            handle.set_session_idle(Some(saved.turn.clone())).await;
+            handle
+                .set_runtime_session_idle(Some(saved.turn.clone()))
+                .await;
         }
         self.record_terminal_turn_status(
-            saved.turn.turn_id,
-            TerminalTurnSnapshot::from_turn(&saved.turn),
+            saved.turn.turn_id(),
+            TerminalTurnSnapshot::from_runtime_turn(&saved.turn),
         )
         .await;
-        self.broadcast_event(ServerEvent::TurnInterrupted(TurnEventPayload {
-            session_id,
-            turn: saved.turn,
-        }))
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::TurnCompleted {
+                turn: Box::new(saved.turn.native.clone()),
+            },
+        )
         .await;
         self.broadcast_recovery_state(session_id).await;
         super::spawn_post_turn_scheduling(
@@ -198,16 +207,18 @@ impl ServerRuntime {
             .session(session_id)
             .await
             .context("session unavailable")?;
-        let Some(record) = handle
+        let Some(path) = handle
             .turn_persistence_snapshot()
             .await
-            .and_then(|snapshot| snapshot.record)
+            .and_then(|snapshot| snapshot.rollout_path)
         else {
             return Ok(());
         };
-        let path = record.rollout_path.clone();
+        let journal_path = path.clone();
+        let turn_id_for_read = turn_id;
         let replay =
-            tokio::task::spawn_blocking(move || read_execution_replay(&path, turn_id)).await??;
+            tokio::task::spawn_blocking(move || read_execution_replay(&path, &turn_id_for_read))
+                .await??;
         let previous = replay.recovery;
         if previous
             .as_ref()
@@ -215,7 +226,7 @@ impl ServerRuntime {
         {
             return Ok(());
         }
-        RolloutToolJournal::new(Arc::clone(self), record.rollout_path, session_id, turn_id)
+        RolloutToolJournal::new(Arc::clone(self), journal_path, session_id, turn_id)
             .commit(ExecutionRecord::Recovery {
                 state: RecoveryState {
                     revision: previous.as_ref().map_or(1, |state| state.revision + 1),
@@ -258,7 +269,7 @@ impl ServerRuntime {
             !params.idempotency_key.trim().is_empty(),
             "idempotency key is required"
         );
-        let session_id = SessionId::try_from(params.session_id.as_str())?;
+        let session_id = params.session_id;
         let gate = self.recovery_gate(session_id).await;
         let _guard = gate.lock().await;
         let key = (session_id, format!("recovery:{}", params.idempotency_key));
@@ -289,19 +300,19 @@ impl ServerRuntime {
         let turn_config = snapshot.runtime_context.resolve_turn_config(
             saved
                 .turn
-                .model_binding_id
-                .as_deref()
-                .or(Some(saved.turn.model.as_str())),
-            saved.turn.reasoning_effort_selection.clone(),
+                .model_binding_id()
+                .or(Some(saved.turn.logical_model())),
+            saved.turn.reasoning_effort_selection(),
         );
         let mut turn = saved.turn;
-        turn.status = TurnStatus::Running;
-        turn.completed_at = None;
-        turn.failure_reason = None;
-        turn.stop_reason = None;
+        turn.native.status = devo_protocol::native::turn::TurnStatus::InProgress;
+        turn.native.completed_at = None;
+        turn.native.error = None;
+        turn.extras.failure_reason = None;
+        turn.extras.stop_reason = None;
         if !self
             .active_turns
-            .try_claim_session(session_id, turn.clone())
+            .try_claim_session(session_id, turn.native.clone())
             .await
         {
             bail!("turn already active");
@@ -309,9 +320,9 @@ impl ServerRuntime {
         let attempt = saved.recovery.attempt + 1;
         let journal = RolloutToolJournal::new(
             Arc::clone(self),
-            saved.record.rollout_path,
+            saved.rollout_path,
             session_id,
-            turn.turn_id,
+            turn.turn_id(),
         );
         let committed = async {
             journal
@@ -330,7 +341,8 @@ impl ServerRuntime {
                     },
                 })
                 .await?;
-            self.persist_turn_line_deduped(session_id, &turn).await
+            self.persist_runtime_turn_line_deduped(session_id, &turn)
+                .await
         }
         .await;
         if let Err(error) = committed {
@@ -340,9 +352,9 @@ impl ServerRuntime {
         self.terminal_turn_statuses
             .lock()
             .await
-            .retain(|(id, _)| *id != turn.turn_id);
+            .retain(|(id, _)| *id != turn.turn_id());
         handle
-            .begin_active_turn(turn.clone(), turn_config.clone())
+            .begin_runtime_turn(turn.clone(), turn_config.clone())
             .await;
         let mut items = saved.execution.items.clone();
         items.extend(saved.execution.interrupted_outcomes());
@@ -352,23 +364,32 @@ impl ServerRuntime {
             .then(|| devo_core::history::response_items_to_messages(&items));
         let runtime = Arc::clone(self);
         let running_turn = turn.clone();
-        self.spawn_active_turn_task(session_id, turn.clone(), Some(connection_id), async move {
-            if let Err(error) = runtime
-                .run_recovered_turn(session_id, running_turn, turn_config, restored)
-                .await
-            {
-                tracing::error!(%session_id, %error, "turn recovery failed");
-            }
-            runtime.clear_active_turn_runtime_handles(session_id).await;
-            runtime.broadcast_recovery_state(session_id).await;
-            super::spawn_post_turn_scheduling(
-                Arc::clone(&runtime),
-                session_id,
-                /*should_auto_continue_goal*/ true,
-            );
-        })
+        let broadcast_session_id = session_id;
+        self.spawn_active_runtime_turn_task(
+            session_id,
+            turn.clone(),
+            Some(connection_id),
+            async move {
+                let resume_session_id = session_id;
+                if let Err(error) = runtime
+                    .run_recovered_turn(resume_session_id, running_turn, turn_config, restored)
+                    .await
+                {
+                    tracing::error!(%resume_session_id, %error, "turn recovery failed");
+                }
+                runtime
+                    .clear_active_turn_runtime_handles(resume_session_id)
+                    .await;
+                runtime.broadcast_recovery_state(resume_session_id).await;
+                super::spawn_post_turn_scheduling(
+                    Arc::clone(&runtime),
+                    resume_session_id,
+                    /*should_auto_continue_goal*/ true,
+                );
+            },
+        )
         .await;
-        let native = devo_protocol::native::wire_projector::native_turn_from_metadata(&turn);
+        let native = turn.native.clone();
         self.recovery_idempotency.lock().await.insert(
             key,
             TurnResumeResult {
@@ -377,7 +398,7 @@ impl ServerRuntime {
             },
         );
         self.broadcast_recovery_notification(
-            session_id,
+            broadcast_session_id,
             devo_protocol::native::event::ServerNotification::TurnResumed {
                 turn: Box::new(native.clone()),
                 attempt,
@@ -393,7 +414,7 @@ impl ServerRuntime {
     async fn run_recovered_turn(
         self: &Arc<Self>,
         session_id: SessionId,
-        turn: crate::TurnMetadata,
+        turn: crate::turn::RuntimeTurn,
         turn_config: devo_core::TurnConfig,
         restored: Option<Vec<devo_core::Message>>,
     ) -> anyhow::Result<()> {
@@ -412,7 +433,7 @@ impl ServerRuntime {
         let collaboration_mode = working.state.core.collaboration_mode;
         self.register_turn_spawn_snapshot(
             session_id,
-            turn.turn_id,
+            turn.turn_id(),
             Arc::new(working.state.spawn_snapshot()),
         )
         .await;
@@ -435,13 +456,14 @@ impl ServerRuntime {
         let query_outcome = self
             .run_turn_model_query(super::TurnModelQueryParams {
                 state: &mut working.state,
-                turn_id: turn.turn_id,
+                turn_id: turn.turn_id(),
                 turn_config: &turn_config,
                 input: "",
                 input_messages: &[],
+                input_images: &[],
                 collaboration_mode,
                 input_mode: TurnInputMode::Recovery,
-                usage_parent_session_id: parent,
+                usage_parent_session_id: parent.as_ref().map(|id| *id),
                 event_tx,
             })
             .await;
@@ -452,7 +474,7 @@ impl ServerRuntime {
             turn,
             query_outcome,
             event_summary,
-            usage_parent_session_id: parent,
+            usage_parent_session_id: parent.as_ref().map(|id| *id),
         })
         .await;
         let inline = working.state.stream.lock().await.turn_inline.take();

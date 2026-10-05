@@ -349,7 +349,7 @@ export async function applyRemoteDiffToLocal(
 
 	try {
 		log.info("Fetching remote diff for apply-to-local", { sessionId })
-		const result = await client.session.diff({ sessionID: sessionId })
+		const result = await client.session.diff({ sessionId: sessionId })
 		const diffs = result.data as unknown
 
 		if (!diffs || (Array.isArray(diffs) && diffs.length === 0)) {

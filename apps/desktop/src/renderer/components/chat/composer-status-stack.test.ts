@@ -92,17 +92,17 @@ describe("ComposerStatusStack", () => {
 
 	test("keeps queued follow-up controls out of transcript turns", () => {
 		expect({
-			requirementComment: chatTurnSource.includes("queue state belongs in the composer status stack"),
 			noSendNowProp: !chatTurnSource.includes("onSendNow"),
 			noSendNowLabel: !chatTurnSource.includes("Send now"),
 			noQueuedInference: !chatTurnSource.includes("isQueued = isWorking"),
 			noQueueLabel: !chatTurnSource.includes(">Queued<"),
+			queueLivesInComposerStatus: stackSource.includes("queued follow-up rows"),
 		}).toEqual({
-			requirementComment: true,
 			noSendNowProp: true,
 			noSendNowLabel: true,
 			noQueuedInference: true,
 			noQueueLabel: true,
+			queueLivesInComposerStatus: true,
 		})
 	})
 
@@ -116,7 +116,7 @@ describe("ComposerStatusStack", () => {
 			reorderHandler: chatViewSource.includes("onReorderQueueItem={reorderQueueItem}"),
 			queuePlaceholder: chatViewSource.includes("Add to queue"),
 			clientQueuePush: clientSource.includes('"session/queue/push"'),
-			clientQueueSteer: clientSource.includes('"session/queue/steer"'),
+			clientTurnSteer: clientSource.includes('"turn/steer"'),
 			queueUpdatedEvent: clientSource.includes('"session.queue.updated"'),
 			editRemovesFromQueue: queueHookSource.includes("await removeQueueItem(item)"),
 		}).toEqual({
@@ -128,7 +128,7 @@ describe("ComposerStatusStack", () => {
 			reorderHandler: true,
 			queuePlaceholder: true,
 			clientQueuePush: true,
-			clientQueueSteer: true,
+			clientTurnSteer: true,
 			queueUpdatedEvent: true,
 			editRemovesFromQueue: true,
 		})

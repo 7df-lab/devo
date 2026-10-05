@@ -1,11 +1,12 @@
+import { toast } from "sonner"
 import { createLogger } from "../../lib/logger"
 import { queryClient } from "../../lib/query-client"
 import type { Event } from "../../lib/types"
+import type { ContextOccupancy } from "../../lib/context-occupancy"
 import { compactionStatusFamily } from "../compaction"
 import { serverConnectedAtom } from "../connection"
 import { discoveryAtom } from "../discovery"
-import { removeMessageAtom, upsertMessageAtom } from "../messages"
-import { applyPartDeltaAtom, removePartAtom, upsertPartAtom } from "../parts"
+import { removeItemAtom, upsertItemAtom } from "../messages"
 import {
 	addPermissionAtom,
 	addQuestionAtom,
@@ -20,7 +21,7 @@ import {
 import { setSessionActiveTurnAtom, setSessionQueueAtom } from "../queue"
 import { sessionNativeFamily } from "../session-native"
 import { appStore } from "../store"
-import { isStreamingField, getStreamingPart, streamingVersionFamily } from "../streaming"
+import { streamingVersionFamily } from "../streaming"
 import { todosFamily } from "../todos"
 import { setSessionDiffAtom } from "../ui"
 import { applyWorkspaceChangesUpdatedAtom } from "../workspace-changes"
@@ -106,8 +107,8 @@ export function processEvent(event: Event): void {
 
 		case "turn.provider_retry_status": {
 			const properties = event.properties
-			const sessionId = properties.sessionID ?? properties.session_id
-			const turnId = properties.turnID ?? properties.turn_id
+			const sessionId = properties.sessionId
+			const turnId = properties.turnId
 			if (sessionId && turnId) {
 				const phase = String(properties.phase ?? "")
 				set(setProviderRetryStatusAtom, {
@@ -118,7 +119,7 @@ export function processEvent(event: Event): void {
 							: {
 								turnId,
 								attempt: Number(properties.attempt ?? 0),
-								backoffMs: Number(properties.backoffMs ?? properties.backoff_ms ?? 0),
+								backoffMs: Number(properties.backoffMs ?? 0),
 								provider: String(properties.provider ?? ""),
 								model: String(properties.model ?? ""),
 								phase,
@@ -131,13 +132,13 @@ export function processEvent(event: Event): void {
 
 		case "session.status":
 			set(setSessionStatusAtom, {
-				sessionId: event.properties.sessionID,
+				sessionId: event.properties.sessionId,
 				status: event.properties.status,
 			})
 			// Clear error when session starts working again
 			if (event.properties.status.type !== "idle") {
 				set(setSessionErrorAtom, {
-					sessionId: event.properties.sessionID,
+					sessionId: event.properties.sessionId,
 					error: undefined,
 				})
 			}
@@ -145,23 +146,23 @@ export function processEvent(event: Event): void {
 
 		case "session.activeTurn":
 			set(setSessionActiveTurnAtom, {
-				sessionId: event.properties.sessionID,
-				turnId: event.properties.turnID ?? null,
+				sessionId: event.properties.sessionId,
+				turnId: event.properties.turnId ?? null,
 			})
 			break
 
 		case "session.queue.updated":
 			set(setSessionQueueAtom, {
-				sessionId: event.properties.sessionID,
+				sessionId: event.properties.sessionId,
 				entries: event.properties.entries ?? [],
 			})
 			break
 
 		case "session.error": {
-			const { sessionID, error } = event.properties
-			if (sessionID && error) {
+			const { sessionId, error } = event.properties
+			if (sessionId && error) {
 				set(setSessionErrorAtom, {
-					sessionId: sessionID,
+					sessionId,
 					error: { name: error.name, data: error.data },
 				})
 			}
@@ -170,124 +171,90 @@ export function processEvent(event: Event): void {
 
 		case "session.compaction.started":
 		case "session/compaction/started": {
-			const sessionID = event.properties.sessionID ?? event.properties.session_id
-			if (sessionID) {
-				set(compactionStatusFamily(sessionID), "started")
+			const sessionId = event.properties.sessionId
+			if (sessionId) {
+				set(compactionStatusFamily(sessionId), "started")
 			}
 			break
 		}
 
 		case "session.compaction.completed":
 		case "session/compaction/completed": {
-			const sessionID = event.properties.sessionID ?? event.properties.session_id
-			if (sessionID) {
+			const sessionId = event.properties.sessionId
+			if (sessionId) {
 				// Transcript markers carry the durable "completed" row; clear the
 				// live atom so a later compaction can show "started" again.
-				set(compactionStatusFamily(sessionID), null)
+				set(compactionStatusFamily(sessionId), null)
 			}
 			break
 		}
 
 		case "session.compaction.failed":
 		case "session/compaction/failed": {
-			const sessionID = event.properties.sessionID ?? event.properties.session_id
-			if (sessionID) {
-				set(compactionStatusFamily(sessionID), null)
+			const sessionId = event.properties.sessionId
+			if (sessionId) {
+				set(compactionStatusFamily(sessionId), null)
 			}
 			break
 		}
 
 		case "permission.asked":
 			set(addPermissionAtom, {
-				sessionId: event.properties.sessionID,
+				sessionId: event.properties.sessionId,
 				permission: event.properties,
 			})
 			break
 
 		case "permission.replied":
 			set(removePermissionAtom, {
-				sessionId: event.properties.sessionID,
-				permissionId: event.properties.requestID,
+				sessionId: event.properties.sessionId,
+				permissionId: event.properties.requestId,
 			})
 			break
 
 		case "question.asked":
 			set(addQuestionAtom, {
-				sessionId: event.properties.sessionID,
+				sessionId: event.properties.sessionId,
 				question: event.properties,
 			})
 			break
 
 		case "question.replied":
 			set(removeQuestionAtom, {
-				sessionId: event.properties.sessionID,
-				requestId: event.properties.requestID,
+				sessionId: event.properties.sessionId,
+				requestId: event.properties.requestId,
 			})
 			break
 
 		case "question.rejected":
 			set(removeQuestionAtom, {
-				sessionId: event.properties.sessionID,
-				requestId: event.properties.requestID,
+				sessionId: event.properties.sessionId,
+				requestId: event.properties.requestId,
 			})
 			break
 
-		case "message.updated":
-			set(upsertMessageAtom, event.properties.info)
+		case "item.updated":
+			set(upsertItemAtom, event.properties.info)
+			set(streamingVersionFamily(event.properties.info.sessionId), (v) => v + 1)
 			break
 
-		case "message.removed":
-			set(removeMessageAtom, {
-				sessionId: event.properties.sessionID,
-				messageId: event.properties.messageID,
+		case "item.removed":
+			set(removeItemAtom, {
+				sessionId: event.properties.sessionId,
+				itemId: event.properties.itemId,
 			})
+			set(streamingVersionFamily(event.properties.sessionId), (v) => v + 1)
 			break
-
-		case "message.part.updated": {
-			const part = event.properties.part
-			set(upsertPartAtom, part)
-			// useSessionChat reads partsFamily imperatively through appStore.get,
-			// so visible part updates must bump the per-session version — except
-			// when the streaming buffer already owns this text/reasoning part and
-			// has scheduled a throttled notify (avoids ~RAF double bumps).
-			const bufferedStreaming =
-				(part.type === "text" || part.type === "reasoning") &&
-				Boolean(getStreamingPart(part.sessionID, part.messageID, part.id))
-			if (!bufferedStreaming) {
-				set(streamingVersionFamily(part.sessionID), (v) => v + 1)
-			}
-			break
-		}
-
-		case "message.part.delta": {
-			const { messageID, partID, field, delta, sessionID } = event.properties
-			set(applyPartDeltaAtom, { sessionId: sessionID, messageId: messageID, partId: partID, field, delta })
-			// Non-streaming field deltas (e.g. tool input) bypass the streaming
-			// buffer and land directly in partsFamily. Bump the version so the
-			// UI re-renders to show the updated content.
-			if (!isStreamingField(field)) {
-				set(streamingVersionFamily(sessionID), (v) => v + 1)
-			}
-			break
-		}
-
-		case "message.part.removed": {
-			const { messageID, partID, sessionID } = event.properties
-			set(removePartAtom, { sessionId: sessionID, messageId: messageID, partId: partID })
-			// Part removal changes the visible part list, so notify the session.
-			set(streamingVersionFamily(sessionID), (v) => v + 1)
-			break
-		}
 
 		case "todo.updated":
-			set(todosFamily(event.properties.sessionID), event.properties.todos)
+			set(todosFamily(event.properties.sessionId), event.properties.todos)
 			break
 
 		case "session.commands.updated": {
-			const sessionID = event.properties.sessionID
-			if (!sessionID) break
-			const current = appStore.get(sessionNativeFamily(sessionID))
-			set(sessionNativeFamily(sessionID), {
+			const sessionId = event.properties.sessionId
+			if (!sessionId) break
+			const current = appStore.get(sessionNativeFamily(sessionId))
+			set(sessionNativeFamily(sessionId), {
 				...current,
 				commands: event.properties.commands ?? [],
 			})
@@ -295,10 +262,10 @@ export function processEvent(event: Event): void {
 		}
 
 		case "session.config.updated": {
-			const sessionID = event.properties.sessionID
-			if (!sessionID) break
-			const current = appStore.get(sessionNativeFamily(sessionID))
-			set(sessionNativeFamily(sessionID), {
+			const sessionId = event.properties.sessionId
+			if (!sessionId) break
+			const current = appStore.get(sessionNativeFamily(sessionId))
+			set(sessionNativeFamily(sessionId), {
 				...current,
 				configOptions: event.properties.configOptions ?? [],
 			})
@@ -306,10 +273,10 @@ export function processEvent(event: Event): void {
 		}
 
 		case "session.mode.updated": {
-			const sessionID = event.properties.sessionID
-			if (!sessionID) break
-			const current = appStore.get(sessionNativeFamily(sessionID))
-			set(sessionNativeFamily(sessionID), {
+			const sessionId = event.properties.sessionId
+			if (!sessionId) break
+			const current = appStore.get(sessionNativeFamily(sessionId))
+			set(sessionNativeFamily(sessionId), {
 				...current,
 				modeID: event.properties.modeID,
 			})
@@ -317,9 +284,9 @@ export function processEvent(event: Event): void {
 		}
 
 		case "session.usage.updated": {
-			const sessionID = event.properties.sessionID
-			if (!sessionID) break
-			const current = appStore.get(sessionNativeFamily(sessionID))
+			const sessionId = event.properties.sessionId
+			if (!sessionId) break
+			const current = appStore.get(sessionNativeFamily(sessionId))
 			const nextUsed = Number(event.properties.used ?? 0)
 			const nextSize = Number(event.properties.size ?? 0)
 			const previousSize = Number(current.usage?.size ?? 0)
@@ -332,7 +299,7 @@ export function processEvent(event: Event): void {
 				current.occupancy && stableSize > 0 && current.occupancy.contextWindowTokens !== stableSize
 					? { ...current.occupancy, contextWindowTokens: stableSize }
 					: current.occupancy
-			set(sessionNativeFamily(sessionID), {
+			set(sessionNativeFamily(sessionId), {
 				...current,
 				occupancy: nextOccupancy,
 				usage: {
@@ -345,16 +312,11 @@ export function processEvent(event: Event): void {
 		}
 
 		case "context.usage.updated": {
-			const sessionID = event.properties.sessionID
-			if (!sessionID) break
-			const occupancy = event.properties.occupancy as
-				| {
-						totalTokens?: number
-						contextWindowTokens?: number
-						categories?: unknown
-				  }
-				| undefined
-			const current = appStore.get(sessionNativeFamily(sessionID))
+			const sessionId = event.properties.sessionId
+			if (!sessionId) break
+			// NativeClient normalizes protocol occupancy to this numeric renderer shape.
+			const occupancy = event.properties.occupancy as ContextOccupancy | undefined
+			const current = appStore.get(sessionNativeFamily(sessionId))
 			const occupancyTotal = Number(occupancy?.totalTokens ?? 0)
 			const occupancyWindow = Number(occupancy?.contextWindowTokens ?? 0)
 			const previousUsed = Number(current.usage?.used ?? 0)
@@ -363,7 +325,7 @@ export function processEvent(event: Event): void {
 			// both apply immediately so the Context usage popover denominator
 			// stays current.
 			const nextWindow = occupancyWindow > 0 ? occupancyWindow : previousOccupancyWindow
-			set(sessionNativeFamily(sessionID), {
+			set(sessionNativeFamily(sessionId), {
 				...current,
 				occupancy: occupancy,
 				usage: {
@@ -376,12 +338,12 @@ export function processEvent(event: Event): void {
 		}
 
 		case "session.diff": {
-			const { sessionID, diff } = event.properties as {
-				sessionID: string
+			const { sessionId, diff } = event.properties as {
+				sessionId: string
 				diff: import("../../lib/types").FileDiff[]
 			}
-			if (sessionID && diff) {
-				set(setSessionDiffAtom, { sessionId: sessionID, diffs: diff })
+			if (sessionId && diff) {
+				set(setSessionDiffAtom, { sessionId, diffs: diff })
 			}
 			break
 		}
@@ -389,6 +351,23 @@ export function processEvent(event: Event): void {
 		case "workspace.changes.updated":
 			set(applyWorkspaceChangesUpdatedAtom, event.properties)
 			break
+
+		case "provider.authStale": {
+			const providerId = String(
+				event.properties?.providerId ?? event.properties?.provider_id ?? "",
+			).trim()
+			const reason =
+				typeof event.properties?.reason === "string" && event.properties.reason.trim().length > 0
+					? event.properties.reason.trim()
+					: undefined
+			log.warn("Provider auth stale", { providerId, reason })
+			queryClient.invalidateQueries({ queryKey: ["providers"] })
+			const label = providerId.length > 0 ? providerId : "provider"
+			toast.warning(`Sign in again for ${label}`, {
+				description: reason ?? "Credentials expired or refresh failed. Open Settings → Connections.",
+			})
+			break
+		}
 
 		// --- Worktree lifecycle events (from Devo experimental API) ---
 

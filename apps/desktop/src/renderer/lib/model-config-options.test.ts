@@ -4,6 +4,7 @@ const setOption = mock(async () => undefined)
 const invalidateQueries = mock(async () => undefined)
 
 mock.module("../services/connection-manager", () => ({
+	getBaseClient: () => null,
 	getProjectClient: () => ({
 		config: { setOption },
 	}),

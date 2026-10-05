@@ -9,6 +9,7 @@ use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
 use devo_core::AppConfigStore;
+use futures::StreamExt;
 use futures::stream;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -19,19 +20,7 @@ use tokio::time::Duration;
 use tokio::time::timeout;
 
 use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
 use devo_core::SkillsConfig;
-use devo_core::tools::ToolCallError;
-use devo_core::tools::ToolRegistry;
-use devo_core::tools::ToolResult;
-use devo_core::tools::ToolResultContent;
-use devo_core::tools::json_schema::JsonSchema;
-use devo_core::tools::registry::ToolRegistryBuilder;
-use devo_core::tools::tool_handler::ToolHandler;
-use devo_core::tools::tool_spec::ToolExecutionMode;
-use devo_core::tools::tool_spec::ToolOutputMode;
-use devo_core::tools::tool_spec::ToolSpec;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::RequestContent;
@@ -41,16 +30,15 @@ use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ErrorResponse;
 use devo_server::ProtocolErrorCode;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use devo_server::SkillRecord;
 use devo_server::SkillScope;
 use devo_server::SkillSource;
 use devo_server::SuccessResponse;
+use devo_server::test_support::TestRuntime;
 
 #[derive(Default)]
 struct CapturingProvider {
@@ -128,13 +116,7 @@ fn build_runtime(
     workspace_root: Option<PathBuf>,
     provider: Arc<dyn ModelProviderSDK>,
 ) -> Arc<ServerRuntime> {
-    build_runtime_with_registry(
-        data_root,
-        user_skill_root,
-        workspace_root,
-        provider,
-        Arc::new(ToolRegistry::new()),
-    )
+    build_runtime_with_registry(data_root, user_skill_root, workspace_root, provider)
 }
 
 fn build_runtime_with_registry(
@@ -142,41 +124,28 @@ fn build_runtime_with_registry(
     user_skill_root: PathBuf,
     workspace_root: Option<PathBuf>,
     provider: Arc<dyn ModelProviderSDK>,
-    registry: Arc<ToolRegistry>,
 ) -> Arc<ServerRuntime> {
     let workspace_skill_roots = workspace_root
         .iter()
         .map(|root| root.join(".devo").join("skills"))
         .collect::<Vec<_>>();
     write_test_config(data_root, &user_skill_root, &workspace_skill_roots);
-    let db_path = data_root.join("test_skills.db");
-    let db = Arc::new(devo_server::db::Database::open(db_path).expect("open test database"));
-    ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            registry,
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::default()),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                enabled: true,
-                user_roots: vec![user_skill_root],
-                workspace_roots: workspace_skill_roots,
-                watch_for_changes: false,
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                include_instructions: Some(true),
-                config: Vec::new(),
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(
-                AppConfigStore::load(data_root.to_path_buf(), workspace_root.as_deref())
-                    .expect("load app config store"),
-            )),
-        ),
-    )
+    TestRuntime::new(provider)
+        .skills(SkillsConfig {
+            enabled: true,
+            user_roots: vec![user_skill_root],
+            workspace_roots: workspace_skill_roots,
+            watch_for_changes: false,
+            bundled: Some(BundledSkillsConfig { enabled: false }),
+            include_instructions: Some(true),
+            config: Vec::new(),
+        })
+        .config_store(Arc::new(Mutex::new(
+            AppConfigStore::load(data_root.to_path_buf(), workspace_root.as_deref())
+                .expect("load app config store"),
+        )))
+        .db_file("test_skills.db")
+        .runtime(data_root)
 }
 
 fn write_test_config(data_root: &Path, user_skill_root: &Path, workspace_skill_roots: &[PathBuf]) {
@@ -270,7 +239,7 @@ async fn start_session(
     let result: SuccessResponse<devo_protocol::native::rpc_session::SessionNewResult> =
         serde_json::from_value(response.clone())
             .with_context(|| format!("session/new response: {response}"))?;
-    let session_id = devo_core::SessionId::try_from(result.result.session.id.as_str())?;
+    let session_id = devo_core::SessionId::from(result.result.session.id.as_str());
     let title_response = runtime
         .handle_incoming(
             connection_id,
@@ -410,29 +379,11 @@ fn all_user_request_texts(request: &ModelRequest) -> Vec<String> {
                 RequestContent::ProviderReasoning { .. }
                 | RequestContent::ToolUse { .. }
                 | RequestContent::HostedToolUse { .. }
-                | RequestContent::ToolResult { .. } => None,
+                | RequestContent::ToolResult { .. }
+                | RequestContent::Image { .. } => None,
             })
         })
         .collect()
-}
-
-fn auto_review_registry(calls: Arc<std::sync::atomic::AtomicUsize>) -> Arc<ToolRegistry> {
-    let mut builder = ToolRegistryBuilder::new();
-    builder.register_handler("mutating_tool", Arc::new(RecordingMutatingTool { calls }));
-    builder.push_spec(ToolSpec {
-        name: "mutating_tool".into(),
-        description: "Mutates test state.".into(),
-        input_schema: JsonSchema::object(std::collections::BTreeMap::new(), None, None),
-        output_mode: ToolOutputMode::Text,
-        execution_mode: ToolExecutionMode::Mutating,
-        capability_tags: vec![devo_core::tools::ToolCapabilityTag::WriteFiles],
-        supports_parallel: false,
-        preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-        display_name: None,
-        supports_cancellation: None,
-        supports_streaming: None,
-    });
-    Arc::new(builder.build())
 }
 
 async fn update_permissions_to_auto_review(
@@ -501,80 +452,22 @@ async fn start_auto_review_turn(
     Ok(())
 }
 
-struct BlockingReadOnlyTool {
-    started: Arc<Notify>,
-    release: Arc<Notify>,
+/// True when a tool result for `call_id` reports an actual execution. The
+/// permission denial itself is recorded as an *error* tool result — that one
+/// must not count.
+fn executed_tool_result(value: &serde_json::Value, call_id: &str) -> bool {
+    let item = &value["params"]["item"]["item"];
+    item.get("type") == Some(&serde_json::json!("toolResult"))
+        && item["callId"] == serde_json::json!(call_id)
+        && item["isError"] != serde_json::json!(true)
 }
 
-#[async_trait]
-impl ToolHandler for BlockingReadOnlyTool {
-    fn spec(&self) -> &ToolSpec {
-        Box::leak(Box::new(ToolSpec {
-            name: "blocking_read".into(),
-            description: "blocking read test tool".into(),
-            input_schema: JsonSchema::object(Default::default(), None, None),
-            output_mode: ToolOutputMode::Text,
-            execution_mode: ToolExecutionMode::ReadOnly,
-            capability_tags: vec![],
-            supports_parallel: true,
-            preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        }))
-    }
+/// Newline-separated commands fail closed to an interactive approval under
+/// the default/autoReview profiles; harmless if a bug ever executes it.
+const PROBE_CODE: &str = "print('review-probe')";
 
-    async fn handle(
-        &self,
-        _ctx: devo_core::tools::ToolContext,
-        _input: serde_json::Value,
-        _progress: Option<devo_core::tools::ToolProgressSender>,
-    ) -> std::result::Result<ToolResult, ToolCallError> {
-        self.started.notify_one();
-        self.release.notified().await;
-        Ok(ToolResult::success(
-            ToolResultContent::Text("released".into()),
-            "released",
-        ))
-    }
-}
-
-struct RecordingMutatingTool {
-    calls: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-#[async_trait]
-impl ToolHandler for RecordingMutatingTool {
-    fn spec(&self) -> &ToolSpec {
-        Box::leak(Box::new(ToolSpec {
-            name: "recording_write".into(),
-            description: "recording write test tool".into(),
-            input_schema: JsonSchema::object(Default::default(), None, None),
-            output_mode: ToolOutputMode::Text,
-            execution_mode: ToolExecutionMode::Mutating,
-            capability_tags: vec![],
-            supports_parallel: false,
-            preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-            display_name: None,
-            supports_cancellation: None,
-            supports_streaming: None,
-        }))
-    }
-
-    async fn handle(
-        &self,
-        _ctx: devo_core::tools::ToolContext,
-        _input: serde_json::Value,
-        _progress: Option<devo_core::tools::ToolProgressSender>,
-    ) -> std::result::Result<ToolResult, ToolCallError> {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(ToolResult::success(
-            ToolResultContent::Text("mutated".into()),
-            "mutated",
-        ))
-    }
-}
-
+/// Streams one `bash` tool call (the probe input), then plain text. The
+/// reviewer-side `completion` answers with the configured risk verdict.
 struct AutoReviewProvider {
     risk: &'static str,
     tool_input: serde_json::Value,
@@ -609,12 +502,20 @@ impl AutoReviewProvider {
 #[async_trait]
 impl ModelProviderSDK for AutoReviewProvider {
     async fn completion(&self, request: ModelRequest) -> Result<ModelResponse> {
-        self.completion_requests
-            .lock()
-            .expect("completion request lock")
-            .push(request);
-        self.reviewer_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Reviewer requests mirror the turn request (same tools array);
+        // title-polish requests carry no tools and are not reviewer calls.
+        let is_review = request
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty());
+        if is_review {
+            self.completion_requests
+                .lock()
+                .expect("completion request lock")
+                .push(request);
+            self.reviewer_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let mut remaining = self
             .completion_failures_remaining
             .load(std::sync::atomic::Ordering::SeqCst);
@@ -625,7 +526,19 @@ impl ModelProviderSDK for AutoReviewProvider {
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
             ) {
-                Ok(_) => return Err(anyhow::anyhow!("test reviewer provider failure")),
+                Ok(_) => {
+                    if !is_review {
+                        // Non-review completions must still succeed.
+                        return Ok(ModelResponse {
+                            id: "title-fallback".into(),
+                            content: vec![ResponseContent::Text("Generated title".into())],
+                            stop_reason: Some(StopReason::EndTurn),
+                            usage: Usage::default(),
+                            metadata: ResponseMetadata::default(),
+                        });
+                    }
+                    return Err(anyhow::anyhow!("test reviewer provider failure"));
+                }
                 Err(current) => remaining = current,
             }
         }
@@ -657,19 +570,15 @@ impl ModelProviderSDK for AutoReviewProvider {
                 Ok(StreamEvent::ToolCallStart {
                     index: 0,
                     id: "tool-1".into(),
-                    name: "mutating_tool".into(),
+                    name: "ipython".into(),
                     input: self.tool_input.clone(),
-                }),
-                Ok(StreamEvent::ToolCallInputDelta {
-                    index: 0,
-                    partial_json: "{}".into(),
                 }),
                 Ok(StreamEvent::MessageDone {
                     response: ModelResponse {
                         id: "resp-1".into(),
                         content: vec![ResponseContent::ToolUse {
                             id: "tool-1".into(),
-                            name: "mutating_tool".into(),
+                            name: "ipython".into(),
                             input: self.tool_input.clone(),
                         }],
                         stop_reason: Some(StopReason::ToolUse),
@@ -703,9 +612,18 @@ impl ModelProviderSDK for AutoReviewProvider {
     }
 }
 
-#[derive(Default)]
 struct SteerCapturingProvider {
     stream_requests: Mutex<Vec<ModelRequest>>,
+    release: Arc<Notify>,
+}
+
+impl SteerCapturingProvider {
+    fn new(release: Arc<Notify>) -> Arc<Self> {
+        Arc::new(Self {
+            stream_requests: Mutex::new(Vec::new()),
+            release,
+        })
+    }
 }
 
 #[async_trait]
@@ -729,33 +647,7 @@ impl ModelProviderSDK for SteerCapturingProvider {
             requests.push(request);
             requests.len()
         };
-        let events = if request_number == 1 {
-            vec![
-                Ok(StreamEvent::ToolCallStart {
-                    index: 0,
-                    id: "tool-1".into(),
-                    name: "blocking_wait".into(),
-                    input: json!({}),
-                }),
-                Ok(StreamEvent::ToolCallInputDelta {
-                    index: 0,
-                    partial_json: "{}".into(),
-                }),
-                Ok(StreamEvent::MessageDone {
-                    response: ModelResponse {
-                        id: "resp-1".into(),
-                        content: vec![ResponseContent::ToolUse {
-                            id: "tool-1".into(),
-                            name: "blocking_wait".into(),
-                            input: json!({}),
-                        }],
-                        stop_reason: Some(StopReason::ToolUse),
-                        usage: Usage::default(),
-                        metadata: ResponseMetadata::default(),
-                    },
-                }),
-            ]
-        } else {
+        let done_events = || {
             vec![
                 Ok(StreamEvent::TextDelta {
                     index: 0,
@@ -772,8 +664,42 @@ impl ModelProviderSDK for SteerCapturingProvider {
                 }),
             ]
         };
-
-        Ok(Box::pin(stream::iter(events)))
+        if request_number == 1 {
+            // Hold the first stream before any event so the test can steer
+            // while the turn is in flight; the Python cell then runs and the
+            // follow-up request picks up the injected steer + skill.
+            let release = Arc::clone(&self.release);
+            let mut events = vec![
+                Ok(StreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "call-1".into(),
+                    name: "ipython".into(),
+                    input: json!({ "code": "print('steer-probe')" }),
+                }),
+                Ok(StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: "resp-1".into(),
+                        content: vec![ResponseContent::ToolUse {
+                            id: "call-1".into(),
+                            name: "ipython".into(),
+                            input: json!({ "code": "print('steer-probe')" }),
+                        }],
+                        stop_reason: Some(StopReason::ToolUse),
+                        usage: Usage::default(),
+                        metadata: ResponseMetadata::default(),
+                    },
+                }),
+            ]
+            .into_iter();
+            let first = events.next().expect("tool call start event");
+            let stream = futures::stream::once(async move {
+                release.notified().await;
+                first
+            })
+            .chain(futures::stream::iter(events.collect::<Vec<_>>()));
+            return Ok(Box::pin(stream));
+        }
+        Ok(Box::pin(stream::iter(done_events())))
     }
 
     fn name(&self) -> &str {
@@ -1097,35 +1023,111 @@ async fn turn_start_rejects_missing_skill_references() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn auto_review_approval_executes_mutating_tool_without_user_prompt() -> Result<()> {
+#[derive(Clone, Copy)]
+enum AutoReviewWait {
+    TurnCompleted,
+    UserApproval,
+}
+
+struct AutoReviewOutcome {
+    _temp_dir: TempDir,
+    provider: Arc<AutoReviewProvider>,
+    tool_calls: usize,
+    reviewer_calls: Arc<AtomicUsize>,
+}
+
+async fn run_auto_review(
+    risk: &'static str,
+    tool_input: impl FnOnce(&Path) -> serde_json::Value,
+    completion_failures: usize,
+    wait: AutoReviewWait,
+) -> Result<AutoReviewOutcome> {
     let temp_dir = TempDir::new()?;
     let user_skill_root = temp_dir.path().join("user-skills");
     let workspace_root = temp_dir.path().join("workspace");
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let reviewer_calls = Arc::new(AtomicUsize::new(0));
-    let provider = AutoReviewProvider::new("low", json!({}), Arc::clone(&reviewer_calls), 0);
+    let provider = AutoReviewProvider::new(
+        risk,
+        tool_input(&workspace_root),
+        Arc::clone(&reviewer_calls),
+        completion_failures,
+    );
     let runtime = build_runtime_with_registry(
         temp_dir.path(),
         user_skill_root,
         Some(workspace_root.clone()),
         Arc::clone(&provider) as Arc<dyn ModelProviderSDK>,
-        auto_review_registry(Arc::clone(&tool_calls)),
     );
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
     update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
-
     start_auto_review_turn(&runtime, connection_id, session_id).await?;
-    wait_for_turn_completed(&mut notifications_rx).await?;
+    // Executions are observed as non-error toolResult items on the
+    // notification stream (the RLM turn registry has no injectable tools).
+    let mut seen = Vec::new();
+    match wait {
+        AutoReviewWait::TurnCompleted => loop {
+            let value = timeout(Duration::from_secs(5), notifications_rx.recv()).await;
+            let Ok(Some(value)) = value else {
+                anyhow::bail!("timed out waiting for turn/completed; seen: {seen:?}");
+            };
+            let completed = is_original_method(&value, "turn/completed");
+            seen.push(value);
+            if completed {
+                break;
+            }
+        },
+        AutoReviewWait::UserApproval => {
+            wait_for_approval_request(&mut notifications_rx).await?;
+        }
+    }
+    // The same toolResult item is broadcast more than once (updated +
+    // completed); one call id is one execution.
+    let tool_calls = usize::from(
+        seen.iter()
+            .any(|value| executed_tool_result(value, "tool-1")),
+    );
+    Ok(AutoReviewOutcome {
+        _temp_dir: temp_dir,
+        provider,
+        tool_calls,
+        reviewer_calls,
+    })
+}
 
-    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    let stream_requests = provider
+fn assert_auto_review_counts(outcome: &AutoReviewOutcome, reviewers: usize, tools: usize) {
+    assert_eq!(
+        outcome
+            .reviewer_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        reviewers
+    );
+    assert_eq!(outcome.tool_calls, tools);
+}
+
+#[tokio::test]
+async fn auto_review_approval_executes_mutating_tool_without_user_prompt() -> Result<()> {
+    let outcome = run_auto_review(
+        "low",
+        |_| {
+            json!({
+                "code": PROBE_CODE,
+                "sandbox_permissions": "with_additional_permissions",
+                "additional_permissions": { "network": { "enabled": true } }
+            })
+        },
+        0,
+        AutoReviewWait::TurnCompleted,
+    )
+    .await?;
+    assert_auto_review_counts(&outcome, 1, 1);
+    let stream_requests = outcome
+        .provider
         .stream_requests
         .lock()
         .expect("stream request lock");
-    let completion_requests = provider
+    let completion_requests = outcome
+        .provider
         .completion_requests
         .lock()
         .expect("completion request lock");
@@ -1158,185 +1160,94 @@ async fn auto_review_approval_executes_mutating_tool_without_user_prompt() -> Re
 }
 
 /// Trace: L2-DES-SAFETY-002
-/// Verifies: explicit full sandbox escalation is routed through AutoReview.
 #[tokio::test]
-async fn auto_review_approval_executes_full_sandbox_escalation() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let user_skill_root = temp_dir.path().join("user-skills");
-    let workspace_root = temp_dir.path().join("workspace");
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let runtime = build_runtime_with_registry(
-        temp_dir.path(),
-        user_skill_root,
-        Some(workspace_root.clone()),
-        AutoReviewProvider::new(
-            "medium",
-            json!({
-                "sandbox_permissions": "require_escalated"
-            }),
-            Arc::clone(&reviewer_calls),
-            0,
-        ),
-        auto_review_registry(Arc::clone(&tool_calls)),
-    );
-    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
-    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
-    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
-
-    start_auto_review_turn(&runtime, connection_id, session_id).await?;
-    wait_for_turn_completed(&mut notifications_rx).await?;
-
-    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    Ok(())
-}
-
-/// Trace: L2-DES-SAFETY-002
-/// Verifies: Tier1 additional permissions are routed through AutoReview.
-#[tokio::test]
-async fn auto_review_approval_executes_additional_permissions_request() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let user_skill_root = temp_dir.path().join("user-skills");
-    let workspace_root = temp_dir.path().join("workspace");
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let runtime = build_runtime_with_registry(
-        temp_dir.path(),
-        user_skill_root,
-        Some(workspace_root.clone()),
-        AutoReviewProvider::new(
-            "low",
-            json!({
-                "sandbox_permissions": "with_additional_permissions",
-                "additional_permissions": {
-                    "file_system": {
-                        "read": [workspace_root.join("external-input").display().to_string()]
-                    }
+async fn auto_review_executes_or_falls_back_by_risk() -> Result<()> {
+    struct Case {
+        risk: &'static str,
+        input: fn(&Path) -> serde_json::Value,
+        failures: usize,
+        wait: AutoReviewWait,
+        reviewers: usize,
+        tools: usize,
+    }
+    let probe = |_: &Path| {
+        json!({
+            "code": PROBE_CODE,
+            "sandbox_permissions": "with_additional_permissions",
+            "additional_permissions": { "network": { "enabled": true } }
+        })
+    };
+    let escalated = |_: &Path| {
+        json!({
+            "code": PROBE_CODE,
+            "sandbox_permissions": "require_escalated",
+            "justification": "approval test"
+        })
+    };
+    let additional = |workspace: &Path| {
+        json!({
+            "code": PROBE_CODE,
+            "sandbox_permissions": "with_additional_permissions",
+            "additional_permissions": {
+                "file_system": {
+                    "read": [workspace.join("external-input").display().to_string()]
                 }
-            }),
-            Arc::clone(&reviewer_calls),
-            0,
-        ),
-        auto_review_registry(Arc::clone(&tool_calls)),
-    );
-    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
-    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
-    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
-
-    start_auto_review_turn(&runtime, connection_id, session_id).await?;
-    wait_for_turn_completed(&mut notifications_rx).await?;
-
-    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_high_risk_falls_back_to_user_approval() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let user_skill_root = temp_dir.path().join("user-skills");
-    let workspace_root = temp_dir.path().join("workspace");
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let runtime = build_runtime_with_registry(
-        temp_dir.path(),
-        user_skill_root,
-        Some(workspace_root.clone()),
-        AutoReviewProvider::new("high", json!({}), Arc::clone(&reviewer_calls), 0),
-        auto_review_registry(Arc::clone(&tool_calls)),
-    );
-    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
-    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
-    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
-
-    start_auto_review_turn(&runtime, connection_id, session_id).await?;
-    wait_for_approval_request(&mut notifications_rx).await?;
-
-    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn auto_review_medium_risk_executes_mutating_tool_without_user_prompt() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let user_skill_root = temp_dir.path().join("user-skills");
-    let workspace_root = temp_dir.path().join("workspace");
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let runtime = build_runtime_with_registry(
-        temp_dir.path(),
-        user_skill_root,
-        Some(workspace_root.clone()),
-        AutoReviewProvider::new("medium", json!({}), Arc::clone(&reviewer_calls), 0),
-        auto_review_registry(Arc::clone(&tool_calls)),
-    );
-    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
-    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
-    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
-
-    start_auto_review_turn(&runtime, connection_id, session_id).await?;
-    wait_for_turn_completed(&mut notifications_rx).await?;
-
-    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    Ok(())
-}
-
-/// Trace: L2-DES-SAFETY-002
-/// Verifies: provider failures retry once, then fall back to user approval.
-#[tokio::test]
-async fn auto_review_provider_failure_retries_once_then_falls_back() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let user_skill_root = temp_dir.path().join("user-skills");
-    let workspace_root = temp_dir.path().join("workspace");
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let runtime = build_runtime_with_registry(
-        temp_dir.path(),
-        user_skill_root,
-        Some(workspace_root.clone()),
-        AutoReviewProvider::new("low", json!({}), Arc::clone(&reviewer_calls), 2),
-        auto_review_registry(Arc::clone(&tool_calls)),
-    );
-    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
-    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
-    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
-
-    start_auto_review_turn(&runtime, connection_id, session_id).await?;
-    wait_for_approval_request(&mut notifications_rx).await?;
-
-    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    Ok(())
-}
-
-/// Trace: L2-DES-SAFETY-002
-/// Verifies: invalid reviewer output falls back to user approval.
-#[tokio::test]
-async fn auto_review_invalid_output_falls_back_to_user_approval() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let user_skill_root = temp_dir.path().join("user-skills");
-    let workspace_root = temp_dir.path().join("workspace");
-    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let runtime = build_runtime_with_registry(
-        temp_dir.path(),
-        user_skill_root,
-        Some(workspace_root.clone()),
-        AutoReviewProvider::new("invalid", json!({}), Arc::clone(&reviewer_calls), 0),
-        auto_review_registry(Arc::clone(&tool_calls)),
-    );
-    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
-    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
-    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
-
-    start_auto_review_turn(&runtime, connection_id, session_id).await?;
-    wait_for_approval_request(&mut notifications_rx).await?;
-
-    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            }
+        })
+    };
+    for case in [
+        Case {
+            risk: "medium",
+            input: escalated,
+            failures: 0,
+            wait: AutoReviewWait::TurnCompleted,
+            reviewers: 1,
+            tools: 1,
+        },
+        Case {
+            risk: "low",
+            input: additional,
+            failures: 0,
+            wait: AutoReviewWait::TurnCompleted,
+            reviewers: 1,
+            tools: 1,
+        },
+        Case {
+            risk: "high",
+            input: probe,
+            failures: 0,
+            wait: AutoReviewWait::UserApproval,
+            reviewers: 1,
+            tools: 0,
+        },
+        Case {
+            risk: "medium",
+            input: probe,
+            failures: 0,
+            wait: AutoReviewWait::TurnCompleted,
+            reviewers: 1,
+            tools: 1,
+        },
+        Case {
+            risk: "low",
+            input: probe,
+            failures: 2,
+            wait: AutoReviewWait::UserApproval,
+            reviewers: 2,
+            tools: 0,
+        },
+        Case {
+            risk: "invalid",
+            input: probe,
+            failures: 0,
+            wait: AutoReviewWait::UserApproval,
+            reviewers: 1,
+            tools: 0,
+        },
+    ] {
+        let outcome = run_auto_review(case.risk, case.input, case.failures, case.wait).await?;
+        assert_auto_review_counts(&outcome, case.reviewers, case.tools);
+    }
     Ok(())
 }
 
@@ -1350,37 +1261,13 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
         "steer-rust",
         "---\nname: steer-rust\ndescription: Rust steering\n---\nPrefer exhaustive matches and cargo tests.",
     );
-    let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let mut builder = ToolRegistryBuilder::new();
-    builder.register_handler(
-        "blocking_wait",
-        Arc::new(BlockingReadOnlyTool {
-            started: Arc::clone(&started),
-            release: Arc::clone(&release),
-        }),
-    );
-    builder.push_spec(ToolSpec {
-        name: "blocking_wait".into(),
-        description: "Blocks until the integration test releases it.".into(),
-        input_schema: JsonSchema::object(std::collections::BTreeMap::new(), None, None),
-        output_mode: ToolOutputMode::Text,
-        execution_mode: ToolExecutionMode::ReadOnly,
-        capability_tags: vec![],
-        supports_parallel: true,
-        preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-        display_name: None,
-        supports_cancellation: None,
-        supports_streaming: None,
-    });
-    let registry = Arc::new(builder.build());
-    let provider = Arc::new(SteerCapturingProvider::default());
+    let provider = SteerCapturingProvider::new(Arc::clone(&release));
     let runtime = build_runtime_with_registry(
         temp_dir.path(),
         user_skill_root,
         Some(workspace_root.clone()),
         provider.clone(),
-        registry,
     );
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
@@ -1412,57 +1299,52 @@ async fn turn_steer_injects_resolved_skill_into_next_model_request() -> Result<(
             .with_context(|| format!("turn/start response: {response}"))?;
     let start_turn_id = start_result.result.turn.id;
 
-    timeout(Duration::from_secs(5), started.notified())
-        .await
-        .context("timed out waiting for blocking tool to start")?;
+    // The first stream is parked inside the provider before its first event,
+    // keeping the turn in flight deterministically.
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if !provider
+                .stream_requests
+                .lock()
+                .expect("stream request lock")
+                .is_empty()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("first model request never arrived")?;
 
-    // Native flow: push the input onto the busy session queue, then
-    // promote the queued entry into the running turn as a steer.
-    let push_response = runtime
-        .handle_incoming(
-            connection_id,
-            serde_json::json!({
-                "id": 9,
-                "method": "session/queue/push",
-                "params": {
-                    "sessionId": session_id,
-                    "input": [
-                        { "type": "text", "text": "Apply this steer now." },
-                        { "type": "skill", "name": "steer-rust" }
-                    ],
-                    "idempotencyKey": "steer-skill-push"
-                }
-            }),
-        )
-        .await
-        .context("session/queue/push response")?;
-    let push_result: SuccessResponse<devo_protocol::native::rpc_turn::SessionQueuePushResult> =
-        serde_json::from_value(push_response.clone())
-            .with_context(|| format!("push_response: {push_response}"))?;
-    let devo_protocol::native::rpc_turn::SessionQueuePushResult::Queued { entry } =
-        push_result.result
-    else {
-        panic!("busy push must queue");
-    };
-
+    // Native flow: inject steer input directly into the running turn.
     let steer_response = runtime
         .handle_incoming(
             connection_id,
             serde_json::json!({
                 "id": 10,
-                "method": "session/queue/steer",
+                "method": "turn/steer",
                 "params": {
                     "sessionId": session_id,
-                    "queueItemId": entry.queue_item_id.as_str(),
-                    "expectedTurnId": start_turn_id.to_string()
+                    "expectedTurnId": start_turn_id.to_string(),
+                    "input": [
+                        { "type": "text", "text": "Apply this steer now." },
+                        { "type": "skill", "name": "steer-rust" }
+                    ],
+                    "idempotencyKey": "steer-skill"
                 }
             }),
         )
         .await
-        .context("session/queue/steer response")?;
-    let steer_result: SuccessResponse<devo_protocol::native::rpc_turn::SessionQueueSteerResult> =
+        .context("turn/steer response")?;
+    let steer_result: SuccessResponse<devo_protocol::native::rpc_turn::TurnSteerResult> =
         serde_json::from_value(steer_response)?;
-    assert!(!steer_result.result.item_id.as_str().is_empty());
+    let devo_protocol::native::rpc_turn::TurnSteerResult::Injected { item_id } =
+        steer_result.result
+    else {
+        panic!("expected Injected steer");
+    };
+    assert!(!item_id.as_str().is_empty());
 
     release.notify_one();
     wait_for_turn_completed(&mut notifications_rx).await?;

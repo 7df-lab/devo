@@ -190,24 +190,6 @@ pub struct SessionQueueRemoveParams {
 #[serde(rename_all = "camelCase")]
 pub struct SessionQueueRemoveResult {}
 
-/// Promotes a queued entry into the running turn as a steer; fails with
-/// `TURN_NOT_STEERABLE` when no steerable turn exists.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionQueueSteerParams {
-    pub session_id: SessionId,
-    pub queue_item_id: QueueItemId,
-    pub expected_turn_id: TurnId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionQueueSteerResult {
-    pub item_id: ItemId,
-}
-
-// ── task/* ──
-
 /// Starts a background task (L2-DES-APP-008 DD-7, unified task model). The
 /// kind discriminates the backing: `process` is an OS process/pty inheriting
 /// the session sandbox; `agent` is a child session.

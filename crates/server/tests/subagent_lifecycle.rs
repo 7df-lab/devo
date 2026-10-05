@@ -36,6 +36,7 @@ use support::request_agent_send_message;
 use support::request_agent_wait;
 use support::request_agent_wait_with;
 use support::spawn_child;
+use support::spawn_child_named;
 use support::spawn_child_with;
 use support::start_parent_session;
 use support::start_turn;
@@ -113,13 +114,80 @@ async fn spawn_agent_generates_unique_child_name() -> Result<()> {
     Ok(())
 }
 
+/// Trace: L2-DES-RLM-001
+/// Verifies: kernel `rlm.spawn` nickname contract — requested names are honored
+/// verbatim (they are the child's address for messaging/observation/delete)
+/// and duplicates among siblings are rejected.
 #[tokio::test]
-async fn spawn_agent_tool_call_does_not_deadlock_parent_turn() -> Result<()> {
+async fn spawn_agent_honors_requested_nickname_and_rejects_duplicates() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(ScriptedProvider::new([StreamScript::Pending]));
+    let runtime = build_runtime(data_root.path(), Arc::clone(&provider) as _)?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
+
+    let first = spawn_child_named(
+        &runtime,
+        parent_session_id,
+        "review the current changes",
+        Some("none"),
+        Some("child-a"),
+    )
+    .await?;
+    assert_eq!(first.agent_nickname, "child-a");
+    assert_eq!(first.agent_path, "root/child-a");
+    assert!(
+        first.session_dir.is_some(),
+        "kernel handles require the child artifact dir"
+    );
+
+    let duplicate = spawn_child_named(
+        &runtime,
+        parent_session_id,
+        "review another area",
+        Some("none"),
+        Some("child-a"),
+    )
+    .await;
+    assert!(duplicate.is_err(), "duplicate sibling name must fail spawn");
+
+    let second = spawn_child_named(
+        &runtime,
+        parent_session_id,
+        "review another area",
+        Some("none"),
+        Some("child-b"),
+    )
+    .await?;
+    assert_eq!(second.agent_nickname, "child-b");
+
+    wait_for_child_turn_started(&mut notifications_rx, first.child_session_id).await?;
+    let agents = request_agent_list(&runtime, connection_id, parent_session_id).await?;
+    assert!(
+        agents
+            .agents
+            .iter()
+            .any(|agent| agent.agent_nickname == "child-a")
+    );
+    assert!(
+        agents
+            .agents
+            .iter()
+            .any(|agent| agent.agent_nickname == "child-b")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rlm_spawn_via_ipython_returns_without_waiting_for_child_completion() -> Result<()> {
     let data_root = TempDir::new()?;
     let provider = Arc::new(ScriptedProvider::new([
-        ScriptedProvider::spawn_agent_tool_call("verify parent spawn tool call returns", "none"),
+        ScriptedProvider::ipython_code_tool_call(
+            "child = await rlm.spawn('verify parent spawn returns', name='spawn-worker')\nprint(child.name)",
+        ),
         ScriptedProvider::completed("child finished"),
-        ScriptedProvider::completed("spawn tool result observed"),
+        ScriptedProvider::completed("spawn result observed"),
     ]));
     let runtime = build_runtime(data_root.path(), Arc::clone(&provider) as _)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
@@ -129,7 +197,7 @@ async fn spawn_agent_tool_call_does_not_deadlock_parent_turn() -> Result<()> {
         &runtime,
         connection_id,
         parent_session_id,
-        "spawn a child using the spawn_agent tool",
+        "spawn a child with rlm.spawn through ipython",
         Some("never"),
     )
     .await?;
@@ -137,25 +205,25 @@ async fn spawn_agent_tool_call_does_not_deadlock_parent_turn() -> Result<()> {
     wait_for_parent_turn_completed(&mut notifications_rx, parent_session_id).await?;
     wait_for_stream_calls(&provider, 3).await?;
 
+    let requests = provider.requests();
+    assert_model_request_exposes_only_ipython(&requests[0]);
     let agents = request_agent_list(&runtime, connection_id, parent_session_id).await?;
     assert_eq!(agents.agents.len(), 1);
-    assert_generated_name(&agents.agents[0].agent_nickname);
+    assert_eq!(agents.agents[0].agent_nickname, "spawn-worker");
     assert_eq!(
         agents.agents[0].last_task_message.as_deref(),
-        Some("verify parent spawn tool call returns")
+        Some("verify parent spawn returns")
     );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn dual_spawn_agent_tool_calls_in_one_response_do_not_deadlock() -> Result<()> {
+async fn two_rlm_spawns_in_one_ipython_cell_do_not_deadlock_parent_turn() -> Result<()> {
     let data_root = TempDir::new()?;
     let provider = Arc::new(ScriptedProvider::new([
-        ScriptedProvider::dual_spawn_agent_tool_calls(
-            "first delegated worker task",
-            "second delegated worker task",
-            "none",
+        ScriptedProvider::ipython_code_tool_call(
+            "first = await rlm.spawn('first delegated worker task', name='worker-one')\nsecond = await rlm.spawn('second delegated worker task', name='worker-two')\nprint(first.name, second.name)",
         ),
         ScriptedProvider::completed("first child finished"),
         ScriptedProvider::completed("second child finished"),
@@ -165,31 +233,34 @@ async fn dual_spawn_agent_tool_calls_in_one_response_do_not_deadlock() -> Result
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
 
-    let drain_notifications =
-        tokio::spawn(async move { while notifications_rx.recv().await.is_some() {} });
-
     start_turn_with_approval_policy(
         &runtime,
         connection_id,
         parent_session_id,
-        "spawn two children in one tool batch",
+        "spawn two children sequentially in one ipython cell",
         Some("never"),
     )
     .await?;
 
-    timeout(Duration::from_secs(15), async {
-        loop {
-            let agents = request_agent_list(&runtime, connection_id, parent_session_id).await?;
-            if agents.agents.len() >= 2 {
-                return Ok::<_, anyhow::Error>(agents);
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .context("timed out waiting for both child agents to register")??;
+    wait_for_parent_turn_completed(&mut notifications_rx, parent_session_id).await?;
+    wait_for_stream_calls(&provider, 4).await?;
 
-    drain_notifications.abort();
+    let requests = provider.requests();
+    assert_model_request_exposes_only_ipython(&requests[0]);
+    let agents = request_agent_list(&runtime, connection_id, parent_session_id).await?;
+    assert_eq!(agents.agents.len(), 2);
+    assert!(
+        agents
+            .agents
+            .iter()
+            .any(|agent| agent.agent_nickname == "worker-one")
+    );
+    assert!(
+        agents
+            .agents
+            .iter()
+            .any(|agent| agent.agent_nickname == "worker-two")
+    );
 
     Ok(())
 }
@@ -381,55 +452,34 @@ async fn wait_agent_returns_accumulated_output_with_terminal_status() -> Result<
 }
 
 #[tokio::test]
-async fn wait_agent_preserves_full_child_report_for_parent_model() -> Result<()> {
+async fn agent_wait_rpc_preserves_full_child_report() -> Result<()> {
     let data_root = TempDir::new()?;
     let full_report = format!("{}END_OF_LONG_SURVEY_REPORT", "survey finding ".repeat(900));
-    let provider = Arc::new(ScriptedProvider::new([
-        ScriptedProvider::completed(&full_report),
-        ScriptedProvider::wait_agent_tool_call(120),
-        ScriptedProvider::completed("parent consumed child report"),
-    ]));
-    let runtime = build_runtime(data_root.path(), Arc::clone(&provider) as _)?;
+    let provider = Arc::new(ScriptedProvider::new([ScriptedProvider::completed(
+        &full_report,
+    )]));
+    let runtime = build_runtime(data_root.path(), provider as _)?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let parent_session_id = start_parent_session(&runtime, connection_id, data_root.path()).await?;
-    let spawn_result = spawn_child(&runtime, connection_id, parent_session_id).await?;
+    let child = spawn_child(&runtime, connection_id, parent_session_id).await?;
 
     wait_for_session_notification(
         &mut notifications_rx,
         "turn/completed",
-        spawn_result.child_session_id,
+        child.child_session_id,
     )
     .await?;
-    start_turn_with_approval_policy(
-        &runtime,
-        connection_id,
-        parent_session_id,
-        "collect the subagent report",
-        Some("never"),
-    )
-    .await?;
-    wait_for_parent_turn_completed(&mut notifications_rx, parent_session_id).await?;
+    let result = request_agent_wait(&runtime, connection_id, parent_session_id, 1).await?;
 
-    let requests = provider.requests();
-    let parent_followup_request = requests
-        .last()
-        .context("expected parent follow-up model request after wait_agent result")?;
-    let tool_result_content = parent_followup_request
-        .messages
+    assert!(!result.timed_out);
+    let report_event = result
+        .events
         .iter()
-        .flat_map(|message| message.content.iter())
-        .find_map(|content| match content {
-            devo_protocol::RequestContent::ToolResult { content, .. } => Some(content.as_str()),
-            devo_protocol::RequestContent::Text { .. }
-            | devo_protocol::RequestContent::Reasoning { .. }
-            | devo_protocol::RequestContent::ProviderReasoning { .. }
-            | devo_protocol::RequestContent::ToolUse { .. }
-            | devo_protocol::RequestContent::HostedToolUse { .. } => None,
-        })
-        .context("expected wait_agent tool result in parent follow-up request")?;
-
-    assert!(tool_result_content.contains("END_OF_LONG_SURVEY_REPORT"));
-    assert!(!tool_result_content.contains("...[truncated]"));
+        .find(|event| event.kind == AgentOutputEventKind::AssistantMessage)
+        .context("expected the child report in the agent/await response")?;
+    let report = report_event.text.as_deref().context("child report text")?;
+    assert!(report.contains("END_OF_LONG_SURVEY_REPORT"));
+    assert!(!report.contains("...[truncated]"));
 
     Ok(())
 }
@@ -731,6 +781,7 @@ async fn ephemeral_deny_all_child_agent_has_no_tools_and_one_turn() -> Result<()
             max_turns: Some(1),
             tool_policy: devo_protocol::AgentToolPolicy::DenyAll,
             ephemeral: true,
+            nickname: None,
         })
         .await?;
     wait_for_child_turn_started(&mut notifications_rx, child.child_session_id).await?;
@@ -744,7 +795,10 @@ async fn ephemeral_deny_all_child_agent_has_no_tools_and_one_turn() -> Result<()
 
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].tools.as_ref().map(Vec::len), Some(0));
+    assert!(
+        requests[0].tools.as_deref().unwrap_or_default().is_empty(),
+        "DenyAll child must receive no wire tools"
+    );
 
     let error = Arc::clone(&runtime)
         .send_message(devo_protocol::AgentMessageParams {
@@ -828,13 +882,7 @@ async fn fork_all_inherits_stable_parent_context() -> Result<()> {
     let active_child_request = find_unique_request_with_text(&requests, "fork while parent active");
     let parent_active_turn_request =
         find_unique_request_with_text(&requests, "active parent text should not be inherited yet");
-    assert!(
-        parent_active_turn_request
-            .tools
-            .as_ref()
-            .is_some_and(|tools| { tools.iter().any(|tool| tool.name == "spawn_agent") }),
-        "parent active turn should expose agent coordination tools"
-    );
+    assert_model_request_exposes_only_ipython(parent_active_turn_request);
 
     let completed_child_texts = message_texts(completed_child_request);
     assert_subagent_request_hides_agent_tools(completed_child_request);
@@ -992,8 +1040,32 @@ fn assert_generated_name(name: &str) {
     assert!(NOUNS.contains(&noun));
 }
 
+fn assert_model_request_exposes_only_ipython(request: &ModelRequest) {
+    let tool_names = request
+        .tools
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(tool_names, ["ipython"]);
+}
+
 fn assert_subagent_request_hides_agent_tools(request: &ModelRequest) {
-    let tools = request.tools.as_ref().expect("child request tools");
+    let tools = request.tools.as_deref().unwrap_or_default();
+    assert!(
+        tools.iter().all(|tool| tool.name == "ipython"),
+        "child models may receive only the ipython tool: {:?}",
+        tools.iter().map(|tool| &tool.name).collect::<Vec<_>>()
+    );
+    // The child doctrine legitimately teaches the RLM Python observation API
+    // (`agent_observe.list_agents()`, served to children via kernel_host);
+    // only the bare wire-tool names are forbidden on child requests.
+    let system = request
+        .system
+        .as_deref()
+        .unwrap_or_default()
+        .replace("agent_observe.list_agents()", "");
     for name in [
         "spawn_agent",
         "send_message",
@@ -1010,12 +1082,11 @@ fn assert_subagent_request_hides_agent_tools(request: &ModelRequest) {
             tools.iter().map(|tool| &tool.name).collect::<Vec<_>>()
         );
         assert!(
-            !request.system.as_deref().unwrap_or_default().contains(name),
+            !system.contains(name),
             "child request system prompt should not mention hidden agent tool {name}"
         );
     }
 
-    let system = request.system.as_deref().unwrap_or_default();
     assert!(
         !system.contains("<system-reminder>"),
         "child request system prompt should remain base-only"
@@ -1027,12 +1098,9 @@ fn assert_subagent_request_hides_agent_tools(request: &ModelRequest) {
 }
 
 fn assert_subagent_reminder_before_task(texts: &[String], task: &str) {
+    // The reminder carries the child role; model-facing coordination tools are
+    // absent from the registry, so there is no tool-specific warning to order.
     assert_text_order(texts, "You are running as a sub-agent", task);
-    assert_text_order(
-        texts,
-        "Do not call agent coordination tools such as spawn_agent",
-        task,
-    );
 }
 
 fn assert_text_order(texts: &[String], before: &str, after: &str) {

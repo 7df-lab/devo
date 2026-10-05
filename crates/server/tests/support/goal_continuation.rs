@@ -10,13 +10,7 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
 use devo_core::tools::ToolRegistry;
-use devo_protocol::Model;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::RequestContent;
@@ -26,10 +20,8 @@ use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use futures::Stream;
 use futures::StreamExt;
 use futures::stream;
@@ -274,34 +266,11 @@ pub fn build_runtime_with_registry(
     provider: Arc<dyn ModelProviderSDK>,
     registry: Arc<ToolRegistry>,
 ) -> Result<Arc<ServerRuntime>> {
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("goal_continuation.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            registry,
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::new(vec![Model {
-                slug: "test-model".to_string(),
-                display_name: "test-model".to_string(),
-                ..Model::default()
-            }])),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                None,
-            )?)),
-        ),
-    ))
+    Ok(devo_server::test_support::TestRuntime::new(provider)
+        .registry(registry)
+        .with_test_model()
+        .db_file("goal_continuation.db")
+        .runtime(data_root))
 }
 
 pub async fn initialize_connection(
@@ -365,9 +334,9 @@ pub async fn start_session(
     let response: devo_server::SuccessResponse<
         devo_protocol::native::rpc_session::SessionNewResult,
     > = serde_json::from_value(start_response)?;
-    Ok(devo_protocol::SessionId::try_from(
+    Ok(devo_protocol::SessionId::from(
         response.result.session.id.as_str(),
-    )?)
+    ))
 }
 
 pub async fn set_session_mode(
@@ -623,7 +592,8 @@ pub fn request_contains_text(request: &ModelRequest, needle: &str) -> bool {
             RequestContent::ProviderReasoning { .. }
             | RequestContent::ToolUse { .. }
             | RequestContent::HostedToolUse { .. }
-            | RequestContent::ToolResult { .. } => false,
+            | RequestContent::ToolResult { .. }
+            | RequestContent::Image { .. } => false,
         })
     })
 }
@@ -637,7 +607,8 @@ pub fn request_last_message_contains_text(request: &ModelRequest, needle: &str) 
             RequestContent::ProviderReasoning { .. }
             | RequestContent::ToolUse { .. }
             | RequestContent::HostedToolUse { .. }
-            | RequestContent::ToolResult { .. } => false,
+            | RequestContent::ToolResult { .. }
+            | RequestContent::Image { .. } => false,
         })
     })
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime_session_summary::RuntimeSessionSummary;
 
 const ACP_SESSION_LIST_CURSOR_PREFIX: &str = "devo-session-list-v1:";
 
@@ -76,7 +77,7 @@ impl ServerRuntime {
         &self,
         session_id: SessionId,
         additional_directories: Vec<PathBuf>,
-    ) -> Result<SessionMetadata, String> {
+    ) -> Result<RuntimeSessionSummary, String> {
         let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
             return Err("session does not exist".to_string());
         };
@@ -105,14 +106,16 @@ impl ServerRuntime {
         }
         session_arc.update_summary(updated_summary.clone()).await;
 
-        if let Some(mut record) = snapshot.record {
-            record.additional_directories = additional_directories;
-            record.updated_at = updated_at;
-            if let Err(error) = self.rollout_store.append_session_meta(&record) {
-                return Err(format!(
-                    "failed to persist ACP session additional directories: {error}"
-                ));
-            }
+        if let Some(rollout_path) = snapshot.rollout_path.as_ref()
+            && let Err(error) = self.rollout_store.append_session_meta_at(
+                rollout_path,
+                &updated_summary.native,
+                /*extras*/ None,
+            )
+        {
+            return Err(format!(
+                "failed to persist ACP session additional directories: {error}"
+            ));
         }
 
         if !updated_summary.ephemeral
@@ -131,15 +134,20 @@ impl ServerRuntime {
         &self,
         connection_id: u64,
         session_id: SessionId,
-        history_items: &[SessionHistoryItem],
+        history_items: &[SessionHistoryEntry],
     ) {
         let mut parent_message_id: Option<String> = None;
         for (index, item) in history_items.iter().enumerate() {
-            if item.kind == SessionHistoryItemKind::User {
+            if matches!(
+                item,
+                SessionHistoryEntry::Item {
+                    item: devo_protocol::native::item::Item::UserMessage { .. }
+                }
+            ) {
                 parent_message_id = Some(format!("history-{index}"));
             }
             let Some(update) =
-                acp_update_from_history_item(index, item, parent_message_id.as_deref())
+                acp_update_from_history_entry(index, item, parent_message_id.as_deref())
             else {
                 continue;
             };

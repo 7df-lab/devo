@@ -4,12 +4,7 @@ use std::sync::Mutex;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
 use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
 use devo_protocol::Model;
 use devo_protocol::ModelProfileKey;
 use devo_protocol::ModelRequest;
@@ -36,7 +31,6 @@ use tokio::time::timeout;
 
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RecordedRequest {
@@ -307,7 +301,7 @@ async fn explicit_binding_controls_route_request_model_and_catalog_profile() -> 
 #[tokio::test]
 async fn session_settings_survive_restart_without_resume() -> Result<()> {
     let data_root = TempDir::new()?;
-    write_provider_config(data_root.path())?;
+    write_session_settings_provider_config(data_root.path())?;
     let runtime = build_runtime(data_root.path(), Arc::new(RecordingRouter::default()))?;
     let (connection_id, _notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
@@ -321,7 +315,7 @@ async fn session_settings_survive_restart_without_resume() -> Result<()> {
                 "params": {
                     "sessionId": session_id,
                     "expectedVersion": 0,
-                    "model": { "provider": "", "model": "alt-model" },
+                    "model": { "provider": "", "model": "alternate/vendor/alt-model" },
                     "settings": {
                         "reasoningEffort": "high",
                         "mode": "plan"
@@ -361,7 +355,10 @@ async fn session_settings_survive_restart_without_resume() -> Result<()> {
         .find(|session| session.id.as_str() == session_id.to_string())
         .context("persisted session missing from Native session/list")?;
 
-    assert_eq!(persisted.model.model, "alt-model");
+    // A qualified `provider/model` reference must survive restart verbatim;
+    // a bare slug is not a durable model selection (it cannot be resolved
+    // against the catalog on replay).
+    assert_eq!(persisted.model.model, "alternate/vendor/alt-model");
     assert_eq!(persisted.settings.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(persisted.settings.mode.as_deref(), Some("plan"));
     Ok(())
@@ -445,45 +442,62 @@ invocation_method = "openai_chat_completions"
 
 fn write_glm_provider_config(data_root: &std::path::Path) -> Result<()> {
     write_test_auth_config(data_root)?;
+    // `providers.json` is the durable catalog; config.toml only carries
+    // session defaults. The custom model id doubles as the wire request
+    // model, exercising the explicit-binding route below.
+    let catalog = serde_json::json!({
+        "provider": {
+            "zai": {
+                "name": "ZAI",
+                "credential": "test_api_key",
+                "wire_api": "openai_chat_completions",
+                "enabled": true,
+                "models": {
+                    "renamed-provider-model": { "name": "Renamed Provider Model" }
+                }
+            },
+            "disabled-zai": {
+                "name": "Disabled ZAI",
+                "credential": "test_api_key",
+                "wire_api": "openai_chat_completions",
+                "enabled": false,
+                "models": {
+                    "disabled-provider-model": { "name": "Disabled Provider Model" }
+                }
+            }
+        }
+    });
     std::fs::write(
-        data_root.join("config.toml"),
-        r#"
-[defaults]
-model_binding = "glm-zai"
+        data_root.join("providers.json"),
+        serde_json::to_vec_pretty(&catalog)?,
+    )?;
+    Ok(())
+}
 
-[providers.zai]
-enabled = true
-name = "ZAI"
-credential = "test_api_key"
-wire_apis = ["openai_chat_completions"]
-
-[providers.disabled-zai]
-enabled = false
-name = "Disabled ZAI"
-credential = "test_api_key"
-wire_apis = ["openai_chat_completions"]
-
-[model_bindings.glm-zai]
-enabled = true
-model_slug = "glm-5.2"
-provider = "zai"
-request_model = "renamed-provider-model"
-invocation_method = "openai_chat_completions"
-
-[model_bindings.glm-disabled]
-enabled = false
-model_slug = "glm-5.2"
-provider = "zai"
-request_model = "disabled-provider-model"
-invocation_method = "openai_chat_completions"
-
-[model_bindings.glm-disabled-provider]
-enabled = true
-model_slug = "glm-5.2"
-provider = "disabled-zai"
-request_model = "disabled-provider-model"
-invocation_method = "openai_chat_completions"
-"#,
+fn write_session_settings_provider_config(data_root: &std::path::Path) -> Result<()> {
+    write_test_auth_config(data_root)?;
+    // `providers.json` is the durable catalog and carries the reasoning
+    // levels, so a persisted "high" effort selection survives restart
+    // normalization instead of collapsing to "off".
+    let catalog = serde_json::json!({
+        "provider": {
+            "alternate": {
+                "name": "Alternate",
+                "credential": "test_api_key",
+                "wire_api": "openai_chat_completions",
+                "enabled": true,
+                "models": {
+                    "vendor/alt-model": {
+                        "name": "Alt Model",
+                        "reasoning_capability": { "levels": ["off", "high"] }
+                    }
+                }
+            }
+        }
+    });
+    std::fs::write(
+        data_root.join("providers.json"),
+        serde_json::to_vec_pretty(&catalog)?,
     )?;
     Ok(())
 }
@@ -533,32 +547,14 @@ fn build_runtime_with_models(
     default_model: &str,
     models: Vec<Model>,
 ) -> Result<Arc<ServerRuntime>> {
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(UnusedProvider);
-    let provider_router: Arc<dyn ProviderRouter> = router;
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("provider_routing.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            provider,
-            provider_router,
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            default_model.to_string(),
-            Arc::new(PresetModelCatalog::new(models)),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                /*workspace_root*/ None,
-            )?)),
-        ),
-    ))
+    Ok(
+        devo_server::test_support::TestRuntime::new(Arc::new(UnusedProvider))
+            .router(router)
+            .default_model(default_model)
+            .catalog(Arc::new(PresetModelCatalog::new(models)))
+            .db_file("provider_routing.db")
+            .runtime(data_root),
+    )
 }
 
 async fn initialize_connection(
@@ -637,7 +633,7 @@ async fn start_session_with_binding(
         devo_protocol::native::rpc_session::SessionNewResult,
     > = serde_json::from_value(response)
         .with_context(|| format!("decode session/new response: {response_value}"))?;
-    let session_id = SessionId::try_from(response.result.session.id.as_str())?;
+    let session_id = SessionId::from(response.result.session.id.as_str());
     let metadata_response = runtime
         .handle_incoming(
             connection_id,

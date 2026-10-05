@@ -9,6 +9,7 @@ import {
 
 type RightPanelResizeHandleProps = {
 	width: number
+	availableWidth: number
 	onWidthChange: (width: number) => void
 	onResizingChange?: (resizing: boolean) => void
 	className?: string
@@ -20,6 +21,7 @@ type RightPanelResizeHandleProps = {
  */
 export function RightPanelResizeHandle({
 	width,
+	availableWidth,
 	onWidthChange,
 	onResizingChange,
 	className,
@@ -57,11 +59,11 @@ export function RightPanelResizeHandle({
 			if (!drag) return
 			// Left edge: moving pointer left → wider panel.
 			const next = clampReviewPanelWidth(drag.startWidth + (drag.startX - event.clientX), {
-				windowWidth: window.innerWidth,
+				availableWidth,
 			})
 			onWidthChange(next)
 		},
-		[onWidthChange],
+		[availableWidth, onWidthChange],
 	)
 
 	const handlePointerUp = useCallback(
@@ -76,9 +78,9 @@ export function RightPanelResizeHandle({
 
 	const handleDoubleClick = useCallback(() => {
 		onWidthChange(
-			clampReviewPanelWidth(REVIEW_PANEL_DEFAULT_WIDTH_PX, { windowWidth: window.innerWidth }),
+			clampReviewPanelWidth(REVIEW_PANEL_DEFAULT_WIDTH_PX, { availableWidth }),
 		)
-	}, [onWidthChange])
+	}, [availableWidth, onWidthChange])
 
 	return (
 		<div
@@ -86,7 +88,7 @@ export function RightPanelResizeHandle({
 			aria-orientation="vertical"
 			aria-label="Resize changes panel"
 			aria-valuemin={REVIEW_PANEL_MIN_WIDTH_PX}
-			aria-valuemax={REVIEW_PANEL_MAX_WIDTH_PX}
+			aria-valuemax={clampReviewPanelWidth(REVIEW_PANEL_MAX_WIDTH_PX, { availableWidth })}
 			aria-valuenow={width}
 			data-slot="right-panel-resize-handle"
 			className={cn(

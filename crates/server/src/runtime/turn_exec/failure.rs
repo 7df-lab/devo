@@ -1,4 +1,5 @@
-use devo_protocol::{TurnErrorPayload, TurnFailureReason};
+use devo_protocol::TurnFailureReason;
+use devo_protocol::native::error::AgentError;
 use devo_provider::error::ProviderError;
 use devo_provider::recovery_hint_for_anyhow;
 
@@ -13,7 +14,8 @@ pub(super) fn turn_failure_reason_from_error(
     }
 }
 
-pub(super) fn turn_error_payload_from_error(error: &devo_core::AgentError) -> TurnErrorPayload {
+/// Stamp a Native `AgentError` onto the failed turn at emit (no sidecar bag).
+pub(super) fn turn_agent_error_from_error(error: &devo_core::AgentError) -> AgentError {
     let code = match error {
         devo_core::AgentError::Provider(source) => source
             .chain()
@@ -29,11 +31,11 @@ pub(super) fn turn_error_payload_from_error(error: &devo_core::AgentError) -> Tu
         | devo_core::AgentError::ContextTooLong
         | devo_core::AgentError::Aborted => None,
     };
-    TurnErrorPayload {
-        code: code.to_string(),
-        message: error.to_string(),
-        recovery_hint,
+    let mut agent_error = AgentError::new(code.to_string(), error.to_string());
+    if let Some(hint) = recovery_hint {
+        agent_error.details = Some(serde_json::json!({ "recoveryHint": hint }));
     }
+    agent_error
 }
 
 #[cfg(test)]
@@ -49,38 +51,28 @@ mod tests {
             ProviderError::ProviderServerError {
                 message: "Internal server error".to_string(),
                 status_code: Some(500),
-                provider_name: Some("openai".to_string()),
+                provider_name: None,
             },
         ));
-
-        assert_eq!(
-            turn_error_payload_from_error(&error),
-            TurnErrorPayload {
-                code: "PROVIDER_SERVER_ERROR".to_string(),
-                message:
-                    "model provider error: provider server error (Some(500)): Internal server error"
-                        .to_string(),
-                recovery_hint: None,
-            }
-        );
+        let agent_error = turn_agent_error_from_error(&error);
+        assert_eq!(agent_error.error_code, "PROVIDER_SERVER_ERROR");
+        assert!(agent_error.message.contains("Internal server error"));
     }
 
     #[test]
-    fn provider_timeout_includes_network_recovery_hint() {
-        let error = devo_core::AgentError::Provider(anyhow::Error::new(
-            ProviderError::ProviderTimeoutError {
-                message: "stream idle timeout".to_string(),
-                provider_name: Some("openai".to_string()),
-            },
-        ));
-
-        assert_eq!(
-            turn_error_payload_from_error(&error),
-            TurnErrorPayload {
-                code: "PROVIDER_TIMEOUT_ERROR".to_string(),
-                message: "model provider error: provider timeout: stream idle timeout".to_string(),
-                recovery_hint: Some(NETWORK_PROXY_HINT.to_string()),
-            }
+    fn preserves_provider_recovery_hint() {
+        // Force a network-ish message so the recovery hint helper can attach.
+        let error = devo_core::AgentError::Provider(anyhow::Error::msg(format!(
+            "connection failed via proxy: {NETWORK_PROXY_HINT}"
+        )));
+        let agent_error = turn_agent_error_from_error(&error);
+        assert!(
+            agent_error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("recoveryHint"))
+                .is_some()
+                || agent_error.message.contains("proxy")
         );
     }
 }

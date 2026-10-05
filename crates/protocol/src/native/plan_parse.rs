@@ -10,11 +10,16 @@ use serde_json::Value as JsonValue;
 use super::item::PlanEntry;
 use super::item::PlanStepStatus;
 
-/// Parse a single plan step object (`step`/`content` + `status`).
+/// Parse a single plan step object (`step`/`content`/`step_name` + `status`).
+///
+/// `step_name` is accepted because providers routinely emit it despite the
+/// tool schema naming the key `step`; without the alias those plans parse to
+/// an empty entry list and silently lose every step.
 pub fn plan_entry_from_json(item: &JsonValue) -> Option<PlanEntry> {
     let step = item
         .get("step")
         .or_else(|| item.get("content"))
+        .or_else(|| item.get("step_name"))
         .and_then(JsonValue::as_str)?
         .trim();
     if step.is_empty() {
@@ -151,6 +156,24 @@ mod tests {
                 step: "## Approach\n".into(),
                 status: PlanStepStatus::Completed,
             }]
+        );
+    }
+
+    #[test]
+    fn parses_step_name_alias_from_provider_shapes() {
+        // Providers routinely emit `step_name` despite the schema; without the
+        // alias the whole plan parses to an empty entry list.
+        let value = serde_json::json!({
+            "plan": [
+                { "step_name": "Debug-R8-PARSE", "status": "pending" },
+            ]
+        });
+        assert_eq!(
+            plan_entries_from_update_plan_json(&value),
+            Some(vec![PlanEntry {
+                step: "Debug-R8-PARSE".into(),
+                status: PlanStepStatus::Pending,
+            }])
         );
     }
 }

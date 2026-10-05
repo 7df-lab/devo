@@ -87,7 +87,7 @@ impl ToolHandler for GoalUpdateHandler {
             )
         })?;
         let result = Arc::clone(&coordinator)
-            .update_goal(ctx.session_id.clone(), status.to_string())
+            .update_goal(ctx.session_id, status.to_string())
             .await?;
 
         let tokens_used = result
@@ -154,6 +154,11 @@ mod tests {
             network_no_proxy: None,
             sandbox_permission_overlay: None,
             sandbox_profile: None,
+            kernel: None,
+            python_cell_first_wait_ms: None,
+            python_cell_watch: None,
+            python_cell_completion: None,
+            session_dir: None,
         };
 
         let error = handler

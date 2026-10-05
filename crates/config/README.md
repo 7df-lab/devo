@@ -42,7 +42,21 @@ When a workspace is known, its provider/model overlay is:
 <workspace>/.devo/providers.json
 ```
 
-The canonical provider/model shape is intentionally small:
+User-owned custom providers/models live in a **separate** file:
+
+```text
+<DEVO_HOME>/custom-providers.json
+<workspace>/.devo/custom-providers.json
+```
+
+`providers.json` stores builtin Connection overlays (credential refs, sparse
+model overrides). `custom-providers.json` stores fully user-defined
+providers/models. Both use the same JSON shape.
+
+Remote catalog refresh uses `[catalog]` in `config.toml` (see
+`crates/core/README.md`). Set `catalog.offline = true` to disable network
+fetches of `https://models.dev/api.json`; point `catalog.source` at a local
+`api.json` dump for air-gapped refresh.
 
 ```json
 {

@@ -10,7 +10,6 @@ import {
 	memo,
 	useCallback,
 	useContext,
-	useEffect,
 	useLayoutEffect,
 	useMemo,
 	useRef,

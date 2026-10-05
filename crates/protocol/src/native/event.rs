@@ -31,6 +31,7 @@ use super::item::SpawnedWorkState;
 use super::queue::QueueChange;
 use super::queue::QueueEntry;
 use super::session::Session;
+use super::session::SessionActivity;
 use super::session::SessionFlag;
 use super::session::SessionStatus;
 use super::turn::Turn;
@@ -155,6 +156,9 @@ pub enum ServerNotification {
         session_id: SessionId,
         status: SessionStatus,
         flags: Vec<SessionFlag>,
+        /// Server-maintained Agents View activity (same derivation as `Session.activity`).
+        #[serde(default)]
+        activity: crate::native::session::SessionActivity,
         active_turn_id: Option<TurnId>,
     },
     #[serde(rename = "session/archived")]
@@ -169,6 +173,14 @@ pub enum ServerNotification {
         session_id: SessionId,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         deleted_session_ids: Vec<SessionId>,
+    },
+    /// Fired after schedule upsert / update / delete persistence.
+    #[serde(rename = "session/schedule/changed")]
+    SessionScheduleChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<SessionId>,
+        job: Box<super::rpc_schedule::ScheduleJob>,
+        change: SessionScheduleChange,
     },
     #[serde(rename = "workspace/restoreStarted")]
     WorkspaceRestoreStarted {
@@ -251,12 +263,25 @@ pub enum ServerNotification {
         goal_id: super::ids::GoalId,
     },
 
+    /// OAuth/API credential is expired or unusable; clients should prompt re-login.
+    #[serde(rename = "provider/authStale")]
+    ProviderAuthStale {
+        provider_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
     // ── Model / Context / Usage ──
     #[serde(rename = "model/queryFailed")]
     ModelQueryFailed {
         session_id: SessionId,
         turn_id: TurnId,
         error: AgentError,
+        /// Retry attempt that exhausted the policy (optional for older peers).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_attempts: Option<u32>,
     },
     #[serde(rename = "model/queryRetrying")]
     ModelQueryRetrying {
@@ -376,6 +401,100 @@ pub enum ServerNotification {
         provider: String,
         change: CredentialChange,
     },
+
+    // ── Interactive / edit / search / shell (formerly ServerEvent) ──
+    #[serde(rename = "tool_call/status_updated")]
+    ToolCallStatusUpdated {
+        session_id: SessionId,
+        turn_id: TurnId,
+        tool_call_id: String,
+        status: String,
+    },
+    #[serde(rename = "item/tool/requestUserInput")]
+    RequestUserInput {
+        request: RequestUserInputNotification,
+        questions: Vec<crate::RequestUserInputQuestion>,
+    },
+    #[serde(rename = "message/edit/recorded")]
+    MessageEditRecorded {
+        session_id: SessionId,
+        edit_id: String,
+        target_message_id: ItemId,
+        replacement_message_id: ItemId,
+        edit_state: String,
+        content_preview: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mentions: Vec<serde_json::Value>,
+        timestamp: DateTime<Utc>,
+    },
+    #[serde(rename = "serverRequest/resolved")]
+    ServerRequestResolved {
+        session_id: SessionId,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<TurnId>,
+    },
+    #[serde(rename = "search/updated")]
+    SearchUpdated(super::rpc_search::SearchSnapshot),
+    #[serde(rename = "search/completed")]
+    SearchCompleted(super::rpc_search::SearchSnapshot),
+    #[serde(rename = "search/failed")]
+    SearchFailed(super::rpc_search::SearchFailedPayload),
+    #[serde(rename = "command/exec/outputDelta")]
+    CommandExecOutputDelta {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<SessionId>,
+        process_id: String,
+        stream: crate::CommandExecOutputStream,
+        delta_base64: String,
+    },
+    #[serde(rename = "command/exec/exited")]
+    CommandExecExited {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<SessionId>,
+        process_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
+}
+
+impl ServerNotification {
+    /// Status-only construction when the live session snapshot is unavailable.
+    /// Flags stay empty; `activity` is derived from `status`.
+    pub fn session_status_changed(
+        session_id: SessionId,
+        status: SessionStatus,
+        active_turn_id: Option<TurnId>,
+    ) -> Self {
+        let flags = Vec::new();
+        let activity = SessionActivity::from_status_and_flags(status, &flags);
+        Self::SessionStatusChanged {
+            session_id,
+            status,
+            flags,
+            activity,
+            active_turn_id,
+        }
+    }
+
+    /// Emit from the live Native [`Session`] (preferred when the summary is held).
+    pub fn session_status_changed_from_session(session: &Session) -> Self {
+        Self::SessionStatusChanged {
+            session_id: session.id,
+            status: session.status,
+            flags: session.flags.clone(),
+            activity: session.activity,
+            active_turn_id: session.active_turn_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionScheduleChange {
+    Upserted,
+    Updated,
+    Deleted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -384,6 +503,19 @@ pub enum CredentialChange {
     Added,
     Updated,
     Deleted,
+}
+
+/// Live notification payload for `item/tool/requestUserInput`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestUserInputNotification {
+    pub request_id: String,
+    pub request_kind: String,
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<ItemId>,
 }
 
 /// Phase of a provider retry cycle (ratified vocabulary, L2-DES-APP-009

@@ -2,19 +2,21 @@ use super::*;
 use crate::goal::GoalStatus;
 
 impl ServerRuntime {
-    pub(super) async fn account_goal_turn_completed(&self, turn: &TurnMetadata) {
+    pub(super) async fn account_goal_turn_completed(
+        &self,
+        turn: &devo_protocol::native::turn::Turn,
+    ) {
+        let turn_id = turn.id;
+        let session_id = turn.session_id;
         let continuation_goal_id = self
             .goal_continuation_turn_goals
             .lock()
             .await
-            .remove(&turn.turn_id);
+            .remove(&turn_id);
         let Some(usage) = turn.usage.as_ref() else {
             return;
         };
-        if turn.status == TurnStatus::Pending || turn.status == TurnStatus::Running {
-            return;
-        }
-        if self.session_is_plan_mode(turn.session_id).await {
+        if self.session_is_plan_mode(session_id).await {
             return;
         }
 
@@ -25,10 +27,7 @@ impl ServerRuntime {
         }
 
         let mut stores = self.goal_stores.lock().await;
-        let Some(goal) = stores
-            .get_mut(&turn.session_id)
-            .and_then(GoalStore::get_mut)
-        else {
+        let Some(goal) = stores.get_mut(&session_id).and_then(GoalStore::get_mut) else {
             return;
         };
         if let Some(goal_id) = continuation_goal_id.as_ref()
@@ -45,14 +44,14 @@ impl ServerRuntime {
             .goal_durable_store
             .append_budget_accounted(
                 &durable_goal,
-                turn.turn_id,
+                turn_id,
                 token_delta,
                 /*turn_delta*/ 0,
                 duration_delta_seconds,
             )
             .await
         {
-            tracing::warn!(session_id = %turn.session_id, turn_id = %turn.turn_id, error = %error, "failed to persist goal token accounting record");
+            tracing::warn!(%session_id, %turn_id, error = %error, "failed to persist goal token accounting record");
         }
 
         if previous_status != durable_goal.status {
@@ -61,14 +60,14 @@ impl ServerRuntime {
                 .append_status_changed(&durable_goal, previous_status, None)
                 .await
             {
-                tracing::warn!(session_id = %turn.session_id, turn_id = %turn.turn_id, error = %error, "failed to persist goal budget status record");
+                tracing::warn!(%session_id, %turn_id, error = %error, "failed to persist goal budget status record");
             }
-            self.sync_core_session_goal(turn.session_id, None).await;
+            self.sync_core_session_goal(session_id, None).await;
         } else if durable_goal.status == GoalStatus::Active {
-            self.sync_core_session_goal(turn.session_id, Some(durable_goal.to_thread_goal()))
+            self.sync_core_session_goal(session_id, Some(&durable_goal))
                 .await;
         } else {
-            self.sync_core_session_goal(turn.session_id, None).await;
+            self.sync_core_session_goal(session_id, None).await;
         }
     }
 
@@ -78,13 +77,15 @@ impl ServerRuntime {
     }
 }
 
-fn goal_token_delta(usage: &TurnUsage) -> i64 {
-    let cached_input = usage.cache_read_input_tokens.unwrap_or_default();
-    let non_cached_input = usage.input_tokens.saturating_sub(cached_input);
-    i64::from(non_cached_input + usage.output_tokens)
+fn goal_token_delta(usage: &devo_protocol::native::usage::TurnUsage) -> i64 {
+    let non_cached_input = usage
+        .query
+        .input_tokens
+        .saturating_sub(usage.query.cache_read_input_tokens);
+    i64::try_from(non_cached_input.saturating_add(usage.query.output_tokens)).unwrap_or(i64::MAX)
 }
 
-fn turn_duration_seconds(turn: &TurnMetadata) -> u64 {
+fn turn_duration_seconds(turn: &devo_protocol::native::turn::Turn) -> u64 {
     let Some(completed_at) = turn.completed_at else {
         return 0;
     };
@@ -101,9 +102,9 @@ fn apply_goal_usage_delta(
     if token_delta > 0 {
         goal.usage.record_tokens(token_delta);
     }
-    goal.usage.duration_seconds = goal
+    goal.usage.time_used_seconds = goal
         .usage
-        .duration_seconds
+        .time_used_seconds
         .saturating_add(duration_delta_seconds);
     goal.updated_at = chrono::Utc::now();
     previous_status
@@ -116,7 +117,7 @@ mod tests {
 
     fn goal_with_budget(max_tokens: i64) -> crate::goal::Goal {
         crate::goal::Goal::from_create_params(devo_protocol::GoalCreateParams {
-            session_id: SessionId::new(),
+            session_id: SessionId::from_legacy_uuid(uuid::Uuid::now_v7()),
             objective: "finish accounting".to_string(),
             token_budget: Some(max_tokens),
             replace_existing: false,
@@ -127,13 +128,16 @@ mod tests {
     #[test]
     fn goal_token_delta_counts_non_cached_input_and_output() {
         // Trace: L2-DES-GOAL-001
-        let usage = TurnUsage {
-            input_tokens: 120,
-            output_tokens: 30,
-            cache_creation_input_tokens: Some(40),
-            cache_read_input_tokens: Some(70),
-            reasoning_output_tokens: None,
-            total_tokens: None,
+        let usage = devo_protocol::native::usage::TurnUsage {
+            query: devo_protocol::native::usage::UsageTotals {
+                total_tokens: 150,
+                input_tokens: 120,
+                output_tokens: 30,
+                cache_creation_input_tokens: 40,
+                cache_read_input_tokens: 70,
+                ..Default::default()
+            },
+            overhead: Default::default(),
         };
 
         assert_eq!(goal_token_delta(&usage), 80);
@@ -152,6 +156,6 @@ mod tests {
         assert_eq!(previous_status, GoalStatus::Active);
         assert_eq!(goal.status, GoalStatus::Active);
         assert_eq!(goal.usage.tokens_used, 100);
-        assert_eq!(goal.usage.duration_seconds, 3);
+        assert_eq!(goal.usage.time_used_seconds, 3);
     }
 }

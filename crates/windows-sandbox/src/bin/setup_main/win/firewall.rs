@@ -52,6 +52,10 @@ struct BlockRuleSpec<'a> {
     remote_ports: Option<&'a str>,
 }
 
+/// Block ALL outbound for a specific executable (proven mechanism on Windows).
+/// Per-user firewall rules don't work for selective outbound (verified); per-program
+/// rules do. This blocks every network connection from the kernel's python.exe.
+
 pub fn ensure_offline_proxy_allowlist(
     offline_sid: &str,
     proxy_ports: &[u16],

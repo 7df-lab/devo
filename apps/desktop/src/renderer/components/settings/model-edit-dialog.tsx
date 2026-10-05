@@ -39,7 +39,7 @@ import { Switch } from "@devo/ui/components/switch"
 import { Textarea } from "@devo/ui/components/textarea"
 import { cn } from "@devo/ui/lib/utils"
 import { ChevronDownIcon, PlusIcon, Trash2Icon } from "lucide-react"
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useId, useMemo, useState } from "react"
 import { getBaseClient } from "../../services/connection-manager"
 import { effectiveContextWindowTokens, contextWindowPercentFromAbsolute } from "../../lib/providers"
 
@@ -47,6 +47,7 @@ const WIRE_API_OPTIONS: Array<{ value: CatalogWireApi; label: string }> = [
 	{ value: "openai_chat_completions", label: "OpenAI Chat Completions" },
 	{ value: "openai_responses", label: "OpenAI Responses" },
 	{ value: "anthropic_messages", label: "Anthropic Messages" },
+	{ value: "google_generative_ai", label: "Google Generative AI" },
 ]
 
 const MODALITY_OPTIONS: InputModality[] = ["text", "image"]
@@ -155,6 +156,7 @@ function parseEffortEncoding(encoding: EffortEncodingDraft): ProviderModelVarian
 		nextHeaders[key] = header.value
 	}
 	return {
+		disabled: false,
 		requestModel: encoding.requestModel.trim() || undefined,
 		request: parseJsonObject(encoding.requestBody),
 		headers: Object.keys(nextHeaders).length > 0 ? nextHeaders : undefined,
@@ -184,14 +186,14 @@ function formatJsonValue(value: unknown): string {
 }
 
 /** Empty string clears the field; otherwise require a JSON object. */
-function parseJsonObject(raw: string): unknown | undefined {
+function parseJsonObject(raw: string): CatalogModelInfo["request"] {
 	const trimmed = raw.trim()
 	if (!trimmed) return undefined
 	const parsed: unknown = JSON.parse(trimmed)
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
 		throw new Error("Request body must be a JSON object")
 	}
-	return parsed
+	return parsed as Exclude<CatalogModelInfo["request"], undefined>
 }
 
 export function effectiveWireApi(
@@ -339,8 +341,8 @@ export function ModelEditDialog({
 			return
 		}
 
-		let parsedRequest: unknown | undefined
-		let parsedOptions: unknown | undefined
+		let parsedRequest: CatalogModelInfo["request"]
+		let parsedOptions: CatalogModelInfo["options"]
 		try {
 			parsedRequest = parseJsonObject(requestBody)
 			parsedOptions = parseJsonObject(optionsBody)
@@ -590,7 +592,9 @@ export function ModelEditDialog({
 						</div>
 
 						<div className="flex flex-col gap-1.5 sm:col-span-2">
-							<Label className="text-xs text-muted-foreground">Invocation method</Label>
+							<Label htmlFor="model-invocation-method" className="text-xs text-muted-foreground">
+								Invocation method
+							</Label>
 							<Select
 								value={wireApi}
 								onValueChange={(v) => {
@@ -598,7 +602,7 @@ export function ModelEditDialog({
 								}}
 								disabled={saving}
 							>
-								<SelectTrigger className="h-9">
+								<SelectTrigger id="model-invocation-method" className="h-9">
 									<SelectValue />
 								</SelectTrigger>
 								<SelectContent>
@@ -622,11 +626,18 @@ export function ModelEditDialog({
 								<p className="text-sm tracking-tight">Enabled</p>
 								<p className="text-xs text-muted-foreground">Show this model in the picker</p>
 							</div>
-							<Switch checked={enabled} onCheckedChange={setEnabled} disabled={saving} />
+							<Switch
+								checked={enabled}
+								onCheckedChange={setEnabled}
+								disabled={saving}
+								aria-label="Show this model in the picker"
+							/>
 						</div>
 
 						<div className="flex flex-col gap-1.5 sm:col-span-2">
-							<Label className="text-xs text-muted-foreground">Reasoning capability</Label>
+							<Label htmlFor="model-reasoning-capability" className="text-xs text-muted-foreground">
+								Reasoning capability
+							</Label>
 							<Select
 								value={reasoningMode}
 								onValueChange={(value) => {
@@ -639,7 +650,7 @@ export function ModelEditDialog({
 								}}
 								disabled={saving}
 							>
-								<SelectTrigger className="h-9">
+								<SelectTrigger id="model-reasoning-capability" className="h-9">
 									<SelectValue />
 								</SelectTrigger>
 								<SelectContent>
@@ -657,8 +668,12 @@ export function ModelEditDialog({
 						</div>
 
 						{reasoningMode === "levels" && (
-							<div className="flex flex-col gap-1.5 sm:col-span-2">
-								<Label className="text-xs text-muted-foreground">Reasoning levels</Label>
+							<div
+								className="flex flex-col gap-1.5 sm:col-span-2"
+								role="group"
+								aria-label="Reasoning levels"
+							>
+								<p className="text-xs text-muted-foreground">Reasoning levels</p>
 								<div className="flex flex-wrap gap-1.5">
 									{LEVEL_CHOICES.map((level) => {
 										const active = reasoningLevels.includes(level)
@@ -666,6 +681,7 @@ export function ModelEditDialog({
 											<button
 												key={level}
 												type="button"
+												aria-pressed={active}
 												disabled={saving}
 												onClick={() => toggleReasoningLevel(level)}
 												className={cn(
@@ -720,6 +736,7 @@ export function ModelEditDialog({
 					<div className="rounded-lg border border-border/50">
 						<button
 							type="button"
+							aria-expanded={advancedOpen}
 							className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left"
 							onClick={() => setAdvancedOpen((v) => !v)}
 						>
@@ -734,6 +751,7 @@ export function ModelEditDialog({
 								)}
 							</div>
 							<ChevronDownIcon
+								aria-hidden="true"
 								className={cn(
 									"size-3.5 shrink-0 stroke-[1.5] text-muted-foreground transition-transform",
 									advancedOpen && "rotate-180",
@@ -742,7 +760,12 @@ export function ModelEditDialog({
 						</button>
 
 						{advancedOpen && (
-							<div className="grid gap-3 border-t border-border/40 px-3 py-3 sm:grid-cols-2">
+							<div
+								id="model-advanced-panel"
+								role="region"
+								aria-label="Advanced model settings"
+								className="grid gap-3 border-t border-border/40 px-3 py-3 sm:grid-cols-2"
+							>
 								<Field
 									label="Context window"
 									value={contextWindow}
@@ -779,8 +802,12 @@ export function ModelEditDialog({
 									placeholder="optional"
 									disabled={saving}
 								/>
-								<div className="flex flex-col gap-1.5 sm:col-span-2">
-									<Label className="text-xs text-muted-foreground">Input modalities</Label>
+								<div
+									className="flex flex-col gap-1.5 sm:col-span-2"
+									role="group"
+									aria-label="Input modalities"
+								>
+									<p className="text-xs text-muted-foreground">Input modalities</p>
 									<div className="flex flex-wrap gap-1.5">
 										{MODALITY_OPTIONS.map((mod) => {
 											const active = modalities.includes(mod)
@@ -788,6 +815,7 @@ export function ModelEditDialog({
 												<button
 													key={mod}
 													type="button"
+													aria-pressed={active}
 													disabled={saving}
 													onClick={() => toggleModality(mod)}
 													className={cn(
@@ -804,8 +832,12 @@ export function ModelEditDialog({
 									</div>
 								</div>
 
-								<div className="flex flex-col gap-2 sm:col-span-2">
-									<Label className="text-xs text-muted-foreground">Request headers</Label>
+								<div
+									className="flex flex-col gap-2 sm:col-span-2"
+									role="group"
+									aria-label="Request headers"
+								>
+									<p className="text-xs text-muted-foreground">Request headers</p>
 									{headers.length === 0 ? (
 										<p className="text-[11px] text-muted-foreground">
 											No custom headers. Merged into HTTP requests for this model.
@@ -814,6 +846,7 @@ export function ModelEditDialog({
 										headers.map((header, index) => (
 											<div key={index} className="flex items-center gap-2">
 												<Input
+													aria-label={`Header ${index + 1} name`}
 													placeholder="Header-Name"
 													value={header.key}
 													onChange={(e) => updateHeader(index, "key", e.target.value)}
@@ -821,6 +854,7 @@ export function ModelEditDialog({
 													className="h-9 flex-1 font-mono text-[13px]"
 												/>
 												<Input
+													aria-label={`Header ${index + 1} value`}
 													placeholder="value"
 													value={header.value}
 													onChange={(e) => updateHeader(index, "value", e.target.value)}
@@ -832,7 +866,7 @@ export function ModelEditDialog({
 													size="sm"
 													onClick={() => removeHeader(index)}
 													disabled={saving}
-													aria-label="Remove header"
+													aria-label={`Remove header ${index + 1}`}
 												>
 													<Trash2Icon className="size-3.5 stroke-[1.5]" />
 												</Button>
@@ -888,7 +922,7 @@ export function ModelEditDialog({
 								{effortOptions.length > 0 && (
 									<div className="flex flex-col gap-3 sm:col-span-2">
 										<div>
-											<Label className="text-xs text-muted-foreground">Effort encodings</Label>
+											<p className="text-xs text-muted-foreground">Effort encodings</p>
 											<p className="text-[11px] text-muted-foreground">
 												Optional per-selection overrides keyed as catalog variants (`off` / `on` /
 												levels). Leave empty to use built-in adapter thinking/effort fields.
@@ -896,6 +930,7 @@ export function ModelEditDialog({
 										</div>
 										{effortOptions.map((selection) => {
 											const encoding = effortEncodings[selection] ?? emptyEffortEncoding()
+											const requestBodyId = `effort-${selection}-request-body`
 											return (
 												<div
 													key={selection}
@@ -912,10 +947,14 @@ export function ModelEditDialog({
 														disabled={saving}
 													/>
 													<div className="flex flex-col gap-1.5">
-														<Label className="text-xs text-muted-foreground">
+														<Label
+															htmlFor={requestBodyId}
+															className="text-xs text-muted-foreground"
+														>
 															Request body (JSON)
 														</Label>
 														<Textarea
+															id={requestBodyId}
 															value={encoding.requestBody}
 															onChange={(e) =>
 																updateEffortEncoding(selection, {
@@ -968,10 +1007,15 @@ function Field({
 	disabled?: boolean
 	hint?: string
 }) {
+	const inputId = useId()
+
 	return (
 		<div className="flex flex-col gap-1.5">
-			<Label className="text-xs text-muted-foreground">{label}</Label>
+			<Label htmlFor={inputId} className="text-xs text-muted-foreground">
+				{label}
+			</Label>
 			<Input
+				id={inputId}
 				value={value}
 				onChange={(e) => onChange(e.target.value)}
 				placeholder={placeholder}

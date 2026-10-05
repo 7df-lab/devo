@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use devo_protocol::SessionId;
 #[cfg(test)]
 use uuid::Uuid;
 
@@ -254,10 +253,7 @@ impl ToolHandler for ExecCommandHandler {
             .await;
 
         if execution_mode == ExecExecutionMode::Background {
-            let owner_session_id =
-                SessionId::try_from(ctx.session_id.as_str()).map_err(|error| {
-                    ToolCallError::InvalidInput(format!("invalid current session id: {error}"))
-                })?;
+            let owner_session_id = ctx.session_id;
             let task = self
                 .background_tasks
                 .register_command(owner_session_id, process_id, args.cmd, Arc::clone(&proc))
@@ -657,6 +653,11 @@ mod tests {
             network_no_proxy: None,
             sandbox_permission_overlay: None,
             sandbox_profile: None,
+            kernel: None,
+            python_cell_first_wait_ms: None,
+            python_cell_watch: None,
+            python_cell_completion: None,
+            session_dir: None,
         }
     }
 

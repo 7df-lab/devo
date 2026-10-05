@@ -30,6 +30,17 @@ struct CommandTaskState {
     output: Option<String>,
 }
 
+fn terminal_result(state: &CommandTaskState) -> Option<AwaitTaskResult> {
+    matches!(
+        state.info.state,
+        TaskState::Completed | TaskState::Failed | TaskState::Canceled
+    )
+    .then(|| AwaitTaskResult::Terminal {
+        task: state.info.clone(),
+        output: state.output.clone(),
+    })
+}
+
 impl BackgroundTaskStore {
     pub(crate) fn new(process_store: Arc<ProcessStore>) -> Self {
         Self {
@@ -137,14 +148,8 @@ impl BackgroundTaskStore {
         loop {
             let notified = task.notify.notified();
             let state = task.state.lock().await;
-            if matches!(
-                state.info.state,
-                TaskState::Completed | TaskState::Failed | TaskState::Canceled
-            ) {
-                return Some(AwaitTaskResult::Terminal {
-                    task: state.info.clone(),
-                    output: state.output.clone(),
-                });
+            if let Some(result) = terminal_result(&state) {
+                return Some(result);
             }
             if started.elapsed() >= timeout {
                 return Some(AwaitTaskResult::TimedOut {
@@ -155,9 +160,10 @@ impl BackgroundTaskStore {
             drop(state);
             if tokio::time::timeout(remaining, notified).await.is_err() {
                 let state = task.state.lock().await;
-                return Some(AwaitTaskResult::TimedOut {
+                let result = terminal_result(&state).unwrap_or_else(|| AwaitTaskResult::TimedOut {
                     task: state.info.clone(),
                 });
+                return Some(result);
             }
         }
     }
@@ -183,5 +189,39 @@ impl BackgroundTaskStore {
         }
         task.notify.notify_waiters();
         Some(info)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use devo_protocol::CommandTaskMetadata;
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn terminal_result_preserves_task_and_output() {
+        let state = CommandTaskState {
+            info: TaskInfo {
+                task_id: TaskId("task-1".into()),
+                kind: TaskKind::Command,
+                state: TaskState::Completed,
+                agent: None,
+                command: Some(CommandTaskMetadata {
+                    process_id: 42,
+                    command: "echo done".into(),
+                    exit_code: Some(0),
+                }),
+            },
+            output: Some("done".into()),
+        };
+
+        assert_eq!(
+            terminal_result(&state),
+            Some(AwaitTaskResult::Terminal {
+                task: state.info.clone(),
+                output: Some("done".into()),
+            })
+        );
     }
 }

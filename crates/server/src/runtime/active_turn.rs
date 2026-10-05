@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use devo_core::SessionId;
-use devo_core::TurnId;
+use devo_protocol::native::ids::SessionId;
+use devo_protocol::native::ids::TurnId;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-
-use crate::turn::TurnMetadata;
 
 use super::session_actor::state::{SessionStreamState, SpawnSnapshot};
 
@@ -15,12 +13,16 @@ use super::session_actor::state::{SessionStreamState, SpawnSnapshot};
 /// Durable session fields remain on `SessionActorState`; turn I/O runs on a
 /// spawned task with a `TurnWorkingSet` and merges back through `MergeTurn`.
 pub(crate) struct ActiveTurnExecution {
-    pub turn: Option<TurnMetadata>,
+    pub turn: Option<devo_protocol::native::turn::Turn>,
     pub cancel_token: Option<CancellationToken>,
     pub abort_handle: Option<tokio::task::AbortHandle>,
     pub connection_id: Option<u64>,
     pub spawn_snapshots: HashMap<TurnId, Arc<SpawnSnapshot>>,
     pub stream: Option<Arc<tokio::sync::Mutex<SessionStreamState>>>,
+    /// Turn whose admitted user text is retained for in-flight schedule deduplication.
+    pub active_user_text_turn_id: Option<TurnId>,
+    /// User text admitted to this turn; cleared when the turn becomes terminal.
+    pub active_user_texts: Vec<String>,
 }
 
 /// Unified registry replacing the scattered `active_turn_*`, `active_tasks`,
@@ -31,7 +33,7 @@ pub(crate) struct ActiveTurnRegistry {
 }
 
 impl ActiveTurnRegistry {
-    fn entry(_session_id: SessionId) -> ActiveTurnExecution {
+    fn entry(_session_id: &SessionId) -> ActiveTurnExecution {
         ActiveTurnExecution {
             turn: None,
             cancel_token: None,
@@ -39,6 +41,8 @@ impl ActiveTurnRegistry {
             connection_id: None,
             spawn_snapshots: HashMap::new(),
             stream: None,
+            active_user_text_turn_id: None,
+            active_user_texts: Vec::new(),
         }
     }
 
@@ -47,15 +51,30 @@ impl ActiveTurnRegistry {
             .lock()
             .await
             .get(&session_id)
-            .and_then(|execution| execution.turn.as_ref().map(|turn| turn.turn_id))
+            .and_then(|execution| execution.turn.as_ref().map(|turn| turn.id))
     }
 
-    pub(crate) async fn active_turn_metadata(&self, session_id: SessionId) -> Option<TurnMetadata> {
+    pub(crate) async fn active_turn(
+        &self,
+        session_id: SessionId,
+    ) -> Option<devo_protocol::native::turn::Turn> {
         self.turns
             .lock()
             .await
             .get(&session_id)
             .and_then(|execution| execution.turn.clone())
+    }
+
+    /// Snapshot of in-flight turn ids for list enrichment (one lock).
+    pub(crate) async fn active_turn_ids(&self) -> HashMap<SessionId, TurnId> {
+        self.turns
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(session_id, execution)| {
+                execution.turn.as_ref().map(|turn| (*session_id, turn.id))
+            })
+            .collect()
     }
 
     pub(crate) async fn active_connection_id(&self, session_id: SessionId) -> Option<u64> {
@@ -66,17 +85,45 @@ impl ActiveTurnRegistry {
             .and_then(|execution| execution.connection_id)
     }
 
-    pub(crate) async fn connection_map(&self) -> HashMap<SessionId, u64> {
+    pub(crate) async fn active_user_texts(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) -> Vec<String> {
         self.turns
             .lock()
             .await
-            .iter()
-            .filter_map(|(session_id, execution)| {
-                execution
-                    .connection_id
-                    .map(|connection_id| (*session_id, connection_id))
-            })
-            .collect()
+            .get(&session_id)
+            .filter(|execution| execution.active_user_text_turn_id == Some(turn_id))
+            .map(|execution| execution.active_user_texts.clone())
+            .unwrap_or_default()
+    }
+
+    /// Seeds text before turn task registration or records input accepted by a live turn.
+    pub(crate) async fn add_active_user_text(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        text: String,
+    ) {
+        let mut turns = self.turns.lock().await;
+        let execution = turns
+            .entry(session_id)
+            .or_insert_with(|| Self::entry(&session_id));
+        if execution
+            .turn
+            .as_ref()
+            .is_some_and(|turn| turn.id != turn_id)
+        {
+            return;
+        }
+        if execution.active_user_text_turn_id != Some(turn_id) {
+            execution.active_user_text_turn_id = Some(turn_id);
+            execution.active_user_texts.clear();
+        }
+        if !execution.active_user_texts.contains(&text) {
+            execution.active_user_texts.push(text);
+        }
     }
 
     pub(crate) async fn cancel_token(&self, session_id: SessionId) -> Option<CancellationToken> {
@@ -96,33 +143,43 @@ impl ActiveTurnRegistry {
             .lock()
             .await
             .entry(session_id)
-            .or_insert_with(|| Self::entry(session_id))
+            .or_insert_with(|| Self::entry(&session_id))
             .cancel_token = Some(token);
     }
 
-    pub(crate) async fn register_turn_metadata(&self, session_id: SessionId, turn: TurnMetadata) {
-        self.turns
-            .lock()
-            .await
+    pub(crate) async fn register_turn(
+        &self,
+        session_id: SessionId,
+        turn: devo_protocol::native::turn::Turn,
+    ) {
+        let mut turns = self.turns.lock().await;
+        let execution = turns
             .entry(session_id)
-            .or_insert_with(|| Self::entry(session_id))
-            .turn = Some(turn);
+            .or_insert_with(|| Self::entry(&session_id));
+        if execution.active_user_text_turn_id != Some(turn.id) {
+            execution.active_user_text_turn_id = Some(turn.id);
+            execution.active_user_texts.clear();
+        }
+        execution.turn = Some(turn);
     }
 
     /// Claims a session for an in-flight turn when no active execution exists.
     pub(crate) async fn try_claim_session(
         &self,
         session_id: SessionId,
-        turn: TurnMetadata,
+        turn: devo_protocol::native::turn::Turn,
     ) -> bool {
         let mut turns = self.turns.lock().await;
         if turns.contains_key(&session_id) {
             return false;
         }
-        turns
+        let turn_id = turn.id;
+        let execution = turns
             .entry(session_id)
-            .or_insert_with(|| Self::entry(session_id))
-            .turn = Some(turn);
+            .or_insert_with(|| Self::entry(&session_id));
+        execution.turn = Some(turn);
+        execution.active_user_text_turn_id = Some(turn_id);
+        execution.active_user_texts.clear();
         true
     }
 
@@ -141,7 +198,7 @@ impl ActiveTurnRegistry {
             .lock()
             .await
             .entry(session_id)
-            .or_insert_with(|| Self::entry(session_id))
+            .or_insert_with(|| Self::entry(&session_id))
             .connection_id = Some(connection_id);
     }
 
@@ -164,7 +221,7 @@ impl ActiveTurnRegistry {
         let mut turns = self.turns.lock().await;
         if let Some(execution) = turns.get_mut(&session_id) {
             execution.cancel_token = None;
-            Self::maybe_remove_empty(&mut turns, session_id);
+            Self::maybe_remove_empty(&mut turns, &session_id);
         }
     }
 
@@ -172,11 +229,11 @@ impl ActiveTurnRegistry {
         let mut turns = self.turns.lock().await;
         if let Some(execution) = turns.get_mut(&session_id) {
             execution.abort_handle = None;
-            Self::maybe_remove_empty(&mut turns, session_id);
+            Self::maybe_remove_empty(&mut turns, &session_id);
         }
     }
 
-    /// Clears cancellation, metadata, and connection routing while a turn ends.
+    /// Clears cancellation, the turn snapshot, and connection routing while a turn ends.
     ///
     /// Stream state and spawn snapshots remain registered until the turn task
     /// unregisters them after `MergeTurn`.
@@ -187,7 +244,9 @@ impl ActiveTurnRegistry {
             execution.cancel_token = None;
             execution.abort_handle = None;
             execution.connection_id = None;
-            Self::maybe_remove_empty(&mut turns, session_id);
+            execution.active_user_text_turn_id = None;
+            execution.active_user_texts.clear();
+            Self::maybe_remove_empty(&mut turns, &session_id);
         }
     }
 
@@ -206,7 +265,7 @@ impl ActiveTurnRegistry {
             .lock()
             .await
             .entry(session_id)
-            .or_insert_with(|| Self::entry(session_id))
+            .or_insert_with(|| Self::entry(&session_id))
             .spawn_snapshots
             .insert(turn_id, snapshot);
     }
@@ -215,7 +274,7 @@ impl ActiveTurnRegistry {
         let mut turns = self.turns.lock().await;
         if let Some(execution) = turns.get_mut(&session_id) {
             execution.spawn_snapshots.remove(&turn_id);
-            Self::maybe_remove_empty(&mut turns, session_id);
+            Self::maybe_remove_empty(&mut turns, &session_id);
         }
     }
 
@@ -241,7 +300,7 @@ impl ActiveTurnRegistry {
             .lock()
             .await
             .entry(session_id)
-            .or_insert_with(|| Self::entry(session_id))
+            .or_insert_with(|| Self::entry(&session_id))
             .stream = Some(stream);
     }
 
@@ -249,7 +308,7 @@ impl ActiveTurnRegistry {
         let mut turns = self.turns.lock().await;
         if let Some(execution) = turns.get_mut(&session_id) {
             execution.stream = None;
-            Self::maybe_remove_empty(&mut turns, session_id);
+            Self::maybe_remove_empty(&mut turns, &session_id);
         }
     }
 
@@ -308,18 +367,20 @@ impl ActiveTurnRegistry {
 
     fn maybe_remove_empty(
         turns: &mut HashMap<SessionId, ActiveTurnExecution>,
-        session_id: SessionId,
+        session_id: &SessionId,
     ) {
-        let should_remove = turns.get(&session_id).is_some_and(|execution| {
+        let should_remove = turns.get(session_id).is_some_and(|execution| {
             execution.turn.is_none()
                 && execution.cancel_token.is_none()
                 && execution.abort_handle.is_none()
                 && execution.connection_id.is_none()
                 && execution.spawn_snapshots.is_empty()
                 && execution.stream.is_none()
+                && execution.active_user_text_turn_id.is_none()
+                && execution.active_user_texts.is_empty()
         });
         if should_remove {
-            turns.remove(&session_id);
+            turns.remove(session_id);
         }
     }
 }

@@ -6,12 +6,8 @@ use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
 use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
 use devo_core::ModelCatalog;
 use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::ResponseContent;
@@ -30,6 +26,8 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio::time::timeout;
+
+use devo_server::test_support::TestRuntime;
 
 #[derive(Default)]
 struct TestProvider;
@@ -300,24 +298,13 @@ fn build_runtime(
     Arc<devo_server::db::Database>,
 )> {
     let db = Arc::new(devo_server::db::Database::open(data_root.join(db_name))?);
-    let runtime = devo_server::ServerRuntime::new(
-        data_root.to_path_buf(),
-        devo_server::ServerRuntimeDependencies::new(
-            provider,
-            provider_router,
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            default_model,
-            model_catalog,
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            Arc::clone(&db),
-            config_store,
-        ),
-    );
+    let runtime = TestRuntime::new(provider)
+        .router(provider_router)
+        .default_model(default_model)
+        .catalog(model_catalog)
+        .database(Arc::clone(&db))
+        .config_store(config_store)
+        .runtime(data_root);
     Ok((runtime, db))
 }
 

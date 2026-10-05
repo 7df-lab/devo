@@ -191,7 +191,7 @@ export function partTime(
 }
 
 export function toolCallIdFromUpdate(update: Record<string, unknown>, now: number): string {
-	return String(update.toolCallId ?? update.callID ?? update.id ?? `tool-${now}`)
+	return String(update.toolCallId ?? update.callId ?? update.id ?? `tool-${now}`)
 }
 
 export function toolPartFromUpdate(
@@ -201,7 +201,12 @@ export function toolPartFromUpdate(
 	now: number,
 ): any {
 	const toolCallId = toolCallIdFromUpdate(update, now)
-	const messageID = `tool-${toolCallId}`
+	const itemId =
+		typeof update.itemId === "string" && update.itemId
+			? update.itemId
+			: typeof existingPart?.itemId === "string" && existingPart.itemId
+				? existingPart.itemId
+				: `tool-${toolCallId}`
 	const legacyContent = Array.isArray(update.content) ? update.content : undefined
 	const legacyLocations = Array.isArray(update.locations) ? update.locations : undefined
 	const incomingInput = objectFromValue(update.rawInput ?? update.input)
@@ -237,11 +242,11 @@ export function toolPartFromUpdate(
 							time: { ...time, end: time.end ?? now },
 						}
 	return {
-		id: `${messageID}-part`,
-		sessionID: sessionId,
-		messageID,
+		id: `${itemId}-part`,
+		sessionId: sessionId,
+		itemId,
 		type: "tool",
-		callID: toolCallId,
+		callId: toolCallId,
 		tool,
 		state,
 	}
@@ -286,11 +291,11 @@ export function statusFromDevo(status?: string): any {
 	}
 }
 
-export function sessionErrorEvent(sessionID: string, error: unknown): any {
+export function sessionErrorEvent(sessionId: string, error: unknown): any {
 	return {
 		type: "session.error",
 		properties: {
-			sessionID,
+			sessionId,
 			error: {
 				name: "Error",
 				data: { message: error instanceof Error ? error.message : String(error) },
@@ -322,7 +327,7 @@ function resolvedToolName(
 	if (kind) return toolNameFromUpdateKind(kind, input)
 
 	const existingTool = stringFromValue(existingPart?.tool)
-	if (existingTool && existingTool !== toolCallId && existingTool !== existingPart?.callID) {
+	if (existingTool && existingTool !== toolCallId && existingTool !== existingPart?.callId) {
 		return existingTool
 	}
 
@@ -340,7 +345,7 @@ function resolvedToolTitle(
 	if (title) return title
 
 	const existingTitle = stringFromValue(existingPart?.state?.title)
-	if (existingTitle && existingTitle !== toolCallId && existingTitle !== existingPart?.callID) {
+	if (existingTitle && existingTitle !== toolCallId && existingTitle !== existingPart?.callId) {
 		return existingTitle
 	}
 

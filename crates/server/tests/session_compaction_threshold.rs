@@ -3,89 +3,27 @@
 //! patches do not change applied policy.
 
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
-use async_trait::async_trait;
-use devo_core::AgentsMdConfig;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
 use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
-use devo_protocol::ModelRequest;
-use devo_protocol::ModelResponse;
-use devo_protocol::ResponseContent;
-use devo_protocol::ResponseMetadata;
 use devo_protocol::SessionId;
-use devo_protocol::StopReason;
-use devo_protocol::StreamEvent;
-use devo_protocol::Usage;
-use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 use devo_server::SuccessResponse;
-use futures::Stream;
+use devo_server::test_support::NoopProvider;
+use devo_server::test_support::TestRuntime;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
-struct NoopProvider;
-
-#[async_trait]
-impl ModelProviderSDK for NoopProvider {
-    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
-        Ok(ModelResponse {
-            id: "noop-response".to_string(),
-            content: vec![ResponseContent::Text("noop".to_string())],
-            stop_reason: Some(StopReason::EndTurn),
-            usage: Usage::default(),
-            metadata: ResponseMetadata::default(),
-        })
-    }
-
-    async fn completion_stream(
-        &self,
-        _request: ModelRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        Ok(Box::pin(futures::stream::empty()))
-    }
-
-    fn name(&self) -> &str {
-        "noop-compaction-threshold-provider"
-    }
-}
-
 fn build_runtime(data_root: &Path) -> Result<Arc<ServerRuntime>> {
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(NoopProvider);
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("compaction_threshold.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::load()?),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                /*workspace_root*/ None,
-            )?)),
-        ),
+    Ok(TestRuntime::new(Arc::new(
+        NoopProvider::text().named("noop-compaction-threshold-provider"),
     ))
+    .catalog(Arc::new(PresetModelCatalog::load()?))
+    .db_file("compaction_threshold.db")
+    .runtime(data_root))
 }
 
 async fn initialize_connection(runtime: &Arc<ServerRuntime>) -> Result<u64> {
@@ -185,7 +123,7 @@ async fn effective_context_window_patch_echoes_model_and_skips_global_config() -
         "compaction-threshold-session-1",
     )
     .await?;
-    let started_id = SessionId::try_from(started.session.id.as_str())?;
+    let started_id = SessionId::from(started.session.id.as_str());
     let model_default = started
         .session
         .settings

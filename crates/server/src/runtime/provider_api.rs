@@ -5,7 +5,6 @@ use devo_core::ModelCatalog;
 use devo_core::PROVIDER_CONFIG_FILE_NAME;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderHttpConfig;
-use devo_core::UserAuthConfigFile;
 use devo_core::read_user_auth_config;
 use devo_core::test_model_connection;
 use devo_protocol::ModelProfileKey;
@@ -17,7 +16,110 @@ use crate::SuccessResponse;
 
 use super::ServerRuntime;
 
+fn mask_secret(secret: &str) -> String {
+    let trimmed = secret.trim();
+    if trimmed.is_empty() {
+        return String::from("****");
+    }
+    if trimmed.len() <= 4 {
+        return "*".repeat(trimmed.len().max(4));
+    }
+    format!("****{}", &trimmed[trimmed.len().saturating_sub(4)..])
+}
+
+/// Ensures the provider entry points at the newly written credential.
+///
+/// The entry is patched in whichever catalog file it actually lives in —
+/// `providers.json` or `custom-providers.json`. Writing a fresh stub into
+/// `providers.json` when the full Connection lives in the custom file would
+/// later be "migrated" over it by [`migrate_custom_providers_file`] and
+/// clobber `base_url`/`wire_api`/`models`, leaving the provider unusable.
+fn bind_provider_credential_id(
+    user_dir: &std::path::Path,
+    provider_id: &str,
+    credential_id: &str,
+) -> Result<(), String> {
+    let config_file = user_dir.join(PROVIDER_CONFIG_FILE_NAME);
+    let custom_file = user_dir.join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME);
+    let mut config =
+        devo_core::read_provider_catalog_config(&config_file).map_err(|error| error.to_string())?;
+
+    if let Some(entry) = config.providers.get_mut(provider_id) {
+        entry.credential = Some(credential_id.to_string());
+        if entry.enabled.is_none() {
+            entry.enabled = Some(true);
+        }
+        return devo_core::write_provider_catalog_config(&config_file, &config)
+            .map_err(|error| error.to_string());
+    }
+
+    let mut custom =
+        devo_core::read_provider_catalog_config(&custom_file).map_err(|error| error.to_string())?;
+    if let Some(entry) = custom.providers.get_mut(provider_id) {
+        entry.credential = Some(credential_id.to_string());
+        if entry.enabled.is_none() {
+            entry.enabled = Some(true);
+        }
+        return devo_core::write_provider_catalog_config(&custom_file, &custom)
+            .map_err(|error| error.to_string());
+    }
+
+    // Provider unknown to both files: seed a stub in `providers.json`;
+    // `migrate_custom_providers_file` splits it out on the next start.
+    config.providers.insert(
+        provider_id.to_string(),
+        devo_core::ProviderConfigEntry {
+            name: Some(provider_id.to_string()),
+            credential: Some(credential_id.to_string()),
+            enabled: Some(true),
+            ..Default::default()
+        },
+    );
+    devo_core::write_provider_catalog_config(&config_file, &config)
+        .map_err(|error| error.to_string())
+}
+
 impl ServerRuntime {
+    /// Reloads Connection routes on the process context and every distinct
+    /// live session context after a provider connection mutation.
+    ///
+    /// Sessions capture their provider router at creation, so without this
+    /// sweep a connection added or removed through `provider/upsert` only
+    /// reaches sessions created afterwards — live turns keep failing with
+    /// "provider route not configured" until a server restart. Contexts are
+    /// shared per workspace (and with spawned subagents), so each distinct
+    /// context reloads exactly once; rebuilds may refresh OAuth credentials.
+    async fn reload_live_provider_routers(&self) {
+        let mut reloaded: Vec<std::sync::Arc<crate::session_context::SessionRuntimeContext>> =
+            Vec::new();
+        let process_context = std::sync::Arc::clone(&self.deps.process_context);
+        if let Err(error) = process_context.reload_provider_router().await {
+            tracing::warn!(
+                error = %error,
+                "failed to reload provider routes on process context"
+            );
+        }
+        reloaded.push(process_context);
+        for handle in self.list_session_handles().await {
+            let Some(session_context) = handle.runtime_context().await else {
+                continue;
+            };
+            if reloaded
+                .iter()
+                .any(|reloaded| std::sync::Arc::ptr_eq(reloaded, &session_context))
+            {
+                continue;
+            }
+            if let Err(error) = session_context.reload_provider_router().await {
+                tracing::warn!(
+                    error = %error,
+                    "failed to reload provider routes on session context"
+                );
+            }
+            reloaded.push(session_context);
+        }
+    }
+
     /// Native `provider/list` (ratified #11), backed by the bundled provider
     /// directory plus the effective config store and projected into the
     /// canonical camelCase result.
@@ -33,9 +135,11 @@ impl ServerRuntime {
             .lock()
             .expect("app config store mutex should not be poisoned");
         let config = store.effective_config();
-        let live_catalog = PresetModelCatalog::load_from_provider_config_with_overrides(
+        let home = store.user_config_dir().to_path_buf();
+        let live_catalog = PresetModelCatalog::load_from_provider_config_with_home(
             &config.provider_catalog,
             &config.provider.model_overrides,
+            Some(home.as_path()),
         )
         .ok();
         let catalog: &dyn ModelCatalog = live_catalog
@@ -112,6 +216,247 @@ impl ServerRuntime {
         .expect("serialize canonical provider/list response")
     }
 
+    /// Native `credential/list` — ids and masks only (L2-DES-AUTH-001).
+    pub(super) async fn handle_native_credential_list(
+        &self,
+        request_id: serde_json::Value,
+    ) -> serde_json::Value {
+        let auth_file = match current_user_config_file() {
+            Ok(path) => path.with_file_name(AUTH_CONFIG_FILE_NAME),
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("could not determine user config path: {error}"),
+                );
+            }
+        };
+        let auth = match read_user_auth_config(&auth_file) {
+            Ok(auth) => auth,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to read auth.json: {error}"),
+                );
+            }
+        };
+        let credentials = auth
+            .credentials
+            .into_iter()
+            .map(|(id, credential)| {
+                let (kind, masked) = match credential.kind {
+                    devo_core::AuthCredentialKind::ApiKey => {
+                        ("api_key".to_string(), mask_secret(&credential.value))
+                    }
+                    devo_core::AuthCredentialKind::Oauth => (
+                        "oauth".to_string(),
+                        mask_secret(credential.access.as_deref().unwrap_or("")),
+                    ),
+                };
+                let provider = devo_core::provider_id_from_credential_id(&id);
+                devo_protocol::native::rpc_admin::CredentialInfo {
+                    id,
+                    provider,
+                    masked,
+                    kind: Some(kind),
+                }
+            })
+            .collect();
+        serde_json::to_value(SuccessResponse {
+            id: request_id,
+            result: devo_protocol::native::rpc_admin::CredentialListResult { credentials },
+        })
+        .expect("serialize credential/list response")
+    }
+
+    /// Native `credential/set` — write-only secrets (L2-DES-AUTH-001).
+    pub(super) async fn handle_native_credential_set(
+        &self,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let params: devo_protocol::native::rpc_admin::CredentialSetParams =
+            match serde_json::from_value(params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InvalidParams,
+                        format!("invalid credential/set params: {error}"),
+                    );
+                }
+            };
+        let provider = params.provider.trim();
+        if provider.is_empty() {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InvalidParams,
+                "credential/set provider must not be empty",
+            );
+        }
+        let kind = params
+            .kind
+            .as_deref()
+            .unwrap_or("api_key")
+            .trim()
+            .to_ascii_lowercase();
+        let user_dir = match current_user_config_file() {
+            Ok(path) => path
+                .parent()
+                .map(|parent| parent.to_path_buf())
+                .unwrap_or(path),
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("could not determine user config path: {error}"),
+                );
+            }
+        };
+        let (credential_id, masked, kind_label) = if kind == "oauth" {
+            let access = match params
+                .access
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                Some(access) => access,
+                None => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InvalidParams,
+                        "oauth credential/set requires access",
+                    );
+                }
+            };
+            let credential_id = params
+                .id
+                .filter(|id| !id.trim().is_empty())
+                .map(|id| devo_core::provider_id_from_credential_id(&id))
+                .unwrap_or_else(|| provider.to_string());
+            if let Err(error) = devo_core::upsert_user_auth_oauth(
+                &user_dir,
+                &credential_id,
+                devo_core::UpsertOauthCredential {
+                    access: access.to_string(),
+                    refresh: params.refresh.clone(),
+                    expires_at: params.expires_at,
+                    account_id: params.account_id.clone(),
+                    enterprise_url: params.enterprise_url.clone(),
+                },
+            ) {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist oauth credential: {error}"),
+                );
+            }
+            if let Err(error) = bind_provider_credential_id(&user_dir, provider, &credential_id) {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to bind provider credential: {error}"),
+                );
+            }
+            (credential_id, mask_secret(access), "oauth".to_string())
+        } else {
+            let secret = match params
+                .secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                Some(secret) => secret,
+                None => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InvalidParams,
+                        "api_key credential/set requires secret",
+                    );
+                }
+            };
+            let credential_id = params
+                .id
+                .filter(|id| !id.trim().is_empty())
+                .map(|id| devo_core::provider_id_from_credential_id(&id))
+                .unwrap_or_else(|| devo_core::default_provider_credential_id(provider));
+            if let Err(error) =
+                devo_core::upsert_user_auth_api_key(&user_dir, &credential_id, secret)
+            {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to persist api key credential: {error}"),
+                );
+            }
+            if let Err(error) = bind_provider_credential_id(&user_dir, provider, &credential_id) {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to bind provider credential: {error}"),
+                );
+            }
+            (credential_id, mask_secret(secret), "api_key".to_string())
+        };
+        serde_json::to_value(SuccessResponse {
+            id: request_id,
+            result: devo_protocol::native::rpc_admin::CredentialSetResult {
+                credential: devo_protocol::native::rpc_admin::CredentialInfo {
+                    id: credential_id,
+                    provider: provider.to_string(),
+                    masked,
+                    kind: Some(kind_label),
+                },
+            },
+        })
+        .expect("serialize credential/set response")
+    }
+
+    /// Native `credential/delete`.
+    pub(super) async fn handle_native_credential_delete(
+        &self,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let params: devo_protocol::native::rpc_admin::CredentialDeleteParams =
+            match serde_json::from_value(params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InvalidParams,
+                        format!("invalid credential/delete params: {error}"),
+                    );
+                }
+            };
+        let user_dir = match current_user_config_file() {
+            Ok(path) => path
+                .parent()
+                .map(|parent| parent.to_path_buf())
+                .unwrap_or(path),
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    format!("could not determine user config path: {error}"),
+                );
+            }
+        };
+        match devo_core::remove_user_auth_credential(&user_dir, &params.credential_id) {
+            Ok(_) => serde_json::to_value(SuccessResponse {
+                id: request_id,
+                result: devo_protocol::native::rpc_admin::CredentialDeleteResult {},
+            })
+            .expect("serialize credential/delete response"),
+            Err(error) => self.error_response(
+                request_id,
+                ProtocolErrorCode::InternalError,
+                format!("failed to delete credential: {error}"),
+            ),
+        }
+    }
+
     /// Native `provider/upsert` (ratified #11).
     pub(super) async fn handle_native_provider_upsert(
         &self,
@@ -161,30 +506,38 @@ impl ServerRuntime {
             );
         }
 
-        let mut store = self
-            .deps
-            .config_store
-            .lock()
-            .expect("app config store mutex should not be poisoned");
         let default_model = params.default_model.clone();
         let small_model = params.small_model.clone();
-        let provider = match store.upsert_provider_connection(
-            params.provider,
-            params.default_model,
-            params.small_model,
-            params.api_key,
-        ) {
-            Ok(provider) => provider,
-            Err(error) => {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    error.to_string(),
-                );
+        let provider_id = params.provider.id.clone();
+        let builtin = devo_core::builtin_provider_config().ok();
+        let provider = {
+            let mut store = self
+                .deps
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned");
+            let baseline = builtin
+                .as_ref()
+                .and_then(|config| config.providers.get(&provider_id));
+            match store.upsert_provider_connection_with_baseline(
+                params.provider,
+                params.default_model,
+                params.small_model,
+                params.api_key,
+                baseline,
+            ) {
+                Ok(provider) => provider,
+                Err(error) => {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        error.to_string(),
+                    );
+                }
             }
         };
-        drop(store);
         self.deps.invalidate_workspace_contexts();
+        self.reload_live_provider_routers().await;
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -246,20 +599,22 @@ impl ServerRuntime {
             );
         }
 
-        let mut store = self
-            .deps
-            .config_store
-            .lock()
-            .expect("app config store mutex should not be poisoned");
-        if let Err(error) = store.disconnect_provider(provider_id) {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::InternalError,
-                error.to_string(),
-            );
+        {
+            let mut store = self
+                .deps
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned");
+            if let Err(error) = store.disconnect_provider(provider_id) {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InternalError,
+                    error.to_string(),
+                );
+            }
         }
-        drop(store);
         self.deps.invalidate_workspace_contexts();
+        self.reload_live_provider_routers().await;
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -487,7 +842,7 @@ async fn validate_provider_candidate(
     };
     let wire_api = model_info
         .wire_api
-        .or_else(|| params.provider.wire_apis.first().copied())
+        .or_else(|| params.provider.wire_apis.first().cloned())
         .context("provider has no usable wire API")?;
     if !params.provider.wire_apis.contains(&wire_api) {
         anyhow::bail!("model wire API must be supported by provider");
@@ -495,7 +850,7 @@ async fn validate_provider_candidate(
 
     let model_ref = format!("{provider_id}/{model_id}");
     let (validation_model, model_profile) = resolve_validation_model(catalog, wire_api, &model_ref);
-    let api_key = resolve_validation_api_key(&provider_id, &params)?;
+    let api_key = resolve_validation_api_key(&provider_id, &params).await?;
     let headers = (!params.provider.headers.is_empty())
         .then(|| serde_json::to_string(&params.provider.headers))
         .transpose()?;
@@ -508,6 +863,7 @@ async fn validate_provider_candidate(
             provider_http.no_proxy,
             headers,
         )?,
+        None,
     )?;
 
     test_model_connection(
@@ -541,7 +897,7 @@ fn resolve_validation_model(
     )
 }
 
-fn resolve_validation_api_key(
+async fn resolve_validation_api_key(
     provider_id: &str,
     params: &devo_protocol::native::rpc_admin::ProviderValidateParams,
 ) -> anyhow::Result<Option<String>> {
@@ -555,21 +911,27 @@ fn resolve_validation_api_key(
     let Some(credential_id) = params.provider.credential.as_deref() else {
         return Ok(None);
     };
-    let auth = current_server_user_auth_config()?;
+    let config_file = current_user_config_file().context("could not determine user config path")?;
+    let config_dir = config_file
+        .parent()
+        .context("user config path has no parent directory")?;
+    let auth = read_user_auth_config(&config_dir.join(AUTH_CONFIG_FILE_NAME))?;
     let credential = auth.credentials.get(credential_id).with_context(|| {
         format!(
             "provider {provider_id} references missing credential {credential_id} in user auth.json"
         )
     })?;
-    Ok(Some(credential.value.clone()))
-}
-
-fn current_server_user_auth_config() -> anyhow::Result<UserAuthConfigFile> {
-    let config_file = current_user_config_file().context("could not determine user config path")?;
-    let config_dir = config_file
-        .parent()
-        .context("user config path has no parent directory")?;
-    read_user_auth_config(&config_dir.join(AUTH_CONFIG_FILE_NAME)).map_err(Into::into)
+    match credential.kind {
+        devo_core::AuthCredentialKind::ApiKey => Ok(Some(credential.value.clone())),
+        devo_core::AuthCredentialKind::Oauth => crate::oauth_refresh::resolve_oauth_access(
+            provider_id,
+            credential_id,
+            credential,
+            config_dir,
+        )
+        .await
+        .map(Some),
+    }
 }
 
 #[cfg(test)]
@@ -665,7 +1027,9 @@ mod tests {
                 headers: BTreeMap::from([("bad header".to_string(), "value".to_string())]),
                 options: None,
                 request: None,
+                compat: None,
                 wire_apis: vec![ProviderWireApi::OpenAIChatCompletions],
+                model_overrides: BTreeMap::new(),
                 models: BTreeMap::from([(
                     "test-model".to_string(),
                     ProviderModelInfo {
@@ -687,6 +1051,92 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "invalid provider custom header name `bad header`"
+        );
+    }
+    #[test]
+    fn bind_patches_custom_provider_in_place_without_seeding_stub() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let full = devo_core::ProviderConfigEntry {
+            name: Some("CC Proxy".to_string()),
+            base_url: Some("https://example/api".to_string()),
+            credential: None,
+            wire_api: Some(ProviderWireApi::AnthropicMessages),
+            enabled: Some(true),
+            models: BTreeMap::from([(
+                "glm-5.3".to_string(),
+                devo_core::ProviderModelConfig::default(),
+            )]),
+            ..devo_core::ProviderConfigEntry::default()
+        };
+        devo_core::write_provider_catalog_config(
+            &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),
+            &devo_core::ProviderConfigFile::default(),
+        )
+        .expect("write default provider catalog");
+        devo_core::write_provider_catalog_config(
+            &dir.path().join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME),
+            &devo_core::ProviderConfigFile {
+                providers: BTreeMap::from([("ccproxy".to_string(), full.clone())]),
+                ..devo_core::ProviderConfigFile::default()
+            },
+        )
+        .expect("write custom provider catalog");
+
+        bind_provider_credential_id(dir.path(), "ccproxy", "ccproxy").expect("bind");
+
+        let connection = devo_core::read_provider_catalog_config(
+            &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),
+        )
+        .expect("read providers.json");
+        let custom = devo_core::read_provider_catalog_config(
+            &dir.path().join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME),
+        )
+        .expect("read custom-providers.json");
+        // No sparse stub may be seeded into providers.json: the next start's
+        // migrate_custom_providers_file would split it over the full entry.
+        assert!(
+            connection.providers.is_empty(),
+            "providers.json must stay clean: {connection:?}"
+        );
+        let expected = devo_core::ProviderConfigEntry {
+            credential: Some("ccproxy".to_string()),
+            ..full
+        };
+        assert_eq!(
+            custom.providers.get("ccproxy"),
+            Some(&expected),
+            "the custom entry keeps its adapter fields and gains the credential"
+        );
+    }
+
+    #[test]
+    fn bind_seeds_stub_for_unknown_provider_in_providers_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        devo_core::write_provider_catalog_config(
+            &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),
+            &devo_core::ProviderConfigFile::default(),
+        )
+        .expect("write default provider catalog");
+        devo_core::write_provider_catalog_config(
+            &dir.path().join(devo_core::CUSTOM_PROVIDER_CONFIG_FILE_NAME),
+            &devo_core::ProviderConfigFile::default(),
+        )
+        .expect("write custom provider catalog");
+
+        bind_provider_credential_id(dir.path(), "fresh", "fresh").expect("bind");
+
+        let connection = devo_core::read_provider_catalog_config(
+            &dir.path().join(devo_core::PROVIDER_CONFIG_FILE_NAME),
+        )
+        .expect("read providers.json");
+        assert_eq!(
+            connection.providers.get("fresh"),
+            Some(&devo_core::ProviderConfigEntry {
+                name: Some("fresh".to_string()),
+                credential: Some("fresh".to_string()),
+                enabled: Some(true),
+                ..devo_core::ProviderConfigEntry::default()
+            })
         );
     }
 }

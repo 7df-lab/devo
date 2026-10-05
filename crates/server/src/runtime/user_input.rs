@@ -1,6 +1,4 @@
 use super::*;
-use crate::PendingServerRequestContext;
-use crate::ServerRequestKind;
 
 impl ServerRuntime {
     pub(super) async fn request_user_input_for_tool(
@@ -20,10 +18,12 @@ impl ServerRuntime {
         }
 
         let host_session_id = self.permission_host_session_id(session_id).await;
+        let (native_session_id, native_turn_id) =
+            self.native_session_turn_ids(session_id, turn_id).await;
         let persisted = self
             .persist_waiting_user_input_item(
-                session_id,
-                turn_id,
+                native_session_id,
+                native_turn_id,
                 request_id.clone(),
                 &args.questions,
             )
@@ -60,6 +60,10 @@ impl ServerRuntime {
             .cancel_token_for_host_or_session(host_session_id, session_id)
             .await;
         let fanout_cancel_token = cancel_token.clone();
+        let broadcast_session_id = session_id;
+        let broadcast_turn_id = turn_id;
+        let fail_session_id = session_id;
+        let fail_turn_id = turn_id;
         let (request_ready_tx, request_ready_rx) = tokio::sync::oneshot::channel();
         let (fanout_error_tx, mut fanout_error_rx) = tokio::sync::mpsc::unbounded_channel();
         let fanout = tokio::spawn(async move {
@@ -100,8 +104,8 @@ impl ServerRuntime {
             Ok(Err(error)) => {
                 fanout.abort();
                 self.fail_pending_user_input(
-                    session_id,
-                    turn_id,
+                    fail_session_id,
+                    fail_turn_id,
                     &request_id,
                     cancel_token.is_cancelled(),
                 )
@@ -110,7 +114,7 @@ impl ServerRuntime {
             }
             Err(_) => {
                 fanout.abort();
-                self.fail_pending_user_input(session_id, turn_id, &request_id, true)
+                self.fail_pending_user_input(fail_session_id, fail_turn_id, &request_id, true)
                     .await;
                 return Err(ToolCallError::ExecutionFailed(
                     "user-input request readiness channel closed".to_string(),
@@ -118,16 +122,18 @@ impl ServerRuntime {
             }
         }
 
-        self.broadcast_event(ServerEvent::RequestUserInput(RequestUserInputPayload {
-            request: PendingServerRequestContext {
-                request_id: request_id.clone().into(),
-                request_kind: ServerRequestKind::ItemToolRequestUserInput,
-                session_id,
-                turn_id: Some(turn_id),
-                item_id: None,
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::RequestUserInput {
+                request: devo_protocol::native::event::RequestUserInputNotification {
+                    request_id: request_id.clone(),
+                    request_kind: "item_tool_request_user_input".to_string(),
+                    session_id: broadcast_session_id,
+                    turn_id: Some(broadcast_turn_id),
+                    item_id: None,
+                },
+                questions: args.questions,
             },
-            questions: args.questions,
-        }))
+        )
         .await;
 
         let mut rx = rx;
@@ -139,8 +145,8 @@ impl ServerRuntime {
                 match error {
                     Some(error) => {
                         self.fail_pending_user_input(
-                            session_id,
-                            turn_id,
+                            fail_session_id,
+                            fail_turn_id,
                             &request_id,
                             cancel_token.is_cancelled(),
                         )
@@ -176,9 +182,11 @@ impl ServerRuntime {
             return;
         };
         if let Some(persisted) = &pending.persisted {
+            let (native_session_id, native_turn_id) =
+                self.native_session_turn_ids(session_id, turn_id).await;
             self.persist_terminal_user_input_item(
-                session_id,
-                turn_id,
+                native_session_id,
+                native_turn_id,
                 request_id.to_string(),
                 &pending.questions,
                 if interrupted {
@@ -210,9 +218,11 @@ impl ServerRuntime {
             return;
         };
         if let Some(persisted) = &pending.persisted {
+            let (native_session_id, native_turn_id) =
+                self.native_session_turn_ids(session_id, turn_id).await;
             self.persist_answered_user_input_item(
-                session_id,
-                turn_id,
+                native_session_id,
+                native_turn_id,
                 request_key.clone(),
                 &pending.questions,
                 &response,
@@ -221,28 +231,25 @@ impl ServerRuntime {
             .await;
         }
         let _ = pending.tx.send(response);
-        self.broadcast_event(ServerEvent::ServerRequestResolved(
-            ServerRequestResolvedPayload {
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::ServerRequestResolved {
                 session_id,
-                request_id: request_key.into(),
+                request_id: request_key,
                 turn_id: Some(turn_id),
             },
-        ))
+        )
         .await;
     }
 
     /// Reconstructs answerable user-input lanes from persisted Waiting items
     /// after a process restart. The original tool task is gone; answering still
     /// completes the item so the desktop question UI can round-trip.
-    pub(super) async fn restore_waiting_user_inputs_from_rollout(
+    pub(super) async fn restore_waiting_user_inputs_from_history(
         &self,
         session_id: SessionId,
         host_session_id: SessionId,
-        rollout_path: &std::path::Path,
+        history: &devo_core::CanonicalHistory,
     ) {
-        let Ok(history) = devo_core::read_canonical_history(rollout_path) else {
-            return;
-        };
         for recovered in super::interaction_items::latest_waiting_user_inputs(&history.items) {
             if recovered.owner_session_id != session_id {
                 continue;

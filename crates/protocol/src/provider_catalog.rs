@@ -94,6 +94,16 @@ pub struct ProviderModelInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub reasoning_capability: Option<ReasoningCapability>,
+    /// pi-ai-compatible flag: model supports configurable thinking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// pi-ai-compatible thinking level → wire value map (`null` = unsupported).
+    #[serde(
+        default,
+        alias = "thinking_level_map",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub thinking_level_map: Option<crate::ThinkingLevelMap>,
     #[serde(
         default,
         alias = "reasoning_implementation",
@@ -182,7 +192,13 @@ pub struct ProviderInfo {
     pub options: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<Value>,
+    /// Open-ended provider compatibility hints for custom adapters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat: Option<Value>,
     pub wire_apis: Vec<ProviderWireApi>,
+    /// Sparse patches applied to inherited directory models before `models`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_overrides: BTreeMap<String, ProviderModelInfo>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, ProviderModelInfo>,
     pub enabled: bool,

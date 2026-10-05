@@ -44,7 +44,7 @@ export function NotificationSettings() {
 							always: "Always",
 						}}
 					>
-						<SelectTrigger className="min-w-[180px]">
+						<SelectTrigger aria-label="Completion notifications" className="min-w-[180px]">
 							<SelectValue />
 						</SelectTrigger>
 						<SelectContent>
@@ -60,6 +60,7 @@ export function NotificationSettings() {
 				>
 					<Switch
 						checked={notif.permissions}
+						aria-label="Permission notifications"
 						onCheckedChange={(v) => updateNotif("permissions", v)}
 					/>
 				</SettingsRow>
@@ -67,18 +68,27 @@ export function NotificationSettings() {
 					label="Question notifications"
 					description="Show alerts when an agent asks a question"
 				>
-					<Switch checked={notif.questions} onCheckedChange={(v) => updateNotif("questions", v)} />
+					<Switch
+						checked={notif.questions}
+						aria-label="Question notifications"
+						onCheckedChange={(v) => updateNotif("questions", v)}
+					/>
 				</SettingsRow>
 				<SettingsRow
 					label="Error notifications"
 					description="Show alerts when an agent encounters an error"
 				>
-					<Switch checked={notif.errors} onCheckedChange={(v) => updateNotif("errors", v)} />
+					<Switch
+						checked={notif.errors}
+						aria-label="Error notifications"
+						onCheckedChange={(v) => updateNotif("errors", v)}
+					/>
 				</SettingsRow>
 				{isMac && (
 					<SettingsRow label="Dock badge" description="Show pending count on the dock icon">
 						<Switch
 							checked={notif.dockBadge}
+							aria-label="Dock badge"
 							onCheckedChange={(v) => updateNotif("dockBadge", v)}
 						/>
 					</SettingsRow>

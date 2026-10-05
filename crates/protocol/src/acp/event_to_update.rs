@@ -13,48 +13,150 @@ use super::DEVO_TURN_ID_META;
 use super::DEVO_TURN_USAGE_META;
 use super::content::*;
 use super::session_update::*;
-use crate::CommandExecutionPayload;
-use crate::EventContext;
-use crate::FileChangePayload;
-use crate::ItemDeltaKind;
-use crate::ItemEventPayload;
-use crate::ItemKind;
-use crate::ServerEvent;
-use crate::SessionEventPayload;
-use crate::ToolCallPayload;
-use crate::ToolResultPayload;
-use crate::TurnPlanStepPayload;
+use crate::native::event::ServerNotification;
+use crate::native::item::FileChangeEntry;
+use crate::native::item::FileChangeKind;
+use crate::native::item::ItemEnvelope;
+use crate::native::item::PlanEntry;
+use crate::native::item::PlanStepStatus;
+use crate::native::notification_bus::notification_legacy_session_id;
+use crate::native::wire_projector::wire_from_server_notification;
 
-pub fn acp_notification_from_server_event(
-    method: &str,
-    event: &ServerEvent,
+/// Project a Native bus [`ServerNotification`] into an ACP `session/update`.
+///
+/// Item lifecycle reuses the envelope ACP projectors. Other Native-covered
+/// lifecycle notifications embed the Native wire params under
+/// `_meta.devo/originalEvent` so ACP adapters keep a recoverable method name.
+pub fn acp_notification_from_server_notification(
+    notification: &ServerNotification,
 ) -> (String, serde_json::Value) {
-    let Some(session_id) = event.session_id() else {
-        return (
-            method.to_string(),
-            serde_json::to_value(event).expect("serialize devo event"),
-        );
+    let (method, params) = wire_from_server_notification(notification);
+    let Some(session_id) = notification_legacy_session_id(notification) else {
+        return (method, params);
     };
-    let (update, meta) = if let Some(update) = acp_update_from_server_event(event) {
-        // Tool item events keep the ACP surface for ACP clients, but also embed
-        // the original server event so TUI/legacy clients can unwrap
-        // `item/started` / `item/completed` with full ToolCallPayload
-        // (parameters + command_actions) instead of the lossy ACP title.
-        let meta = if should_preserve_original_tool_event(event) {
-            Some(original_event_meta(method, event))
-        } else {
-            None
-        };
-        (update, meta)
-    } else {
-        (
+    let (update, meta) = match notification {
+        ServerNotification::ItemStarted { item } => match acp_update_from_item_started(item) {
+            Some(update) => {
+                let meta = should_preserve_original_tool_envelope(item, /*completed*/ false)
+                    .then(|| original_notification_meta(&method, notification));
+                (update, meta)
+            }
+            None => (
+                AcpSessionUpdate::SessionInfoUpdate {
+                    title: None,
+                    updated_at: None,
+                    meta: None,
+                },
+                Some(original_notification_meta(&method, notification)),
+            ),
+        },
+        ServerNotification::ItemCompleted { item } => match acp_update_from_item_completed(item) {
+            Some(update) => {
+                let meta = should_preserve_original_tool_envelope(item, /*completed*/ true)
+                    .then(|| original_notification_meta(&method, notification));
+                (update, meta)
+            }
+            None => (
+                AcpSessionUpdate::SessionInfoUpdate {
+                    title: None,
+                    updated_at: None,
+                    meta: None,
+                },
+                Some(original_notification_meta(&method, notification)),
+            ),
+        },
+        ServerNotification::ItemUpdated { item } => match acp_update_from_item_updated(item) {
+            Some(update) => (update, None),
+            None => (
+                AcpSessionUpdate::SessionInfoUpdate {
+                    title: None,
+                    updated_at: None,
+                    meta: None,
+                },
+                Some(original_notification_meta(&method, notification)),
+            ),
+        },
+        ServerNotification::SessionCreated { session }
+        | ServerNotification::SessionMetadataUpdated { session } => {
+            let mut meta = AcpMeta::new();
+            meta.insert(
+                DEVO_SESSION_META.to_string(),
+                serde_json::to_value(session.as_ref()).expect("serialize native session"),
+            );
+            (
+                AcpSessionUpdate::SessionInfoUpdate {
+                    title: session.title.clone(),
+                    updated_at: Some(session.last_activity_at.to_rfc3339()),
+                    meta: Some(meta),
+                },
+                None,
+            )
+        }
+        ServerNotification::ItemAssistantMessageDelta(delta) => (
+            AcpSessionUpdate::AgentMessageChunk {
+                content: AcpContentBlock::text(delta.delta.clone()),
+                message_id: Some(delta.item_id.as_str().to_string()),
+                meta: Some(acp_delta_meta(delta)),
+            },
+            None,
+        ),
+        ServerNotification::ItemReasoningDelta(delta) => (
+            AcpSessionUpdate::AgentThoughtChunk {
+                content: AcpContentBlock::text(delta.delta.clone()),
+                message_id: Some(delta.item_id.as_str().to_string()),
+                meta: Some(acp_delta_meta(delta)),
+            },
+            None,
+        ),
+        ServerNotification::TurnUsageUpdated {
+            usage,
+            session_totals,
+            context_window,
+            ..
+        } => {
+            let used = session_totals
+                .as_ref()
+                .map(|totals| totals.input_tokens + totals.output_tokens)
+                .unwrap_or(usage.query.input_tokens + usage.query.output_tokens);
+            let mut meta = AcpMeta::new();
+            meta.insert(DEVO_TURN_USAGE_META.to_string(), params.clone());
+            (
+                AcpSessionUpdate::UsageUpdate {
+                    used,
+                    size: context_window.unwrap_or_else(|| used.max(1)),
+                    cost: None,
+                    meta: Some(meta),
+                },
+                None,
+            )
+        }
+        ServerNotification::ToolCallStatusUpdated {
+            turn_id,
+            tool_call_id,
+            status,
+            ..
+        } => (
+            AcpSessionUpdate::ToolCallUpdate {
+                tool_call_id: tool_call_id.clone(),
+                title: None,
+                kind: None,
+                status: acp_tool_call_status_from_str(status.as_str()),
+                raw_input: None,
+                raw_output: None,
+                content: None,
+                locations: None,
+                meta: Some(acp_activity_meta_from_turn_id_str(turn_id.as_str())),
+            },
+            None,
+        ),
+        _ => (
             AcpSessionUpdate::SessionInfoUpdate {
                 title: None,
                 updated_at: None,
                 meta: None,
             },
-            Some(original_event_meta(method, event)),
-        )
+            Some(original_notification_meta(&method, notification)),
+        ),
     };
     (
         ACP_SESSION_UPDATE_METHOD.to_string(),
@@ -67,61 +169,45 @@ pub fn acp_notification_from_server_event(
     )
 }
 
-fn original_event_meta(method: &str, event: &ServerEvent) -> AcpMeta {
+fn original_notification_meta(method: &str, notification: &ServerNotification) -> AcpMeta {
     let mut meta = AcpMeta::new();
     meta.insert(
         DEVO_ORIGINAL_METHOD_META.to_string(),
         serde_json::Value::String(method.to_string()),
     );
-    meta.insert(
-        DEVO_ORIGINAL_EVENT_META.to_string(),
-        serde_json::to_value(event).expect("serialize original server event"),
-    );
+    // Store Native wire params (not the tagged ServerNotification) so ACP
+    // unwrap helpers can rebuild a method+params envelope without a dual bus.
+    let (_, params) = wire_from_server_notification(notification);
+    meta.insert(DEVO_ORIGINAL_EVENT_META.to_string(), params);
     meta
 }
 
-fn should_preserve_original_tool_event(event: &ServerEvent) -> bool {
-    match event {
-        ServerEvent::ItemStarted(payload) => matches!(
-            payload.item.item_kind,
-            ItemKind::ToolCall | ItemKind::CommandExecution
-        ),
-        ServerEvent::ItemCompleted(payload) => matches!(
-            payload.item.item_kind,
-            ItemKind::ToolCall
-                | ItemKind::ToolResult
-                | ItemKind::CommandExecution
-                | ItemKind::FileChange
-        ),
-        // Keep status updates on the ACP surface; TUI ignores title-less status updates.
-        _ => false,
+fn should_preserve_original_tool_envelope(envelope: &ItemEnvelope, completed: bool) -> bool {
+    if completed {
+        matches!(
+            &envelope.item,
+            crate::native::item::Item::ToolCall { .. }
+                | crate::native::item::Item::ToolResult { .. }
+                | crate::native::item::Item::CommandExecution { .. }
+                | crate::native::item::Item::FileChange { .. }
+        )
+    } else {
+        matches!(
+            &envelope.item,
+            crate::native::item::Item::ToolCall { .. }
+                | crate::native::item::Item::CommandExecution { .. }
+        )
     }
 }
 
-pub fn original_event_from_acp_notification(
+/// Unwrap Native-bus originals embedded by [`acp_notification_from_server_notification`].
+pub fn original_notification_wire_from_acp(
     notification: &AcpSessionNotification,
-) -> Option<(String, ServerEvent)> {
+) -> Option<(String, serde_json::Value)> {
     let meta = notification.meta.as_ref()?;
     let method = meta.get(DEVO_ORIGINAL_METHOD_META)?.as_str()?.to_string();
-    let event = serde_json::from_value(meta.get(DEVO_ORIGINAL_EVENT_META)?.clone()).ok()?;
-    Some((method, event))
-}
-
-fn acp_meta_from_context(context: &EventContext) -> Option<AcpMeta> {
-    let mut meta = AcpMeta::new();
-    if let Some(turn_id) = &context.turn_id {
-        meta.insert(
-            DEVO_TURN_ID_META.to_string(),
-            serde_json::Value::String(turn_id.to_string()),
-        );
-    }
-    if let Some(item_id) = &context.item_id {
-        meta.insert(
-            DEVO_ITEM_ID_META.to_string(),
-            serde_json::Value::String(item_id.to_string()),
-        );
-    }
-    (!meta.is_empty()).then_some(meta)
+    let params = meta.get(DEVO_ORIGINAL_EVENT_META)?.clone();
+    Some((method, params))
 }
 
 fn add_activity_at(meta: &mut AcpMeta) {
@@ -131,13 +217,21 @@ fn add_activity_at(meta: &mut AcpMeta) {
     );
 }
 
-fn acp_activity_meta_from_context(context: &EventContext) -> AcpMeta {
-    let mut meta = acp_meta_from_context(context).unwrap_or_default();
+fn acp_activity_meta_from_envelope(envelope: &ItemEnvelope) -> AcpMeta {
+    let mut meta = AcpMeta::new();
+    meta.insert(
+        DEVO_TURN_ID_META.to_string(),
+        serde_json::Value::String(envelope.turn_id.as_str().to_string()),
+    );
+    meta.insert(
+        DEVO_ITEM_ID_META.to_string(),
+        serde_json::Value::String(envelope.id.as_str().to_string()),
+    );
     add_activity_at(&mut meta);
     meta
 }
 
-fn acp_activity_meta_from_turn_id(turn_id: &crate::TurnId) -> AcpMeta {
+fn acp_activity_meta_from_turn_id_str(turn_id: &str) -> AcpMeta {
     let mut meta = AcpMeta::new();
     meta.insert(
         DEVO_TURN_ID_META.to_string(),
@@ -147,228 +241,226 @@ fn acp_activity_meta_from_turn_id(turn_id: &crate::TurnId) -> AcpMeta {
     meta
 }
 
-pub(crate) fn acp_update_from_server_event(event: &ServerEvent) -> Option<AcpSessionUpdate> {
-    match event {
-        ServerEvent::SessionStarted(SessionEventPayload { session })
-        | ServerEvent::SessionTitleUpdated(SessionEventPayload { session }) => {
-            let mut meta = AcpMeta::new();
-            meta.insert(
-                DEVO_SESSION_META.to_string(),
-                serde_json::to_value(session).expect("serialize session metadata"),
-            );
-            Some(AcpSessionUpdate::SessionInfoUpdate {
-                title: session.title.clone(),
-                updated_at: Some(session.last_activity_at.to_rfc3339()),
-                meta: Some(meta),
-            })
-        }
-        ServerEvent::TurnPlanUpdated(payload) => Some(AcpSessionUpdate::Plan {
-            entries: payload
-                .plan
-                .iter()
-                .map(acp_plan_entry_from_turn_plan_step)
-                .collect(),
+fn acp_delta_meta(delta: &crate::native::event::ItemDelta) -> AcpMeta {
+    let mut meta = AcpMeta::new();
+    meta.insert(
+        DEVO_ITEM_ID_META.to_string(),
+        serde_json::Value::String(delta.item_id.as_str().to_string()),
+    );
+    add_activity_at(&mut meta);
+    meta
+}
+
+fn acp_update_from_item_updated(envelope: &ItemEnvelope) -> Option<AcpSessionUpdate> {
+    match &envelope.item {
+        crate::native::item::Item::Plan { entries, .. } => Some(AcpSessionUpdate::Plan {
+            entries: entries.iter().map(acp_plan_entry_from_native).collect(),
             meta: None,
         }),
-        ServerEvent::TurnUsageUpdated(payload) => {
-            let used = (payload.total_input_tokens + payload.total_output_tokens) as u64;
-            let mut meta = AcpMeta::new();
-            meta.insert(
-                DEVO_TURN_USAGE_META.to_string(),
-                serde_json::to_value(payload).expect("serialize turn usage payload"),
-            );
-            Some(AcpSessionUpdate::UsageUpdate {
-                used,
-                size: payload.context_window.unwrap_or_else(|| used.max(1)),
-                cost: None,
-                meta: Some(meta),
-            })
-        }
-        ServerEvent::ToolCallStatusUpdated(payload) => Some(AcpSessionUpdate::ToolCallUpdate {
-            tool_call_id: payload.tool_call_id.clone(),
-            title: None,
-            kind: None,
-            status: acp_tool_call_status_from_str(payload.status.as_str()),
-            raw_input: None,
-            raw_output: None,
-            content: None,
-            locations: None,
-            meta: Some(acp_activity_meta_from_turn_id(&payload.turn_id)),
-        }),
-        ServerEvent::ItemDelta {
-            delta_kind,
-            payload,
-        } => acp_update_from_item_delta(delta_kind.clone(), payload),
-        ServerEvent::ItemStarted(payload) => acp_update_from_item_started(payload),
-        ServerEvent::ItemCompleted(payload) => acp_update_from_item_completed(payload),
         _ => None,
     }
 }
 
-fn acp_update_from_item_delta(
-    delta_kind: ItemDeltaKind,
-    payload: &crate::ItemDeltaPayload,
+pub(crate) fn acp_update_from_item_started(envelope: &ItemEnvelope) -> Option<AcpSessionUpdate> {
+    let meta = Some(acp_activity_meta_from_envelope(envelope));
+    acp_update_from_native_item_started(&envelope.item, meta)
+}
+
+fn acp_update_from_native_item_started(
+    native: &crate::native::item::Item,
+    meta: Option<AcpMeta>,
 ) -> Option<AcpSessionUpdate> {
-    let content = AcpContentBlock::text(payload.delta.clone());
-    let message_id = payload.context.item_id.map(|item_id| item_id.to_string());
-    let meta = Some(acp_activity_meta_from_context(&payload.context));
-    match delta_kind {
-        ItemDeltaKind::AgentMessageDelta => Some(AcpSessionUpdate::AgentMessageChunk {
-            content,
-            message_id,
+    use crate::native::item::Item;
+    match native {
+        Item::ToolCall {
+            call_id,
+            tool_name,
+            input,
+            ..
+        } => {
+            let parameters = input.clone().unwrap_or(serde_json::Value::Null);
+            Some(AcpSessionUpdate::ToolCall {
+                tool_call_id: call_id.clone(),
+                title: tool_title(tool_name.as_str(), &parameters),
+                kind: Some(tool_kind_from_name(tool_name.as_str())),
+                status: Some(AcpToolCallStatus::Pending),
+                locations: tool_locations_from_value(&parameters),
+                raw_input: Some(parameters),
+                raw_output: None,
+                content: Vec::new(),
+                meta,
+            })
+        }
+        Item::CommandExecution {
+            call_id,
+            command,
+            input,
+            ..
+        } => Some(AcpSessionUpdate::ToolCall {
+            tool_call_id: call_id.clone(),
+            title: command.clone(),
+            kind: Some(AcpToolKind::Execute),
+            status: Some(AcpToolCallStatus::Pending),
+            locations: input
+                .as_ref()
+                .map(tool_locations_from_value)
+                .unwrap_or_default(),
+            raw_input: input.clone(),
+            raw_output: None,
+            content: Vec::new(),
             meta,
         }),
-        ItemDeltaKind::ReasoningSummaryTextDelta | ItemDeltaKind::ReasoningTextDelta => {
-            Some(AcpSessionUpdate::AgentThoughtChunk {
-                content,
-                message_id,
-                meta,
-            })
-        }
         _ => None,
     }
 }
 
-fn acp_update_from_item_started(payload: &ItemEventPayload) -> Option<AcpSessionUpdate> {
-    let meta = Some(acp_activity_meta_from_context(&payload.context));
-    match payload.item.item_kind {
-        ItemKind::ToolCall => {
-            let tool =
-                serde_json::from_value::<ToolCallPayload>(payload.item.payload.clone()).ok()?;
-            Some(AcpSessionUpdate::ToolCall {
-                tool_call_id: tool.tool_call_id,
-                title: tool_title(tool.tool_name.as_str(), &tool.parameters),
-                kind: Some(tool_kind_from_name(tool.tool_name.as_str())),
-                status: Some(AcpToolCallStatus::Pending),
-                locations: tool_locations_from_value(&tool.parameters),
-                raw_input: Some(tool.parameters),
-                raw_output: None,
-                content: Vec::new(),
-                meta,
-            })
-        }
-        ItemKind::CommandExecution => {
-            let command =
-                serde_json::from_value::<CommandExecutionPayload>(payload.item.payload.clone())
-                    .ok()?;
-            Some(AcpSessionUpdate::ToolCall {
-                tool_call_id: command.tool_call_id,
-                title: command.command,
-                kind: Some(AcpToolKind::Execute),
-                status: Some(AcpToolCallStatus::Pending),
-                locations: command
-                    .input
-                    .as_ref()
-                    .map(tool_locations_from_value)
-                    .unwrap_or_default(),
-                raw_input: command.input,
-                raw_output: None,
-                content: Vec::new(),
-                meta,
-            })
-        }
-        _ => None,
-    }
+pub(crate) fn acp_update_from_item_completed(envelope: &ItemEnvelope) -> Option<AcpSessionUpdate> {
+    let meta = Some(acp_activity_meta_from_envelope(envelope));
+    acp_update_from_native_item_completed(envelope, &envelope.item, meta)
 }
 
-fn acp_update_from_item_completed(payload: &ItemEventPayload) -> Option<AcpSessionUpdate> {
-    let meta = Some(acp_activity_meta_from_context(&payload.context));
-    match payload.item.item_kind {
-        ItemKind::UserMessage => {
-            let text = payload.item.payload.get("text")?.as_str()?.to_string();
+fn acp_update_from_native_item_completed(
+    envelope: &ItemEnvelope,
+    native: &crate::native::item::Item,
+    meta: Option<AcpMeta>,
+) -> Option<AcpSessionUpdate> {
+    use crate::native::item::{Item, UserInput};
+    match native {
+        Item::UserMessage { content, .. } => {
+            let text = content
+                .iter()
+                .filter_map(|part| match part {
+                    UserInput::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             Some(AcpSessionUpdate::UserMessageChunk {
                 content: AcpContentBlock::text(text),
-                message_id: payload.context.item_id.map(|item_id| item_id.to_string()),
+                message_id: Some(envelope.id.as_str().to_string()),
                 meta,
             })
         }
-        ItemKind::ToolResult => {
-            let result =
-                serde_json::from_value::<ToolResultPayload>(payload.item.payload.clone()).ok()?;
-            Some(AcpSessionUpdate::ToolCallUpdate {
-                tool_call_id: result.tool_call_id,
-                title: Some(
-                    (!result.summary.is_empty())
-                        .then_some(result.summary)
-                        .or(result.tool_name.clone())
-                        .unwrap_or_else(|| "Tool result".to_string()),
-                ),
-                kind: result.tool_name.as_deref().map(tool_kind_from_name),
-                status: Some(if result.is_error {
-                    AcpToolCallStatus::Failed
-                } else {
-                    AcpToolCallStatus::Completed
-                }),
-                raw_input: result.input.clone(),
-                raw_output: Some(result.content.clone()),
-                locations: Some(
-                    result
-                        .input
-                        .as_ref()
-                        .map(tool_locations_from_value)
-                        .unwrap_or_default(),
-                ),
-                content: Some(tool_result_content(result.display_content, result.content)),
-                meta,
-            })
-        }
-        ItemKind::CommandExecution => {
-            let command =
-                serde_json::from_value::<CommandExecutionPayload>(payload.item.payload.clone())
-                    .ok()?;
-            let content = command
-                .output
+        Item::ToolResult {
+            call_id,
+            output,
+            display_content,
+            is_error,
+            ..
+        } => Some(AcpSessionUpdate::ToolCallUpdate {
+            tool_call_id: call_id.clone(),
+            title: Some("Tool result".to_string()),
+            kind: None,
+            status: Some(if *is_error {
+                AcpToolCallStatus::Failed
+            } else {
+                AcpToolCallStatus::Completed
+            }),
+            raw_input: None,
+            raw_output: Some(output.clone()),
+            locations: Some(Vec::new()),
+            content: Some(tool_result_content(display_content.clone(), output.clone())),
+            meta,
+        }),
+        Item::CommandExecution {
+            call_id,
+            command,
+            input,
+            output,
+            is_error,
+            ..
+        } => {
+            let content = output
                 .as_ref()
                 .and_then(serde_json::Value::as_str)
                 .map(|text| vec![AcpToolCallContent::content(AcpContentBlock::text(text))]);
             Some(AcpSessionUpdate::ToolCallUpdate {
-                tool_call_id: command.tool_call_id,
-                title: Some(command.command),
+                tool_call_id: call_id.clone(),
+                title: Some(command.clone()),
                 kind: Some(AcpToolKind::Execute),
-                status: Some(if command.is_error {
+                status: Some(if *is_error {
                     AcpToolCallStatus::Failed
                 } else {
                     AcpToolCallStatus::Completed
                 }),
-                raw_input: command.input,
-                raw_output: command.output,
+                raw_input: input.clone(),
+                raw_output: output.clone(),
                 content,
                 locations: None,
                 meta,
             })
         }
-        ItemKind::FileChange => {
-            let change =
-                serde_json::from_value::<FileChangePayload>(payload.item.payload.clone()).ok()?;
-            Some(AcpSessionUpdate::ToolCallUpdate {
-                tool_call_id: change.tool_call_id.clone(),
-                title: change.tool_name.clone(),
-                kind: Some(AcpToolKind::Edit),
-                status: Some(if change.is_error {
-                    AcpToolCallStatus::Failed
-                } else {
-                    AcpToolCallStatus::Completed
-                }),
-                raw_input: change.input.clone(),
-                raw_output: Some(payload.item.payload.clone()),
-                content: Some(file_change_tool_content(&change)),
-                locations: Some(file_change_locations(&change)),
-                meta,
-            })
-        }
+        Item::FileChange {
+            call_id, changes, ..
+        } => Some(AcpSessionUpdate::ToolCallUpdate {
+            tool_call_id: call_id.clone(),
+            title: None,
+            kind: Some(AcpToolKind::Edit),
+            status: Some(AcpToolCallStatus::Completed),
+            raw_input: None,
+            raw_output: Some(serde_json::to_value(changes).unwrap_or(serde_json::Value::Null)),
+            content: Some(native_file_change_tool_content(changes)),
+            locations: Some(native_file_change_locations(changes)),
+            meta,
+        }),
         _ => None,
     }
 }
 
-fn acp_plan_entry_from_turn_plan_step(step: &TurnPlanStepPayload) -> AcpPlanEntry {
+fn native_file_change_tool_content(changes: &[FileChangeEntry]) -> Vec<AcpToolCallContent> {
+    changes
+        .iter()
+        .map(|entry| match &entry.change {
+            FileChangeKind::Add { content } if entry.path.is_absolute() => {
+                AcpToolCallContent::Diff {
+                    path: entry.path.clone(),
+                    old_text: None,
+                    new_text: content.clone(),
+                    meta: None,
+                }
+            }
+            FileChangeKind::Delete { content } if entry.path.is_absolute() => {
+                AcpToolCallContent::Diff {
+                    path: entry.path.clone(),
+                    old_text: Some(content.clone()),
+                    new_text: String::new(),
+                    meta: None,
+                }
+            }
+            FileChangeKind::Update { unified_diff, .. } if entry.path.is_absolute() => {
+                AcpToolCallContent::content(AcpContentBlock::text(unified_diff.clone()))
+            }
+            FileChangeKind::Add { content } | FileChangeKind::Delete { content } => {
+                AcpToolCallContent::content(AcpContentBlock::text(content.clone()))
+            }
+            FileChangeKind::Update { unified_diff, .. } => {
+                AcpToolCallContent::content(AcpContentBlock::text(unified_diff.clone()))
+            }
+        })
+        .collect()
+}
+
+fn native_file_change_locations(changes: &[FileChangeEntry]) -> Vec<AcpToolCallLocation> {
+    changes
+        .iter()
+        .filter_map(|entry| {
+            entry.path.is_absolute().then_some(AcpToolCallLocation {
+                path: entry.path.clone(),
+                line: None,
+                meta: None,
+            })
+        })
+        .collect()
+}
+
+fn acp_plan_entry_from_native(entry: &PlanEntry) -> AcpPlanEntry {
     AcpPlanEntry {
-        content: step.step.clone(),
+        content: entry.step.clone(),
         priority: AcpPlanEntryPriority::Medium,
-        status: match step.status.as_str() {
-            "completed" => AcpPlanEntryStatus::Completed,
-            "in_progress" => AcpPlanEntryStatus::InProgress,
-            "pending" | "cancelled" => AcpPlanEntryStatus::Pending,
-            _ => AcpPlanEntryStatus::Pending,
+        status: match entry.status {
+            PlanStepStatus::Completed => AcpPlanEntryStatus::Completed,
+            PlanStepStatus::InProgress => AcpPlanEntryStatus::InProgress,
+            PlanStepStatus::Pending => AcpPlanEntryStatus::Pending,
         },
         meta: None,
     }
@@ -435,69 +527,6 @@ fn acp_tool_call_status_from_str(status: &str) -> Option<AcpToolCallStatus> {
         "cancelled" => return None,
         _ => return None,
     })
-}
-
-pub(crate) fn file_change_tool_content(change: &FileChangePayload) -> Vec<AcpToolCallContent> {
-    change
-        .changes
-        .iter()
-        .map(|(path, change)| match change {
-            crate::protocol::FileChange::Add { content } if path.is_absolute() => {
-                AcpToolCallContent::Diff {
-                    path: path.clone(),
-                    old_text: None,
-                    new_text: content.clone(),
-                    meta: None,
-                }
-            }
-            crate::protocol::FileChange::Delete { content } if path.is_absolute() => {
-                AcpToolCallContent::Diff {
-                    path: path.clone(),
-                    old_text: Some(content.clone()),
-                    new_text: String::new(),
-                    meta: None,
-                }
-            }
-            crate::protocol::FileChange::Update {
-                unified_diff,
-                old_text,
-                new_text,
-                ..
-            } if path.is_absolute() => {
-                if let (Some(old_text), Some(new_text)) = (old_text, new_text) {
-                    AcpToolCallContent::Diff {
-                        path: path.clone(),
-                        old_text: Some(old_text.clone()),
-                        new_text: new_text.clone(),
-                        meta: None,
-                    }
-                } else {
-                    AcpToolCallContent::content(AcpContentBlock::text(unified_diff.clone()))
-                }
-            }
-            crate::protocol::FileChange::Add { content }
-            | crate::protocol::FileChange::Delete { content } => {
-                AcpToolCallContent::content(AcpContentBlock::text(content.clone()))
-            }
-            crate::protocol::FileChange::Update { unified_diff, .. } => {
-                AcpToolCallContent::content(AcpContentBlock::text(unified_diff.clone()))
-            }
-        })
-        .collect()
-}
-
-fn file_change_locations(change: &FileChangePayload) -> Vec<AcpToolCallLocation> {
-    change
-        .changes
-        .iter()
-        .filter_map(|(path, _)| {
-            path.is_absolute().then_some(AcpToolCallLocation {
-                path: path.clone(),
-                line: None,
-                meta: None,
-            })
-        })
-        .collect()
 }
 
 fn tool_locations_from_value(value: &serde_json::Value) -> Vec<AcpToolCallLocation> {

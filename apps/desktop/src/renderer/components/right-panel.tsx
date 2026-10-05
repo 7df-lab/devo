@@ -161,7 +161,9 @@ export const RightPanel = memo(function RightPanel({ sessionId, directory }: Rig
 										handleCloseTabClick(tab.id)
 									}}
 									className={cn(
-										"rounded p-0.5 text-muted-foreground/70 opacity-0 transition-opacity hover:bg-background/80 hover:text-foreground group-hover:opacity-100",
+										"flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/70 opacity-0 transition-opacity",
+										"hover:bg-background/80 hover:text-foreground group-hover:opacity-100",
+										"group-focus-within:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
 										active && "opacity-60",
 									)}
 									title="Close tab"
@@ -204,6 +206,7 @@ export const RightPanel = memo(function RightPanel({ sessionId, directory }: Rig
 					onClick={handleToggleExpanded}
 					className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/80 transition-colors hover:bg-muted/60 hover:text-foreground"
 					title={settings.expanded ? "Restore panel size" : "Expand to full width"}
+					aria-label={settings.expanded ? "Restore panel size" : "Expand to full width"}
 				>
 					{settings.expanded ? (
 						<Minimize2Icon className="size-3.5 stroke-[1.5]" />
@@ -216,6 +219,7 @@ export const RightPanel = memo(function RightPanel({ sessionId, directory }: Rig
 					onClick={handleClosePanel}
 					className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/80 transition-colors hover:bg-muted/60 hover:text-foreground"
 					title="Hide side panel"
+					aria-label="Hide side panel"
 				>
 					<RightPanelIcon open className="size-4" aria-hidden="true" />
 				</button>

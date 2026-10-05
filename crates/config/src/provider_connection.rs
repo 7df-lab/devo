@@ -72,25 +72,43 @@ impl AppConfigStore {
             anyhow::bail!("provider {provider_id} is not a user Connection");
         }
 
-        let target_config_file = self.user_provider_config_file();
-        let mut config = self.load_editable_provider_catalog()?;
-
-        if let Some(provider) = config.providers.get_mut(&provider_id) {
+        let connection_path = self.user_provider_config_file();
+        let custom_path = self.user_custom_provider_config_file();
+        let mut connection = read_provider_catalog_config(&connection_path)?;
+        let mut custom = read_provider_catalog_config(&custom_path)?;
+        if let Some(provider) = connection.providers.get_mut(&provider_id) {
             provider.models.remove(&model_id);
+            provider.model_overrides.remove(&model_id);
+        } else if let Some(provider) = custom.providers.get_mut(&provider_id) {
+            provider.models.remove(&model_id);
+            provider.model_overrides.remove(&model_id);
         }
         let model_prefix = format!("{provider_id}/{model_id}");
-        if config.model.as_deref().is_some_and(|model| {
-            model == model_prefix || model.starts_with(&format!("{model_prefix}/"))
-        }) {
-            config.model = None;
-        }
-        if config.small_model.as_deref().is_some_and(|model| {
-            model == model_prefix || model.starts_with(&format!("{model_prefix}/"))
-        }) {
-            config.small_model = None;
+        for config in [&mut connection, &mut custom] {
+            if config.model.as_deref().is_some_and(|model| {
+                model == model_prefix || model.starts_with(&format!("{model_prefix}/"))
+            }) {
+                config.model = None;
+            }
+            if config.small_model.as_deref().is_some_and(|model| {
+                model == model_prefix || model.starts_with(&format!("{model_prefix}/"))
+            }) {
+                config.small_model = None;
+            }
         }
 
-        write_provider_catalog_config(&target_config_file, &config)?;
+        write_provider_catalog_config(&connection_path, &connection)?;
+        write_provider_catalog_config(&custom_path, &custom)?;
+        super::clear_user_session_default_if_matches(
+            &self.user_config_file,
+            "model",
+            &model_prefix,
+        )?;
+        super::clear_user_session_default_if_matches(
+            &self.user_config_file,
+            "small_model",
+            &model_prefix,
+        )?;
         migrate_legacy_provider_config_file(&self.user_config_file)?;
         self.config = self
             .loader
@@ -108,6 +126,29 @@ impl AppConfigStore {
         small_model: Option<String>,
         api_key: Option<String>,
     ) -> anyhow::Result<ProviderInfo> {
+        self.upsert_provider_connection_with_baseline(
+            provider,
+            default_model,
+            small_model,
+            api_key,
+            None,
+        )
+    }
+
+    /// Like [`Self::upsert_provider_connection`], but when `builtin_baseline` is
+    /// the embedded catalog entry for this provider id, only novel models and
+    /// sparse `model_overrides` are written (sparse overlay semantics).
+    ///
+    /// Builtin Connections are stored in `providers.json`. User-owned custom
+    /// providers/models are stored in `custom-providers.json`.
+    pub fn upsert_provider_connection_with_baseline(
+        &mut self,
+        provider: ProviderInfo,
+        default_model: Option<String>,
+        small_model: Option<String>,
+        api_key: Option<String>,
+        builtin_baseline: Option<&ProviderConfigEntry>,
+    ) -> anyhow::Result<ProviderInfo> {
         let provider_id = non_empty_string(&provider.id)
             .or_else(|| non_empty_string(&provider.name))
             .ok_or_else(|| anyhow::anyhow!("provider id or name must not be empty"))?;
@@ -118,19 +159,41 @@ impl AppConfigStore {
             validate_model(&provider_id, &provider.wire_apis, model_id, model)?;
         }
 
-        let target_config_file = self.user_provider_config_file();
-        let mut config = self.load_editable_provider_catalog()?;
+        let target_config_file = if builtin_baseline.is_some() {
+            self.user_provider_config_file()
+        } else {
+            self.user_custom_provider_config_file()
+        };
+        let other_config_file = if builtin_baseline.is_some() {
+            self.user_custom_provider_config_file()
+        } else {
+            self.user_provider_config_file()
+        };
+        let mut config = read_provider_catalog_config(&target_config_file)?;
+        let mut other = read_provider_catalog_config(&other_config_file)?;
+        if other.providers.remove(&provider_id).is_some() {
+            write_provider_catalog_config(&other_config_file, &other)?;
+        }
 
         let api_key = api_key.as_deref().and_then(non_empty_string);
         let credential = provider
             .credential
             .as_deref()
             .and_then(non_empty_string)
+            .map(|id| crate::provider_id_from_credential_id(&id))
             .or_else(|| {
                 config
                     .providers
                     .get(&provider_id)
                     .and_then(|entry| entry.credential.clone())
+                    .map(|id| crate::provider_id_from_credential_id(&id))
+            })
+            .or_else(|| {
+                other
+                    .providers
+                    .get(&provider_id)
+                    .and_then(|entry| entry.credential.clone())
+                    .map(|id| crate::provider_id_from_credential_id(&id))
             })
             .or_else(|| {
                 api_key
@@ -142,25 +205,52 @@ impl AppConfigStore {
                 .map_err(|error| anyhow::anyhow!(error))?;
         }
 
-        let entry = config.providers.entry(provider_id.clone()).or_default();
-        apply_provider_info(entry, &provider, credential.clone());
-        for (model_id, model_info) in provider.models {
-            entry
-                .models
-                .insert(model_id, provider_model_config_from_info(model_info));
-        }
-        if let Some(model) = default_model.as_deref().and_then(non_empty_string) {
-            if !provider_has_model(entry, &provider_id, &model) {
-                anyhow::bail!("default model `{model}` is not in provider `{provider_id}`");
+        {
+            let entry = config.providers.entry(provider_id.clone()).or_default();
+            apply_provider_info(entry, &provider, credential.clone());
+            for (model_id, model_info) in provider.models {
+                entry
+                    .models
+                    .insert(model_id, provider_model_config_from_info(model_info));
             }
-            config.model = Some(model);
-        }
-        if let Some(model) = small_model.as_deref().and_then(non_empty_string) {
-            if !provider_has_model(entry, &provider_id, &model) {
-                anyhow::bail!("small model `{model}` is not in provider `{provider_id}`");
+            if let Some(model) = default_model.as_deref().and_then(non_empty_string) {
+                if !provider_has_model(entry, &provider_id, &model)
+                    && !provider_has_model_in_overrides_or_baseline(
+                        entry,
+                        builtin_baseline,
+                        &provider_id,
+                        &model,
+                    )
+                {
+                    anyhow::bail!("default model `{model}` is not in provider `{provider_id}`");
+                }
+                // Persist session default in config.toml, not providers.json.
+                super::write_user_session_default(&self.user_config_file, "model", &model)?;
             }
-            config.small_model = Some(model);
+            if let Some(model) = small_model.as_deref().and_then(non_empty_string) {
+                if !provider_has_model(entry, &provider_id, &model)
+                    && !provider_has_model_in_overrides_or_baseline(
+                        entry,
+                        builtin_baseline,
+                        &provider_id,
+                        &model,
+                    )
+                {
+                    anyhow::bail!("small model `{model}` is not in provider `{provider_id}`");
+                }
+                super::write_user_session_default(&self.user_config_file, "small_model", &model)?;
+            }
+
+            // Builtin providers persist sparse overlays; custom providers stay full.
+            if let Some(baseline) = builtin_baseline {
+                sparsify_provider_entry_against_builtin(entry, baseline);
+            }
         }
+
+        // Session defaults are preferences in config.toml, not catalog fields.
+        config.model = None;
+        config.small_model = None;
+        config.reasoning_effort = None;
 
         write_provider_catalog_config(&target_config_file, &config)?;
         migrate_legacy_provider_config_file(&self.user_config_file)?;
@@ -179,9 +269,61 @@ impl AppConfigStore {
     }
 
     fn load_editable_provider_catalog(&self) -> anyhow::Result<ProviderConfigFile> {
-        let target_config_file = self.user_provider_config_file();
-        Ok(read_provider_catalog_config(&target_config_file)?)
+        let mut config = read_provider_catalog_config(&self.user_provider_config_file())?;
+        config.merge_overlay(read_provider_catalog_config(
+            &self.user_custom_provider_config_file(),
+        )?);
+        Ok(config)
     }
+}
+
+/// Rewrites a user provider entry so built-in models become sparse
+/// `model_overrides` (or are omitted when identical) and only novel models stay
+/// in `models` — matching the `models.json` sparse overlay rules.
+pub fn sparsify_provider_entry_against_builtin(
+    entry: &mut ProviderConfigEntry,
+    builtin: &ProviderConfigEntry,
+) {
+    let mut custom_models = BTreeMap::new();
+    let mut overrides = entry.model_overrides.clone();
+    for (model_id, model) in std::mem::take(&mut entry.models) {
+        match builtin.models.get(&model_id) {
+            None => {
+                custom_models.insert(model_id, model);
+            }
+            Some(baseline_model) if model == *baseline_model => {
+                // Identical to builtin — inherit; do not persist.
+            }
+            Some(_) => {
+                overrides.insert(model_id, model);
+            }
+        }
+    }
+    entry.models = custom_models;
+    entry.model_overrides = overrides;
+
+    if entry.name.is_some() && entry.name == builtin.name {
+        // Keep display name; harmless. Prefer omitting when equal to shrink file.
+        entry.name = None;
+    }
+    if entry.description.is_some() && entry.description == builtin.description {
+        entry.description = None;
+    }
+}
+
+fn provider_has_model_in_overrides_or_baseline(
+    provider: &ProviderConfigEntry,
+    builtin_baseline: Option<&ProviderConfigEntry>,
+    provider_id: &str,
+    model: &str,
+) -> bool {
+    let model_id = model
+        .strip_prefix(&format!("{provider_id}/"))
+        .unwrap_or(model);
+    if provider.model_overrides.contains_key(model_id) {
+        return true;
+    }
+    builtin_baseline.is_some_and(|baseline| baseline.models.contains_key(model_id))
 }
 
 fn provider_has_model(provider: &ProviderConfigEntry, provider_id: &str, model: &str) -> bool {
@@ -238,6 +380,13 @@ fn apply_provider_info(
     entry.headers = (!provider.headers.is_empty()).then(|| provider.headers.clone());
     entry.options = provider.options.clone();
     entry.request = provider.request.clone();
+    entry.compat = provider.compat.clone();
+    entry.model_overrides = provider
+        .model_overrides
+        .clone()
+        .into_iter()
+        .map(|(model_id, model)| (model_id, provider_model_config_from_info(model)))
+        .collect();
     entry.wire_api = provider.wire_apis.first().copied();
     entry.enabled = Some(provider.enabled);
 }
@@ -257,6 +406,8 @@ fn provider_model_config_from_info(info: ProviderModelInfo) -> ProviderModelConf
         top_p: info.top_p,
         top_k: info.top_k,
         reasoning_capability: info.reasoning_capability,
+        reasoning: info.reasoning,
+        thinking_level_map: info.thinking_level_map,
         reasoning_implementation: info.reasoning_implementation,
         default_reasoning_effort: info.default_reasoning_effort,
         default_reasoning_selection: info.default_reasoning_selection,
@@ -314,11 +465,17 @@ fn provider_info_from_config(provider_id: &str, config: &ProviderConfigEntry) ->
         headers: config.headers.clone().unwrap_or_default(),
         options: config.options.clone(),
         request: config.request.clone(),
+        compat: config.compat.clone(),
         wire_apis: vec![
             config
                 .wire_api
                 .unwrap_or(devo_protocol::ProviderWireApi::OpenAIChatCompletions),
         ],
+        model_overrides: config
+            .model_overrides
+            .iter()
+            .map(|(model_id, model)| (model_id.clone(), provider_model_info_from_config(model)))
+            .collect(),
         models: config
             .models
             .iter()
@@ -329,6 +486,21 @@ fn provider_info_from_config(provider_id: &str, config: &ProviderConfigEntry) ->
 }
 
 fn provider_model_info_from_config(config: &ProviderModelConfig) -> ProviderModelInfo {
+    let capability = config
+        .reasoning_capability
+        .clone()
+        .unwrap_or(devo_protocol::ReasoningCapability::Unsupported);
+    let (reasoning, thinking_level_map, _) = devo_protocol::resolve_thinking_fields_for_model_info(
+        &capability,
+        config.reasoning,
+        config.thinking_level_map.as_ref(),
+    );
+    let project_thinking = config.reasoning.is_some()
+        || config
+            .thinking_level_map
+            .as_ref()
+            .is_some_and(|map| !map.is_empty())
+        || !matches!(capability, devo_protocol::ReasoningCapability::Unsupported);
     ProviderModelInfo {
         name: config.name.clone(),
         family: config.family.clone(),
@@ -343,6 +515,16 @@ fn provider_model_info_from_config(config: &ProviderModelConfig) -> ProviderMode
         top_p: config.top_p,
         top_k: config.top_k,
         reasoning_capability: config.reasoning_capability.clone(),
+        reasoning: if project_thinking {
+            Some(reasoning)
+        } else {
+            config.reasoning
+        },
+        thinking_level_map: if thinking_level_map.is_empty() {
+            None
+        } else {
+            Some(thinking_level_map)
+        },
         reasoning_implementation: config.reasoning_implementation.clone(),
         default_reasoning_effort: config.default_reasoning_effort,
         default_reasoning_selection: config.default_reasoning_selection.clone(),

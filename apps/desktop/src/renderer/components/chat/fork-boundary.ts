@@ -16,8 +16,14 @@ export function forkBoundaryAfterTurnIndex(
 
 	let lastInherited = -1
 	for (let index = 0; index < turns.length; index++) {
-		const created = turns[index].userMessage.info.time?.created
-		if (typeof created === "number" && created <= forkSessionCreatedAt) {
+		const createdAt = turns[index].userMessage.info.createdAt
+		const created =
+			typeof createdAt === "number"
+				? createdAt
+				: typeof createdAt === "string"
+					? Date.parse(createdAt)
+					: Number.NaN
+		if (Number.isFinite(created) && created <= forkSessionCreatedAt) {
 			lastInherited = index
 			continue
 		}

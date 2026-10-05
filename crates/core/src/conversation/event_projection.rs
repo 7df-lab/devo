@@ -1,14 +1,10 @@
-//! Derivation of persisted delivery-log events from v2 rollout facts.
+//! Derivation of persisted delivery-log events from rollout records.
 //!
 //! Truth source: `devo-api-design/08-events-subscription.md` §5/§7. The
 //! rollout JSONL is the canonical recovery log; every persisted event in the
-//! SQLite `event_log` is derived from a v2 line by this pure mapping, so
-//! crash recovery only ever *re-derives* the same rows (idempotent by source
-//! fact) — a crash may delay an event, never lose or duplicate it.
-//!
-//! Only v2 lines produce events: legacy lines are first projected forward by
-//! `LegacyProjector` during hydration/reconciliation, so all log rows come
-//! from v2 facts.
+//! SQLite `event_log` is derived from a versioned line by this pure mapping,
+//! so crash recovery only ever *re-derives* the same rows (idempotent by
+//! source fact) — a crash may delay an event, never lose or duplicate it.
 
 use sha2::Digest;
 use sha2::Sha256;
@@ -19,7 +15,7 @@ use devo_protocol::native::ids::SessionId;
 use devo_protocol::native::item::ItemState;
 use devo_protocol::native::turn::TurnStatus;
 
-use super::rollout_v2::RolloutLineV2;
+use super::rollout::RolloutLine;
 
 /// One derived persisted event (pre-sequencing). `event_kind` is the
 /// notification method string (`item/started`, ...).
@@ -36,9 +32,9 @@ pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
 /// Stable identity of a rollout fact: `<rollout_path>#<line_index>[.<sub>]`.
 /// The line index counts physical JSONL rows; `sub_index` distinguishes
-/// multiple v2 facts projected from one legacy row (packed item expansion).
-/// The event log is idempotent by this key (paired with event kind and
-/// stream), so re-deriving the same fact after a crash is always a no-op.
+/// multiple projected facts that share the same source row. The event log is
+/// idempotent by this key (paired with event kind and stream), so re-deriving
+/// the same fact after a crash is always a no-op.
 pub fn source_fact_id(rollout_path: &std::path::Path, line_index: u64, sub_index: u64) -> String {
     if sub_index == 0 {
         format!("{}#{line_index}", rollout_path.to_string_lossy())
@@ -77,12 +73,13 @@ fn is_terminal_item_state(state: ItemState) -> bool {
     }
 }
 
-/// Derives the persisted events carried by one v2 rollout line. Line kinds
+/// Derives the persisted events carried by one versioned rollout line.
+/// Line kinds
 /// without a faithful canonical notification are skipped (each with its
 /// reason on the match arm); they remain recoverable from the rollout itself.
-pub fn events_from_v2_line(line: &RolloutLineV2) -> Vec<DerivedEvent> {
+pub fn events_from_rollout_line(line: &RolloutLine) -> Vec<DerivedEvent> {
     match line {
-        RolloutLineV2::Item { item, .. } => {
+        RolloutLine::Item { item, .. } => {
             let stream_id = session_stream_id(&item.session_id);
             let envelope = Box::new(item.clone());
             let (event_kind, notification) = if is_terminal_item_state(item.state) {
@@ -108,10 +105,10 @@ pub fn events_from_v2_line(line: &RolloutLineV2) -> Vec<DerivedEvent> {
                 notification,
             }]
         }
-        RolloutLineV2::Turn { turn, .. } => {
+        RolloutLine::Turn { turn, .. } => {
             let stream_id = session_stream_id(&turn.session_id);
             let (event_kind, notification) = match turn.status {
-                TurnStatus::InProgress => (
+                TurnStatus::InProgress | TurnStatus::WaitingApproval => (
                     "turn/started",
                     ServerNotification::TurnStarted {
                         turn: Box::new(turn.clone()),
@@ -130,7 +127,7 @@ pub fn events_from_v2_line(line: &RolloutLineV2) -> Vec<DerivedEvent> {
                 notification,
             }]
         }
-        RolloutLineV2::SessionMeta { session, .. } => {
+        RolloutLine::SessionMeta { session, .. } => {
             // One fact, two streams: the session stream and the per-cwd
             // session-list stream. The log PK includes stream_id, so both
             // rows are idempotent independently.
@@ -150,7 +147,7 @@ pub fn events_from_v2_line(line: &RolloutLineV2) -> Vec<DerivedEvent> {
             }
             events
         }
-        RolloutLineV2::WorkspaceRestoreStarted { record, .. } => {
+        RolloutLine::WorkspaceRestoreStarted { record, .. } => {
             vec![DerivedEvent {
                 event_kind: "workspace/restoreStarted",
                 stream_id: session_stream_id(&SessionId::from_string(
@@ -162,7 +159,7 @@ pub fn events_from_v2_line(line: &RolloutLineV2) -> Vec<DerivedEvent> {
                 },
             }]
         }
-        RolloutLineV2::WorkspaceRestoreCompleted { record, .. } => {
+        RolloutLine::WorkspaceRestoreCompleted { record, .. } => {
             let succeeded = record.outcomes.iter().all(|outcome| {
                 matches!(
                     outcome.status,
@@ -192,12 +189,12 @@ pub fn events_from_v2_line(line: &RolloutLineV2) -> Vec<DerivedEvent> {
         // - SessionRollback: P4's rollback preview/commit flow emits live
         //   events; the marker is replay state.
         // - Internal / WorkspaceCheckpoint / WorkspaceChange: rollout-only.
-        RolloutLineV2::SessionTitleUpdated { .. }
-        | RolloutLineV2::CompactionSnapshot { .. }
-        | RolloutLineV2::SessionRollback { .. }
-        | RolloutLineV2::Internal { .. }
-        | RolloutLineV2::WorkspaceCheckpoint { .. }
-        | RolloutLineV2::WorkspaceChange { .. } => Vec::new(),
+        RolloutLine::SessionTitleUpdated { .. }
+        | RolloutLine::CompactionSnapshot { .. }
+        | RolloutLine::SessionRollback { .. }
+        | RolloutLine::Internal { .. }
+        | RolloutLine::WorkspaceCheckpoint { .. }
+        | RolloutLine::WorkspaceChange { .. } => Vec::new(),
     }
 }
 
@@ -232,6 +229,7 @@ mod tests {
                 }],
                 entry: UserMessageEntry::TurnStart,
             },
+            parent_id: None,
         }
     }
 
@@ -246,12 +244,12 @@ mod tests {
             (ItemState::Interrupted, 1, "item/completed"),
             (ItemState::Lost, 2, "item/completed"),
         ] {
-            let line = RolloutLineV2::Item {
+            let line = RolloutLine::Item {
                 v: 2,
                 timestamp: Utc::now(),
                 item: item_envelope(state, revision),
             };
-            let events = events_from_v2_line(&line);
+            let events = events_from_rollout_line(&line);
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].event_kind, expected, "{state:?} rev {revision}");
         }

@@ -1,0 +1,27 @@
+{
+  "name": "@devo/tui",
+  "version": "0.1.39",
+  "private": true,
+  "description": "Devo product TUI — InteractiveMode + Native AgentConnection",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "test": "node --import tsx --test src/*.test.ts src/**/*.test.ts lib/coding-agent/src/**/*.test.ts",
+    "test:tmux": "node scripts/run-tmux-smoke.js",
+    "generate:protocol": "cargo run --manifest-path ../../Cargo.toml -p devo-protocol --bin generate-native-ts -- src/generated/protocol"
+  },
+    "dependencies": {
+    "@earendil-works/pi-agent-core": "file:./lib/agent",
+    "@earendil-works/pi-ai": "file:./lib/ai",
+    "@earendil-works/pi-coding-agent": "file:./lib/coding-agent",
+    "@earendil-works/pi-tui": "file:./lib/tui"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=22.8.0"
+  }
+}

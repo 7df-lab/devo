@@ -1,38 +1,11 @@
-use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use ts_rs::TS;
 
-use crate::command_exec::{CommandExecExitedPayload, CommandExecOutputDeltaPayload};
 use crate::parse_command::ParsedCommand;
-use crate::protocol::{ExecCommandSource, FileChange};
-use crate::reference_search::{ReferenceSearchFailedPayload, ReferenceSearchSnapshot};
-use crate::request_user_input::RequestUserInputQuestion;
-use crate::session::{SessionMetadata, SessionRuntimeStatus};
-use crate::turn::TurnMetadata;
-use crate::workspace_changes::WorkspaceChangesUpdatedPayload;
-use crate::{ItemId, SessionId, TurnId, TurnUsage};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EventContext {
-    pub session_id: SessionId,
-    pub turn_id: Option<TurnId>,
-    pub item_id: Option<ItemId>,
-    pub seq: u64,
-    /// The item's own sequence number within the session, when the emitter
-    /// allocated one. Additive (P2): absent for older emitters and for
-    /// events without an allocated item sequence.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub item_seq: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ItemEnvelope {
-    pub item_id: ItemId,
-    pub item_kind: ItemKind,
-    pub payload: serde_json::Value,
-}
+use crate::protocol::ExecCommandSource;
+use crate::{ItemId, SessionId, TurnId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallPayload {
@@ -79,277 +52,65 @@ pub struct CommandExecutionPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FileChangePayload {
-    pub tool_call_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<serde_json::Value>,
-    pub changes: Vec<(std::path::PathBuf, FileChange)>,
-    pub is_error: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ItemEventPayload {
-    pub context: EventContext,
-    pub item: ItemEnvelope,
-}
-
-/// Opt-in typed item event payload (P2, 06-item-model migration step 2):
-/// the same context as [`ItemEventPayload`], but the item is the canonical
-/// typed envelope — a typed `Item` instead of the legacy `ItemKind` +
-/// `serde_json::Value` payload bag. Only emitted to connections that set
-/// `_meta.devo.typedItems` on initialize.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TypedItemEventPayload {
-    pub context: EventContext,
-    pub item: crate::native::item::ItemEnvelope,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ItemDeltaPayload {
-    pub context: EventContext,
-    pub delta: String,
-    pub stream_index: Option<u32>,
-    pub channel: Option<String>,
-    /// Per-item monotonically increasing delta counter assigned at the emit
-    /// site (0-based, reset when a new item starts). Carried into the
-    /// canonical typed delta as `chunk_index` (L2-DES-APP-009 DD-2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chunk_index: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnEventPayload {
     pub session_id: SessionId,
-    pub turn: TurnMetadata,
+    pub turn: crate::native::turn::Turn,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct TurnFailedPayload {
     pub session_id: SessionId,
-    pub turn: TurnMetadata,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<TurnErrorPayload>,
+    /// Native turn with `error` stamped at emit (no sidecar failure bag).
+    pub turn: crate::native::turn::Turn,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-pub struct TurnErrorPayload {
-    pub code: String,
-    pub message: String,
-    /// Optional user-facing next step for recovering from this failure.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub recovery_hint: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnPlanStepPayload {
-    pub step: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnPlanUpdatedPayload {
-    pub session_id: SessionId,
-    pub turn: TurnMetadata,
-    pub explanation: Option<String>,
-    pub plan: Vec<TurnPlanStepPayload>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export)]
-pub enum ProviderRetryPhase {
-    Scheduled,
-    Resumed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(export)]
-pub struct TurnProviderRetryStatusPayload {
-    pub session_id: SessionId,
-    pub turn_id: TurnId,
-    pub attempt: usize,
-    // Total attempts allowed by the retry policy; projected into the
-    // canonical `model/queryRetrying` notification.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_attempts: Option<u32>,
-    pub backoff_ms: u64,
-    pub provider: String,
-    pub model: String,
-    pub phase: ProviderRetryPhase,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnUsageUpdatedPayload {
-    pub session_id: SessionId,
-    pub turn_id: TurnId,
-    pub usage: TurnUsage,
-    pub total_input_tokens: usize,
-    pub total_output_tokens: usize,
-    #[serde(default)]
-    pub total_tokens: usize,
-    pub total_cache_read_tokens: usize,
-    pub last_query_input_tokens: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextUsageUpdatedPayload {
-    pub session_id: SessionId,
-    pub occupancy: crate::native::item::ContextOccupancy,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolCallStatusUpdatedPayload {
-    pub session_id: SessionId,
-    pub turn_id: TurnId,
-    pub tool_call_id: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionEventPayload {
-    pub session: SessionMetadata,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionDeletedPayload {
-    pub session_id: SessionId,
-    pub deleted_session_ids: Vec<SessionId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionStatusChangedPayload {
-    pub session_id: SessionId,
-    pub status: SessionRuntimeStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionEffectiveContextWindowUpdatedPayload {
-    pub session_id: SessionId,
-    pub effective_context_window: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionCompactionFailedPayload {
-    pub session_id: SessionId,
-    pub message: String,
-}
-
-/// Emit-site enriched compaction lifecycle payload (L2-DES-APP-009 DD-3):
-/// carries the compaction turn id and trigger so the typed projector can
-/// emit canonical `context/compactionStarted` without degrading the shape.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionCompactionStartedPayload {
-    pub session: SessionMetadata,
-    pub turn_id: TurnId,
-    pub trigger: crate::native::item::CompactionTrigger,
-}
-
-/// Completed compaction; `item_id` links the persisted `ContextCompaction`
-/// item when one was created (compact-with-replacement).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionCompactionCompletedPayload {
-    pub session: SessionMetadata,
-    pub turn_id: TurnId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub item_id: Option<ItemId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServerRequestResolvedPayload {
-    pub session_id: SessionId,
-    pub request_id: SmolStr,
-    pub turn_id: Option<TurnId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MessageEditRecordedPayload {
-    pub session_id: SessionId,
-    pub edit_id: String,
-    pub target_message_id: ItemId,
-    pub replacement_message_id: ItemId,
-    pub edit_state: String,
-    pub content_preview: String,
-    #[serde(default)]
-    pub mentions: Vec<serde_json::Value>,
-    pub timestamp: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnSupersededPayload {
-    pub session_id: SessionId,
-    pub superseded_turn_id: TurnId,
-    pub replacement_turn_id: TurnId,
-    pub edit_id: String,
-    pub reason: String,
-    pub timestamp: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceRestoreStartedPayload {
-    pub session_id: SessionId,
-    pub edit_id: String,
-    pub superseded_turn_id: TurnId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint_id: Option<String>,
-    #[serde(default)]
-    pub candidate_files: Vec<String>,
-    pub restore_policy: String,
-    pub timestamp: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceRestoreCompletedPayload {
-    pub session_id: SessionId,
-    pub edit_id: String,
-    pub superseded_turn_id: TurnId,
-    #[serde(default)]
-    pub restored_files: Vec<String>,
-    #[serde(default)]
-    pub skipped_files: Vec<String>,
-    #[serde(default)]
-    pub unsupported_files: Vec<String>,
-    #[serde(default)]
-    pub failed_files: Vec<String>,
-    pub current_state_kept: bool,
-    pub timestamp: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ItemKind {
-    UserMessage,
-    AgentMessage,
-    Reasoning,
-    Plan,
-    ToolCall,
-    ToolResult,
-    CommandExecution,
-    FileChange,
-    McpToolCall,
-    WebSearch,
-    ImageView,
-    ContextCompaction,
-    ApprovalRequest,
-    ApprovalDecision,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Emit-site discriminator for Native item text/output deltas.
+///
+/// Maps 1:1 onto [`crate::native::event::ServerNotification`] item-delta
+/// variants via [`item_delta_notification`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemDeltaKind {
     AgentMessageDelta,
     ReasoningSummaryTextDelta,
     ReasoningTextDelta,
     CommandExecutionOutputDelta,
-    FileChangeOutputDelta,
     PlanDelta,
     ToolCallInputDelta,
+}
+
+/// Build a Native bus item-delta notification from Native opaque ids.
+pub fn item_delta_notification(
+    kind: ItemDeltaKind,
+    session_id: crate::native::ids::SessionId,
+    item_id: crate::native::ids::ItemId,
+    chunk_index: u64,
+    delta: impl Into<String>,
+) -> crate::native::event::ServerNotification {
+    let delta = crate::native::event::ItemDelta {
+        item_id,
+        session_id,
+        // Text deltas apply to the item birth snapshot; `item/updated`
+        // revisions are not emitted for them yet.
+        base_revision: 1,
+        chunk_index,
+        delta: delta.into(),
+    };
+    match kind {
+        ItemDeltaKind::AgentMessageDelta => {
+            crate::native::event::ServerNotification::ItemAssistantMessageDelta(delta)
+        }
+        ItemDeltaKind::ReasoningSummaryTextDelta | ItemDeltaKind::ReasoningTextDelta => {
+            crate::native::event::ServerNotification::ItemReasoningDelta(delta)
+        }
+        ItemDeltaKind::CommandExecutionOutputDelta => {
+            crate::native::event::ServerNotification::ItemCommandExecutionOutputDelta(delta)
+        }
+        ItemDeltaKind::ToolCallInputDelta => {
+            crate::native::event::ServerNotification::ItemToolCallInputDelta(delta)
+        }
+        ItemDeltaKind::PlanDelta => crate::native::event::ServerNotification::ItemPlanDelta(delta),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,240 +165,57 @@ pub struct ApprovalDecisionPayload {
     pub decision_source: Option<crate::native::item::ApprovalDecisionSource>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RequestUserInputPayload {
-    pub request: PendingServerRequestContext,
-    pub questions: Vec<RequestUserInputQuestion>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ServerEvent {
-    SessionStarted(SessionEventPayload),
-    SessionTitleUpdated(SessionEventPayload),
-    SessionCompactionStarted(SessionCompactionStartedPayload),
-    SessionCompactionCompleted(SessionCompactionCompletedPayload),
-    SessionCompactionFailed(SessionCompactionFailedPayload),
-    SessionStatusChanged(SessionStatusChangedPayload),
-    SessionEffectiveContextWindowUpdated(SessionEffectiveContextWindowUpdatedPayload),
-    SessionArchived(SessionEventPayload),
-    SessionUnarchived(SessionEventPayload),
-    SessionClosed(SessionEventPayload),
-    SessionDeleted(SessionDeletedPayload),
-    TurnStarted(TurnEventPayload),
-    TurnCompleted(TurnEventPayload),
-    TurnInterrupted(TurnEventPayload),
-    TurnFailed(TurnFailedPayload),
-    TurnPlanUpdated(TurnPlanUpdatedPayload),
-    TurnDiffUpdated(TurnEventPayload),
-    TurnUsageUpdated(TurnUsageUpdatedPayload),
-    ContextUsageUpdated(ContextUsageUpdatedPayload),
-    TurnProviderRetryStatus(TurnProviderRetryStatusPayload),
-    WorkspaceChangesUpdated(WorkspaceChangesUpdatedPayload),
-    ToolCallStatusUpdated(ToolCallStatusUpdatedPayload),
-    RequestUserInput(RequestUserInputPayload),
-    MessageEditRecorded(MessageEditRecordedPayload),
-    TurnSuperseded(TurnSupersededPayload),
-    WorkspaceRestoreStarted(WorkspaceRestoreStartedPayload),
-    WorkspaceRestoreCompleted(WorkspaceRestoreCompletedPayload),
-    ItemStarted(ItemEventPayload),
-    ItemCompleted(ItemEventPayload),
-    ItemDelta {
-        delta_kind: ItemDeltaKind,
-        payload: ItemDeltaPayload,
-    },
-    ServerRequestResolved(ServerRequestResolvedPayload),
-    ReferenceSearchUpdated(ReferenceSearchSnapshot),
-    ReferenceSearchCompleted(ReferenceSearchSnapshot),
-    ReferenceSearchFailed(ReferenceSearchFailedPayload),
-    CommandExecOutputDelta(CommandExecOutputDeltaPayload),
-    CommandExecExited(CommandExecExitedPayload),
-}
-
-impl ServerEvent {
-    pub fn session_id(&self) -> Option<SessionId> {
-        match self {
-            Self::SessionStarted(payload)
-            | Self::SessionTitleUpdated(payload)
-            | Self::SessionArchived(payload)
-            | Self::SessionUnarchived(payload)
-            | Self::SessionClosed(payload) => Some(payload.session.session_id),
-            Self::SessionCompactionStarted(payload) => Some(payload.session.session_id),
-            Self::SessionCompactionCompleted(payload) => Some(payload.session.session_id),
-            Self::SessionDeleted(payload) => Some(payload.session_id),
-            Self::SessionCompactionFailed(payload) => Some(payload.session_id),
-            Self::SessionStatusChanged(payload) => Some(payload.session_id),
-            Self::SessionEffectiveContextWindowUpdated(payload) => Some(payload.session_id),
-            Self::TurnStarted(payload)
-            | Self::TurnCompleted(payload)
-            | Self::TurnInterrupted(payload)
-            | Self::TurnDiffUpdated(payload) => Some(payload.session_id),
-            Self::TurnFailed(payload) => Some(payload.session_id),
-            Self::TurnPlanUpdated(payload) => Some(payload.session_id),
-            Self::TurnUsageUpdated(payload) => Some(payload.session_id),
-            Self::ContextUsageUpdated(payload) => Some(payload.session_id),
-            Self::TurnProviderRetryStatus(payload) => Some(payload.session_id),
-            Self::WorkspaceChangesUpdated(payload) => Some(payload.session_id),
-            Self::ToolCallStatusUpdated(payload) => Some(payload.session_id),
-            Self::RequestUserInput(payload) => Some(payload.request.session_id),
-            Self::MessageEditRecorded(payload) => Some(payload.session_id),
-            Self::TurnSuperseded(payload) => Some(payload.session_id),
-            Self::WorkspaceRestoreStarted(payload) => Some(payload.session_id),
-            Self::WorkspaceRestoreCompleted(payload) => Some(payload.session_id),
-            Self::ItemStarted(payload) | Self::ItemCompleted(payload) => {
-                Some(payload.context.session_id)
-            }
-            Self::ItemDelta { payload, .. } => Some(payload.context.session_id),
-            Self::ServerRequestResolved(payload) => Some(payload.session_id),
-            Self::ReferenceSearchUpdated(_)
-            | Self::ReferenceSearchCompleted(_)
-            | Self::ReferenceSearchFailed(_) => None,
-            Self::CommandExecOutputDelta(payload) => payload.session_id,
-            Self::CommandExecExited(payload) => payload.session_id,
-        }
-    }
-
-    pub fn method_name(&self) -> &'static str {
-        match self {
-            Self::SessionStarted(_) => "session/started",
-            Self::SessionTitleUpdated(_) => "session/title/updated",
-            Self::SessionCompactionStarted(_) => "session/compaction/started",
-            Self::SessionCompactionCompleted(_) => "session/compaction/completed",
-            Self::SessionCompactionFailed(_) => "session/compaction/failed",
-            Self::SessionStatusChanged(_) => "session/status/changed",
-            Self::SessionEffectiveContextWindowUpdated(_) => {
-                "session/effective_context_window/updated"
-            }
-            Self::SessionArchived(_) => "session/archived",
-            Self::SessionUnarchived(_) => "session/unarchived",
-            Self::SessionClosed(_) => "session/closed",
-            Self::SessionDeleted(_) => "session/deleted",
-            Self::TurnStarted(_) => "turn/started",
-            Self::TurnCompleted(_) => "turn/completed",
-            Self::TurnInterrupted(_) => "turn/interrupted",
-            Self::TurnFailed(_) => "turn/failed",
-            Self::TurnPlanUpdated(_) => "turn/plan/updated",
-            Self::TurnDiffUpdated(_) => "turn/diff/updated",
-            Self::TurnUsageUpdated(_) => "turn/usage/updated",
-            Self::ContextUsageUpdated(_) => "context/usageUpdated",
-            Self::TurnProviderRetryStatus(_) => "turn/provider_retry_status",
-            Self::WorkspaceChangesUpdated(_) => "workspace/changes/updated",
-            Self::ToolCallStatusUpdated(_) => "tool_call/status_updated",
-            Self::RequestUserInput(_) => "item/tool/requestUserInput",
-            Self::MessageEditRecorded(_) => "message/edit/recorded",
-            Self::TurnSuperseded(_) => "turn/superseded",
-            Self::WorkspaceRestoreStarted(_) => "workspace_restore_started",
-            Self::WorkspaceRestoreCompleted(_) => "workspace_restore_completed",
-            Self::ItemStarted(_) => "item/started",
-            Self::ItemCompleted(_) => "item/completed",
-            Self::ItemDelta { delta_kind, .. } => match delta_kind {
-                ItemDeltaKind::AgentMessageDelta => "item/agentMessage/delta",
-                ItemDeltaKind::ReasoningSummaryTextDelta => "item/reasoning/summaryTextDelta",
-                ItemDeltaKind::ReasoningTextDelta => "item/reasoning/textDelta",
-                ItemDeltaKind::CommandExecutionOutputDelta => "item/commandExecution/outputDelta",
-                ItemDeltaKind::FileChangeOutputDelta => "item/fileChange/outputDelta",
-                ItemDeltaKind::PlanDelta => "item/plan/delta",
-                ItemDeltaKind::ToolCallInputDelta => "item/toolCall/inputDelta",
-            },
-            Self::ServerRequestResolved(_) => "serverRequest/resolved",
-            Self::ReferenceSearchUpdated(_) => "search/updated",
-            Self::ReferenceSearchCompleted(_) => "search/completed",
-            Self::ReferenceSearchFailed(_) => "search/failed",
-            Self::CommandExecOutputDelta(_) => "command/exec/outputDelta",
-            Self::CommandExecExited(_) => "command/exec/exited",
-        }
-    }
-
-    pub fn with_seq(mut self, seq: u64) -> Self {
-        match &mut self {
-            Self::ItemStarted(payload) | Self::ItemCompleted(payload) => {
-                payload.context.seq = seq;
-            }
-            Self::ItemDelta { payload, .. } => payload.context.seq = seq,
-            Self::TurnUsageUpdated(_)
-            | Self::ContextUsageUpdated(_)
-            | Self::TurnProviderRetryStatus(_)
-            | Self::WorkspaceChangesUpdated(_)
-            | Self::ToolCallStatusUpdated(_)
-            | Self::RequestUserInput(_)
-            | Self::MessageEditRecorded(_)
-            | Self::TurnSuperseded(_)
-            | Self::WorkspaceRestoreStarted(_)
-            | Self::WorkspaceRestoreCompleted(_)
-            | Self::ReferenceSearchUpdated(_)
-            | Self::ReferenceSearchCompleted(_)
-            | Self::ReferenceSearchFailed(_)
-            | Self::CommandExecOutputDelta(_)
-            | Self::CommandExecExited(_) => {}
-            _ => {}
-        }
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use pretty_assertions::assert_eq;
 
     use super::*;
     use crate::workspace_changes::{
         WorkspaceChangeCoverage, WorkspaceChangeScope, WorkspaceChangeSetStatus,
-        WorkspaceChangeStats, WorkspaceChangeViewStatus,
+        WorkspaceChangeViewStatus,
     };
 
     #[test]
-    fn turn_failed_payload_serializes_error_and_accepts_legacy_shape() {
+    fn turn_failed_payload_carries_error_on_native_turn() {
         let session_id = SessionId::new();
-        let turn = TurnMetadata {
-            turn_id: TurnId::new(),
+        let turn_id = TurnId::new();
+        let mut turn = crate::native::turn::Turn {
+            id: turn_id,
             session_id,
             sequence: 1,
-            status: crate::TurnStatus::Failed,
-            kind: crate::TurnKind::Regular,
-            model: "catalog-model".to_string(),
-            model_binding_id: None,
-            reasoning_effort_selection: None,
-            reasoning_effort: None,
-            request_model: "provider-model".to_string(),
-            request_thinking: None,
+            kind: crate::native::turn::TurnKind::Regular,
+            status: crate::native::turn::TurnStatus::Failed,
+            model: crate::native::model::ModelBinding {
+                provider: "unknown".into(),
+                model: "provider-model".into(),
+                variant: None,
+                reasoning_effort: None,
+            },
+            collaboration_mode: None,
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),
+            error: None,
             usage: None,
-            stop_reason: None,
-            failure_reason: None,
         };
+        turn.error = Some(crate::native::error::AgentError::new(
+            "PROVIDER_SERVER_ERROR".to_string(),
+            "Internal server error".to_string(),
+        ));
         let payload = TurnFailedPayload {
             session_id,
-            turn,
-            error: Some(TurnErrorPayload {
-                code: "PROVIDER_SERVER_ERROR".to_string(),
-                message: "Internal server error".to_string(),
-                recovery_hint: None,
-            }),
+            turn: turn.clone(),
         };
 
-        let mut value = serde_json::to_value(&payload).expect("serialize turn failure");
+        let value = serde_json::to_value(&payload).expect("serialize turn failure");
+        assert!(value.get("error").is_none());
         assert_eq!(
-            value["error"],
-            serde_json::json!({
-                "code": "PROVIDER_SERVER_ERROR",
-                "message": "Internal server error"
-            })
+            value["turn"]["error"]["errorCode"],
+            serde_json::json!("PROVIDER_SERVER_ERROR")
         );
-        value
-            .as_object_mut()
-            .expect("turn failure object")
-            .remove("error");
-        let legacy = serde_json::from_value::<TurnFailedPayload>(value)
-            .expect("deserialize legacy turn failure");
-
-        assert_eq!(
-            legacy,
-            TurnFailedPayload {
-                error: None,
-                ..payload
-            }
-        );
+        let restored: TurnFailedPayload =
+            serde_json::from_value(value).expect("deserialize turn failure");
+        assert_eq!(restored, payload);
     }
 
     #[test]
@@ -680,11 +258,10 @@ mod tests {
         let session_id = SessionId::new();
         let target_message_id = ItemId::new();
         let replacement_message_id = ItemId::new();
-        let superseded_turn_id = TurnId::new();
-        let replacement_turn_id = TurnId::new();
         let timestamp = Utc::now();
-        let edit_payload = MessageEditRecordedPayload {
-            session_id,
+        let native_session_id = session_id;
+        let edit = crate::native::event::ServerNotification::MessageEditRecorded {
+            session_id: native_session_id,
             edit_id: "edit-1".to_string(),
             target_message_id,
             replacement_message_id,
@@ -693,89 +270,71 @@ mod tests {
             mentions: vec![],
             timestamp,
         };
-        let superseded_payload = TurnSupersededPayload {
-            session_id,
-            superseded_turn_id,
-            replacement_turn_id,
-            edit_id: "edit-1".to_string(),
-            reason: "message_edit_previous".to_string(),
-            timestamp,
+        let restore_started = crate::native::event::ServerNotification::WorkspaceRestoreStarted {
+            session_id: native_session_id,
+            restore_plan_id: crate::native::ids::RestorePlanId::from_string("edit-1".to_string()),
         };
-        let restore_started_payload = WorkspaceRestoreStartedPayload {
-            session_id,
-            edit_id: "edit-1".to_string(),
-            superseded_turn_id,
-            checkpoint_id: None,
-            candidate_files: vec!["src/main.rs".to_string()],
-            restore_policy: "safe".to_string(),
-            timestamp,
-        };
-        let restore_completed_payload = WorkspaceRestoreCompletedPayload {
-            session_id,
-            edit_id: "edit-1".to_string(),
-            superseded_turn_id,
-            restored_files: vec![],
-            skipped_files: vec!["src/main.rs".to_string()],
-            unsupported_files: vec![],
-            failed_files: vec![],
-            current_state_kept: true,
-            timestamp,
-        };
+        let restore_completed =
+            crate::native::event::ServerNotification::WorkspaceRestoreCompleted {
+                session_id: native_session_id,
+                restore_plan_id: crate::native::ids::RestorePlanId::from_string(
+                    "edit-1".to_string(),
+                ),
+                succeeded: true,
+                error: None,
+            };
 
-        let restored: MessageEditRecordedPayload =
-            serde_json::from_str(&serde_json::to_string(&edit_payload).expect("serialize"))
-                .expect("deserialize");
-        assert_eq!(restored, edit_payload);
-        let restored: WorkspaceRestoreCompletedPayload = serde_json::from_str(
-            &serde_json::to_string(&restore_completed_payload).expect("serialize"),
-        )
-        .expect("deserialize");
-        assert_eq!(restored, restore_completed_payload);
-
-        let edit_event = ServerEvent::MessageEditRecorded(edit_payload);
-        assert_eq!(edit_event.method_name(), "message/edit/recorded");
-        assert_eq!(edit_event.session_id(), Some(session_id));
-
-        let superseded_event = ServerEvent::TurnSuperseded(superseded_payload);
-        assert_eq!(superseded_event.method_name(), "turn/superseded");
-        assert_eq!(superseded_event.session_id(), Some(session_id));
-
-        let restore_started_event = ServerEvent::WorkspaceRestoreStarted(restore_started_payload);
+        let (edit_method, _) = crate::native::wire_projector::wire_from_server_notification(&edit);
+        assert_eq!(edit_method, "message/edit/recorded");
         assert_eq!(
-            restore_started_event.method_name(),
-            "workspace_restore_started"
+            crate::native::notification_bus::notification_legacy_session_id(&edit),
+            Some(session_id)
         );
-        assert_eq!(restore_started_event.session_id(), Some(session_id));
 
-        let restore_completed_event =
-            ServerEvent::WorkspaceRestoreCompleted(restore_completed_payload);
+        let (restore_started_method, _) =
+            crate::native::wire_projector::wire_from_server_notification(&restore_started);
+        assert_eq!(restore_started_method, "workspace/restoreStarted");
         assert_eq!(
-            restore_completed_event.method_name(),
-            "workspace_restore_completed"
+            crate::native::notification_bus::notification_legacy_session_id(&restore_started),
+            Some(session_id)
         );
-        assert_eq!(restore_completed_event.session_id(), Some(session_id));
+
+        let (restore_completed_method, _) =
+            crate::native::wire_projector::wire_from_server_notification(&restore_completed);
+        assert_eq!(restore_completed_method, "workspace/restoreCompleted");
+        assert_eq!(
+            crate::native::notification_bus::notification_legacy_session_id(&restore_completed),
+            Some(session_id)
+        );
     }
 
     #[test]
-    fn workspace_changes_updated_method_name() {
+    fn workspace_changes_updated_notification_method_name() {
         let session_id = SessionId::new();
-        let event = ServerEvent::WorkspaceChangesUpdated(WorkspaceChangesUpdatedPayload {
-            session_id,
-            turn_id: TurnId::new(),
-            scope: WorkspaceChangeScope::Turn,
-            status: WorkspaceChangeViewStatus::Ready,
-            coverage: WorkspaceChangeCoverage::GitVisible,
-            change_set_status: WorkspaceChangeSetStatus::Finalized,
-            stats: WorkspaceChangeStats {
-                files_changed: 1,
-                additions: 2,
-                deletions: 0,
+        let turn_id = TurnId::new();
+        let notification = crate::native::event::ServerNotification::WorkspaceChangesUpdated(
+            crate::native::event::WorkspaceChangesUpdatedNotification {
+                session_id,
+                turn_id,
+                scope: WorkspaceChangeScope::Turn,
+                status: WorkspaceChangeViewStatus::Ready,
+                coverage: WorkspaceChangeCoverage::GitVisible,
+                change_set_status: WorkspaceChangeSetStatus::Finalized,
+                stats: crate::native::event::WorkspaceChangeStatsNotification {
+                    files_changed: 1,
+                    additions: 2,
+                    deletions: 0,
+                },
+                version: 1,
+                generated_at: Utc::now(),
             },
-            version: 1,
-            generated_at: Utc::now(),
-        });
-
-        assert_eq!(event.method_name(), "workspace/changes/updated");
-        assert_eq!(event.session_id(), Some(session_id));
+        );
+        let (method, _) =
+            crate::native::wire_projector::wire_from_server_notification(&notification);
+        assert_eq!(method, "workspace/changes/updated");
+        assert_eq!(
+            crate::native::notification_bus::notification_legacy_session_id(&notification),
+            Some(session_id)
+        );
     }
 }

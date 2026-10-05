@@ -21,11 +21,33 @@ pub struct ToolsConfig {
     pub web_search: WebSearchConfig,
     #[serde(default, skip_serializing_if = "WebFetchConfig::is_default")]
     pub web_fetch: WebFetchConfig,
+    #[serde(default, skip_serializing_if = "ToolExecutionSurface::is_default")]
+    pub execution_surface: ToolExecutionSurface,
 }
 
 impl ToolsConfig {
     pub fn is_empty(&self) -> bool {
-        self.web_search.is_default() && self.web_fetch.is_default()
+        self.web_search.is_default()
+            && self.web_fetch.is_default()
+            && self.execution_surface.is_default()
+    }
+}
+
+/// Selects the model-facing tool surface for turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionSurface {
+    /// Start the RLM Python kernel when available. Only `ipython` is exposed to
+    /// the model; internal host handlers stay server-side.
+    #[default]
+    Rlm,
+    /// Do not start the RLM kernel. No model-facing tool is exposed.
+    Discrete,
+}
+
+impl ToolExecutionSurface {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
     }
 }
 
@@ -229,6 +251,11 @@ fn resolve_local_web_search(
             base_url: provider.base_url.clone(),
             max_results: provider.max_results,
         }),
+        AuthCredentialKind::Oauth => Err(ProviderConfigError::Validation {
+            message: format!(
+                "web search local provider `{provider_id}` requires an api_key credential, found oauth"
+            ),
+        }),
     }
 }
 
@@ -256,6 +283,11 @@ mod tests {
                 AuthCredentialConfig {
                     kind: AuthCredentialKind::ApiKey,
                     value: "secret".to_string(),
+                    access: None,
+                    refresh: None,
+                    expires_at: None,
+                    account_id: None,
+                    enterprise_url: None,
                 },
             )]),
             ..UserAuthConfigFile::default()

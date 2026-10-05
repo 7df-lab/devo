@@ -13,36 +13,44 @@ pub(super) struct UsageTotals {
 }
 
 impl UsageTotals {
-    pub(super) fn from_turn_usage(usage: &TurnUsage) -> Self {
+    pub(super) fn from_turn_usage(usage: &devo_protocol::native::usage::TurnUsage) -> Self {
         Self {
-            input_tokens: usage.input_tokens as usize,
-            output_tokens: usage.output_tokens as usize,
-            total_tokens: usage.display_total_tokens(),
-            cache_creation_input_tokens: usage.cache_creation_input_tokens.unwrap_or(0) as usize,
-            cache_read_input_tokens: usage.cache_read_input_tokens.unwrap_or(0) as usize,
-            reasoning_output_tokens: usage.reasoning_output_tokens.unwrap_or(0) as usize,
+            input_tokens: usage.query.input_tokens as usize,
+            output_tokens: usage.query.output_tokens as usize,
+            total_tokens: usage.display_total_tokens() as usize,
+            cache_creation_input_tokens: usage.query.cache_creation_input_tokens as usize,
+            cache_read_input_tokens: usage.query.cache_read_input_tokens as usize,
+            reasoning_output_tokens: usage.query.reasoning_tokens as usize,
         }
     }
 
-    pub(super) fn from_session_summary(summary: &SessionMetadata) -> Self {
+    pub(super) fn from_session_summary(
+        summary: &crate::runtime_session_summary::RuntimeSessionSummary,
+    ) -> Self {
         Self {
-            input_tokens: summary.total_input_tokens,
-            output_tokens: summary.total_output_tokens,
-            total_tokens: summary.total_tokens,
-            cache_creation_input_tokens: summary.total_cache_creation_tokens,
-            cache_read_input_tokens: summary.total_cache_read_tokens,
+            input_tokens: summary.total_input_tokens(),
+            output_tokens: summary.total_output_tokens(),
+            total_tokens: summary.total_tokens(),
+            cache_creation_input_tokens: summary.total_cache_creation_tokens(),
+            cache_read_input_tokens: summary.total_cache_read_tokens(),
             reasoning_output_tokens: 0,
         }
     }
 
-    pub(super) fn to_turn_usage(self) -> TurnUsage {
-        TurnUsage {
-            input_tokens: saturating_u32(self.input_tokens),
-            output_tokens: saturating_u32(self.output_tokens),
-            cache_creation_input_tokens: nonzero_saturating_u32(self.cache_creation_input_tokens),
-            cache_read_input_tokens: nonzero_saturating_u32(self.cache_read_input_tokens),
-            reasoning_output_tokens: nonzero_saturating_u32(self.reasoning_output_tokens),
-            total_tokens: nonzero_saturating_u32(self.total_tokens),
+    pub(super) fn to_turn_usage(self) -> devo_protocol::native::usage::TurnUsage {
+        devo_protocol::native::usage::TurnUsage {
+            query: devo_protocol::native::usage::UsageTotals {
+                total_tokens: self.total_tokens as u64,
+                input_tokens: self.input_tokens as u64,
+                output_tokens: self.output_tokens as u64,
+                reasoning_tokens: self.reasoning_output_tokens as u64,
+                cache_read_input_tokens: self.cache_read_input_tokens as u64,
+                cache_creation_input_tokens: self.cache_creation_input_tokens as u64,
+                call_count: 0,
+                metered_call_count: 1,
+                ..devo_protocol::native::usage::UsageTotals::default()
+            },
+            overhead: devo_protocol::native::usage::UsageTotals::default(),
         }
     }
 
@@ -81,7 +89,7 @@ impl UsageTotals {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParentUsageSnapshot {
     pub(super) session_id: SessionId,
     pub(super) turn_id: TurnId,
@@ -122,13 +130,13 @@ struct ParentTurnUsage {
     context_window: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ChildUsageOwner {
     parent_session_id: SessionId,
     parent_turn_id: Option<TurnId>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ChildTurnUsage {
     parent_session_id: SessionId,
     parent_turn_id: Option<TurnId>,
@@ -138,13 +146,13 @@ struct ChildTurnUsage {
     inflight_usage: UsageTotals,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ParentTurnKey {
     session_id: SessionId,
     turn_id: TurnId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ChildTurnKey {
     session_id: SessionId,
     turn_id: TurnId,
@@ -262,7 +270,7 @@ impl SubagentUsageState {
                 parent_turn_id: entry.parent_turn_id,
             }
         } else {
-            let owner = *self.child_owners.get(&child_session_id)?;
+            let owner = self.child_owners.get(&child_session_id)?.clone();
             let mut committed = UsageTotals::default();
             let mut inflight = UsageTotals::default();
             apply_usage_update(&mut committed, &mut inflight, usage, kind);
@@ -455,7 +463,7 @@ impl ServerRuntime {
         &self,
         session_id: SessionId,
         turn_id: TurnId,
-        usage: TurnUsage,
+        usage: devo_protocol::native::usage::TurnUsage,
         context_window: Option<u64>,
         kind: UsageUpdateKind,
     ) -> Option<ParentUsageSnapshot> {
@@ -471,7 +479,7 @@ impl ServerRuntime {
                 kind,
             )
         }?;
-        self.apply_parent_usage_snapshot(snapshot).await;
+        self.apply_parent_usage_snapshot(snapshot.clone()).await;
         Some(snapshot)
     }
 
@@ -479,7 +487,7 @@ impl ServerRuntime {
         &self,
         child_session_id: SessionId,
         child_turn_id: TurnId,
-        usage: TurnUsage,
+        usage: devo_protocol::native::usage::TurnUsage,
         kind: UsageUpdateKind,
     ) -> Option<ParentUsageSnapshot> {
         // Child turns must roll usage into the parent turn ledger. Ensure that
@@ -487,7 +495,7 @@ impl ServerRuntime {
         // child outlived the parent's begin_parent_usage_turn call).
         let parent_owner = {
             let usage_state = self.subagent_usage.lock().await;
-            usage_state.child_owners.get(&child_session_id).copied()
+            usage_state.child_owners.get(&child_session_id).cloned()
         };
         if let Some(owner) = parent_owner
             && let Some(parent_turn_id) = owner.parent_turn_id
@@ -508,7 +516,7 @@ impl ServerRuntime {
                 kind,
             )
         }?;
-        self.apply_parent_usage_snapshot(snapshot).await;
+        self.apply_parent_usage_snapshot(snapshot.clone()).await;
         Some(snapshot)
     }
 
@@ -521,7 +529,7 @@ impl ServerRuntime {
             let mut usage_state = self.subagent_usage.lock().await;
             usage_state.commit_child_inflight_usage(child_session_id, child_turn_id)
         }?;
-        self.apply_parent_usage_snapshot(snapshot).await;
+        self.apply_parent_usage_snapshot(snapshot.clone()).await;
         Some(snapshot)
     }
 
@@ -543,7 +551,7 @@ impl ServerRuntime {
             if let Some(stream) = self.active_stream_state(snapshot.session_id).await {
                 let mut stream = stream.lock().await;
                 if let Some(inline) = stream.turn_inline.as_mut() {
-                    snapshot.apply_to_summary(&mut inline.summary);
+                    snapshot.clone().apply_to_summary(&mut inline.summary);
                     inline.hook_context.summary = inline.summary.clone();
                     if inline.turn_id == snapshot.turn_id {
                         inline.active_turn_usage = Some(snapshot.turn_usage.to_turn_usage());
@@ -559,28 +567,44 @@ impl ServerRuntime {
             // Child agent event streams publish usage onto the parent session.
             // Use try-send so a full mailbox cannot deadlock the child stream.
             if let Some(session_handle) = self.session(snapshot.session_id).await {
-                let _ = session_handle.try_apply_parent_usage_snapshot(snapshot);
+                let _ = session_handle.try_apply_parent_usage_snapshot(snapshot.clone());
             }
         }
-        self.broadcast_event(ServerEvent::TurnUsageUpdated(
-            snapshot.to_turn_usage_updated_payload(),
-        ))
+        let (native_session_id, native_turn_id) = self
+            .native_session_turn_ids(snapshot.session_id, snapshot.turn_id)
+            .await;
+        self.broadcast_notification(
+            snapshot.to_turn_usage_updated_notification(native_session_id, native_turn_id),
+        )
         .await;
     }
 }
 
 impl ParentUsageSnapshot {
-    pub(super) fn to_turn_usage_updated_payload(self) -> TurnUsageUpdatedPayload {
-        TurnUsageUpdatedPayload {
-            session_id: self.session_id,
-            turn_id: self.turn_id,
-            // Context bar / last_query_* use the latest model call only.
-            usage: self.latest_query_usage.to_turn_usage(),
-            total_input_tokens: self.session_totals.input_tokens,
-            total_output_tokens: self.session_totals.output_tokens,
-            total_tokens: self.session_totals.total_tokens,
-            total_cache_read_tokens: self.session_totals.cache_read_input_tokens,
-            last_query_input_tokens: self.latest_query_usage.input_tokens,
+    pub(super) fn to_turn_usage_updated_notification(
+        &self,
+        session_id: devo_protocol::native::ids::SessionId,
+        turn_id: devo_protocol::native::ids::TurnId,
+    ) -> devo_protocol::native::event::ServerNotification {
+        let usage = self.latest_query_usage.to_turn_usage();
+        devo_protocol::native::event::ServerNotification::TurnUsageUpdated {
+            session_id,
+            turn_id,
+            usage,
+            last_query_input_tokens: self.latest_query_usage.input_tokens as u64,
+            session_totals: Some(devo_protocol::native::usage::UsageTotals {
+                total_tokens: self.session_totals.total_tokens as u64,
+                input_tokens: self.session_totals.input_tokens as u64,
+                output_tokens: self.session_totals.output_tokens as u64,
+                reasoning_tokens: 0,
+                cache_read_input_tokens: self.session_totals.cache_read_input_tokens as u64,
+                cache_creation_input_tokens: self.session_totals.cache_creation_input_tokens as u64,
+                call_count: 0,
+                metered_call_count: 0,
+                failed_call_count: 0,
+                cancelled_call_count: 0,
+                estimated_cost: None,
+            }),
             context_window: self.context_window,
         }
     }
@@ -589,11 +613,11 @@ impl ParentUsageSnapshot {
         self,
         state: &mut crate::runtime::session_actor::state::SessionActorState,
     ) {
-        self.apply_to_summary(&mut state.summary);
+        self.clone().apply_to_summary(&mut state.summary);
         if let Some(active_turn) = state.active_turn.as_mut()
-            && active_turn.turn_id == self.turn_id
+            && active_turn.turn_id() == self.turn_id
         {
-            active_turn.usage = Some(self.turn_usage.to_turn_usage());
+            active_turn.native.usage = Some(self.turn_usage.to_turn_usage());
         }
         state.core.total_input_tokens = self.session_totals.input_tokens;
         state.core.total_output_tokens = self.session_totals.output_tokens;
@@ -602,24 +626,18 @@ impl ParentUsageSnapshot {
         state.core.total_cache_read_tokens = self.session_totals.cache_read_input_tokens;
     }
 
-    fn apply_to_summary(self, summary: &mut crate::session::SessionMetadata) {
-        summary.total_input_tokens = self.session_totals.input_tokens;
-        summary.total_output_tokens = self.session_totals.output_tokens;
-        summary.total_tokens = self.session_totals.total_tokens;
-        summary.total_cache_creation_tokens = self.session_totals.cache_creation_input_tokens;
-        summary.total_cache_read_tokens = self.session_totals.cache_read_input_tokens;
+    fn apply_to_summary(self, summary: &mut crate::runtime_session_summary::RuntimeSessionSummary) {
+        summary.set_cumulative_usage(
+            self.session_totals.input_tokens,
+            self.session_totals.output_tokens,
+            self.session_totals.total_tokens,
+            self.session_totals.cache_creation_input_tokens,
+            self.session_totals.cache_read_input_tokens,
+        );
         // Context length is latest query usage, not cumulative session totals.
         summary.last_query_usage = Some(self.latest_query_usage.to_turn_usage());
         summary.last_query_total_tokens = self.latest_query_usage.total_tokens;
     }
-}
-
-fn saturating_u32(value: usize) -> u32 {
-    value.try_into().unwrap_or(u32::MAX)
-}
-
-fn nonzero_saturating_u32(value: usize) -> Option<u32> {
-    (value > 0).then(|| saturating_u32(value))
 }
 
 #[cfg(test)]

@@ -20,7 +20,6 @@ use devo_protocol::TurnId;
 use crate::db::Database;
 use crate::goal::Goal;
 use crate::goal::GoalBudget;
-use crate::goal::GoalId;
 use crate::goal::GoalStatus;
 use crate::goal::GoalUsage;
 use crate::goal::TurnRef;
@@ -59,16 +58,17 @@ impl GoalDurableStore {
         }
         let record = DurableRecord::GoalCreated(GoalCreatedRecord {
             schema_version: 1,
-            goal_id: goal.durable_goal_id,
+            goal_id: goal.goal_id,
             session_id: goal.session_id,
             turn_id: goal
                 .created_turn_id
+                .as_ref()
                 .map(|turn_ref| turn_ref.turn_id)
                 .unwrap_or_default(),
-            prompt: goal.prompt.clone(),
+            prompt: goal.objective.clone(),
             description: goal.description.clone(),
             max_iterations: goal.budget.max_turns,
-            budget: durable_budget_from_goal(&goal.budget),
+            budget: (!goal.budget.is_unbounded()).then(|| goal.budget.clone()),
             created_at: goal.created_at,
         });
         self.store.append(goal.session_id, record).await?;
@@ -86,11 +86,11 @@ impl GoalDurableStore {
         }
         let record = DurableRecord::GoalStatusChanged(GoalStatusChangedRecord {
             schema_version: 1,
-            goal_id: goal.durable_goal_id,
+            goal_id: goal.goal_id,
             session_id: goal.session_id,
-            previous_status: durable_status_from_goal(previous_status),
-            new_status: durable_status_from_goal(goal.status),
-            reason: reason.or_else(|| durable_status_reason(goal.status)),
+            previous_status,
+            new_status: goal.status,
+            reason,
             changed_at: goal.updated_at,
         });
         self.store.append(goal.session_id, record).await?;
@@ -110,12 +110,12 @@ impl GoalDurableStore {
         }
         let record = DurableRecord::GoalBudgetAccounted(GoalBudgetAccountedRecord {
             schema_version: 1,
-            goal_id: goal.durable_goal_id,
+            goal_id: goal.goal_id,
             session_id: goal.session_id,
             turn_id,
-            budget_delta: devo_core::GoalBudget {
+            budget_delta: GoalBudget {
                 max_turns: (turn_delta > 0).then_some(turn_delta),
-                max_tokens: (token_delta > 0).then_some(token_delta),
+                token_budget: (token_delta > 0).then_some(token_delta),
                 max_duration_seconds: (duration_delta_seconds > 0)
                     .then_some(duration_delta_seconds),
             },
@@ -138,7 +138,7 @@ impl GoalDurableStore {
         let record =
             DurableRecord::GoalContextSnapshotRecorded(GoalContextSnapshotRecordedRecord {
                 schema_version: 1,
-                goal_id: goal.durable_goal_id,
+                goal_id: goal.goal_id,
                 session_id: goal.session_id,
                 snapshot_id,
                 summary,
@@ -189,10 +189,9 @@ impl GoalDurableStore {
             match record {
                 DurableRecord::GoalCreated(record) => {
                     goal = Some(Goal {
-                        goal_id: GoalId::from_durable(record.goal_id),
-                        durable_goal_id: record.goal_id,
+                        goal_id: record.goal_id,
                         session_id: record.session_id,
-                        prompt: record.prompt,
+                        objective: record.prompt,
                         description: record.description,
                         status: GoalStatus::Active,
                         created_turn_id: Some(TurnRef {
@@ -201,7 +200,7 @@ impl GoalDurableStore {
                         }),
                         created_at: record.created_at,
                         updated_at: record.created_at,
-                        budget: goal_budget_from_durable(record.budget),
+                        budget: record.budget.unwrap_or_default(),
                         usage: GoalUsage::default(),
                         progress_summary: None,
                         blocker_summary: None,
@@ -209,45 +208,38 @@ impl GoalDurableStore {
                     });
                 }
                 DurableRecord::GoalStatusChanged(record) => {
-                    if let Some(goal) = goal
-                        .as_mut()
-                        .filter(|goal| goal.durable_goal_id == record.goal_id)
+                    if let Some(goal) = goal.as_mut().filter(|goal| goal.goal_id == record.goal_id)
                     {
-                        goal.status =
-                            goal_status_from_durable(record.new_status, record.reason.as_deref());
+                        goal.status = record.new_status;
                         match record.new_status {
-                            devo_core::GoalStatus::Completed => {
+                            GoalStatus::Completed => {
                                 goal.verification_summary = record.reason;
                             }
-                            devo_core::GoalStatus::Paused
-                            | devo_core::GoalStatus::Blocked
-                            | devo_core::GoalStatus::Failed => {
+                            GoalStatus::Paused
+                            | GoalStatus::Blocked
+                            | GoalStatus::UsageLimited
+                            | GoalStatus::BudgetLimited
+                            | GoalStatus::Failed => {
                                 goal.blocker_summary = record.reason;
                             }
-                            devo_core::GoalStatus::Active
-                            | devo_core::GoalStatus::Canceled
-                            | devo_core::GoalStatus::Cleared => {}
+                            GoalStatus::Active | GoalStatus::Canceled | GoalStatus::Cleared => {}
                         }
                         goal.updated_at = record.changed_at;
                     }
                 }
                 DurableRecord::GoalBudgetAccounted(record) => {
-                    if let Some(goal) = goal
-                        .as_mut()
-                        .filter(|goal| goal.durable_goal_id == record.goal_id)
+                    if let Some(goal) = goal.as_mut().filter(|goal| goal.goal_id == record.goal_id)
                     {
                         goal.usage.turns_used += record.budget_delta.max_turns.unwrap_or_default();
                         goal.usage.tokens_used +=
-                            record.budget_delta.max_tokens.unwrap_or_default();
-                        goal.usage.duration_seconds +=
+                            record.budget_delta.token_budget.unwrap_or_default();
+                        goal.usage.time_used_seconds +=
                             record.budget_delta.max_duration_seconds.unwrap_or_default();
                         goal.updated_at = record.recorded_at;
                     }
                 }
                 DurableRecord::GoalProgressRecorded(record) => {
-                    if let Some(goal) = goal
-                        .as_mut()
-                        .filter(|goal| goal.durable_goal_id == record.goal_id)
+                    if let Some(goal) = goal.as_mut().filter(|goal| goal.goal_id == record.goal_id)
                     {
                         apply_progress_record(goal, record);
                     }
@@ -255,7 +247,7 @@ impl GoalDurableStore {
                 DurableRecord::GoalCleared(record) => {
                     if goal
                         .as_ref()
-                        .is_some_and(|goal| goal.durable_goal_id == record.goal_id)
+                        .is_some_and(|goal| goal.goal_id == record.goal_id)
                     {
                         goal = None;
                     }
@@ -335,17 +327,15 @@ impl GoalDurableStore {
                 }
                 Err(error) => return Err(anyhow::anyhow!("parse goal rollout: {error}")),
             };
-            let devo_core::ParsedRolloutLine::V2(line) = parsed else {
-                continue;
-            };
-            if let devo_core::RolloutLineV2::Internal {
+            let line = parsed;
+            if let devo_core::RolloutLine::Internal {
                 entry:
-                    devo_core::InternalRecordV2::GoalState {
+                    devo_core::InternalRecord::GoalState {
                         schema_version,
                         goal,
                     },
                 ..
-            } = *line
+            } = line
             {
                 anyhow::ensure!(
                     schema_version == 1,
@@ -377,75 +367,21 @@ impl GoalDurableStore {
     }
 }
 
-fn durable_budget_from_goal(budget: &GoalBudget) -> Option<devo_core::GoalBudget> {
-    (budget.max_turns.is_some()
-        || budget.max_tokens.is_some()
-        || budget.max_duration_seconds.is_some())
-    .then_some(devo_core::GoalBudget {
-        max_turns: budget.max_turns,
-        max_tokens: budget.max_tokens,
-        max_duration_seconds: budget.max_duration_seconds,
-    })
-}
-
-fn goal_budget_from_durable(budget: Option<devo_core::GoalBudget>) -> GoalBudget {
-    let Some(budget) = budget else {
-        return GoalBudget::default();
-    };
+fn remaining_budget(goal: &Goal) -> GoalBudget {
     GoalBudget {
-        max_turns: budget.max_turns,
-        max_tokens: budget.max_tokens,
-        max_duration_seconds: budget.max_duration_seconds,
-    }
-}
-
-fn remaining_budget(goal: &Goal) -> devo_core::GoalBudget {
-    devo_core::GoalBudget {
         max_turns: goal
             .budget
             .max_turns
             .map(|budget| budget.saturating_sub(goal.usage.turns_used)),
-        max_tokens: goal
+        token_budget: goal
             .budget
-            .max_tokens
+            .token_budget
             .map(|budget| budget.saturating_sub(goal.usage.tokens_used)),
         max_duration_seconds: goal
             .budget
             .max_duration_seconds
-            .map(|budget| budget.saturating_sub(goal.usage.duration_seconds)),
+            .map(|budget| budget.saturating_sub(goal.usage.time_used_seconds)),
     }
-}
-
-fn durable_status_from_goal(status: GoalStatus) -> devo_core::GoalStatus {
-    match status {
-        GoalStatus::Active => devo_core::GoalStatus::Active,
-        GoalStatus::Paused => devo_core::GoalStatus::Paused,
-        GoalStatus::BudgetLimited => devo_core::GoalStatus::Blocked,
-        GoalStatus::Completed => devo_core::GoalStatus::Completed,
-        GoalStatus::Failed => devo_core::GoalStatus::Failed,
-        GoalStatus::Blocked => devo_core::GoalStatus::Blocked,
-        GoalStatus::Canceled => devo_core::GoalStatus::Canceled,
-        GoalStatus::Cleared => devo_core::GoalStatus::Cleared,
-    }
-}
-
-fn goal_status_from_durable(status: devo_core::GoalStatus, reason: Option<&str>) -> GoalStatus {
-    match status {
-        devo_core::GoalStatus::Active => GoalStatus::Active,
-        devo_core::GoalStatus::Paused => GoalStatus::Paused,
-        devo_core::GoalStatus::Completed => GoalStatus::Completed,
-        devo_core::GoalStatus::Failed => GoalStatus::Failed,
-        devo_core::GoalStatus::Blocked if reason == Some("budget_limited") => {
-            GoalStatus::BudgetLimited
-        }
-        devo_core::GoalStatus::Blocked => GoalStatus::Blocked,
-        devo_core::GoalStatus::Canceled => GoalStatus::Canceled,
-        devo_core::GoalStatus::Cleared => GoalStatus::Cleared,
-    }
-}
-
-fn durable_status_reason(status: GoalStatus) -> Option<String> {
-    (status == GoalStatus::BudgetLimited).then(|| "budget_limited".to_string())
 }
 
 fn apply_progress_record(goal: &mut Goal, record: GoalProgressRecordedRecord) {
@@ -496,8 +432,9 @@ mod tests {
         rollout_store
             .append_session_meta(&record)
             .expect("append session meta");
-        let metadata = crate::persistence::session_metadata_from_record(&record, record.created_at);
-        db.upsert_session(&metadata, Some(record.rollout_path.as_path()))
+        let index_row =
+            crate::persistence::session_index_row_from_record(&record, record.created_at);
+        db.upsert_session(index_row, Some(record.rollout_path.as_path()))
             .expect("index session");
         let store = GoalDurableStore::with_primary(
             temp.path().to_path_buf(),
@@ -599,11 +536,7 @@ mod tests {
             .await
             .expect("append created");
         store
-            .append_goal_cleared(
-                session_id,
-                goal.durable_goal_id,
-                Some("user clear".to_string()),
-            )
+            .append_goal_cleared(session_id, goal.goal_id, Some("user clear".to_string()))
             .await
             .expect("append clear");
 

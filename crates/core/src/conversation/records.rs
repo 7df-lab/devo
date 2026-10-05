@@ -214,10 +214,23 @@ pub struct TurnRecord {
 }
 
 /// Carries a simple text payload for lightweight item kinds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TextItem {
     /// The textual payload for the item.
     pub text: String,
+    /// Local image paths attached to a user/steer message. Empty for other kinds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_image_paths: Vec<PathBuf>,
+}
+
+impl TextItem {
+    /// Text-only item with no attached local images.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            local_image_paths: Vec::new(),
+        }
+    }
 }
 
 /// Stores one tool-call request as a persisted item payload.
@@ -535,11 +548,17 @@ pub enum SessionSettingsField {
     ReasoningEffortSelection,
     /// Session collaboration mode (`SessionRecord::collaboration_mode`).
     CollaborationMode,
+    /// Root auto-refine enable (`SessionSettings.auto_refine_enabled`).
+    AutoRefineEnabled,
+    /// Root auto-refine turn interval (`SessionSettings.auto_refine_turn_interval`).
+    AutoRefineTurnInterval,
+    /// Python cell first foreground wait (`SessionSettings.python_cell_first_wait_ms`).
+    PythonCellFirstWaitMs,
 }
 
 /// Stores one field-level session settings change in the rollout file.
-/// Carried on disk as `InternalRecordV2::SessionSettings`; the legacy line
-/// exists so replay can consume it through the same `RolloutLine` channel as
+/// Carried on disk as `InternalRecord::SessionSettings`; the legacy line
+/// exists so replay can consume it through the same `LegacyRolloutLine` channel as
 /// every other record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSettingsLine {
@@ -631,9 +650,9 @@ pub struct TurnWorkspaceRestoreCompletedLine {
     pub record: TurnWorkspaceRestoreCompletedRecord,
 }
 
-/// Enumerates every canonical line type written to the rollout journal.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum RolloutLine {
+/// In-memory legacy replay records. The rollout reader does not deserialize this type.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum LegacyRolloutLine {
     /// Session metadata line.
     SessionMeta(Box<SessionMetaLine>),
     /// Turn metadata line.
@@ -670,7 +689,6 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use crate::Model;
     use crate::conversation::{ItemId, SessionId, SessionTitleState, TurnId, TurnStatus};
 
     // ── SessionRecord ──────────────────────────────────────────
@@ -891,9 +909,7 @@ mod tests {
                 tool_name: "shell_command".into(),
                 input: serde_json::json!({"command":"pwd"}),
             })],
-            output_items: vec![TurnItem::AgentMessage(TextItem {
-                text: "running".into(),
-            })],
+            output_items: vec![TurnItem::AgentMessage(TextItem::text("running"))],
             worklog: None,
             error: None,
             schema_version: 1,
@@ -945,18 +961,10 @@ mod tests {
     #[test]
     fn turn_item_all_variants_roundtrip() {
         let variants = vec![
-            TurnItem::UserMessage(TextItem {
-                text: "hello".into(),
-            }),
-            TurnItem::SteerInput(TextItem {
-                text: "steer".into(),
-            }),
-            TurnItem::AgentMessage(TextItem {
-                text: "response".into(),
-            }),
-            TurnItem::Reasoning(TextItem {
-                text: "think".into(),
-            }),
+            TurnItem::UserMessage(TextItem::text("hello")),
+            TurnItem::SteerInput(TextItem::text("steer")),
+            TurnItem::AgentMessage(TextItem::text("response")),
+            TurnItem::Reasoning(TextItem::text("think")),
             TurnItem::ToolCall(ToolCallItem {
                 tool_call_id: "t1".into(),
                 tool_name: "read".into(),
@@ -995,122 +1003,17 @@ mod tests {
                 scope: "Once".into(),
                 decision_source: None,
             }),
-            TurnItem::Plan(TextItem { text: "[]".into() }),
-            TurnItem::ContextCompaction(TextItem {
-                text: "summary".into(),
-            }),
-            TurnItem::TurnSummary(TextItem { text: "0".into() }),
-            TurnItem::WebSearch(TextItem {
-                text: "results".into(),
-            }),
-            TurnItem::HookPrompt(TextItem {
-                text: "hook".into(),
-            }),
+            TurnItem::Plan(TextItem::text("[]")),
+            TurnItem::ContextCompaction(TextItem::text("summary")),
+            TurnItem::TurnSummary(TextItem::text("0")),
+            TurnItem::WebSearch(TextItem::text("results")),
+            TurnItem::HookPrompt(TextItem::text("hook")),
         ];
 
         for variant in variants {
             let json = serde_json::to_string(&variant).expect("serialize");
             let restored: TurnItem = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(variant, restored, "roundtrip failed for variant");
-        }
-    }
-
-    // ── RolloutLine enum ──────────────────────────────────────
-
-    #[test]
-    fn rollout_line_all_variants_roundtrip() {
-        let session = make_test_session();
-        let turn = make_test_turn(TurnStatus::Running);
-        let item = make_test_item();
-
-        let variants: Vec<RolloutLine> = vec![
-            RolloutLine::SessionMeta(Box::new(SessionMetaLine {
-                timestamp: Utc::now(),
-                session: session.clone(),
-            })),
-            RolloutLine::Turn(Box::new(TurnLine {
-                timestamp: Utc::now(),
-                turn: turn.clone(),
-            })),
-            RolloutLine::Item(Box::new(ItemLine {
-                timestamp: Utc::now(),
-                item: item.clone(),
-            })),
-            RolloutLine::SessionTitleUpdated(SessionTitleUpdatedLine {
-                timestamp: Utc::now(),
-                session_id: session.id,
-                title: "New Title".into(),
-                title_state: SessionTitleState::Generating,
-                previous_title: Some("Old Title".into()),
-            }),
-            RolloutLine::SessionContextUpdated(Box::new(SessionContextUpdatedLine {
-                timestamp: Utc::now(),
-                session_id: session.id,
-                session_context: SessionContext {
-                    base_instructions: "base".into(),
-                    available_skills: None,
-                    workspace_instructions: None,
-                    locked_agents_snapshot: None,
-                    environment: crate::EnvironmentContext {
-                        cwd: ".".into(),
-                        shell: "bash".into(),
-                        current_date: "2026-07-08".into(),
-                        timezone: "UTC".into(),
-                    },
-                    language: crate::LanguageContext::default(),
-                    persona: crate::Persona::Default,
-                    model: Model {
-                        slug: "test-model".into(),
-                        ..Model::default()
-                    },
-                    reasoning_effort_selection: None,
-                    reasoning_effort: None,
-                    system_prompt_mode: crate::SystemPromptMode::CodingAgent,
-                },
-                schema_version: 1,
-            })),
-            RolloutLine::CompactionSnapshot(Box::new(CompactionSnapshotLine {
-                timestamp: Utc::now(),
-                session_id: session.id,
-                turn_id: turn.id,
-                summary_item_id: item.id,
-                preserved_item_ids: vec![item.id],
-                context_occupancy: None,
-            })),
-            RolloutLine::SessionRollback(Box::new(SessionRollbackLine {
-                timestamp: Utc::now(),
-                session_id: session.id,
-                retained_turn_ids: vec![turn.id],
-                retained_item_ids: vec![item.id],
-                latest_turn_id: Some(turn.id),
-                schema_version: 1,
-            })),
-        ];
-
-        for variant in variants {
-            let json = serde_json::to_string(&variant).expect("serialize");
-            let restored: RolloutLine = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(
-                variant, restored,
-                "roundtrip failed for RolloutLine variant"
-            );
-        }
-    }
-
-    #[test]
-    fn rollout_line_session_meta_carries_full_session_record() {
-        let session = make_test_session();
-        let line = RolloutLine::SessionMeta(Box::new(SessionMetaLine {
-            timestamp: Utc::now(),
-            session: session.clone(),
-        }));
-        let json = serde_json::to_string(&line).expect("serialize");
-        let restored: RolloutLine = serde_json::from_str(&json).expect("deserialize");
-        if let RolloutLine::SessionMeta(meta) = restored {
-            assert_eq!(meta.session.title, session.title);
-            assert_eq!(meta.session.schema_version, session.schema_version);
-        } else {
-            panic!("expected SessionMeta");
         }
     }
 
@@ -1383,10 +1286,8 @@ mod tests {
             attempt_placement: None,
             turn_status: Some(TurnStatus::Running),
             sibling_turn_ids: Vec::new(),
-            input_items: vec![TurnItem::UserMessage(TextItem {
-                text: "test".into(),
-            })],
-            output_items: vec![TurnItem::AgentMessage(TextItem { text: "ok".into() })],
+            input_items: vec![TurnItem::UserMessage(TextItem::text("test"))],
+            output_items: vec![TurnItem::AgentMessage(TextItem::text("ok"))],
             worklog: None,
             error: None,
             schema_version: 1,

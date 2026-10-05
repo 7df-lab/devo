@@ -1,8 +1,8 @@
 use super::super::*;
 use std::panic::AssertUnwindSafe;
 
-use devo_protocol::TurnFailedPayload;
 use devo_protocol::approx_tokens_from_byte_count;
+use devo_protocol::native::item::CompactionTrigger;
 use futures::FutureExt;
 
 enum CompactionTurnOutcome {
@@ -13,6 +13,31 @@ enum CompactionTurnOutcome {
 
 struct SessionCompactRequest {
     session_id: SessionId,
+}
+
+/// Options for [`ServerRuntime::run_session_compaction`].
+#[derive(Debug, Clone)]
+pub(crate) struct CompactionRunOptions {
+    pub trigger: CompactionTrigger,
+    pub custom_instructions: Option<String>,
+}
+
+impl Default for CompactionRunOptions {
+    fn default() -> Self {
+        Self {
+            trigger: CompactionTrigger::Manual,
+            custom_instructions: None,
+        }
+    }
+}
+
+fn compaction_trigger_hook_label(trigger: CompactionTrigger) -> &'static str {
+    match trigger {
+        CompactionTrigger::Manual => "manual",
+        CompactionTrigger::AgentRequested => "agentRequested",
+        CompactionTrigger::AutoThreshold => "autoThreshold",
+        CompactionTrigger::ProviderRetry => "providerRetry",
+    }
 }
 
 impl ServerRuntime {
@@ -35,13 +60,7 @@ impl ServerRuntime {
                     );
                 }
             };
-        let Ok(legacy_session_id) = SessionId::try_from(params.session_id.as_str()) else {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::SessionNotFound,
-                "session id is not addressable by this server",
-            );
-        };
+        let legacy_session_id = params.session_id;
         let response = self
             .handle_session_compact_translated(
                 request_id.clone(),
@@ -62,19 +81,18 @@ impl ServerRuntime {
                 "cannot compact while a turn is active or queued",
             );
         };
-        // `spawn_active_turn_task` has already registered runtime metadata.
+        // `spawn_active_runtime_turn_task` has already registered runtime metadata.
         // Compaction may not yet have a stream/spawn snapshot, so the mailbox
         // reservation can miss the active turn. Read the registry the same
         // way native `turn/start` does.
-        let Some(metadata) = self
+        let Some(turn) = self
             .active_turns
-            .active_turn_metadata(legacy_session_id)
+            .active_turn(legacy_session_id)
             .await
-            .filter(|turn| turn.turn_id == turn_id)
+            .filter(|turn| turn.id.as_str() == turn_id.to_string())
         else {
             return response;
         };
-        let turn = devo_protocol::native::wire_projector::native_turn_from_metadata(&metadata);
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: devo_protocol::native::rpc_turn::TurnStartResult { turn },
@@ -87,7 +105,8 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         params: SessionCompactRequest,
     ) -> serde_json::Value {
-        let Some(session_handle) = self.session(params.session_id).await else {
+        let session_id = params.session_id;
+        let Some(session_handle) = self.session(session_id).await else {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::SessionNotFound,
@@ -98,13 +117,9 @@ impl ServerRuntime {
         // Busy rejection must not wait on the session actor: turns execute
         // inline on the actor, so a mailbox round-trip here would deadlock
         // while a turn is running. `runtime_active_turn_id` reads the runtime
-        // turn cache only; the mailbox-based `try_begin_active_turn` below
+        // turn cache only; the mailbox-based `try_begin_runtime_turn` below
         // stays the authoritative admission check once the session is idle.
-        if self
-            .runtime_active_turn_id(params.session_id)
-            .await
-            .is_some()
-        {
+        if self.runtime_active_turn_id(session_id).await.is_some() {
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::TurnAlreadyRunning,
@@ -123,7 +138,7 @@ impl ServerRuntime {
 
         let requested_model = session_model_selection(&reservation.summary);
         let requested_reasoning_effort_selection =
-            reservation.summary.reasoning_effort_selection.clone();
+            reservation.summary.settings.reasoning_effort.clone();
         let turn_config = reservation
             .runtime_context
             .resolve_turn_config(requested_model, requested_reasoning_effort_selection);
@@ -132,30 +147,43 @@ impl ServerRuntime {
             .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
         let request_model = turn_config.provider_request_model(&resolved_request.request_model);
         let now = Utc::now();
-        let turn = TurnMetadata {
-            turn_id: TurnId::new(),
-            session_id: params.session_id,
-            sequence: reservation
-                .latest_turn
-                .as_ref()
-                .map_or(1, |turn| turn.sequence + 1),
-            status: TurnStatus::Running,
-            kind: devo_core::TurnKind::ManualCompaction,
-            model: turn_config.model.slug.clone(),
-            model_binding_id: turn_config.model_binding_id.clone(),
-            reasoning_effort_selection: turn_config.reasoning_effort_selection.clone(),
-            reasoning_effort: resolved_request.effective_reasoning_effort,
-            request_model,
-            request_thinking: resolved_request.request_thinking,
-            started_at: now,
-            completed_at: None,
-            usage: None,
-            stop_reason: None,
-            failure_reason: None,
+        let native_turn_id = devo_protocol::native::ids::TurnId::new();
+        let turn_id = native_turn_id;
+        let native_session_id = reservation.summary.native.id;
+        let runtime_turn = crate::turn::RuntimeTurn {
+            native: devo_protocol::native::turn::Turn {
+                id: native_turn_id,
+                session_id: native_session_id,
+                sequence: reservation
+                    .latest_turn
+                    .as_ref()
+                    .map_or(1, |turn| turn.native.sequence + 1),
+                kind: devo_protocol::native::turn::TurnKind::Compaction,
+                status: devo_protocol::native::turn::TurnStatus::InProgress,
+                model: devo_protocol::native::model::ModelBinding {
+                    provider: turn_config
+                        .model_binding_id
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    model: request_model,
+                    variant: None,
+                    reasoning_effort: resolved_request.effective_reasoning_effort,
+                },
+                collaboration_mode: None,
+                started_at: now,
+                completed_at: None,
+                error: None,
+                usage: None,
+            },
+            extras: crate::turn::RuntimeTurnExtras {
+                request_thinking: resolved_request.request_thinking,
+                stop_reason: None,
+                failure_reason: None,
+            },
         };
 
         if !session_handle
-            .try_begin_active_turn(turn.clone(), turn_config)
+            .try_begin_runtime_turn(runtime_turn.clone(), turn_config)
             .await
             .unwrap_or(false)
         {
@@ -167,14 +195,12 @@ impl ServerRuntime {
         }
 
         if let Some(persistence) = session_handle.turn_persistence_snapshot().await
-            && persistence.record.is_some()
+            && persistence.rollout_path.is_some()
             && let Err(error) = self
-                .persist_turn_line_deduped(params.session_id, &turn)
+                .persist_turn_line_deduped(session_id, &runtime_turn)
                 .await
         {
-            let _ = session_handle
-                .clear_active_turn_if_matches(turn.turn_id)
-                .await;
+            let _ = session_handle.clear_active_turn_if_matches(turn_id).await;
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::InternalError,
@@ -183,39 +209,41 @@ impl ServerRuntime {
         }
 
         let runtime = Arc::clone(self);
-        let session_id = params.session_id;
-        let turn_for_task = turn.clone();
+        let turn_for_task = runtime_turn.clone();
         let session_handle_for_task = session_handle.clone();
+        let post_spawn_session_id = session_id;
         if let Some(spawn) = session_handle.spawn_snapshot().await {
-            self.register_turn_spawn_snapshot(session_id, turn.turn_id, Arc::new(spawn))
+            self.register_turn_spawn_snapshot(session_id, turn_id, Arc::new(spawn))
                 .await;
         }
-        self.spawn_active_turn_task(
+        self.spawn_active_runtime_turn_task(
             session_id,
-            turn.clone(),
+            runtime_turn.clone(),
             /*connection_id*/ None,
             async move {
+                let compaction_session_id = session_id;
                 let runtime_for_panic = Arc::clone(&runtime);
                 let session_handle_for_panic = session_handle_for_task.clone();
                 let turn_for_panic = turn_for_task.clone();
                 if let Err(panic) = AssertUnwindSafe(runtime.run_session_compaction(
-                    session_id,
+                    compaction_session_id,
                     session_handle_for_task,
                     turn_for_task,
+                    CompactionRunOptions::default(),
                 ))
                 .catch_unwind()
                 .await
                 {
                     tracing::error!(
-                        session_id = %session_id,
-                        turn_id = %turn_for_panic.turn_id,
+                        session_id = %compaction_session_id,
+                        turn_id = %turn_for_panic.turn_id(),
                         panic = ?panic,
                         "session compaction task panicked"
                     );
                     runtime_for_panic
                         .finalize_manual_compaction_turn(
                             &session_handle_for_panic,
-                            session_id,
+                            compaction_session_id,
                             turn_for_panic.clone(),
                             CompactionTurnOutcome::Failed {
                                 message: "compaction failed: panicked".to_string(),
@@ -226,66 +254,61 @@ impl ServerRuntime {
                     // If the panic happened after claim, finalize is a no-op — still
                     // recover so the session is not left without terminal events.
                     if runtime_for_panic
-                        .recent_terminal_turn_status(turn_for_panic.turn_id)
+                        .recent_terminal_turn_status(turn_for_panic.turn_id())
                         .await
                         .is_none()
                     {
                         let _ = runtime_for_panic
                             .recover_orphaned_manual_compaction_interrupt(
                                 &session_handle_for_panic,
-                                session_id,
-                                turn_for_panic.turn_id,
+                                compaction_session_id,
+                                turn_for_panic.turn_id(),
                             )
                             .await;
                         if runtime_for_panic
-                            .recent_terminal_turn_status(turn_for_panic.turn_id)
+                            .recent_terminal_turn_status(turn_for_panic.turn_id())
                             .await
                             .is_none()
                         {
                             // Actor claim may have cleared runtime metadata too; force
                             // a Failed terminal so admission reopens.
                             let mut failed = turn_for_panic;
-                            failed.status = TurnStatus::Failed;
-                            failed.completed_at = Some(Utc::now());
+                            failed.native.status = devo_protocol::native::turn::TurnStatus::Failed;
+                            failed.native.completed_at = Some(Utc::now());
+                            failed.native.error =
+                                Some(devo_protocol::native::error::AgentError::new(
+                                    "COMPACTION_FAILED",
+                                    "compaction failed: panicked",
+                                ));
+                            let failed_runtime = failed.clone();
                             session_handle_for_panic
-                                .set_session_idle(Some(failed.clone()))
+                                .set_runtime_session_idle(Some(failed_runtime.clone()))
                                 .await;
                             runtime_for_panic
-                                .clear_active_turn_runtime_handles(session_id)
+                                .clear_active_turn_runtime_handles(compaction_session_id)
                                 .await;
                             runtime_for_panic
-                                .broadcast_event(ServerEvent::SessionCompactionFailed(
-                                    SessionCompactionFailedPayload {
-                                        session_id,
+                                .broadcast_notification(
+                                    devo_protocol::native::event::ServerNotification::ContextCompactionFailed {
+                                        session_id: failed_runtime.native.session_id,
                                         message: "compaction failed: panicked".to_string(),
                                     },
-                                ))
+                                )
                                 .await;
                             runtime_for_panic
-                                .broadcast_event(ServerEvent::TurnFailed(TurnFailedPayload {
-                                    session_id,
-                                    turn: failed.clone(),
-                                    error: None,
-                                }))
+                                .broadcast_notification(
+            devo_protocol::native::event::ServerNotification::TurnCompleted {
+                turn: Box::new(failed_runtime.native.clone()),
+            },
+        )
                                 .await;
                             runtime_for_panic
-                                .broadcast_event(ServerEvent::TurnCompleted(TurnEventPayload {
-                                    session_id,
-                                    turn: failed.clone(),
-                                }))
-                                .await;
-                            runtime_for_panic
-                                .broadcast_event(ServerEvent::SessionStatusChanged(
-                                    SessionStatusChangedPayload {
-                                        session_id,
-                                        status: SessionRuntimeStatus::Idle,
-                                    },
-                                ))
+                                .broadcast_notification(devo_protocol::native::event::ServerNotification::session_status_changed(compaction_session_id, SessionStatus::Idle, /*active_turn_id*/ None))
                                 .await;
                             runtime_for_panic
                                 .record_terminal_turn_status(
-                                    failed.turn_id,
-                                    TerminalTurnSnapshot::from_turn(&failed),
+                                    failed.turn_id(),
+                                    TerminalTurnSnapshot::from_runtime_turn(&failed),
                                 )
                                 .await;
                         }
@@ -296,47 +319,204 @@ impl ServerRuntime {
         .await;
 
         tracing::info!(
-            session_id = %session_id,
-            turn_id = %turn.turn_id,
-            sequence = turn.sequence,
+            session_id = %post_spawn_session_id,
+            turn_id = %runtime_turn.turn_id(),
+            sequence = runtime_turn.native.sequence,
             "started manual compaction turn"
         );
-        self.broadcast_event(ServerEvent::SessionStatusChanged(
-            SessionStatusChangedPayload {
-                session_id,
-                status: SessionRuntimeStatus::ActiveTurn,
-            },
-        ))
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::session_status_changed(
+                post_spawn_session_id,
+                SessionStatus::Active,
+                /*active_turn_id*/ None,
+            ),
+        )
         .await;
-        self.broadcast_event(ServerEvent::TurnStarted(TurnEventPayload {
-            session_id,
-            turn: turn.clone(),
-        }))
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::TurnStarted {
+                turn: Box::new(runtime_turn.native.clone()),
+            },
+        )
         .await;
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: TurnStartResult::Started {
-                turn_id: turn.turn_id,
-                status: turn.status.clone(),
+                turn_id,
+                status: TurnStatus::Running,
                 accepted_at: now,
             },
         })
         .expect("serialize session/compact response")
     }
 
+    /// Admit a ManualCompaction turn and **await** compaction for an
+    /// agent-requested (`compact.run`) schedule. Used at turn end before refine.
+    pub(crate) async fn execute_agent_requested_compaction(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        instructions: Option<String>,
+    ) {
+        let Some(session_handle) = self.session(session_id).await else {
+            tracing::warn!(
+                %session_id,
+                "agent-requested compaction skipped: session unavailable"
+            );
+            return;
+        };
+        if self.runtime_active_turn_id(session_id).await.is_some() {
+            tracing::warn!(
+                %session_id,
+                "agent-requested compaction skipped: turn still active"
+            );
+            return;
+        }
+
+        let turn = {
+            let _state_change_guard = session_handle.lock_state_change().await;
+            let Some(reservation) = session_handle.turn_reservation_snapshot().await else {
+                tracing::warn!(
+                    %session_id,
+                    "agent-requested compaction skipped: session unavailable"
+                );
+                return;
+            };
+
+            let requested_model = session_model_selection(&reservation.summary);
+            let requested_reasoning_effort_selection =
+                reservation.summary.settings.reasoning_effort.clone();
+            let turn_config = reservation
+                .runtime_context
+                .resolve_turn_config(requested_model, requested_reasoning_effort_selection);
+            let resolved_request = turn_config.model.resolve_reasoning_effort_selection(
+                turn_config.reasoning_effort_selection.as_deref(),
+            );
+            let request_model = turn_config.provider_request_model(&resolved_request.request_model);
+            let now = Utc::now();
+            let native_turn_id = devo_protocol::native::ids::TurnId::new();
+            let turn_id = native_turn_id;
+            let native_session_id = reservation.summary.native.id;
+            let runtime_turn = crate::turn::RuntimeTurn {
+                native: devo_protocol::native::turn::Turn {
+                    id: native_turn_id,
+                    session_id: native_session_id,
+                    sequence: reservation
+                        .latest_turn
+                        .as_ref()
+                        .map_or(1, |turn| turn.native.sequence + 1),
+                    kind: devo_protocol::native::turn::TurnKind::Compaction,
+                    status: devo_protocol::native::turn::TurnStatus::InProgress,
+                    model: devo_protocol::native::model::ModelBinding {
+                        provider: turn_config
+                            .model_binding_id
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        model: request_model,
+                        variant: None,
+                        reasoning_effort: resolved_request.effective_reasoning_effort,
+                    },
+                    collaboration_mode: None,
+                    started_at: now,
+                    completed_at: None,
+                    error: None,
+                    usage: None,
+                },
+                extras: crate::turn::RuntimeTurnExtras {
+                    request_thinking: resolved_request.request_thinking,
+                    stop_reason: None,
+                    failure_reason: None,
+                },
+            };
+
+            if !session_handle
+                .try_begin_runtime_turn(runtime_turn.clone(), turn_config)
+                .await
+                .unwrap_or(false)
+            {
+                tracing::warn!(
+                    %session_id,
+                    "agent-requested compaction skipped: could not admit turn"
+                );
+                return;
+            }
+
+            if let Some(persistence) = session_handle.turn_persistence_snapshot().await
+                && persistence.rollout_path.is_some()
+                && let Err(error) = self
+                    .persist_turn_line_deduped(session_id, &runtime_turn)
+                    .await
+            {
+                let _ = session_handle.clear_active_turn_if_matches(turn_id).await;
+                tracing::warn!(
+                    %session_id,
+                    %error,
+                    "agent-requested compaction failed to persist turn start"
+                );
+                return;
+            }
+
+            if let Some(spawn) = session_handle.spawn_snapshot().await {
+                self.register_turn_spawn_snapshot(session_id, turn_id, Arc::new(spawn))
+                    .await;
+            }
+            runtime_turn
+        };
+
+        let runtime_turn = turn.clone();
+        self.register_active_runtime_turn_execution(
+            session_id,
+            runtime_turn.clone(),
+            /*connection_id*/ None,
+        )
+        .await;
+        tracing::info!(
+            session_id = %session_id,
+            turn_id = %runtime_turn.turn_id(),
+            sequence = runtime_turn.native.sequence,
+            "started agent-requested compaction turn"
+        );
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::session_status_changed(
+                session_id,
+                SessionStatus::Active,
+                /*active_turn_id*/ None,
+            ),
+        )
+        .await;
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::TurnStarted {
+                turn: Box::new(runtime_turn.native.clone()),
+            },
+        )
+        .await;
+
+        Arc::clone(self)
+            .run_session_compaction(
+                session_id,
+                session_handle,
+                turn,
+                CompactionRunOptions {
+                    trigger: CompactionTrigger::AgentRequested,
+                    custom_instructions: instructions,
+                },
+            )
+            .await;
+    }
+
     pub(crate) async fn run_session_compaction(
         self: Arc<Self>,
         session_id: SessionId,
         session_handle: crate::runtime::session_actor::SessionHandle,
-        turn: TurnMetadata,
+        turn: crate::turn::RuntimeTurn,
+        options: CompactionRunOptions,
     ) {
         tracing::info!(
             session_id = %session_id,
-            turn_id = %turn.turn_id,
+            turn_id = %turn.turn_id(),
+            trigger = ?options.trigger,
             "session compaction task started"
         );
-        let Some(started_summary) = session_handle.summary().await else {
+        let Some(started_session) = session_handle.native_session().await else {
             self.finalize_manual_compaction_turn(
                 &session_handle,
                 session_id,
@@ -349,30 +529,36 @@ impl ServerRuntime {
             .await;
             return;
         };
-        self.broadcast_event(ServerEvent::SessionCompactionStarted(
-            devo_protocol::SessionCompactionStartedPayload {
-                session: started_summary,
-                turn_id: turn.turn_id,
-                trigger: devo_protocol::native::item::CompactionTrigger::Manual,
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::ContextCompactionStarted {
+                session_id: started_session.id,
+                turn_id: turn.native.id,
+                trigger: options.trigger,
             },
-        ))
+        )
         .await;
         // Surface "Compacting context" in the Desktop transcript as soon as
         // manual compaction begins — not only after summarization finishes.
-        let compaction_item_id = devo_core::ItemId::new();
-        self.broadcast_event(super::super::turn_exec::manual_compaction_started_event(
-            session_id,
-            turn.turn_id,
+        let compaction_item_id = devo_protocol::native::ids::ItemId::new();
+        self.broadcast_notification(super::super::turn_exec::manual_compaction_started_event(
+            turn.native.session_id,
+            turn.native.id,
             compaction_item_id,
             /*item_seq*/ None,
         ))
         .await;
+        let trigger_label = compaction_trigger_hook_label(options.trigger);
+        let custom_instructions = options
+            .custom_instructions
+            .as_ref()
+            .map(|s| serde_json::Value::String(s.clone()))
+            .unwrap_or(serde_json::Value::Null);
         self.run_session_hook(
             session_id,
             devo_core::HookEvent::PreCompact,
             serde_json::Map::from_iter([
-                ("trigger".to_string(), serde_json::json!("manual")),
-                ("custom_instructions".to_string(), serde_json::Value::Null),
+                ("trigger".to_string(), serde_json::json!(trigger_label)),
+                ("custom_instructions".to_string(), custom_instructions),
             ]),
         )
         .await;
@@ -447,7 +633,7 @@ impl ServerRuntime {
 
         tracing::debug!(
             session_id = %session_id,
-            turn_id = %turn.turn_id,
+            turn_id = %turn.turn_id(),
             model = %model_slug,
             request_model = %request_model,
             item_count = items.len(),
@@ -477,7 +663,7 @@ impl ServerRuntime {
                     .provider_for_route(provider_route)
             },
             session_id,
-            Some(turn.turn_id),
+            Some(turn.turn_id()),
             devo_protocol::native::usage::UsagePurpose::Compaction,
         );
         let summarizer =
@@ -510,7 +696,7 @@ impl ServerRuntime {
                 drop(state_change_guard);
                 tracing::info!(
                     session_id = %session_id,
-                    turn_id = %turn.turn_id,
+                    turn_id = %turn.turn_id(),
                     "session compaction canceled"
                 );
                 self.finalize_manual_compaction_turn(
@@ -550,36 +736,67 @@ impl ServerRuntime {
                     .await;
                     return;
                 };
+                let mut summary_item = summary_item_from_compacted(
+                    &compacted_items,
+                    devo_protocol::native::item::CompactionTrigger::Manual,
+                );
+                // Manual compaction has no post-compaction occupancy yet;
+                // record what the context held before it.
+                if let devo_protocol::native::item::Item::ContextCompaction { before, .. } =
+                    &mut summary_item
+                {
+                    *before = crate::persisted_native_item::context_usage_from_occupancy(
+                        runtime_session.summary.last_context_occupancy.as_ref(),
+                    );
+                }
                 // A failed write must leave the previous prompt installed.
-                if let Some(record) = runtime_session.record.clone() {
+                if let Some(rollout_path) = runtime_session.rollout_path.clone() {
+                    // Chain the summary item into the transcript tree: write
+                    // its parent edge and the advanced session-leaf pointer so
+                    // active-path scoping keeps the compaction row. The actor
+                    // re-derives its tip from the rollout's leaf line when
+                    // `replace_state` runs below.
+                    let prep = session_handle.prepare_persist_item(turn.native.id).await;
+                    let parent_id = prep.as_ref().and_then(|prep| prep.transcript_leaf_id);
+                    let leaf_epoch = prep
+                        .as_ref()
+                        .map_or(1, |prep| prep.leaf_epoch.saturating_add(1));
                     let persist = CompactionSummaryPersist {
                         session_id,
-                        turn_id: turn.turn_id,
+                        turn_id: turn.native.id,
                         summary_item_id: compaction_item_id,
                         item_seq: runtime_session.next_item_seq,
-                        summary_turn_item: summary_turn_item_from_compacted(&compacted_items),
+                        summary_item: summary_item.clone(),
                         snapshot: build_compaction_snapshot_line(
-                            session_id,
-                            turn.turn_id,
-                            compaction_item_id,
+                            &session_id,
+                            &turn.native.id,
+                            &compaction_item_id,
                             preserved_item_ids_from_compacted(
                                 &runtime_session.persisted_turn_items,
                                 &compacted_items,
                             ),
                             runtime_session.summary.last_context_occupancy.clone(),
                         ),
+                        parent_id,
+                        leaf_epoch,
                     };
                     let runtime = Arc::clone(&self);
                     let committed = tokio::task::spawn_blocking(move || {
                         append_compaction_summary_and_snapshot(
                             &runtime.rollout_store,
-                            &record,
+                            &rollout_path,
                             persist,
                         )
                     })
                     .await;
                     if let Err(error) = committed.unwrap_or_else(|error| Err(error.into())) {
                         drop(state_change_guard);
+                        tracing::warn!(
+                            session_id = %session_id,
+                            turn_id = %turn.turn_id(),
+                            error = %error,
+                            "manual compaction persistence failed"
+                        );
                         self.finalize_manual_compaction_turn(
                             &session_handle,
                             session_id,
@@ -596,7 +813,7 @@ impl ServerRuntime {
                 // Claim terminalization before mutating history so an interrupt that
                 // already took `active_turn` cannot race with replace_state.
                 if session_handle
-                    .clear_active_turn_if_matches(turn.turn_id)
+                    .clear_active_turn_if_matches(turn.turn_id())
                     .await
                     != Some(true)
                 {
@@ -635,8 +852,7 @@ impl ServerRuntime {
                         core_session.prompt_token_estimate = compacted_prompt_token_estimate;
                         let model = runtime_session
                             .summary
-                            .model
-                            .as_deref()
+                            .model_name()
                             .and_then(|slug| {
                                 runtime_session
                                     .runtime_context
@@ -647,8 +863,7 @@ impl ServerRuntime {
                             .or_else(|| {
                                 runtime_session
                                     .summary
-                                    .model_binding_id
-                                    .as_deref()
+                                    .model_binding_id()
                                     .and_then(|binding| {
                                         runtime_session
                                             .runtime_context
@@ -659,6 +874,7 @@ impl ServerRuntime {
                             });
                         let window = runtime_session
                             .summary
+                            .settings
                             .effective_context_window
                             .or_else(|| {
                                 model
@@ -686,13 +902,13 @@ impl ServerRuntime {
                             occupancy,
                         )
                     };
-                    runtime_session.summary.total_input_tokens = compacted_total_input_tokens;
-                    runtime_session.summary.total_output_tokens = compacted_total_output_tokens;
-                    runtime_session.summary.total_tokens = compacted_total_tokens;
-                    runtime_session.summary.total_cache_creation_tokens =
-                        compacted_total_cache_creation_tokens;
-                    runtime_session.summary.total_cache_read_tokens =
-                        compacted_total_cache_read_tokens;
+                    runtime_session.summary.set_cumulative_usage(
+                        compacted_total_input_tokens,
+                        compacted_total_output_tokens,
+                        compacted_total_tokens,
+                        compacted_total_cache_creation_tokens,
+                        compacted_total_cache_read_tokens,
+                    );
                     runtime_session.summary.prompt_token_estimate = compacted_prompt_token_estimate;
                     runtime_session.summary.last_query_total_tokens =
                         compacted_occupancy.total_tokens as usize;
@@ -702,13 +918,13 @@ impl ServerRuntime {
 
                 if !runtime_session.summary.ephemeral {
                     let stats = crate::db::SessionStats {
-                        total_input_tokens: runtime_session.summary.total_input_tokens,
-                        total_output_tokens: runtime_session.summary.total_output_tokens,
-                        total_tokens: runtime_session.summary.total_tokens,
+                        total_input_tokens: runtime_session.summary.total_input_tokens(),
+                        total_output_tokens: runtime_session.summary.total_output_tokens(),
+                        total_tokens: runtime_session.summary.total_tokens(),
                         total_cache_creation_tokens: runtime_session
                             .summary
-                            .total_cache_creation_tokens,
-                        total_cache_read_tokens: runtime_session.summary.total_cache_read_tokens,
+                            .total_cache_creation_tokens(),
+                        total_cache_read_tokens: runtime_session.summary.total_cache_read_tokens(),
                         last_input_tokens: runtime_session.summary.prompt_token_estimate,
                         turn_count: runtime_session.summary.updated_at.timestamp() as usize,
                         prompt_token_estimate: runtime_session.summary.prompt_token_estimate,
@@ -726,27 +942,33 @@ impl ServerRuntime {
                     }
                 }
 
-                let turn_id = turn.turn_id;
+                let turn_id = turn.turn_id();
                 let item_id = compaction_item_id;
                 let item_seq = runtime_session.next_item_seq;
                 runtime_session.loaded_item_count += 1;
                 runtime_session.next_item_seq += 1;
 
-                self.broadcast_event(super::super::turn_exec::manual_compaction_completed_event(
-                    session_id, turn_id, item_id, item_seq,
-                ))
+                self.broadcast_notification(
+                    super::super::turn_exec::manual_compaction_completed_event(
+                        turn.native.session_id,
+                        turn.native.id,
+                        item_id,
+                        item_seq,
+                    ),
+                )
                 .await;
 
-                let summary_turn_item = summary_turn_item_from_compacted(&compacted_items);
-                let compact_summary = match &summary_turn_item {
-                    TurnItem::ContextCompaction(TextItem { text }) => text.clone(),
+                let compact_summary = match &summary_item {
+                    devo_protocol::native::item::Item::ContextCompaction { summary, .. } => {
+                        summary.clone().unwrap_or_default()
+                    }
                     _ => String::new(),
                 };
-                if runtime_session.record.is_some() {
+                if runtime_session.rollout_path.is_some() {
                     let snapshot = build_compaction_snapshot_line(
-                        session_id,
-                        turn_id,
-                        item_id,
+                        &session_id,
+                        &turn_id,
+                        &item_id,
                         preserved_item_ids.clone(),
                         runtime_session.summary.last_context_occupancy.clone(),
                     );
@@ -754,24 +976,25 @@ impl ServerRuntime {
                     runtime_session
                         .persisted_turn_items
                         .push(compaction_persisted_turn_item(
-                            turn_id,
-                            devo_core::TurnKind::ManualCompaction,
+                            turn.native.id,
+                            devo_protocol::native::turn::TurnKind::Compaction,
                             item_id,
-                            summary_turn_item.clone(),
+                            summary_item.clone(),
                         ));
                     if let Some(history_item) =
-                        crate::projection::history_item_from_turn_item(&summary_turn_item)
+                        crate::persisted_native_item::history_entry_from_native_item(&summary_item)
                     {
                         runtime_session.history_items.push(history_item);
                     }
                 }
 
                 let mut completed_turn = turn.clone();
-                completed_turn.status = TurnStatus::Completed;
-                completed_turn.completed_at = Some(Utc::now());
+                completed_turn.native.status = devo_protocol::native::turn::TurnStatus::Completed;
+                completed_turn.native.completed_at = Some(Utc::now());
+                let completed_runtime_turn = completed_turn.clone();
                 runtime_session.active_turn = None;
-                runtime_session.latest_turn = Some(completed_turn.clone());
-                runtime_session.summary.status = SessionRuntimeStatus::Idle;
+                runtime_session.latest_turn = Some(completed_runtime_turn.clone());
+                runtime_session.summary.set_status(SessionStatus::Idle);
                 let summary = runtime_session.summary.clone();
                 session_handle
                     .replace_state(
@@ -782,15 +1005,29 @@ impl ServerRuntime {
                     .await;
                 drop(state_change_guard);
                 self.clear_active_turn_runtime_handles(session_id).await;
+                // Follow-ups queued while compacting must run next: a manual
+                // compaction turn never runs the turn_exec post-turn pipeline,
+                // so drain here once the session is idle again — otherwise the
+                // queued message strands and makes TryBeginActiveTurn reject
+                // every later turn ("active or queued"). This mirrors the drain
+                // in finalize_manual_compaction_turn for the non-replaced
+                // outcomes.
+                let drain_runtime = Arc::clone(&self);
+                let drain_session_id = session_id;
+                tokio::spawn(async move {
+                    drain_runtime
+                        .spawn_next_turn_from_queue(drain_session_id)
+                        .await;
+                });
                 if let Some(persistence) = session_handle.turn_persistence_snapshot().await
-                    && persistence.record.is_some()
+                    && persistence.rollout_path.is_some()
                     && let Err(error) = self
                         .persist_turn_line_deduped(session_id, &completed_turn)
                         .await
                 {
                     tracing::warn!(
                         session_id = %session_id,
-                        turn_id = %completed_turn.turn_id,
+                        turn_id = %completed_turn.turn_id(),
                         error = %error,
                         "failed to persist compaction turn completion"
                     );
@@ -799,7 +1036,7 @@ impl ServerRuntime {
                     session_id,
                     devo_core::HookEvent::PostCompact,
                     serde_json::Map::from_iter([
-                        ("trigger".to_string(), serde_json::json!("manual")),
+                        ("trigger".to_string(), serde_json::json!(trigger_label)),
                         (
                             "compact_summary".to_string(),
                             serde_json::Value::String(compact_summary),
@@ -809,41 +1046,41 @@ impl ServerRuntime {
                 .await;
                 tracing::info!(
                     session_id = %session_id,
-                    turn_id = %completed_turn.turn_id,
+                    turn_id = %completed_turn.turn_id(),
                     "session compaction completed with replacement"
                 );
                 if let Some(occupancy) = summary.last_context_occupancy.clone() {
-                    self.broadcast_event(ServerEvent::ContextUsageUpdated(
-                        crate::ContextUsageUpdatedPayload {
-                            session_id,
+                    self.broadcast_notification(
+                        devo_protocol::native::event::ServerNotification::ContextUsageUpdated {
+                            session_id: summary.native.id,
                             occupancy,
                         },
-                    ))
+                    )
                     .await;
                 }
-                self.broadcast_event(ServerEvent::SessionCompactionCompleted(
-                    devo_protocol::SessionCompactionCompletedPayload {
-                        session: summary,
-                        turn_id: completed_turn.turn_id,
-                        item_id: Some(item_id),
+                let session = session_handle
+                    .native_session()
+                    .await
+                    .unwrap_or_else(|| summary.native.clone());
+                self.broadcast_notification(
+                    devo_protocol::native::event::ServerNotification::ContextCompactionCompleted {
+                        session_id: session.id,
+                        turn_id: completed_turn.native.id,
+                        item_id,
                     },
-                ))
+                )
                 .await;
-                self.broadcast_event(ServerEvent::TurnCompleted(TurnEventPayload {
-                    session_id,
-                    turn: completed_turn.clone(),
-                }))
-                .await;
-                self.broadcast_event(ServerEvent::SessionStatusChanged(
-                    SessionStatusChangedPayload {
-                        session_id,
-                        status: SessionRuntimeStatus::Idle,
+                self.broadcast_notification(
+                    devo_protocol::native::event::ServerNotification::TurnCompleted {
+                        turn: Box::new(completed_runtime_turn.native.clone()),
                     },
-                ))
+                )
                 .await;
+                self.broadcast_notification(summary.status_changed_notification())
+                    .await;
                 self.record_terminal_turn_status(
-                    completed_turn.turn_id,
-                    TerminalTurnSnapshot::from_turn(&completed_turn),
+                    completed_turn.turn_id(),
+                    TerminalTurnSnapshot::from_runtime_turn(&completed_turn),
                 )
                 .await;
             }
@@ -851,7 +1088,7 @@ impl ServerRuntime {
                 drop(state_change_guard);
                 tracing::info!(
                     session_id = %session_id,
-                    turn_id = %turn.turn_id,
+                    turn_id = %turn.turn_id(),
                     "session compaction completed without replacement"
                 );
                 self.finalize_manual_compaction_turn(
@@ -867,7 +1104,7 @@ impl ServerRuntime {
                 drop(state_change_guard);
                 tracing::warn!(
                     session_id = %session_id,
-                    turn_id = %turn.turn_id,
+                    turn_id = %turn.turn_id(),
                     error = %error,
                     "session compaction failed"
                 );
@@ -893,39 +1130,66 @@ impl ServerRuntime {
         self: &Arc<Self>,
         session_handle: &crate::runtime::session_actor::SessionHandle,
         session_id: SessionId,
-        mut turn: TurnMetadata,
+        mut turn: crate::turn::RuntimeTurn,
         outcome: CompactionTurnOutcome,
-        compaction_item_id: Option<ItemId>,
+        compaction_item_id: Option<devo_protocol::native::ids::ItemId>,
     ) {
         // Ensure interrupt abort cannot drop us between claim and event emit.
         self.detach_active_turn_abort(session_id).await;
 
         let now = Utc::now();
-        turn.completed_at = Some(now);
-        turn.status = match &outcome {
-            CompactionTurnOutcome::Skipped => TurnStatus::Completed,
-            CompactionTurnOutcome::Failed { .. } => TurnStatus::Failed,
-            CompactionTurnOutcome::Canceled => TurnStatus::Interrupted,
+        turn.native.completed_at = Some(now);
+        turn.native.status = match &outcome {
+            CompactionTurnOutcome::Skipped => devo_protocol::native::turn::TurnStatus::Completed,
+            CompactionTurnOutcome::Failed { .. } => devo_protocol::native::turn::TurnStatus::Failed,
+            CompactionTurnOutcome::Canceled => devo_protocol::native::turn::TurnStatus::Interrupted,
         };
+        // Surface why the compaction turn failed on the turn itself — clients
+        // render `turn.error`, and without it a failed compaction shows as a
+        // bare "Error" with no explanation.
+        if let CompactionTurnOutcome::Failed { message } = &outcome {
+            turn.native.error = Some(devo_protocol::native::error::AgentError::new(
+                "COMPACTION_FAILED",
+                message.clone(),
+            ));
+        }
+        let runtime_turn = turn.clone();
 
         // Atomic claim: interrupt may have already taken `active_turn`.
         if session_handle
-            .clear_active_turn_if_matches(turn.turn_id)
+            .clear_active_turn_if_matches(turn.turn_id())
             .await
             != Some(true)
         {
             return;
         }
-        session_handle.set_session_idle(Some(turn.clone())).await;
+        session_handle
+            .set_runtime_session_idle(Some(runtime_turn.clone()))
+            .await;
         self.clear_active_turn_runtime_handles(session_id).await;
 
+        // A manual compaction turn never runs the turn_exec post-turn
+        // pipeline, so follow-ups queued while compacting would strand here
+        // forever — and their presence makes TryBeginActiveTurn reject every
+        // later turn or compaction ("active or queued"). Drain once the
+        // session is idle again.
+        let drain_runtime = Arc::clone(self);
+        let drain_session_id = session_id;
+        tokio::spawn(async move {
+            drain_runtime
+                .spawn_next_turn_from_queue(drain_session_id)
+                .await;
+        });
+
         if let Some(persistence) = session_handle.turn_persistence_snapshot().await
-            && persistence.record.is_some()
-            && let Err(error) = self.persist_turn_line_deduped(session_id, &turn).await
+            && persistence.rollout_path.is_some()
+            && let Err(error) = self
+                .persist_turn_line_deduped(session_id, &runtime_turn)
+                .await
         {
             tracing::warn!(
                 session_id = %session_id,
-                turn_id = %turn.turn_id,
+                turn_id = %turn.turn_id(),
                 error = %error,
                 "failed to persist compaction turn terminal line"
             );
@@ -936,21 +1200,23 @@ impl ServerRuntime {
         if let Some(item_id) = compaction_item_id {
             match &outcome {
                 CompactionTurnOutcome::Skipped => {
-                    self.broadcast_event(
-                        super::super::turn_exec::manual_compaction_completed_event(
-                            session_id,
-                            turn.turn_id,
+                    // Match the TUI contract: short sessions warn instead of
+                    // claiming "Context compacted" with no history change.
+                    self.broadcast_notification(
+                        super::super::turn_exec::manual_compaction_item_failed_event(
+                            turn.native.session_id,
+                            turn.native.id,
                             item_id,
-                            /*item_seq*/ 0,
+                            "Session is too short to compact — try again once it grows".to_string(),
                         ),
                     )
                     .await;
                 }
                 CompactionTurnOutcome::Failed { message } => {
-                    self.broadcast_event(
+                    self.broadcast_notification(
                         super::super::turn_exec::manual_compaction_item_failed_event(
-                            session_id,
-                            turn.turn_id,
+                            turn.native.session_id,
+                            turn.native.id,
                             item_id,
                             message.clone(),
                         ),
@@ -958,10 +1224,10 @@ impl ServerRuntime {
                     .await;
                 }
                 CompactionTurnOutcome::Canceled => {
-                    self.broadcast_event(
+                    self.broadcast_notification(
                         super::super::turn_exec::manual_compaction_item_failed_event(
-                            session_id,
-                            turn.turn_id,
+                            turn.native.session_id,
+                            turn.native.id,
                             item_id,
                             "compaction canceled".to_string(),
                         ),
@@ -976,101 +1242,105 @@ impl ServerRuntime {
                 let Some(summary) = session_handle.summary().await else {
                     tracing::warn!(
                         session_id = %session_id,
-                        turn_id = %turn.turn_id,
+                        turn_id = %turn.turn_id(),
                         "compaction skipped but session summary unavailable"
                     );
-                    self.broadcast_event(ServerEvent::TurnCompleted(TurnEventPayload {
-                        session_id,
-                        turn: turn.clone(),
-                    }))
-                    .await;
-                    self.broadcast_event(ServerEvent::SessionStatusChanged(
-                        SessionStatusChangedPayload {
-                            session_id,
-                            status: SessionRuntimeStatus::Idle,
+                    self.broadcast_notification(
+                        devo_protocol::native::event::ServerNotification::TurnCompleted {
+                            turn: Box::new(runtime_turn.native.clone()),
                         },
-                    ))
+                    )
+                    .await;
+                    self.broadcast_notification(
+                        devo_protocol::native::event::ServerNotification::session_status_changed(
+                            session_id,
+                            SessionStatus::Idle,
+                            /*active_turn_id*/ None,
+                        ),
+                    )
                     .await;
                     self.record_terminal_turn_status(
-                        turn.turn_id,
-                        TerminalTurnSnapshot::from_turn(&turn),
+                        turn.turn_id(),
+                        TerminalTurnSnapshot::from_runtime_turn(&turn),
                     )
                     .await;
                     return;
                 };
                 if let Some(occupancy) = summary.last_context_occupancy.clone() {
-                    self.broadcast_event(ServerEvent::ContextUsageUpdated(
-                        crate::ContextUsageUpdatedPayload {
-                            session_id,
+                    self.broadcast_notification(
+                        devo_protocol::native::event::ServerNotification::ContextUsageUpdated {
+                            session_id: summary.native.id,
                             occupancy,
                         },
-                    ))
+                    )
                     .await;
                 }
-                self.broadcast_event(ServerEvent::SessionCompactionCompleted(
-                    devo_protocol::SessionCompactionCompletedPayload {
-                        session: summary,
-                        turn_id: turn.turn_id,
-                        item_id: compaction_item_id,
+                let session = session_handle
+                    .native_session()
+                    .await
+                    .unwrap_or_else(|| summary.native.clone());
+                if let Some(item_id) = compaction_item_id {
+                    self.broadcast_notification(
+                        devo_protocol::native::event::ServerNotification::ContextCompactionCompleted {
+                            session_id: session.id,
+                            turn_id: turn.native.id,
+                            item_id,
+                        },
+                    )
+                    .await;
+                }
+                self.broadcast_notification(
+                    devo_protocol::native::event::ServerNotification::TurnCompleted {
+                        turn: Box::new(runtime_turn.native.clone()),
                     },
-                ))
-                .await;
-                self.broadcast_event(ServerEvent::TurnCompleted(TurnEventPayload {
-                    session_id,
-                    turn: turn.clone(),
-                }))
+                )
                 .await;
             }
             CompactionTurnOutcome::Failed { message } => {
-                self.broadcast_event(ServerEvent::SessionCompactionFailed(
-                    SessionCompactionFailedPayload {
-                        session_id,
+                self.broadcast_notification(
+                    devo_protocol::native::event::ServerNotification::ContextCompactionFailed {
+                        session_id: turn.native.session_id,
                         message,
                     },
-                ))
+                )
                 .await;
-                self.broadcast_event(ServerEvent::TurnFailed(TurnFailedPayload {
-                    session_id,
-                    turn: turn.clone(),
-                    error: None,
-                }))
-                .await;
-                self.broadcast_event(ServerEvent::TurnCompleted(TurnEventPayload {
-                    session_id,
-                    turn: turn.clone(),
-                }))
+                self.broadcast_notification(
+                    devo_protocol::native::event::ServerNotification::TurnCompleted {
+                        turn: Box::new(runtime_turn.native.clone()),
+                    },
+                )
                 .await;
             }
             CompactionTurnOutcome::Canceled => {
-                self.broadcast_event(ServerEvent::SessionCompactionFailed(
-                    SessionCompactionFailedPayload {
-                        session_id,
+                self.broadcast_notification(
+                    devo_protocol::native::event::ServerNotification::ContextCompactionFailed {
+                        session_id: turn.native.session_id,
                         message: "compaction canceled".to_string(),
                     },
-                ))
+                )
                 .await;
-                self.broadcast_event(ServerEvent::TurnInterrupted(TurnEventPayload {
-                    session_id,
-                    turn: turn.clone(),
-                }))
-                .await;
-                self.broadcast_event(ServerEvent::TurnCompleted(TurnEventPayload {
-                    session_id,
-                    turn: turn.clone(),
-                }))
+                self.broadcast_notification(
+                    devo_protocol::native::event::ServerNotification::TurnCompleted {
+                        turn: Box::new(runtime_turn.native.clone()),
+                    },
+                )
                 .await;
             }
         }
 
-        self.broadcast_event(ServerEvent::SessionStatusChanged(
-            SessionStatusChangedPayload {
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::session_status_changed(
                 session_id,
-                status: SessionRuntimeStatus::Idle,
-            },
-        ))
+                SessionStatus::Idle,
+                /*active_turn_id*/ None,
+            ),
+        )
         .await;
-        self.record_terminal_turn_status(turn.turn_id, TerminalTurnSnapshot::from_turn(&turn))
-            .await;
+        self.record_terminal_turn_status(
+            turn.turn_id(),
+            TerminalTurnSnapshot::from_runtime_turn(&turn),
+        )
+        .await;
     }
 }
 
@@ -1079,26 +1349,32 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
-    use devo_core::CommandExecutionItem;
+    use devo_protocol::native::ids::ItemId;
 
     #[test]
     fn preserved_item_ids_match_complete_command_execution_pair() {
         let command_item_id = ItemId::new();
         let command_input = serde_json::json!({ "cmd": "printf ok" });
         let command_output = serde_json::Value::String("ok".to_string());
-        let persisted_turn_items = vec![crate::execution::PersistedTurnItem {
-            turn_id: TurnId::new(),
-            turn_kind: devo_core::TurnKind::Regular,
-            item_id: command_item_id,
-            turn_item: TurnItem::CommandExecution(CommandExecutionItem {
-                tool_call_id: "call-1".to_string(),
-                tool_name: "exec_command".to_string(),
+        let persisted_turn_items = vec![crate::persisted_native_item::PersistedNativeItem::new(
+            TurnId::new(),
+            devo_protocol::native::turn::TurnKind::Regular,
+            command_item_id,
+            devo_protocol::native::item::Item::CommandExecution {
+                call_id: "call-1".to_string(),
                 command: "printf ok".to_string(),
-                input: command_input.clone(),
-                output: command_output.clone(),
+                argv: None,
+                cwd: Default::default(),
+                input: Some(command_input.clone()),
+                output: Some(command_output.clone()),
+                exit_code: None,
+                execution_handle: None,
                 is_error: false,
-            }),
-        }];
+                execution_mode: devo_protocol::native::item::ExecutionMode::Foreground,
+                origin: devo_protocol::native::item::ExecOrigin::AgentTool,
+                sandbox: None,
+            },
+        )];
         let compacted_items = vec![
             ResponseItem::Message(Message::assistant_text("summary")),
             ResponseItem::ToolCall {
@@ -1113,9 +1389,11 @@ mod tests {
             },
         ];
 
+        // The journal's single CommandExecution item covers both the call and
+        // its output; it must be listed once, not duplicated.
         assert_eq!(
             preserved_item_ids_from_compacted(&persisted_turn_items, &compacted_items),
-            vec![command_item_id, command_item_id]
+            vec![command_item_id]
         );
     }
 }

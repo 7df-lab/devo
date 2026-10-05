@@ -49,6 +49,11 @@ use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
 use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
 const SE_KERNEL_OBJECT: u32 = 6;
 const INHERIT_ONLY_ACE: u8 = 0x08;
+/// ACE flag marking rights inherited from an ancestor. SET_ACCESS cannot
+/// replace an inherited ACE, so explicit-only repair checks must skip it
+/// (otherwise an ancestor's inherited grant keeps reporting "needs refresh"
+/// forever and every refresh rewrites the DACL).
+const INHERITED_ACE: u8 = 0x10;
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 const ACCESS_DENIED_ACE_TYPE: u8 = 1;
 const GENERIC_READ_MASK: u32 = 0x8000_0000;
@@ -104,6 +109,31 @@ pub unsafe fn dacl_mask_allows(
     desired_mask: u32,
     require_all_bits: bool,
 ) -> bool {
+    dacl_mask_allows_with_scope(
+        p_dacl,
+        psids,
+        desired_mask,
+        require_all_bits,
+        AceScope::Effective,
+    )
+}
+
+/// Which ACEs a mask check considers: effective (inherited + explicit) or
+/// explicit-only (repair-convergence checks — SET_ACCESS cannot replace an
+/// inherited ACE, so a stale inherited grant must not keep them alive).
+#[derive(Clone, Copy)]
+enum AceScope {
+    Effective,
+    Explicit,
+}
+
+unsafe fn dacl_mask_allows_with_scope(
+    p_dacl: *mut ACL,
+    psids: &[*mut c_void],
+    desired_mask: u32,
+    require_all_bits: bool,
+    scope: AceScope,
+) -> bool {
     if p_dacl.is_null() {
         return false;
     }
@@ -133,6 +163,11 @@ pub unsafe fn dacl_mask_allows(
             continue; // not ACCESS_ALLOWED
         }
         if (hdr.AceFlags & INHERIT_ONLY_ACE) != 0 {
+            continue;
+        }
+        // SET_ACCESS cannot replace an ACE inherited from an ancestor, so it cannot make
+        // an explicit-only repair converge when that inherited ACE contains stale rights.
+        if matches!(scope, AceScope::Explicit) && (hdr.AceFlags & INHERITED_ACE) != 0 {
             continue;
         }
         let base = p_ace as usize;
@@ -307,6 +342,38 @@ pub unsafe fn dacl_has_read_deny_for_sid(p_dacl: *mut ACL, psid: *mut c_void) ->
 const WRITE_ALLOW_MASK: u32 =
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
 
+unsafe fn dacl_allow_mask_needs_refresh(
+    p_dacl: *mut ACL,
+    psid: *mut c_void,
+    allow_mask: u32,
+    disallow_mask: u32,
+) -> bool {
+    !dacl_mask_allows(p_dacl, &[psid], allow_mask, /*require_all_bits*/ true)
+        || dacl_mask_allows_with_scope(
+            p_dacl,
+            &[psid],
+            disallow_mask,
+            /*require_all_bits*/ false,
+            AceScope::Explicit,
+        )
+}
+
+/// Returns whether any provided SID needs its writable-root allow ACE refreshed.
+/// Explicit-scope on the disallow half: an inherited `FILE_DELETE_CHILD` grant
+/// must not report "needs refresh" forever (SET_ACCESS cannot replace it).
+pub fn path_write_aces_need_refresh(path: &Path, psids: &[*mut c_void]) -> Result<bool> {
+    unsafe {
+        let (p_dacl, p_sd) = fetch_dacl_handle(path)?;
+        let needs_refresh = psids.iter().any(|psid| {
+            dacl_allow_mask_needs_refresh(p_dacl, *psid, WRITE_ALLOW_MASK, FILE_DELETE_CHILD)
+        });
+        if !p_sd.is_null() {
+            LocalFree(p_sd as HLOCAL);
+        }
+        Ok(needs_refresh)
+    }
+}
+
 unsafe fn ensure_allow_mask_aces_with_inheritance_impl(
     path: &Path,
     sids: &[*mut c_void],
@@ -317,14 +384,7 @@ unsafe fn ensure_allow_mask_aces_with_inheritance_impl(
     let (p_dacl, p_sd) = fetch_dacl_handle(path)?;
     let mut entries: Vec<EXPLICIT_ACCESS_W> = Vec::new();
     for sid in sids {
-        if dacl_mask_allows(p_dacl, &[*sid], allow_mask, /*require_all_bits*/ true)
-            && !dacl_mask_allows(
-                p_dacl,
-                &[*sid],
-                disallow_mask,
-                /*require_all_bits*/ false,
-            )
-        {
+        if !dacl_allow_mask_needs_refresh(p_dacl, *sid, allow_mask, disallow_mask) {
             continue;
         }
         entries.push(EXPLICIT_ACCESS_W {
@@ -613,7 +673,12 @@ pub unsafe fn add_deny_read_ace(path: &Path, psid: *mut c_void) -> Result<bool> 
     add_deny_ace(path, psid, DenyAceKind::Read)
 }
 
-pub unsafe fn revoke_ace(path: &Path, psid: *mut c_void) {
+/// Remove a SID's explicit ACE, reporting every ACL failure to callers that
+/// must keep a durable revocation journal until the operation succeeds.
+///
+/// # Safety
+/// `psid` must remain a valid SID pointer for the duration of this call.
+pub unsafe fn revoke_ace_checked(path: &Path, psid: *mut c_void) -> Result<()> {
     let mut p_sd: *mut c_void = std::ptr::null_mut();
     let mut p_dacl: *mut ACL = std::ptr::null_mut();
     let code = GetNamedSecurityInfoW(
@@ -630,39 +695,64 @@ pub unsafe fn revoke_ace(path: &Path, psid: *mut c_void) {
         if !p_sd.is_null() {
             LocalFree(p_sd as HLOCAL);
         }
-        return;
+        return Err(anyhow!(
+            "GetNamedSecurityInfoW({}) failed: {code}",
+            path.display()
+        ));
     }
-    let trustee = TRUSTEE_W {
-        pMultipleTrustee: std::ptr::null_mut(),
-        MultipleTrusteeOperation: 0,
-        TrusteeForm: TRUSTEE_IS_SID,
-        TrusteeType: TRUSTEE_IS_UNKNOWN,
-        ptstrName: psid as *mut u16,
-    };
-    let mut explicit: EXPLICIT_ACCESS_W = std::mem::zeroed();
-    explicit.grfAccessPermissions = 0;
-    explicit.grfAccessMode = 4; // REVOKE_ACCESS
-    explicit.grfInheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
-    explicit.Trustee = trustee;
-    let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
-    let code2 = SetEntriesInAclW(1, &explicit, p_dacl, &mut p_new_dacl);
-    if code2 == ERROR_SUCCESS {
-        let _ = SetNamedSecurityInfoW(
-            to_wide(path).as_ptr() as *mut u16,
-            1,
-            DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            p_new_dacl,
-            std::ptr::null_mut(),
-        );
+    let result = (|| {
+        let trustee = TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: 0,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: psid as *mut u16,
+        };
+        let mut explicit: EXPLICIT_ACCESS_W = std::mem::zeroed();
+        explicit.grfAccessPermissions = 0;
+        explicit.grfAccessMode = 4; // REVOKE_ACCESS
+        explicit.grfInheritance = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+        explicit.Trustee = trustee;
+        let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
+        let code2 = SetEntriesInAclW(1, &explicit, p_dacl, &mut p_new_dacl);
+        let result = if code2 == ERROR_SUCCESS {
+            let code3 = SetNamedSecurityInfoW(
+                to_wide(path).as_ptr() as *mut u16,
+                1,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                p_new_dacl,
+                std::ptr::null_mut(),
+            );
+            if code3 == ERROR_SUCCESS {
+                Ok(())
+            } else {
+                Err(anyhow!(
+                    "SetNamedSecurityInfoW({}) failed: {code3}",
+                    path.display()
+                ))
+            }
+        } else {
+            Err(anyhow!(
+                "SetEntriesInAclW({}) failed: {code2}",
+                path.display()
+            ))
+        };
         if !p_new_dacl.is_null() {
             LocalFree(p_new_dacl as HLOCAL);
         }
-    }
+        result
+    })();
     if !p_sd.is_null() {
         LocalFree(p_sd as HLOCAL);
     }
+    result
+}
+
+/// Best-effort legacy cleanup (other callers do not use a recovery journal).
+pub unsafe fn revoke_ace(path: &Path, psid: *mut c_void) {
+    let _ = revoke_ace_checked(path, psid);
 }
 
 /// Grants RX to the null device for the given SID to support stdout/stderr redirection.

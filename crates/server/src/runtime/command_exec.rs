@@ -15,12 +15,9 @@ use tokio::sync::broadcast;
 use tokio::time::Duration;
 
 use crate::ProtocolErrorCode;
-use crate::ServerEvent;
 use crate::SuccessResponse;
 use crate::runtime::ServerRuntime;
 use crate::runtime::connection::SubscriptionFilter;
-use devo_protocol::CommandExecExitedPayload;
-use devo_protocol::CommandExecOutputDeltaPayload;
 use devo_protocol::CommandExecOutputStream;
 use devo_protocol::CommandExecParams;
 use devo_protocol::CommandExecProgram;
@@ -32,7 +29,8 @@ use devo_protocol::CommandExecTerminateParams;
 use devo_protocol::CommandExecTerminateResult;
 use devo_protocol::CommandExecWriteParams;
 use devo_protocol::CommandExecWriteResult;
-use devo_protocol::SessionId;
+use devo_protocol::native::event::ServerNotification;
+use devo_protocol::native::ids::SessionId;
 
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -54,6 +52,7 @@ pub(super) struct CommandExecManager {
 pub(super) struct CompletedTaskRecord {
     pub(super) session_id: Option<SessionId>,
     pub(super) process_id: String,
+    pub(super) command: String,
     pub(super) exit_code: Option<i32>,
     pub(super) tail: Vec<u8>,
 }
@@ -63,6 +62,7 @@ pub(super) struct CompletedTaskRecord {
 pub(super) struct TaskProcessSnapshot {
     pub(super) process_id: String,
     pub(super) session_id: Option<SessionId>,
+    pub(super) command: String,
     pub(super) is_running: bool,
     pub(super) exit_code: Option<i32>,
     pub(super) tail: Vec<u8>,
@@ -83,6 +83,7 @@ struct CommandExecKey {
 #[derive(Clone)]
 struct CommandExecSession {
     store_process_id: i32,
+    command: String,
 }
 
 type CommandExecRuntimeResult<T> = Result<T, (ProtocolErrorCode, String)>;
@@ -109,40 +110,73 @@ impl CommandExecManager {
         }
     }
 
+    fn output_delta_notification(&self, key: &CommandExecKey, bytes: &[u8]) -> ServerNotification {
+        ServerNotification::CommandExecOutputDelta {
+            // boundary: UnifiedExecProcess key stores legacy SessionId only
+            session_id: key.session_id,
+            process_id: key.process_id.clone(),
+            stream: CommandExecOutputStream::Pty,
+            delta_base64: STANDARD.encode(bytes),
+        }
+    }
+
+    fn process_running_state(process: Option<&UnifiedExecProcess>) -> (bool, Option<i32>) {
+        process
+            .map(|process| {
+                let exit_code = process.exit_code();
+                (exit_code.is_none() && process.is_running(), exit_code)
+            })
+            .unwrap_or((false, None))
+    }
+
+    async fn snapshot_for_key(
+        &self,
+        key: &CommandExecKey,
+        store_process_id: i32,
+    ) -> TaskProcessSnapshot {
+        let process = self.store.get(store_process_id).await;
+        let (is_running, exit_code) = Self::process_running_state(process.as_deref());
+        let command = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .get(key)
+                .map(|session| session.command.clone())
+                .unwrap_or_default()
+        };
+        let tail = self
+            .tails
+            .lock()
+            .await
+            .get(key)
+            .cloned()
+            .unwrap_or_default();
+        TaskProcessSnapshot {
+            process_id: key.process_id.clone(),
+            session_id: key.session_id,
+            command,
+            is_running,
+            exit_code,
+            tail,
+        }
+    }
+
     /// Reads one facade process task by process id (any owning connection):
     /// the live entry first, then the retained terminal record.
     pub(super) async fn task_snapshot(&self, process_id: &str) -> Option<TaskProcessSnapshot> {
-        {
+        // Drop the sessions lock before snapshotting: `snapshot_for_key`
+        // re-acquires it for the command lookup, and the tokio mutex is not
+        // reentrant — holding it across the await self-deadlocks every
+        // live-process task/read (and, with the lock parked forever, every
+        // later exec-manager operation).
+        let live = {
             let sessions = self.sessions.lock().await;
-            for (key, session) in sessions.iter() {
-                if key.process_id == process_id {
-                    let process = self.store.get(session.store_process_id).await;
-                    let (is_running, exit_code) = process
-                        .as_ref()
-                        .map(|process| {
-                            // `is_running` only tracks explicit termination;
-                            // a natural exit is terminal once an exit code
-                            // exists.
-                            let exit_code = process.exit_code();
-                            (exit_code.is_none() && process.is_running(), exit_code)
-                        })
-                        .unwrap_or((false, None));
-                    let tail = self
-                        .tails
-                        .lock()
-                        .await
-                        .get(key)
-                        .cloned()
-                        .unwrap_or_default();
-                    return Some(TaskProcessSnapshot {
-                        process_id: key.process_id.clone(),
-                        session_id: key.session_id,
-                        is_running,
-                        exit_code,
-                        tail,
-                    });
-                }
-            }
+            sessions
+                .iter()
+                .find(|(key, _)| key.process_id == process_id)
+                .map(|(key, session)| (key.clone(), session.store_process_id))
+        };
+        if let Some((key, store_process_id)) = live {
+            return Some(self.snapshot_for_key(&key, store_process_id).await);
         }
         let completed = self.completed.lock().await;
         completed
@@ -151,6 +185,7 @@ impl CommandExecManager {
             .map(|record| TaskProcessSnapshot {
                 process_id: record.process_id.clone(),
                 session_id: record.session_id,
+                command: record.command.clone(),
                 is_running: false,
                 exit_code: record.exit_code,
                 tail: record.tail.clone(),
@@ -172,28 +207,7 @@ impl CommandExecManager {
                 .collect()
         };
         for (key, store_process_id) in keys {
-            let process = self.store.get(store_process_id).await;
-            let (is_running, exit_code) = process
-                .as_ref()
-                .map(|process| {
-                    let exit_code = process.exit_code();
-                    (exit_code.is_none() && process.is_running(), exit_code)
-                })
-                .unwrap_or((false, None));
-            let tail = self
-                .tails
-                .lock()
-                .await
-                .get(&key)
-                .cloned()
-                .unwrap_or_default();
-            snapshots.push(TaskProcessSnapshot {
-                process_id: key.process_id.clone(),
-                session_id: key.session_id,
-                is_running,
-                exit_code,
-                tail,
-            });
+            snapshots.push(self.snapshot_for_key(&key, store_process_id).await);
         }
         let completed = self.completed.lock().await;
         for record in completed.iter() {
@@ -201,6 +215,7 @@ impl CommandExecManager {
                 snapshots.push(TaskProcessSnapshot {
                     process_id: record.process_id.clone(),
                     session_id: record.session_id,
+                    command: record.command.clone(),
                     is_running: false,
                     exit_code: record.exit_code,
                     tail: record.tail.clone(),
@@ -228,6 +243,10 @@ impl CommandExecManager {
             validate_terminal_size(size)?;
         }
 
+        let command = match &params.program {
+            CommandExecProgram::OneShot { command } => command.clone(),
+            CommandExecProgram::InteractiveShell => String::new(),
+        };
         let key = CommandExecKey {
             connection_id,
             session_id: params.session_id,
@@ -244,7 +263,13 @@ impl CommandExecManager {
             if sessions.contains_key(&key) {
                 true
             } else {
-                sessions.insert(key.clone(), CommandExecSession { store_process_id });
+                sessions.insert(
+                    key.clone(),
+                    CommandExecSession {
+                        store_process_id,
+                        command: command.clone(),
+                    },
+                );
                 false
             }
         };
@@ -424,19 +449,10 @@ impl CommandExecManager {
                         match output {
                             Ok(bytes) => {
                                 manager.record_tail(&key, &bytes).await;
-                                let event = ServerEvent::CommandExecOutputDelta(
-                                    CommandExecOutputDeltaPayload {
-                                        session_id: key.session_id,
-                                        process_id: key.process_id.clone(),
-                                        stream: CommandExecOutputStream::Pty,
-                                        delta_base64: STANDARD.encode(&bytes),
-                                    },
-                                );
                                 runtime
-                                    .emit_to_connection(
+                                    .emit_notification_to_connection(
                                         key.connection_id,
-                                        event.method_name(),
-                                        event,
+                                        manager.output_delta_notification(&key, &bytes),
                                     )
                                     .await;
                             }
@@ -454,27 +470,30 @@ impl CommandExecManager {
 
             while let Ok(bytes) = output_rx.try_recv() {
                 manager.record_tail(&key, &bytes).await;
-                let event = ServerEvent::CommandExecOutputDelta(CommandExecOutputDeltaPayload {
-                    session_id: key.session_id,
-                    process_id: key.process_id.clone(),
-                    stream: CommandExecOutputStream::Pty,
-                    delta_base64: STANDARD.encode(&bytes),
-                });
                 runtime
-                    .emit_to_connection(key.connection_id, event.method_name(), event)
+                    .emit_notification_to_connection(
+                        key.connection_id,
+                        manager.output_delta_notification(&key, &bytes),
+                    )
                     .await;
             }
 
-            let event = ServerEvent::CommandExecExited(CommandExecExitedPayload {
+            let notification = ServerNotification::CommandExecExited {
+                // boundary: UnifiedExecProcess key stores legacy SessionId only
                 session_id: key.session_id,
                 process_id: key.process_id.clone(),
                 exit_code: process.exit_code(),
-            });
+            };
             runtime
-                .emit_to_connection(key.connection_id, event.method_name(), event)
+                .emit_notification_to_connection(key.connection_id, notification)
                 .await;
-            // Retain a bounded terminal snapshot so canonical task/read and
-            // task/list stay meaningful after the live entry is removed.
+            let command = {
+                let sessions = manager.sessions.lock().await;
+                sessions
+                    .get(&key)
+                    .map(|session| session.command.clone())
+                    .unwrap_or_default()
+            };
             let tail = manager
                 .tails
                 .lock()
@@ -490,12 +509,24 @@ impl CommandExecManager {
                 completed.push_back(CompletedTaskRecord {
                     session_id: key.session_id,
                     process_id: key.process_id.clone(),
+                    command: command.clone(),
                     exit_code: process.exit_code(),
-                    tail,
+                    tail: tail.clone(),
                 });
                 while completed.len() > COMPLETED_TASK_RECORD_LIMIT {
                     completed.pop_front();
                 }
+            }
+            if let Some(session_id) = key.session_id {
+                runtime
+                    .persist_shell_background_task(
+                        session_id,
+                        &key.process_id,
+                        &command,
+                        process.exit_code(),
+                        &tail,
+                    )
+                    .await;
             }
             manager.remove_key(&key).await;
         });
@@ -586,13 +617,7 @@ impl ServerRuntime {
                 cwd,
                 idempotency_key,
             } => {
-                let Ok(legacy_session_id) = SessionId::try_from(session_id.as_str()) else {
-                    return self.error_response(
-                        request_id,
-                        ProtocolErrorCode::SessionNotFound,
-                        "session id is not addressable by this server",
-                    );
-                };
+                let legacy_session_id = session_id;
                 if let Some(item_id) = self
                     .task_start_idempotency
                     .lock()
@@ -665,18 +690,12 @@ impl ServerRuntime {
                 )
             }
         };
-        let Ok(legacy_session_id) = SessionId::try_from(session_id.as_str()) else {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::SessionNotFound,
-                "session id is not addressable by this server",
-            );
-        };
+        let legacy_session_id = session_id;
         if let Some(item_id) = self
             .task_start_idempotency
             .lock()
             .await
-            .get(&(legacy_session_id, idempotency_key.clone()))
+            .get(&(session_id, idempotency_key.clone()))
             .cloned()
         {
             return success_response(
@@ -696,6 +715,7 @@ impl ServerRuntime {
                 max_turns,
                 tool_policy: tool_policy.unwrap_or(devo_protocol::AgentToolPolicy::Inherit),
                 ephemeral,
+                nickname: None,
             })
             .await
         {
@@ -706,10 +726,10 @@ impl ServerRuntime {
             "item_{}",
             result.child_session_id
         ));
-        self.task_start_idempotency.lock().await.insert(
-            (legacy_session_id, idempotency_key),
-            item_id.as_str().to_string(),
-        );
+        self.task_start_idempotency
+            .lock()
+            .await
+            .insert((session_id, idempotency_key), item_id.as_str().to_string());
         success_response(
             request_id,
             devo_protocol::native::rpc_turn::TaskStartResult { item_id },
@@ -851,7 +871,7 @@ impl ServerRuntime {
             self.agent_item_target(params.item_id.as_str()).await
         {
             let info = match self
-                .agent_info(parent_session_id, &child_session_id.to_string())
+                .agent_info(parent_session_id, child_session_id.as_ref())
                 .await
             {
                 Ok(info) => info,
@@ -906,13 +926,7 @@ impl ServerRuntime {
                     );
                 }
             };
-        let Ok(legacy_session_id) = SessionId::try_from(params.session_id.as_str()) else {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::SessionNotFound,
-                "session id is not addressable by this server",
-            );
-        };
+        let legacy_session_id = params.session_id;
         let agents = match Arc::clone(self)
             .list_agents(devo_protocol::AgentListParams {
                 session_id: legacy_session_id,
@@ -1114,7 +1128,72 @@ impl ServerRuntime {
                 "failed to read session summary".to_string(),
             ));
         };
-        Ok(summary.cwd)
+        Ok(summary.cwd.clone())
+    }
+
+    /// Persist a completed user `!` shell task into the session rollout so
+    /// resume can rebuild BashExecution chrome from `session/items/list`.
+    pub(super) async fn persist_shell_background_task(
+        &self,
+        session_id: SessionId,
+        process_id: &str,
+        command: &str,
+        exit_code: Option<i32>,
+        tail: &[u8],
+    ) {
+        if command.trim().is_empty() {
+            return;
+        }
+        use chrono::Utc;
+        use devo_protocol::native::ids::{ItemId, TurnId};
+        use devo_protocol::native::item::{
+            BackgroundTaskKind, Item, ItemEnvelope, ItemState, SpawnedWorkState,
+        };
+
+        let output = String::from_utf8_lossy(tail).into_owned();
+        let item = Item::BackgroundTask {
+            origin_call_id: None,
+            task_kind: BackgroundTaskKind::Shell,
+            state: SpawnedWorkState::Completed,
+            execution_handle: Some(process_id.to_string()),
+            cwd: None,
+            exit_code,
+            command: Some(command.to_string()),
+            output: (!output.is_empty()).then_some(output),
+        };
+        if let Some(session_handle) = self.session(session_id).await {
+            session_handle
+                .append_history_item(devo_protocol::SessionHistoryEntry::item(item.clone()))
+                .await;
+        }
+        let Some(rollout_path) = self.session_rollout_path(session_id).await else {
+            return;
+        };
+        let now = Utc::now();
+        let envelope = ItemEnvelope {
+            id: ItemId::from_string(process_id.to_string()),
+            session_id,
+            // boundary: user bash is session-scoped, not turn-scoped yet
+            turn_id: TurnId::from_string(session_id.to_string()),
+            seq: u64::try_from(now.timestamp_millis().max(0)).unwrap_or(0),
+            revision: 1,
+            created_at: now,
+            updated_at: now,
+            state: ItemState::Completed,
+            item,
+            parent_id: None,
+        };
+        if let Err(error) = self
+            .rollout_store
+            .append_canonical_item_at(&rollout_path, envelope)
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                process_id,
+                error = %error,
+                "failed to persist shell background task"
+            );
+        }
     }
 }
 
@@ -1192,13 +1271,12 @@ fn success_response<T: serde::Serialize>(
 fn background_task_item_from_snapshot(
     snapshot: &TaskProcessSnapshot,
 ) -> devo_protocol::native::item::ItemEnvelope {
-    use devo_protocol::native::ids::{ItemId, SessionId as NativeSessionId, TurnId};
+    use devo_protocol::native::ids::{ItemId, TurnId};
     use devo_protocol::native::item::{
         BackgroundTaskKind, Item, ItemEnvelope, ItemState, SpawnedWorkState,
     };
-    use uuid::Uuid;
 
-    let legacy_session_id = snapshot.session_id.unwrap_or_default();
+    let native_session_id = snapshot.session_id.unwrap_or_default();
     let (state, item_state) = if snapshot.is_running {
         (SpawnedWorkState::Running, ItemState::Running)
     } else {
@@ -1207,8 +1285,9 @@ fn background_task_item_from_snapshot(
     let now = chrono::Utc::now();
     ItemEnvelope {
         id: ItemId::from_string(snapshot.process_id.clone()),
-        session_id: NativeSessionId::from_legacy_uuid(Uuid::from(legacy_session_id)),
-        turn_id: TurnId::from_legacy_uuid(Uuid::from(legacy_session_id)),
+        // boundary: TaskProcessSnapshot stores native session id only (no turn)
+        session_id: native_session_id,
+        turn_id: TurnId::from_string(native_session_id.to_string()),
         seq: 0,
         revision: 1,
         created_at: now,
@@ -1221,6 +1300,12 @@ fn background_task_item_from_snapshot(
             execution_handle: Some(snapshot.process_id.clone()),
             cwd: None,
             exit_code: snapshot.exit_code,
+            command: (!snapshot.command.is_empty()).then(|| snapshot.command.clone()),
+            output: {
+                let text = String::from_utf8_lossy(&snapshot.tail).into_owned();
+                (!text.is_empty()).then_some(text)
+            },
         },
+        parent_id: None,
     }
 }

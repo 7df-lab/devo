@@ -8,8 +8,9 @@
 //! enough.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use devo_core::read_canonical_history;
+use devo_core::active_path_items;
 use devo_protocol::native::item::ItemEnvelope;
 use devo_protocol::native::page::{Page, PageParams};
 use devo_protocol::native::rpc_session::{SessionItemsListParams, SessionTurnsListParams};
@@ -44,9 +45,22 @@ impl ServerRuntime {
             Ok(history) => history,
             Err(response) => return response,
         };
-        let page = match paginate(&history.turns, &params.page, |turn| {
-            u64::from(turn.sequence)
-        }) {
+        // Keep turn records consistent with the active-path item view above:
+        // turns whose items all sit on an abandoned branch are dead history.
+        let turns = match active_path_items(&history) {
+            Some(items) => {
+                let active_turn_ids: std::collections::HashSet<_> =
+                    items.iter().map(|item| item.turn_id).collect();
+                history
+                    .turns
+                    .iter()
+                    .filter(|turn| active_turn_ids.contains(&turn.id))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            }
+            None => history.turns.clone(),
+        };
+        let page = match paginate(&turns, &params.page, |turn| u64::from(turn.sequence)) {
             Ok(page) => page,
             Err(message) => {
                 return self.error_response(request_id, ProtocolErrorCode::InvalidParams, message);
@@ -81,14 +95,15 @@ impl ServerRuntime {
             Ok(history) => history,
             Err(response) => return response,
         };
-        let items: Vec<ItemEnvelope> = match &params.turn_id {
-            Some(turn_id) => history
-                .items
-                .into_iter()
-                .filter(|item| item.turn_id == *turn_id)
-                .collect(),
-            None => history.items,
-        };
+        // The rollout is a linear journal: after a rewind it still holds the
+        // abandoned branch. Clients page this method to render the current
+        // conversation, so scope to the active path (linear fallback for
+        // tree-less histories — single-line sessions and forks).
+        let mut items: Vec<ItemEnvelope> =
+            active_path_items(&history).unwrap_or_else(|| history.items.clone());
+        if let Some(turn_id) = params.turn_id {
+            items.retain(|item| item.turn_id == turn_id);
+        }
         let page = match paginate(&items, &params.page, |item| item.seq) {
             Ok(page) => page,
             Err(message) => {
@@ -109,7 +124,7 @@ impl ServerRuntime {
         &self,
         request_id: &serde_json::Value,
         session_id: devo_protocol::native::ids::SessionId,
-    ) -> Result<devo_core::CanonicalHistory, serde_json::Value> {
+    ) -> Result<Arc<devo_core::CanonicalHistory>, serde_json::Value> {
         let Some(rollout_path) = self.resolve_rollout_path(&session_id).await else {
             return Err(self.error_response(
                 request_id.clone(),
@@ -117,13 +132,16 @@ impl ServerRuntime {
                 "session does not exist",
             ));
         };
-        read_canonical_history(&rollout_path).map_err(|error| {
-            self.error_response(
-                request_id.clone(),
-                ProtocolErrorCode::InternalError,
-                format!("failed to read session history: {error}"),
-            )
-        })
+        self.history_cache
+            .load(session_id, rollout_path)
+            .await
+            .map_err(|error| {
+                self.error_response(
+                    request_id.clone(),
+                    ProtocolErrorCode::InternalError,
+                    format!("failed to read session history: {error}"),
+                )
+            })
     }
 
     /// Finds the rollout file for a session, loaded or cold. Prefer durable
@@ -134,24 +152,23 @@ impl ServerRuntime {
         &self,
         session_id: &devo_protocol::native::ids::SessionId,
     ) -> Option<PathBuf> {
-        let legacy_id = SessionId::try_from(session_id.as_str()).ok()?;
-        if let Ok(Some(index)) = self.deps.db.get_session_index(&legacy_id)
+        if let Ok(Some(index)) = self.deps.db.get_session_index(session_id)
             && let Some(path) = index.rollout_path
         {
             return Some(path);
         }
         if let Some(path) = self
             .rollout_store
-            .find_rollout_by_session_id(&legacy_id)
+            .find_rollout_by_session_id(session_id)
             .ok()
             .flatten()
         {
             return Some(path);
         }
-        if let Some(handle) = self.session(legacy_id).await
-            && let Some(record) = handle.record().await.flatten()
+        if let Some(handle) = self.session(*session_id).await
+            && let Some(path) = handle.rollout_path().await.flatten()
         {
-            return Some(record.rollout_path);
+            return Some(path);
         }
         None
     }

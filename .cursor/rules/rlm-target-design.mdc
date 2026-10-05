@@ -1,0 +1,20 @@
+---
+description: Target RLM design follows Prime Intellect blog invariants
+alwaysApply: true
+---
+# Target RLM design (Prime Intellect)
+
+Canonical reference: https://www.primeintellect.ai/blog/rlm
+
+When designing or changing Devo RLM (kernel, prompts, tools, subagents, sandboxes), treat these as the **target** product invariants (Devo branding stays):
+
+1. **Root tools = `ipython` + `bash` + MCP**, plus **hosted `web_search`** only
+   on Anthropic Messages / OpenAI Responses wires. Fat tool outputs for
+   file/search/etc. still prefer sub-LLMs via the REPL; do not grow a full
+   discrete toolbelt (`read`/`edit`/…) on the RLM root.
+2. **Parallel sub-LLMs.** Prefer a batch API (`llm_batch`-shaped) so the root can fan out prompts in one REPL step.
+3. **Answer channel.** Final answer is only via an environment `answer` dict: `{"content": ..., "ready": bool}`. Rollout/turn completion extracts `content` only when `ready` is true; the model may revise `content` across turns before setting `ready`.
+4. **Environment.** Stdlib always available; pip/uv packages installable and **advertised** to the model; code runs in isolated sandboxes.
+5. **Prompt vs data.** Task prompt may enter the RLM context; large extra input is programmatic-only (REPL inspect/print). Cap REPL stdout echoed to the model (blog default 8192 chars, adjustable) so the root must use Python/sub-LLMs for big data.
+
+Do not regress toward a root agent that calls many discrete tools (read/edit/…) as its primary surface when the session is on the RLM path (`ExecutionSurface::Rlm`).

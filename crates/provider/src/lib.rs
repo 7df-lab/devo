@@ -7,6 +7,7 @@
 pub mod anthropic;
 mod dsml;
 pub mod error;
+pub mod google;
 mod hosted_tools;
 mod http;
 pub mod openai;
@@ -14,6 +15,7 @@ mod provider;
 pub mod recovery_hint;
 mod request;
 pub mod router;
+mod sse;
 mod text_normalization;
 pub mod timeout;
 

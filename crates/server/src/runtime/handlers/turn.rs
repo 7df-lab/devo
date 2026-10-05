@@ -1,9 +1,11 @@
 use super::super::*;
+use super::image_input::write_data_uri_image_to_temp;
 
 fn pending_turn_metadata(
     collaboration_mode: devo_protocol::CollaborationMode,
     model: Option<String>,
     model_binding_id: Option<String>,
+    client_user_message_id: Option<&str>,
 ) -> Option<serde_json::Value> {
     let mut metadata = serde_json::Map::new();
     if collaboration_mode != devo_protocol::CollaborationMode::Build {
@@ -20,6 +22,12 @@ fn pending_turn_metadata(
     }
     if let Some(model) = model {
         metadata.insert("model".to_string(), serde_json::Value::String(model));
+    }
+    if let Some(client_user_message_id) = client_user_message_id {
+        metadata.insert(
+            "clientUserMessageId".to_string(),
+            serde_json::Value::String(client_user_message_id.to_string()),
+        );
     }
     (!metadata.is_empty()).then_some(serde_json::Value::Object(metadata))
 }
@@ -38,8 +46,10 @@ impl ServerRuntime {
     /// Native `turn/start` (L2-DES-APP-008 Phase B): lean params (input +
     /// idempotency key; per-turn model/settings moved to settings updates),
     /// busy sessions reject with `TURN_ALREADY_RUNNING` (clients use
-    /// `session/queue/push`), and the result carries the canonical turn
-    /// snapshot. Idempotent replays return the originally started turn.
+    /// `session/queue/push`) — except an active turn parked at an approval
+    /// checkpoint, which the new message preempts — and the result carries
+    /// the canonical turn snapshot. Idempotent replays return the originally
+    /// started turn.
     async fn handle_native_turn_start(
         self: &Arc<Self>,
         connection_id: Option<u64>,
@@ -57,37 +67,41 @@ impl ServerRuntime {
                     );
                 }
             };
-        let Ok(session_id) = SessionId::try_from(params.session_id.as_str()) else {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::SessionNotFound,
-                "session id is not addressable by this server",
-            );
-        };
-        // Input conversion: canonical `UserInput` → internal `InputItem`.
+        let session_id = params.session_id;
+        // Normalize Image data-URIs to LocalImage paths; keep Native UserInput
+        // end-to-end (no legacy InputItem conversion).
         let mut input = Vec::with_capacity(params.input.len());
         for item in &params.input {
             use devo_protocol::native::item::UserInput;
             let converted = match item {
-                UserInput::Text { text } => devo_protocol::InputItem::Text { text: text.clone() },
-                UserInput::LocalImage { path, .. } => {
-                    devo_protocol::InputItem::LocalImage { path: path.clone() }
+                UserInput::Image {
+                    uri,
+                    mime_type,
+                    detail,
+                } => {
+                    let path = match write_data_uri_image_to_temp(uri, mime_type.as_deref()) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            return self.error_response(
+                                request_id,
+                                ProtocolErrorCode::InvalidParams,
+                                format!("failed to decode image input: {error}"),
+                            );
+                        }
+                    };
+                    UserInput::LocalImage {
+                        path,
+                        detail: *detail,
+                    }
                 }
-                UserInput::Mention { uri } => devo_protocol::InputItem::Mention {
-                    path: uri.clone(),
-                    name: None,
-                },
-                UserInput::Skill { name } => devo_protocol::InputItem::Skill {
-                    name: name.clone(),
-                    path: std::path::PathBuf::new(),
-                },
-                UserInput::Image { .. } | UserInput::Audio { .. } => {
+                UserInput::Audio { .. } => {
                     return self.error_response(
                         request_id,
                         ProtocolErrorCode::InvalidParams,
-                        "image and audio inputs are not served by canonical turn/start yet",
+                        "audio inputs are not served by canonical turn/start yet",
                     );
                 }
+                other => other.clone(),
             };
             input.push(converted);
         }
@@ -131,11 +145,12 @@ impl ServerRuntime {
             execution_mode: Default::default(),
         };
         let response = self
-            .handle_turn_start_with_queue_policy(
+            .handle_turn_start_with_queue_policy_and_client_message_id(
                 connection_id,
                 request_id.clone(),
                 turn_params,
                 TurnStartQueuePolicy::RejectActive,
+                params.client_user_message_id.clone(),
             )
             .await;
         let Ok(success) =
@@ -153,16 +168,15 @@ impl ServerRuntime {
             );
         };
         // Prefer runtime registry metadata over a mailbox reservation read:
-        // `spawn_active_turn_task` registers before the turn task checkouts.
-        let Some(metadata) = self
+        // `spawn_active_runtime_turn_task` registers before the turn task checkouts.
+        let Some(turn) = self
             .active_turns
-            .active_turn_metadata(session_id)
+            .active_turn(session_id)
             .await
-            .filter(|turn| turn.turn_id == turn_id)
+            .filter(|turn| turn.id.as_str() == turn_id.to_string())
         else {
             return response;
         };
-        let turn = devo_protocol::native::wire_projector::native_turn_from_metadata(&metadata);
         self.turn_start_idempotency
             .lock()
             .await
@@ -180,6 +194,24 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         params: TurnStartParams,
         queue_policy: TurnStartQueuePolicy,
+    ) -> serde_json::Value {
+        self.handle_turn_start_with_queue_policy_and_client_message_id(
+            connection_id,
+            request_id,
+            params,
+            queue_policy,
+            /*client_user_message_id*/ None,
+        )
+        .await
+    }
+
+    pub(crate) async fn handle_turn_start_with_queue_policy_and_client_message_id(
+        self: &Arc<Self>,
+        connection_id: Option<u64>,
+        request_id: serde_json::Value,
+        params: TurnStartParams,
+        queue_policy: TurnStartQueuePolicy,
+        client_user_message_id: Option<String>,
     ) -> serde_json::Value {
         if params.input.is_empty() {
             return self.error_response(
@@ -202,7 +234,7 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
-        // Registry presence is mailbox-free: `spawn_active_turn_task`
+        // Registry presence is mailbox-free: `spawn_active_runtime_turn_task`
         // records the turn before the stream is registered. Native busy
         // clients must reject here instead of waiting on the actor.
         if queue_policy == TurnStartQueuePolicy::RejectActive
@@ -211,11 +243,30 @@ impl ServerRuntime {
                 .await
                 .is_some()
         {
-            return self.error_response(
-                request_id,
-                ProtocolErrorCode::TurnAlreadyRunning,
-                "session already has an active prompt turn",
-            );
+            // An approval-parked turn never reaches a turn boundary on its
+            // own, so rejecting here would strand the user's message behind
+            // a permission request that can wait indefinitely. Preempt it
+            // (see `preempt_approval_parked_turn`) and re-check.
+            if self
+                .session_interactive
+                .has_pending_approval_for_host(params.session_id)
+                .await
+                && let Some(active_turn_id) = self.runtime_active_turn_id(params.session_id).await
+            {
+                self.preempt_approval_parked_turn(params.session_id, active_turn_id)
+                    .await;
+            }
+            if self
+                .runtime_active_turn_id(params.session_id)
+                .await
+                .is_some()
+            {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::TurnAlreadyRunning,
+                    "session already has an active prompt turn",
+                );
+            }
         }
         // A busy session needs no state-change gate to enqueue: the queue
         // mutex is the serialization point for queue ops (01 §4.3).
@@ -249,12 +300,12 @@ impl ServerRuntime {
         } else {
             None
         };
-        let workspace_root = params
-            .cwd
+        let mut state_change_guard = state_change_guard;
+        let requested_cwd = params.cwd.clone();
+        let workspace_root = requested_cwd
             .clone()
             .unwrap_or_else(|| reservation.summary.cwd.clone());
-        let runtime_context = if params
-            .cwd
+        let runtime_context = if requested_cwd
             .as_ref()
             .is_some_and(|cwd| cwd != &reservation.summary.cwd)
         {
@@ -278,7 +329,13 @@ impl ServerRuntime {
                     .lock()
                     .expect("app config store mutex should not be poisoned");
                 let provider_config = config_store.effective_config().provider_catalog_config();
-                match provider_config.resolve_model(Some(binding_id)) {
+                let user_config_dir = config_store.user_config_dir().to_path_buf();
+                let effective = devo_core::effective_provider_catalog_with_home(
+                    &provider_config,
+                    Some(user_config_dir.as_path()),
+                )
+                .unwrap_or_else(|_| provider_config.clone());
+                match effective.resolve_model(Some(binding_id)) {
                     Ok(_) => None,
                     Err(error) => Some(error.to_string()),
                 }
@@ -336,6 +393,37 @@ impl ServerRuntime {
         }
         let now = Utc::now();
         let mut cwd_change = None;
+        // Same starvation rule for the enqueue policy: a turn parked at an
+        // approval checkpoint never yields a turn boundary, so queueing
+        // behind it would strand the input. Preempt, then take the
+        // state-change gate (admission below relies on it and this path may
+        // not hold one yet) and re-read the reservation inside it; the block
+        // below handles whatever is still active. Rare race: the gate may
+        // already be held here, stretching the preempt's bounded wait past
+        // the gate's usual short critical section.
+        if let Some(active_turn_id) = reservation.active_turn.as_ref().map(|turn| turn.turn_id())
+            && self
+                .session_interactive
+                .has_pending_approval_for_host(params.session_id)
+                .await
+        {
+            self.preempt_approval_parked_turn(params.session_id, active_turn_id)
+                .await;
+            if state_change_guard.is_none() {
+                state_change_guard = Some(session_handle.lock_state_change().await);
+            }
+            let Some(fresh) = self
+                .session_turn_reservation_snapshot(params.session_id)
+                .await
+            else {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::SessionNotFound,
+                    "session does not exist",
+                );
+            };
+            reservation = fresh;
+        }
         if let Some(active_turn) = reservation.active_turn.as_ref() {
             if queue_policy == TurnStartQueuePolicy::RejectActive {
                 return self.error_response(
@@ -344,50 +432,77 @@ impl ServerRuntime {
                     "session already has an active prompt turn",
                 );
             }
-            let active_turn_id = active_turn.turn_id;
+            let active_turn_id = active_turn.turn_id();
+            // A queued follow-up behind a goal-continuation turn must preempt
+            // it (see `preempt_goal_continuation_for_user_input`): the queued
+            // entry below then drains through the standard post-turn path.
+            // Regular turns are steerable and keep today's behavior.
+            if active_turn.native.kind == devo_protocol::native::turn::TurnKind::GoalContinuation {
+                self.preempt_goal_continuation_for_user_input(params.session_id, active_turn_id);
+            }
             let queued_model = params
                 .model
-                .clone()
-                .or_else(|| reservation.summary.model.clone());
+                .or_else(|| reservation.summary.model_name().map(str::to_string));
             let queued_model_binding_id = params
                 .model_binding_id
-                .clone()
-                .or_else(|| reservation.summary.model_binding_id.clone());
+                .or_else(|| reservation.summary.model_binding_id().map(str::to_string));
             let item = devo_core::PendingInputItem::new(
                 devo_core::PendingInputKind::UserInput {
                     input: params.input.clone(),
                     display_text: display_input.clone(),
                     prompt_text: resolved_input.prompt_text.clone(),
                     prompt_messages: resolved_input.prompt_messages.clone(),
+                    prompt_images: resolved_input.images.clone(),
                 },
                 pending_turn_metadata(
                     params.collaboration_mode,
                     queued_model,
                     queued_model_binding_id,
+                    client_user_message_id.as_deref(),
                 ),
                 now,
             );
             let queued_input_id = item.id;
-            // Push into the shared queue directly (01 §4.3 last-write-wins):
-            // callers must see their entry synchronously at decision points.
-            // The actor / turn drain reads the same shared queue.
-            reservation
-                .pending_turn_queue
-                .lock()
-                .expect("pending turn queue mutex should not be poisoned")
-                .push_back(item.clone());
-            if !reservation.ephemeral
-                && let Err(err) =
-                    self.deps
-                        .db
-                        .push_pending(&params.session_id, QueueType::Turn, &item)
-            {
+            let persistence_error = if reservation.ephemeral {
+                None
+            } else {
+                self.deps
+                    .db
+                    .push_pending(&params.session_id, QueueType::Turn, &item)
+                    .err()
+            };
+            if let Some(error) = persistence_error {
+                if client_user_message_id.is_some() {
+                    return self.error_response(
+                        request_id,
+                        ProtocolErrorCode::InternalError,
+                        format!("failed to persist pending turn message: {error}"),
+                    );
+                }
                 tracing::warn!(
                     session_id = %params.session_id,
-                    error = %err,
+                    error = %error,
                     "failed to persist pending turn message to database"
                 );
             }
+            // Persist first so an accepted client-identified queue item is
+            // recoverable if the process stops before the in-memory push.
+            let queue_len_after = {
+                let mut queue = reservation
+                    .pending_turn_queue
+                    .lock()
+                    .expect("pending turn queue mutex should not be poisoned");
+                queue.push_back(item.clone());
+                queue.len()
+            };
+            tracing::info!(
+                session_id = %params.session_id,
+                queued_input_id = %queued_input_id,
+                queue_len_after,
+                active_turn_id = %active_turn_id,
+                active_kind = ?active_turn.native.kind,
+                "queued follow-up input while turn active"
+            );
             let sid = params.session_id;
             // The gate-free enqueue can race the post-turn drain: if the
             // active turn ended between the snapshot and this push and the
@@ -433,37 +548,50 @@ impl ServerRuntime {
         );
         let requested_reasoning_effort_selection = params
             .reasoning_effort_selection
-            .clone()
-            .or_else(|| reservation.summary.reasoning_effort_selection.clone());
+            .or_else(|| reservation.summary.settings.reasoning_effort.clone());
         let turn_config = runtime_context
             .resolve_turn_config(requested_model, requested_reasoning_effort_selection);
+        let model_binding_id = turn_config
+            .model_binding_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
         let resolved_request = turn_config
             .model
             .resolve_reasoning_effort_selection(turn_config.reasoning_effort_selection.as_deref());
         let request_model = turn_config.provider_request_model(&resolved_request.request_model);
-        let turn = TurnMetadata {
-            turn_id: TurnId::new(),
-            session_id: params.session_id,
-            sequence: reservation
-                .latest_turn
-                .as_ref()
-                .map_or(1, |turn| turn.sequence + 1),
-            status: TurnStatus::Running,
-            kind: devo_core::TurnKind::Regular,
-            model: turn_config.model.slug.clone(),
-            model_binding_id: turn_config.model_binding_id.clone(),
-            reasoning_effort_selection: turn_config.reasoning_effort_selection.clone(),
-            reasoning_effort: resolved_request.effective_reasoning_effort,
-            request_model,
-            request_thinking: resolved_request.request_thinking,
-            started_at: now,
-            completed_at: None,
-            usage: None,
-            stop_reason: None,
-            failure_reason: None,
+        let native_turn_id = devo_protocol::native::ids::TurnId::new();
+        let turn_id = native_turn_id;
+        let native_session_id = reservation.summary.native.id;
+        let runtime_turn = crate::turn::RuntimeTurn {
+            native: devo_protocol::native::turn::Turn {
+                id: native_turn_id,
+                session_id: native_session_id,
+                sequence: reservation
+                    .latest_turn
+                    .as_ref()
+                    .map_or(1, |turn| turn.native.sequence + 1),
+                kind: devo_protocol::native::turn::TurnKind::Regular,
+                status: devo_protocol::native::turn::TurnStatus::InProgress,
+                model: devo_protocol::native::model::ModelBinding {
+                    provider: model_binding_id,
+                    model: request_model,
+                    variant: None,
+                    reasoning_effort: resolved_request.effective_reasoning_effort,
+                },
+                collaboration_mode: Some(params.collaboration_mode),
+                started_at: now,
+                completed_at: None,
+                error: None,
+                usage: None,
+            },
+            extras: crate::turn::RuntimeTurnExtras {
+                request_thinking: resolved_request.request_thinking,
+                stop_reason: None,
+                failure_reason: None,
+            },
         };
         session_handle
-            .begin_active_turn(turn.clone(), turn_config.clone())
+            .begin_runtime_turn(runtime_turn.clone(), turn_config.clone())
             .await;
         drop(state_change_guard);
         if let Some((old_cwd, new_cwd)) = cwd_change {
@@ -484,14 +612,12 @@ impl ServerRuntime {
             .await;
         }
         if let Some(persistence) = session_handle.turn_persistence_snapshot().await
-            && persistence.record.is_some()
+            && persistence.rollout_path.is_some()
             && let Err(error) = self
-                .persist_turn_line_deduped(params.session_id, &turn)
+                .persist_turn_line_deduped(params.session_id, &runtime_turn)
                 .await
         {
-            let _ = session_handle
-                .clear_active_turn_if_matches(turn.turn_id)
-                .await;
+            let _ = session_handle.clear_active_turn_if_matches(turn_id).await;
             return self.error_response(
                 request_id,
                 ProtocolErrorCode::InternalError,
@@ -500,7 +626,7 @@ impl ServerRuntime {
         }
 
         if let Some(spawn) = session_handle.spawn_snapshot().await {
-            self.register_turn_spawn_snapshot(params.session_id, turn.turn_id, Arc::new(spawn))
+            self.register_turn_spawn_snapshot(params.session_id, turn_id, Arc::new(spawn))
                 .await;
         }
 
@@ -510,59 +636,119 @@ impl ServerRuntime {
         self.prepare_title_from_user_input(params.session_id, &display_input)
             .await;
 
+        // Project the user bubble before spawn / TurnStarted so IM is not
+        // blocked on the turn task or workspace baseline I/O.
+        let user_message_text =
+            crate::runtime::items::render_input_text_without_images(&params.input);
+        let user_message = if let Some(client_user_message_id) = client_user_message_id {
+            crate::runtime::items::native_user_message_item_with_client_message_id(
+                user_message_text,
+                &resolved_input.image_paths,
+                devo_protocol::native::item::UserMessageEntry::TurnStart,
+                client_user_message_id,
+            )
+        } else {
+            crate::runtime::items::native_user_message_item(
+                user_message_text,
+                &resolved_input.image_paths,
+                devo_protocol::native::item::UserMessageEntry::TurnStart,
+            )
+        };
+        self.emit_turn_native_item(
+            runtime_turn.native.session_id,
+            runtime_turn.native.id,
+            user_message,
+        )
+        .await;
+
         let runtime = Arc::clone(self);
-        let turn_for_task = turn.clone();
+        let turn_for_task = runtime_turn.clone();
         let display_input_for_task = display_input.clone();
         let input_for_task = resolved_input.prompt_text.clone();
         let input_messages_for_task = resolved_input.prompt_messages.clone();
+        let input_images_for_task = resolved_input.images.clone();
+        let input_image_paths_for_task = resolved_input.image_paths.clone();
         let turn_config_for_task = turn_config.clone();
         let collaboration_mode = params.collaboration_mode;
         let session_id = params.session_id;
-        self.spawn_active_turn_task(params.session_id, turn.clone(), connection_id, async move {
-            runtime
-                .execute_turn(ExecuteTurnRequest {
-                    session_id,
-                    turn: turn_for_task,
-                    turn_config: turn_config_for_task,
-                    display_input: display_input_for_task,
-                    input: input_for_task,
-                    input_messages: input_messages_for_task,
-                    collaboration_mode,
-                    input_mode: TurnInputMode::VisibleUserMessage,
-                })
-                .await;
-        })
+        self.add_active_turn_user_text(session_id, turn_id, display_input.clone())
+            .await;
+        self.spawn_active_runtime_turn_task(
+            params.session_id,
+            runtime_turn.clone(),
+            connection_id,
+            async move {
+                runtime
+                    .execute_turn(ExecuteTurnRequest {
+                        session_id,
+                        turn: turn_for_task,
+                        turn_config: turn_config_for_task,
+                        display_input: display_input_for_task,
+                        client_user_message_id: None,
+                        input: input_for_task,
+                        input_messages: input_messages_for_task,
+                        input_images: input_images_for_task,
+                        input_image_paths: input_image_paths_for_task,
+                        collaboration_mode,
+                        input_mode: TurnInputMode::VisibleUserMessage,
+                        user_message_already_emitted: true,
+                    })
+                    .await;
+            },
+        )
         .await;
 
         tracing::info!(
             session_id = %params.session_id,
-            turn_id = %turn.turn_id,
-            sequence = turn.sequence,
-            request_model = %turn.request_model,
+            turn_id = %turn_id,
+            sequence = runtime_turn.native.sequence,
+            request_model = %runtime_turn.native.model.model,
             input_chars = resolved_input.prompt_text.len(),
             "started turn"
         );
-        self.broadcast_event(ServerEvent::SessionStatusChanged(
-            SessionStatusChangedPayload {
-                session_id: params.session_id,
-                status: SessionRuntimeStatus::ActiveTurn,
-            },
-        ))
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::session_status_changed(
+                params.session_id,
+                SessionStatus::Active,
+                /*active_turn_id*/ None,
+            ),
+        )
         .await;
-        self.broadcast_event(ServerEvent::TurnStarted(TurnEventPayload {
-            session_id: params.session_id,
-            turn: turn.clone(),
-        }))
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::TurnStarted {
+                turn: Box::new(runtime_turn.native.clone()),
+            },
+        )
         .await;
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: TurnStartResult::Started {
-                turn_id: turn.turn_id,
-                status: turn.status.clone(),
+                turn_id,
+                status: TurnStatus::Running,
                 accepted_at: now,
             },
         })
         .expect("serialize turn/start response")
+    }
+}
+
+#[cfg(test)]
+mod client_user_message_metadata_tests {
+    use pretty_assertions::assert_eq;
+
+    use super::pending_turn_metadata;
+
+    #[test]
+    fn queued_turn_metadata_includes_client_user_message_id_atomically() {
+        assert_eq!(
+            pending_turn_metadata(
+                devo_protocol::CollaborationMode::Build,
+                None,
+                None,
+                Some("message-id-1"),
+            ),
+            Some(serde_json::json!({"clientUserMessageId":"message-id-1"}))
+        );
     }
 }

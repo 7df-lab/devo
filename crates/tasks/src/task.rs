@@ -35,6 +35,7 @@ pub struct TaskInfo {
 /// Tasks are the key abstraction separating synchronous tool calls from
 /// background execution. They support lifecycle tracking, cancellation,
 /// and notification back to the main conversation.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Task: Send + Sync {
     fn id(&self) -> &str;

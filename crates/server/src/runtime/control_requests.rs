@@ -38,6 +38,8 @@ pub(super) fn approval_decision_from_native(
         ApprovalScope::Tool => ApprovalScopeValue::Tool,
         ApprovalScope::CommandPrefix => ApprovalScopeValue::CommandPrefix,
         ApprovalScope::CommandPrefixPersist => ApprovalScopeValue::CommandPrefixPersist,
+        ApprovalScope::PathPrefixPersist => ApprovalScopeValue::PathPrefixPersist,
+        ApprovalScope::HostPersist => ApprovalScopeValue::HostPersist,
     };
     (decision_value, scope)
 }
@@ -53,12 +55,8 @@ impl ServerRuntime {
 
         let mut answerable = Vec::new();
         for request in requests {
-            let Ok(session_id) = SessionId::try_from(request.item.session_id.as_str()) else {
-                continue;
-            };
-            let Ok(turn_id) = TurnId::try_from(request.item.turn_id.as_str()) else {
-                continue;
-            };
+            let session_id = request.item.session_id;
+            let turn_id = request.item.turn_id;
             let (method, approval_controller) = match (&request.kind, &request.item.item) {
                 (ControlRequestKind::ApprovalCommand, Item::Approval { approval_id, .. }) => (
                     "approval/command/request",
@@ -94,7 +92,8 @@ impl ServerRuntime {
                 .expect("serialize recovered control request item");
             let host_session_id = approval_controller
                 .as_ref()
-                .map_or(session_id, |(host_session_id, _)| *host_session_id);
+                .map(|(host_session_id, _)| *host_session_id)
+                .unwrap_or(session_id);
             let cancel_token = self
                 .active_turns
                 .cancel_token_for_host_or_session(host_session_id, session_id)
@@ -102,6 +101,9 @@ impl ServerRuntime {
             let (enqueued_tx, mut enqueued_rx) = tokio::sync::mpsc::unbounded_channel();
             let runtime = Arc::clone(self);
             let request_id = request.request_id.clone();
+            let spawn_session_id = session_id;
+            let spawn_turn_id = turn_id;
+            let spawn_request_id = request_id.clone();
             let method = method.to_string();
             tokio::spawn(async move {
                 let response = runtime
@@ -129,9 +131,9 @@ impl ServerRuntime {
                     };
                     runtime
                         .resolve_user_input_from_native(
-                            session_id,
-                            turn_id,
-                            request_id,
+                            spawn_session_id,
+                            spawn_turn_id,
+                            spawn_request_id,
                             devo_protocol::RequestUserInputResponse { answers },
                         )
                         .await;
@@ -141,15 +143,15 @@ impl ServerRuntime {
                     >(response)
                 {
                     let (decision, scope) = approval_decision_from_native(&answer.decision);
-                    if runtime.active_turns.has_session(session_id).await {
+                    if runtime.active_turns.has_session(spawn_session_id).await {
                         let _ = controller.send((decision, scope));
                     } else {
                         runtime
                             .resolve_approval_from_control_response(
                                 host_session_id,
-                                session_id,
-                                turn_id,
-                                &request_id,
+                                spawn_session_id,
+                                spawn_turn_id,
+                                &spawn_request_id,
                                 decision,
                                 scope,
                             )
@@ -187,6 +189,40 @@ impl ServerRuntime {
             .await;
         if connection_ids.is_empty() {
             let error = "no client connection is available for permission request".to_string();
+            let live_connections = {
+                let connections = self.connections.lock().await;
+                connections
+                    .iter()
+                    .map(|(connection_id, connection)| {
+                        (
+                            *connection_id,
+                            connection
+                                .event_selectors
+                                .iter()
+                                .map(|selector| {
+                                    match selector {
+                                    devo_protocol::native::event::StreamSelector::Session {
+                                        session_id,
+                                    } => format!("session:{}", session_id.as_str()),
+                                    devo_protocol::native::event::StreamSelector::SessionsByCwd {
+                                        cwd,
+                                    } => format!("cwd:{}", cwd.display()),
+                                    devo_protocol::native::event::StreamSelector::BackgroundTask {
+                                        item_id,
+                                    } => format!("task:{item_id}"),
+                                }
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            tracing::warn!(
+                host_session_id = %host_session_id,
+                owner_connection_id,
+                ?live_connections,
+                "permission request found no controlling connection"
+            );
             let _ = request.ready.send(Err(error.clone()));
             return Err(error);
         }
@@ -445,7 +481,7 @@ impl ServerRuntime {
         }
         let pending = self
             .pending_control_requests(&[StreamSelector::Session {
-                session_id: session_id.clone(),
+                session_id: *session_id,
             }])
             .await;
         self.reissue_pending_control_requests(connection_id, pending)

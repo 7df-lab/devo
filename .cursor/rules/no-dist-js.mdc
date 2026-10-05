@@ -1,0 +1,10 @@
+---
+description: Never read or edit compiled dist/*.js — always use TypeScript sources
+alwaysApply: true
+---
+
+# No dist/*.js
+
+Do not read or edit any `*.js` file under a `dist/` folder (including `vendor/**/dist`, `apps/**/dist`, package build outputs).
+
+Those files are transformed from `*.ts` sources. Always change and inspect the TypeScript source instead.

@@ -1,32 +1,28 @@
 use std::collections::HashMap;
 
+use super::*;
 use chrono::Utc;
 use devo_protocol::native::ids::{
     ItemId as NativeItemId, SessionId as NativeSessionId, TurnId as NativeTurnId,
 };
 use devo_protocol::native::item::{
     ApprovalDecision, ApprovalDecisionKind, ApprovalDecisionSource, ApprovalScope, ApprovalTarget,
-    FileChangeEntry, FileChangeKind, Item, ItemEnvelope, ItemState, UserQuestion,
-    UserQuestionOption,
+    FileChangeEntry, Item, ItemEnvelope, ItemState, UserQuestion, UserQuestionOption,
 };
-use uuid::Uuid;
-
-use super::*;
 
 impl ServerRuntime {
     pub(super) async fn persist_waiting_approval_item(
         &self,
-        session_id: SessionId,
-        turn_id: TurnId,
-        item_id: devo_core::ItemId,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
+        item_id: NativeItemId,
         seq: u64,
         request: &devo_core::tools::ToolPermissionRequest,
         available_scopes: &[String],
     ) -> Option<crate::execution::PersistedLivingItem> {
-        let item_id = NativeItemId::from_legacy_uuid(Uuid::from(item_id));
         let now = Utc::now();
         let item = approval_envelope(
-            item_id.clone(),
+            item_id,
             session_id,
             turn_id,
             seq,
@@ -39,20 +35,20 @@ impl ServerRuntime {
             available_scopes,
             None,
         );
-        self.persist_native_active_turn_item(session_id, item)
-            .await
-            .then_some(crate::execution::PersistedLivingItem {
+        self.persist_native_active_turn_item(item).await.then_some(
+            crate::execution::PersistedLivingItem {
                 item_id,
                 seq,
                 created_at: now,
-            })
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn persist_resolved_approval_item(
         &self,
-        session_id: SessionId,
-        turn_id: TurnId,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
         request: &devo_core::tools::ToolPermissionRequest,
         available_scopes: &[String],
         decision: ApprovalDecisionKind,
@@ -62,7 +58,7 @@ impl ServerRuntime {
     ) {
         let now = Utc::now();
         let item = approval_envelope(
-            persisted.item_id.clone(),
+            persisted.item_id,
             session_id,
             turn_id,
             persisted.seq,
@@ -80,15 +76,15 @@ impl ServerRuntime {
                 decided_at: now,
             }),
         );
-        self.persist_native_active_turn_item(session_id, item).await;
+        self.persist_native_active_turn_item(item).await;
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn persist_completed_approval_item(
         &self,
-        session_id: SessionId,
-        turn_id: TurnId,
-        item_id: devo_core::ItemId,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
+        item_id: NativeItemId,
         seq: u64,
         approval_id: &str,
         request: &devo_core::tools::ToolPermissionRequest,
@@ -97,7 +93,7 @@ impl ServerRuntime {
     ) {
         let now = Utc::now();
         let item = approval_envelope(
-            NativeItemId::from_legacy_uuid(Uuid::from(item_id)),
+            item_id,
             session_id,
             turn_id,
             seq,
@@ -115,23 +111,23 @@ impl ServerRuntime {
                 decided_at: now,
             }),
         );
-        self.persist_native_active_turn_item(session_id, item).await;
+        self.persist_native_active_turn_item(item).await;
     }
 
     pub(super) async fn persist_file_change_item(
         &self,
-        session_id: SessionId,
-        turn_id: TurnId,
-        item_id: devo_core::ItemId,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
+        item_id: NativeItemId,
         seq: u64,
         call_id: String,
-        changes: &[(std::path::PathBuf, devo_protocol::FileChange)],
+        changes: &[FileChangeEntry],
     ) {
         let now = Utc::now();
         let item = ItemEnvelope {
-            id: NativeItemId::from_legacy_uuid(Uuid::from(item_id)),
-            session_id: NativeSessionId::from_legacy_uuid(Uuid::from(session_id)),
-            turn_id: NativeTurnId::from_legacy_uuid(Uuid::from(turn_id)),
+            id: item_id,
+            session_id,
+            turn_id,
             seq,
             revision: 2,
             created_at: now,
@@ -139,50 +135,28 @@ impl ServerRuntime {
             state: ItemState::Completed,
             item: Item::FileChange {
                 call_id,
-                changes: changes
-                    .iter()
-                    .map(|(path, change)| FileChangeEntry {
-                        path: path.clone(),
-                        change: match change {
-                            devo_protocol::FileChange::Add { content } => FileChangeKind::Add {
-                                content: content.clone(),
-                            },
-                            devo_protocol::FileChange::Delete { content } => {
-                                FileChangeKind::Delete {
-                                    content: content.clone(),
-                                }
-                            }
-                            devo_protocol::FileChange::Update {
-                                unified_diff,
-                                move_path,
-                                ..
-                            } => FileChangeKind::Update {
-                                unified_diff: unified_diff.clone(),
-                                move_path: move_path.clone(),
-                            },
-                        },
-                    })
-                    .collect(),
+                changes: changes.to_vec(),
                 sandbox: None,
             },
+            parent_id: None,
         };
-        self.persist_native_active_turn_item(session_id, item).await;
+        self.persist_native_active_turn_item(item).await;
     }
 
     pub(super) async fn persist_waiting_user_input_item(
         &self,
-        session_id: SessionId,
-        turn_id: TurnId,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
         request_id: String,
         questions: &[devo_protocol::RequestUserInputQuestion],
     ) -> Option<crate::execution::PersistedLivingItem> {
-        let item_id = NativeItemId::from_legacy_uuid(Uuid::now_v7());
-        let seq = self.allocate_item_sequence(session_id).await;
+        let item_id = NativeItemId::new();
+        let seq = self.allocate_item_sequence(&session_id).await;
         let now = Utc::now();
         let item = ItemEnvelope {
-            id: item_id.clone(),
-            session_id: NativeSessionId::from_legacy_uuid(Uuid::from(session_id)),
-            turn_id: NativeTurnId::from_legacy_uuid(Uuid::from(turn_id)),
+            id: item_id,
+            session_id,
+            turn_id,
             seq,
             revision: 1,
             created_at: now,
@@ -194,20 +168,21 @@ impl ServerRuntime {
                 questions: native_questions(questions),
                 answers: None,
             },
+            parent_id: None,
         };
-        self.persist_native_active_turn_item(session_id, item)
-            .await
-            .then_some(crate::execution::PersistedLivingItem {
+        self.persist_native_active_turn_item(item).await.then_some(
+            crate::execution::PersistedLivingItem {
                 item_id,
                 seq,
                 created_at: now,
-            })
+            },
+        )
     }
 
     pub(super) async fn persist_answered_user_input_item(
         &self,
-        session_id: SessionId,
-        turn_id: TurnId,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
         request_id: String,
         questions: &[devo_protocol::RequestUserInputQuestion],
         response: &devo_protocol::RequestUserInputResponse,
@@ -215,9 +190,9 @@ impl ServerRuntime {
     ) {
         let now = Utc::now();
         let item = ItemEnvelope {
-            id: persisted.item_id.clone(),
-            session_id: NativeSessionId::from_legacy_uuid(Uuid::from(session_id)),
-            turn_id: NativeTurnId::from_legacy_uuid(Uuid::from(turn_id)),
+            id: persisted.item_id,
+            session_id,
+            turn_id,
             seq: persisted.seq,
             revision: 2,
             created_at: persisted.created_at,
@@ -229,14 +204,15 @@ impl ServerRuntime {
                 questions: native_questions(questions),
                 answers: serde_json::to_value(response).ok(),
             },
+            parent_id: None,
         };
-        self.persist_native_active_turn_item(session_id, item).await;
+        self.persist_native_active_turn_item(item).await;
     }
 
     pub(super) async fn persist_terminal_user_input_item(
         &self,
-        session_id: SessionId,
-        turn_id: TurnId,
+        session_id: NativeSessionId,
+        turn_id: NativeTurnId,
         request_id: String,
         questions: &[devo_protocol::RequestUserInputQuestion],
         state: ItemState,
@@ -244,9 +220,9 @@ impl ServerRuntime {
     ) {
         let now = Utc::now();
         let item = ItemEnvelope {
-            id: persisted.item_id.clone(),
-            session_id: NativeSessionId::from_legacy_uuid(Uuid::from(session_id)),
-            turn_id: NativeTurnId::from_legacy_uuid(Uuid::from(turn_id)),
+            id: persisted.item_id,
+            session_id,
+            turn_id,
             seq: persisted.seq,
             revision: 2,
             created_at: persisted.created_at,
@@ -258,37 +234,61 @@ impl ServerRuntime {
                 questions: native_questions(questions),
                 answers: None,
             },
+            parent_id: None,
         };
-        self.persist_native_active_turn_item(session_id, item).await;
+        self.persist_native_active_turn_item(item).await;
     }
 
-    async fn persist_native_active_turn_item(
+    /// Resolve Native session/turn ids for interaction-item persistence.
+    /// Prefers the live turn-inline snapshot.
+    pub(super) async fn native_session_turn_ids(
         &self,
         session_id: SessionId,
-        item: ItemEnvelope,
-    ) -> bool {
-        let record = if let Some(stream) = self.active_stream_state(session_id).await {
+        turn_id: TurnId,
+    ) -> (NativeSessionId, NativeTurnId) {
+        if let Some(stream) = self.active_stream_state(session_id).await {
+            let stream = stream.lock().await;
+            if let Some(inline) = stream.turn_inline.as_ref()
+                && inline.turn_id == turn_id
+            {
+                return (inline.summary.native.id, inline.turn_id);
+            }
+        }
+        (session_id, turn_id)
+    }
+
+    /// Persist a Native item for the active turn.
+    async fn persist_native_active_turn_item(&self, item: ItemEnvelope) -> bool {
+        let session_id = item.session_id;
+        let rollout_path = if let Some(stream) = self.active_stream_state(session_id).await {
             let stream = stream.lock().await;
             stream
                 .turn_inline
                 .as_ref()
-                .and_then(|inline| inline.record.clone())
+                .and_then(|inline| inline.rollout_path.clone())
         } else {
             None
         };
-        let record = match record {
-            Some(record) => record,
+        let rollout_path = match rollout_path {
+            Some(path) => path,
             None => {
                 let Some(handle) = self.session(session_id).await else {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "interaction item session id is not addressable for persistence"
+                    );
                     return false;
                 };
-                let Some(record) = handle.record().await.flatten() else {
+                let Some(path) = handle.rollout_path().await.flatten() else {
                     return false;
                 };
-                record
+                path
             }
         };
-        match self.rollout_store.append_canonical_item(&record, item) {
+        match self
+            .rollout_store
+            .append_canonical_item_at(&rollout_path, item)
+        {
             Ok(()) => true,
             Err(error) => {
                 tracing::warn!(
@@ -305,8 +305,8 @@ impl ServerRuntime {
 #[allow(clippy::too_many_arguments)]
 fn approval_envelope(
     item_id: NativeItemId,
-    session_id: SessionId,
-    turn_id: TurnId,
+    session_id: NativeSessionId,
+    turn_id: NativeTurnId,
     seq: u64,
     revision: u32,
     created_at: chrono::DateTime<Utc>,
@@ -319,8 +319,8 @@ fn approval_envelope(
 ) -> ItemEnvelope {
     ItemEnvelope {
         id: item_id,
-        session_id: NativeSessionId::from_legacy_uuid(Uuid::from(session_id)),
-        turn_id: NativeTurnId::from_legacy_uuid(Uuid::from(turn_id)),
+        session_id,
+        turn_id,
         seq,
         revision,
         created_at,
@@ -353,6 +353,7 @@ fn approval_envelope(
                 }),
             decision,
         },
+        parent_id: None,
     }
 }
 
@@ -391,23 +392,16 @@ impl RecoveredWaitingApproval {
             Some(ApprovalScope::CommandPrefixPersist) => {
                 devo_protocol::ApprovalScopeValue::CommandPrefixPersist
             }
+            Some(ApprovalScope::PathPrefixPersist) => {
+                devo_protocol::ApprovalScopeValue::PathPrefixPersist
+            }
+            Some(ApprovalScope::HostPersist) => devo_protocol::ApprovalScopeValue::HostPersist,
             None => devo_protocol::ApprovalScopeValue::Once,
         }
     }
 }
 
 /// Latest approval items per approval id. Later revisions win.
-pub(super) fn core_item_id_from_native(
-    native: &devo_protocol::native::ids::ItemId,
-) -> Option<devo_core::ItemId> {
-    let raw = native.as_str();
-    if let Ok(uuid) = Uuid::parse_str(raw) {
-        return Some(devo_core::ItemId::from(uuid));
-    }
-    let stripped = raw.strip_prefix("item_").unwrap_or(raw);
-    Uuid::parse_str(stripped).ok().map(devo_core::ItemId::from)
-}
-
 pub(super) fn latest_waiting_approvals(
     items: &[ItemEnvelope],
     checkpoints: &std::collections::HashMap<
@@ -436,8 +430,8 @@ pub(super) fn latest_waiting_approvals(
             if item.state != ItemState::Waiting || decision.is_some() {
                 return None;
             }
-            let owner_session_id = SessionId::try_from(item.session_id.as_str()).ok()?;
-            let turn_id = TurnId::try_from(item.turn_id.as_str()).ok()?;
+            let owner_session_id = SessionId::from(item.session_id.as_str());
+            let turn_id = TurnId::from(item.turn_id.as_str());
             let host_session_id = checkpoints
                 .get(approval_id)
                 .map(super::approval_checkpoint::host_session_id_from_checkpoint)
@@ -449,7 +443,7 @@ pub(super) fn latest_waiting_approvals(
                 turn_id,
                 available_scopes: available_scopes.clone(),
                 persisted: crate::execution::PersistedLivingItem {
-                    item_id: item.id.clone(),
+                    item_id: item.id,
                     seq: item.seq,
                     created_at: item.created_at,
                 },
@@ -485,8 +479,8 @@ pub(super) fn latest_decided_approvals(
                 return None;
             };
             let decision = decision.clone()?;
-            let owner_session_id = SessionId::try_from(item.session_id.as_str()).ok()?;
-            let turn_id = TurnId::try_from(item.turn_id.as_str()).ok()?;
+            let owner_session_id = SessionId::from(item.session_id.as_str());
+            let turn_id = TurnId::from(item.turn_id.as_str());
             let host_session_id = checkpoints
                 .get(approval_id)
                 .map(super::approval_checkpoint::host_session_id_from_checkpoint)
@@ -498,7 +492,7 @@ pub(super) fn latest_decided_approvals(
                 turn_id,
                 available_scopes: available_scopes.clone(),
                 persisted: crate::execution::PersistedLivingItem {
-                    item_id: item.id.clone(),
+                    item_id: item.id,
                     seq: item.seq,
                     created_at: item.created_at,
                 },
@@ -540,15 +534,15 @@ pub(super) fn latest_waiting_user_inputs(items: &[ItemEnvelope]) -> Vec<Recovere
             if item.state != ItemState::Waiting || answers.is_some() {
                 return None;
             }
-            let owner_session_id = SessionId::try_from(item.session_id.as_str()).ok()?;
-            let turn_id = TurnId::try_from(item.turn_id.as_str()).ok()?;
+            let owner_session_id = SessionId::from(item.session_id.as_str());
+            let turn_id = TurnId::from(item.turn_id.as_str());
             Some(RecoveredWaitingUserInput {
                 request_id: request_id.clone(),
                 owner_session_id,
                 turn_id,
                 questions: protocol_questions(questions),
                 persisted: crate::execution::PersistedLivingItem {
-                    item_id: item.id.clone(),
+                    item_id: item.id,
                     seq: item.seq,
                     created_at: item.created_at,
                 },
@@ -604,6 +598,14 @@ pub(super) fn native_questions(
 }
 
 #[cfg(test)]
+pub(super) fn core_item_id_from_native(
+    native: &devo_protocol::native::ids::ItemId,
+) -> Option<devo_core::ItemId> {
+    // Opaque IDs are shared; any non-empty string form is accepted.
+    Some(*native)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
@@ -618,10 +620,11 @@ mod tests {
         answers: Option<serde_json::Value>,
     ) -> ItemEnvelope {
         let now = Utc::now();
+        // test fixture: bare UUID wire form via from_legacy_uuid
         ItemEnvelope {
-            id: NativeItemId::from_legacy_uuid(Uuid::now_v7()),
-            session_id: NativeSessionId::from_legacy_uuid(Uuid::from(session_id)),
-            turn_id: NativeTurnId::from_legacy_uuid(Uuid::from(turn_id)),
+            id: NativeItemId::new(),
+            session_id,
+            turn_id,
             seq: u64::from(revision),
             revision,
             created_at: now,
@@ -640,6 +643,7 @@ mod tests {
                 }],
                 answers,
             },
+            parent_id: None,
         }
     }
 
@@ -700,10 +704,11 @@ mod tests {
         decision: Option<ApprovalDecision>,
     ) -> ItemEnvelope {
         let now = Utc::now();
+        // test fixture: bare UUID wire form via from_legacy_uuid
         ItemEnvelope {
-            id: NativeItemId::from_legacy_uuid(Uuid::now_v7()),
-            session_id: NativeSessionId::from_legacy_uuid(Uuid::from(session_id)),
-            turn_id: NativeTurnId::from_legacy_uuid(Uuid::from(turn_id)),
+            id: NativeItemId::new(),
+            session_id,
+            turn_id,
             seq: 1,
             revision: 1,
             created_at: now,
@@ -721,6 +726,7 @@ mod tests {
                 target: None,
                 decision,
             },
+            parent_id: None,
         }
     }
 
@@ -744,7 +750,7 @@ mod tests {
         let legacy = Uuid::now_v7();
         let legacy_id = NativeItemId::from_legacy_uuid(legacy);
         let core_id = super::core_item_id_from_native(&legacy_id).expect("legacy uuid");
-        assert_eq!(core_id, devo_core::ItemId::from(legacy));
+        assert_eq!(core_id, legacy_id);
         assert!(super::core_item_id_from_native(&NativeItemId::new()).is_some());
     }
 }

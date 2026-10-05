@@ -288,11 +288,19 @@ impl ServerRuntime {
                 config.provider.model_overrides.clone(),
             )
         };
-        let models = if let Ok(catalog) =
-            PresetModelCatalog::load_from_provider_config_with_overrides(
-                &configured.0,
-                &configured.1,
-            ) {
+        let home = {
+            let store = self
+                .deps
+                .config_store
+                .lock()
+                .expect("app config store mutex should not be poisoned");
+            store.user_config_dir().to_path_buf()
+        };
+        let models = if let Ok(catalog) = PresetModelCatalog::load_from_provider_config_with_home(
+            &configured.0,
+            &configured.1,
+            Some(home.as_path()),
+        ) {
             catalog
                 .list_visible()
                 .into_iter()
@@ -318,7 +326,24 @@ fn model_info_from_catalog_model(
     model: &devo_protocol::Model,
     catalog: &dyn ModelCatalog,
 ) -> devo_protocol::native::rpc_admin::ModelInfo {
-    let info = devo_protocol::native::rpc_admin::ModelInfo::from(ModelCatalogEntry::from(model));
+    // Prefer the catalog Model's authored thinkingLevelMap (pi-ai
+    // getSupportedThinkingLevels), not capability-only derivation from
+    // ModelCatalogEntry which drops the map.
+    let (reasoning, thinking_level_map, available_thinking_levels) =
+        devo_protocol::resolve_thinking_fields_for_model_info(
+            &model.reasoning_capability,
+            model.reasoning,
+            model.thinking_level_map.as_ref(),
+        );
+    let mut info =
+        devo_protocol::native::rpc_admin::ModelInfo::from(ModelCatalogEntry::from(model));
+    info.reasoning = reasoning;
+    info.thinking_level_map = if thinking_level_map.is_empty() {
+        None
+    } else {
+        Some(thinking_level_map)
+    };
+    info.available_thinking_levels = available_thinking_levels;
     let Some((provider_id, model_id)) = model.slug.split_once('/') else {
         return info;
     };

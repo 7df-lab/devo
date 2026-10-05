@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use devo_core::{SessionId, TurnId, TurnStatus};
+use devo_protocol::native::ids::SessionId;
 
 use super::super::*;
 use super::types::{ExecuteTurnRequest, QueuedTurnInput};
@@ -85,13 +85,14 @@ impl ServerRuntime {
             self.register_subagent_usage_owner(parent_session_id, session_id, parent_turn_id)
                 .await;
         }
-        self.activate_queued_turn(session_id, &turn, &turn_config)
+        self.activate_queued_turn(session_id, &turn, &turn_config, &queued.display_input)
             .await;
         drop(state_change_guard);
-        self.broadcast_event(crate::ServerEvent::TurnStarted(TurnEventPayload {
-            session_id,
-            turn: turn.clone(),
-        }))
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::TurnStarted {
+                turn: Box::new(turn.native.clone()),
+            },
+        )
         .await;
         // `drained` carries queueItemId + startedTurnId, emitted in the same
         // session-actor operation as the matching turn/started so handles
@@ -100,9 +101,7 @@ impl ServerRuntime {
             session_id,
             devo_protocol::native::queue::QueueChange::Drained,
             queued.queued_item_id,
-            Some(devo_protocol::native::ids::TurnId::from_legacy_uuid(
-                uuid::Uuid::from(turn.turn_id),
-            )),
+            Some(turn.native.id),
         )
         .await;
         let runtime = Arc::clone(self);
@@ -113,10 +112,14 @@ impl ServerRuntime {
                     turn,
                     turn_config,
                     display_input: queued.display_input,
+                    client_user_message_id: queued.client_user_message_id,
                     input: queued.input_text,
                     input_messages: queued.input_messages,
+                    input_images: queued.input_images,
+                    input_image_paths: queued.input_image_paths,
                     collaboration_mode: queued.collaboration_mode,
                     input_mode: TurnInputMode::VisibleUserMessage,
+                    user_message_already_emitted: false,
                 })
                 .await;
         });
@@ -132,12 +135,30 @@ impl ServerRuntime {
             return false;
         };
         let state_change_guard = session_handle.lock_state_change().await;
+        let queue_len_before = session_handle
+            .pending_queue_snapshot()
+            .await
+            .map(|snapshot| snapshot.pending_count)
+            .unwrap_or_default();
         let Some(queued) = self
             .pop_next_queued_turn_input(session_id, /*require_idle_session*/ false)
             .await
         else {
+            if queue_len_before > 0 {
+                tracing::warn!(
+                    session_id = %session_id,
+                    queue_len_before,
+                    "post-turn chain found a non-empty queue but popped nothing (entries un-drainable?)"
+                );
+            }
             return false;
         };
+        tracing::info!(
+            session_id = %session_id,
+            queued_input_id = %queued.queued_item_id,
+            queue_len_before,
+            "post-turn chain draining queued follow-up"
+        );
         let Some((turn, turn_config)) = self.prepare_queued_turn_start(session_id, &queued).await
         else {
             return false;
@@ -146,21 +167,20 @@ impl ServerRuntime {
             self.register_subagent_usage_owner(parent_session_id, session_id, parent_turn_id)
                 .await;
         }
-        self.activate_queued_turn(session_id, &turn, &turn_config)
+        self.activate_queued_turn(session_id, &turn, &turn_config, &queued.display_input)
             .await;
         drop(state_change_guard);
-        self.broadcast_event(crate::ServerEvent::TurnStarted(TurnEventPayload {
-            session_id,
-            turn: turn.clone(),
-        }))
+        self.broadcast_notification(
+            devo_protocol::native::event::ServerNotification::TurnStarted {
+                turn: Box::new(turn.native.clone()),
+            },
+        )
         .await;
         self.broadcast_queue_updated(
             session_id,
             devo_protocol::native::queue::QueueChange::Drained,
-            queued.queued_item_id.clone(),
-            Some(devo_protocol::native::ids::TurnId::from_legacy_uuid(
-                uuid::Uuid::from(turn.turn_id),
-            )),
+            queued.queued_item_id,
+            Some(turn.native.id),
         )
         .await;
         Box::pin(Arc::clone(self).execute_turn(ExecuteTurnRequest {
@@ -168,10 +188,14 @@ impl ServerRuntime {
             turn,
             turn_config,
             display_input: queued.display_input,
+            client_user_message_id: queued.client_user_message_id,
             input: queued.input_text,
             input_messages: queued.input_messages,
+            input_images: queued.input_images,
+            input_image_paths: queued.input_image_paths,
             collaboration_mode: queued.collaboration_mode,
             input_mode: TurnInputMode::VisibleUserMessage,
+            user_message_already_emitted: false,
         }))
         .await;
         true
@@ -200,12 +224,14 @@ impl ServerRuntime {
             );
         }
         Some(QueuedTurnInput {
-            queued_item_id: devo_protocol::native::ids::QueueItemId::from_legacy_uuid(
-                uuid::Uuid::from(popped.queued_input_id),
-            ),
+            // boundary: pending queue item id is already QueueItemId
+            queued_item_id: popped.queued_input_id,
+            client_user_message_id: popped.client_user_message_id,
             display_input: popped.display_input,
             input_text: popped.input_text,
             input_messages: popped.input_messages,
+            input_images: popped.input_images,
+            input_image_paths: popped.input_image_paths,
             collaboration_mode: popped.collaboration_mode,
             model_selection: popped.model_selection,
             subagent_usage_owner: popped.subagent_usage_owner,
@@ -216,7 +242,7 @@ impl ServerRuntime {
         self: &Arc<Self>,
         session_id: SessionId,
         queued: &QueuedTurnInput,
-    ) -> Option<(crate::TurnMetadata, devo_core::TurnConfig)> {
+    ) -> Option<(crate::turn::RuntimeTurn, devo_core::TurnConfig)> {
         let session_handle = self.sessions.lock().await.get(&session_id).cloned()?;
         let reservation = session_handle.turn_reservation_snapshot().await?;
         let model_override = queued
@@ -225,7 +251,7 @@ impl ServerRuntime {
             .or_else(|| session_model_selection(&reservation.summary));
         let turn_config = reservation.runtime_context.resolve_turn_config(
             model_override,
-            reservation.summary.reasoning_effort_selection.clone(),
+            reservation.summary.settings.reasoning_effort.clone(),
         );
         let resolved_request = turn_config
             .model
@@ -234,38 +260,58 @@ impl ServerRuntime {
         let sequence = reservation
             .latest_turn
             .as_ref()
-            .map_or(1, |turn| turn.sequence + 1);
+            .map_or(1, |turn| turn.native.sequence + 1);
         let now = Utc::now();
-        let turn = crate::TurnMetadata {
-            turn_id: TurnId::new(),
-            session_id,
+        let native_turn_id = devo_protocol::native::ids::TurnId::new();
+        let native_session_id = reservation.summary.native.id;
+        let native = devo_protocol::native::turn::Turn {
+            id: native_turn_id,
+            session_id: native_session_id,
             sequence,
-            status: TurnStatus::Running,
-            kind: devo_core::TurnKind::Regular,
-            model: turn_config.model.slug.clone(),
-            model_binding_id: turn_config.model_binding_id.clone(),
-            reasoning_effort_selection: turn_config.reasoning_effort_selection.clone(),
-            reasoning_effort: resolved_request.effective_reasoning_effort,
-            request_model,
-            request_thinking: resolved_request.request_thinking.clone(),
+            status: devo_protocol::native::turn::TurnStatus::InProgress,
+            kind: devo_protocol::native::turn::TurnKind::Regular,
+            model: devo_protocol::native::model::ModelBinding {
+                provider: turn_config
+                    .model_binding_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                model: request_model,
+                variant: None,
+                reasoning_effort: turn_config
+                    .reasoning_effort_selection
+                    .as_deref()
+                    .and_then(|selection| selection.parse().ok())
+                    .or(resolved_request.effective_reasoning_effort),
+            },
+            collaboration_mode: Some(queued.collaboration_mode),
             started_at: now,
             completed_at: None,
             usage: None,
-            stop_reason: None,
-            failure_reason: None,
+            error: None,
         };
+        let turn = crate::turn::RuntimeTurn::new(
+            native,
+            crate::turn::RuntimeTurnExtras {
+                request_thinking: resolved_request.request_thinking.clone(),
+                stop_reason: None,
+                failure_reason: None,
+            },
+        );
         Some((turn, turn_config))
     }
 
     async fn activate_queued_turn(
         self: &Arc<Self>,
         session_id: SessionId,
-        turn: &crate::TurnMetadata,
+        turn: &crate::turn::RuntimeTurn,
         turn_config: &devo_core::TurnConfig,
+        display_input: &str,
     ) {
         if let Some(session_handle) = self.sessions.lock().await.get(&session_id).cloned() {
             session_handle
-                .activate_queued_turn(turn.clone(), turn_config.clone())
+                .activate_runtime_queued_turn(turn.clone(), turn_config.clone())
+                .await;
+            self.add_active_turn_user_text(session_id, turn.turn_id(), display_input.to_string())
                 .await;
         }
     }

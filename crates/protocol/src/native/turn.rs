@@ -50,9 +50,10 @@ pub struct Turn {
 ///
 /// v1 keeps exactly three variants: the legacy `Review` kind was dead code
 /// and an open `Other(String)` variant breaks exhaustive client matching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum TurnKind {
+    #[default]
     Regular,
     Compaction,
     /// Goal-driven autonomous turn. Has no user message by design and is not
@@ -64,6 +65,8 @@ pub enum TurnKind {
 #[serde(rename_all = "camelCase")]
 pub enum TurnStatus {
     InProgress,
+    /// Execution is paused until a first-party approval decision arrives.
+    WaitingApproval,
     Completed,
     Interrupted,
     Failed,

@@ -1,11 +1,14 @@
+import {
+	isUserMessageItem,
+	userMessageText,
+} from "@devo-ai/sdk/v2/client"
 import { useAtomValue } from "jotai"
 import { useCallback, useMemo } from "react"
-import { messagesFamily } from "../atoms/messages"
-import { partsFamily, partStorageKey } from "../atoms/parts"
+import { itemsFamily } from "../atoms/messages"
 import { sessionFamily } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
 import { formatShortcut } from "../lib/shortcut-display"
-import type { Session, TextPart } from "../lib/types"
+import type { Session } from "../lib/types"
 import { getProjectClient } from "../services/connection-manager"
 import { useServerCommands } from "./use-devo-data"
 
@@ -28,44 +31,41 @@ export interface AppCommand {
 // ============================================================
 
 function findUndoTarget(sessionId: string, revertMessageId?: string): string | null {
-	const messages = appStore.get(messagesFamily(sessionId))
-	if (!messages || messages.length === 0) return null
+	const items = appStore.get(itemsFamily(sessionId))
+	if (!items || items.length === 0) return null
 
 	let lastUserMsgId: string | null = null
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i]
-		if (msg.role !== "user") continue
-		if (revertMessageId && msg.id >= revertMessageId) continue
-		lastUserMsgId = msg.id
+	for (let i = items.length - 1; i >= 0; i--) {
+		const item = items[i]
+		if (!isUserMessageItem(item)) continue
+		if (revertMessageId && item.id >= revertMessageId) continue
+		lastUserMsgId = item.id
 		break
 	}
 	return lastUserMsgId
 }
 
 function findRedoTarget(sessionId: string, revertMessageId: string): string | null {
-	const messages = appStore.get(messagesFamily(sessionId))
-	if (!messages) return null
+	const items = appStore.get(itemsFamily(sessionId))
+	if (!items) return null
 
 	let foundRevertPoint = false
-	for (const msg of messages) {
-		if (msg.id === revertMessageId) {
+	for (const item of items) {
+		if (item.id === revertMessageId) {
 			foundRevertPoint = true
 			continue
 		}
-		if (foundRevertPoint && msg.role === "user") {
-			return msg.id
+		if (foundRevertPoint && isUserMessageItem(item)) {
+			return item.id
 		}
 	}
 	return null
 }
 
 function getUserMessageText(sessionId: string, messageId: string): string {
-	const parts = appStore.get(partsFamily(partStorageKey(sessionId, messageId)))
-	if (!parts) return ""
-	return parts
-		.filter((p): p is TextPart => p.type === "text" && !("synthetic" in p && p.synthetic))
-		.map((p) => p.text)
-		.join("\n")
+	const items = appStore.get(itemsFamily(sessionId))
+	const envelope = items?.find((item) => item.id === messageId)
+	return envelope ? userMessageText(envelope) : ""
 }
 
 export interface UseSessionRevertResult {
@@ -83,16 +83,16 @@ export function useSessionRevert(
 ): UseSessionRevertResult {
 	const entry = useAtomValue(sessionFamily(sessionId ?? ""))
 	const session = entry?.session
-	const messages = useAtomValue(messagesFamily(sessionId ?? ""))
+	const items = useAtomValue(itemsFamily(sessionId ?? ""))
 
 	const isReverted = !!session?.revert
 	const revertInfo = session?.revert
 
 	const canUndo = useMemo(() => {
-		if (!directory || !sessionId || !messages || messages.length === 0) return false
-		const target = findUndoTarget(sessionId, revertInfo?.messageID)
+		if (!directory || !sessionId || !items || items.length === 0) return false
+		const target = findUndoTarget(sessionId, revertInfo?.itemId)
 		return target !== null
-	}, [directory, sessionId, messages, revertInfo])
+	}, [directory, sessionId, items, revertInfo])
 
 	const canRedo = isReverted
 
@@ -103,14 +103,14 @@ export function useSessionRevert(
 
 		const sessionEntry = appStore.get(sessionFamily(sessionId))
 		if (sessionEntry?.status?.type === "busy") {
-			await client.session.abort({ sessionID: sessionId })
+			await client.session.abort({ sessionId: sessionId })
 		}
 
-		const targetId = findUndoTarget(sessionId, revertInfo?.messageID)
+		const targetId = findUndoTarget(sessionId, revertInfo?.itemId)
 		if (!targetId) return undefined
 
 		const userText = getUserMessageText(sessionId, targetId)
-		await client.session.revert({ sessionID: sessionId, messageID: targetId })
+		await client.session.revert({ sessionId: sessionId })
 		return userText
 	}, [directory, sessionId, revertInfo])
 
@@ -119,11 +119,11 @@ export function useSessionRevert(
 		const client = getProjectClient(directory)
 		if (!client) return
 
-		const nextTarget = findRedoTarget(sessionId, revertInfo.messageID)
+		const nextTarget = findRedoTarget(sessionId, revertInfo.itemId)
 		if (nextTarget) {
-			await client.session.revert({ sessionID: sessionId, messageID: nextTarget })
+			await client.session.revert({ sessionId: sessionId })
 		} else {
-			await client.session.unrevert({ sessionID: sessionId })
+			await client.session.unrevert({ sessionId: sessionId })
 		}
 	}, [directory, sessionId, revertInfo])
 
@@ -189,7 +189,7 @@ export function useCommands(
 				if (!directory || !sessionId) return
 				const client = getProjectClient(directory)
 				if (!client) return
-				await client.session.summarize({ sessionID: sessionId })
+				await client.session.summarize({ sessionId: sessionId })
 			},
 		})
 
@@ -220,7 +220,7 @@ export function useCommands(
 				const client = getProjectClient(directory)
 				if (!client) return
 				await client.session.command({
-					sessionID: sessionId,
+					sessionId: sessionId,
 					command: cmd.name,
 					arguments: "",
 				})

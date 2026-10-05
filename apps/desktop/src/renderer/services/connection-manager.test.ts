@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import type { DevoClient } from "@devo-ai/sdk/v2/client"
 import type { Event, Session } from "../lib/types"
 import { discoveryAtom } from "../atoms/discovery"
-import { partsFamily, partStorageKey } from "../atoms/parts"
+import { itemsFamily } from "../atoms/messages"
 import { projectPaginationFamily, sessionFamily, upsertSessionAtom } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
 
@@ -46,6 +46,14 @@ class FakeEventStream {
 }
 
 const streams = new Map<string, FakeEventStream>()
+type FakeClient = {
+	directory: string
+	stream: FakeEventStream
+	disposeCalls: number
+	disposed: boolean
+	dispose: () => void
+}
+const createdClients: FakeClient[] = []
 let activeManager: typeof import("./connection-manager") | null = null
 let listSessionsImpl: (client: DevoClient, options?: unknown) => Promise<Session[]> = async () => []
 let deleteSessionImpl: (client: DevoClient, sessionId: string) => Promise<void> = async () => {}
@@ -60,9 +68,30 @@ function streamFor(directory: string): FakeEventStream {
 	return stream
 }
 
+function createFakeClient(directory: string): FakeClient {
+	const stream = new FakeEventStream()
+	let disposed = false
+	const client: FakeClient = {
+		directory,
+		stream,
+		disposeCalls: 0,
+		disposed: false,
+		dispose() {
+			client.disposeCalls++
+			if (disposed) return
+			disposed = true
+			client.disposed = true
+			stream.close()
+		},
+	}
+	streams.set(directory, stream)
+	createdClients.push(client)
+	return client
+}
+
 mock.module("./devo", () => ({
 	connectToServer: (_url: string, options?: { directory?: string }) =>
-		({ directory: options?.directory ?? "__base__" }) as unknown as DevoClient,
+		createFakeClient(options?.directory ?? "__base__") as unknown as DevoClient,
 	disposeAllInstances: () => {},
 	getSession: async () => null,
 	getSessionStatuses: async () => getSessionStatusesImpl(),
@@ -71,12 +100,13 @@ mock.module("./devo", () => ({
 	listSessions: async (client: DevoClient, options?: unknown) => listSessionsImpl(client, options),
 	deleteSession: async (client: DevoClient, sessionId: string) => deleteSessionImpl(client, sessionId),
 	subscribeToGlobalEvents: async (client: DevoClient) =>
-		streamFor(((client as unknown as { directory?: string }).directory) ?? "__base__"),
+		(client as unknown as FakeClient).stream,
 }))
 
 describe("connection manager project event bridge", () => {
 	beforeEach(() => {
 		streams.clear()
+		createdClients.length = 0
 		listSessionsImpl = async () => []
 		deleteSessionImpl = async () => {}
 		getSessionStatusesImpl = async () => ({})
@@ -116,13 +146,56 @@ describe("connection manager project event bridge", () => {
 		streamFor(directory).push({
 			type: "session.status",
 			properties: {
-				sessionID: session.id,
+				sessionId: session.id,
 				status: { type: "busy" },
 			},
 		})
 		await new Promise((resolve) => setTimeout(resolve, 5))
 
 		expect(appStore.get(sessionFamily(session.id))?.status).toEqual({ type: "busy" })
+	})
+
+	test("disposes base and project clients on server replacement and disconnect", async () => {
+		const manager = await import(`./connection-manager?case=${Date.now()}`)
+		activeManager = manager
+		await manager.connectToDevo("devo://first")
+		const firstBaseClient = createdClients[0]
+		const firstProjectClient = manager.getProjectClient("/repo/client-lifecycle") as unknown as FakeClient
+
+		await manager.connectToDevo("devo://second")
+		expect(firstBaseClient.disposeCalls).toBe(1)
+		expect(firstProjectClient.disposeCalls).toBe(1)
+
+		const secondBaseClient = createdClients[2]
+		const secondProjectClient = manager.getProjectClient("/repo/client-lifecycle") as unknown as FakeClient
+		expect(secondProjectClient).not.toBe(firstProjectClient)
+
+		manager.disconnect()
+		expect(secondBaseClient.disposeCalls).toBe(1)
+		expect(secondProjectClient.disposeCalls).toBe(1)
+		manager.disconnect()
+		expect(createdClients.map((client) => client.disposeCalls)).toEqual([1, 1, 1, 1])
+	})
+
+	test("disposes prior-module clients during base and project getter recovery", async () => {
+		const previousManager = await import(`./connection-manager?previous=${Date.now()}`)
+		activeManager = previousManager
+		await previousManager.connectToDevo("devo://hmr")
+		const previousBaseClient = createdClients[0]
+		const previousProjectClient = previousManager.getProjectClient("/repo/hmr") as unknown as FakeClient
+
+		const baseRecoveryManager = await import(`./connection-manager?base-recovery=${Date.now()}`)
+		activeManager = baseRecoveryManager
+		const recoveredBaseClient = baseRecoveryManager.getBaseClient() as unknown as FakeClient
+		expect(previousBaseClient.disposeCalls).toBe(1)
+		expect(previousProjectClient.disposeCalls).toBe(1)
+
+		const projectRecoveryManager = await import(`./connection-manager?project-recovery=${Date.now()}`)
+		activeManager = projectRecoveryManager
+		const recoveredProjectClient = projectRecoveryManager.getProjectClient("/repo/hmr") as unknown as FakeClient
+		expect(recoveredBaseClient.disposeCalls).toBe(1)
+		expect(recoveredProjectClient).toBe(createdClients[4])
+		expect(createdClients).toHaveLength(5)
 	})
 
 	test("forwards project-scoped message part events into renderer state", async () => {
@@ -141,26 +214,34 @@ describe("connection manager project event bridge", () => {
 		expect(manager.getProjectClient(directory)).not.toBeNull()
 
 		streamFor(directory).push({
-			type: "message.part.updated",
+			type: "item.updated",
 			properties: {
-				part: {
-					id: "assistant-message-text",
-					sessionID: session.id,
-					messageID: "assistant-message",
-					type: "text",
-					text: "hello from project stream",
+				info: {
+					id: "assistant-message",
+					sessionId: session.id,
+					turnId: "turn-1",
+					seq: 1,
+					revision: 1,
+					createdAt: "2026-01-01T00:00:01.000Z",
+					updatedAt: "2026-01-01T00:00:01.000Z",
+					state: "running",
+					item: { type: "assistantMessage", text: "hello from project stream" },
 				},
 			},
 		})
 		await new Promise((resolve) => setTimeout(resolve, 5))
 
-		expect(appStore.get(partsFamily(partStorageKey(session.id, "assistant-message")))).toEqual([
+		expect(appStore.get(itemsFamily(session.id))).toEqual([
 			{
-				id: "assistant-message-text",
-				sessionID: session.id,
-				messageID: "assistant-message",
-				type: "text",
-				text: "hello from project stream",
+				id: "assistant-message",
+				sessionId: session.id,
+				turnId: "turn-1",
+				seq: 1,
+				revision: 1,
+				createdAt: "2026-01-01T00:00:01.000Z",
+				updatedAt: "2026-01-01T00:00:01.000Z",
+				state: "running",
+				item: { type: "assistantMessage", text: "hello from project stream" },
 			},
 		])
 	})
@@ -314,6 +395,8 @@ describe("connection manager project event bridge", () => {
 		activeManager = manager
 		await manager.connectToDevo("devo://stdio")
 		await manager.loadAllProjects()
+		const removedDirectoryClient = manager.getProjectClient(directory) as unknown as FakeClient
+		const removedDirectoryAliasClient = manager.getProjectClient(`${directory}/`) as unknown as FakeClient
 		for (const session of sessions) {
 			appStore.set(upsertSessionAtom, { session, directory: session.directory ?? "" })
 		}
@@ -343,6 +426,10 @@ describe("connection manager project event bridge", () => {
 		})
 
 		await manager.deleteProjectSessions(directory)
+		expect(removedDirectoryClient.disposeCalls).toBe(1)
+		expect(removedDirectoryAliasClient.disposeCalls).toBe(1)
+		const reopenedDirectoryClient = manager.getProjectClient(directory) as unknown as FakeClient
+		expect(reopenedDirectoryClient).not.toBe(removedDirectoryClient)
 		await manager.loadProjectSessions(directory)
 
 		expect({
@@ -367,5 +454,28 @@ describe("connection manager project event bridge", () => {
 			},
 			discoveredWorktrees: [otherDirectory],
 		})
+	})
+
+	test("keeps a project client live when session deletion fails", async () => {
+		const directory = "/repo/remove-failure"
+		const session: Session = {
+			id: "failed-delete-session",
+			directory,
+			title: "Failed deletion",
+			time: { created: 1, updated: 1 },
+		}
+		listSessionsImpl = async () => [session]
+		deleteSessionImpl = async () => {
+			throw new Error("delete failed")
+		}
+
+		const manager = await import(`./connection-manager?case=${Date.now()}`)
+		activeManager = manager
+		await manager.connectToDevo("devo://stdio")
+		const client = manager.getProjectClient(directory) as unknown as FakeClient
+
+		await expect(manager.deleteProjectSessions(directory)).rejects.toThrow("delete failed")
+		expect(client.disposeCalls).toBe(0)
+		expect(manager.getProjectClient(directory)).toBe(client)
 	})
 })

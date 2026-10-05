@@ -25,6 +25,7 @@ use crate::sandbox_utils::inject_git_safe_directory;
 use crate::setup::effective_write_roots_for_permissions;
 use crate::token::LocalSid;
 use crate::token::create_readonly_token_with_cap;
+use crate::token::create_workspace_write_token_with_caps_and_additional_restrictions_from;
 use crate::token::create_workspace_write_token_with_caps_from;
 use crate::token::get_current_token_for_restriction;
 use crate::token::get_logon_sid_bytes;
@@ -149,6 +150,7 @@ pub(crate) fn prepare_legacy_session_security(
     devo_home: &Path,
     cwd: &Path,
     capability_roots: impl IntoIterator<Item = PathBuf>,
+    session_credential_sid: Option<&str>,
 ) -> Result<LegacySessionSecurity> {
     let caps = load_or_create_cap_sids(devo_home)?;
     let (h_token, readonly_sid, readonly_sid_str, write_root_sids) = unsafe {
@@ -162,7 +164,19 @@ pub(crate) fn prepare_legacy_session_security(
                 .iter()
                 .map(|root| root.sid.as_ptr())
                 .collect();
-            let h_token = create_workspace_write_token_with_caps_from(base, cap_ptrs.as_slice());
+            let h_token = match session_credential_sid
+                .map(crate::token::LocalSid::from_string)
+                .transpose()?
+            {
+                Some(session_sid) => {
+                    create_workspace_write_token_with_caps_and_additional_restrictions_from(
+                        base,
+                        cap_ptrs.as_slice(),
+                        &[session_sid.as_ptr()],
+                    )
+                }
+                None => create_workspace_write_token_with_caps_from(base, cap_ptrs.as_slice()),
+            };
             CloseHandle(base);
             let h_token = h_token?;
             (h_token, None, None, write_root_sids)

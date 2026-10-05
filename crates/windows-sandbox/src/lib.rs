@@ -2,6 +2,9 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::fmt;
+// `Path` is only referenced by `#[cfg(windows)]` provisioning entry points.
+#[cfg(windows)]
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -59,6 +62,13 @@ pub struct WindowsSandboxRequest {
     pub writable_roots: Vec<PathBuf>,
     pub deny_read: Vec<PathBuf>,
     pub restrict_network: bool,
+    /// Per-session credential SID (design doc §9, P2); `None` for plain
+    /// per-command sandboxing. See `credential_delivery`.
+    pub session_credential_sid: Option<String>,
+    /// Extra env the sandboxed child must receive. The wrapper builds the
+    /// child's environment from its argv env-json snapshot, so callers cannot
+    /// rely on setting `Command::env` after wrapping.
+    pub env_extra: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +93,55 @@ pub fn prepare_windows_sandbox_launch(
         let _ = req;
         Ok(None)
     }
+}
+
+/// One-shot provisioning entry (`devo sandbox-setup`): request the elevated
+/// setup for workspace-write permissions around `cwd`. The UAC consent prompt
+/// appears; after it completes, `sandbox_setup_is_complete` flips true and the
+/// RLM kernel fence can be raised (design doc §5.3).
+#[cfg(windows)]
+pub fn request_default_sandbox_setup(devo_home: &Path, cwd: &Path) -> anyhow::Result<()> {
+    let profile = PermissionProfile::workspace_write();
+    let roots = vec![devo_util_paths::absolute_path::AbsolutePathBuf::from_absolute_path(cwd)?];
+    let permissions =
+        resolved_permissions::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
+            &profile,
+            &roots,
+        )?;
+    let env_map = std::env::vars().collect();
+    setup::run_elevated_setup(
+        setup::SandboxSetupRequest {
+            permissions: &permissions,
+            command_cwd: cwd,
+            env_map: &env_map,
+            devo_home,
+            proxy_enforced: false,
+        },
+        setup::SetupRootOverrides::default(),
+    )
+}
+
+/// Direct-argv sandbox launch for non-shell callers (e.g. the RLM kernel host
+/// execs `python -m rlm.repl`). Shell-shaped fields of `req` are ignored;
+/// `inner_command` is the exact argv executed inside the sandbox.
+#[cfg(windows)]
+pub fn prepare_windows_sandbox_launch_for_argv(
+    req: &WindowsSandboxRequest,
+    inner_command: Vec<String>,
+) -> anyhow::Result<WindowsSandboxLaunch> {
+    launch::prepare_direct_argv_launch(req, inner_command)
+}
+
+/// Direct-argv launch with a caller-filtered inherited environment. Unlike
+/// `Command::env_remove`, this filters the snapshot serialized into the
+/// wrapper's command-line arguments BEFORE the wrapper process starts.
+#[cfg(windows)]
+pub fn prepare_windows_sandbox_launch_for_argv_with_env(
+    req: &WindowsSandboxRequest,
+    inner_command: Vec<String>,
+    inherited_env: Vec<(String, String)>,
+) -> anyhow::Result<WindowsSandboxLaunch> {
+    launch::prepare_direct_argv_launch_with_env(req, inner_command, inherited_env)
 }
 
 /// CLI early-dispatch hook: if argv requests the Windows sandbox wrapper, run it
@@ -134,6 +193,8 @@ mod capture_stub;
 #[cfg(windows)]
 mod conpty;
 #[cfg(windows)]
+mod credential_delivery;
+#[cfg(windows)]
 mod deny_read_acl;
 mod deny_read_resolver;
 #[cfg(windows)]
@@ -159,6 +220,7 @@ mod launch;
 #[cfg(windows)]
 mod logging;
 mod otel_stub;
+pub use otel_stub::StatsigMetricsSettings;
 #[cfg(windows)]
 mod path_normalization;
 mod path_util;
@@ -227,6 +289,8 @@ pub use acl::fetch_dacl_handle;
 #[cfg(windows)]
 pub use acl::path_mask_allows;
 #[cfg(windows)]
+pub use acl::path_write_aces_need_refresh;
+#[cfg(windows)]
 pub use audit::apply_world_writable_scan_and_denies_for_permissions;
 #[cfg(windows)]
 pub use cap::load_or_create_cap_sids;
@@ -242,6 +306,10 @@ pub use cap::workspace_write_root_overlaps_path;
 pub use conpty::ConptyInstance;
 #[cfg(windows)]
 pub use conpty::spawn_conpty_process_as_user;
+#[cfg(windows)]
+pub use credential_delivery::SessionCredentialAuthority;
+#[cfg(windows)]
+pub use credential_delivery::sweep_orphaned_sessions;
 #[cfg(windows)]
 pub use deny_read_acl::apply_deny_read_acls;
 #[cfg(windows)]
@@ -375,11 +443,14 @@ pub use token::LocalSid;
 #[cfg(windows)]
 pub use token::convert_string_sid_to_sid;
 #[cfg(windows)]
+#[cfg(windows)]
 pub use token::create_readonly_token_with_cap_from;
 #[cfg(windows)]
 pub use token::create_readonly_token_with_caps_and_user_from;
 #[cfg(windows)]
 pub use token::create_readonly_token_with_caps_from;
+#[cfg(windows)]
+pub use token::create_readonly_token_with_caps_user_and_additional_restrictions_from;
 #[cfg(windows)]
 pub use token::create_workspace_write_token_with_caps_and_user_from;
 #[cfg(windows)]
@@ -442,6 +513,8 @@ mod tests {
             writable_roots: vec![],
             deny_read: vec![],
             restrict_network: false,
+            session_credential_sid: None,
+            env_extra: vec![],
         })
         .expect("prepare");
         #[cfg(not(windows))]

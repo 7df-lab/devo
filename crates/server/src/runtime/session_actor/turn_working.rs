@@ -5,11 +5,11 @@
 //! [`SessionActorState::merge_turn_working_set`].
 
 use super::state::SessionActorState;
-use crate::turn::TurnMetadata;
+use crate::turn::RuntimeTurn;
 
 /// Turn-owned session state for one in-flight execution.
 ///
-/// Shares `stream`, queue Arcs, and `file_read_ledger` with the actor so the
+/// Shares `stream`, queue Arcs, `file_read_ledger`, and `kernel` with the actor so the
 /// control plane and item stream stay coherent. Conversation mutations happen
 /// only on the embedded `state` until merge.
 pub(crate) struct TurnWorkingSet {
@@ -21,11 +21,14 @@ impl SessionActorState {
     ///
     /// Installs `TurnInlineState` on the shared stream. Queue Arcs are shared so
     /// pending/steer RPCs remain mailbox-free.
-    pub(crate) fn checkout_turn_working_set(&self, _turn: &TurnMetadata) -> TurnWorkingSet {
+    pub(crate) fn checkout_turn_working_set(&self, _turn: &RuntimeTurn) -> TurnWorkingSet {
         TurnWorkingSet {
             state: SessionActorState {
                 runtime_context: std::sync::Arc::clone(&self.runtime_context),
-                record: self.record.clone(),
+                rollout_path: self.rollout_path.clone(),
+                // Turn-working checkout: OS locks are not cloneable and must
+                // stay owned by the session actor itself.
+                session_file_lock: None,
                 summary: self.summary.clone(),
                 config: self.config.clone(),
                 core: self.core.snapshot_for_export(),
@@ -36,7 +39,7 @@ impl SessionActorState {
                 history_items: self.history_items.clone(),
                 persisted_turn_items: self.persisted_turn_items.clone(),
                 latest_compaction_snapshot: self.latest_compaction_snapshot.clone(),
-                turn_records_by_id: self.turn_records_by_id.clone(),
+                turns_by_id: self.turns_by_id.clone(),
                 pending_turn_queue: std::sync::Arc::clone(&self.pending_turn_queue),
                 steer_input_queue: std::sync::Arc::clone(&self.steer_input_queue),
                 agent_tool_policy: self.agent_tool_policy,
@@ -45,9 +48,12 @@ impl SessionActorState {
                 first_user_input: self.first_user_input.clone(),
                 tool_registry: self.tool_registry.clone(),
                 file_read_ledger: std::sync::Arc::clone(&self.file_read_ledger),
+                kernel: self.kernel.as_ref().map(std::sync::Arc::clone),
                 session_approval_cache: self.session_approval_cache.clone(),
                 turn_approval_cache: self.turn_approval_cache.clone(),
                 session_context_recorded: self.session_context_recorded,
+                transcript_leaf_id: self.transcript_leaf_id,
+                leaf_epoch: self.leaf_epoch,
             },
         }
     }
@@ -61,34 +67,37 @@ impl SessionActorState {
 
         let session_config = self.config.clone();
         let session_core_config = self.core.config.clone();
-        let session_permission_preset = self.summary.permission_preset;
-        let session_model = self.summary.model.clone();
-        let session_model_binding_id = self.summary.model_binding_id.clone();
-        let session_effort = self.summary.reasoning_effort_selection.clone();
-        let session_effective_context_window = self.summary.effective_context_window;
+        let session_permission_preset = self.summary.permission_preset();
+        let session_model = self.summary.model_name().map(str::to_string);
+        let session_model_binding_id = self.summary.model_binding_id().map(str::to_string);
+        let session_effort = self.summary.settings.reasoning_effort.clone();
+        let session_effective_context_window = self.summary.settings.effective_context_window;
         let session_title = self.summary.title.clone();
         let session_title_state = self.summary.title_state.clone();
-        let session_record = self.record.clone();
+        let session_rollout_path = self.rollout_path.clone();
 
         self.core = working.core;
         self.core.config = session_core_config;
         self.config = session_config;
 
         self.summary = working.summary;
-        if session_permission_preset.is_some() {
-            self.summary.permission_preset = session_permission_preset;
+        if let Some(session_permission_preset) = session_permission_preset {
+            self.summary
+                .set_permission_preset(session_permission_preset);
         }
-        if session_model.is_some() {
-            self.summary.model = session_model;
-            self.summary.model_binding_id = session_model_binding_id;
+        if let Some(session_model) = session_model {
+            self.summary.model.model = session_model;
+            self.summary.model.provider =
+                session_model_binding_id.unwrap_or_else(|| "unknown".into());
         } else if session_model_binding_id.is_some() {
-            self.summary.model_binding_id = session_model_binding_id;
+            self.summary.model.provider =
+                session_model_binding_id.unwrap_or_else(|| "unknown".into());
         }
         if session_effort.is_some() {
-            self.summary.reasoning_effort_selection = session_effort;
+            self.summary.settings.reasoning_effort = session_effort;
         }
         if session_effective_context_window.is_some() {
-            self.summary.effective_context_window = session_effective_context_window;
+            self.summary.settings.effective_context_window = session_effective_context_window;
         }
         if session_title.is_some() {
             self.summary.title = session_title;
@@ -107,34 +116,19 @@ impl SessionActorState {
             self.latest_compaction_snapshot = working.latest_compaction_snapshot;
         }
         self.session_context_recorded = working.session_context_recorded;
-        self.turn_records_by_id = working.turn_records_by_id;
+        self.turns_by_id = working.turns_by_id;
         self.first_user_input = working
             .first_user_input
             .or_else(|| self.first_user_input.clone());
-
-        match (session_record, working.record) {
-            (Some(actor_record), Some(mut turn_record)) => {
-                turn_record.title = actor_record.title.or(turn_record.title);
-                turn_record.title_state = actor_record.title_state;
-                if actor_record.permission_preset.is_some() {
-                    turn_record.permission_preset = actor_record.permission_preset;
-                }
-                if actor_record.model.is_some() {
-                    turn_record.model = actor_record.model;
-                    turn_record.model_binding_id = actor_record.model_binding_id;
-                } else if actor_record.model_binding_id.is_some() {
-                    turn_record.model_binding_id = actor_record.model_binding_id;
-                }
-                if actor_record.reasoning_effort_selection.is_some() {
-                    turn_record.reasoning_effort_selection =
-                        actor_record.reasoning_effort_selection;
-                }
-                turn_record.updated_at = turn_record.updated_at.max(actor_record.updated_at);
-                self.record = Some(turn_record);
-            }
-            (actor_record, turn_record) => {
-                self.record = turn_record.or(actor_record);
-            }
+        // Prefer the turn-owned kernel when present so ensure_kernel persists.
+        if working.kernel.is_some() {
+            self.kernel = working.kernel;
         }
+
+        // Path is session-plane: prefer actor path if set during the turn
+        // (e.g. repair), otherwise take the turn working copy.
+        self.rollout_path = session_rollout_path.or(working.rollout_path);
+        self.transcript_leaf_id = working.transcript_leaf_id;
+        self.leaf_epoch = working.leaf_epoch;
     }
 }

@@ -56,9 +56,11 @@ impl ServerRuntime {
                 .map(|ids| ids.contains(&provider_id))
                 .unwrap_or(false);
             let config = store.effective_config();
-            let live_catalog = PresetModelCatalog::load_from_provider_config_with_overrides(
+            let home = store.user_config_dir().to_path_buf();
+            let live_catalog = PresetModelCatalog::load_from_provider_config_with_home(
                 &config.provider_catalog,
                 &config.provider.model_overrides,
+                Some(home.as_path()),
             )
             .ok();
             let catalog: &dyn ModelCatalog = live_catalog
@@ -178,7 +180,13 @@ impl ServerRuntime {
             .config_store
             .lock()
             .expect("app config store mutex should not be poisoned");
-        let provider = match store.upsert_provider_connection(provider, None, None, None) {
+        let builtin = devo_core::builtin_provider_config().ok();
+        let baseline = builtin
+            .as_ref()
+            .and_then(|config| config.providers.get(&provider_id));
+        let provider = match store
+            .upsert_provider_connection_with_baseline(provider, None, None, None, baseline)
+        {
             Ok(provider) => provider,
             Err(error) => {
                 return self.error_response(
@@ -469,6 +477,8 @@ fn merge_discovered_model(
     fill_if_missing!(top_p);
     fill_if_missing!(top_k);
     fill_if_missing!(reasoning_capability);
+    fill_if_missing!(reasoning);
+    fill_if_missing!(thinking_level_map);
     fill_if_missing!(reasoning_implementation);
     fill_if_missing!(default_reasoning_effort);
     fill_if_missing!(default_reasoning_selection);

@@ -33,6 +33,8 @@ import { SettingsHeader } from "./settings-header"
 import { SettingsSection } from "./settings-section"
 import { settingsBannerClass, settingsPageClass } from "./settings-surface"
 import { TemplateConnectDialog } from "./template-connect-dialog"
+import { ConnectProviderDialog } from "./connect-provider-dialog"
+import { isDesktopOAuthProvider } from "./desktop-oauth-providers"
 import { CustomProviderDialog } from "./custom-provider-dialog"
 import { ConnectionDetailDialog } from "./connection-detail-dialog"
 
@@ -191,7 +193,17 @@ export function ProviderSettings() {
 			</div>
 
 			{/* Dialogs */}
-			{connectTemplate && (
+			{connectTemplate && isDesktopOAuthProvider(connectTemplate.id) && (
+				<ConnectProviderDialog
+					provider={{ ...connectTemplate, env: [] }}
+					onClose={() => setConnectTemplate(null)}
+					onConnected={() => {
+						setConnectTemplate(null)
+						handleConnected()
+					}}
+				/>
+			)}
+			{connectTemplate && !isDesktopOAuthProvider(connectTemplate.id) && (
 				<TemplateConnectDialog
 					provider={connectTemplate}
 					open={!!connectTemplate}
@@ -202,6 +214,7 @@ export function ProviderSettings() {
 
 			{customDialogOpen && (
 				<CustomProviderDialog
+					templateIds={catalog?.templateIds ?? new Set()}
 					open={customDialogOpen}
 					onOpenChange={setCustomDialogOpen}
 					onSaved={handleConnected}

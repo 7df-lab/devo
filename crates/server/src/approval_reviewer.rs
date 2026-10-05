@@ -5,6 +5,8 @@ use devo_protocol::{
     ModelRequest, RequestContent, RequestMessage, ResponseContent, SamplingControls,
 };
 
+use crate::json_extract::extract_json_object;
+
 const REVIEWER_MAX_TOKENS: usize = 512;
 const REVIEWER_JSON_SHAPE: &str = "{\"risk\":\"low|medium|high\",\"rationale\":\"short reason\"}";
 const REVIEWER_SYSTEM_PROMPT: &str = "Rate the risk of the pending tool call. Reply with JSON only. Writing outside the workspace or running a command is not automatically high; judge from the conversation. Mark high only for clearly destructive or irreversible actions such as `rm -rf *`.";
@@ -146,40 +148,6 @@ fn assessment_from_value(value: &serde_json::Value) -> Option<ReviewerAssessment
         _ => return None,
     };
     Some(ReviewerAssessment { risk, rationale })
-}
-
-fn extract_json_object(raw: &str) -> Option<&str> {
-    let start = raw.find('{')?;
-    let bytes = raw.as_bytes();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    for (offset, byte) in bytes[start..].iter().enumerate() {
-        let index = start + offset;
-        let ch = *byte as char;
-        if in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&raw[start..=index]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn review_prompt_for_request(
@@ -367,8 +335,8 @@ mod tests {
             tool_name: "shell_command".to_string(),
             input: json!({ "command": "git add -A" }),
             cwd: std::path::PathBuf::from("repo"),
-            session_id: "session".to_string(),
-            turn_id: Some("turn".to_string()),
+            session_id: "session".into(),
+            turn_id: Some("turn".into()),
             resource: devo_safety::ResourceKind::ShellExec,
             action_summary: "Run git add -A".to_string(),
             justification: Some("stage files".to_string()),
@@ -402,8 +370,8 @@ mod tests {
             tool_name: "shell_command".to_string(),
             input: json!({ "command": "rm -rf build/" }),
             cwd: std::path::PathBuf::from("repo"),
-            session_id: "session".to_string(),
-            turn_id: Some("turn".to_string()),
+            session_id: "session".into(),
+            turn_id: Some("turn".into()),
             resource: devo_safety::ResourceKind::ShellExec,
             action_summary: "Remove build directory".to_string(),
             justification: None,
@@ -481,8 +449,8 @@ mod tests {
             tool_name: "mutating_tool".to_string(),
             input: json!({}),
             cwd: std::path::PathBuf::from("repo"),
-            session_id: "session".to_string(),
-            turn_id: Some("turn".to_string()),
+            session_id: "session".into(),
+            turn_id: Some("turn".into()),
             resource: devo_safety::ResourceKind::FileWrite,
             action_summary: "Write a file".to_string(),
             justification: None,

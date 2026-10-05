@@ -45,7 +45,7 @@ impl ServerRuntime {
             };
             let requested_model = session_model_selection(&reservation.summary);
             let requested_reasoning_effort_selection =
-                reservation.summary.reasoning_effort_selection.clone();
+                reservation.summary.settings.reasoning_effort.clone();
             let turn_config = reservation
                 .runtime_context
                 .resolve_turn_config(requested_model, requested_reasoning_effort_selection);
@@ -55,29 +55,42 @@ impl ServerRuntime {
             let request_model = turn_config.provider_request_model(&resolved_request.request_model);
 
             let now = Utc::now();
-            let turn = TurnMetadata {
-                turn_id: TurnId::new(),
-                session_id,
-                sequence: reservation
-                    .latest_turn
-                    .as_ref()
-                    .map_or(1, |turn| turn.sequence + 1),
-                status: TurnStatus::Running,
-                kind: devo_core::TurnKind::Regular,
-                model: turn_config.model.slug.clone(),
-                model_binding_id: turn_config.model_binding_id.clone(),
-                reasoning_effort_selection: turn_config.reasoning_effort_selection.clone(),
-                reasoning_effort: resolved_request.effective_reasoning_effort,
-                request_model,
-                request_thinking: resolved_request.request_thinking.clone(),
-                started_at: now,
-                completed_at: None,
-                usage: None,
-                stop_reason: None,
-                failure_reason: None,
+            let native_turn_id = devo_protocol::native::ids::TurnId::new();
+            let turn_id = native_turn_id;
+            let native_session_id = reservation.summary.native.id;
+            let runtime_turn = crate::turn::RuntimeTurn {
+                native: devo_protocol::native::turn::Turn {
+                    id: native_turn_id,
+                    session_id: native_session_id,
+                    sequence: reservation
+                        .latest_turn
+                        .as_ref()
+                        .map_or(1, |turn| turn.native.sequence + 1),
+                    kind: devo_protocol::native::turn::TurnKind::GoalContinuation,
+                    status: devo_protocol::native::turn::TurnStatus::InProgress,
+                    model: devo_protocol::native::model::ModelBinding {
+                        provider: turn_config
+                            .model_binding_id
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        model: request_model,
+                        variant: None,
+                        reasoning_effort: resolved_request.effective_reasoning_effort,
+                    },
+                    collaboration_mode: None,
+                    started_at: now,
+                    completed_at: None,
+                    error: None,
+                    usage: None,
+                },
+                extras: crate::turn::RuntimeTurnExtras {
+                    request_thinking: resolved_request.request_thinking.clone(),
+                    stop_reason: None,
+                    failure_reason: None,
+                },
             };
             if !session_handle
-                .try_begin_active_turn(turn.clone(), turn_config.clone())
+                .try_begin_runtime_turn(runtime_turn.clone(), turn_config.clone())
                 .await
                 .unwrap_or(false)
             {
@@ -86,31 +99,31 @@ impl ServerRuntime {
             self.active_goal_continuation_turns
                 .lock()
                 .await
-                .insert(session_id, turn.turn_id);
+                .insert(session_id, turn_id);
             self.goal_continuation_turn_goals
                 .lock()
                 .await
-                .insert(turn.turn_id, candidate.goal_id.clone());
+                .insert(turn_id, candidate.goal_id);
             if !self
-                .mark_goal_continuation_turn_started(session_id, &candidate.goal_id, turn.turn_id)
+                .mark_goal_continuation_turn_started(session_id, &candidate.goal_id, turn_id)
                 .await
             {
-                self.clear_goal_continuation_turn_reservation(&session_handle, turn.turn_id)
+                self.clear_goal_continuation_turn_reservation(&session_handle, turn_id)
                     .await;
                 return;
             }
 
             if let Err(error) = self
-                .append_goal_continuation_turn_start(session_id, &turn)
+                .append_goal_continuation_turn_start(session_id, &runtime_turn)
                 .await
             {
                 tracing::warn!(
                     session_id = %session_id,
-                    turn_id = %turn.turn_id,
+                    turn_id = %turn_id,
                     error = %error,
                     "failed to persist goal continuation turn start"
                 );
-                self.clear_goal_continuation_turn_reservation(&session_handle, turn.turn_id)
+                self.clear_goal_continuation_turn_reservation(&session_handle, turn_id)
                     .await;
                 return;
             }
@@ -118,93 +131,100 @@ impl ServerRuntime {
                 self,
                 &session_handle,
                 session_id,
-                turn.turn_id,
+                turn_id,
                 &candidate.goal_id,
             )
             .await
             {
-                self.clear_goal_continuation_turn_reservation(&session_handle, turn.turn_id)
+                self.clear_goal_continuation_turn_reservation(&session_handle, turn_id)
                     .await;
                 return;
             }
 
-            self.broadcast_event(ServerEvent::SessionStatusChanged(
-                SessionStatusChangedPayload {
+            self.broadcast_notification(
+                devo_protocol::native::event::ServerNotification::session_status_changed(
                     session_id,
-                    status: SessionRuntimeStatus::ActiveTurn,
-                },
-            ))
+                    SessionStatus::Active,
+                    /*active_turn_id*/ None,
+                ),
+            )
             .await;
             if !goal_continuation_turn_still_current(
                 self,
                 &session_handle,
                 session_id,
-                turn.turn_id,
+                turn_id,
                 &candidate.goal_id,
             )
             .await
             {
-                self.clear_goal_continuation_turn_reservation(&session_handle, turn.turn_id)
+                self.clear_goal_continuation_turn_reservation(&session_handle, turn_id)
                     .await;
                 return;
             }
-            self.broadcast_event(ServerEvent::TurnStarted(TurnEventPayload {
-                session_id,
-                turn: turn.clone(),
-            }))
+            self.broadcast_notification(
+                devo_protocol::native::event::ServerNotification::TurnStarted {
+                    turn: Box::new(runtime_turn.native.clone()),
+                },
+            )
             .await;
             if !goal_continuation_turn_still_current(
                 self,
                 &session_handle,
                 session_id,
-                turn.turn_id,
+                turn_id,
                 &candidate.goal_id,
             )
             .await
             {
-                self.clear_goal_continuation_turn_reservation(&session_handle, turn.turn_id)
+                self.clear_goal_continuation_turn_reservation(&session_handle, turn_id)
                     .await;
                 return;
             }
 
             let cancel_token = CancellationToken::new();
             let runtime = Arc::clone(self);
-            let task_turn = turn.clone();
+            let task_turn = runtime_turn.clone();
             let task_turn_config = turn_config.clone();
             let task_goal = candidate.goal.to_thread_goal();
+            let spawn_session_id = session_id;
             let task_started = {
                 let tracked_turns = self.active_goal_continuation_turns.lock().await;
                 let still_reserved = tracked_turns
                     .get(&session_id)
-                    .is_some_and(|tracked_turn_id| *tracked_turn_id == turn.turn_id);
+                    .is_some_and(|tracked_turn_id| *tracked_turn_id == turn_id);
                 if !still_reserved {
                     false
                 } else {
                     let still_active_turn = session_handle
                         .active_turn_id()
                         .await
-                        .is_some_and(|active_turn_id| active_turn_id == Some(turn.turn_id));
+                        .is_some_and(|active_turn_id| active_turn_id == Some(turn_id));
                     if !still_active_turn {
                         false
                     } else {
                         self.active_turns
                             .insert_cancel_token(session_id, cancel_token.clone())
                             .await;
-                        self.register_runtime_active_turn(session_id, turn.clone())
+                        self.register_runtime_active_turn(session_id, runtime_turn)
                             .await;
                         let task = tokio::spawn(async move {
                             runtime
                                 .execute_turn(ExecuteTurnRequest {
-                                    session_id,
+                                    session_id: spawn_session_id,
                                     turn: task_turn,
                                     turn_config: task_turn_config,
                                     display_input: String::new(),
+                                    client_user_message_id: None,
                                     input: String::new(),
                                     input_messages: Vec::new(),
+                                    input_images: Vec::new(),
+                                    input_image_paths: Vec::new(),
                                     collaboration_mode: devo_protocol::CollaborationMode::Build,
                                     input_mode: TurnInputMode::HiddenGoalContinuation {
                                         goal: task_goal,
                                     },
+                                    user_message_already_emitted: false,
                                 })
                                 .await;
                         });
@@ -216,7 +236,7 @@ impl ServerRuntime {
                 }
             };
             if !task_started {
-                self.clear_goal_continuation_turn_reservation(&session_handle, turn.turn_id)
+                self.clear_goal_continuation_turn_reservation(&session_handle, turn_id)
                     .await;
             }
         })
@@ -259,7 +279,7 @@ impl ServerRuntime {
             return None;
         }
         Some(GoalContinuationCandidate {
-            goal_id: goal.goal_id.clone(),
+            goal_id: goal.goal_id,
             goal,
         })
     }
@@ -326,7 +346,7 @@ impl ServerRuntime {
     async fn append_goal_continuation_turn_start(
         self: &Arc<Self>,
         session_id: SessionId,
-        turn: &TurnMetadata,
+        turn: &crate::turn::RuntimeTurn,
     ) -> anyhow::Result<()> {
         let Some(session_handle) = self.session(session_id).await else {
             return Ok(());
@@ -334,7 +354,7 @@ impl ServerRuntime {
         let Some(persistence) = session_handle.turn_persistence_snapshot().await else {
             return Ok(());
         };
-        if persistence.record.is_some() {
+        if persistence.rollout_path.is_some() {
             self.persist_turn_line_deduped(session_id, turn).await?;
         }
         let goal = {
@@ -345,10 +365,10 @@ impl ServerRuntime {
             && let Some(prompt) = goal.continuation_prompt()
             && let Err(error) = self
                 .goal_durable_store
-                .append_context_snapshot(&goal, format!("turn-{}", turn.turn_id), prompt)
+                .append_context_snapshot(&goal, format!("turn-{}", turn.turn_id()), prompt)
                 .await
         {
-            tracing::warn!(session_id = %session_id, turn_id = %turn.turn_id, error = %error, "failed to persist goal context snapshot");
+            tracing::warn!(session_id = %session_id, turn_id = %turn.turn_id(), error = %error, "failed to persist goal context snapshot");
         }
         Ok(())
     }
@@ -418,8 +438,8 @@ impl ServerRuntime {
                 .find_map(|(session_id, tracked_turn_id)| {
                     (*tracked_turn_id == turn_id).then_some(*session_id)
                 });
-            if let Some(session_id) = session_id {
-                tracked_turns.remove(&session_id);
+            if let Some(ref session_id) = session_id {
+                tracked_turns.remove(session_id);
             }
             session_id
         };
@@ -432,6 +452,25 @@ impl ServerRuntime {
             .await
             .remove(&turn_id);
         session_handle.clear_active_turn_if_matches(turn_id).await;
+    }
+
+    /// Drop continuation bookkeeping without cancelling the in-flight turn.
+    ///
+    /// Used by kernel `goal.complete`: the model is finishing the continuation
+    /// turn itself, so `interrupt_active_goal_continuation_turn` would abort the
+    /// host_request mid-flight (`await goal.complete()` shows ✗).
+    pub(super) async fn clear_goal_continuation_registration(&self, session_id: SessionId) {
+        let turn_id = self
+            .active_goal_continuation_turns
+            .lock()
+            .await
+            .remove(&session_id);
+        if let Some(turn_id) = turn_id {
+            self.goal_continuation_turn_goals
+                .lock()
+                .await
+                .remove(&turn_id);
+        }
     }
 
     pub(super) async fn interrupt_active_goal_continuation_turn(
@@ -536,32 +575,34 @@ async fn goal_continuation_turn_still_current(
 
 fn failed_turn_should_suppress_goal(
     goal_updated_at: chrono::DateTime<Utc>,
-    latest_turn: Option<&TurnMetadata>,
+    latest_turn: Option<&crate::turn::RuntimeTurn>,
 ) -> bool {
     let Some(turn) = latest_turn else {
         return false;
     };
-    if turn.status != TurnStatus::Failed {
+    if turn.native.status != devo_protocol::native::turn::TurnStatus::Failed {
         return false;
     }
-    turn.completed_at.unwrap_or(turn.started_at) > goal_updated_at
+    turn.native.completed_at.unwrap_or(turn.native.started_at) > goal_updated_at
 }
 
 fn latest_failed_turn_error_message(
     items: &[crate::execution::PersistedTurnItem],
-    latest_turn: &TurnMetadata,
+    latest_turn: &crate::turn::RuntimeTurn,
 ) -> Option<String> {
-    if latest_turn.status != TurnStatus::Failed {
+    if latest_turn.native.status != devo_protocol::native::turn::TurnStatus::Failed {
         return None;
     }
-    items.iter().rev().find_map(|item| {
-        match (item.turn_id == latest_turn.turn_id, &item.turn_item) {
-            (true, TurnItem::AgentMessage(TextItem { text })) if !text.trim().is_empty() => {
+    items.iter().rev().find_map(
+        |item| match (item.turn_id == latest_turn.native.id, &item.item) {
+            (true, devo_protocol::native::item::Item::AssistantMessage { text, .. })
+                if !text.trim().is_empty() =>
+            {
                 Some(text.clone())
             }
             _ => None,
-        }
-    })
+        },
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -649,24 +690,42 @@ fn goal_failure_blocker_summary(message: Option<&str>) -> String {
 mod tests {
     use super::*;
 
-    fn turn(status: TurnStatus, completed_at: chrono::DateTime<Utc>) -> TurnMetadata {
-        TurnMetadata {
-            turn_id: TurnId::new(),
-            session_id: SessionId::new(),
-            sequence: 1,
-            status,
-            kind: devo_core::TurnKind::Regular,
-            model: "model-a".into(),
-            model_binding_id: None,
-            reasoning_effort_selection: None,
-            reasoning_effort: None,
-            request_model: "provider/model-a".into(),
-            request_thinking: None,
-            started_at: completed_at - chrono::Duration::seconds(1),
-            completed_at: Some(completed_at),
-            usage: None,
-            stop_reason: None,
-            failure_reason: None,
+    fn turn(status: TurnStatus, completed_at: chrono::DateTime<Utc>) -> crate::turn::RuntimeTurn {
+        let turn_id = TurnId::new();
+        let session_id = SessionId::new();
+        let native_status = match status {
+            TurnStatus::Failed => devo_protocol::native::turn::TurnStatus::Failed,
+            TurnStatus::Completed => devo_protocol::native::turn::TurnStatus::Completed,
+            TurnStatus::Interrupted => devo_protocol::native::turn::TurnStatus::Interrupted,
+            TurnStatus::WaitingApproval => devo_protocol::native::turn::TurnStatus::WaitingApproval,
+            TurnStatus::Pending | TurnStatus::Running => {
+                devo_protocol::native::turn::TurnStatus::InProgress
+            }
+        };
+        crate::turn::RuntimeTurn {
+            native: devo_protocol::native::turn::Turn {
+                id: turn_id,
+                session_id,
+                sequence: 1,
+                kind: devo_protocol::native::turn::TurnKind::Regular,
+                status: native_status,
+                model: devo_protocol::native::model::ModelBinding {
+                    provider: "unknown".into(),
+                    model: "provider/model-a".into(),
+                    variant: None,
+                    reasoning_effort: None,
+                },
+                collaboration_mode: None,
+                started_at: completed_at - chrono::Duration::seconds(1),
+                completed_at: Some(completed_at),
+                error: None,
+                usage: None,
+            },
+            extras: crate::turn::RuntimeTurnExtras {
+                request_thinking: None,
+                stop_reason: None,
+                failure_reason: None,
+            },
         }
     }
 

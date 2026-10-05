@@ -65,7 +65,7 @@ function needsSummary(key: string): boolean {
 
 function hasFilePatch(view: WorkspaceChangeView, filePath: string): boolean {
 	const normalized = filePath.replace(/\\/g, "/")
-	const existing = view.unified_diff ?? ""
+	const existing = view.unifiedDiff ?? ""
 	if (
 		!(
 			existing.includes(`b/${normalized}\n`) ||
@@ -113,8 +113,8 @@ function stripFilePatch(diff: string, filePath: string): string {
 
 /** True when every non-binary file already has a complete patch chunk. */
 function viewHasCompletePatches(view: WorkspaceChangeView): boolean {
-	if (view.files.length === 0) return Boolean(view.unified_diff != null)
-	const diff = view.unified_diff
+	if (view.files.length === 0) return Boolean(view.unifiedDiff != null)
+	const diff = view.unifiedDiff
 	if (diff == null || diff.length === 0) return false
 	return view.files.every((file) => Boolean(file.binary) || hasFilePatch(view, String(file.path)))
 }
@@ -127,7 +127,7 @@ function findFile(view: WorkspaceChangeView, filePath: string) {
 function fileHasSides(view: WorkspaceChangeView, filePath: string): boolean {
 	const file = findFile(view, filePath)
 	if (!file) return false
-	return typeof file.old_text === "string" || typeof file.new_text === "string"
+	return typeof file.oldText === "string" || typeof file.newText === "string"
 }
 
 /** Ready for MultiFileDiff, or PatchDiff/binary fallback without another sides fetch. */
@@ -162,9 +162,9 @@ export function mergePathFullIntoView(
 			additions: updated.additions ?? file.additions,
 			deletions: updated.deletions ?? file.deletions,
 			binary: updated.binary ?? file.binary,
-			diff_truncated: updated.diff_truncated ?? file.diff_truncated,
-			old_text: updated.old_text ?? file.old_text,
-			new_text: updated.new_text ?? file.new_text,
+			diffTruncated: updated.diffTruncated ?? file.diffTruncated,
+			oldText: updated.oldText ?? file.oldText,
+			newText: updated.newText ?? file.newText,
 		}
 	})
 	// Keep Summary-only rows (e.g. untracked) that Full omitted.
@@ -173,10 +173,10 @@ export function mergePathFullIntoView(
 		if (files.some((file) => String(file.path).replace(/\\/g, "/") === path)) continue
 		files.push(incoming)
 	}
-	const incoming = (patchView.unified_diff ?? "").trimEnd()
+	const incoming = (patchView.unifiedDiff ?? "").trimEnd()
 	const paths = patchView.files.map((file) => String(file.path).replace(/\\/g, "/"))
 	if (!incoming) return { ...base, files }
-	let baseDiff = base.unified_diff ?? ""
+	let baseDiff = base.unifiedDiff ?? ""
 	for (const path of paths) {
 		if (!hasFilePatch(base, path)) {
 			baseDiff = stripFilePatch(baseDiff, path)
@@ -185,7 +185,7 @@ export function mergePathFullIntoView(
 	const already = paths.every((path) => hasFilePatch(base, path))
 	if (already) return { ...base, files }
 	const unified = baseDiff.trimEnd() ? `${baseDiff.trimEnd()}\n${incoming}\n` : `${incoming}\n`
-	return { ...base, files, unified_diff: unified }
+	return { ...base, files, unifiedDiff: unified }
 }
 
 /** Summary refreshes must not wipe expand-on-demand patches/sides. */
@@ -203,11 +203,11 @@ export function mergeSummaryPreservingExpandState(
 		if (!prev) return file
 		return {
 			...file,
-			old_text: prev.old_text ?? file.old_text,
-			new_text: prev.new_text ?? file.new_text,
+			oldText: prev.oldText ?? file.oldText,
+			newText: prev.newText ?? file.newText,
 		}
 	})
-	let unified = previous.unified_diff ?? undefined
+	let unified = previous.unifiedDiff ?? undefined
 	if (unified) {
 		const keptPaths = new Set(files.map((file) => String(file.path).replace(/\\/g, "/")))
 		for (const prev of previous.files) {
@@ -221,7 +221,7 @@ export function mergeSummaryPreservingExpandState(
 	return {
 		...summary,
 		files,
-		unified_diff: unified ?? summary.unified_diff,
+		unifiedDiff: unified ?? summary.unifiedDiff,
 	}
 }
 
@@ -326,7 +326,7 @@ export function useWorkspaceChanges(
 					return
 				}
 				const current = appStore.get(workspaceChangesStateFamily(fetchKey))
-				if (detail === "summary" && current.view?.unified_diff && !current.stale) {
+				if (detail === "summary" && current.view?.unifiedDiff && !current.stale) {
 					if (!silentUpgrade) markLoading({ key: fetchKey, loading: false })
 					return
 				}
@@ -491,7 +491,7 @@ export function useWorkspaceChanges(
 	const displayView = state.view ?? (state.loading ? fallbackState.view : null)
 	const isInitialLoading = !displayView && state.loading
 	const isRefreshing = Boolean(displayView) && state.loading
-	const patchesPending = Boolean(displayView && displayView.files.length > 0 && !displayView.unified_diff)
+	const patchesPending = Boolean(displayView && displayView.files.length > 0 && !displayView.unifiedDiff)
 
 	return {
 		...state,

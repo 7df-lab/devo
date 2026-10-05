@@ -168,7 +168,7 @@ describe("subscription replay forward compatibility", () => {
 
 		const client = createDevoClient({ directory: "/repo", transport })
 		await client.session.updateSettings({
-			sessionID: "session-1",
+			sessionId: "session-1",
 			modelID: "test-model",
 			reasoningEffort: "high",
 			mode: "plan",
@@ -179,7 +179,7 @@ describe("subscription replay forward compatibility", () => {
 
 		// An empty patch must not hit the wire at all.
 		const before = transport.requests.length
-		await client.session.updateSettings({ sessionID: "session-1" })
+		await client.session.updateSettings({ sessionId: "session-1" })
 		expect(transport.requests.length).toBe(before)
 	})
 
@@ -196,7 +196,7 @@ describe("subscription replay forward compatibility", () => {
 		})
 
 		const client = createDevoClient({ directory: "/repo", transport })
-		await client.session.updateSettings({ sessionID: "session-1", modelID: "test-model" })
+		await client.session.updateSettings({ sessionId: "session-1", modelID: "test-model" })
 		const calls = transport.requests.map((request) => request.method)
 		expect(calls).not.toContain("session/resume")
 		expect(calls.filter((method) => method === "session/metadata/update").length).toBe(1)
@@ -225,9 +225,9 @@ describe("subscription replay forward compatibility", () => {
 		})
 
 		const client = createDevoClient({ directory: "/repo", transport })
-		const first = client.session.updateSettings({ sessionID: "session-1", modelID: "model-a" })
+		const first = client.session.updateSettings({ sessionId: "session-1", modelID: "model-a" })
 		await Promise.resolve()
-		const second = client.session.updateSettings({ sessionID: "session-1", mode: "plan" })
+		const second = client.session.updateSettings({ sessionId: "session-1", mode: "plan" })
 		releaseFirst?.()
 		await Promise.all([first, second])
 
@@ -252,10 +252,10 @@ describe("subscription replay forward compatibility", () => {
 
 		const client = createDevoClient({ directory: "/repo", transport })
 		await expect(
-			client.session.updateSettings({ sessionID: "session-1", modelID: "test-model" }),
+			client.session.updateSettings({ sessionId: "session-1", modelID: "test-model" }),
 		).rejects.toThrow("rejected")
 		failed = false
-		await client.session.retrySettings({ sessionID: "session-1" })
+		await client.session.retrySettings({ sessionId: "session-1" })
 		expect(
 			transport.requests.filter((request) => request.method === "session/metadata/update"),
 		).toHaveLength(2)

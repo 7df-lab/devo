@@ -5,13 +5,6 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::AppConfigStore;
-use devo_core::BundledSkillsConfig;
-use devo_core::FileSystemSkillCatalog;
-use devo_core::PresetModelCatalog;
-use devo_core::SkillsConfig;
-use devo_core::tools::ToolRegistry;
-use devo_protocol::Model;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::ResponseContent;
@@ -21,7 +14,6 @@ use devo_protocol::StopReason;
 use devo_protocol::StreamEvent;
 use devo_protocol::Usage;
 use devo_provider::ModelProviderSDK;
-use devo_provider::SingleProviderRouter;
 use futures::Stream;
 use futures::stream;
 use pretty_assertions::assert_eq;
@@ -32,7 +24,6 @@ use tokio::time::timeout;
 
 use devo_server::ClientTransportKind;
 use devo_server::ServerRuntime;
-use devo_server::ServerRuntimeDependencies;
 
 struct SingleReplyProvider;
 
@@ -109,7 +100,7 @@ async fn session_fork_reports_fork_from_id_and_replays_self_contained_history() 
     >(fork_title_response)?
     .result
     .session;
-    let fork_session_id = SessionId::try_from(fork_session.id.as_str())?;
+    let fork_session_id = SessionId::from(fork_session.id.as_str());
 
     assert_eq!(fork_session.parent, None);
     assert_eq!(
@@ -226,36 +217,191 @@ fn model_response(text: &str) -> ModelResponse {
     }
 }
 
+/// Same replies as [`SingleReplyProvider`] but records every model request,
+/// so a test can assert on the prompt the fork actually ran.
+struct CapturingForkProvider {
+    requests: std::sync::Mutex<Vec<ModelRequest>>,
+}
+
+#[async_trait]
+impl ModelProviderSDK for CapturingForkProvider {
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        Ok(model_response("Generated title"))
+    }
+
+    async fn completion_stream(
+        &self,
+        request: ModelRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        self.requests.lock().expect("lock requests").push(request);
+        Ok(Box::pin(stream::iter(vec![
+            Ok(StreamEvent::TextDelta {
+                index: 0,
+                text: "Fork persistence reply.".to_string(),
+            }),
+            Ok(StreamEvent::MessageDone {
+                response: model_response("Fork persistence reply."),
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "capturing-fork-test-provider"
+    }
+}
+
+/// A fork cut that keeps the compaction turn must keep the compacted prompt:
+/// the fork's first model turn runs summary + preserved suffix, not the full
+/// linear history of the source session.
+#[tokio::test]
+async fn fork_of_compacted_session_keeps_compacted_prompt() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let provider = Arc::new(CapturingForkProvider {
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let runtime = devo_server::test_support::TestRuntime::new(provider.clone())
+        .with_named_model("test-model", "Test Model")
+        .db_file("session_fork_compaction.db")
+        .runtime(data_root.path());
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let source = start_session(&runtime, connection_id, data_root.path()).await?;
+
+    // Distinct payloads: the snapshot preserves the last complete turn
+    // verbatim, so only the first turn's "a" run is guaranteed compacted away.
+    for (request_id, letter) in [(3_u64, 'a'), (4, 'b')] {
+        let response = runtime
+            .handle_incoming(
+                connection_id,
+                serde_json::json!({
+                    "id": request_id,
+                    "method": "turn/start",
+                    "params": {
+                        "sessionId": source,
+                        "input": [{ "type": "text", "text": letter.to_string().repeat(30_000) }],
+                        "idempotencyKey": format!("fork-compaction-seed-{letter}")
+                    }
+                }),
+            )
+            .await
+            .context("turn/start response")?;
+        assert!(
+            serde_json::from_value::<
+                devo_server::SuccessResponse<devo_protocol::native::rpc_turn::TurnStartResult>,
+            >(response)
+            .is_ok(),
+            "turn/start must succeed"
+        );
+        wait_for_turn_completed(&mut notifications_rx).await?;
+    }
+
+    let compact_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 5,
+                "method": "session/compact/start",
+                "params": { "sessionId": source }
+            }),
+        )
+        .await
+        .context("session/compact/start response")?;
+    assert!(
+        compact_response.get("result").is_some(),
+        "compaction must start: {compact_response}"
+    );
+    timeout(Duration::from_secs(5), async {
+        while let Some(value) = notifications_rx.recv().await {
+            if value.get("method") == Some(&serde_json::json!("context/compactionCompleted"))
+                || has_original_method(&value, "context/compactionCompleted")
+            {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("notification channel closed before compaction completed")
+    })
+    .await
+    .context("timed out waiting for context/compactionCompleted")??;
+    // The compaction turn finalizes after compactionCompleted; wait for its
+    // terminal turn/completed before forking.
+    wait_for_turn_completed(&mut notifications_rx).await?;
+
+    let fork_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 6,
+                "method": "session/fork",
+                "params": { "sessionId": source }
+            }),
+        )
+        .await
+        .context("session/fork response")?;
+    let fork = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_protocol::native::rpc_session::SessionForkResult>,
+    >(fork_response)?
+    .result;
+    let fork_session_id = SessionId::from(fork.session.id.as_str());
+
+    let resume_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 7,
+                "method": "session/resume",
+                "params": { "sessionId": fork.session.id }
+            }),
+        )
+        .await
+        .context("session/resume forked child")?;
+    assert!(
+        resume_response.get("result").is_some(),
+        "forked session must resume: {resume_response}"
+    );
+
+    let turn_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 8,
+                "method": "turn/start",
+                "params": {
+                    "sessionId": fork_session_id,
+                    "input": [{ "type": "text", "text": "hello from the fork" }],
+                    "idempotencyKey": "fork-compaction-probe"
+                }
+            }),
+        )
+        .await
+        .context("turn/start on fork response")?;
+    assert!(
+        serde_json::from_value::<
+            devo_server::SuccessResponse<devo_protocol::native::rpc_turn::TurnStartResult>,
+        >(turn_response)
+        .is_ok(),
+        "turn/start on the fork must succeed"
+    );
+    wait_for_turn_completed(&mut notifications_rx).await?;
+
+    let requests = provider.requests.lock().expect("lock requests");
+    let last = serde_json::to_string(requests.last().context("captured fork request")?)?;
+    assert!(
+        last.contains("<compaction_summary>"),
+        "a fork that keeps the compaction turn must run the compacted prompt"
+    );
+    assert!(
+        !last.contains(&"a".repeat(2_000)),
+        "fork reverted the compacted session to the full linear history"
+    );
+    Ok(())
+}
+
 fn build_runtime(data_root: &Path) -> Result<Arc<ServerRuntime>> {
-    let provider: Arc<dyn ModelProviderSDK> = Arc::new(SingleReplyProvider);
-    let db = Arc::new(devo_server::db::Database::open(
-        data_root.join("session_fork_persistence.db"),
-    )?);
-    Ok(ServerRuntime::new(
-        data_root.to_path_buf(),
-        ServerRuntimeDependencies::new(
-            Arc::clone(&provider),
-            Arc::new(SingleProviderRouter::new(provider)),
-            Arc::new(ToolRegistry::new()),
-            devo_server::empty_mcp_manager(),
-            "test-model".to_string(),
-            Arc::new(PresetModelCatalog::new(vec![Model {
-                slug: "test-model".to_string(),
-                display_name: "Test Model".to_string(),
-                ..Model::default()
-            }])),
-            Box::new(FileSystemSkillCatalog::new(SkillsConfig {
-                bundled: Some(BundledSkillsConfig { enabled: false }),
-                ..SkillsConfig::default()
-            })),
-            devo_core::AgentsMdConfig::default(),
-            db,
-            Arc::new(std::sync::Mutex::new(AppConfigStore::load(
-                data_root.to_path_buf(),
-                /*workspace_root*/ None,
-            )?)),
-        ),
-    ))
+    Ok(
+        devo_server::test_support::TestRuntime::new(Arc::new(SingleReplyProvider))
+            .with_named_model("test-model", "Test Model")
+            .db_file("session_fork_persistence.db")
+            .runtime(data_root),
+    )
 }
 
 async fn initialize_connection(
@@ -315,7 +461,7 @@ async fn start_session(
     let response: devo_server::SuccessResponse<
         devo_protocol::native::rpc_session::SessionNewResult,
     > = serde_json::from_value(response)?;
-    Ok(SessionId::try_from(response.result.session.id.as_str())?)
+    Ok(SessionId::from(response.result.session.id.as_str()))
 }
 
 async fn start_and_complete_turn(

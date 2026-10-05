@@ -1,5 +1,6 @@
 pub mod compaction;
 mod context_insertion;
+mod harness_digest_strip;
 mod transactions;
 pub use transactions::response_items_to_messages;
 pub mod normalize;
@@ -12,7 +13,8 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use devo_protocol::{InputModality, RequestContent, RequestMessage, Role, UserInput};
+use devo_protocol::native::item::UserInput;
+use devo_protocol::{InputModality, RequestContent, RequestMessage, Role};
 
 use crate::context::ContextualUserFragment;
 use crate::response_item::ResponseItem;
@@ -450,7 +452,7 @@ pub fn prepend_user_inputs(messages: &mut Vec<RequestMessage>, user_inputs: &[Us
     messages.splice(
         0..0,
         user_inputs.iter().filter_map(|input| match input {
-            UserInput::Text { text, .. } if !text.trim().is_empty() => Some(RequestMessage {
+            UserInput::Text { text } if !text.trim().is_empty() => Some(RequestMessage {
                 role: Role::User.as_str().to_string(),
                 content: vec![RequestContent::Text { text: text.clone() }],
             }),
@@ -459,7 +461,7 @@ pub fn prepend_user_inputs(messages: &mut Vec<RequestMessage>, user_inputs: &[Us
             | UserInput::LocalImage { .. }
             | UserInput::Skill { .. }
             | UserInput::Mention { .. }
-            | _ => None,
+            | UserInput::Audio { .. } => None,
         }),
     );
 }
@@ -670,7 +672,6 @@ mod tests {
         let msgs = h.for_prompt_with_prefix(
             &[UserInput::Text {
                 text: "<environment_context>locked</environment_context>".into(),
-                text_elements: Vec::new(),
             }],
             &[InputModality::Text],
         );

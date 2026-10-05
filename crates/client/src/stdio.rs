@@ -603,11 +603,11 @@ impl StdioServerClient {
         self.core.session_queue_remove(params).await
     }
 
-    pub async fn session_queue_steer(
+    pub async fn turn_steer(
         &mut self,
-        params: native::rpc_turn::SessionQueueSteerParams,
-    ) -> Result<native::rpc_turn::SessionQueueSteerResult> {
-        self.core.session_queue_steer(params).await
+        params: native::rpc_turn::TurnSteerParams,
+    ) -> Result<native::rpc_turn::TurnSteerResult> {
+        self.core.turn_steer(params).await
     }
 
     pub async fn subscription_create(

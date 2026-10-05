@@ -74,12 +74,7 @@ impl ServerRuntime {
         request_id: serde_json::Value,
         session_id: devo_protocol::native::ids::SessionId,
     ) -> std::result::Result<bool, (ProtocolErrorCode, String)> {
-        let session_id = SessionId::try_from(session_id.as_str()).map_err(|_| {
-            (
-                ProtocolErrorCode::SessionNotFound,
-                "session id is not addressable by this server".to_string(),
-            )
-        })?;
+        // Param is already a Native session id.
         if self.session(session_id).await.is_none() {
             return Err((
                 ProtocolErrorCode::SessionNotFound,

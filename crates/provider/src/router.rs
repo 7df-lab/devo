@@ -38,6 +38,7 @@ impl ProviderRoute {
 ///
 /// The server should depend on `ProviderRouter` rather than on individual
 /// provider SDK implementations directly.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ProviderRouter: Send + Sync {
     /// Send a streaming request to the appropriate provider.
@@ -122,6 +123,12 @@ impl MultiProviderRouter {
 
     pub fn insert_route(&mut self, route: ProviderRoute, provider: Arc<dyn ModelProviderSDK>) {
         self.providers.insert(route, provider);
+    }
+
+    /// Whether a Connection route has an adapter registered. Lets live provider
+    /// reloads verify that a connection actually reached the running router.
+    pub fn has_route(&self, route: &ProviderRoute) -> bool {
+        self.providers.contains_key(route)
     }
 
     fn provider_for_route(

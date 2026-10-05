@@ -1,15 +1,24 @@
 import { describe, expect, test } from "bun:test"
 import type { ChatTurn } from "../../atoms/derived/session-chat"
+import type { NativeItemEnvelope } from "@devo-ai/sdk/v2/client"
 import { forkBoundaryAfterTurnIndex } from "./fork-boundary"
 
 function turn(turnId: string, created: number): ChatTurn {
+	const info: NativeItemEnvelope = {
+		id: `user-${turnId}`,
+		sessionId: "s",
+		turnId,
+		seq: 1,
+		revision: 1,
+		createdAt: new Date(created).toISOString(),
+		updatedAt: new Date(created).toISOString(),
+		state: "completed",
+		item: { type: "userMessage", content: [{ type: "text", text: "hello" }], entry: "turnStart" },
+	}
 	return {
 		id: turnId,
 		turnId,
-		userMessage: {
-			info: { id: `user-${turnId}`, role: "user", time: { created } },
-			parts: [{ type: "text", text: "hello", sessionID: "s", messageID: `user-${turnId}`, id: "p1" }],
-		},
+		userMessage: { info },
 		assistantMessages: [],
 	}
 }

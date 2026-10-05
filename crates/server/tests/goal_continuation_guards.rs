@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -8,17 +7,6 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use devo_core::tools::ToolCallError;
-use devo_core::tools::ToolHandler;
-use devo_core::tools::ToolRegistry;
-use devo_core::tools::ToolRegistryBuilder;
-use devo_core::tools::ToolResult;
-use devo_core::tools::ToolResultContent;
-use devo_core::tools::create_default_tool_registry;
-use devo_core::tools::json_schema::JsonSchema;
-use devo_core::tools::tool_spec::ToolExecutionMode;
-use devo_core::tools::tool_spec::ToolOutputMode;
-use devo_core::tools::tool_spec::ToolSpec;
 use devo_protocol::ModelRequest;
 use devo_protocol::ModelResponse;
 use devo_protocol::ResponseContent;
@@ -38,7 +26,6 @@ mod support;
 
 use support::CapturingProvider;
 use support::build_runtime;
-use support::build_runtime_with_registry;
 use support::collect_until_turn_completed;
 use support::create_goal;
 use support::initialize_connection;
@@ -97,13 +84,15 @@ async fn goal_set_does_not_start_continuation_in_plan_mode() -> Result<()> {
     Ok(())
 }
 
+/// The Python cell is harmless if it is ever executed, but the adversarial
+/// permission fields must park it at an interactive approval.
+const PARK_CODE: &str = "print('parked')";
+
 struct ToolCallProvider {
     requests: AtomicUsize,
     tool_name: &'static str,
     tool_input: serde_json::Value,
 }
-
-struct EscalatingTool;
 
 #[async_trait]
 impl ModelProviderSDK for ToolCallProvider {
@@ -160,63 +149,43 @@ impl ModelProviderSDK for ToolCallProvider {
     }
 }
 
-#[async_trait]
-impl ToolHandler for EscalatingTool {
-    fn spec(&self) -> &ToolSpec {
-        Box::leak(Box::new(escalating_tool_spec()))
-    }
-
-    async fn handle(
-        &self,
-        _ctx: devo_core::tools::ToolContext,
-        _input: serde_json::Value,
-        _progress: Option<devo_core::tools::ToolProgressSender>,
-    ) -> std::result::Result<ToolResult, ToolCallError> {
-        Ok(ToolResult::success(
-            ToolResultContent::Text("approved".to_string()),
-            "approved",
-        ))
-    }
-}
-
-fn escalating_tool_registry() -> ToolRegistry {
-    let mut builder = ToolRegistryBuilder::new();
-    builder.register_handler("escalating_tool", Arc::new(EscalatingTool));
-    builder.push_spec(escalating_tool_spec());
-    builder.build()
-}
-
-fn escalating_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: "escalating_tool".to_string(),
-        description: "Escalates so the test can observe pending approval.".to_string(),
-        input_schema: JsonSchema::object(BTreeMap::new(), None, None),
-        output_mode: ToolOutputMode::Text,
-        execution_mode: ToolExecutionMode::Mutating,
-        capability_tags: vec![],
-        supports_parallel: false,
-        preparation_feedback: devo_core::tools::ToolPreparationFeedback::None,
-        display_name: None,
-        supports_cancellation: None,
-        supports_streaming: None,
-    }
-}
-
 #[tokio::test]
 async fn goal_set_does_not_start_continuation_while_approval_is_pending() -> Result<()> {
     let data_root = TempDir::new()?;
     let provider = Arc::new(ToolCallProvider {
         requests: AtomicUsize::new(0),
-        tool_name: "escalating_tool",
+        tool_name: "ipython",
         tool_input: serde_json::json!({
-            "sandbox_permissions": "require_escalated",
-            "justification": "approval test"
+            "code": PARK_CODE,
+            "sandbox_permissions": "with_additional_permissions",
+            "additional_permissions": { "network": { "enabled": true } }
         }),
     });
-    let registry = Arc::new(escalating_tool_registry());
-    let runtime = build_runtime_with_registry(data_root.path(), provider.clone(), registry)?;
+    let runtime = build_runtime(data_root.path(), provider.clone())?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
+    // Use the default preset for a normal session, then send a malicious
+    // ipython call with unadvertised permission fields. The server must still
+    // park it for an interactive approval.
+    let tighten_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 49,
+                "method": "session/metadata/update",
+                "params": {
+                    "sessionId": session_id.to_string(),
+                    "expectedVersion": 1,
+                    "settings": { "permissionProfile": "default" }
+                }
+            }),
+        )
+        .await
+        .context("tighten response")?;
+    assert!(
+        tighten_response.get("error").is_none(),
+        "tighten failed: {tighten_response}"
+    );
     let start_response = runtime
         .handle_incoming(
             connection_id,
@@ -264,19 +233,17 @@ async fn goal_set_does_not_start_continuation_while_user_input_is_pending() -> R
     let data_root = TempDir::new()?;
     let provider = Arc::new(ToolCallProvider {
         requests: AtomicUsize::new(0),
-        tool_name: "request_user_input",
+        tool_name: "ipython",
         tool_input: serde_json::json!({
-            "question": "Which path should the goal use?"
+            "code": "await rlm.request_user_input([{'id': 'choice', 'header': 'Path', 'question': 'Which path should the goal use?', 'options': [{'label': 'A', 'description': 'Use path A'}, {'label': 'B', 'description': 'Use path B'}]}])"
         }),
     });
-    let runtime = build_runtime_with_registry(
-        data_root.path(),
-        provider.clone(),
-        Arc::new(create_default_tool_registry()),
-    )?;
+    let runtime = build_runtime(data_root.path(), provider.clone())?;
     let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
     let session_id = start_session(&runtime, connection_id, data_root.path()).await?;
-    set_session_mode(&runtime, connection_id, session_id, "plan").await?;
+    // This checks goal scheduling while user input is pending, independent of
+    // Plan's fail-closed read-only kernel fence. The temp workspace sits under
+    // /tmp, which is intentionally a writable scratch ancestor in Plan mode.
 
     let start_response = runtime
         .handle_incoming(
@@ -292,7 +259,7 @@ async fn goal_set_does_not_start_continuation_while_user_input_is_pending() -> R
                     "sandbox": null,
                     "approval_policy": null,
                     "cwd": null,
-                    "collaboration_mode": "plan"
+                    "collaboration_mode": "build"
                 }
             }),
         )

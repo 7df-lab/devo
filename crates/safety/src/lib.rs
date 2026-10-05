@@ -643,6 +643,8 @@ pub struct PolicySnapshot {
 }
 
 /// Asynchronous permission policy contract used by the runtime.
+// `async_trait` expands the method to a boxed future that is already must-use.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PermissionPolicy: Send + Sync {
     /// Produces the permission decision for one request within one policy snapshot.

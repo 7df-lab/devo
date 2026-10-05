@@ -91,7 +91,7 @@ function buildRunningSection(
 ): MenuItemConstructorOptions[] {
 	const discoveryById = new Map(discoverySessions.map((session) => [session.id, session]))
 	const runningSessions = Array.from(liveSessions.entries())
-		.filter(([, state]) => !state.parentID && isWorkingSessionStatus(state.status))
+		.filter(([, state]) => !state.parentId && isWorkingSessionStatus(state.status))
 		.map(([sessionId, state]) => {
 			const discovered = discoveryById.get(sessionId)
 			return {
@@ -120,7 +120,7 @@ function buildRecentSection(
 ): MenuItemConstructorOptions[] {
 	const runningSessionIds = new Set(
 		Array.from(liveSessions.entries())
-			.filter(([, state]) => !state.parentID && isWorkingSessionStatus(state.status))
+			.filter(([, state]) => !state.parentId && isWorkingSessionStatus(state.status))
 			.map(([sessionId]) => sessionId),
 	)
 	const recentSessions = discoverySessions
@@ -181,7 +181,7 @@ function normalizeDiscoverySessions(discovery: DiscoveryCache | null): TraySessi
 		title: titleForSession(session.title),
 		directory: String(session.directory ?? ""),
 		updatedAt: Number(session.time?.updated ?? session.time?.created ?? 0),
-		parentId: session.parentID ? String(session.parentID) : undefined,
+		parentId: session.parentId ? String(session.parentId) : undefined,
 	}))
 }
 

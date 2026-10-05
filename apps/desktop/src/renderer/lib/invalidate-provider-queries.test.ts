@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test"
 
 const invalidateConfigOptionCaches = mock(() => undefined)
-const invalidateQueries = mock(async () => undefined)
+const invalidateQueries = mock(async (_filters: { queryKey?: readonly unknown[] }) => undefined)
 
 mock.module("../services/connection-manager", () => ({
 	invalidateConfigOptionCaches,

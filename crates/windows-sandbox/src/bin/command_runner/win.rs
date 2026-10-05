@@ -278,6 +278,16 @@ fn spawn_ipc_process(req: &SpawnRequest) -> Result<IpcSpawnedProcess> {
     // wrappers for as long as possible. That way any failure after SID parsing but before the
     // child is fully spawned still releases the backing LocalAlloc memory automatically.
     let cap_psid_ptrs: Vec<*mut _> = cap_psids.iter().map(LocalSid::as_ptr).collect();
+    // Primary token via LogonUser (WFP fix): a restricted token's user SID is
+    // ignored by WFP per-user firewall rules, so network blocking silently
+    // fails. The primary token keeps the sandbox account's unmodified SID —
+    // WFP respects it, and file access stays enforced by capability-SID ACLs.
+    // Restricted token: the ONLY token type CreateProcessAsUserW accepts
+    // without SE_ASSIGNPRIMARYTOKEN_NAME (which the sandbox account lacks).
+    // Windows Firewall does NOT match restricted-token processes (per-user,
+    // per-program — both verified). Network blocking is therefore UNAVAILABLE
+    // on Windows with this architecture; the design doc (§5.3) prescribes an
+    // explicit downgrade warning for this limitation.
     let base = OwnedWinHandle::new(unsafe { get_current_token_for_restriction()? });
     let h_token = OwnedWinHandle::new(unsafe {
         match token_mode {

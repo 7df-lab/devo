@@ -13,9 +13,9 @@ export function countWorkingRootSessions(sessions: ReadonlyMap<string, SessionSt
 
 			while (!visited.has(currentId)) {
 				visited.add(currentId)
-				const parentID = sessions.get(currentId)?.parentID
-				if (!parentID) break
-				currentId = parentID
+				const parentId = sessions.get(currentId)?.parentId
+				if (!parentId) break
+				currentId = parentId
 			}
 
 			workingRootSessionIds.add(currentId)

@@ -2,6 +2,21 @@ use super::*;
 
 const ACP_SESSION_LIST_PAGE_SIZE: usize = 50;
 
+#[derive(serde::Deserialize)]
+struct LegacySessionIdentity {
+    id: devo_protocol::native::ids::SessionId,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacySessionStartProjection {
+    session: LegacySessionIdentity,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacySessionResumeProjection {
+    history_items: Vec<SessionHistoryEntry>,
+}
+
 /// Accept the pre-ACP session creation shape used by existing Devo clients.
 ///
 /// ACP v1 describes `mcpServers` as part of the session lifecycle request
@@ -50,7 +65,7 @@ impl ServerRuntime {
             }
             None => 0,
         };
-        let sessions = self.list_session_summaries().await;
+        let sessions = self.list_native_sessions().await;
         let mut filtered_sessions = Vec::new();
         for session in sessions.iter().filter(|session| {
             params
@@ -62,13 +77,10 @@ impl ServerRuntime {
                 return acp_error_response(
                     request_id,
                     AcpErrorCode::InternalError,
-                    format!(
-                        "stored session {} cwd is not an absolute path",
-                        session.session_id
-                    ),
+                    format!("stored session {} cwd is not an absolute path", session.id),
                 );
             }
-            filtered_sessions.push(acp_session_info_from_metadata(session));
+            filtered_sessions.push(acp_session_info_from_native_session(session));
         }
         if start > filtered_sessions.len() {
             return acp_error_response(
@@ -145,22 +157,20 @@ impl ServerRuntime {
                 },
             )
             .await;
-        let mut legacy: SuccessResponse<SessionResumeResult> =
+        let legacy: SuccessResponse<LegacySessionResumeProjection> =
             match serde_json::from_value(legacy_response.clone()) {
                 Ok(legacy) => legacy,
                 Err(_) => return legacy_error_to_acp(request_id, legacy_response),
             };
-        let updated_summary = match self
+        if let Err(error) = self
             .apply_acp_session_additional_directories(
                 params.session_id,
                 params.additional_directories.clone(),
             )
             .await
         {
-            Ok(summary) => summary,
-            Err(error) => return acp_error_response(request_id, AcpErrorCode::ServerError, error),
-        };
-        legacy.result.session = updated_summary;
+            return acp_error_response(request_id, AcpErrorCode::ServerError, error);
+        }
         self.subscribe_connection_to_session(connection_id, params.session_id, None)
             .await;
         self.send_acp_history_updates(
@@ -229,29 +239,41 @@ impl ServerRuntime {
                 tool_registry,
             )
             .await;
-        let legacy: SuccessResponse<SessionStartResult> =
+        let legacy: SuccessResponse<LegacySessionStartProjection> =
             match serde_json::from_value(legacy_response.clone()) {
                 Ok(legacy) => legacy,
                 Err(_) => return legacy_error_to_acp(request_id, legacy_response),
             };
+        let session_id = SessionId::from(legacy.result.session.id.as_str());
+        let Some(handle) = self.session(session_id).await else {
+            return acp_error_response(
+                request_id,
+                AcpErrorCode::ServerError,
+                "new session actor unavailable",
+            );
+        };
+        let Some(session) = handle.native_session().await else {
+            return acp_error_response(
+                request_id,
+                AcpErrorCode::ServerError,
+                "new session actor unavailable",
+            );
+        };
         let mut meta = serde_json::Map::new();
         meta.insert(
             DEVO_SESSION_META.to_string(),
-            serde_json::to_value(&legacy.result.session).expect("serialize session metadata"),
+            serde_json::to_value(&session).expect("serialize native session"),
         );
-        self.subscribe_connection_to_session(connection_id, legacy.result.session.session_id, None)
+        self.subscribe_connection_to_session(connection_id, session_id, None)
             .await;
-        let config_options = match self
-            .acp_session_config_options(legacy.result.session.session_id)
-            .await
-        {
+        let config_options = match self.acp_session_config_options(session_id).await {
             Ok(config_options) => config_options,
             Err(error) => return acp_error_response(request_id, AcpErrorCode::ServerError, error),
         };
         acp_success_response(
             request_id,
             AcpNewSessionResult {
-                session_id: legacy.result.session.session_id,
+                session_id,
                 modes: None,
                 config_options: Some(config_options),
                 meta: Some(meta),
@@ -311,7 +333,7 @@ impl ServerRuntime {
                 },
             )
             .await;
-        let mut legacy: SuccessResponse<SessionResumeResult> =
+        let _legacy: SuccessResponse<LegacySessionResumeProjection> =
             match serde_json::from_value(legacy_response.clone()) {
                 Ok(legacy) => legacy,
                 Err(_) => return legacy_error_to_acp(request_id, legacy_response),
@@ -326,15 +348,10 @@ impl ServerRuntime {
             Ok(summary) => summary,
             Err(error) => return acp_error_response(request_id, AcpErrorCode::ServerError, error),
         };
-        legacy.result.session = updated_summary;
         let mut meta = serde_json::Map::new();
         meta.insert(
             DEVO_SESSION_META.to_string(),
-            serde_json::to_value(&legacy.result.session).expect("serialize session metadata"),
-        );
-        meta.insert(
-            DEVO_SESSION_RESUME_META.to_string(),
-            serde_json::to_value(&legacy.result).expect("serialize session resume result"),
+            serde_json::to_value(&updated_summary.native).expect("serialize native session"),
         );
         self.subscribe_connection_to_session(connection_id, params.session_id, None)
             .await;
@@ -412,10 +429,12 @@ impl ServerRuntime {
             }
         };
         if !deleted_session_ids.is_empty() {
-            self.broadcast_event(ServerEvent::SessionDeleted(SessionDeletedPayload {
-                session_id: params.session_id,
-                deleted_session_ids,
-            }))
+            self.broadcast_notification(
+                devo_protocol::native::event::ServerNotification::SessionDeleted {
+                    session_id: params.session_id,
+                    deleted_session_ids: deleted_session_ids.to_vec(),
+                },
+            )
             .await;
         }
         acp_success_response(request_id, AcpDeleteSessionResult::default())
@@ -470,7 +489,7 @@ impl ServerRuntime {
         // User forks use `fork_from_id` and must remain after the source is deleted.
         let session_ids_in_runtime: Vec<SessionId> = {
             let sessions = self.sessions.lock().await;
-            sessions.keys().copied().collect()
+            sessions.keys().cloned().collect()
         };
         let mut agent_children_by_parent = Vec::new();
         for session_id in session_ids_in_runtime {
@@ -483,7 +502,7 @@ impl ServerRuntime {
             let is_agent_child = summary.agent_path.is_some()
                 || summary.agent_role.is_some()
                 || summary.agent_nickname.is_some();
-            if is_agent_child && let Some(parent_id) = summary.parent_session_id {
+            if is_agent_child && let Some(parent_id) = summary.parent_session_id() {
                 agent_children_by_parent.push((session_id, parent_id));
             }
         }

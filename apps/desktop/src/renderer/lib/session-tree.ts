@@ -12,19 +12,19 @@
 // ============================================================
 
 /**
- * Build a map from parentID → list of childIDs using the provided session entries.
+ * Build a map from parentId → list of childIDs using the provided session entries.
  */
 export function buildChildrenMap(
-	sessions: Map<string, { parentID?: string }>,
+	sessions: Map<string, { parentId?: string }>,
 ): Map<string, string[]> {
 	const map = new Map<string, string[]>()
 	for (const [id, session] of sessions) {
-		if (!session.parentID) continue
-		const existing = map.get(session.parentID)
+		if (!session.parentId) continue
+		const existing = map.get(session.parentId)
 		if (existing) {
 			existing.push(id)
 		} else {
-			map.set(session.parentID, [id])
+			map.set(session.parentId, [id])
 		}
 	}
 	return map
@@ -61,7 +61,7 @@ export function getSessionDescendants(
  * The walk is breadth-first so the root session's own requests are checked
  * first, then its direct children, etc.
  *
- * @param childrenMap  Pre-built parentID→childIDs map (from buildChildrenMap)
+ * @param childrenMap  Pre-built parentId→childIDs map (from buildChildrenMap)
  * @param requests     Map from sessionID to list of pending requests of type T
  * @param rootSessionId The session whose subtree to search
  * @param include      Optional predicate to filter which requests to consider

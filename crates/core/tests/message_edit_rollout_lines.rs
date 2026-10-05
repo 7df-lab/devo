@@ -1,10 +1,10 @@
 use chrono::Utc;
 use devo_core::{
-    ContentPart, EditId, EditState, FileRestoreOutcome, ItemId, MessageEditRecordedLine,
-    MessageEditRecordedRecord, RestoreFileStatus, RestoreId, RolloutLine, SessionId, TurnId,
-    TurnSupersededLine, TurnSupersededRecord, TurnWorkspaceRestoreCompletedLine,
-    TurnWorkspaceRestoreCompletedRecord, TurnWorkspaceRestoreStartedLine,
-    TurnWorkspaceRestoreStartedRecord, WorkspaceRestorePolicy,
+    ContentPart, EditId, EditState, FileRestoreOutcome, ItemId, MessageEditRecordedRecord,
+    RestoreFileStatus, RestoreId, RolloutLine, SessionId, TurnId, TurnSupersededRecord,
+    TurnWorkspaceRestoreCompletedRecord, TurnWorkspaceRestoreStartedRecord, WorkspaceRestorePolicy,
+    message_edit_line, parse_rollout_line, turn_superseded_line, workspace_restore_completed_line,
+    workspace_restore_started_line,
 };
 use pretty_assertions::assert_eq;
 
@@ -19,10 +19,10 @@ fn message_edit_rollout_lines_roundtrip() {
     let target_message_id = ItemId::new();
     let replacement_message_id = ItemId::new();
 
-    let variants = vec![
-        RolloutLine::MessageEditRecorded(Box::new(MessageEditRecordedLine {
-            timestamp: now,
-            record: MessageEditRecordedRecord {
+    let variants: Vec<RolloutLine> = vec![
+        message_edit_line(
+            now,
+            &MessageEditRecordedRecord {
                 schema_version: 1,
                 session_id,
                 edit_id,
@@ -38,10 +38,11 @@ fn message_edit_rollout_lines_roundtrip() {
                 requested_by_client_id: None,
                 created_at: now,
             },
-        })),
-        RolloutLine::TurnSuperseded(Box::new(TurnSupersededLine {
-            timestamp: now,
-            record: TurnSupersededRecord {
+        )
+        .expect("build message edit line"),
+        turn_superseded_line(
+            now,
+            &TurnSupersededRecord {
                 schema_version: 1,
                 session_id,
                 superseded_turn_id,
@@ -51,10 +52,11 @@ fn message_edit_rollout_lines_roundtrip() {
                 reason: "message_edit_previous".into(),
                 created_at: now,
             },
-        })),
-        RolloutLine::TurnWorkspaceRestoreStarted(Box::new(TurnWorkspaceRestoreStartedLine {
-            timestamp: now,
-            record: TurnWorkspaceRestoreStartedRecord {
+        )
+        .expect("build turn superseded line"),
+        workspace_restore_started_line(
+            now,
+            TurnWorkspaceRestoreStartedRecord {
                 schema_version: 1,
                 session_id,
                 turn_id: superseded_turn_id,
@@ -63,10 +65,10 @@ fn message_edit_rollout_lines_roundtrip() {
                 policy: WorkspaceRestorePolicy::Skip,
                 started_at: now,
             },
-        })),
-        RolloutLine::TurnWorkspaceRestoreCompleted(Box::new(TurnWorkspaceRestoreCompletedLine {
-            timestamp: now,
-            record: TurnWorkspaceRestoreCompletedRecord {
+        ),
+        workspace_restore_completed_line(
+            now,
+            TurnWorkspaceRestoreCompletedRecord {
                 schema_version: 1,
                 session_id,
                 restore_id,
@@ -76,12 +78,12 @@ fn message_edit_rollout_lines_roundtrip() {
                 }],
                 completed_at: now,
             },
-        })),
+        ),
     ];
 
-    for variant in variants {
-        let json = serde_json::to_string(&variant).expect("serialize rollout line");
-        let restored: RolloutLine = serde_json::from_str(&json).expect("deserialize rollout line");
-        assert_eq!(restored, variant);
+    for line in variants {
+        let json = serde_json::to_string(&line).expect("serialize rollout line");
+        let restored = parse_rollout_line(&json).expect("parse rollout line");
+        assert_eq!(restored, line);
     }
 }

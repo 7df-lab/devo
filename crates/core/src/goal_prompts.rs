@@ -106,8 +106,8 @@ mod tests {
 
         assert!(prompt.contains("finish &lt;goal&gt; &amp; report &quot;done&quot;"));
         assert!(!prompt.contains("finish <goal> & report \"done\""));
-        assert!(prompt.contains("Completion audit:"));
-        assert!(prompt.contains("call update_goal with status \"complete\""));
+        assert!(prompt.contains("await goal.complete()"));
+        assert!(prompt.contains("Do not call `goal.complete()` unless the goal is complete"));
     }
 
     #[test]
@@ -117,8 +117,8 @@ mod tests {
 
         let prompt = render_goal_continuation_prompt(&goal).expect("active goal prompt");
 
-        assert!(prompt.contains("- Token budget: none"));
-        assert!(prompt.contains("- Tokens remaining: unlimited"));
+        assert!(prompt.contains("- token budget: none"));
+        assert!(prompt.contains("- remaining tokens: unlimited"));
     }
 
     #[test]
@@ -130,7 +130,7 @@ mod tests {
         let prompt = render_goal_continuation_prompt(&goal).expect("budget prompt");
 
         assert!(prompt.contains("has reached its token budget"));
-        assert!(prompt.contains("do not start new substantive work"));
+        assert!(prompt.contains("Do not start new substantive work"));
     }
 
     #[test]

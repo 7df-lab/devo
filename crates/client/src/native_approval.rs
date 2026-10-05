@@ -87,6 +87,8 @@ fn native_approval_decision(
         ApprovalScopeValue::Tool => ApprovalScope::Tool,
         ApprovalScopeValue::CommandPrefix => ApprovalScope::CommandPrefix,
         ApprovalScopeValue::CommandPrefixPersist => ApprovalScope::CommandPrefixPersist,
+        ApprovalScopeValue::PathPrefixPersist => ApprovalScope::PathPrefixPersist,
+        ApprovalScopeValue::HostPersist => ApprovalScope::HostPersist,
     };
     devo_protocol::native::item::ApprovalDecision {
         decision,

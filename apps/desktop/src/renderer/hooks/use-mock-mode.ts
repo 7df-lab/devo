@@ -11,9 +11,8 @@ import { useAtomValue } from "jotai"
 import { useEffect, useRef } from "react"
 import { serverConnectedAtom, serverUrlAtom } from "../atoms/connection"
 import { discoveryAtom } from "../atoms/discovery"
-import { messagesFamily } from "../atoms/messages"
+import { itemsFamily } from "../atoms/messages"
 import { isMockModeAtom } from "../atoms/mock-mode"
-import { partsFamily, partStorageKey } from "../atoms/parts"
 import { sessionFamily, sessionIdsAtom } from "../atoms/sessions"
 import { appStore } from "../atoms/store"
 import { sessionDiffFamily } from "../atoms/ui"
@@ -21,8 +20,7 @@ import { createLogger } from "../lib/logger"
 import {
 	MOCK_DIFFS,
 	MOCK_DISCOVERY,
-	MOCK_MESSAGES,
-	MOCK_PARTS,
+	MOCK_ITEMS,
 	MOCK_SESSION_ENTRIES,
 	MOCK_SESSION_IDS,
 } from "../lib/mock-data"
@@ -72,15 +70,9 @@ function activateMockMode(): void {
 		appStore.set(sessionFamily(sessionId), entry)
 	}
 
-	// 3. Hydrate messages and parts
-	for (const [sessionId, messages] of MOCK_MESSAGES) {
-		appStore.set(messagesFamily(sessionId), messages)
-	}
-	for (const [sessionId, sessionParts] of MOCK_PARTS) {
-		for (const [messageId, parts] of Object.entries(sessionParts)) {
-			appStore.set(partsFamily(partStorageKey(sessionId, messageId)), parts)
-			appStore.set(partsFamily(messageId), parts)
-		}
+	// 3. Hydrate Native ItemEnvelope transcript
+	for (const [sessionId, items] of MOCK_ITEMS) {
+		appStore.set(itemsFamily(sessionId), items)
 	}
 
 	// 4. Hydrate diffs
@@ -94,7 +86,7 @@ function activateMockMode(): void {
 
 	log.info("Mock mode activated", {
 		sessions: MOCK_SESSION_IDS.size,
-		messages: MOCK_MESSAGES.size,
+		items: MOCK_ITEMS.size,
 	})
 }
 
@@ -111,13 +103,9 @@ function deactivateMockMode(): void {
 	}
 	appStore.set(sessionIdsAtom, new Set<string>())
 
-	// 2. Clear message and part atoms
-	for (const [sessionId, messages] of MOCK_MESSAGES) {
-		appStore.set(messagesFamily(sessionId), [])
-		for (const msg of messages) {
-			appStore.set(partsFamily(partStorageKey(sessionId, msg.id)), [])
-			appStore.set(partsFamily(msg.id), [])
-		}
+	// 2. Clear Native item atoms
+	for (const sessionId of MOCK_ITEMS.keys()) {
+		appStore.set(itemsFamily(sessionId), [])
 	}
 
 	// 3. Clear diff atoms

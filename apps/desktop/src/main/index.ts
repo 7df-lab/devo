@@ -126,12 +126,11 @@ ipcMain.handle(
 		} else {
 			const wrapper = Menu.buildFromTemplate([item])
 			menu = wrapper.items[0]?.submenu
-			if (menu) activePopupMenu = wrapper
 		}
 		if (!menu) {
 			return { success: false }
 		}
-		if (explicitSubmenu) activePopupMenu = menu
+		activePopupMenu = menu
 
 		const popupOptions: Electron.PopupOptions = { window: win }
 		if (typeof request.x === "number" && typeof request.y === "number") {
@@ -139,7 +138,7 @@ ipcMain.handle(
 			popupOptions.y = Math.round(request.y)
 		}
 
-		menu.popup(popupOptions)
+		activePopupMenu.popup(popupOptions)
 		return { success: true }
 	},
 )

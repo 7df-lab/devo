@@ -4,7 +4,7 @@ use serde::Serialize;
 use ts_rs::TS;
 
 use super::AcpMeta;
-use crate::InputItem;
+use crate::native::item::UserInput;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -71,9 +71,10 @@ impl AcpContentBlock {
         }
     }
 
-    pub fn into_input_items(self) -> Result<Vec<InputItem>, String> {
+    /// ACP prompt → Native `UserInput` (external protocol boundary adapter).
+    pub fn into_user_inputs(self) -> Result<Vec<UserInput>, String> {
         match self {
-            Self::Text { text, .. } => Ok(vec![InputItem::Text { text }]),
+            Self::Text { text, .. } => Ok(vec![UserInput::Text { text }]),
             Self::Image { .. } => {
                 Err("session/prompt image content is not supported by this agent".to_string())
             }
@@ -81,18 +82,15 @@ impl AcpContentBlock {
                 Err("session/prompt audio content is not supported by this agent".to_string())
             }
             Self::ResourceLink { uri, name, .. } => {
-                if let Some(path) = path_from_file_uri(&uri) {
-                    Ok(vec![InputItem::Mention {
-                        path: path.to_string_lossy().into_owned(),
-                        name: Some(name),
-                    }])
+                if path_from_file_uri(&uri).is_some() {
+                    Ok(vec![UserInput::Mention { uri }])
                 } else {
-                    Ok(vec![InputItem::Text {
+                    Ok(vec![UserInput::Text {
                         text: format!("Resource {name}: {uri}"),
                     }])
                 }
             }
-            Self::Resource { resource, .. } => Ok(vec![InputItem::Text {
+            Self::Resource { resource, .. } => Ok(vec![UserInput::Text {
                 text: resource.into_prompt_text(),
             }]),
         }

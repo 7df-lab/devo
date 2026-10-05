@@ -56,7 +56,7 @@ export function workspaceChangeStats(view: WorkspaceChangeView | null | undefine
 } {
 	if (!view) return { fileCount: 0, additions: 0, deletions: 0 }
 	return {
-		fileCount: numberFromProtocol(view.stats.files_changed),
+		fileCount: numberFromProtocol(view.stats.filesChanged),
 		additions: numberFromProtocol(view.stats.additions),
 		deletions: numberFromProtocol(view.stats.deletions),
 	}
@@ -66,7 +66,7 @@ export function workspacePatchFilesFromView(
 	view: WorkspaceChangeView | null | undefined,
 ): WorkspacePatchFile[] {
 	if (!view) return []
-	const patches = patchesByPath(view.unified_diff ?? "")
+	const patches = patchesByPath(view.unifiedDiff ?? "")
 	return view.files.map((file) => {
 		const path = normalizeWorkspacePath(String(file.path))
 		const binary = Boolean(file.binary)
@@ -79,12 +79,12 @@ export function workspacePatchFilesFromView(
 			additions: numberFromProtocol(file.additions),
 			deletions: numberFromProtocol(file.deletions),
 			binary,
-			diffTruncated: Boolean(file.diff_truncated),
+			diffTruncated: Boolean(file.diffTruncated),
 			patch: complete ? patch : null,
 			// Missing or header-only stub → still waiting on path-scoped Full.
-			patchPending: !binary && !complete && file.old_text == null && file.new_text == null,
-			oldText: typeof file.old_text === "string" ? file.old_text : null,
-			newText: typeof file.new_text === "string" ? file.new_text : null,
+			patchPending: !binary && !complete && file.oldText == null && file.newText == null,
+			oldText: typeof file.oldText === "string" ? file.oldText : null,
+			newText: typeof file.newText === "string" ? file.newText : null,
 			warnings: warningsForFile(view, file),
 		}
 	})
@@ -96,8 +96,8 @@ function warningsForFile(
 ): string[] {
 	const warnings: string[] = []
 	if (file.binary) warnings.push("Binary file")
-	if (file.diff_truncated) warnings.push("Diff truncated")
-	// Missing unified_diff is normal for Summary responses (patches upgrade later).
+	if (file.diffTruncated) warnings.push("Diff truncated")
+	// Missing unifiedDiff is normal for Summary responses (patches upgrade later).
 	return warnings
 }
 

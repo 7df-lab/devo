@@ -2,18 +2,14 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use std::str::FromStr;
-
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use rusqlite::{Connection, params, types::Type};
 use serde_json;
 
+use devo_protocol::native::ids::{SessionId, TurnId};
 use devo_protocol::native::item::ContextOccupancy;
-use devo_protocol::{
-    PendingInputId, PendingInputItem, PendingInputKind, SessionId, SessionMetadata,
-    SessionRuntimeStatus, SessionTitleState, TurnId,
-};
+use devo_protocol::{PendingInputItem, PendingInputKind, QueueItemId, SessionTitleState};
 
 /// Queue type for pending messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,10 +29,166 @@ impl QueueType {
     }
 }
 
-/// SQLite index row used for lazy session list and resume.
+/// SQLite's deliberately narrow session-index model.
+///
+/// This is not a first-party runtime session model. It contains only columns
+/// stored by the rebuildable SQLite index; callers must convert it to Native
+/// `Session` (or the legacy ACP adapter) at this boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionIndexRow {
+    pub session_id: SessionId,
+    pub cwd: PathBuf,
+    pub additional_directories: Vec<PathBuf>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub last_activity_at: chrono::DateTime<Utc>,
+    pub title: Option<String>,
+    pub title_state: SessionTitleState,
+    pub parent_session_id: Option<SessionId>,
+    pub fork_from_id: Option<SessionId>,
+    pub fork_at_turn_id: Option<TurnId>,
+    pub agent_path: Option<String>,
+    pub ephemeral: bool,
+    pub model: Option<String>,
+    pub reasoning_effort_selection: Option<String>,
+}
+
+impl SessionIndexRow {
+    /// Projects this rebuildable index row into the first-party Native shape.
+    pub fn into_native_session(self) -> devo_protocol::native::session::Session {
+        use devo_protocol::native::model::{ModelBinding, PermissionProfile};
+        use devo_protocol::native::session::{
+            Session, SessionActivity, SessionParent, SessionSettings, SessionStatus,
+        };
+        use devo_protocol::native::usage::{SessionUsage, UsageTotals};
+
+        let has_agent_parent = self.agent_path.is_some();
+        let parent = self.parent_session_id.and_then(|session_id| {
+            has_agent_parent.then_some(SessionParent::Agent {
+                session_id,
+                role: None,
+            })
+        });
+        let fork_from_id = self.fork_from_id.or_else(|| {
+            (!has_agent_parent)
+                .then_some(self.parent_session_id)
+                .flatten()
+        });
+        Session {
+            id: self.session_id,
+            version: 1,
+            cwd: self.cwd,
+            additional_directories: self.additional_directories,
+            parent,
+            fork_from_id,
+            at_turn_id: self.fork_at_turn_id,
+            ephemeral: self.ephemeral,
+            created_at: self.created_at,
+            status: SessionStatus::Idle,
+            flags: Vec::new(),
+            archived: false,
+            activity: SessionActivity::Idle,
+            active_turn_id: None,
+            queued_count: 0,
+            title: self.title,
+            title_state: self.title_state,
+            model: ModelBinding {
+                provider: "unknown".into(),
+                model: self.model.unwrap_or_default(),
+                variant: None,
+                reasoning_effort: self
+                    .reasoning_effort_selection
+                    .as_deref()
+                    .and_then(|selection| selection.parse().ok()),
+            },
+            settings: SessionSettings {
+                permission_profile: PermissionProfile::AutoReview,
+                reasoning_effort: self
+                    .reasoning_effort_selection
+                    .as_deref()
+                    .map(devo_protocol::normalize_reasoning_effort_selection_for_ui),
+                mode: Some(String::new()),
+                sandbox_profile: None,
+                effective_context_window: None,
+                auto_refine_enabled: None,
+                auto_refine_turn_interval: None,
+                python_cell_first_wait_ms: None,
+            },
+            git_info: None,
+            preview: String::new(),
+            last_activity_at: self.last_activity_at,
+            transcript_size_bytes: None,
+            message_count: None,
+            summary: None,
+            task_state: None,
+            usage: SessionUsage {
+                total: UsageTotals::default(),
+                by_purpose: Vec::new(),
+                legacy: None,
+                updated_at: self.updated_at,
+            },
+        }
+    }
+}
+
+impl From<&SessionIndexRow> for SessionIndexRow {
+    fn from(row: &SessionIndexRow) -> Self {
+        row.clone()
+    }
+}
+
+impl From<&devo_protocol::native::session::Session> for SessionIndexRow {
+    fn from(session: &devo_protocol::native::session::Session) -> Self {
+        let parent_session_id = session.parent.as_ref().map(|parent| match parent {
+            devo_protocol::native::session::SessionParent::Agent { session_id, .. } => *session_id,
+        });
+        Self {
+            session_id: session.id,
+            cwd: session.cwd.clone(),
+            additional_directories: session.additional_directories.clone(),
+            created_at: session.created_at,
+            updated_at: session.usage.updated_at,
+            last_activity_at: session.last_activity_at,
+            title: session.title.clone(),
+            title_state: session.title_state.clone(),
+            parent_session_id,
+            fork_from_id: session.fork_from_id,
+            fork_at_turn_id: session.at_turn_id,
+            agent_path: session.parent.as_ref().map(|_| "subagent".to_string()),
+            ephemeral: session.ephemeral,
+            model: (!session.model.model.is_empty()).then(|| session.model.model.clone()),
+            reasoning_effort_selection: session.settings.reasoning_effort.clone(),
+        }
+    }
+}
+
+impl From<&crate::runtime_session_summary::RuntimeSessionSummary> for SessionIndexRow {
+    fn from(summary: &crate::runtime_session_summary::RuntimeSessionSummary) -> Self {
+        let fork_from_id = summary.native.fork_from_id;
+        Self {
+            session_id: summary.session_id(),
+            cwd: summary.native.cwd.clone(),
+            additional_directories: summary.native.additional_directories.clone(),
+            created_at: summary.native.created_at,
+            updated_at: summary.updated_at,
+            last_activity_at: summary.native.last_activity_at,
+            title: summary.native.title.clone(),
+            title_state: summary.native.title_state.clone(),
+            parent_session_id: summary.parent_session_id().or(fork_from_id),
+            fork_from_id,
+            fork_at_turn_id: summary.native.at_turn_id,
+            agent_path: summary.agent_path.clone(),
+            ephemeral: summary.native.ephemeral,
+            model: summary.model_name().map(ToOwned::to_owned),
+            reasoning_effort_selection: summary.native.settings.reasoning_effort.clone(),
+        }
+    }
+}
+
+/// SQLite index row plus the rollout locator used for lazy resume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionIndexRecord {
-    pub metadata: SessionMetadata,
+    pub session: SessionIndexRow,
     pub rollout_path: Option<PathBuf>,
 }
 
@@ -60,7 +212,7 @@ pub struct SessionStats {
     /// Latest **model-query** input tokens (not cumulative turn usage).
     ///
     /// Used for hydrate / diagnostics. Must not be confused with turn-aggregate
-    /// `TurnMetadata.usage`, which sums every completed leg in a multi-tool turn.
+    /// usage on a completed turn, which sums every completed leg in a multi-tool turn.
     pub last_input_tokens: usize,
     pub turn_count: usize,
     pub prompt_token_estimate: usize,
@@ -135,7 +287,12 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 last_activity_at INTEGER NOT NULL DEFAULT 0,
-                schema_version INTEGER NOT NULL DEFAULT 2
+                schema_version INTEGER NOT NULL DEFAULT 3,
+                rollout_path TEXT,
+                parent_session_id TEXT,
+                fork_from_id TEXT,
+                fork_at_turn_id TEXT,
+                agent_path TEXT
             );
 
             CREATE TABLE IF NOT EXISTS session_stats (
@@ -159,7 +316,8 @@ impl Database {
                 content TEXT NOT NULL,
                 pending_input_id TEXT,
                 metadata TEXT,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE INDEX IF NOT EXISTS idx_pending_session
@@ -167,134 +325,73 @@ impl Database {
             ",
         )
         .context("failed to run database migrations")?;
-        let has_session_additional_directories = {
-            let mut stmt = conn
-                .prepare("PRAGMA table_info(sessions)")
-                .context("failed to inspect sessions schema")?;
-            let columns = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .context("failed to read sessions schema")?;
-            let mut found = false;
-            for column in columns {
-                if column? == "additional_directories" {
-                    found = true;
-                    break;
-                }
-            }
-            found
-        };
-        if !has_session_additional_directories {
-            conn.execute(
+        for (table, column, alter_sql) in [
+            (
+                "sessions",
+                "additional_directories",
                 "ALTER TABLE sessions ADD COLUMN additional_directories TEXT NOT NULL DEFAULT '[]'",
-                [],
-            )
-            .context("failed to add additional_directories column")?;
+            ),
+            (
+                "pending_messages",
+                "pending_input_id",
+                "ALTER TABLE pending_messages ADD COLUMN pending_input_id TEXT",
+            ),
+            (
+                "session_stats",
+                "last_context_occupancy",
+                "ALTER TABLE session_stats ADD COLUMN last_context_occupancy TEXT",
+            ),
+            (
+                "sessions",
+                "rollout_path",
+                "ALTER TABLE sessions ADD COLUMN rollout_path TEXT",
+            ),
+            (
+                "sessions",
+                "parent_session_id",
+                "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
+            ),
+            (
+                "sessions",
+                "agent_path",
+                "ALTER TABLE sessions ADD COLUMN agent_path TEXT",
+            ),
+            (
+                "sessions",
+                "fork_from_id",
+                "ALTER TABLE sessions ADD COLUMN fork_from_id TEXT",
+            ),
+            (
+                "sessions",
+                "fork_at_turn_id",
+                "ALTER TABLE sessions ADD COLUMN fork_at_turn_id TEXT",
+            ),
+        ] {
+            ensure_column(&conn, table, column, alter_sql)?;
         }
-        let has_session_last_activity_at = {
-            let mut stmt = conn
-                .prepare("PRAGMA table_info(sessions)")
-                .context("failed to inspect sessions schema")?;
-            let columns = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .context("failed to read sessions schema")?;
-            let mut found = false;
-            for column in columns {
-                if column? == "last_activity_at" {
-                    found = true;
-                    break;
-                }
-            }
-            found
-        };
-        if !has_session_last_activity_at {
-            conn.execute(
-                "ALTER TABLE sessions ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0",
-                [],
-            )
-            .context("failed to add last_activity_at column")?;
+        if ensure_column(
+            &conn,
+            "sessions",
+            "last_activity_at",
+            "ALTER TABLE sessions ADD COLUMN last_activity_at INTEGER NOT NULL DEFAULT 0",
+        )? {
             conn.execute(
                 "UPDATE sessions SET last_activity_at = updated_at WHERE last_activity_at = 0",
                 [],
             )
             .context("failed to backfill last_activity_at column")?;
         }
-        let has_pending_input_id = {
-            let mut stmt = conn
-                .prepare("PRAGMA table_info(pending_messages)")
-                .context("failed to inspect pending_messages schema")?;
-            let columns = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .context("failed to read pending_messages schema")?;
-            let mut found = false;
-            for column in columns {
-                if column? == "pending_input_id" {
-                    found = true;
-                    break;
-                }
-            }
-            found
-        };
-        if !has_pending_input_id {
-            conn.execute(
-                "ALTER TABLE pending_messages ADD COLUMN pending_input_id TEXT",
-                [],
-            )
-            .context("failed to add pending_input_id column")?;
-        }
-        let has_session_stats_total_tokens = {
-            let mut stmt = conn
-                .prepare("PRAGMA table_info(session_stats)")
-                .context("failed to inspect session_stats schema")?;
-            let columns = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .context("failed to read session_stats schema")?;
-            let mut found = false;
-            for column in columns {
-                if column? == "total_tokens" {
-                    found = true;
-                    break;
-                }
-            }
-            found
-        };
-        if !has_session_stats_total_tokens {
-            conn.execute(
-                "ALTER TABLE session_stats ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0",
-                [],
-            )
-            .context("failed to add total_tokens column")?;
+        if ensure_column(
+            &conn,
+            "session_stats",
+            "total_tokens",
+            "ALTER TABLE session_stats ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0",
+        )? {
             conn.execute(
                 "UPDATE session_stats SET total_tokens = total_input_tokens + total_output_tokens",
                 [],
             )
             .context("failed to backfill total_tokens column")?;
-        }
-        if !table_has_column(&conn, "session_stats", "last_context_occupancy")? {
-            conn.execute(
-                "ALTER TABLE session_stats ADD COLUMN last_context_occupancy TEXT",
-                [],
-            )
-            .context("failed to add last_context_occupancy column")?;
-        }
-        if !sessions_has_column(&conn, "rollout_path")? {
-            conn.execute("ALTER TABLE sessions ADD COLUMN rollout_path TEXT", [])
-                .context("failed to add rollout_path column")?;
-        }
-        if !sessions_has_column(&conn, "parent_session_id")? {
-            conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT", [])
-                .context("failed to add parent_session_id column")?;
-        }
-        if !sessions_has_column(&conn, "agent_path")? {
-            conn.execute("ALTER TABLE sessions ADD COLUMN agent_path TEXT", [])
-                .context("failed to add agent_path column")?;
-        }
-        if !sessions_has_column(&conn, "fork_from_id")? {
-            conn.execute("ALTER TABLE sessions ADD COLUMN fork_from_id TEXT", [])
-                .context("failed to add fork_from_id column")?;
-        }
-        if !sessions_has_column(&conn, "fork_at_turn_id")? {
-            conn.execute("ALTER TABLE sessions ADD COLUMN fork_at_turn_id TEXT", [])
-                .context("failed to add fork_at_turn_id column")?;
         }
         // User forks used to reuse parent_session_id. Move those rows onto
         // fork_from_id so delete/list treat them as independent sessions.
@@ -311,12 +408,12 @@ impl Database {
         // Queue entries have an explicit position so `session/queue/update`
         // can reorder without rewriting row ids (P4c); existing rows keep
         // their insertion order (position = id).
-        if !pending_messages_has_column(&conn, "position")? {
-            conn.execute(
-                "ALTER TABLE pending_messages ADD COLUMN position INTEGER",
-                [],
-            )
-            .context("failed to add pending_messages position column")?;
+        if ensure_column(
+            &conn,
+            "pending_messages",
+            "position",
+            "ALTER TABLE pending_messages ADD COLUMN position INTEGER",
+        )? {
             conn.execute(
                 "UPDATE pending_messages SET position = id WHERE position IS NULL",
                 [],
@@ -548,26 +645,40 @@ impl Database {
     // === Session CRUD ===
 
     /// Inserts or updates a session's metadata and optional rollout index fields.
-    pub fn upsert_session(
+    pub fn upsert_session<T>(
         &self,
-        meta: &SessionMetadata,
+        session: T,
         rollout_path: Option<&std::path::Path>,
-    ) -> Result<()> {
-        self.upsert_session_with_source(meta, rollout_path, SessionUpsertSource::RuntimeLive)
+    ) -> Result<()>
+    where
+        T: Into<SessionIndexRow>,
+    {
+        self.upsert_session_with_source(
+            session.into(),
+            rollout_path,
+            SessionUpsertSource::RuntimeLive,
+        )
     }
 
     /// Inserts or updates session metadata using rollout-index semantics.
-    pub fn upsert_rollout_index_session(
+    pub fn upsert_rollout_index_session<T>(
         &self,
-        meta: &SessionMetadata,
+        session: T,
         rollout_path: Option<&std::path::Path>,
-    ) -> Result<()> {
-        self.upsert_session_with_source(meta, rollout_path, SessionUpsertSource::RolloutIndex)
+    ) -> Result<()>
+    where
+        T: Into<SessionIndexRow>,
+    {
+        self.upsert_session_with_source(
+            session.into(),
+            rollout_path,
+            SessionUpsertSource::RolloutIndex,
+        )
     }
 
     fn upsert_session_with_source(
         &self,
-        meta: &SessionMetadata,
+        meta: SessionIndexRow,
         rollout_path: Option<&std::path::Path>,
         source: SessionUpsertSource,
     ) -> Result<()> {
@@ -580,47 +691,39 @@ impl Database {
             SessionTitleState::Final(_) => "final",
         };
         let rollout_path_str = rollout_path.map(|path| path.to_string_lossy().into_owned());
-        let parent_session_id = meta.parent_session_id.map(|id| id.to_string());
-        let fork_from_id = meta.fork_from_id.map(|id| id.to_string());
-        let fork_at_turn_id = meta.fork_at_turn_id.map(|id| id.to_string());
+        let parent_session_id = meta
+            .parent_session_id
+            .as_ref()
+            .map(|id| id.as_str().to_owned());
+        let fork_from_id = meta.fork_from_id.as_ref().map(|id| id.as_str().to_owned());
+        let fork_at_turn_id = meta
+            .fork_at_turn_id
+            .as_ref()
+            .map(|id| id.as_str().to_owned());
         let agent_path = meta.agent_path.clone();
+        const UPSERT_SHARED: &str = "title = COALESCE(excluded.title, sessions.title),
+                title_state = CASE
+                    WHEN excluded.title IS NOT NULL THEN excluded.title_state
+                    ELSE sessions.title_state
+                END,
+                model = COALESCE(excluded.model, sessions.model),
+                thinking = COALESCE(excluded.thinking, sessions.thinking),
+                cwd = excluded.cwd,
+                additional_directories = excluded.additional_directories,
+                updated_at = excluded.updated_at,
+                parent_session_id = COALESCE(excluded.parent_session_id, sessions.parent_session_id),
+                fork_from_id = COALESCE(excluded.fork_from_id, sessions.fork_from_id),
+                fork_at_turn_id = COALESCE(excluded.fork_at_turn_id, sessions.fork_at_turn_id),
+                agent_path = COALESCE(excluded.agent_path, sessions.agent_path),
+                rollout_path = COALESCE(excluded.rollout_path, sessions.rollout_path)";
         let update_clause = match source {
             SessionUpsertSource::RuntimeLive => {
-                "title = COALESCE(excluded.title, sessions.title),
-                title_state = CASE
-                    WHEN excluded.title IS NOT NULL THEN excluded.title_state
-                    ELSE sessions.title_state
-                END,
-                model = COALESCE(excluded.model, sessions.model),
-                thinking = COALESCE(excluded.thinking, sessions.thinking),
-                cwd = excluded.cwd,
-                additional_directories = excluded.additional_directories,
-                updated_at = excluded.updated_at,
-                last_activity_at = excluded.last_activity_at,
-                parent_session_id = COALESCE(excluded.parent_session_id, sessions.parent_session_id),
-                fork_from_id = COALESCE(excluded.fork_from_id, sessions.fork_from_id),
-                fork_at_turn_id = COALESCE(excluded.fork_at_turn_id, sessions.fork_at_turn_id),
-                agent_path = COALESCE(excluded.agent_path, sessions.agent_path),
-                rollout_path = COALESCE(excluded.rollout_path, sessions.rollout_path)"
+                format!("{UPSERT_SHARED}, last_activity_at = excluded.last_activity_at")
             }
             SessionUpsertSource::RolloutIndex => {
-                "title = COALESCE(excluded.title, sessions.title),
-                title_state = CASE
-                    WHEN excluded.title IS NOT NULL THEN excluded.title_state
-                    ELSE sessions.title_state
-                END,
-                model = COALESCE(excluded.model, sessions.model),
-                thinking = COALESCE(excluded.thinking, sessions.thinking),
-                cwd = excluded.cwd,
-                additional_directories = excluded.additional_directories,
-                created_at = excluded.created_at,
-                updated_at = excluded.updated_at,
-                last_activity_at = MAX(excluded.last_activity_at, sessions.last_activity_at),
-                parent_session_id = COALESCE(excluded.parent_session_id, sessions.parent_session_id),
-                fork_from_id = COALESCE(excluded.fork_from_id, sessions.fork_from_id),
-                fork_at_turn_id = COALESCE(excluded.fork_at_turn_id, sessions.fork_at_turn_id),
-                agent_path = COALESCE(excluded.agent_path, sessions.agent_path),
-                rollout_path = COALESCE(excluded.rollout_path, sessions.rollout_path)"
+                format!(
+                    "{UPSERT_SHARED}, created_at = excluded.created_at, last_activity_at = MAX(excluded.last_activity_at, sessions.last_activity_at)"
+                )
             }
         };
         let sql = format!(
@@ -631,7 +734,7 @@ impl Database {
         conn.execute(
             &sql,
             params![
-                meta.session_id.to_string(),
+                meta.session_id.as_str(),
                 meta.title,
                 title_state_str,
                 meta.model,
@@ -667,27 +770,12 @@ impl Database {
         Ok(count > 0)
     }
 
-    /// Retrieves a session's metadata by ID.
-    pub fn get_session(&self, id: &SessionId) -> Result<Option<SessionMetadata>> {
-        let conn = self.conn.lock().expect("database mutex poisoned");
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, title, title_state, model, thinking, cwd, additional_directories, ephemeral, created_at, updated_at, last_activity_at, parent_session_id, fork_from_id, fork_at_turn_id, agent_path
-                 FROM sessions WHERE id = ?1",
-            )
-            .context("failed to prepare get_session statement")?;
-        let result = stmt.query_row(params![id.to_string()], |row| {
-            parse_session_metadata_row(row, false)
-        });
-
-        match result {
-            Ok(meta) => Ok(Some(meta)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+    /// Retrieves a session's metadata by Native session id.
+    pub fn get_session(&self, id: &SessionId) -> Result<Option<SessionIndexRow>> {
+        Ok(self.get_session_index(id)?.map(|record| record.session))
     }
 
-    /// Returns resume/list index fields for a session id.
+    /// Returns resume/list index fields for a Native session id.
     pub fn get_session_index(&self, id: &SessionId) -> Result<Option<SessionIndexRecord>> {
         let conn = self.conn.lock().expect("database mutex poisoned");
         let mut stmt = conn
@@ -696,14 +784,14 @@ impl Database {
                  FROM sessions WHERE id = ?1",
             )
             .context("failed to prepare get_session_index statement")?;
-        let result = stmt.query_row(params![id.to_string()], |row| {
-            let metadata = parse_session_metadata_row(row, true)?;
+        let result = stmt.query_row(params![id.as_str()], |row| {
+            let session = parse_session_index_row(row)?;
             let rollout_path = row
                 .get::<_, Option<String>>(15)?
                 .map(PathBuf::from)
                 .filter(|path| !path.as_os_str().is_empty());
             Ok(SessionIndexRecord {
-                metadata,
+                session,
                 rollout_path,
             })
         });
@@ -716,7 +804,7 @@ impl Database {
     }
 
     /// Lists durable user-visible sessions (roots and forks, excluding subagents).
-    pub fn list_root_sessions(&self) -> Result<Vec<SessionMetadata>> {
+    pub fn list_root_sessions(&self) -> Result<Vec<SessionIndexRow>> {
         let conn = self.conn.lock().expect("database mutex poisoned");
         let mut stmt = conn
             .prepare(
@@ -726,19 +814,11 @@ impl Database {
                  ORDER BY last_activity_at DESC, updated_at DESC",
             )
             .context("failed to prepare list_root_sessions statement")?;
-        let rows = stmt
-            .query_map([], |row| parse_session_metadata_row(row, false))
-            .context("failed to query root sessions")?;
-
-        let mut sessions = Vec::new();
-        for row in rows {
-            sessions.push(row?);
-        }
-        Ok(sessions)
+        collect_session_index_rows(&mut stmt, "root sessions")
     }
 
     /// Lists all sessions ordered by most recently updated.
-    pub fn list_sessions(&self) -> Result<Vec<SessionMetadata>> {
+    pub fn list_sessions(&self) -> Result<Vec<SessionIndexRow>> {
         let conn = self.conn.lock().expect("database mutex poisoned");
         let mut stmt = conn
             .prepare(
@@ -746,25 +826,38 @@ impl Database {
                  FROM sessions ORDER BY last_activity_at DESC, updated_at DESC",
             )
             .context("failed to prepare list_sessions statement")?;
-        let rows = stmt
-            .query_map([], |row| parse_session_metadata_row(row, false))
-            .context("failed to query sessions")?;
+        collect_session_index_rows(&mut stmt, "sessions")
+    }
 
-        let mut sessions = Vec::new();
+    /// Bulk map of session id → on-disk rollout path for list enrichment.
+    pub fn list_rollout_paths(&self) -> Result<std::collections::HashMap<SessionId, PathBuf>> {
+        let conn = self.conn.lock().expect("database mutex poisoned");
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, rollout_path FROM sessions
+                 WHERE rollout_path IS NOT NULL AND rollout_path != ''",
+            )
+            .context("failed to prepare list_rollout_paths statement")?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let path: String = row.get(1)?;
+                Ok((SessionId::from_string(id), PathBuf::from(path)))
+            })
+            .context("failed to query list_rollout_paths")?;
+        let mut out = std::collections::HashMap::new();
         for row in rows {
-            sessions.push(row?);
+            let (id, path) = row.context("failed to read list_rollout_paths row")?;
+            out.insert(id, path);
         }
-        Ok(sessions)
+        Ok(out)
     }
 
     /// Deletes a session and its related data.
     pub fn delete_session(&self, id: &SessionId) -> Result<()> {
         let conn = self.conn.lock().expect("database mutex poisoned");
-        conn.execute(
-            "DELETE FROM sessions WHERE id = ?1",
-            params![id.to_string()],
-        )
-        .context("failed to delete session")?;
+        conn.execute("DELETE FROM sessions WHERE id = ?1", params![id.as_str()])
+            .context("failed to delete session")?;
         Ok(())
     }
 
@@ -795,7 +888,7 @@ impl Database {
                 prompt_token_estimate = excluded.prompt_token_estimate,
                 last_context_occupancy = excluded.last_context_occupancy",
             params![
-                id.to_string(),
+                id.as_str(),
                 stats.total_input_tokens as i64,
                 stats.total_output_tokens as i64,
                 stats.total_tokens as i64,
@@ -819,7 +912,7 @@ impl Database {
                     total_cache_read_tokens, last_input_tokens, turn_count, prompt_token_estimate,
                     last_context_occupancy
              FROM session_stats WHERE session_id = ?1",
-            params![id.to_string()],
+            params![id.as_str()],
             |row| {
                 let occupancy_json: Option<String> = row.get(8)?;
                 let last_context_occupancy = occupancy_json.and_then(|json| {
@@ -846,6 +939,31 @@ impl Database {
         }
     }
 
+    /// Bulk turn_count lookup for session/list message_count enrichment.
+    pub fn list_turn_counts(
+        &self,
+        session_ids: &[SessionId],
+    ) -> Result<std::collections::HashMap<SessionId, u32>> {
+        if session_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.conn.lock().expect("database mutex poisoned");
+        let mut out = std::collections::HashMap::with_capacity(session_ids.len());
+        let mut stmt = conn
+            .prepare("SELECT turn_count FROM session_stats WHERE session_id = ?1")
+            .context("failed to prepare list_turn_counts statement")?;
+        for session_id in session_ids {
+            match stmt.query_row(params![session_id.as_str()], |row| row.get::<_, i64>(0)) {
+                Ok(turn_count) => {
+                    out.insert(*session_id, turn_count as u32);
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(out)
+    }
+
     // === Pending Messages ===
 
     /// Pushes a pending message to the specified queue.
@@ -863,7 +981,7 @@ impl Database {
              SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 (SELECT COALESCE(MAX(position), 0) + 1 FROM pending_messages WHERE session_id = ?1 AND queue_type = ?2)",
             params![
-                session_id.to_string(),
+                session_id.as_str(),
                 queue.as_str(),
                 kind_str,
                 content,
@@ -893,7 +1011,7 @@ impl Database {
                 "UPDATE pending_messages SET kind = ?4, content = ?5, metadata = ?6
                  WHERE session_id = ?1 AND queue_type = ?2 AND pending_input_id = ?3",
                 params![
-                    session_id.to_string(),
+                    session_id.as_str(),
                     queue.as_str(),
                     item.id.to_string(),
                     kind_str,
@@ -912,7 +1030,7 @@ impl Database {
         &self,
         session_id: &SessionId,
         queue: QueueType,
-        pending_input_id: &PendingInputId,
+        pending_input_id: &QueueItemId,
         key: &str,
         value: &str,
     ) -> Result<bool> {
@@ -923,7 +1041,7 @@ impl Database {
                  SET metadata = json_set(COALESCE(metadata, '{}'), '$.' || ?4, ?5)
                  WHERE session_id = ?1 AND queue_type = ?2 AND pending_input_id = ?3",
                 params![
-                    session_id.to_string(),
+                    session_id.as_str(),
                     queue.as_str(),
                     pending_input_id.to_string(),
                     key,
@@ -941,7 +1059,7 @@ impl Database {
         &self,
         session_id: &SessionId,
         queue: QueueType,
-        ordered_ids: &[PendingInputId],
+        ordered_ids: &[QueueItemId],
     ) -> Result<()> {
         let conn = self.conn.lock().expect("database mutex poisoned");
         for (index, id) in ordered_ids.iter().enumerate() {
@@ -949,7 +1067,7 @@ impl Database {
                 "UPDATE pending_messages SET position = ?4
                  WHERE session_id = ?1 AND queue_type = ?2 AND pending_input_id = ?3",
                 params![
-                    session_id.to_string(),
+                    session_id.as_str(),
                     queue.as_str(),
                     id.to_string(),
                     (index + 1) as i64,
@@ -976,25 +1094,7 @@ impl Database {
                  ORDER BY position ASC, id ASC",
             )
             .context("failed to prepare list_pending statement")?;
-        let items = stmt
-            .query_map(params![session_id.to_string(), queue.as_str()], |row| {
-                let kind_str: String = row.get(0)?;
-                let content: String = row.get(1)?;
-                let pending_input_id: Option<String> = row.get(2)?;
-                let metadata_str: Option<String> = row.get(3)?;
-                let created_at: i64 = row.get(4)?;
-                Ok(pending_input_from_row(
-                    &kind_str,
-                    &content,
-                    pending_input_id,
-                    metadata_str,
-                    created_at,
-                ))
-            })
-            .context("failed to query pending messages")?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to decode pending messages")?;
-        Ok(items)
+        collect_pending_rows(&mut stmt, session_id, queue)
     }
 
     /// Drains all pending messages from the specified queue, deleting them in the process.
@@ -1018,34 +1118,12 @@ impl Database {
                      ORDER BY position ASC, id ASC",
                 )
                 .context("failed to prepare drain_pending statement")?;
-            let rows = stmt
-                .query_map(params![session_id.to_string(), queue.as_str()], |row| {
-                    let kind_str: String = row.get(0)?;
-                    let content: String = row.get(1)?;
-                    let pending_input_id: Option<String> = row.get(2)?;
-                    let metadata_str: Option<String> = row.get(3)?;
-                    let created_at: i64 = row.get(4)?;
-
-                    Ok(pending_input_from_row(
-                        &kind_str,
-                        &content,
-                        pending_input_id,
-                        metadata_str,
-                        created_at,
-                    ))
-                })
-                .context("failed to query pending messages")?;
-
-            let mut items = Vec::new();
-            for row in rows {
-                items.push(row?);
-            }
-            items
+            collect_pending_rows(&mut stmt, session_id, queue)?
         };
 
         tx.execute(
             "DELETE FROM pending_messages WHERE session_id = ?1 AND queue_type = ?2",
-            params![session_id.to_string(), queue.as_str()],
+            params![session_id.as_str(), queue.as_str()],
         )
         .context("failed to delete drained messages")?;
 
@@ -1059,7 +1137,7 @@ impl Database {
         &self,
         session_id: &SessionId,
         queue: QueueType,
-        pending_input_id: &PendingInputId,
+        pending_input_id: &QueueItemId,
     ) -> Result<bool> {
         let conn = self.conn.lock().expect("database mutex poisoned");
         let affected = conn
@@ -1067,7 +1145,7 @@ impl Database {
                 "DELETE FROM pending_messages
                  WHERE session_id = ?1 AND queue_type = ?2 AND pending_input_id = ?3",
                 params![
-                    session_id.to_string(),
+                    session_id.as_str(),
                     queue.as_str(),
                     pending_input_id.to_string(),
                 ],
@@ -1081,7 +1159,7 @@ impl Database {
         let conn = self.conn.lock().expect("database mutex poisoned");
         conn.execute(
             "DELETE FROM pending_messages WHERE session_id = ?1 AND queue_type = ?2",
-            params![session_id.to_string(), queue.as_str()],
+            params![session_id.as_str(), queue.as_str()],
         )
         .context("failed to clear pending messages")?;
         Ok(())
@@ -1093,19 +1171,49 @@ impl Database {
         let conn = self.conn.lock().expect("database mutex poisoned");
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pending_messages WHERE session_id = ?1 AND queue_type = ?2",
-            params![session_id.to_string(), queue.as_str()],
+            params![session_id.as_str(), queue.as_str()],
             |row| row.get(0),
         )?;
         Ok(count as usize)
     }
 }
 
-fn sessions_has_column(conn: &Connection, column: &str) -> Result<bool> {
-    table_has_column(conn, "sessions", column)
+fn collect_pending_rows(
+    stmt: &mut rusqlite::Statement<'_>,
+    session_id: &SessionId,
+    queue: QueueType,
+) -> Result<Vec<PendingInputItem>> {
+    stmt.query_map(params![session_id.as_str(), queue.as_str()], |row| {
+        Ok(pending_input_from_row(
+            &row.get::<_, String>(0)?,
+            &row.get::<_, String>(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        ))
+    })
+    .context("failed to query pending messages")?
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .context("failed to decode pending messages")
 }
 
-fn pending_messages_has_column(conn: &Connection, column: &str) -> Result<bool> {
-    table_has_column(conn, "pending_messages", column)
+fn collect_session_index_rows(
+    stmt: &mut rusqlite::Statement<'_>,
+    label: &str,
+) -> Result<Vec<SessionIndexRow>> {
+    stmt.query_map([], parse_session_index_row)
+        .with_context(|| format!("failed to query {label}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to parse {label}"))
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) -> Result<bool> {
+    if table_has_column(conn, table, column)? {
+        return Ok(false);
+    }
+    conn.execute(alter_sql, [])
+        .with_context(|| format!("failed to add {table}.{column} column"))?;
+    Ok(true)
 }
 
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -1123,10 +1231,7 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool
     Ok(false)
 }
 
-fn parse_session_metadata_row(
-    row: &rusqlite::Row<'_>,
-    _include_parent: bool,
-) -> rusqlite::Result<SessionMetadata> {
+fn parse_session_index_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionIndexRow> {
     let id_str: String = row.get(0)?;
     let title: Option<String> = row.get(1)?;
     let title_state_str: String = row.get(2)?;
@@ -1150,9 +1255,10 @@ fn parse_session_metadata_row(
         .get::<_, Option<String>>(13)?
         .map(|value| parse_turn_id_column(value, 13))
         .transpose()?;
-    let agent_path = row
-        .get::<_, Option<String>>(14)?
-        .filter(|path| !path.is_empty());
+    let agent_path = match row.get::<_, Option<String>>(14)? {
+        Some(path) if path.is_empty() => Some("subagent".to_string()),
+        other => other,
+    };
 
     let title_state = match title_state_str.as_str() {
         "generating" => SessionTitleState::Generating,
@@ -1162,7 +1268,7 @@ fn parse_session_metadata_row(
         _ => SessionTitleState::Unset,
     };
 
-    Ok(SessionMetadata {
+    Ok(SessionIndexRow {
         session_id: parse_session_id_column(id_str, 0)?,
         cwd: PathBuf::from(&cwd_str),
         additional_directories: parse_additional_directories_column(additional_directories_str, 6)?,
@@ -1184,49 +1290,38 @@ fn parse_session_metadata_row(
         fork_from_id,
         fork_at_turn_id,
         agent_path,
-        agent_nickname: None,
-        agent_role: None,
         ephemeral: ephemeral != 0,
         model,
-        model_binding_id: None,
         reasoning_effort_selection: thinking,
-        reasoning_effort: None,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_tokens: 0,
-        total_cache_creation_tokens: 0,
-        total_cache_read_tokens: 0,
-        prompt_token_estimate: 0,
-        last_query_usage: None,
-        last_query_total_tokens: 0,
-        last_context_occupancy: None,
-        status: SessionRuntimeStatus::Idle,
-        collaboration_mode: Default::default(),
-        // Applied compaction window is resolved from AppConfig at session
-        // hydrate / create time; DB list rows do not persist it.
-        effective_context_window: None,
-        permission_preset: None,
     })
 }
 
 fn parse_session_id_column(id: String, column: usize) -> rusqlite::Result<SessionId> {
-    SessionId::from_str(&id).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
+    if id.is_empty() {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
             column,
             Type::Text,
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-        )
-    })
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "session id must be non-empty",
+            )),
+        ));
+    }
+    Ok(SessionId::from_string(id))
 }
 
 fn parse_turn_id_column(id: String, column: usize) -> rusqlite::Result<TurnId> {
-    TurnId::from_str(&id).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
+    if id.is_empty() {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
             column,
             Type::Text,
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-        )
-    })
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "turn id must be non-empty",
+            )),
+        ));
+    }
+    Ok(TurnId::from_string(id))
 }
 
 fn parse_additional_directories_column(
@@ -1248,12 +1343,14 @@ fn pending_kind_parts(kind: &PendingInputKind) -> (&'static str, String) {
             display_text,
             prompt_text,
             prompt_messages,
+            prompt_images,
         } => {
             let content = serde_json::json!({
                 "input": input,
                 "display_text": display_text,
                 "prompt_text": prompt_text,
                 "prompt_messages": prompt_messages,
+                "prompt_images": prompt_images,
             });
             ("user_input", content.to_string())
         }
@@ -1303,6 +1400,10 @@ fn pending_input_from_row(
                         .get("prompt_messages")
                         .and_then(|messages| serde_json::from_value(messages.clone()).ok())
                         .unwrap_or_default(),
+                    prompt_images: value
+                        .get("prompt_images")
+                        .and_then(|images| serde_json::from_value(images.clone()).ok())
+                        .unwrap_or_default(),
                 })
             })
             .unwrap_or(PendingInputKind::UserText {
@@ -1325,7 +1426,7 @@ fn pending_input_from_row(
     };
     PendingInputItem {
         id: pending_input_id
-            .and_then(|id| PendingInputId::try_from(id).ok())
+            .map(QueueItemId::from_string)
             .unwrap_or_default(),
         kind,
         metadata: metadata_str.and_then(|s| serde_json::from_str(&s).ok()),
@@ -1406,7 +1507,7 @@ mod tests {
                 "INSERT INTO pending_messages
                     (session_id, queue_type, kind, content, pending_input_id, created_at, position)
                  VALUES (?1, 'btw', 'user_text', 'keep steering', ?2, 0, 1)",
-                params![session_id.to_string(), PendingInputId::new().to_string()],
+                params![session_id.to_string(), QueueItemId::new().to_string()],
             )
             .expect("insert legacy steer row");
         }
@@ -1472,9 +1573,9 @@ mod tests {
         assert_eq!(stats.total_tokens, 42);
     }
 
-    fn sample_session(id: &str) -> SessionMetadata {
-        SessionMetadata {
-            session_id: SessionId::from_str(id).unwrap_or_default(),
+    fn sample_session(id: &str) -> SessionIndexRow {
+        SessionIndexRow {
+            session_id: SessionId::from_string(id.to_owned()),
             cwd: PathBuf::from("/tmp"),
             additional_directories: Vec::new(),
             created_at: Utc::now(),
@@ -1486,67 +1587,43 @@ mod tests {
             fork_from_id: None,
             fork_at_turn_id: None,
             agent_path: None,
-            agent_nickname: None,
-            agent_role: None,
             ephemeral: false,
             model: Some("claude-sonnet-4-20250514".into()),
-            model_binding_id: None,
             reasoning_effort_selection: None,
-            reasoning_effort: None,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_tokens: 0,
-            total_cache_creation_tokens: 0,
-            total_cache_read_tokens: 0,
-            prompt_token_estimate: 0,
-            last_query_usage: None,
-            last_query_total_tokens: 0,
-            last_context_occupancy: None,
-            status: SessionRuntimeStatus::Idle,
-            collaboration_mode: Default::default(),
-            effective_context_window: None,
-            permission_preset: None,
         }
     }
 
     #[test]
-    fn upsert_and_get_session() {
+    fn session_index_crud_and_ordering() {
         let (db, _dir) = test_db();
         let mut meta = sample_session("session-1");
         meta.additional_directories = vec![PathBuf::from("/tmp/shared")];
         db.upsert_session(&meta, None).expect("upsert");
-
-        let retrieved = db.get_session(&meta.session_id).expect("get");
-        assert!(retrieved.is_some());
-        let retrieved = retrieved.unwrap();
+        let retrieved = db.get_session(&meta.session_id).expect("get").expect("row");
         assert_eq!(retrieved.session_id, meta.session_id);
-        assert_eq!(retrieved.title, Some("Test Session".into()));
         assert_eq!(
             retrieved.additional_directories,
             meta.additional_directories
         );
-    }
 
-    #[test]
-    fn list_sessions_ordered() {
-        let (db, _dir) = test_db();
-        let mut meta1 = sample_session("session-1");
-        let mut meta2 = sample_session("session-2");
+        let mut newer = sample_session("session-2");
         let baseline = Utc::now();
-        meta1.updated_at = baseline;
-        meta1.last_activity_at = baseline;
-        meta2.updated_at = baseline + chrono::Duration::seconds(10);
-        meta2.last_activity_at = baseline - chrono::Duration::seconds(10);
-        db.upsert_session(&meta1, None).expect("upsert");
-        db.upsert_session(&meta2, None).expect("upsert");
-
+        meta.updated_at = baseline;
+        meta.last_activity_at = baseline + chrono::Duration::seconds(10);
+        newer.updated_at = baseline;
+        newer.last_activity_at = baseline;
+        db.upsert_session(&meta, None).expect("upsert meta");
+        db.upsert_session(&newer, None).expect("upsert newer");
         let sessions = db.list_sessions().expect("list");
         assert_eq!(sessions.len(), 2);
-        assert_eq!(sessions[0].session_id, meta1.session_id);
+        assert_eq!(sessions[0].session_id, meta.session_id);
+
+        db.delete_session(&meta.session_id).expect("delete");
+        assert!(db.get_session(&meta.session_id).expect("get").is_none());
     }
 
     #[test]
-    fn list_sessions_rejects_invalid_persisted_session_id() {
+    fn list_sessions_rejects_empty_persisted_session_id() {
         let (db, _dir) = test_db();
         let conn = db.conn.lock().expect("database mutex poisoned");
         conn.execute(
@@ -1567,60 +1644,24 @@ mod tests {
 
         let error = db
             .list_sessions()
-            .expect_err("invalid persisted session id should fail closed");
+            .expect_err("empty persisted session id should fail closed");
         let message = error
             .chain()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(message.contains("invalid length: found 0"), "{message}");
+        assert!(
+            message.contains("session id must be non-empty"),
+            "{message}"
+        );
     }
 
     #[test]
-    fn delete_session_cascades() {
+    fn session_stats_roundtrip() {
         let (db, _dir) = test_db();
         let meta = sample_session("session-1");
         db.upsert_session(&meta, None).expect("upsert");
-
-        db.delete_session(&meta.session_id).expect("delete");
-        let retrieved = db.get_session(&meta.session_id).expect("get");
-        assert!(retrieved.is_none());
-    }
-
-    #[test]
-    fn update_and_get_stats() {
-        let (db, _dir) = test_db();
-        let meta = sample_session("session-1");
-        db.upsert_session(&meta, None).expect("upsert");
-
-        let stats = SessionStats {
-            total_input_tokens: 1000,
-            total_output_tokens: 500,
-            total_tokens: 600,
-            total_cache_creation_tokens: 100,
-            total_cache_read_tokens: 50,
-            last_input_tokens: 200,
-            turn_count: 5,
-            prompt_token_estimate: 800,
-            last_context_occupancy: None,
-        };
-        db.update_stats(&meta.session_id, &stats).expect("update");
-
-        let retrieved = db.get_stats(&meta.session_id).expect("get");
-        assert!(retrieved.is_some());
-        let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.total_input_tokens, 1000);
-        assert_eq!(retrieved.total_output_tokens, 500);
-        assert_eq!(retrieved.turn_count, 5);
-    }
-
-    #[test]
-    fn update_and_get_stats_roundtrips_context_occupancy() {
-        let (db, _dir) = test_db();
-        let meta = sample_session("session-occupancy");
-        db.upsert_session(&meta, None).expect("upsert");
-
         let occupancy = ContextOccupancy::from_category_tokens(
             /*context_window_tokens*/ 100_000, /*base*/ 10_000, /*skills*/ 5_000,
             /*tools_builtin*/ 20_000, /*tools_mcp*/ 15_000, /*conversation*/ 50_000,
@@ -1629,125 +1670,41 @@ mod tests {
             total_input_tokens: 1000,
             total_output_tokens: 500,
             total_tokens: 1500,
-            total_cache_creation_tokens: 0,
-            total_cache_read_tokens: 200,
-            last_input_tokens: 1000,
-            turn_count: 2,
-            prompt_token_estimate: 100_000,
+            total_cache_creation_tokens: 100,
+            total_cache_read_tokens: 50,
+            last_input_tokens: 200,
+            turn_count: 5,
+            prompt_token_estimate: 800,
             last_context_occupancy: Some(occupancy.clone()),
         };
         db.update_stats(&meta.session_id, &stats).expect("update");
-
-        let retrieved = db
-            .get_stats(&meta.session_id)
-            .expect("get")
-            .expect("stats row");
+        let retrieved = db.get_stats(&meta.session_id).expect("get").expect("row");
+        assert_eq!(retrieved.total_input_tokens, 1000);
+        assert_eq!(retrieved.turn_count, 5);
         assert_eq!(retrieved.last_context_occupancy, Some(occupancy));
     }
 
     #[test]
-    fn push_and_drain_pending() {
+    fn pending_queue_operations() {
         let (db, _dir) = test_db();
         let meta = sample_session("session-1");
         db.upsert_session(&meta, None).expect("upsert");
-
-        let item1 = PendingInputItem::new(
-            PendingInputKind::UserText {
-                text: "hello".into(),
-            },
-            None,
-            Utc::now(),
+        assert!(
+            db.drain_pending(&meta.session_id, QueueType::Turn)
+                .expect("drain empty")
+                .is_empty()
         );
-        let item2 = PendingInputItem::new(
-            PendingInputKind::UserText {
-                text: "world".into(),
-            },
-            None,
-            Utc::now(),
-        );
-
-        db.push_pending(&meta.session_id, QueueType::Turn, &item1)
-            .expect("push");
-        db.push_pending(&meta.session_id, QueueType::Turn, &item2)
-            .expect("push");
-
-        let count = db
-            .count_pending(&meta.session_id, QueueType::Turn)
-            .expect("count");
-        assert_eq!(count, 2);
-
-        let drained = db
-            .drain_pending(&meta.session_id, QueueType::Turn)
-            .expect("drain");
-        assert_eq!(drained.len(), 2);
-        assert_eq!(drained[0].id, item1.id);
-        assert_eq!(drained[1].id, item2.id);
-        assert!(matches!(&drained[0].kind, PendingInputKind::UserText { text } if text == "hello"));
-        assert!(matches!(&drained[1].kind, PendingInputKind::UserText { text } if text == "world"));
-
-        let count = db
-            .count_pending(&meta.session_id, QueueType::Turn)
-            .expect("count");
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn queue_types_are_isolated() {
-        let (db, _dir) = test_db();
-        let meta = sample_session("session-1");
-        db.upsert_session(&meta, None).expect("upsert");
 
         let turn_item = PendingInputItem::new(
             PendingInputKind::UserText {
-                text: "turn msg".into(),
+                text: "turn".into(),
             },
             None,
             Utc::now(),
         );
         let steer_item = PendingInputItem::new(
             PendingInputKind::UserText {
-                text: "steer msg".into(),
-            },
-            None,
-            Utc::now(),
-        );
-
-        db.push_pending(&meta.session_id, QueueType::Turn, &turn_item)
-            .expect("push");
-        db.push_pending(&meta.session_id, QueueType::Steer, &steer_item)
-            .expect("push");
-
-        let turn_count = db
-            .count_pending(&meta.session_id, QueueType::Turn)
-            .expect("count");
-        let steer_count = db
-            .count_pending(&meta.session_id, QueueType::Steer)
-            .expect("count");
-        assert_eq!(turn_count, 1);
-        assert_eq!(steer_count, 1);
-
-        db.clear_pending(&meta.session_id, QueueType::Steer)
-            .expect("clear");
-        let steer_count = db
-            .count_pending(&meta.session_id, QueueType::Steer)
-            .expect("count");
-        assert_eq!(steer_count, 0);
-
-        let turn_count = db
-            .count_pending(&meta.session_id, QueueType::Turn)
-            .expect("count");
-        assert_eq!(turn_count, 1);
-    }
-
-    #[test]
-    fn remove_pending_by_id_only_removes_matching_item() {
-        let (db, _dir) = test_db();
-        let meta = sample_session("session-1");
-        db.upsert_session(&meta, None).expect("upsert");
-
-        let first = PendingInputItem::new(
-            PendingInputKind::UserText {
-                text: "first".into(),
+                text: "steer".into(),
             },
             None,
             Utc::now(),
@@ -1756,41 +1713,40 @@ mod tests {
             PendingInputKind::UserText {
                 text: "second".into(),
             },
-            None,
+            Some(serde_json::json!({"clientUserMessageId":"stable-message-1"})),
             Utc::now(),
         );
-
-        db.push_pending(&meta.session_id, QueueType::Turn, &first)
-            .expect("push first");
+        db.push_pending(&meta.session_id, QueueType::Turn, &turn_item)
+            .expect("push turn");
+        db.push_pending(&meta.session_id, QueueType::Steer, &steer_item)
+            .expect("push steer");
         db.push_pending(&meta.session_id, QueueType::Turn, &second)
             .expect("push second");
-
-        let removed = db
-            .remove_pending_by_id(&meta.session_id, QueueType::Turn, &first.id)
-            .expect("remove first");
-        assert!(removed);
-        let removed_again = db
-            .remove_pending_by_id(&meta.session_id, QueueType::Turn, &first.id)
-            .expect("remove first again");
-        assert!(!removed_again);
-
+        assert_eq!(
+            db.count_pending(&meta.session_id, QueueType::Turn)
+                .expect("count turn"),
+            2
+        );
+        assert_eq!(
+            db.count_pending(&meta.session_id, QueueType::Steer)
+                .expect("count steer"),
+            1
+        );
+        assert!(
+            db.remove_pending_by_id(&meta.session_id, QueueType::Turn, &turn_item.id)
+                .expect("remove first")
+        );
+        db.clear_pending(&meta.session_id, QueueType::Steer)
+            .expect("clear steer");
         let remaining = db
             .drain_pending(&meta.session_id, QueueType::Turn)
             .expect("drain");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, second.id);
-    }
-
-    #[test]
-    fn drain_pending_empty_returns_empty() {
-        let (db, _dir) = test_db();
-        let meta = sample_session("session-1");
-        db.upsert_session(&meta, None).expect("upsert");
-
-        let drained = db
-            .drain_pending(&meta.session_id, QueueType::Turn)
-            .expect("drain");
-        assert!(drained.is_empty());
+        assert_eq!(
+            remaining[0].metadata,
+            Some(serde_json::json!({"clientUserMessageId":"stable-message-1"}))
+        );
     }
 
     #[test]
@@ -1825,19 +1781,19 @@ mod tests {
         let ephemeral_id = SessionId::new();
         let rollout_path = PathBuf::from("/tmp/root.jsonl");
 
-        let mut root = sample_session(&root_id.to_string());
+        let mut root = sample_session(root_id.as_ref());
         root.session_id = root_id;
         db.upsert_session(&root, Some(rollout_path.as_path()))
             .expect("upsert root");
 
-        let mut subagent = sample_session(&subagent_id.to_string());
+        let mut subagent = sample_session(subagent_id.as_ref());
         subagent.session_id = subagent_id;
         subagent.parent_session_id = Some(root_id);
         subagent.agent_path = Some("root/review".into());
         db.upsert_session(&subagent, Some("/tmp/subagent.jsonl".as_ref()))
             .expect("upsert subagent");
 
-        let mut ephemeral = sample_session(&ephemeral_id.to_string());
+        let mut ephemeral = sample_session(ephemeral_id.as_ref());
         ephemeral.session_id = ephemeral_id;
         ephemeral.ephemeral = true;
         db.upsert_session(&ephemeral, None)
@@ -1852,12 +1808,12 @@ mod tests {
             .expect("get index")
             .expect("root index");
         assert_eq!(index.rollout_path, Some(rollout_path));
-        assert_eq!(index.metadata.parent_session_id, None);
+        assert_eq!(index.session.parent_session_id, None);
 
         let subagent_index = db
             .get_session_index(&subagent_id)
             .expect("get subagent index")
             .expect("subagent index");
-        assert_eq!(subagent_index.metadata.parent_session_id, Some(root_id));
+        assert_eq!(subagent_index.session.parent_session_id, Some(root_id));
     }
 }

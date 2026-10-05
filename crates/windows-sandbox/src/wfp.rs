@@ -2,6 +2,7 @@ mod filter_specs;
 
 use crate::to_wide;
 use anyhow::Result;
+use anyhow::anyhow;
 use std::ffi::OsStr;
 use std::mem::zeroed;
 use std::ptr::null;
@@ -19,6 +20,7 @@ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITI
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_CONDITION_VALUE0_0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_EMPTY;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_MATCH_EQUAL;
+const FWP_SID_TYPE: u32 = 0x8; // FWP_DATA_TYPE for SID comparison
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_SECURITY_DESCRIPTOR_TYPE;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_UINT8;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_UINT16;
@@ -170,6 +172,8 @@ impl Drop for Transaction<'_> {
 struct UserMatchCondition {
     security_descriptor: PSECURITY_DESCRIPTOR,
     blob: FWP_BYTE_BLOB,
+    /// Direct SID for FWP_SID_TYPE matching (reliable for restricted tokens).
+    account_sid: Vec<u8>,
 }
 
 impl UserMatchCondition {
@@ -203,12 +207,53 @@ impl UserMatchCondition {
         };
         ensure_success(result, "BuildSecurityDescriptorW")?;
 
+        // Resolve the account SID for direct FWP_SID_TYPE comparison —
+        // SD-based access checks are unreliable for restricted tokens.
+        let mut sid_buf = Vec::with_capacity(68);
+        let mut sid_size: u32 = 68;
+        let mut domain_buf = Vec::with_capacity(256);
+        let mut domain_size: u32 = 256;
+        let mut sid_name_use: u32 = 0;
+        let sid_ok = {
+            #[link(name = "advapi32")]
+            unsafe extern "system" {
+                fn LookupAccountNameW(
+                    lpSystemName: *const u16,
+                    lpAccountName: *const u16,
+                    Sid: *mut u8,
+                    cbSid: *mut u32,
+                    lpReferencedDomainName: *mut u16,
+                    cchReferencedDomainName: *mut u32,
+                    peUse: *mut u32,
+                ) -> i32;
+            }
+            unsafe {
+                LookupAccountNameW(
+                    std::ptr::null(),
+                    account_w.as_ptr(),
+                    sid_buf.as_mut_ptr() as *mut _,
+                    &mut sid_size,
+                    domain_buf.as_mut_ptr(),
+                    &mut domain_size,
+                    &mut sid_name_use,
+                )
+            }
+        };
+        if sid_ok == 0 {
+            return Err(anyhow!(
+                "LookupAccountNameW failed for {account}: {}",
+                unsafe { windows_sys::Win32::Foundation::GetLastError() }
+            ));
+        }
+        unsafe { sid_buf.set_len(sid_size as usize) }
+
         Ok(Self {
             security_descriptor,
             blob: FWP_BYTE_BLOB {
                 size: security_descriptor_len,
                 data: security_descriptor as *mut u8,
             },
+            account_sid: sid_buf,
         })
     }
 }
