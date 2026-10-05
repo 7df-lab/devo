@@ -1,298 +1,162 @@
 <div align="center">
 
-<img src="./.github/assets/devo-readme-brand.svg" alt="Devo desktop coding agent app icon and wordmark" width="360" />
+<img src="./.github/assets/devo-readme-brand.svg" alt="Devo open-source AI coding agent logo" width="360" />
 
 </div>
 
-<div align="center">
+# Devo — Open-source AI coding agent for desktop and terminal
 
-**Devo is an open-source coding agent with a Desktop app, terminal TUI/CLI, and model-neutral Rust runtime for private, enterprise, and OpenAI-compatible model environments. Connect DeepSeek, Qwen, Kimi, Anthropic-compatible APIs, local gateways, or your own model endpoint.**
+Devo is a coding agent with a **Desktop app**, **terminal TUI/CLI**, and a
+**Rust-based local runtime**. Connect an OpenAI-compatible or Anthropic-compatible
+model provider, use your own API key, or point Devo at a local or private gateway.
+Work in a repository with plans, tool approvals, reusable skills, and session
+history in either interface.
 
-[![Stars](https://img.shields.io/github/stars/7df-lab/devo?style=flat-square)](https://github.com/7df-lab/devo/stargazers)
-[![Language](https://img.shields.io/badge/language-Rust-E57324?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/7df-lab/devo/pulls)
 [![CI](https://img.shields.io/github/actions/workflow/status/7df-lab/devo/ci.yml?branch=main&style=flat-square)](https://github.com/7df-lab/devo/actions)
 [![Release](https://img.shields.io/github/v/release/7df-lab/devo?style=flat-square)](https://github.com/7df-lab/devo/releases)
-[![AUR version](https://img.shields.io/aur/version/devo-bin?color=%231793d1&label=AUR&logo=arch-linux&logoColor=%23fff&style=flat-square)](https://aur.archlinux.org/packages/devo-bin/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
 
-[English](./README.md) | [简体中文](./README.zh-Hans.md) | [繁體中文](./README.zh-Hant.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
+[English](./README.md) · [简体中文](./README.zh-Hans.md) · [繁體中文](./README.zh-Hant.md) · [日本語](./README.ja.md) · [Русский](./README.ru.md)
 
-[Why Devo](#why-devo) · [Screenshots](#screenshots) · [Features](#features) · [Tested Models](#tested-models) · [Tested Platforms](#tested-platforms) · [Install](#installation) · [Quick Start](#quick-start) · [Docs](#docs)
+[Quick start](#quick-start) · [Features](#features) · [Models and providers](#models-and-providers) · [Installation](#installation) · [Configuration](#configuration) · [Contributing](#contributing)
 
-</div>
+## Quick start
 
----
+1. [Install Devo](#installation) for your platform.
+2. Open a repository and run onboarding:
 
-## Screenshots
+   ```bash
+   cd /path/to/your/repo
+   devo onboard
+   ```
 
-<p align="center">
-  <img width="100%" alt="Devo terminal TUI coding agent running in a local repository with model, context, and token status" src="./.github/assets/devo-terminal-tui-coding-agent-screenshot.png" />
-</p>
+3. Start or resume a terminal session:
 
-<p align="center">
-  <img width="100%" alt="Devo desktop coding agent app showing a repository conversation, project sidebar, and model controls" src="./.github/assets/devo-desktop-coding-agent-screenshot.png" />
-</p>
+   ```bash
+   devo
+   devo resume <session-id>
+   ```
 
-## Why Devo
-
-Devo is for teams that need a coding agent outside a single hosted model
-ecosystem. It keeps the desktop experience, terminal workflow, model choice,
-runtime behavior, and workspace execution under your control.
-
-- **Bring your own model** - Connect OpenAI-compatible Chat Completions,
-  OpenAI-compatible Responses, Anthropic Messages, DeepSeek, Qwen, Kimi, or
-  private model gateways through provider/model Connections.
-- **Works in private and intranet environments** - Run a single local Rust
-  binary, support offline installation paths, and point Devo at internal
-  endpoints without depending on a hosted agent service.
-- **One agent across Desktop and terminal** - Use the Desktop app for visual
-  onboarding and daily coding, or the CLI/TUI for terminal-native automation,
-  remote shells, and scriptable workflows.
-- **Built for agent runtime extensibility** - MCP servers, reusable skills,
-  auditable sessions, permissions, and multi-agent flows are runtime features
-  rather than one-off prompts.
+Prefer a graphical workspace? Install the [Desktop app](#desktop-app), then
+connect a model provider in its setup flow.
 
 ## Features
 
-- **Model-neutral provider runtime** - Use provider/model Connections for
-  OpenAI-compatible, Anthropic-compatible, DeepSeek, Qwen, Kimi, GLM, MiniMax,
-  Xiaomi MiMo, OpenRouter, or local endpoints.
-- **MCP support** - Connect external tools and context through
-  [Model Context Protocol](https://modelcontextprotocol.io/) servers. Add and
-  manage servers from the CLI with `devo mcp add|list|enable|disable|remove`
-  (see [Configuration](./docs/configuration.md#mcp-servers)).
-- **Skill support** - Package repeatable workflows, instructions, scripts, and
-  references as reusable [Agent Skills](https://agentskills.io/).
-- **Long-running task support** - Let Devo manage context automatically across
-  multi-turn work instead of losing the thread as tasks grow.
-- **Multi-agent support** - Split work across specialized agents while keeping
-  coordination visible in the session.
-- **Plan Mode** - Break larger tasks into clear multi-step plans before
-  implementation starts.
-- **Parallel tool calls** - Run multiple independent tools in parallel so
-  models spend less time waiting and more time making progress.
-- **Permissioned tool execution** - Review sensitive tool calls before they
-  touch your workspace.
-- **Auditable sessions** - Keep model output, tool calls, approvals, token
-  usage, and session history inspectable and resumable.
-- **Cost and context visibility** - Show input/output tokens, cached tokens, and
-  context-window usage where providers expose them.
-- **Lightweight Rust runtime** - Built in Rust with low memory overhead and a
-  compact local runtime.
-- **Built-in semantic code search (MCP)** - Optional bundled MCP server
-  (`code_search` / `devo-code-search-mcp`), **not installed or enabled by
-  default**. Runs a local CPU code-embedding model and combines dense retrieval
-  with BM25 keyword matching to reduce code-search context versus grep/find-only
-  agents. Install it explicitly with `--with-code-search`, then enable it with
-  `devo mcp enable code_search` or TUI `/mcps`.
+| Interface | What it offers |
+| --- | --- |
+| **Desktop** | Visual setup, repository conversations, session browsing, and model controls. |
+| **TUI / CLI** | A terminal-native coding workflow, including session resume and command-line access. |
+| **Shared runtime** | Model connections, tool permissions, plans, MCP servers, skills, and multi-agent sessions. |
 
-## Tested Models
+- **Bring your own model:** Select a provider and model without tying the agent
+  to a single hosted model service. Local endpoints are supported when they
+  implement a compatible API.
+- **Plan and execute:** Review a plan before implementation, and approve
+  sensitive tool actions when permissions require it.
+- **Extend the agent:** Connect [Model Context Protocol](https://modelcontextprotocol.io/)
+  (MCP) servers and package repeatable workflows as [Agent Skills](https://agentskills.io/).
+- **Continue your work:** Inspect session history, resume previous sessions,
+  and coordinate child agents on larger tasks.
+- **Optional local code search:** The `code_search` MCP combines embeddings and
+  keyword search. Its binary and model are not installed by default.
 
-<p>
-  <img alt="DeepSeek v4 Flash / Pro" src="https://img.shields.io/badge/DeepSeek-v4%20Flash%20%2F%20Pro-4D6BFE?style=flat-square&logo=deepseek&logoColor=white" />
-  <img alt="GLM 5.2" src="https://img.shields.io/badge/GLM-5.2-7856FF?style=flat-square&logo=huggingfacei&logoColor=white" />
-  <img alt="MiniMax M3" src="https://img.shields.io/badge/MiniMax-M3-0B5FFF?style=flat-square&logo=minimax&logoColor=white" />
-  <img alt="Qwen3 Coder Next" src="https://img.shields.io/badge/Qwen3-Coder%20Next-615CED?style=flat-square&logo=qwen&logoColor=white" />
-  <img alt="Kimi K3" src="https://img.shields.io/badge/Kimi-K3-111111?style=flat-square&logo=moonshotai&logoColor=white" />
-</p>
+## Models and providers
 
-Devo's built-in model catalog includes tested model definitions for Qwen, Kimi,
-MiniMax, GLM, and DeepSeek. Provider endpoints remain configurable through
-provider/model Connections.
+Devo supports configurable connections for
+**OpenAI-compatible Chat Completions**, **OpenAI-compatible Responses**, and
+**Anthropic Messages** APIs.
+Its bundled catalog includes model definitions for providers such as DeepSeek,
+Qwen, Kimi, GLM, and MiniMax. You can configure a compatible endpoint or private
+gateway rather than relying on the bundled entries.
 
-## Tested Platforms
-
-<p>
-  <img alt="macOS tested" src="https://img.shields.io/badge/macOS-tested-000000?style=flat-square&logo=apple&logoColor=white" />
-  <img alt="Linux tested" src="https://img.shields.io/badge/Linux-tested-FCC624?style=flat-square&logo=linux&logoColor=000000" />
-  <img alt="Windows tested" src="https://img.shields.io/badge/Windows-tested-0078D4?style=flat-square&logo=windows&logoColor=white" />
-</p>
-
-Devo has been tested on macOS, Linux, Windows, and Kylin OS.
-
-### For Chinese Enterprise Users
-
-<p>
-  <img alt="Kylin OS tested" src="https://img.shields.io/badge/Kylin%20OS-tested-1E88E5?style=flat-square" />
-  <img alt="HarmonyOS support on the road" src="https://img.shields.io/badge/HarmonyOS-on%20the%20road-111111?style=flat-square&logo=harmonyos&logoColor=white" />
-</p>
-
-Kylin OS coverage is called out because domestic operating systems are often
-part of real deployment requirements in Chinese enterprise environments.
-HarmonyOS support is on the roadmap; contributors with HarmonyOS devices are
-welcome to build, test, and publish releases for that platform.
+Model requests go to the endpoint you configure. For local model traffic,
+choose a compatible local endpoint.
 
 ## Installation
 
-Devo can be installed in two forms. Pick the Desktop app for a graphical coding
-agent workspace, the terminal-native TUI/CLI for shell-first development, or
-install both on the same machine.
+### Desktop app
 
-### Option 1: Desktop App
+Download the package for your operating system and architecture from
+[GitHub Releases](https://github.com/7df-lab/devo/releases/latest). Release
+assets include macOS `.dmg`/`.zip`, Windows `.exe`, and Linux `.AppImage`/`.deb`/`.rpm`
+packages. Check the asset name for the right architecture before installing.
 
-Start here if you want the graphical Devo experience. Download the latest Devo
-Desktop package from [GitHub Releases](https://github.com/7df-lab/devo/releases/latest),
-then choose the asset that matches your operating system and architecture:
+### Terminal TUI / CLI
 
-- **macOS** - download the `devo-desktop-...-mac-...` `.dmg` or `.zip` asset.
-- **Windows** - download the `devo-desktop-...-windows-...` `.exe` asset.
-- **Linux** - download the `devo-desktop-...-linux-...` `.AppImage`, `.deb`, or
-  `.rpm` asset.
-
-**If macOS reports that `Devo.app` is damaged and cannot be opened, this is
-expected.** Current macOS Desktop builds are unsigned, so after installing,
-run the following command so macOS can launch the app:
-
-```bash
-sudo xattr -dr com.apple.quarantine /Applications/Devo.app
-```
-
-### Option 2: TUI / CLI
-
-Install the terminal-native `devo` command if you prefer the TUI, want shell
-automation, or want to use Devo alongside the Desktop app.
-
-Linux / macOS:
+**Linux or macOS:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh
 ```
 
-Windows:
+**Windows (PowerShell):**
 
 ```powershell
 irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
 ```
 
-The online installer places `devo` under the Devo home directory and installs
-the `rg` sidecar used for fast repository search. It does not install the
-`code_search` MCP or its local model by default.
+Review an installer before running it if your environment requires it.
+The installer sets up the `devo` command and its `rg` search sidecar;
+`code_search` is an optional extra.
 
 <details>
-<summary>Optional: install the <code>code_search</code> MCP and local model</summary>
+<summary>Install the optional code-search MCP and local model</summary>
 
-Use this only if you want the code-search MCP and its Hugging Face model
-installed during setup.
-
-Linux / macOS:
+On Linux or macOS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh -s -- --with-code-search
 ```
 
-Windows:
+On Windows (PowerShell):
 
 ```powershell
 $env:DEVO_INSTALL_CODE_SEARCH = "1"; irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
 ```
 
+After installation, enable the MCP with `devo mcp enable code_search` or
+TUI `/mcps`.
+
 </details>
 
-Upgrade an existing installation to the latest release:
-
-```bash
-devo upgrade
-```
-
-The upgrade command runs the same platform installer, and the installer prints
-the version transition, for example `Version: v0.1.12 -> v0.1.15`.
-
-For air-gapped or intranet installs, see
-[Offline Installation](./docs/offline-installation.md).
-
-## Quick Start
-
-Configure a provider, open a repository, and start the TUI:
-
-```bash
-cd /path/to/your/repo
-devo onboard
-```
-
-Useful commands:
-
-```bash
-devo                         # start the interactive TUI in the current repo
-devo resume <session-id>
-```
+To upgrade an existing CLI installation, run `devo upgrade`.
 
 ## Configuration
 
-`devo onboard` is the recommended setup path. It writes provider Connections
-and model directories to `providers.json` and stores your API key in
-user-scoped `auth.json`.
+`devo onboard` is the simplest way to connect a provider. In the Desktop app,
+use the provider setup flow. Provider/model connections and API credentials are
+stored separately: built-in provider connections use `providers.json`, custom
+providers use `custom-providers.json`, the default model is selected in
+`config.toml`, and user-scoped secrets use `auth.json`. Do not put API keys in
+provider definitions or commit credential files.
 
-To bring your own key with a custom model manually:
-
-1. Define a `provider.<id>.models.<model-id>` entry in `providers.json` and set
-   the active model as `provider/model`.
-2. Put the secret in `DEVO_HOME/auth.json` and reference that credential id from
-   `provider.<id>.credential` — never put the API key itself in `providers.json`.
-3. Set `wire_api` to match the endpoint protocol:
-   `openai_chat_completions`, `openai_responses`, or `anthropic_messages`.
-
-Full worked example (custom model parameters + API key) and protocol details:
-[Configuration](./docs/configuration.md#bring-your-own-api-key).
-
-## Slow Providers
-
-Provider responses are not subject to an application-level response timeout, so
-local models may take as long as necessary to load or generate output. Provider
-connections still have an internal connection-establishment deadline, and every
-request can be cancelled by the user.
-
-## Docs
-
-- [Offline Installation](./docs/offline-installation.md)
-- [Configuration](./docs/configuration.md)
+Use `devo mcp` subcommands (`add`, `list`, `enable`, `disable`, `remove`)
+to manage MCP servers. For the terminal interface, see the
+[TUI guide](./apps/tui/README.md).
 
 ## FAQ
 
-### What is the project status?
+### Can I use a local model or private gateway?
 
-Devo is pre-1.0 and actively developed. It is ready for local evaluation,
-experiments, and contributor use; public APIs and configuration may still
-change.
+Yes, if its endpoint implements a supported API. Set the connection to that
+endpoint and choose its provider/model entry. Model requests go to the
+endpoint you configure.
 
-### What models are supported?
+### Is Devo ready for production deployments?
 
-Built-in model metadata currently covers Qwen, Kimi, MiniMax, GLM, and DeepSeek
-families. Any model endpoint that supports OpenAI-compatible Chat Completions,
-OpenAI-compatible Responses, or the Anthropic Messages API can be connected through
-provider/model Connections.
+Devo is pre-1.0 and under active development. Evaluate it with your own model,
+permissions, and deployment requirements; APIs and configuration may change.
 
-### How do I bring my own API key?
+### Can I switch between Desktop and the terminal?
 
-Use `devo onboard`, or manually define a custom provider/model in
-`providers.json`, store the key in user-scoped `auth.json`, and set
-`wire_api` to `openai_chat_completions`, `openai_responses`, or
-`anthropic_messages`. See
-[Configuration](./docs/configuration.md#bring-your-own-api-key).
-
-### Should I use the Desktop app or the TUI/CLI?
-
-Use the Desktop app when you want visual onboarding, session browsing, and a
-graphical coding workspace. Use the TUI/CLI when you want terminal-native
-automation, remote shell workflows, or a coding agent that stays inside your
-existing command-line setup. Both surfaces target the same local Devo runtime.
+Both interfaces use the Devo runtime. Choose Desktop for graphical setup and
+session browsing, or the TUI/CLI for terminal-first work.
 
 ## Contributing
 
-Contributions are welcome while the project is still early:
-
-- Architecture feedback on the client/server runtime, provider layer, safety
-  model, and TUI.
-- Documentation and translations.
-- Provider, model, and wire API coverage.
-- Focused fixes with validation commands and regression tests.
-
-Open an issue or pull request to discuss changes.
+Issues, documentation updates, and focused fixes are welcome. Read
+[CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull request.
 
 ## License
 
-This project is licensed under the [MIT License](./LICENSE).
-
----
-
-**If you find Devo useful, please consider giving it a star.**
+Devo is licensed under the [MIT License](./LICENSE).

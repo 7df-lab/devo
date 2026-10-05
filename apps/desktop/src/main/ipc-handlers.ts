@@ -80,7 +80,55 @@ import {
 } from "./updater"
 
 const log = createLogger("ipc")
-const oauthControllers = new Map<number, AbortController>()
+type OAuthAttempt = {
+	controller: AbortController
+	phase: "authorizing" | "saving"
+	finished: Promise<void>
+	finish: () => void
+}
+const oauthAttempts = new Map<number, OAuthAttempt>()
+const pendingOauthLogins = new Map<number, AbortController>()
+// Credential writes to one provider are ordered across renderer windows while their
+// RPCs are pending. If transport fails before the server write finishes, ordering
+// requires server-side support; do not blindly delete an unknown credential.
+const oauthCredentialWrites = new Map<string, Promise<void>>()
+
+function assertCurrentOAuth(senderId: number, attempt: OAuthAttempt): void {
+	if (attempt.controller.signal.aborted || oauthAttempts.get(senderId) !== attempt) {
+		throw new Error("Login cancelled")
+	}
+}
+
+async function persistDesktopOAuthCredential(
+	senderId: number,
+	attempt: OAuthAttempt,
+	providerId: string,
+	credential: Awaited<ReturnType<typeof loginDesktopOAuth>>,
+	onSaving: () => void,
+): Promise<void> {
+	assertCurrentOAuth(senderId, attempt)
+	const previous = oauthCredentialWrites.get(providerId)
+	let release!: () => void
+	const write = new Promise<void>((resolve) => {
+		release = resolve
+	})
+	oauthCredentialWrites.set(providerId, write)
+	try {
+		if (previous) await previous
+		assertCurrentOAuth(senderId, attempt)
+		// No await between entering the non-cancellable phase and dispatching the RPC.
+		// Cancel before here is accepted and cannot submit credential/set.
+		attempt.phase = "saving"
+		onSaving()
+		await requestNative(
+			"credential/set",
+			credentialSetParamsFromDesktopOAuth(providerId, credential),
+		)
+	} finally {
+		release()
+		if (oauthCredentialWrites.get(providerId) === write) oauthCredentialWrites.delete(providerId)
+	}
+}
 
 /** Read the opaque windows preference for use at window creation time. */
 export { getOpaqueWindows as getOpaqueWindowsPref } from "./settings-store"
@@ -270,32 +318,72 @@ export function registerIpcHandlers(): void {
 				if (!isDesktopOAuthProviderId(request.providerId)) {
 					throw new Error(`Unsupported OAuth provider: ${request.providerId}`)
 				}
-				oauthControllers.get(event.sender.id)?.abort()
+				const senderId = event.sender.id
 				const controller = new AbortController()
-				oauthControllers.set(event.sender.id, controller)
+				pendingOauthLogins.get(senderId)?.abort()
+				pendingOauthLogins.set(senderId, controller)
 				try {
-					const credential = await loginDesktopOAuth(request.providerId, {
-						signal: controller.signal,
-						enterpriseUrl: request.enterpriseUrl,
-						onUpdate: (update) => event.sender.send("provider-oauth:update", update),
-					})
-					await requestNative(
-						"credential/set",
-						credentialSetParamsFromDesktopOAuth(request.providerId, credential),
-					)
-				} finally {
-					controller.abort()
-					if (oauthControllers.get(event.sender.id) === controller) {
-						oauthControllers.delete(event.sender.id)
+					const prior = oauthAttempts.get(senderId)
+					if (prior?.phase === "saving") await prior.finished
+					if (controller.signal.aborted || pendingOauthLogins.get(senderId) !== controller) {
+						throw new Error("Login cancelled")
 					}
+					pendingOauthLogins.delete(senderId)
+					// A new login may supersede an authorization, but never an in-flight save.
+					oauthAttempts.get(senderId)?.controller.abort()
+					let finish!: () => void
+					const finished = new Promise<void>((resolve) => {
+						finish = resolve
+					})
+					const attempt: OAuthAttempt = { controller, phase: "authorizing", finished, finish }
+					oauthAttempts.set(senderId, attempt)
+					try {
+						const credential = await loginDesktopOAuth(request.providerId, {
+							signal: controller.signal,
+							enterpriseUrl: request.enterpriseUrl,
+							onUpdate: (update) => {
+								if (!controller.signal.aborted && oauthAttempts.get(senderId) === attempt) {
+									event.sender.send("provider-oauth:update", update)
+								}
+							},
+						})
+						await persistDesktopOAuthCredential(
+							senderId,
+							attempt,
+							request.providerId,
+							credential,
+							() => {
+								try {
+									event.sender.send("provider-oauth:update", {
+										phase: "saving",
+										instructions: "Saving credential...",
+									})
+								} catch (error) {
+									log.warn("Could not send OAuth saving update", { senderId, error })
+								}
+							},
+						)
+					} finally {
+						controller.abort()
+						if (oauthAttempts.get(senderId) === attempt) oauthAttempts.delete(senderId)
+						finish()
+					}
+				} finally {
+					if (pendingOauthLogins.get(senderId) === controller) pendingOauthLogins.delete(senderId)
 				}
 			},
 		),
 	)
 
-	ipcMain.handle("provider-oauth:cancel", (event) => {
-		oauthControllers.get(event.sender.id)?.abort()
-		oauthControllers.delete(event.sender.id)
+	ipcMain.handle("provider-oauth:cancel", (event): boolean => {
+		const senderId = event.sender.id
+		pendingOauthLogins.get(senderId)?.abort()
+		pendingOauthLogins.delete(senderId)
+		const attempt = oauthAttempts.get(senderId)
+		if (attempt?.phase === "saving") return false
+		attempt?.controller.abort()
+		if (attempt) oauthAttempts.delete(senderId)
+		return true
 	})
 
 	subscribeNative((event) => {

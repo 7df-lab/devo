@@ -29,6 +29,7 @@ import { isTerminalToggleShortcut } from "../lib/terminal-shortcut"
 import { AppBarProvider } from "./app-bar-context"
 import { CommandPalette } from "./command-palette"
 import { OnboardingOverlay } from "./onboarding/onboarding-overlay"
+import { handleSessionNavigationKeyDown, isSessionNavigationBlocked } from "./root-layout-keyboard"
 import { SidebarSlotProvider } from "./sidebar-slot-context"
 import { StartupOverlay } from "./startup-overlay"
 
@@ -98,38 +99,16 @@ export function RootLayout() {
 				return
 			}
 
-			const target = e.target as HTMLElement
-			if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
-				return
-			}
+			if (handleSessionNavigationKeyDown(e, { agents: visibleAgents, sessionId, navigate })) return
+			// The same capture guard applies to global shortcuts such as Cmd/Ctrl+N/K.
+			if (isSessionNavigationBlocked(e)) return
 
-			if (e.key === "Escape") {
-				e.preventDefault()
-				navigate({ to: "/" })
-				return
-			}
-
-			if ((e.key === "j" || e.key === "k") && !e.metaKey && !e.ctrlKey && !e.altKey) {
-				e.preventDefault()
-				const currentIndex = visibleAgents.findIndex((a) => a.id === sessionId)
-				let nextIndex: number
-				if (e.key === "j") {
-					nextIndex = currentIndex < visibleAgents.length - 1 ? currentIndex + 1 : 0
-				} else {
-					nextIndex = currentIndex > 0 ? currentIndex - 1 : visibleAgents.length - 1
-				}
-				const agent = visibleAgents[nextIndex]
-				if (agent) {
-					navigate({
-						to: "/project/$projectSlug/session/$sessionId",
-						params: {
-							projectSlug: agent.projectSlug,
-							sessionId: agent.id,
-						},
-					})
-				}
-				return
-			}
+			// Keep other global shortcuts out of controls, as before.
+			const target = e.target
+			if (
+				target instanceof HTMLElement &&
+				(target.matches("input, textarea") || target.isContentEditable)
+			) return
 
 			if ((e.metaKey || e.ctrlKey) && e.key === "n") {
 				e.preventDefault()

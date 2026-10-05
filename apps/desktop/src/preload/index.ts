@@ -90,11 +90,11 @@ contextBridge.exposeInMainWorld("devo", {
 			ipcRenderer.invoke("provider-oauth:login", { providerId, enterpriseUrl }),
 		cancel: () => ipcRenderer.invoke("provider-oauth:cancel"),
 		onUpdate: (
-			callback: (update: { url?: string; instructions: string; userCode?: string }) => void,
+			callback: (update: { url?: string; instructions: string; userCode?: string; phase?: "saving" }) => void,
 		) => {
 			const listener = (
 				_event: unknown,
-				update: { url?: string; instructions: string; userCode?: string },
+				update: { url?: string; instructions: string; userCode?: string; phase?: "saving" },
 			) => callback(update)
 			ipcRenderer.on("provider-oauth:update", listener)
 			return () => {

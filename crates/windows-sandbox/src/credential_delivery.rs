@@ -1,16 +1,15 @@
-//! Per-session credential authority (design doc `docs/design/rlm-permissions.md`
-//! §9, P2). Devo-owned: codex's per-exec model never needs to deliver
-//! credentials to a long-lived sandboxed process, so this layer cannot live
-//! upstream (see `DEVO_PATCHES.md`).
+//! Per-session credential authority. Devo-owned: codex's per-exec model never
+//! needs to deliver credentials to a long-lived sandboxed process, so this
+//! layer cannot live upstream (see `DEVO_PATCHES.md`).
 //!
 //! A session-scoped capability SID is minted once per kernel session and, when
 //! the kernel is fenced, travels in its restricted token. Granting a path =
 //! adding an inheritable allow ACE for that SID (raw `open()` works
 //! immediately, no kernel restart); revoking = removing the ACE (new opens are
-//! refused; already-open handles keep working — a documented residual, §9).
+//! refused; already-open handles keep working — a known residual).
 //! Every grant/revoke is journaled to `<devo_home>/.sandbox/credential_journal.json`
 //! so crash recovery can re-derive deliveries. The journal is the authority
-//! for recovery — not just an audit trail (§8).
+//! for recovery — not just an audit trail.
 //!
 //! Startup orphan cleanup is not called automatically: this journal has no
 //! cross-process liveness markers, and one server could otherwise revoke the
@@ -51,7 +50,7 @@ pub struct SessionCredentialAuthority {
 struct CredentialJournal {
     /// session_id → credential record. The SID is journaled alongside the
     /// grants because revocation is impossible without it, and crash recovery
-    /// (not just audit) reads this file (§8).
+    /// (not just audit) reads this file.
     sessions: BTreeMap<String, SessionRecord>,
 }
 

@@ -220,6 +220,7 @@ function navigateToSession(sessionId: string): void {
 	const win = BrowserWindow.getAllWindows()[0]
 	if (win) {
 		if (win.isMinimized()) win.restore()
+		if (!win.isVisible()) win.show()
 		win.focus()
 		win.webContents.send("notification:navigate", { sessionId })
 	}

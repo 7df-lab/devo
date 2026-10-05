@@ -248,29 +248,34 @@ export class StdioNativeClient implements NativeTransport {
 		this.stopped = false
 
 		const stdout = createInterface({ input: child.stdout })
-		stdout.on("line", (line) => this.handleLine(line))
+		stdout.on("line", (line) => {
+			if (this.child === child) this.handleLine(line)
+		})
 
 		const stderr = createInterface({ input: child.stderr })
 		stderr.on("line", (line) => {
+			if (this.child !== child) return
 			if (line.trim()) log.warn(`[stderr] ${line}`)
 		})
 
 		child.stdin.on("error", (error) => {
+			if (this.child !== child) return
 			const reason = toError(error)
 			log.warn("Devo Native stdio stdin failed", reason)
-			this.close(reason)
+			this.close(reason, child)
 		})
 
 		child.on("error", (error) => {
+			if (this.child !== child) return
 			log.error("Devo Native stdio process failed", error)
-			this.close(error)
+			this.close(error, child)
 		})
 
 		child.on("exit", (code, signal) => {
-			if (this.stopped) return
+			if (this.child !== child || this.stopped) return
 			const reason = `Devo Native stdio process exited with code ${code ?? "null"} signal ${signal ?? "null"}`
 			log.warn(reason)
-			this.close(new Error(reason))
+			this.close(new Error(reason), child)
 		})
 	}
 
@@ -345,7 +350,7 @@ export class StdioNativeClient implements NativeTransport {
 			if (pending?.timer !== undefined) clearTimeout(pending.timer)
 			this.pending.delete(id)
 			this.pendingMethods.delete(id)
-			this.close(reason)
+			this.close(reason, child)
 			throw reason
 		}
 		return response
@@ -366,16 +371,17 @@ export class StdioNativeClient implements NativeTransport {
 			})
 		} catch (error) {
 			const reason = toError(error)
-			this.close(reason)
+			this.close(reason, child)
 			throw reason
 		}
 	}
 
 	async respond(id: JsonRpcId, result: unknown): Promise<void> {
 		this.start()
+		const child = this.requireChild()
 		const payload = { jsonrpc: "2.0", id, result }
 		try {
-			await this.writeJson(this.requireChild(), payload)
+			await this.writeJson(child, payload)
 			this.recordTraffic({
 				direction: "desktop-to-server",
 				kind: "response",
@@ -384,7 +390,7 @@ export class StdioNativeClient implements NativeTransport {
 			})
 		} catch (error) {
 			const reason = toError(error)
-			this.close(reason)
+			this.close(reason, child)
 			throw reason
 		}
 	}
@@ -506,7 +512,8 @@ export class StdioNativeClient implements NativeTransport {
 		return this.child
 	}
 
-	private close(error: Error): void {
+	private close(error: Error, child?: ChildProcessWithoutNullStreams): void {
+		if (child && this.child !== child) return
 		this.child = null
 		this.initializeResult = undefined
 		this.initializeInFlight = null
