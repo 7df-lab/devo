@@ -572,8 +572,10 @@ impl KernelSession {
         // launcher; Unix reuses the platform sandbox wrapper (bwrap/Seatbelt)
         // that shell sandboxing uses, carrying the fence roots as overlay.
         // Every unimplementable fence is an explicit downgrade, never silent.
-        #[cfg(any(windows, unix))]
+        #[cfg(unix)]
         let mut fence_outcome = crate::fence::fence_or_bare(&config, cmd);
+        #[cfg(windows)]
+        let fence_outcome = crate::fence::wrap_or_bare(&config, cmd);
         #[cfg(windows)]
         tracing::warn!(
             program = ?fence_outcome.command.as_std().get_program(),

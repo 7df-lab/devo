@@ -12,8 +12,6 @@ use std::sync::{Arc, Weak};
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
 
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -468,19 +466,27 @@ fn same_file_identity(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(windows)]
-fn same_file_identity(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
-    match (
-        a.volume_serial_number(),
-        a.file_index(),
-        b.volume_serial_number(),
-        b.file_index(),
-    ) {
-        (Some(a_volume), Some(a_index), Some(b_volume), Some(b_index)) => {
-            a_volume == b_volume && a_index == b_index
-        }
+fn same_file_identity(a: &File, b: &File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let mut a_information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    let mut b_information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: each borrowed File keeps its handle open; the API initializes
+    // each output structure on success before either is read.
+    if unsafe { GetFileInformationByHandle(a.as_raw_handle(), a_information.as_mut_ptr()) } == 0
+        || unsafe { GetFileInformationByHandle(b.as_raw_handle(), b_information.as_mut_ptr()) } == 0
+    {
         // Identity unavailable: fail closed rather than trust a mutable path.
-        _ => false,
+        return false;
     }
+    let a_information = unsafe { a_information.assume_init() };
+    let b_information = unsafe { b_information.assume_init() };
+    a_information.dwVolumeSerialNumber == b_information.dwVolumeSerialNumber
+        && a_information.nFileIndexHigh == b_information.nFileIndexHigh
+        && a_information.nFileIndexLow == b_information.nFileIndexLow
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -492,7 +498,10 @@ fn open_mediated_read(path: &Path) -> std::io::Result<(PathBuf, File)> {
     let canonical = std::fs::canonicalize(path)?;
     // Capture the inode *before* the open, so a regular-file replacement
     // between canonicalization and open cannot be approved under the old path.
+    #[cfg(unix)]
     let expected = std::fs::metadata(&canonical)?;
+    #[cfg(windows)]
+    let expected = File::open(&canonical)?;
     let mut options = OpenOptions::new();
     options.read(true);
     // A final-component symlink inserted after canonicalization must not be
@@ -512,8 +521,17 @@ fn open_mediated_read(path: &Path) -> std::io::Result<(PathBuf, File)> {
     if std::fs::canonicalize(path)? != canonical {
         return Err(std::io::Error::other("fs.read target changed during open"));
     }
-    let current = std::fs::metadata(&canonical)?;
-    if !same_file_identity(&expected, &metadata) || !same_file_identity(&metadata, &current) {
+    #[cfg(unix)]
+    let identity_matches = {
+        let current = std::fs::metadata(&canonical)?;
+        same_file_identity(&expected, &metadata) && same_file_identity(&metadata, &current)
+    };
+    #[cfg(windows)]
+    let identity_matches = {
+        let current = File::open(&canonical)?;
+        same_file_identity(&expected, &file) && same_file_identity(&file, &current)
+    };
+    if !identity_matches {
         return Err(std::io::Error::other("fs.read target changed during open"));
     }
     Ok((canonical, file))
