@@ -1,16 +1,16 @@
 <div align="center">
 
-<img src="./.github/assets/devo-readme-brand.svg" alt="Devo open-source AI coding agent logo" width="360" />
+<img src="./.github/assets/devo-readme-brand.svg" alt="Devo Recursive Agent logo" width="360" />
 
 </div>
 
-# Devo — Open-source AI coding agent for desktop and terminal
+# Devo — Open-source Recursive Agent for multi-step work
 
-Devo is a coding agent with a **Desktop app**, **terminal TUI/CLI**, and a
-**Rust-based local runtime**. Connect an OpenAI-compatible or Anthropic-compatible
-model provider, use your own API key, or point Devo at a local or private gateway.
-Work in a repository with plans, tool approvals, reusable skills, and session
-history in either interface.
+Devo takes a **recursive, programmable approach** to complex tasks. Its agent
+can keep working state in Python, inspect results step by step, and delegate
+independent work to child agents. Software development is one use case, not its
+limit. Use Devo in the **Desktop app** or **terminal TUI/CLI**, with a local Rust
+runtime and your choice of compatible model provider or private gateway.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/7df-lab/devo/ci.yml?branch=main&style=flat-square)](https://github.com/7df-lab/devo/actions)
 [![Release](https://img.shields.io/github/v/release/7df-lab/devo?style=flat-square)](https://github.com/7df-lab/devo/releases)
@@ -18,15 +18,39 @@ history in either interface.
 
 [English](./README.md) · [简体中文](./README.zh-Hans.md) · [繁體中文](./README.zh-Hant.md) · [日本語](./README.ja.md) · [Русский](./README.ru.md)
 
-[Quick start](#quick-start) · [Features](#features) · [Models and providers](#models-and-providers) · [Installation](#installation) · [Configuration](#configuration) · [Contributing](#contributing)
+[IPython workspace](#ipython-a-persistent-workspace-for-recursive-agents) · [Quick start](#quick-start) · [Features](#features) · [Models and providers](#models-and-providers) · [Installation](#installation) · [Configuration](#configuration)
+
+## IPython: a persistent workspace for recursive agents
+
+In Devo's Recursive Agent mode, the model-facing `ipython` tool runs a
+**persistent Python REPL**. It is a programmable control environment, not a
+Jupyter notebook, and does not require the third-party IPython package.
+Imports, variables, and intermediate results remain available across calls
+within a session.
+
+That changes how it works compared with one-off commands or a fixed menu of
+tools:
+
+- **Inspect selectively:** Use Python to search, parse, and filter files or
+  tool output, then bring only the relevant results into the conversation.
+- **Build on earlier steps:** Reuse parsed data and small helper functions in
+  later calls instead of starting each tool invocation from a blank state.
+- **Coordinate real tools:** Use `bash()` to run project commands in their own
+  environments, and top-level `await` to manage asynchronous work.
+- **Delegate focused work:** When available, spawn child agents for independent
+  subtasks. Each child has its own session and Python state, reports findings
+  to the parent, and does not return an answer from the spawn call itself.
+
+The workspace remains subject to Devo's permission and sandbox rules. Recursion
+does not give a child agent broader access than its approved environment.
 
 ## Quick start
 
 1. [Install Devo](#installation) for your platform.
-2. Open a repository and run onboarding:
+2. Choose a working directory and run onboarding:
 
    ```bash
-   cd /path/to/your/repo
+   cd /path/to/your/workspace
    devo onboard
    ```
 
@@ -44,10 +68,12 @@ connect a model provider in its setup flow.
 
 | Interface | What it offers |
 | --- | --- |
-| **Desktop** | Visual setup, repository conversations, session browsing, and model controls. |
-| **TUI / CLI** | A terminal-native coding workflow, including session resume and command-line access. |
-| **Shared runtime** | Model connections, tool permissions, plans, MCP servers, skills, and multi-agent sessions. |
+| **Desktop** | Visual setup, workspace conversations, session browsing, and model controls. |
+| **TUI / CLI** | A terminal-native agent workflow, including session resume and command-line access. |
+| **Shared runtime** | Persistent Python execution, model connections, permissions, MCP servers, skills, and child-agent sessions. |
 
+- **Work recursively:** Keep the parent focused on the overall task while child
+  agents investigate independent parts and report back.
 - **Bring your own model:** Select a provider and model without tying the agent
   to a single hosted model service. Local endpoints are supported when they
   implement a compatible API.
