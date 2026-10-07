@@ -12,6 +12,8 @@ use crate::tool_handler::ToolHandler;
 use crate::tool_spec::{ToolCapabilityTag, ToolExecutionMode, ToolOutputMode, ToolSpec};
 use crate::tools::websearch_prompt::web_search_prompt;
 
+mod parallel;
+
 const LOCAL_CONFIG_KEY: &str = "__devo_local_web_search";
 const DEFAULT_EXA_BASE_URL: &str = "https://api.exa.ai/search";
 const DEFAULT_TAVILY_BASE_URL: &str = "https://api.tavily.com/search";
@@ -95,6 +97,9 @@ impl ToolHandler for WebSearchHandler {
             .unwrap_or(DEFAULT_MAX_RESULTS);
 
         let response = match config.kind {
+            LocalWebSearchProviderKind::Parallel => {
+                parallel::search(&config, query, max_results, &ctx).await?
+            }
             LocalWebSearchProviderKind::Exa => {
                 search_exa(
                     &config,
