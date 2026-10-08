@@ -107,6 +107,7 @@ impl WebFetchConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalWebSearchProviderConfig {
     pub kind: LocalWebSearchProviderKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub credential: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
@@ -120,6 +121,8 @@ pub struct LocalWebSearchProviderConfig {
 pub enum LocalWebSearchProviderKind {
     Exa,
     Tavily,
+    /// Anonymous Parallel Search MCP over Streamable HTTP.
+    Parallel,
 }
 
 /// Fully resolved web search behavior for one model invocation.
@@ -229,6 +232,24 @@ fn resolve_local_web_search(
                     "tools.web_search references missing local provider `{provider_id}`"
                 ),
             })?;
+    if provider.kind == LocalWebSearchProviderKind::Parallel
+        && !provider.credential.trim().is_empty()
+    {
+        return Err(ProviderConfigError::Validation {
+            message: format!(
+                "web search local provider `{provider_id}` uses anonymous Parallel MCP and must omit credential"
+            ),
+        });
+    }
+    if provider.kind == LocalWebSearchProviderKind::Parallel {
+        return Ok(ResolvedLocalWebSearchConfig {
+            provider_id: provider_id.to_string(),
+            kind: provider.kind,
+            api_key: String::new(),
+            base_url: provider.base_url.clone(),
+            max_results: provider.max_results,
+        });
+    }
     if provider.credential.trim().is_empty() {
         return Err(ProviderConfigError::Validation {
             message: format!("web search local provider `{provider_id}` has an empty credential"),
@@ -321,6 +342,64 @@ mod tests {
         .expect("resolve web search");
 
         assert_eq!(resolved, ResolvedWebSearchConfig::Provider);
+    }
+
+    #[test]
+    fn parallel_config_resolves_without_saved_credentials() {
+        let global: WebSearchConfig = toml::from_str(
+            "mode = 'local'\nlocal_provider = 'parallel'\n[local_providers.parallel]\nkind = 'parallel'\nmax_results = 3",
+        )
+        .expect("keyless config");
+        assert_eq!(
+            resolve_web_search_config(
+                &global,
+                /*provider_override*/ None,
+                /*model_override*/ None,
+                &UserAuthConfigFile::default(),
+            )
+            .expect("anonymous provider"),
+            ResolvedWebSearchConfig::Local(ResolvedLocalWebSearchConfig {
+                provider_id: "parallel".into(),
+                kind: LocalWebSearchProviderKind::Parallel,
+                api_key: String::new(),
+                base_url: None,
+                max_results: Some(3),
+            })
+        );
+    }
+
+    #[test]
+    fn keyless_config_does_not_weaken_exa_or_tavily_authentication() {
+        for kind in ["exa", "tavily"] {
+            let global: WebSearchConfig = toml::from_str(&format!(
+                "mode = 'local'\n[local_providers.search]\nkind = '{kind}'"
+            ))
+            .expect("deserialize config");
+            let error = resolve_web_search_config(
+                &global,
+                /*provider_override*/ None,
+                /*model_override*/ None,
+                &UserAuthConfigFile::default(),
+            )
+            .expect_err("existing providers still require credentials");
+            assert!(error.to_string().contains("empty credential"));
+        }
+    }
+
+    #[test]
+    fn parallel_rejects_a_saved_credential_reference() {
+        let global: WebSearchConfig = toml::from_str(
+            "mode = 'local'\n[local_providers.parallel]\nkind = 'parallel'\ncredential = 'exa_api_key'",
+        )
+        .expect("deserialize config");
+        let error = resolve_web_search_config(
+            &global,
+            /*provider_override*/ None,
+            /*model_override*/ None,
+            &auth(),
+        )
+        .expect_err("anonymous provider must not send saved keys");
+        assert!(error.to_string().contains("must omit credential"));
     }
 
     #[test]

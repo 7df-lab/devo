@@ -203,12 +203,39 @@ credential = "exa_api_key"
 max_results = 5
 ```
 
-The local provider credential must also exist in `auth.json`.
+For Exa and Tavily, the local provider credential must also exist in `auth.json`.
 
 Supported local search provider kinds are:
 
 - `exa`
 - `tavily`
+- `parallel` (anonymous Parallel Search MCP)
+
+To use the built-in `web_search` tool without a search API key, explicitly select
+Parallel:
+
+```toml
+[tools.web_search]
+mode = "local"
+local_provider = "parallel"
+
+[tools.web_search.local_providers.parallel]
+kind = "parallel"
+max_results = 5
+```
+
+Omit `credential` for Parallel; this provider does not read saved search keys or
+MCP OAuth tokens. It connects to `https://search.parallel.ai/mcp` using Devo's
+Streamable HTTP MCP client, configured network proxy, and tool cancellation and
+time budget (60 seconds when no budget is set). `max_results` limits the returned
+URLs and excerpts and must be positive. It does not change the server's search
+request size. An optional `base_url` overrides the MCP endpoint.
+
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp) is free
+for anonymous light use with lower rate limits. Model inference is separate.
+HTTP and MCP errors, including rate limits, are reported as search failures.
+Search defaults remain `provider`; existing provider and model overrides still
+apply. This integration only supplies `web_search`; web fetch settings are unchanged.
 
 ## Disabling A Provider
 

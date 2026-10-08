@@ -179,10 +179,10 @@ Local provider fields:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `kind` | `exa`, `tavily` | Search service kind. |
-| `credential` | string | Credential id in `auth.json`. |
-| `base_url` | string | Optional service endpoint override. |
-| `max_results` | integer | Optional result limit. |
+| `kind` | `exa`, `tavily`, `parallel` | Search service kind. Parallel uses anonymous Search MCP. |
+| `credential` | string | Required credential id in `auth.json` for Exa and Tavily. Omit for Parallel. |
+| `base_url` | string | Optional service endpoint override; for Parallel this is a Streamable HTTP MCP URL. |
+| `max_results` | integer | Optional result limit (default `5`). Parallel requires a positive value and truncates returned results locally. |
 
 ## `[tools.web_fetch]`
 

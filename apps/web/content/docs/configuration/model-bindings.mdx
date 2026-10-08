@@ -122,9 +122,11 @@ Inside a provider record, web capability objects use these forms:
 
 `web_search.mode` is `disabled`, `provider`, or `local`. Its optional
 `local_provider` selects a named local service; `local_providers` maps names to
-records whose `kind` is `exa` or `tavily`, whose `credential` is an `auth.json`
-credential id, and whose optional `base_url` and `max_results` override the
-service defaults. `web_fetch.mode` is `disabled`, `provider`, or `local`.
+records whose `kind` is `exa`, `tavily`, or `parallel`. Exa and Tavily require a
+`credential` id from `auth.json`; Parallel uses anonymous Search MCP and must omit
+`credential`. Optional `base_url` and `max_results` override the service defaults.
+See [Local Web Search](/docs/configuration/provider-setup#local-web-search) for
+configuration and free-tier limits. `web_fetch.mode` is `disabled`, `provider`, or `local`.
 Search defaults to `provider`; fetch defaults to `local`.
 
 ## Model fields
