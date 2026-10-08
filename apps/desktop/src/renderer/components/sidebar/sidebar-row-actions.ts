@@ -23,6 +23,7 @@ export interface BuildSessionRowActionsArgs {
 
 export interface BuildProjectRowActionsArgs {
 	canRevealInFinder: boolean
+	platform?: string
 }
 
 export function buildSessionRowActions({
@@ -39,12 +40,18 @@ export function buildSessionRowActions({
 
 export function buildProjectRowActions({
 	canRevealInFinder,
+	platform,
 }: BuildProjectRowActionsArgs): SidebarRowAction<ProjectRowActionId>[] {
 	return [
 		{ id: "pin", label: "Pin project", variant: "default", disabled: true },
 		{
 			id: "reveal",
-			label: "Reveal in Finder",
+			label:
+				platform === "win32"
+					? "Show in Explorer"
+					: platform === "darwin"
+						? "Reveal in Finder"
+						: "Show in file manager",
 			variant: "default",
 			disabled: !canRevealInFinder,
 		},

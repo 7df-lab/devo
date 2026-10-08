@@ -3,6 +3,7 @@ mod acp_session_setup;
 
 use anyhow::Context;
 use anyhow::Result;
+use devo_core::ModelCatalog;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -11,7 +12,7 @@ use acp_session_setup::devo_command;
 use acp_session_setup::read_stdio_json;
 use acp_session_setup::read_stdio_json_until;
 use acp_session_setup::write_stdio_json;
-use acp_session_setup::write_test_config;
+use acp_session_setup::write_test_config_with_extra;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader as AsyncBufReader;
 
@@ -19,7 +20,12 @@ use tokio::io::BufReader as AsyncBufReader;
 async fn stdio_model_preferences_read_returns_cold_start_options_without_creating_session()
 -> Result<()> {
     let home_dir = TempDir::new()?;
-    write_test_config(&home_dir, &["stdio://"], "http://127.0.0.1:1")?;
+    write_test_config_with_extra(
+        &home_dir,
+        &["stdio://"],
+        "http://127.0.0.1:1",
+        "\n[providers.deepseek]\nenabled = true\nname = \"DeepSeek\"\n",
+    )?;
 
     let cwd = home_dir.path().join("workspace");
     std::fs::create_dir_all(cwd.join(".devo"))?;
@@ -90,6 +96,42 @@ base_instructions = "Catalog-only model instructions"
     let available_models = preferences["availableModels"]
         .as_array()
         .expect("availableModels array");
+    // A Connection may contain only a credential/provider overlay. Its models
+    // still come from the embedded directory; unrelated templates stay hidden.
+    let inherited_model = available_models
+        .iter()
+        .find(|model| model["value"] == "deepseek/deepseek-v4-flash")
+        .context("credential-only DeepSeek Connection must expose inherited models")?;
+    let catalog = devo_core::PresetModelCatalog::load()?;
+    let model = catalog
+        .get("deepseek/deepseek-v4-flash")
+        .context("builtin DeepSeek model")?;
+    let efforts: Vec<_> = model
+        .effective_reasoning_capability()
+        .options()
+        .into_iter()
+        .map(|effort| {
+            serde_json::json!({
+                "value": effort.value,
+                "label": effort.label,
+                "description": effort.description,
+            })
+        })
+        .collect();
+    assert_eq!(
+        inherited_model,
+        &serde_json::json!({
+            "value": model.slug,
+            "label": model.display_name,
+            "description": "deepseek: deepseek-v4-flash",
+            "availableEfforts": efforts,
+        })
+    );
+    assert!(available_models.iter().all(|model| {
+        !model["value"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("anthropic/"))
+    }));
     let test_model = available_models
         .iter()
         .find(|model| model["value"] == "openai/test-model")
@@ -125,6 +167,31 @@ base_instructions = "Catalog-only model instructions"
     assert_eq!(
         top_level_efforts, test_efforts,
         "top-level availableEfforts must match the current default model"
+    );
+
+    // Changing effort before the first message persists preferences without
+    // constructing a hidden session or invoking any provider.
+    let mut expected_preferences = preferences.clone();
+    expected_preferences["reasoningEffort"] = serde_json::json!("high");
+    write_stdio_json(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "model/preferences/write",
+            "params": {"cwd": cwd, "patch": {"reasoningEffort": "high"}}
+        }),
+    )
+    .await?;
+    let saved = read_stdio_json_until(
+        &mut child,
+        &mut stdout_reader,
+        &mut stderr_reader,
+        "model/preferences/write effort response",
+        |value| value["id"] == serde_json::json!(4),
+    )
+    .await?;
+    assert_eq!(
+        saved,
+        serde_json::json!({"id": 4, "result": {"preferences": expected_preferences}})
     );
 
     write_stdio_json(

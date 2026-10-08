@@ -12,7 +12,6 @@ describe("Settings navigation groups", () => {
 			"about",
 			"servers",
 			"providers",
-			"models",
 			"mcp",
 			"skills",
 			"worktrees",

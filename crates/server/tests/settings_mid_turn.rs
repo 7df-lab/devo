@@ -378,18 +378,34 @@ async fn mid_turn_tighten_to_default_triggers_approval_for_ipython_permission_re
 
     // The first probe executes without asking (fullAccess).
     let mut seen = Vec::new();
-    timeout(Duration::from_secs(10), async {
+    // This first execution includes cold Python startup on Windows. Keep
+    // approval/tool failures immediate instead of hiding them behind the budget.
+    timeout(Duration::from_secs(30), async {
         while let Some(value) = notifications_rx.recv().await {
             let executed = executed_tool_result(&value, "call-1");
+            let item = &value["params"]["item"]["item"];
+            anyhow::ensure!(
+                item["callId"] != "call-1" || item["isError"] != true,
+                "first probe failed: {value}"
+            );
+            anyhow::ensure!(
+                !matches!(
+                    value["method"].as_str(),
+                    Some("approval/permission/request") | Some("approval/command/request")
+                ),
+                "fullAccess unexpectedly requested approval: {value}"
+            );
             seen.push(value);
             if executed {
-                return;
+                return Ok::<_, anyhow::Error>(());
             }
         }
-        panic!("notification channel closed before the first probe executed");
+        anyhow::bail!("notification channel closed before the first probe executed")
     })
     .await
-    .context("first probe should execute under fullAccess without approval")?;
+    .with_context(|| {
+        format!("first probe should execute under fullAccess without approval; seen: {seen:?}")
+    })??;
 
     // Tighten mid-turn; the override must reach the running turn.
     let tighten_response = runtime

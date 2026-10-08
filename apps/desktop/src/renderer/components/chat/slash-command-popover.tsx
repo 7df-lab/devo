@@ -66,6 +66,11 @@ interface SlashCommandPopoverProps {
 
 const CLIENT_COMMANDS: SlashCommand[] = [
 	{
+		name: "model",
+		description: "Choose a model or connect a provider",
+		icon: SparklesIcon,
+	},
+	{
 		name: "compact",
 		description: "Summarize conversation to save context",
 		icon: SparklesIcon,

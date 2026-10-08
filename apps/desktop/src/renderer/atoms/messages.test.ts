@@ -33,6 +33,27 @@ function assistantItem(id: string, turnId: string, seq: number, createdAt: strin
 }
 
 describe("Native item ordering", () => {
+	for (const canonicalFirst of [true, false]) {
+		test(`reconciles user messages when canonical arrives ${canonicalFirst ? "first" : "last"}`, () => {
+			const store = createStore()
+			const canonical = userItem("u1", "t1", 1, "2026-01-01T00:00:01.000Z")
+			const optimistic = userItem("optimistic-1", "t1", Number.MAX_SAFE_INTEGER, "2026-01-01T00:00:02.000Z")
+			for (const item of canonicalFirst ? [canonical, optimistic] : [optimistic, canonical]) {
+				store.set(upsertItemAtom, item)
+			}
+			expect(store.get(itemsFamily("s1"))).toEqual([canonical])
+		})
+	}
+
+	test("keeps identical prompts in distinct turns", () => {
+		const store = createStore()
+		const canonical = userItem("u1", "t1", 1, "2026-01-01T00:00:01.000Z")
+		const optimistic = userItem("optimistic-2", "t2", Number.MAX_SAFE_INTEGER, "2026-01-01T00:00:02.000Z")
+		store.set(upsertItemAtom, canonical)
+		store.set(upsertItemAtom, optimistic)
+		expect(store.get(itemsFamily("s1"))).toEqual([canonical, optimistic])
+	})
+
 	test("keeps assistant replies after optimistic user messages by seq", () => {
 		const store = createStore()
 		const user = userItem("optimistic-2000", "", 1, "2026-01-01T00:00:02.000Z")
@@ -76,6 +97,35 @@ describe("Native item ordering", () => {
 		store.set(setItemsAtom, { sessionId: "s1", items: [first] })
 		expect(store.get(itemsFamily("s1"))).toEqual([first])
 	})
+
+	for (const coldReplay of [false, true]) {
+		test(`keeps steering messages after completion (${coldReplay ? "cold replay" : "live events"})`, () => {
+			const store = createStore()
+			const user = userItem("u1", "t1", 1, "2026-01-01T00:00:01.000Z")
+			const before = assistantItem("a1", "t1", 2, "2026-01-01T00:00:02.000Z")
+			const steer = {
+				...userItem("steer-1", "t1", 3, "2026-01-01T00:00:03.000Z"),
+				item: {
+					type: "userMessage",
+					entry: "steer",
+					content: [{ type: "text", text: "Keep this steering message visible." }],
+				},
+			}
+			const after = assistantItem("a2", "t1", 4, "2026-01-01T00:00:04.000Z")
+			const items = [user, before, steer, after]
+			if (coldReplay) {
+				store.set(setItemsAtom, { sessionId: "s1", items: [...items].reverse() })
+			} else {
+				for (const item of items) store.set(upsertItemAtom, item)
+			}
+			const turns = groupIntoTurns(mergeSessionItems(store.get(itemsFamily("s1"))), [])
+			expect(turns).toEqual([
+				{ id: user.id, turnId: "t1", userMessage: { info: user }, assistantMessages: [{ info: before }] },
+				{ id: steer.id, turnId: "t1", userMessage: { info: steer }, assistantMessages: [{ info: after }] },
+			])
+			expect(groupIntoTurns(mergeSessionItems(store.get(itemsFamily("s1"))), turns)).toEqual(turns)
+		})
+	}
 
 	test("keeps explicitly loaded earlier history during live updates", () => {
 		const store = createStore()

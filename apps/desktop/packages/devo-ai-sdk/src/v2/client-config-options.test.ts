@@ -260,3 +260,65 @@ describe("Native desktop SDK config option cache", () => {
 		])
 	})
 })
+
+
+describe("Native default model preferences", () => {
+	test("saving effort without a chat never creates or resumes a session", async () => {
+		const transport = new FakeTransport((method, params) => {
+			if (method === "initialize") return initializeResult
+			if (method === "model/preferences/write") {
+				expect(params).toEqual({ cwd: "/repo", patch: { reasoningEffort: "high" } })
+				return { preferences: { ...modelPreferences, reasoningEffort: "high" } }
+			}
+			throw new Error(`unexpected request ${method}`)
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+		await client.model.preferences.write({ patch: { reasoningEffort: "high" } })
+		expect((await client.config.providers()).data.providers[0].models["test-openai"].currentVariant).toBe("high")
+		expect(transport.requests.map(request => request.method)).toEqual(["initialize", "model/preferences/write"])
+	})
+
+	test("rapid model and effort choices write in order without session startup", async () => {
+		let finishModel!: () => void
+		const held = new Promise<void>(resolve => { finishModel = resolve })
+		let started!: () => void
+		const firstStarted = new Promise<void>(resolve => { started = resolve })
+		const writes: unknown[] = []
+		const transport = new FakeTransport(async (method, params) => {
+			if (method === "initialize") return initializeResult
+			if (method !== "model/preferences/write") throw new Error(`unexpected request ${method}`)
+			writes.push(params)
+			if (writes.length === 1) { started(); await held }
+			return { preferences: { ...modelPreferences, model: "alt-openai", reasoningEffort: "max" } }
+		})
+		const client = createDevoClient({ directory: "/repo", transport })
+		const model = client.model.preferences.write({ patch: { model: "alt-openai" } })
+		await firstStarted
+		const effort = client.model.preferences.write({ patch: { reasoningEffort: "max" } })
+		await Promise.resolve()
+		expect(writes).toEqual([{ cwd: "/repo", patch: { model: "alt-openai" } }])
+		finishModel()
+		await Promise.all([model, effort])
+		expect(writes).toEqual([
+			{ cwd: "/repo", patch: { model: "alt-openai" } },
+			{ cwd: "/repo", patch: { reasoningEffort: "max" } },
+		])
+		expect(transport.requests.map(request => request.method)).toEqual(["initialize", "model/preferences/write", "model/preferences/write"])
+	})
+
+	test("failed saves remain visible and the next choice can retry", async () => {
+		let attempt = 0
+		const transport = new FakeTransport(method => {
+			if (method === "initialize") return initializeResult
+			if (method !== "model/preferences/write") throw new Error(`unexpected request ${method}`)
+			if (++attempt === 1) throw new Error("Preference write failed")
+			return { preferences: modelPreferences }
+		})
+		const client = createDevoClient({ transport })
+		await expect(client.model.preferences.write({ patch: { reasoningEffort: "high" } })).rejects.toThrow("Preference write failed")
+		await client.model.preferences.write({ patch: { reasoningEffort: "medium" } })
+		expect(transport.requests.filter(request => request.method === "model/preferences/write").map(request => request.params)).toEqual([
+			{ patch: { reasoningEffort: "high" } }, { patch: { reasoningEffort: "medium" } },
+		])
+	})
+})

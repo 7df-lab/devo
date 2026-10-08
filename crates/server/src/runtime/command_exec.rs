@@ -34,6 +34,11 @@ use devo_protocol::native::ids::SessionId;
 
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Whether interruption applies to one client or all commands of a deleted session.
+pub(super) enum SessionCommandOwner {
+    Connection(u64),
+    AllConnections,
+}
 #[derive(Clone)]
 pub(super) struct CommandExecManager {
     sessions: Arc<Mutex<HashMap<CommandExecKey, CommandExecSession>>>,
@@ -373,20 +378,23 @@ impl CommandExecManager {
         Ok(CommandExecTerminateResult {})
     }
 
-    /// Terminates every live process owned by one Native session. The
-    /// connection id is part of the ownership boundary because sessionless
-    /// command processes may share the same process id on different clients.
+    /// Terminates session commands within the requested client ownership scope.
     pub(super) async fn terminate_session(
         &self,
-        connection_id: u64,
         session_id: SessionId,
+        owner: SessionCommandOwner,
     ) -> usize {
         let process_ids = {
             let sessions = self.sessions.lock().await;
             sessions
                 .iter()
                 .filter(|(key, _)| {
-                    key.connection_id == connection_id && key.session_id == Some(session_id)
+                    (match owner {
+                        SessionCommandOwner::Connection(connection_id) => {
+                            key.connection_id == connection_id
+                        }
+                        SessionCommandOwner::AllConnections => true,
+                    }) && key.session_id == Some(session_id)
                 })
                 .map(|(_, session)| session.store_process_id)
                 .collect::<Vec<_>>()

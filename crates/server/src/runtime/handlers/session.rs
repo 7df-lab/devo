@@ -1615,19 +1615,6 @@ impl ServerRuntime {
                 Err(error) => return error,
             };
         let session_id = params.session_id;
-        let loaded_session_ids: Vec<SessionId> =
-            self.sessions.lock().await.keys().cloned().collect();
-        let mut native_session_ids = std::collections::HashMap::new();
-        for legacy_id in loaded_session_ids {
-            if let Some(handle) = self.session(legacy_id).await
-                && let Some(native_session) = handle.native_session().await
-            {
-                native_session_ids.insert(legacy_id, native_session.id);
-            }
-        }
-        if let Some(snapshot) = self.native_session_snapshot(session_id).await {
-            native_session_ids.insert(session_id, snapshot.id);
-        }
         let deleted_session_ids = match self.delete_session_tree(session_id).await {
             Ok(deleted_session_ids) => deleted_session_ids,
             Err(error) => {
@@ -1639,22 +1626,10 @@ impl ServerRuntime {
             }
         };
         if !deleted_session_ids.is_empty() {
-            let native_session_id = native_session_ids.get(&session_id).cloned().unwrap_or({
-                // boundary: session summary unavailable before delete
-                session_id
-            });
             self.broadcast_notification(
                 devo_protocol::native::event::ServerNotification::SessionDeleted {
-                    session_id: native_session_id,
-                    deleted_session_ids: deleted_session_ids
-                        .iter()
-                        .map(|id| {
-                            native_session_ids.get(id).cloned().unwrap_or({
-                                // boundary: child session summary unavailable before delete
-                                *id
-                            })
-                        })
-                        .collect(),
+                    session_id,
+                    deleted_session_ids,
                 },
             )
             .await;
@@ -1813,7 +1788,7 @@ impl ServerRuntime {
                 );
             }
         };
-        let _state_change_guard = session_handle.lock_state_change().await;
+        let state_change_guard = session_handle.lock_state_change().await;
         match tool_registry_update {
             RuntimeSessionToolRegistryUpdate::KeepCurrent => {}
             RuntimeSessionToolRegistryUpdate::ReplaceIfCwdMatches { cwd, tool_registry } => {
@@ -1838,6 +1813,9 @@ impl ServerRuntime {
         let loaded_item_count = resume_snapshot.loaded_item_count;
         let history_items = resume_snapshot.history_items;
         let pending_texts = resume_snapshot.pending_texts;
+        // Queue recovery below acquires this same gate. Release it after the
+        // snapshot/tool-registry mutation, before hooks or queue admission.
+        drop(state_change_guard);
         self.subscribe_connection_to_session(connection_id, params.session_id, None)
             .await;
         self.run_session_hook(

@@ -12,6 +12,7 @@
  */
 
 import { Button } from "@devo/ui/components/button"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@devo/ui/components/dialog"
 import { GitForkIcon, Loader2Icon, RotateCcwIcon, TrashIcon } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useProjectList } from "../../hooks/use-agents"
@@ -38,7 +39,7 @@ interface WorktreeEntry {
 
 /** Extracts the last path segment as a display name */
 function dirName(dir: string): string {
-	return dir.split("/").filter(Boolean).pop() ?? dir
+	return dir.split(/[\\/]/).filter(Boolean).pop() ?? dir
 }
 
 // ============================================================
@@ -51,6 +52,8 @@ export function WorktreeSettings() {
 	const [loading, setLoading] = useState(true)
 	const [removing, setRemoving] = useState<string | null>(null)
 	const [resetting, setResetting] = useState<string | null>(null)
+	const [error, setError] = useState<string | null>(null)
+	const [pending, setPending] = useState<{ worktree: WorktreeEntry; action: "remove" | "reset" } | null>(null)
 
 	// Keep a ref so the stable callback always reads the latest project list
 	// without needing it as a dependency.
@@ -67,6 +70,7 @@ export function WorktreeSettings() {
 	const loadWorktrees = useCallback(async () => {
 		const currentProjects = projectsRef.current
 		setLoading(true)
+		setError(null)
 		try {
 			const results = await Promise.allSettled(
 				currentProjects.map(async (project) => {
@@ -82,14 +86,18 @@ export function WorktreeSettings() {
 			)
 
 			const entries: WorktreeEntry[] = []
+			const failures: string[] = []
 			for (const result of results) {
 				if (result.status === "fulfilled") {
 					entries.push(...result.value)
+				} else {
+					failures.push(String(result.reason))
 				}
 			}
-			setWorktrees(entries)
-		} catch {
-			// Silently fail
+			setWorktrees([...new Map(entries.map((entry) => [entry.directory, entry])).values()])
+			if (failures.length) setError(failures.join("; "))
+		} catch (error) {
+			setError(error instanceof Error ? error.message : "Failed to load worktrees")
 		} finally {
 			setLoading(false)
 		}
@@ -103,11 +111,13 @@ export function WorktreeSettings() {
 	const handleRemove = useCallback(
 		async (wt: WorktreeEntry) => {
 			setRemoving(wt.directory)
+			setError(null)
 			try {
 				await removeWorktree(wt.projectDir, wt.directory)
 				await loadWorktrees()
-			} catch {
-				// Silently fail
+				setPending(null)
+			} catch (error) {
+				setError(error instanceof Error ? error.message : "Failed to remove worktree")
 			} finally {
 				setRemoving(null)
 			}
@@ -118,11 +128,13 @@ export function WorktreeSettings() {
 	const handleReset = useCallback(
 		async (wt: WorktreeEntry) => {
 			setResetting(wt.directory)
+			setError(null)
 			try {
 				await resetWorktree(wt.projectDir, wt.directory)
 				await loadWorktrees()
-			} catch {
-				// Silently fail
+				setPending(null)
+			} catch (error) {
+				setError(error instanceof Error ? error.message : "Failed to reset worktree")
 			} finally {
 				setResetting(null)
 			}
@@ -140,6 +152,7 @@ export function WorktreeSettings() {
 				title="Worktrees"
 				description="Manage git worktrees created for isolated agent sessions."
 			/>
+			{error && !pending && <div role="alert" className="flex items-center gap-3 text-sm text-destructive"><span>{error}</span><Button size="sm" variant="outline" onClick={loadWorktrees}>Retry</Button></div>}
 
 			{/* Summary */}
 			<SettingsSection title="Overview">
@@ -178,12 +191,27 @@ export function WorktreeSettings() {
 							worktree={wt}
 							isRemoving={removing === wt.directory}
 							isResetting={resetting === wt.directory}
-							onRemove={() => handleRemove(wt)}
-							onReset={() => handleReset(wt)}
+							onRemove={() => { setError(null); setPending({ worktree: wt, action: "remove" }) }}
+							onReset={() => { setError(null); setPending({ worktree: wt, action: "reset" }) }}
 						/>
 					))}
 				</SettingsSection>
 			)}
+			<Dialog open={!!pending} onOpenChange={(open) => { if (!open && !removing && !resetting) setPending(null) }}>
+				<DialogContent>
+					<DialogHeader><DialogTitle>{pending?.action === "remove" ? "Remove worktree?" : "Reset worktree?"}</DialogTitle>
+						<DialogDescription>{pending?.worktree.directory}. {pending?.action === "remove" ? "Remove this checkout from disk. Its Git branch remains available." : "Reset this checkout to the repository default branch."} Uncommitted changes must be saved first.</DialogDescription>
+					</DialogHeader>
+					{error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+					<DialogFooter>
+						<Button variant="outline" disabled={!!removing || !!resetting} onClick={() => setPending(null)}>Cancel</Button>
+						<Button variant="destructive" disabled={!!removing || !!resetting} onClick={() => {
+							if (!pending) return
+							void (pending.action === "remove" ? handleRemove(pending.worktree) : handleReset(pending.worktree))
+						}}>{removing || resetting ? "Working…" : pending?.action === "remove" ? "Remove" : "Reset"}</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 		</div>
 	)
 }

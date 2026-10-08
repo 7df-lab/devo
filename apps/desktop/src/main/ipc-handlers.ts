@@ -237,7 +237,7 @@ function withLogging<TArgs extends unknown[], TResult>(
  * the Bun + Hono server on port 3100. Now they run in-process in Electron's
  * main process, communicating via IPC instead of HTTP.
  */
-export function registerIpcHandlers(): void {
+export function registerIpcHandlers({ recreateWindows }: { recreateWindows?: () => Promise<void> } = {}): void {
 	// --- App info ---
 
 	ipcMain.handle("app:info", () => ({
@@ -677,7 +677,13 @@ export function registerIpcHandlers(): void {
 		return { success: true }
 	})
 
-	ipcMain.handle("app:relaunch", () => {
+	ipcMain.handle("app:relaunch", async () => {
+		if (!app.isPackaged) {
+			// Keep electron-vite and its staged runtime alive during development.
+			if (!recreateWindows) throw new Error("Development window recreation is unavailable")
+			await recreateWindows()
+			return
+		}
 		app.relaunch()
 		app.exit(0)
 	})

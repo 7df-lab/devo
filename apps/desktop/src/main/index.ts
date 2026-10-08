@@ -269,7 +269,7 @@ if (isDev) {
 	app.setPath("userData", path.join(app.getPath("appData"), "Devo Dev"))
 }
 
-async function createWindow(): Promise<BrowserWindow> {
+async function createWindow({ bounds, hash }: { bounds?: Electron.Rectangle; hash?: string } = {}): Promise<BrowserWindow> {
 	const title = isDev ? `${appName} (Dev)` : appName
 
 	const isMac = process.platform === "darwin"
@@ -308,6 +308,7 @@ async function createWindow(): Promise<BrowserWindow> {
 		title,
 		width: 1200,
 		height: 800,
+		...bounds,
 		autoHideMenuBar: process.platform === "win32",
 		// Transparent background for macOS glass/vibrancy tiers. Windows acrylic
 		// keeps a non-transparent BrowserWindow so native resize/maximize work.
@@ -403,9 +404,11 @@ async function createWindow(): Promise<BrowserWindow> {
 
 	// Dev: load from Vite dev server | Prod: load built files
 	if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
-		win.loadURL(process.env.ELECTRON_RENDERER_URL)
+		const url = new URL(process.env.ELECTRON_RENDERER_URL)
+		if (hash) url.hash = hash
+		await win.loadURL(url.href)
 	} else {
-		win.loadFile(path.join(__dirname, "../renderer/index.html"))
+		await win.loadFile(path.join(__dirname, "../renderer/index.html"), { hash })
 	}
 
 	return win
@@ -449,7 +452,17 @@ if (!gotLock) {
 
 		initSettingsStore()
 		initCredentialStore()
-		registerIpcHandlers()
+		registerIpcHandlers({
+			recreateWindows: async () => {
+				const previousWindows = BrowserWindow.getAllWindows()
+				const previous = BrowserWindow.getFocusedWindow() ?? previousWindows[0]
+				await createWindow({
+					bounds: previous?.getBounds(),
+					hash: previous?.webContents.getURL().split("#")[1],
+				})
+				for (const win of previousWindows) win.destroy()
+			},
+		})
 		initAutomations().catch(console.error)
 		setMacDockIcon()
 		createWindow()

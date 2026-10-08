@@ -44,7 +44,8 @@ function SettingsSidebarContent() {
 	const lastAppRoute = useAtomValue(lastAppRouteAtom)
 
 	// Derive active tab from the last path segment (e.g. "/settings/general" -> "general")
-	const activeTab = pathname.split("/").pop() || "general"
+	const routeTab = pathname.split("/").pop() || "general"
+	const activeTab = routeTab === "models" ? "providers" : routeTab
 
 	return (
 		<SidebarContent className="gap-0 bg-transparent px-0 pb-3">

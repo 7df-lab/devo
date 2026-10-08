@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
+import type { NativeTransportEvent } from "./native-stdio-client"
 
 type Deferred<T> = {
 	promise: Promise<T>
@@ -24,7 +25,7 @@ let watcherStops = 0
 
 class FakeClient {
 	readonly pidValue = 100 + clients.length
-	readonly listeners = new Set<(event: { type: "closed"; error: string }) => void>()
+	readonly listeners = new Set<(event: NativeTransportEvent) => void>()
 	starts = 0
 	stops = 0
 	initializeCalls = 0
@@ -43,7 +44,7 @@ class FakeClient {
 	pid(): number {
 		return this.pidValue
 	}
-	subscribe(listener: (event: { type: "closed"; error: string }) => void): () => void {
+	subscribe(listener: (event: NativeTransportEvent) => void): () => void {
 		this.listeners.add(listener)
 		return () => this.listeners.delete(listener)
 	}
@@ -54,6 +55,9 @@ class FakeClient {
 	}
 	emitClosed(): void {
 		for (const listener of this.listeners) listener({ type: "closed", error: "old process closed" })
+	}
+	emit(event: NativeTransportEvent): void {
+		for (const listener of this.listeners) listener(event)
 	}
 }
 
@@ -90,6 +94,29 @@ afterEach(() => {
 })
 
 describe("desktop server lifecycle", () => {
+	test("forwards events across backend replacement and ignores the old child", async () => {
+		const events: unknown[] = []
+		const unsubscribe = manager.subscribeNative((event) => events.push(event))
+		await manager.ensureServer()
+		const oldChild = clients[0]!
+		oldChild.emitClosed()
+		await manager.restartServer()
+		const replacement = clients[1]!
+		oldChild.emitClosed()
+		const notification: NativeTransportEvent = {
+			type: "notification", method: "session/statusChanged",
+			params: { sessionId: "session-1", status: "idle" },
+		}
+		oldChild.emit(notification)
+		replacement.emit(notification)
+		unsubscribe()
+		replacement.emit(notification)
+		expect(events).toEqual([
+			{ type: "closed", error: "old process closed" },
+			notification,
+		])
+	})
+
 	test("stop during shell environment wait prevents spawning or publishing", async () => {
 		const env = deferred<void>()
 		envGates.push(env)

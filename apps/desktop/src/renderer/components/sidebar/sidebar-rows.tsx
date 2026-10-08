@@ -290,7 +290,10 @@ export const ProjectRow = memo(function ProjectRow({
 	onRemoveProject?: () => void
 	isUnavailable?: boolean
 }) {
-	const actions = buildProjectRowActions({ canRevealInFinder: !!onRevealInFinder })
+	const actions = buildProjectRowActions({
+		canRevealInFinder: !!onRevealInFinder,
+		platform: typeof window !== "undefined" && "devo" in window ? window.devo.platform : undefined,
+	})
 	const handleAction = useCallback(
 		(actionId: ProjectRowActionId) => {
 			if (actionId === "reveal") {

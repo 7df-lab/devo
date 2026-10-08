@@ -45,7 +45,17 @@ pub(crate) fn prepare_direct_argv_launch_with_env(
     let devo_home = find_devo_home()?;
 
     let env_map = compose_launch_env(inherited_env, &req.env_extra);
-    let program = env::current_exe()?;
+    let current_exe = env::current_exe()?;
+    // Library integration tests live in Cargo's `debug/deps` directory and do
+    // not implement the CLI's sandbox early-dispatch hook. Use the adjacent
+    // built CLI for that layout, rather than relaunching the test harness.
+    let program = current_exe
+        .parent()
+        .filter(|parent| parent.file_name() == Some(std::ffi::OsStr::new("deps")))
+        .and_then(std::path::Path::parent)
+        .map(|parent| parent.join("devo.exe"))
+        .filter(|candidate| candidate.is_file())
+        .unwrap_or(current_exe);
     let args = create_windows_sandbox_command_args_for_permission_profile(
         inner_command,
         &command_cwd,

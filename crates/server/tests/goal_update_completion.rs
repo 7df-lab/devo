@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
 use devo_core::tools::create_default_tool_registry;
@@ -28,7 +29,6 @@ use tokio::time::timeout;
 mod support;
 
 use support::build_runtime_with_registry;
-use support::collect_until_turn_completed;
 use support::create_goal;
 use support::initialize_connection;
 use support::read_goal;
@@ -94,7 +94,7 @@ impl ModelProviderSDK for CompletingGoalProvider {
             ]))),
             _ => {
                 self.unexpected_request.notify_one();
-                Ok(Box::pin(stream::pending()))
+                anyhow::bail!("unexpected provider request {request_number} after goal completion")
             }
         }
     }
@@ -127,7 +127,26 @@ async fn goal_complete_finishes_current_turn_without_another_continuation() -> R
     )
     .await?;
 
-    collect_until_turn_completed(&mut notifications_rx).await?;
+    // This turn starts a real Python process and performs a host RPC. The
+    // tool-free goal fixture's five-second budget can expire on a busy runner.
+    let mut observed = Vec::new();
+    timeout(Duration::from_secs(/*secs*/ 30), async {
+        while let Some(value) = notifications_rx.recv().await {
+            let completed = value.get("method") == Some(&serde_json::json!("turn/completed"));
+            observed.push(value);
+            if completed {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("notification channel closed before turn/completed")
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "timed out waiting for Python goal completion; provider requests: {}; notifications: {observed:?}",
+            provider.requests.load(Ordering::SeqCst),
+        )
+    })??;
     wait_for_captured_request_count(&provider.captured_requests, /*expected*/ 2).await?;
 
     let response = read_goal(&runtime, connection_id, session_id).await?;

@@ -1045,6 +1045,7 @@ async fn run_auto_review(
     let temp_dir = TempDir::new()?;
     let user_skill_root = temp_dir.path().join("user-skills");
     let workspace_root = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace_root)?;
     let reviewer_calls = Arc::new(AtomicUsize::new(0));
     let provider = AutoReviewProvider::new(
         risk,

@@ -33,7 +33,9 @@ export function AboutSettings() {
 				<SettingsRow
 					label="Updates"
 					description={
-						updater.status === "available"
+						isDev
+							? "Updates are available in installed builds."
+							: updater.status === "available"
 							? `Version ${updater.version} available`
 							: updater.status === "ready"
 								? "Update downloaded, restart to apply"
@@ -43,7 +45,7 @@ export function AboutSettings() {
 					}
 				>
 					{updater.status === "idle" && (
-						<Button variant="outline" size="sm" onClick={updater.checkForUpdates}>
+						<Button variant="outline" size="sm" disabled={isDev} onClick={updater.checkForUpdates}>
 							Check for updates
 						</Button>
 					)}

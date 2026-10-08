@@ -281,7 +281,7 @@ export function CustomProviderDialog({
 						{/* Wire API */}
 						<div className="flex flex-col gap-1.5">
 							<Label className="text-[13px]">Wire API</Label>
-							<Select value={wireApi} onValueChange={(v) => setWireApi(v as CatalogWireApi)}>
+							<Select value={wireApi} items={Object.fromEntries(WIRE_API_OPTIONS.map((option) => [option.value, option.label]))} onValueChange={(v) => setWireApi(v as CatalogWireApi)}>
 								<SelectTrigger aria-label="Wire API">
 									<SelectValue />
 								</SelectTrigger>

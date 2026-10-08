@@ -41,28 +41,32 @@ describe("resolveDevoProgram", () => {
 	})
 
 	test("uses bundled runtime in packaged apps", () => {
+		const resourcesPath = path.join(process.cwd(), "packaged-resources")
+		const bundled = path.join(resourcesPath, "runtime", "bin", process.platform === "win32" ? "devo.exe" : "devo")
 		const program = resolveDevoProgram({
 			appPath: "/repo/apps/desktop",
 			env: {},
-			existsSync: (candidate) => candidate === "/Applications/Devo.app/Contents/Resources/runtime/bin/devo",
+			existsSync: (candidate) => candidate === bundled,
 			isPackaged: true,
-			resourcesPath: "/Applications/Devo.app/Contents/Resources",
+			resourcesPath,
 		})
 
-		expect(program).toBe("/Applications/Devo.app/Contents/Resources/runtime/bin/devo")
+		expect(program).toBe(bundled)
 	})
 
 	test("uses bundled Windows runtime executable in packaged apps", () => {
+		const resourcesPath = path.join(process.cwd(), "windows-resources")
+		const bundled = path.join(resourcesPath, "runtime", "bin", "devo.exe")
 		const program = resolveDevoProgram({
 			appPath: "/app/resources/app.asar",
 			env: {},
-			existsSync: (candidate) => candidate === "/app/resources/runtime/bin/devo.exe",
+			existsSync: (candidate) => candidate === bundled,
 			isPackaged: true,
 			platform: "win32",
-			resourcesPath: "/app/resources",
+			resourcesPath,
 		})
 
-		expect(program).toBe("/app/resources/runtime/bin/devo.exe")
+		expect(program).toBe(bundled)
 	})
 
 	test("fails clearly when packaged runtime is missing", () => {

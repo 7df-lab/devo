@@ -64,7 +64,7 @@ class FakeNativeImage {
 	}
 }
 
-class FakeElectronTray {
+class FakeElectronTray extends EventEmitter {
 	readonly icon: FakeNativeImage
 	tooltip = ""
 	title = ""
@@ -72,6 +72,7 @@ class FakeElectronTray {
 	destroyed = false
 
 	constructor(icon: FakeNativeImage) {
+		super()
 		this.icon = icon
 		trayInstances.push(this)
 	}

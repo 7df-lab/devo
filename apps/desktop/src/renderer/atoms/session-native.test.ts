@@ -308,3 +308,19 @@ describe("Native session renderer state", () => {
 		})
 	})
 })
+
+
+test("keeps replayed provider failures scoped to their original turns", () => {
+	const sessionId = "replayed-failures"
+	appStore.set(upsertSessionAtom, { session: { id: sessionId, title: "Failures" }, directory: "/repo" })
+	for (const turnId of ["turn-first", "turn-last", "turn-last"]) {
+		processEvent({
+			type: "session.error",
+			properties: { sessionId, turnId, error: { name: "PAYMENT_REQUIRED", data: { message: "Insufficient Balance" } } },
+		})
+	}
+	expect(appStore.get(sessionFamily(sessionId))?.providerErrors).toEqual([
+		{ id: "failed-turn-first-PAYMENT_REQUIRED-Insufficient Balance", turnId: "turn-first", message: "Insufficient Balance", phase: "failed", code: "PAYMENT_REQUIRED" },
+		{ id: "failed-turn-last-PAYMENT_REQUIRED-Insufficient Balance", turnId: "turn-last", message: "Insufficient Balance", phase: "failed", code: "PAYMENT_REQUIRED" },
+	])
+})

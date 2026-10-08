@@ -666,6 +666,7 @@ def _snapshot_state(
 
     try:
         import dill
+        from ._snapshot_serialization import SnapshotPickler
     except Exception as err:  # noqa: BLE001 - dill is provisioned by the host, not a hard dep
         return {"error": f"dill unavailable: {err}"}
     dill.settings["recurse"] = True
@@ -687,7 +688,7 @@ def _snapshot_state(
         limit = max_variable_bytes if prune_oversized else min(max_variable_bytes, remaining)
         buffer = io.BytesIO()
         try:
-            dill.dump(value, _CappedWriter(buffer, limit))
+            SnapshotPickler(_CappedWriter(buffer, limit)).dump(value)
             blob = buffer.getvalue()
         except _SnapshotSizeLimitExceeded:
             if not prune_oversized and remaining < max_variable_bytes:
@@ -835,11 +836,12 @@ def _restore_state(
         return {"restored": [], "failed": [], "reason": "snapshot not found"}
     try:
         import dill
+        from ._snapshot_serialization import SnapshotUnpickler
     except Exception as err:  # noqa: BLE001
         return {"error": f"dill unavailable: {err}"}
     try:
         with open(path, "rb") as fh:
-            payload = dill.load(fh)
+            payload = SnapshotUnpickler(fh).load()
     except Exception as err:  # noqa: BLE001 - a corrupt snapshot yields an empty restore
         return {"error": f"load failed: {_safe_str(err)}"}
     if not isinstance(payload, dict):
@@ -851,7 +853,7 @@ def _restore_state(
         if name in _RESTORE_SKIP:
             continue
         try:
-            staged[name] = dill.loads(blob)
+            staged[name] = SnapshotUnpickler(io.BytesIO(blob)).load()
         except Exception as err:  # noqa: BLE001 - revive every other name regardless
             failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
     result = {"restored": sorted(staged), "failed": failed}
@@ -1192,7 +1194,12 @@ def main() -> None:
     user_module.__dict__["__builtins__"] = __builtins__
     sys.modules["__main__"] = user_module
 
-    _loop = asyncio.new_event_loop()
+    if sys.platform == "win32":
+        from ._windows_event_loop import PipeProactorEventLoop
+
+        _loop = PipeProactorEventLoop()
+    else:
+        _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
     signal.signal(signal.SIGINT, _sigint_handler)

@@ -1,5 +1,6 @@
 import { atom } from "jotai"
-import { atomFamily, atomWithStorage } from "jotai/utils"
+import { atomWithStorage } from "jotai/utils"
+import { atomFamily } from "jotai-family"
 import type { FileDiff, WorkspaceChangeScope } from "../lib/types"
 import { REVIEW_PANEL_DEFAULT_WIDTH_PX } from "../lib/review-panel-width"
 

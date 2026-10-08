@@ -18,6 +18,7 @@ class FakeTransport implements DevoNativeTransport {
 			return { protocolVersion: 1, agentCapabilities: {}, authMethods: [] }
 		}
 		if (method === "session/list") return { data: [], nextCursor: null }
+		if (method === "subscription/create") return { subscriptionId: "folder", snapshots: [], cursors: [] }
 		throw new Error(`unexpected request ${method}`)
 	}
 
@@ -61,7 +62,7 @@ describe("NativeClient initialize retry", () => {
 			expect(await secondClient.event.subscribe()).toEqual({ stream: expect.anything() })
 			expect(await firstClient.session.list()).toEqual({ data: [] })
 			expect(transport.requests).toEqual([
-				"initialize", "initialize", "session/list", "session/list",
+				"initialize", "initialize", "subscription/create", "session/list",
 			])
 			await firstClient.event.subscribe()
 			await secondClient.session.list()

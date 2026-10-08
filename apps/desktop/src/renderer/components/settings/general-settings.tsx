@@ -67,6 +67,7 @@ function OpenDestinationRow() {
 			>
 				<Select
 					value={preferred ?? undefined}
+					items={Object.fromEntries(targets.map((target) => [target.id, target.label]))}
 					onValueChange={(v) => {
 						if (v !== null) handleChange(v)
 					}}

@@ -287,7 +287,7 @@ impl ServerRuntime {
                 // Persist latest-query input only — turn-aggregate usage would
                 // inflate auto-compact after resume via hydrate.
                 last_input_tokens: last_input_for_stats,
-                turn_count: state.summary.updated_at.timestamp() as usize,
+                turn_count: state.core.turn_count,
                 prompt_token_estimate: session_prompt_token_estimate,
                 last_context_occupancy: state.summary.last_context_occupancy.clone(),
             };

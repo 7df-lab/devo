@@ -492,7 +492,7 @@ mod tests {
             eprintln!("skip: DEVO_GRANT_SID/DEVO_GRANT_ROOT not set");
             return;
         };
-        let authority =
+        let _authority =
             SessionCredentialAuthority::new(&format!("kernel-{sid}"), std::path::Path::new(&home))
                 .expect("authority");
         // The authority mints a fresh SID; for an external grant the SID is
@@ -522,8 +522,13 @@ mod tests {
         let sid = LocalSid::from_string(authority.sid()).expect("sid");
         let read_mask = FILE_GENERIC_READ | GENERIC_READ_MASK;
         assert!(
-            unsafe { crate::acl::path_mask_allows(&root, &[sid.as_ptr()], read_mask, false) }
-                .expect("mask check"),
+            crate::acl::path_mask_allows(
+                &root,
+                &[sid.as_ptr()],
+                read_mask,
+                /*require_all_bits*/ false,
+            )
+            .expect("mask check"),
             "read grant must deliver a read-mask allow ACE"
         );
     }

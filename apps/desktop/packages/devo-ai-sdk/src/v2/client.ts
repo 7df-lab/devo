@@ -32,6 +32,10 @@ export {
 	userMessageText,
 } from "./native-item"
 import type {
+	ModelListResult,
+	CredentialListResult,
+	ModelCatalogRefreshParams,
+	ModelCatalogRefreshResult,
 	ProviderDisconnectParams,
 	ProviderDisconnectResult,
 	ProviderDiscoverParams,
@@ -185,6 +189,12 @@ export type ToolStateCompleted = any
 export type UserMessage = any
 export type Worktree = any
 export type {
+	ModelInfo,
+	CredentialInfo,
+	ModelListResult,
+	CredentialListResult,
+	ModelCatalogRefreshParams,
+	ModelCatalogRefreshResult,
 	ProviderDisconnectParams,
 	ProviderDisconnectResult,
 	ProviderDiscoverParams,
@@ -590,7 +600,7 @@ function pathFromFileUri(uri: string): string | null {
 }
 
 export type PromptAsyncOutcome =
-	| { outcome: "started" }
+	| { outcome: "started"; turnId?: string }
 	| { outcome: "queued"; queueItemId: string }
 
 export type QueueWireEntry = {
@@ -797,6 +807,12 @@ class NativeClient {
 	/** Session transcript: Native ItemEnvelope keyed by itemId (no Message/Part dual). */
 	private items = new Map<string, Map<string, NativeItemEnvelope>>()
 	private loadedSessionLimits = new Map<string, LoadedSessionLimit>()
+	private historyCursors = new Map<string, string | null>()
+	private resumedSessions = new Set<string>()
+	private sessionResumes = new Map<string, Promise<void>>()
+	private subscriptionLoads = new Map<string, Promise<void>>()
+	private directorySubscriptions = new Map<string, Promise<void>>()
+	private sessionLists = new Map<string, Promise<Session[]>>()
 	private configOptionsBySession = new Map<string, SessionConfigOption[]>()
 	private configOptionsByDirectory = new Map<string, SessionConfigOption[]>()
 	private pendingPermissions = new Map<string, PendingPermission>()
@@ -889,7 +905,7 @@ class NativeClient {
 				// addressable until session/resume. Composer refresh races
 				// message load on open, so wait for load before queue/list.
 				try {
-					await this.loadSession(params.sessionId)
+					await this.ensureSessionReady(params.sessionId)
 					const result = (await this.requestCanonical("session/queue/list", {
 						sessionId: params.sessionId,
 					})) as { entries?: unknown }
@@ -1332,10 +1348,19 @@ class NativeClient {
 	}
 
 	worktree = {
-		list: async () => ({ data: [] }),
-		create: async (_params: unknown) => ({ data: null }),
-		remove: async (_params: unknown) => ({ data: null }),
-		reset: async (_params: unknown) => ({ data: null }),
+		list: async () => {
+			const result = await this.requestCanonical("workspace/worktree/list", { cwd: this.options.directory ?? defaultCwd() }) as { worktrees: Array<{ directory: string }> }
+			return { data: result.worktrees.map((worktree) => worktree.directory) }
+		},
+		create: async (params: { worktreeCreateInput: { name: string; startCommand?: string } }) => ({
+			data: await this.requestCanonical("workspace/worktree/create", { cwd: this.options.directory ?? defaultCwd(), name: params.worktreeCreateInput.name }),
+		}),
+		remove: async (params: { worktreeRemoveInput: { directory: string } }) => ({
+			data: await this.requestCanonical("workspace/worktree/remove", { cwd: this.options.directory ?? defaultCwd(), directory: params.worktreeRemoveInput.directory }),
+		}),
+		reset: async (params: { worktreeResetInput: { directory: string } }) => ({
+			data: await this.requestCanonical("workspace/worktree/reset", { cwd: this.options.directory ?? defaultCwd(), directory: params.worktreeResetInput.directory }),
+		}),
 	}
 
 	config = {
@@ -1398,6 +1423,40 @@ class NativeClient {
 		},
 		setEnabled: async (params: { name: string; enabled: boolean }) => ({
 			data: await this.requestCanonical("mcp/set_enabled", params),
+		}),
+	}
+
+	private modelPreferencesWrite: Promise<unknown> = Promise.resolve()
+
+	model = {
+		preferences: {
+			write: (params: { patch: { model?: string; reasoningEffort?: string } }) => {
+				const write = this.modelPreferencesWrite.catch(() => undefined).then(async () => {
+					const result = await this.requestCanonical("model/preferences/write", {
+						...params, ...(this.options.directory ? { cwd: this.options.directory } : {}),
+					}) as { preferences: ModelPreferencesWire }
+					this.rememberDirectoryConfigOptions(this.options.directory ?? defaultCwd(),
+						sessionConfigOptionsFromModelPreferences(result.preferences))
+					return { data: result }
+				})
+				this.modelPreferencesWrite = write
+				return write
+			},
+		},
+		list: async (): Promise<{ data: ModelListResult }> => ({
+			data: await this.requestCanonical("model/list", {}) as ModelListResult,
+		}),
+		refreshCatalog: async (params: ModelCatalogRefreshParams): Promise<{ data: ModelCatalogRefreshResult }> => {
+			const data = await this.requestCanonical("model/catalog/refresh", params) as ModelCatalogRefreshResult
+			if (data.status === "updated") this.invalidateConfigOptionCaches()
+			return { data }
+		},
+	}
+
+	credential = {
+		/** Native returns credential metadata only, never secret values. */
+		list: async (): Promise<{ data: CredentialListResult }> => ({
+			data: await this.requestCanonical("credential/list", {}) as CredentialListResult,
 		}),
 	}
 
@@ -1473,6 +1532,17 @@ class NativeClient {
 	}
 
 	private async listSessions(params?: { limit?: number; roots?: boolean; search?: string }): Promise<Session[]> {
+		const key = JSON.stringify(params ?? {})
+		const pending = this.sessionLists.get(key)
+		if (pending) return pending
+		const load = this.listSessionsOnce(params)
+		this.sessionLists.set(key, load)
+		try { return await load } finally {
+			if (this.sessionLists.get(key) === load) this.sessionLists.delete(key)
+		}
+	}
+
+	private async listSessionsOnce(params?: { limit?: number; roots?: boolean; search?: string }): Promise<Session[]> {
 		await this.ensureInitialized()
 		const sessions: Session[] = []
 		let cursor: string | undefined
@@ -1510,6 +1580,7 @@ class NativeClient {
 		})) as { session: Record<string, unknown> }
 		const session = this.rememberNativeSession(result.session)
 		await this.ensureSessionSubscription(session.id)
+		this.resumedSessions.add(session.id)
 		this.emit(session.directory ?? cwd, {
 			type: "session.created",
 			properties: { info: session, session },
@@ -1530,16 +1601,21 @@ class NativeClient {
 		return recentNativeItems(items, limit).map((info) => ({ info }))
 	}
 	private async loadSession(sessionId: string, limit?: number): Promise<void> {
-		const loadedLimit = this.loadedSessionLimits.get(sessionId)
-		if (loadedLimitCovers(loadedLimit, limit)) return
-		const pending = this.sessionLoads.get(sessionId)
-		if (pending) return pending
-		const load = this.loadSessionOnce(sessionId, limit)
-		this.sessionLoads.set(sessionId, load)
-		try {
-			await load
-		} finally {
-			if (this.sessionLoads.get(sessionId) === load) this.sessionLoads.delete(sessionId)
+		// A concurrent queue/read or wider history request must not claim that a
+		// narrower in-flight window covers it. Recheck coverage after joining.
+		while (!loadedLimitCovers(this.loadedSessionLimits.get(sessionId), limit)) {
+			const pending = this.sessionLoads.get(sessionId)
+			if (pending) { await pending; continue }
+			const load = this.loadSessionOnce(sessionId, limit)
+			this.sessionLoads.set(sessionId, load)
+			try { await load } catch (error) {
+				if (isSessionNotFoundError(error) && (this.sessions.has(sessionId) || this.items.has(sessionId))) {
+					this.dropMissingSession(sessionId)
+				}
+				throw error
+			} finally {
+				if (this.sessionLoads.get(sessionId) === load) this.sessionLoads.delete(sessionId)
+			}
 		}
 	}
 
@@ -1550,54 +1626,50 @@ class NativeClient {
 		this.emitSessionDeleted(sessionId, directory)
 	}
 
-	private async loadSessionOnce(sessionId: string, limit?: number): Promise<void> {
-		await this.ensureInitialized()
+	private async ensureSessionReady(sessionId: string): Promise<void> {
+		if (this.resumedSessions.has(sessionId)) return
+		const pending = this.sessionResumes.get(sessionId)
+		if (pending) return pending
+		const resume = this.resumeSessionOnce(sessionId)
+		this.sessionResumes.set(sessionId, resume)
+		try { await resume } finally {
+			if (this.sessionResumes.get(sessionId) === resume) this.sessionResumes.delete(sessionId)
+		}
+	}
+
+	private async resumeSessionOnce(sessionId: string): Promise<void> {
 		try {
-			const session = await this.getSessionById(sessionId)
-			const cwd = session?.directory ?? this.sessionDirectories.get(sessionId)
-			if (!cwd) throw new Error(`session ${sessionId} not found`)
-			const resumed = (await this.requestCanonical("session/resume", {
-				sessionId,
-			})) as { session: Record<string, unknown>; lastContextOccupancy?: unknown; last_context_occupancy?: unknown }
-			const enriched = this.rememberNativeSession(resumed.session)
-			// The resume response carries the authoritative persisted model /
-			// settings for the session; cold `session/list` snapshots may lack
-			// them. Surface the enrichment so renderer session stores re-seed the
-			// composer — without this, the enriched snapshot stays buried in this
-			// client's internal cache and restored sessions fall back to defaults.
-			this.emit(enriched.directory ?? cwd, {
-				type: "session.updated",
-				properties: { info: enriched, session: enriched },
-			})
-			this.emitContextUsage(
-				sessionId,
-				resumed.lastContextOccupancy ?? resumed.last_context_occupancy,
-			)
-			let cursor: string | undefined
-			do {
-				const page = (await this.requestCanonical("session/items/list", {
-					sessionId,
-					...(cursor ? { cursor } : {}),
-					limit: 500,
-				})) as { data?: Array<Record<string, unknown>>; nextCursor?: string | null }
-				for (const item of page.data ?? []) {
-					this.handleNativeItemEnvelope(item, nativeItemNotificationMethod(item))
-				}
-				cursor = page.nextCursor ?? undefined
-			} while (cursor)
-			const queueResult = (await this.requestCanonical("session/queue/list", {
-				sessionId,
-			})) as { entries?: unknown }
-			this.emitQueueSnapshot(sessionId, parseQueueWireEntries(queueResult.entries), "sync")
-			await this.ensureSessionSubscription(sessionId)
-			this.loadedSessionLimits.set(sessionId, null)
-		} catch (error) {
-			if (isSessionNotFoundError(error)) {
-				this.dropMissingSession(sessionId)
-				throw error
+			const resumed = (await this.requestCanonical("session/resume", { sessionId })) as {
+				session: Record<string, unknown>; lastContextOccupancy?: unknown; last_context_occupancy?: unknown
 			}
+			const enriched = this.rememberNativeSession(resumed.session)
+			this.emit(enriched.directory ?? this.options.directory ?? defaultCwd(), {
+				type: "session.updated", properties: { info: enriched, session: enriched },
+			})
+			this.emitContextUsage(sessionId, resumed.lastContextOccupancy ?? resumed.last_context_occupancy)
+			await this.ensureSessionSubscription(sessionId)
+			this.resumedSessions.add(sessionId)
+			this.sessionsNeedingResume.delete(sessionId)
+		} catch (error) {
+			if (isSessionNotFoundError(error)) this.dropMissingSession(sessionId)
 			throw error
 		}
+	}
+
+	private async loadSessionOnce(sessionId: string, limit?: number): Promise<void> {
+		await this.ensureSessionReady(sessionId)
+		let loaded = this.loadedSessionLimits.get(sessionId) ?? 0
+		let cursor: string | null = this.historyCursors.get(sessionId) ?? "tail"
+		do {
+			const page = (await this.requestCanonical("session/items/list", {
+				sessionId, cursor, limit: Math.min(200, limit === undefined ? 200 : Math.max(1, limit - loaded)),
+			})) as { data?: Array<Record<string, unknown>>; nextCursor?: string | null }
+			for (const item of page.data ?? []) this.handleNativeItemEnvelope(item, nativeItemNotificationMethod(item))
+			loaded += (page.data ?? []).length
+			cursor = page.nextCursor ?? null
+			this.historyCursors.set(sessionId, cursor)
+			this.loadedSessionLimits.set(sessionId, cursor ? loaded : null)
+		} while (cursor && (limit === undefined || loaded < limit))
 	}
 
 	private async getSessionById(sessionId: string): Promise<Session | undefined> {
@@ -1869,6 +1941,11 @@ class NativeClient {
 			this.pendingPermissions.clear()
 			this.pendingQuestions.clear()
 			this.subscriptions.clear()
+			for (const sessionId of this.sessions.keys()) this.sessionsNeedingResume.add(sessionId)
+			this.loadedSessionLimits.clear()
+			this.historyCursors.clear()
+			this.resumedSessions.clear()
+			this.directorySubscriptions.clear()
 			this.turnSessions.clear()
 			this.nativeItemCallIds.clear()
 			this.referenceSearchSession = null
@@ -1994,6 +2071,11 @@ class NativeClient {
 				return true
 			}
 			const status = { type: String(value.status) === "active" ? "busy" : "idle" }
+			if (status.type === "busy" && this.subscriptionReplayDepth === 0) {
+				void this.ensureSessionSubscription(sessionId).catch(error => {
+					this.emit(this.sessionDirectories.get(sessionId) ?? defaultCwd(), sessionErrorEvent(sessionId, error))
+				})
+			}
 			this.sessionStatuses.set(sessionId, status)
 			this.emit(this.sessionDirectories.get(sessionId) ?? this.options.directory ?? defaultCwd(), {
 				type: "session.status",
@@ -2086,7 +2168,7 @@ class NativeClient {
 				if (assistantError) {
 					this.emit(directory, {
 						type: "session.error",
-						properties: { sessionId: sessionId, error: assistantError },
+						properties: { sessionId: sessionId, turnId, error: assistantError },
 					})
 				}
 				this.completeOpenAssistantMessages(sessionId, directory, startedAt, assistantError)
@@ -2442,6 +2524,8 @@ class NativeClient {
 	}
 
 	private removeItemsForTurn(sessionId: string, turnId: string): void {
+		this.loadedSessionLimits.delete(sessionId)
+		this.historyCursors.delete(sessionId)
 		const directory = this.sessionDirectories.get(sessionId) ?? this.options.directory ?? defaultCwd()
 		const byId = this.items.get(sessionId)
 		if (!byId) return
@@ -2497,19 +2581,31 @@ class NativeClient {
 
 	private async ensureSessionSubscription(sessionId: string): Promise<void> {
 		if (this.subscriptions.has(sessionId)) return
-		const after = this.subscriptionCursors.get(sessionId) ?? []
+		const pending = this.subscriptionLoads.get(sessionId)
+		if (pending) return pending
+		const load = this.subscribeSession(sessionId)
+		this.subscriptionLoads.set(sessionId, load)
+		try { await load } finally {
+			if (this.subscriptionLoads.get(sessionId) === load) this.subscriptionLoads.delete(sessionId)
+		}
+	}
+
+	private async subscribeSession(sessionId: string): Promise<void> {
+		if (this.subscriptions.has(sessionId)) return
 		let result: {
 			subscriptionId: string
 			snapshots?: Array<Record<string, unknown>>
 			replay?: Array<Record<string, unknown>>
 			cursors?: Array<{ streamId: string; seq: number }>
 			pendingControlRequests?: Array<Record<string, unknown>>
+			recoverySnapshots?: Array<{ item: Record<string, unknown> }>
 		}
 		try {
 			result = (await this.requestCanonical("subscription/create", {
 				selectors: [{ kind: "session", sessionId }],
 				includeSnapshot: true,
-				after,
+				replay: "snapshotOnly",
+				after: [],
 			})) as typeof result
 		} catch (error) {
 			if (isSessionNotFoundError(error)) {
@@ -2539,6 +2635,9 @@ class NativeClient {
 					this.handleNativeNotification(notification.method, notification.params)
 				}
 			}
+			for (const recovery of result.recoverySnapshots ?? []) {
+				this.handleNativeItemEnvelope(recovery.item, nativeItemNotificationMethod(recovery.item))
+			}
 			for (const pending of result.pendingControlRequests ?? []) {
 				const item = objectRecord(pending.item)
 				if (item) this.handleNativeItemEnvelope(item, "item/started")
@@ -2565,15 +2664,43 @@ class NativeClient {
 	}
 
 	private async ensureKnownSessionSubscriptions(): Promise<void> {
-		const sessions = await this.listSessions()
-		for (const session of sessions) {
-			try {
-				await this.ensureSessionSubscription(session.id)
-			} catch (error) {
-				if (isSessionNotFoundError(error)) continue
+		const sessions = this.options.directory ? [] : await this.listSessions()
+		const directories = this.options.directory ? [this.options.directory] : [...new Set(sessions.map(s => s.directory).filter(Boolean))]
+		for (const cwd of directories) {
+			let load = this.directorySubscriptions.get(cwd)
+			if (!load) {
+				load = this.subscribeDirectory(cwd)
+				this.directorySubscriptions.set(cwd, load)
+			}
+			try { await load } catch (error) {
+				if (this.directorySubscriptions.get(cwd) === load) this.directorySubscriptions.delete(cwd)
 				throw error
 			}
 		}
+		for (const session of this.sessions.values()) {
+			if (this.options.directory && session.directory !== this.options.directory) continue
+			if (this.sessionStatuses.get(session.id)?.type === "busy") await this.ensureSessionSubscription(session.id)
+		}
+	}
+
+	private async subscribeDirectory(cwd: string): Promise<void> {
+		const result = await this.requestCanonical("subscription/create", {
+			selectors: [{ kind: "sessionsByCwd", cwd }], includeSnapshot: true, replay: "snapshotOnly", after: [],
+		}) as { subscriptionId: string; snapshots?: Array<Record<string, unknown>>; cursors?: Array<{ streamId: string; seq: number }> }
+		for (const snapshot of result.snapshots ?? []) {
+			const data = objectRecord(snapshot.data)
+			for (const session of (data?.sessions ?? []) as Array<Record<string, unknown>>) {
+				// Folder rosters project the lightweight index. Preserve richer
+				// canonical model/settings already obtained from resume or reads.
+				const existing = this.sessions.get(String(session.id ?? ""))
+				this.rememberNativeSession({
+					...session,
+					model: existing?.model ?? session.model,
+					settings: existing?.settings ?? session.settings,
+				})
+			}
+		}
+		if (result.cursors?.length) await this.requestCanonical("subscription/ack", { subscriptionId: result.subscriptionId, cursors: result.cursors })
 	}
 
 	private emitPermissionAsked(
@@ -2711,6 +2838,8 @@ class NativeClient {
 		this.promptStartedAtBySession.delete(sessionId)
 		this.sessionDirectories.delete(sessionId)
 		this.loadedSessionLimits.delete(sessionId)
+		this.historyCursors.delete(sessionId)
+		this.resumedSessions.delete(sessionId)
 		const sessionItems = this.items.get(sessionId)
 		if (sessionItems) {
 			for (const itemId of sessionItems.keys()) {
@@ -2844,11 +2973,16 @@ class NativeClient {
 		})
 	}
 
+	private readonly sessionsNeedingResume = new Set<string>()
+
 	private async pushSessionQueue(params: {
 		sessionId: string
 		parts: PromptPartInput[]
 		collaborationMode?: string
 	}): Promise<PromptAsyncOutcome> {
+		if (this.sessionsNeedingResume.has(params.sessionId)) {
+			await this.ensureSessionReady(params.sessionId)
+		}
 		if (params.collaborationMode) {
 			const settingsPatch: SessionSettingsPatch = {
 				mode: params.collaborationMode,
@@ -2856,11 +2990,25 @@ class NativeClient {
 			await this.enqueueSessionSettings(params.sessionId, settingsPatch)
 		}
 		await this.ensureSessionSubscription(params.sessionId)
-		const result = (await this.requestCanonical("session/queue/push", {
+		const request = {
 			sessionId: params.sessionId,
 			input: userInputsFromPromptParts(params.parts),
 			idempotencyKey: crypto.randomUUID(),
-		})) as Record<string, unknown>
+		}
+		let result: Record<string, unknown>
+		try {
+			result = await this.requestCanonical("session/queue/push", request) as Record<string, unknown>
+		} catch (error) {
+			if (!isSessionNotFoundError(error)) throw error
+			// An evicted actor or a missed transport-close event can invalidate
+			// the client cache. Restore once, then retry with the same input/key.
+			this.loadedSessionLimits.delete(params.sessionId)
+			this.historyCursors.delete(params.sessionId)
+			this.resumedSessions.delete(params.sessionId)
+			this.subscriptions.delete(params.sessionId)
+			await this.ensureSessionReady(params.sessionId)
+			result = await this.requestCanonical("session/queue/push", request) as Record<string, unknown>
+		}
 		const outcome = String(result.outcome ?? "")
 		if (outcome === "queued" || result.entry) {
 			const entry = objectRecord(result.entry) ?? result
@@ -2886,7 +3034,7 @@ class NativeClient {
 				properties: { sessionId: params.sessionId, turnId: String(turn.id) },
 			})
 		}
-		return { outcome: "started" }
+		return { outcome: "started", ...(turn?.id ? { turnId: String(turn.id) } : {}) }
 	}
 
 	private rememberConfigOptions(
@@ -3034,7 +3182,6 @@ class NativeClient {
 		value: string,
 	): Promise<SessionConfigOption[]> {
 		await this.ensureInitialized()
-		const directory = this.options.directory ?? defaultCwd()
 		// Canonical model/preferences/write (ratified #12): configId maps to
 		// the patch fields; the result converts back to the select shape the
 		// config UI renders.
@@ -3042,13 +3189,7 @@ class NativeClient {
 		if (configId === "model") patch.model = value
 		else if (configId === "thought_level") patch.reasoningEffort = value
 		else throw new Error(`unknown model config option '${configId}'`)
-		const params: Record<string, unknown> = { patch }
-		if (this.options.directory) params.cwd = this.options.directory
-		const result = (await this.requestCanonical("model/preferences/write", params)) as {
-			preferences?: ModelPreferencesWire
-		}
-		const options = sessionConfigOptionsFromModelPreferences(result.preferences ?? {})
-		this.rememberDirectoryConfigOptions(directory, options)
+		await this.model.preferences.write({ patch })
 		return this.currentConfigOptions()
 	}
 

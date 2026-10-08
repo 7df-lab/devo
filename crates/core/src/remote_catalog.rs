@@ -114,7 +114,7 @@ pub async fn refresh_remote_catalog(
         return CatalogRefreshOutcome::SkippedOffline;
     }
 
-    if is_url && cache_is_fresh(home_dir, config.refresh_interval_hours) {
+    if is_url && cache_is_fresh(home_dir, source, config.refresh_interval_hours) {
         return CatalogRefreshOutcome::CacheFresh;
     }
 
@@ -172,7 +172,7 @@ pub async fn refresh_remote_catalog(
     CatalogRefreshOutcome::Updated { providers, models }
 }
 
-fn cache_is_fresh(home_dir: &Path, interval_hours: u64) -> bool {
+fn cache_is_fresh(home_dir: &Path, source: &str, interval_hours: u64) -> bool {
     let meta_path = catalog_cache_dir(home_dir).join(META_CACHE_FILE_NAME);
     let Ok(data) = fs::read_to_string(meta_path) else {
         return false;
@@ -181,7 +181,11 @@ fn cache_is_fresh(home_dir: &Path, interval_hours: u64) -> bool {
         return false;
     };
     let age = Utc::now().signed_duration_since(meta.fetched_at);
-    age.num_hours() < interval_hours as i64
+    interval_hours > 0
+        && meta.source == source
+        && remote_catalog_api_path(home_dir).exists()
+        && age.num_seconds() >= 0
+        && age.num_hours() < interval_hours as i64
 }
 
 async fn download_models_dev(url: &str) -> Result<String, CatalogRefreshOutcome> {
@@ -541,6 +545,23 @@ mod tests {
     use crate::ProviderWireApi;
     use crate::read_provider_catalog_config;
     use crate::write_provider_catalog_config;
+
+    #[test]
+    fn fresh_cache_requires_the_same_source_and_a_complete_dump() {
+        let dir = tempdir().expect("tempdir");
+        let source = "https://catalog.example/api.json";
+        write_catalog_cache(dir.path(), source, "{}", 0, 0).expect("cache");
+        assert_eq!(
+            [
+                cache_is_fresh(dir.path(), source, 24),
+                cache_is_fresh(dir.path(), source, 0),
+                cache_is_fresh(dir.path(), "https://other.example/api.json", 24),
+            ],
+            [true, false, false],
+        );
+        fs::remove_file(remote_catalog_api_path(dir.path())).expect("remove fixture dump");
+        assert!(!cache_is_fresh(dir.path(), source, 24));
+    }
 
     #[test]
     fn convert_updates_overlapping_builtin_models_only() {

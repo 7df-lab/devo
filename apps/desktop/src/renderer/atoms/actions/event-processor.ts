@@ -159,10 +159,11 @@ export function processEvent(event: Event): void {
 			break
 
 		case "session.error": {
-			const { sessionId, error } = event.properties
+			const { sessionId, turnId, error } = event.properties
 			if (sessionId && error) {
 				set(setSessionErrorAtom, {
 					sessionId,
+					turnId,
 					error: { name: error.name, data: error.data },
 				})
 			}

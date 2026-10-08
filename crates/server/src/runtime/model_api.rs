@@ -65,6 +65,35 @@ fn model_preferences_from_config_options(
             _ => {}
         }
     }
+    // Connection files are sparse overlays: a credential-only provider inherits
+    // its models from the directory. Native preferences must include those
+    // resolved models, rather than only models explicitly written to the overlay.
+    let configured_providers = runtime_context
+        .config_store
+        .lock()
+        .expect("app config store mutex should not be poisoned")
+        .effective_config()
+        .provider_catalog_config()
+        .providers;
+    for model in runtime_context.model_catalog.list_visible() {
+        let Some((provider_id, model_id)) = model.slug.split_once('/') else {
+            continue;
+        };
+        if !configured_providers.contains_key(provider_id)
+            || preferences
+                .available_models
+                .iter()
+                .any(|option| option.value == model.slug)
+        {
+            continue;
+        }
+        preferences.available_models.push(PreferencesOption {
+            value: model.slug.clone(),
+            label: model.display_name.clone(),
+            description: Some(format!("{provider_id}: {model_id}")),
+            available_efforts: Vec::new(),
+        });
+    }
     enrich_available_models_with_efforts(&mut preferences, runtime_context);
     preferences
 }
@@ -74,10 +103,11 @@ fn enrich_available_models_with_efforts(
     runtime_context: &SessionRuntimeContext,
 ) {
     for model_option in &mut preferences.available_models {
-        let turn_config =
-            runtime_context.resolve_turn_config(Some(model_option.value.as_str()), None);
-        model_option.available_efforts = turn_config
-            .model
+        // Effort choices are catalog metadata. Resolving a complete turn here
+        // rereads the remote overlay and credentials for every row, making a
+        // large catalog block preference saves and unrelated Native requests.
+        let model = runtime_context.resolve_turn_model(Some(model_option.value.as_str()));
+        model_option.available_efforts = model
             .effective_reasoning_capability()
             .options()
             .into_iter()

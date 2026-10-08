@@ -176,16 +176,45 @@ impl ServerRuntime {
 
 /// Slices `items` (ascending by position) into one page.
 ///
-/// Cursor encoding: the decimal position of the previous page's last item
-/// (`sequence` for turns, `seq` for items); clients must treat it as
-/// opaque. `nextCursor` is the last returned item's position and is present
-/// iff more data remains. The limit defaults to 50 and clamps into
+/// A missing cursor starts forward pagination; a decimal cursor continues
+/// after that position. `tail` starts at the newest page and `before:<position>`
+/// continues toward older history. Both directions return chronological pages;
+/// clients treat returned continuation cursors as opaque. The limit defaults to 50 and clamps into
 /// `1..=200` — out-of-range limits never error (01 §4.2).
 fn paginate<T: Clone>(
     items: &[T],
     params: &PageParams,
     position: impl Fn(&T) -> u64,
 ) -> Result<Page<T>, String> {
+    // Native clients can open the recent tail without downloading the full
+    // transcript. Older pages retain chronological order within each page.
+    if params.cursor.as_deref() == Some("tail")
+        || params
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.starts_with("before:"))
+    {
+        let before = match params.cursor.as_deref() {
+            Some("tail") => None,
+            Some(cursor) => Some(
+                cursor["before:".len()..]
+                    .parse::<u64>()
+                    .map_err(|_| "malformed cursor".to_string())?,
+            ),
+            None => unreachable!("tail pagination requires a cursor"),
+        };
+        let limit = params
+            .limit
+            .unwrap_or(DEFAULT_PAGE_LIMIT)
+            .clamp(1, MAX_PAGE_LIMIT) as usize;
+        let end = before.map_or(items.len(), |before| {
+            items.partition_point(|item| position(item) < before)
+        });
+        let start = end.saturating_sub(limit);
+        let data = items[start..end].to_vec();
+        let next_cursor = (start > 0).then(|| format!("before:{}", position(&items[start])));
+        return Ok(Page { data, next_cursor });
+    }
     let after = match &params.cursor {
         Some(cursor) => cursor
             .parse::<u64>()
@@ -270,6 +299,86 @@ mod tests {
                 data: Vec::new(),
                 next_cursor: None,
             }
+        );
+    }
+
+    #[test]
+    fn tail_pages_walk_backwards_across_sequence_gaps() {
+        let items = [1u64, 3, 10, 20, 25];
+        let mut cursor = "tail".to_string();
+        for expected in [
+            Page {
+                data: vec![20, 25],
+                next_cursor: Some("before:20".into()),
+            },
+            Page {
+                data: vec![3, 10],
+                next_cursor: Some("before:3".into()),
+            },
+            Page {
+                data: vec![1],
+                next_cursor: None,
+            },
+        ] {
+            let actual =
+                paginate(&items, &params(Some(&cursor), Some(2)), |item| *item).expect("tail page");
+            assert_eq!(actual, expected);
+            cursor = actual.next_cursor.unwrap_or_default();
+        }
+    }
+
+    #[test]
+    fn tail_pages_clamp_limits_and_handle_empty_boundaries() {
+        let items: Vec<u64> = (1..=250).collect();
+        for (cursor, limit, expected) in [
+            (
+                "tail",
+                1000,
+                Page {
+                    data: (51..=250).collect(),
+                    next_cursor: Some("before:51".into()),
+                },
+            ),
+            (
+                "tail",
+                0,
+                Page {
+                    data: vec![250],
+                    next_cursor: Some("before:250".into()),
+                },
+            ),
+            (
+                "before:1",
+                10,
+                Page {
+                    data: vec![],
+                    next_cursor: None,
+                },
+            ),
+            (
+                "before:0",
+                10,
+                Page {
+                    data: vec![],
+                    next_cursor: None,
+                },
+            ),
+        ] {
+            assert_eq!(
+                paginate(&items, &params(Some(cursor), Some(limit)), |item| *item).expect("page"),
+                expected
+            );
+        }
+        assert_eq!(
+            paginate(&[] as &[u64], &params(Some("tail"), None), |item| *item).expect("empty tail"),
+            Page {
+                data: vec![],
+                next_cursor: None
+            }
+        );
+        assert_eq!(
+            paginate(&items, &params(Some("before:bad"), None), |item| *item),
+            Err("malformed cursor".into())
         );
     }
 }

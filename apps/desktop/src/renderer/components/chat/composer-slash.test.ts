@@ -3,6 +3,7 @@ import { parseComposerSlash, goalPromptText } from "./composer-slash"
 
 describe("composer slash parsing", () => {
 	test("recognizes first-party commands and aliases", () => {
+		expect(parseComposerSlash("/model")).toEqual({ name: "model", args: "" })
 		expect(parseComposerSlash("/plan")).toEqual({ name: "plan", args: "" })
 		expect(parseComposerSlash("/goal write tests")).toEqual({
 			name: "goal",

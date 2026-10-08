@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import type { DevoClient } from "@devo-ai/sdk/v2/client"
 import type { Event, Session } from "../lib/types"
+import { serverUrlAtom } from "../atoms/connection"
 import { discoveryAtom } from "../atoms/discovery"
 import { itemsFamily } from "../atoms/messages"
 import { projectPaginationFamily, sessionFamily, upsertSessionAtom } from "../atoms/sessions"
@@ -81,7 +82,7 @@ function createFakeClient(directory: string): FakeClient {
 			if (disposed) return
 			disposed = true
 			client.disposed = true
-			stream.close()
+			client.stream.close()
 		},
 	}
 	streams.set(directory, stream)
@@ -153,6 +154,55 @@ describe("connection manager project event bridge", () => {
 		await new Promise((resolve) => setTimeout(resolve, 5))
 
 		expect(appStore.get(sessionFamily(session.id))?.status).toEqual({ type: "busy" })
+	})
+
+	test("an early folder read does not leave pagination loading before connection", async () => {
+        const directory = "/repo/early-folder-loading"
+        appStore.set(serverUrlAtom, null)
+        const manager = await import(`./connection-manager?case=${Date.now()}`)
+        activeManager = manager
+        await manager.loadProjectSessions(directory, undefined, { limit: 5, roots: true })
+        expect(appStore.get(projectPaginationFamily(directory))).toEqual({
+            loaded: false, loading: false, hasMore: true, currentLimit: 5,
+        })
+        await manager.connectToDevo("devo://stdio")
+        await manager.loadProjectSessions(directory, undefined, { limit: 5, roots: true })
+        expect(appStore.get(projectPaginationFamily(directory))).toEqual({
+            loaded: true, loading: false, hasMore: false, currentLimit: 5,
+        })
+    })
+
+	test("reconnects a project event stream after a backend restart", async () => {
+		const directory = "/repo/project-restart-bridge"
+		const session: Session = {
+			id: "restart-bridge-session",
+			directory,
+			title: "Restart bridge",
+			time: { created: 1, updated: 1 },
+		}
+		appStore.set(upsertSessionAtom, { session, directory })
+		const manager = await import(`./connection-manager?case=${Date.now()}`)
+		activeManager = manager
+		await manager.connectToDevo("devo://stdio")
+		const client = manager.getProjectClient(directory) as unknown as FakeClient
+		client.stream.push({
+			type: "session.status",
+			properties: { sessionId: session.id, status: { type: "busy" } },
+		})
+		await new Promise((resolve) => setTimeout(resolve, 20))
+		expect(appStore.get(sessionFamily(session.id))?.status).toEqual({ type: "busy" })
+		client.stream.close()
+		client.stream = new FakeEventStream()
+		streams.set(directory, client.stream)
+		client.stream.push({
+			type: "session.status",
+			properties: { sessionId: session.id, status: { type: "idle" } },
+		})
+		const deadline = Date.now() + 3000
+		while (appStore.get(sessionFamily(session.id))?.status.type !== "idle" && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 20))
+		}
+		expect(appStore.get(sessionFamily(session.id))?.status).toEqual({ type: "idle" })
 	})
 
 	test("disposes base and project clients on server replacement and disconnect", async () => {

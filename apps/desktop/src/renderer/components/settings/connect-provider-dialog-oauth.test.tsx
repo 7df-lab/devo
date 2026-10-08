@@ -52,6 +52,7 @@ let update:
 let settleLogin: (() => void) | undefined
 let canCancel = true
 let closes = 0
+let loginStarts = 0
 const provider = {
 	id: "openai-codex",
 	name: "OpenAI",
@@ -65,6 +66,7 @@ Object.assign(dom, {
 		providerOAuth: {
 			login: () =>
 				new Promise<void>((resolve) => {
+					loginStarts++
 					settleLogin = resolve
 				}),
 			cancel: async () => canCancel,
@@ -109,12 +111,26 @@ afterEach(async () => {
 	mount?.remove()
 	mount = undefined
 	closes = 0
+	loginStarts = 0
 	canCancel = true
 	update = undefined
 	settleLogin = undefined
 })
 
 describe("Desktop OAuth dialog save phase", () => {
+	test("catalog refetches preserve authorization and completed connection", async () => {
+		const dialog = await openDialog()
+		await act(async () => {
+			update?.({ instructions: "Waiting for browser login" })
+			root?.render(<ConnectProviderDialog provider={{ ...provider }} onClose={() => {}} onConnected={() => {}} />)
+		})
+		expect({ starts: loginStarts, waiting: dialog.textContent?.includes("Waiting for browser login") }).toEqual({ starts: 1, waiting: true })
+		await act(async () => { settleLogin?.() })
+		await act(async () => {
+			root?.render(<ConnectProviderDialog provider={{ ...provider }} onClose={() => {}} onConnected={() => {}} />)
+		})
+		expect({ starts: loginStarts, connected: dialog.textContent?.includes("Connected to OpenAI") }).toEqual({ starts: 1, connected: true })
+	})
 	test("refused Escape keeps Saving visible until credential RPC succeeds", async () => {
 		const dialog = await openDialog()
 		await act(async () => {

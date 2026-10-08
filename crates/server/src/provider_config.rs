@@ -403,7 +403,7 @@ fn resolve_server_model_with_home(
     effective.resolve_model(None).map_err(Into::into)
 }
 
-async fn resolve_provider_api_key(
+pub(crate) async fn resolve_provider_api_key(
     provider_id: &str,
     provider: &ProviderConfigEntry,
     auth: &devo_core::UserAuthConfigFile,
@@ -438,7 +438,7 @@ async fn resolve_provider_api_key(
 /// Prefer an explicit provider `credential` binding; otherwise discover the
 /// Provider-keyed auth.json entry, with legacy `{provider}_oauth` /
 /// `{provider}_api_key` fallbacks for unmigrated files.
-fn resolve_provider_credential_id(
+pub(crate) fn resolve_provider_credential_id(
     provider_id: &str,
     provider: &ProviderConfigEntry,
     auth: &devo_core::UserAuthConfigFile,

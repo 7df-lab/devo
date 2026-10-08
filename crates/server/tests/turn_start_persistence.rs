@@ -246,6 +246,26 @@ async fn turn_start_answers_before_slow_title_generation_completes() -> Result<(
 
     wait_for_notification(&mut notifications_rx, "turn/completed", 5).await?;
 
+    let listed = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({ "id": 30, "method": "session/list", "params": {} }),
+        )
+        .await
+        .context("session/list after completed turn")?;
+    let listed: devo_server::SuccessResponse<
+        devo_protocol::native::rpc_session::SessionListResult,
+    > = serde_json::from_value(listed)?;
+    assert_eq!(
+        listed
+            .result
+            .data
+            .iter()
+            .find(|item| item.id == session.id)
+            .map(|item| item.message_count),
+        Some(Some(1)),
+    );
+
     for _ in 0..500 {
         if title_entered.load(std::sync::atomic::Ordering::SeqCst) {
             break;

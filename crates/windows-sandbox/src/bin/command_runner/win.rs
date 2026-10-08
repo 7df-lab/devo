@@ -528,6 +528,15 @@ fn spawn_input_loop(
                 CloseHandle(handle);
             }
         }
+        // EOF or a framing failure means the parent no longer owns this
+        // session. Closing ConPTY stdin alone does not stop an idle kernel.
+        if let Ok(guard) = process_handle.lock()
+            && let Some(handle) = guard.as_ref()
+        {
+            unsafe {
+                let _ = TerminateProcess(*handle, 1);
+            }
+        }
     })
 }
 
@@ -666,8 +675,10 @@ pub fn main() -> Result<()> {
         if pi.hThread != 0 {
             CloseHandle(pi.hThread);
         }
-        if pi.hProcess != 0 {
-            CloseHandle(pi.hProcess);
+        if let Ok(mut guard) = process_handle.lock()
+            && let Some(handle) = guard.take()
+        {
+            CloseHandle(handle);
         }
         if let Some(job) = h_job {
             CloseHandle(job);
@@ -701,3 +712,7 @@ pub fn main() -> Result<()> {
 
     std::process::exit(exit_code);
 }
+
+#[cfg(test)]
+#[path = "win/input_tests.rs"]
+mod input_tests;

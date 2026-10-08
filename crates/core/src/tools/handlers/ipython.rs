@@ -731,6 +731,7 @@ pub async fn ensure_kernel_with_restore_state(
     // `src/` dirs plus in-tree `rlm_skills` stubs). Callable skills with `run`
     // are wrapped so `await attach_image(...)` calls `run`.
     let bootstrap = concat!(
+        "import asyncio\n",
         "import rlm\n",
         "import rlm.mcp as mcp\n",
         "import importlib as _devo_importlib\n",

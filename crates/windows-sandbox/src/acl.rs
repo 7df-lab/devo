@@ -153,6 +153,8 @@ unsafe fn dacl_mask_allows_with_scope(
         GenericExecute: FILE_GENERIC_EXECUTE,
         GenericAll: FILE_ALL_ACCESS,
     };
+    let mut desired_mask = desired_mask;
+    MapGenericMask(&mut desired_mask, &mapping);
     for i in 0..(info.AceCount as usize) {
         let mut p_ace: *mut c_void = std::ptr::null_mut();
         if GetAce(p_dacl as *const ACL, i as u32, &mut p_ace) == 0 {
@@ -700,7 +702,7 @@ pub unsafe fn revoke_ace_checked(path: &Path, psid: *mut c_void) -> Result<()> {
             path.display()
         ));
     }
-    let result = (|| {
+    let result = {
         let trustee = TRUSTEE_W {
             pMultipleTrustee: std::ptr::null_mut(),
             MultipleTrusteeOperation: 0,
@@ -743,7 +745,7 @@ pub unsafe fn revoke_ace_checked(path: &Path, psid: *mut c_void) -> Result<()> {
             LocalFree(p_new_dacl as HLOCAL);
         }
         result
-    })();
+    };
     if !p_sd.is_null() {
         LocalFree(p_sd as HLOCAL);
     }

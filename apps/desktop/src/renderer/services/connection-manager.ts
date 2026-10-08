@@ -1,3 +1,4 @@
+import { deleteProjectSessionBatch } from "./project-session-deletion"
 import type { DevoClient } from "@devo-ai/sdk/v2/client"
 import { processEvent } from "../atoms/actions/event-processor"
 import { authHeaderAtom, serverConnectedAtom, serverUrlAtom } from "../atoms/connection"
@@ -321,6 +322,8 @@ export async function loadProjectSessions(
 	sandboxDirs?: Set<string>,
 	options?: { limit?: number; roots?: boolean; search?: string },
 ): Promise<void> {
+	const client = getProjectClient(directory)
+	if (!client) return
 	if (options?.limit) {
 		appStore.set(setProjectPaginationLoadingAtom, directory)
 	}
@@ -333,9 +336,6 @@ export async function loadProjectSessions(
 		})
 		return
 	}
-
-	const client = getProjectClient(directory)
-	if (!client) return
 
 	try {
 		const { sessions, hasMore } = await fetchProjectSessionPage(client, options ?? {})
@@ -479,9 +479,16 @@ export async function deleteProjectSessions(projectDirectory: string): Promise<v
 		count: sessions.length,
 	})
 
-	for (const session of sessions) {
-		await deleteSession(client, session.id)
-	}
+	await deleteProjectSessionBatch({
+		sessionIds: sessions.map((session) => session.id),
+		deleteSession: (sessionId) => deleteSession(client, sessionId),
+		onDeleted: (sessionId) => {
+			if (discoveredSessions) {
+				discoveredSessions = discoveredSessions.filter((session) => session.id !== sessionId)
+			}
+			appStore.set(removeSessionAtom, sessionId)
+		},
+	})
 
 	if (discoveredSessions) {
 		const deletedIds = new Set(sessions.map((session) => session.id))
@@ -814,23 +821,33 @@ function startProjectEventBridge(client: DevoClient, directory: string, signal: 
 	projectEventBridgeDirs.add(directory)
 
 	void (async () => {
-		const batcher = createEventBatcher()
+		let retryDelay = 1000
+		const isStale = () => signal.aborted || projectClients.get(directory) !== client
 		try {
-			const stream = await subscribeToGlobalEvents(client)
-			for await (const globalEvent of stream) {
-				if (signal.aborted) break
-				const event = globalEvent.payload
-				if (event) {
-					batcher.enqueue(event)
+			while (!isStale()) {
+				const batcher = createEventBatcher()
+				try {
+					const stream = await subscribeToGlobalEvents(client)
+					if (isStale()) break
+					retryDelay = 1000
+					for await (const globalEvent of stream) {
+						if (isStale()) break
+						const event = globalEvent.payload
+						if (event) batcher.enqueue(event)
+					}
+				} catch (err) {
+					if (!isStale()) {
+						log.warn("Project event bridge disconnected", { directory, retryDelay }, err)
+					}
+				} finally {
+					batcher.dispose(isStale())
 				}
-			}
-		} catch (err) {
-			if (!signal.aborted) {
-				log.warn("Project event bridge stopped", { directory }, err)
+				if (isStale()) break
+				await new Promise((resolve) => setTimeout(resolve, retryDelay))
+				retryDelay = Math.min(retryDelay * 2, 30000)
 			}
 		} finally {
-			batcher.dispose(signal.aborted)
-			projectEventBridgeDirs.delete(directory)
+			if (projectClients.get(directory) === client) projectEventBridgeDirs.delete(directory)
 		}
 	})()
 }

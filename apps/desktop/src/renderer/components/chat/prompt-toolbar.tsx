@@ -1,12 +1,4 @@
 import {
-	SearchableListPopover,
-	SearchableListPopoverContent,
-	SearchableListPopoverEmpty,
-	SearchableListPopoverGroup,
-	SearchableListPopoverList,
-	SearchableListPopoverTrigger,
-} from "@devo/ui/components/searchable-list-popover"
-import {
 	Select,
 	SelectContent,
 	SelectItem,
@@ -15,30 +7,25 @@ import {
 } from "@devo/ui/components/select"
 import { Separator } from "@devo/ui/components/separator"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/tooltip"
-import { useIsMobile } from "@devo/ui/hooks/use-mobile"
 import { cn } from "@devo/ui/lib/utils"
 import { useAtomValue } from "jotai"
 import {
-	ChevronDownIcon,
 	GitBranchIcon,
 	MonitorIcon,
-	SparklesIcon,
 } from "lucide-react"
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useMemo } from "react"
 import { itemsFamily } from "../../atoms/messages"
 import type {
 	CompactionConfig,
 	ModelRef,
 	ProvidersData,
 	SdkAgent,
-	SdkProvider,
 	VcsData,
 } from "../../hooks/use-devo-data"
 import {
 	getModelCurrentVariant,
 	getModelVariants,
 	modelAllowsDefaultVariant,
-	parseModelRef,
 } from "../../hooks/use-devo-data"
 import {
 	computeContextUsage,
@@ -46,22 +33,12 @@ import {
 	type ModelLimitInfo,
 	shortModelName,
 } from "../../lib/session-metrics"
-import { ProviderIcon } from "../settings/provider-icon"
-import { ModelSelectorOptionRow } from "./model-selector-option-row"
-import {
-	ModelSelectorReasoningStrength,
-	ModelSelectorReasoningStrengthMobileView,
-} from "./model-selector-reasoning-strength"
-import { ModelSelectorTriggerLabel } from "./model-selector-trigger-label"
-import { getVariantTriggerLabel, resolveSelectedVariant } from "./model-selector-variant-label"
+import { ModelSelector } from "./model-selector"
+export { ModelSelector } from "./model-selector"
 
 // ============================================================
 // Shared toolbar trigger styles
 // ============================================================
-
-/** Base classes shared by ALL toolbar triggers (Popover + Select). */
-const TOOLBAR_TRIGGER_BASE_CN =
-	"flex h-7 items-center gap-1 rounded-md border-none bg-transparent px-2 text-[13px] font-normal shadow-none transition-colors"
 
 /**
  * Classes for SelectTrigger overrides. Uses `!` modifier to beat the base
@@ -140,230 +117,8 @@ export function AgentSelector({
 }
 
 // ============================================================
-// Model Selector (Combobox-based with search)
+// Model selector lives in model-selector.tsx.
 // ============================================================
-
-interface ModelOption {
-	/** Composite value: "providerID/modelID" */
-	value: string
-	providerID: string
-	modelID: string
-	displayName: string
-	providerName: string
-	reasoning: boolean
-}
-
-function flattenModels(providers: SdkProvider[]): ModelOption[] {
-	const models: ModelOption[] = []
-	for (const provider of providers) {
-		for (const [key, model] of Object.entries(provider.models)) {
-			const modelInfo = model as { name: string; capabilities?: { reasoning?: boolean } }
-			models.push({
-				value: `${provider.id}/${key}`,
-				providerID: provider.id,
-				modelID: key,
-				displayName: modelInfo.name,
-				providerName: provider.name,
-				reasoning: modelInfo.capabilities?.reasoning ?? false,
-			})
-		}
-	}
-	return models
-}
-
-function groupByProvider(models: ModelOption[]): Map<string, ModelOption[]> {
-	const groups = new Map<string, ModelOption[]>()
-	for (const model of models) {
-		const existing = groups.get(model.providerName)
-		if (existing) {
-			existing.push(model)
-		} else {
-			groups.set(model.providerName, [model])
-		}
-	}
-	return groups
-}
-
-interface ModelSelectorProps {
-	providers: ProvidersData | null
-	/** The resolved effective model (after agent/config/default resolution) */
-	effectiveModel: ModelRef | null
-	/** Whether the user has explicitly overridden the model */
-	hasOverride: boolean
-	onSelectModel: (model: ModelRef | null) => void
-	variants?: string[]
-	selectedVariant?: string | undefined
-	currentVariant?: string | undefined
-	allowDefaultVariant?: boolean
-	onSelectVariant?: (variant: string | undefined) => void
-	disabled?: boolean
-}
-
-export function ModelSelector({
-	providers,
-	effectiveModel,
-	onSelectModel,
-	variants = [],
-	selectedVariant,
-	currentVariant,
-	allowDefaultVariant = true,
-	onSelectVariant = () => undefined,
-	disabled,
-}: ModelSelectorProps) {
-	const models = useMemo(() => (providers ? flattenModels(providers.providers) : []), [providers])
-
-	const activeValue = effectiveModel
-		? `${effectiveModel.providerID}/${effectiveModel.modelID}`
-		: null
-
-	const activeModel = useMemo(
-		() => models.find((m) => m.value === activeValue) ?? null,
-		[models, activeValue],
-	)
-	const hasVariants = variants.length > 0
-	const resolvedVariant = useMemo(
-		() => resolveSelectedVariant(variants, selectedVariant, currentVariant, allowDefaultVariant),
-		[allowDefaultVariant, currentVariant, selectedVariant, variants],
-	)
-	const variantTriggerLabel = hasVariants ? getVariantTriggerLabel(resolvedVariant) : null
-	const isMobile = useIsMobile()
-
-	const [open, setOpen] = useState(false)
-	const [mobileVariantView, setMobileVariantView] = useState(false)
-
-	const handleOpenChange = useCallback((nextOpen: boolean) => {
-		setOpen(nextOpen)
-		if (!nextOpen) setMobileVariantView(false)
-	}, [])
-
-	const handleSelect = useCallback(
-		(value: string) => {
-			const ref = parseModelRef(value)
-			if (ref) {
-				onSelectModel(ref)
-			}
-			setMobileVariantView(false)
-			setOpen(false)
-		},
-		[onSelectModel],
-	)
-
-	if (!providers || models.length === 0) {
-		return (
-			<div className="flex items-center gap-1.5 text-xs text-muted-foreground/50">
-				<SparklesIcon className="size-3" />
-				<span>No models</span>
-			</div>
-		)
-	}
-
-	return (
-		<SearchableListPopover open={open} onOpenChange={handleOpenChange}>
-			<SearchableListPopoverTrigger
-				className={cn(
-					TOOLBAR_TRIGGER_BASE_CN,
-					"hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50",
-				)}
-				disabled={disabled}
-			>
-				{activeModel ? (
-					<ModelSelectorTriggerLabel
-						displayName={activeModel.displayName}
-						variantLabel={variantTriggerLabel}
-					/>
-				) : (
-					<span className="text-muted-foreground">Select model...</span>
-				)}
-				<ChevronDownIcon className="size-3 shrink-0 text-muted-foreground/50 pointer-events-none" />
-			</SearchableListPopoverTrigger>
-			<SearchableListPopoverContent side="top" align="start" width="w-56">
-				{mobileVariantView && hasVariants ? (
-					<ModelSelectorReasoningStrengthMobileView
-						variants={variants}
-						selectedVariant={resolvedVariant}
-						allowDefaultVariant={allowDefaultVariant}
-						onBack={() => setMobileVariantView(false)}
-						onSelectVariant={onSelectVariant}
-						onClose={() => setOpen(false)}
-					/>
-				) : (
-					<>
-						<ModelSelectorList
-							models={models}
-							activeValue={activeValue}
-							onSelect={handleSelect}
-						/>
-						{hasVariants && (
-							<ModelSelectorReasoningStrength
-								variants={variants}
-								selectedVariant={resolvedVariant}
-								allowDefaultVariant={allowDefaultVariant}
-								isMobile={isMobile}
-								onOpenMobileView={() => setMobileVariantView(true)}
-								onSelectVariant={onSelectVariant}
-								onClose={() => setOpen(false)}
-							/>
-						)}
-					</>
-				)}
-			</SearchableListPopoverContent>
-		</SearchableListPopover>
-	)
-}
-
-/** Inner list component — reads search from context */
-function ModelSelectorList({
-	models,
-	activeValue,
-	onSelect,
-}: {
-	models: ModelOption[]
-	activeValue: string | null
-	onSelect: (value: string) => void
-}) {
-	const grouped = useMemo(() => groupByProvider(models), [models])
-
-	return (
-		<SearchableListPopoverList>
-			{models.length === 0 ? (
-				<SearchableListPopoverEmpty>No models found</SearchableListPopoverEmpty>
-			) : (
-				<>
-					{/* Provider-grouped models */}
-					{Array.from(grouped.entries()).map(([providerName, providerModels]) => {
-						// Get the provider ID from the first model in the group to look up the icon
-						const providerId = providerModels[0]?.providerID
-						const items = providerModels.map((model) => (
-							<ModelSelectorOptionRow
-								key={model.value}
-								displayName={model.displayName}
-								reasoning={model.reasoning}
-								selected={model.value === activeValue}
-								onSelect={() => onSelect(model.value)}
-							/>
-						))
-						if (providerId === "session") {
-							return <div key={providerName}>{items}</div>
-						}
-						return (
-							<SearchableListPopoverGroup
-								key={providerName}
-								label={
-									<>
-										{providerId && <ProviderIcon id={providerId} name={providerName} size="xs" />}
-										<span>{providerName}</span>
-									</>
-								}
-							>
-								{items}
-							</SearchableListPopoverGroup>
-						)
-					})}
-				</>
-			)}
-		</SearchableListPopoverList>
-	)
-}
 
 // ============================================================
 // Variant Selector
@@ -464,6 +219,8 @@ export interface PromptToolbarProps {
 	/** Whether the user has explicitly overridden the model */
 	hasModelOverride: boolean
 	onSelectModel: (model: ModelRef | null) => void
+	modelPickerOpen?: boolean
+	onModelPickerOpenChange?: (open: boolean) => void
 
 	/** Currently selected variant */
 	selectedVariant: string | undefined
@@ -485,6 +242,8 @@ export function PromptToolbar({
 	effectiveModel,
 	hasModelOverride,
 	onSelectModel,
+	modelPickerOpen,
+	onModelPickerOpenChange,
 	selectedVariant,
 	onSelectVariant,
 	disabled,
@@ -532,6 +291,8 @@ export function PromptToolbar({
 				effectiveModel={effectiveModel}
 				hasOverride={hasModelOverride}
 				onSelectModel={onSelectModel}
+				open={modelPickerOpen}
+				onOpenChange={onModelPickerOpenChange}
 				variants={variants}
 				selectedVariant={selectedVariant}
 				currentVariant={currentVariant}

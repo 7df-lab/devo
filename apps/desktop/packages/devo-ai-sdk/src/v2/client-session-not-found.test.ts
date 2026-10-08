@@ -8,6 +8,7 @@ import {
 
 class FakeTransport implements DevoNativeTransport {
 	readonly requests: Array<{ method: string; params: unknown }> = []
+	private listener?: (event: DevoNativeTransportEvent) => void
 
 	constructor(private readonly handler: (method: string, params: unknown) => unknown) {}
 
@@ -18,8 +19,15 @@ class FakeTransport implements DevoNativeTransport {
 
 	async respond(): Promise<void> {}
 
-	subscribe(_listener: (event: DevoNativeTransportEvent) => void): () => void {
-		return () => {}
+	subscribe(listener: (event: DevoNativeTransportEvent) => void): () => void {
+		this.listener = listener
+		return () => {
+			this.listener = undefined
+		}
+	}
+
+	emit(event: DevoNativeTransportEvent): void {
+		this.listener?.(event)
 	}
 
 	connected(): boolean {
@@ -181,4 +189,53 @@ describe("session.queue.list resumes cold historical sessions", () => {
 		const result = await client.session.queue.list({ sessionId: "missing-session" })
 		expect(result.data.entries).toEqual([])
 	})
+})
+
+
+describe("runtime restart", () => {
+	for (const operation of ["queue list", "send prompt", "evicted actor"] as const) {
+		test(`${operation} resumes a previously loaded session after transport closes`, async () => {
+			let resumed = false
+			let restart = false
+			const transport = new FakeTransport((method) => {
+				if (method === "initialize") return { protocolVersion: 1, agentCapabilities: {}, authMethods: [] }
+				if (method === "session/list") return { data: [nativeSession], nextCursor: null }
+				if (method === "session/resume") {
+					resumed = true
+					return { session: nativeSession }
+				}
+				if (method === "session/items/list") return { data: [], nextCursor: null }
+				if (method === "subscription/create") return { subscriptionId: restart ? "sub-new" : "sub-old", snapshots: [], replay: [], cursors: [] }
+				if (method === "session/queue/list" || method === "session/queue/push") {
+					if (!resumed) throw new Error("session does not exist")
+					return method === "session/queue/list" ? { entries: [] } : { outcome: "started", turn: { id: "recovered-turn", sessionId: nativeSession.id, sequence: 1, kind: "regular", status: "inProgress", model: nativeSession.model, startedAt: nativeSession.createdAt } }
+				}
+				throw new Error(`unexpected method ${method}`)
+			})
+			const client = createDevoClient({ directory: "/repo", transport })
+			await client.session.messages({ sessionId: nativeSession.id })
+			resumed = false
+			restart = true
+			const beforeRestart = transport.requests.length
+			if (operation !== "evicted actor") transport.emit({ type: "closed" })
+			if (operation === "queue list") {
+				expect(await client.session.queue.list({ sessionId: nativeSession.id })).toEqual({ data: { entries: [] } })
+			} else {
+				expect(await client.session.promptAsync({ sessionId: nativeSession.id, parts: [{ type: "text", text: "after restart" }] })).toEqual({ data: { outcome: "started", turnId: "recovered-turn" } })
+			}
+			expect(transport.requests.slice(beforeRestart).map(({ method }) => method)).toEqual(
+				operation === "evicted actor"
+					? ["session/queue/push", "session/resume", "subscription/create", "session/queue/push"]
+					: ["initialize", "session/resume", "subscription/create",
+						operation === "queue list" ? "session/queue/list" : "session/queue/push"],
+			)
+			if (operation === "evicted actor") {
+				expect(transport.requests.filter(({ method }) => method === "session/queue/push")
+					.map(({ params }) => params)).toEqual([
+					transport.requests.at(-1)?.params, transport.requests.at(-1)?.params,
+				])
+			}
+			client.dispose()
+		})
+	}
 })

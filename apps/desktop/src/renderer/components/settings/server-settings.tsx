@@ -33,6 +33,7 @@ export function ServerSettings({ initialNativeTrafficLogState = null }: ServerSe
 	const url = useAtomValue(serverUrlAtom)
 	const { settings, updateSettings } = useSettings()
 	const [restarting, setRestarting] = useState(false)
+	const [restartError, setRestartError] = useState<string | null>(null)
 	const [nativeTrafficLogState, setNativeTrafficLogState] = useState<NativeTrafficLogState | null>(
 		initialNativeTrafficLogState,
 	)
@@ -58,8 +59,11 @@ export function ServerSettings({ initialNativeTrafficLogState = null }: ServerSe
 	async function restart() {
 		if (!isElectron) return
 		setRestarting(true)
+		setRestartError(null)
 		try {
 			await window.devo.restartDevo()
+		} catch (error) {
+			setRestartError(error instanceof Error ? error.message : "Failed to restart runtime")
 		} finally {
 			setRestarting(false)
 		}
@@ -177,7 +181,7 @@ export function ServerSettings({ initialNativeTrafficLogState = null }: ServerSe
 					label="Restart runtime"
 					description="Stop the current child process and start a fresh Devo stdio server"
 				>
-					<Button size="sm" variant="outline" onClick={restart} disabled={restarting}>
+					<Button size="sm" variant="outline" onClick={restart} disabled={restarting || (networkProxy.mode === "custom" && !customProxyUrl)}>
 						<RefreshCwIcon
 							aria-hidden="true"
 							className={`size-3.5 ${restarting ? "animate-spin" : ""}`}
@@ -186,6 +190,7 @@ export function ServerSettings({ initialNativeTrafficLogState = null }: ServerSe
 					</Button>
 				</SettingsRow>
 			</SettingsSection>
+			{restartError && <p role="alert" className="text-sm text-destructive">{restartError}</p>}
 
 			<NativeTrafficLogStatus state={nativeTrafficLogState} />
 		</div>

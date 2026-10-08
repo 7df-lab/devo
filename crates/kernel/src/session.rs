@@ -962,11 +962,11 @@ impl KernelSession {
         match graceful {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                self.force_terminate_child().await;
+                self.terminate().await;
                 return Err(error);
             }
             Err(_) => {
-                self.force_terminate_child().await;
+                self.terminate().await;
                 return Err(ReplError::Other(
                     "kernel graceful shutdown timed out".into(),
                 ));
@@ -980,11 +980,11 @@ impl KernelSession {
         {
             Ok(Ok(_status)) => Ok(()),
             Ok(Err(error)) => {
-                self.force_terminate_child().await;
+                self.terminate().await;
                 Err(ReplError::Io(error))
             }
             Err(_) => {
-                self.force_terminate_child().await;
+                self.terminate().await;
                 Err(ReplError::Other(
                     "kernel did not exit after graceful shutdown".into(),
                 ))
@@ -992,7 +992,9 @@ impl KernelSession {
         }
     }
 
-    async fn force_terminate_child(&self) {
+    /// Immediately stop and reap the kernel child when its session is permanently deleted.
+    /// This discards the REPL namespace and does not wait for running Python code.
+    pub async fn terminate(&self) {
         let mut child = self.child.lock().await;
         if child.try_wait().ok().flatten().is_none() {
             let _ = child.start_kill();
@@ -1052,11 +1054,29 @@ pub(crate) fn kernel_env_overrides(config: &KernelSessionConfig) -> Vec<(String,
 }
 
 async fn read_ready(stdout: &mut BufReader<ChildStdout>) -> Result<ReadyEvent, ReplError> {
-    match read_line_event(stdout).await? {
-        KernelEvent::Ready { protocol, python } => Ok(ReadyEvent { protocol, python }),
-        other => Err(ReplError::Handshake(format!(
-            "expected ready, got {other:?}"
-        ))),
+    let mut startup_stderr = String::new();
+    loop {
+        match read_line_event(stdout).await {
+            Ok(KernelEvent::Ready { protocol, python }) => {
+                return Ok(ReadyEvent { protocol, python });
+            }
+            Ok(KernelEvent::Stderr { text, .. }) => {
+                // Python redirects startup diagnostics onto the protocol stream.
+                // Read the complete traceback instead of losing it at the first line.
+                startup_stderr.extend(text.chars().take(16_384 - startup_stderr.len().min(16_384)));
+            }
+            Ok(other) => {
+                return Err(ReplError::Handshake(format!(
+                    "expected ready, got {other:?}"
+                )));
+            }
+            Err(error) if !startup_stderr.is_empty() => {
+                return Err(ReplError::Handshake(format!(
+                    "{error}; startup stderr: {startup_stderr}"
+                )));
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -1221,6 +1241,45 @@ mod tests {
         assert_eq!(session.ready().protocol, PROTOCOL_VERSION);
         // Drop the session; kill_on_drop terminates the child.
         drop(session);
+    }
+
+    #[tokio::test]
+    async fn terminating_a_deleted_kernel_stops_a_running_python_cell() {
+        let Some(mut config) = live_config() else {
+            eprintln!("skip: kernel runtime not found");
+            return;
+        };
+        let directory = tempfile::tempdir().unwrap();
+        config.cwd = directory.path().to_path_buf();
+        let session = match KernelSession::spawn(config).await {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("skip: could not spawn kernel: {error}");
+                return;
+            }
+        };
+        let executing = Arc::clone(&session);
+        let task = tokio::spawn(async move {
+            executing.execute("import asyncio\nfrom pathlib import Path\nPath('started.txt').write_text('started')\nawait asyncio.sleep(300)").await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !directory.path().join("started.txt").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Python cell must start before termination");
+        tokio::time::timeout(Duration::from_secs(2), session.terminate())
+            .await
+            .expect("termination must not wait for the cell");
+        assert!(session.child.lock().await.try_wait().unwrap().is_some());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1770,3 +1829,7 @@ for line in sys.stdin:
         assert!(done.stdout.contains("late"), "stdout={:?}", done.stdout);
     }
 }
+
+#[cfg(test)]
+#[path = "session/startup_tests.rs"]
+mod startup_tests;

@@ -3,14 +3,6 @@
  * Transcript rows use Native ItemEnvelope fields and shared disclosure styling.
  */
 import {
-	CodeBlock,
-	CodeBlockActions,
-	CodeBlockContent,
-	CodeBlockCopyButton,
-	CodeBlockHeader,
-	CodeBlockTitle,
-} from "@devo/ui/components/ai-elements/code-block"
-import {
 	Message,
 	MessageContent,
 	MessageResponse,
@@ -21,21 +13,16 @@ import {
 	nativeItemType,
 	userMessageText,
 } from "@devo-ai/sdk/v2/client"
-import { BotIcon, ChevronDownIcon, ChevronRightIcon, CopyIcon, SplitIcon } from "lucide-react"
+import { CopyIcon, SplitIcon } from "lucide-react"
 import { memo, useCallback, useMemo, useState } from "react"
 import type { ChatMessageEntry, ChatTurn as ChatTurnType } from "../../hooks/use-session-chat"
 import type { ProviderErrorEntry, ProviderRetryStatus } from "../../atoms/sessions"
 import type { Agent } from "../../lib/types"
-import { formatNativeToolTitle } from "../../lib/tool-name"
-import { formatNativeToolDetails, getNativePythonToolCode } from "../../lib/tool-details"
 import { itemDisplayText } from "../../atoms/derived/session-chat"
 import { UserMessageBlock } from "./user-message-block"
 import { ProviderErrorRow } from "./provider-error-row"
-import {
-	TranscriptDisclosure,
-	TranscriptDisclosureContent,
-	TranscriptDisclosureTrigger,
-} from "./transcript-disclosure"
+import { TurnActivity } from "./turn-activity"
+import { groupTurnSegments } from "./turn-activity-model"
 
 export function isSyntheticMessage(entry: ChatMessageEntry): boolean {
 	const type = nativeItemType(entry.info)
@@ -63,86 +50,6 @@ function NativeItemRow({ entry, streaming }: { entry: ChatMessageEntry; streamin
 	const text = itemDisplayText(entry.info)
 	const state = entry.info.state
 
-	if (type === "reasoning") {
-		return (
-			<TranscriptDisclosure>
-				<TranscriptDisclosureTrigger label="Thinking" />
-				<TranscriptDisclosureContent rail>
-					<MessageResponse
-						streaming={streaming}
-						className="devo-reasoning-response"
-					>
-						{text}
-					</MessageResponse>
-				</TranscriptDisclosureContent>
-			</TranscriptDisclosure>
-		)
-	}
-
-	if (
-		type === "toolCall" ||
-		type === "toolResult" ||
-		type === "commandExecution" ||
-		type === "fileChange" ||
-		type === "hostedToolCall"
-	) {
-		const title = formatNativeToolTitle(String(entry.info.item.toolName ?? entry.info.item.command ?? type))
-		const pythonCode = getNativePythonToolCode(entry.info.item)
-		const details = formatNativeToolDetails(entry.info.item)
-		const statusLabel =
-			state === "completed"
-				? "Done"
-				: state === "running"
-					? "Running"
-					: state === "waiting"
-						? "Waiting"
-						: state === "failed"
-							? "Failed"
-							: state === "interrupted"
-								? "Interrupted"
-								: state === "lost"
-									? "Lost"
-									: state
-		return (
-			<TranscriptDisclosure>
-				<TranscriptDisclosureTrigger
-					label={title}
-					trailing={
-						statusLabel ? (
-							<span
-								className={
-									state === "failed" || state === "lost"
-										? "text-[11px] font-medium text-destructive"
-										: "text-[11px] text-muted-foreground/70"
-								}
-							>
-								{statusLabel}
-							</span>
-						) : null
-					}
-					aria-label={`${title}${statusLabel ? ` · ${statusLabel}` : ""}: expand to view details`}
-				/>
-				<TranscriptDisclosureContent rail>
-					{pythonCode !== undefined ? (
-						<CodeBlock code={pythonCode} language="python" className="devo-python-tool-code-block max-h-48">
-							<CodeBlockHeader>
-								<CodeBlockTitle>Python</CodeBlockTitle>
-								<CodeBlockActions>
-									<CodeBlockCopyButton aria-label="Copy Python tool input" title="Copy code" />
-								</CodeBlockActions>
-							</CodeBlockHeader>
-							<CodeBlockContent code={pythonCode} language="python" />
-						</CodeBlock>
-					) : (
-						<pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-foreground">
-							{details}
-						</pre>
-					)}
-				</TranscriptDisclosureContent>
-			</TranscriptDisclosure>
-		)
-	}
-
 	if (type === "contextCompaction") {
 		return (
 			<div className="text-center text-[11px] text-muted-foreground">
@@ -155,6 +62,14 @@ function NativeItemRow({ entry, streaming }: { entry: ChatMessageEntry; streamin
 		return (
 			<div className="rounded border border-border/50 px-3 py-2 text-sm whitespace-pre-wrap">
 				{text || "Plan"}
+			</div>
+		)
+	}
+
+	if (type === "warning") {
+		return (
+			<div role="status" className="border-l-2 border-border pl-3 text-sm text-muted-foreground whitespace-pre-wrap">
+				{text}
 			</div>
 		)
 	}
@@ -206,7 +121,8 @@ export const ChatTurnComponent = memo(
 		onEditUserMessage,
 	}: ChatTurnProps) {
 		const [copied, setCopied] = useState(false)
-		const [expanded, setExpanded] = useState(true)
+		const segments = useMemo(() => groupTurnSegments(turn.assistantMessages), [turn.assistantMessages])
+		const lastSegment = segments.at(-1)
 		const isSynthetic = useMemo(() => isSyntheticMessage(turn.userMessage), [turn.userMessage])
 		const userText = useMemo(() => getUserText(turn.userMessage), [turn.userMessage])
 
@@ -248,36 +164,27 @@ export const ChatTurnComponent = memo(
 					</div>
 				)}
 
-				{turn.assistantMessages.length > 0 && (
-					<div className="flex flex-col gap-2">
-						<button
-							type="button"
-							className="flex items-center gap-1 self-start text-[11px] text-muted-foreground"
-							onClick={() => setExpanded((v) => !v)}
-						>
-							{expanded ? (
-								<ChevronDownIcon className="size-3.5 stroke-[1.5]" />
-							) : (
-								<ChevronRightIcon className="size-3.5 stroke-[1.5]" />
-							)}
-							<BotIcon className="size-3.5 stroke-[1.5]" />
-							<span>
-								{turn.assistantMessages.length} item
-								{turn.assistantMessages.length === 1 ? "" : "s"}
-								{isWorking && isLast ? " · working" : ""}
-							</span>
-						</button>
-						{expanded &&
-							turn.assistantMessages.map((entry) => (
-								<NativeItemRow
-									key={entry.info.id}
-									entry={entry}
-									streaming={isWorking && isLast && entry.info.state === "running"}
-								/>
-							))}
-					</div>
-				)}
-
+				<div className="flex flex-col gap-3">
+					{segments.map((segment) =>
+						segment.kind === "activity" ? (
+							<TurnActivity
+								key={segment.id}
+								entries={segment.entries}
+								working={isWorking && isLast}
+							/>
+						) : (
+							<NativeItemRow
+								key={segment.id}
+								entry={segment.entry}
+								streaming={isWorking && isLast && segment.entry.info.state === "running"}
+							/>
+						),
+					)}
+					{isWorking && isLast && !segments.some((segment) => segment.kind === "activity") &&
+						(lastSegment?.kind !== "message" || lastSegment.entry.info.state !== "running") && (
+							<TurnActivity entries={[]} working />
+						)}
+				</div>
 				{providerErrors.map((row) => (
 					<ProviderErrorRow key={row.id} entry={row} />
 				))}

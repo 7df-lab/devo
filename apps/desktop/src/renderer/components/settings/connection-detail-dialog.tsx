@@ -47,9 +47,11 @@ export function ConnectionDetailDialog({
 	const [discovering, setDiscovering] = useState(false)
 	const [removingModel, setRemovingModel] = useState<string | null>(null)
 	const [addingModel, setAddingModel] = useState(false)
+	const [error, setError] = useState<string | null>(null)
+	const catalogRefresh = provider.id === "openai-codex"
 
 	const models = useMemo(() => {
-		const entries = Object.entries(connectionModels)
+		const entries = Object.entries({ ...provider.models, ...connectionModels })
 		if (!search.trim()) return entries
 		const lower = search.toLowerCase()
 		return entries.filter(
@@ -57,18 +59,18 @@ export function ConnectionDetailDialog({
 				id.toLowerCase().includes(lower) ||
 				(m.name ?? "").toLowerCase().includes(lower),
 		)
-	}, [connectionModels, search])
+	}, [provider.models, connectionModels, search])
 
 	const handleDiscover = useCallback(async () => {
 		setDiscovering(true)
+		setError(null)
 		try {
 			const client = getBaseClient()
-			if (!client) return
-			await client.provider.discover({
-				providerId: provider.id,
-				forceRefresh: true,
-			})
+			if (!client) throw new Error("Not connected to server")
+			await client.provider.discover({ providerId: provider.id, forceRefresh: true })
 			onChanged()
+		} catch (error) {
+			setError(error instanceof Error ? error.message : "Failed to discover models")
 		} finally {
 			setDiscovering(false)
 		}
@@ -77,14 +79,17 @@ export function ConnectionDetailDialog({
 	const handleRemoveModel = useCallback(
 		async (modelId: string) => {
 			setRemovingModel(modelId)
+			setError(null)
 			try {
 				const client = getBaseClient()
-				if (!client) return
+				if (!client) throw new Error("Not connected to server")
 				await client.provider.modelRemove({
 					providerId: provider.id,
 					modelId,
 				})
 				onChanged()
+			} catch (error) {
+				setError(error instanceof Error ? error.message : "Failed to remove model")
 			} finally {
 				setRemovingModel(null)
 			}
@@ -103,8 +108,8 @@ export function ConnectionDetailDialog({
 						<Badge variant="secondary">Connected</Badge>
 					</div>
 					<DialogDescription>
-						{Object.keys(connectionModels).length} model
-						{Object.keys(connectionModels).length !== 1 ? "s" : ""} in this Connection.
+						{Object.keys({ ...provider.models, ...connectionModels }).length} model
+						{Object.keys({ ...provider.models, ...connectionModels }).length !== 1 ? "s" : ""} available.
 						{provider.baseUrl ? ` Endpoint: ${provider.baseUrl}` : ""}
 					</DialogDescription>
 				</DialogHeader>
@@ -127,7 +132,7 @@ export function ConnectionDetailDialog({
 						disabled={discovering}
 					>
 						{discovering ? <Spinner className="size-3.5" /> : <RefreshCwIcon className="size-3.5 stroke-[1.5]" />}
-						Discover
+						{catalogRefresh ? "Refresh catalog" : "Discover"}
 					</Button>
 					<Button
 						variant="outline"
@@ -138,12 +143,13 @@ export function ConnectionDetailDialog({
 						Add
 					</Button>
 				</div>
+				{error && <p role="alert" className="text-sm text-destructive">{error}</p>}
 
 				{/* Model list */}
 				<div className="divide-y divide-border/40 overflow-hidden rounded-xl border border-border/50">
 					{models.length === 0 ? (
 						<div className="px-4 py-6 text-center text-xs text-muted-foreground">
-							{search.trim() ? `No models match "${search}"` : "No models in this Connection."}
+							{search.trim() ? `No models match "${search}"` : "No models available. Discover or add a model."}
 						</div>
 					) : (
 						models.map(([modelId, model]) => {
@@ -163,10 +169,11 @@ export function ConnectionDetailDialog({
 										{contextLabel}
 									</span>
 								)}
-								<Button
+								{connectionModels[modelId] && <Button
 									variant="ghost"
 									size="sm"
 									className="text-muted-foreground hover:text-destructive"
+									aria-label={`Remove saved model ${model.name ?? modelId}`}
 									onClick={() => handleRemoveModel(modelId)}
 									disabled={removingModel === modelId}
 								>
@@ -175,7 +182,7 @@ export function ConnectionDetailDialog({
 									) : (
 										<Trash2Icon className="size-3.5 stroke-[1.5]" />
 									)}
-								</Button>
+								</Button>}
 							</div>
 							)
 						})

@@ -109,7 +109,13 @@ export const isTransparentAtom = atom((get) => {
 	return !opaque && (tier === "liquid-glass" || tier === "vibrancy" || tier === "transparent")
 })
 
-export const draftsAtom = atomWithStorage<Record<string, string>>("devo:drafts", {})
+// The composer reads a snapshot without subscribing, so hydrate before its first read.
+export const draftsAtom = atomWithStorage<Record<string, string>>(
+	"devo:drafts",
+	{},
+	undefined,
+	{ getOnInit: true },
+)
 
 export const projectModelsAtom = atomWithStorage<Record<string, PersistedModelRef>>(
 	"devo:projectModels",

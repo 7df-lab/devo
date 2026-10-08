@@ -6,7 +6,7 @@
  * Devo servers without any upstream code changes.
  */
 
-import type { DevoClient, Worktree } from "@devo-ai/sdk/v2/client"
+import type { Worktree } from "@devo-ai/sdk/v2/client"
 import { createLogger } from "../lib/logger"
 import { isElectron } from "./backend"
 import { getProjectClient } from "./connection-manager"
@@ -128,30 +128,13 @@ export function randomWorktreeName(): string {
 // ============================================================
 
 /**
- * Builds a shell command that copies .env files from the main worktree to the
- * new worktree directory. Used as the `startCommand` parameter for the API.
- *
- * The command is safe to run on servers where the files don't exist (uses || true).
- */
-function buildEnvSyncCommand(sourceDir: string, worktreeDir: string): string {
-	// Use a bash snippet that copies .env* files excluding .example/.sample
-	return [
-		`for f in "${sourceDir}"/.env*; do`,
-		`  [ -f "$f" ] || continue`,
-		`  case "$f" in *.example|*.sample) continue;; esac`,
-		`  cp "$f" "${worktreeDir}/" 2>/dev/null`,
-		"done",
-	].join(" ")
-}
-
-/**
  * Computes the monorepo workspace subpath.
  * If sourceDir is /repo/packages/app and the worktree root is at /worktree/,
  * returns "packages/app". Returns "" if sourceDir IS the repo root.
  */
 function computeSubPath(repoRoot: string, sourceDir: string): string {
-	const normalizedRoot = repoRoot.replace(/\/+$/, "")
-	const normalizedSource = sourceDir.replace(/\/+$/, "")
+	const normalizedRoot = repoRoot.replace(/\\/g, "/").replace(/\/+$/, "")
+	const normalizedSource = sourceDir.replace(/\\/g, "/").replace(/\/+$/, "")
 
 	if (normalizedSource === normalizedRoot) return ""
 
@@ -160,36 +143,6 @@ function computeSubPath(repoRoot: string, sourceDir: string): string {
 	}
 
 	return ""
-}
-
-/**
- * Wait for a worktree.ready event by polling the project's sandbox list.
- * Checks if the directory appears in the list, meaning the worktree has been
- * fully bootstrapped.
- */
-async function waitForWorktreeReady(
-	client: DevoClient,
-	directory: string,
-	timeoutMs = 60_000,
-): Promise<void> {
-	const start = Date.now()
-	const pollIntervalMs = 500
-
-	while (Date.now() - start < timeoutMs) {
-		try {
-			const result = await client.worktree.list()
-			const sandboxes = (result.data ?? []) as string[]
-			if (sandboxes.includes(directory)) {
-				log.debug("Worktree ready (found in sandbox list)", { directory })
-				return
-			}
-		} catch {
-			// Ignore poll errors, keep trying
-		}
-		await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
-	}
-
-	log.warn("Worktree readiness check timed out, proceeding anyway", { directory, timeoutMs })
 }
 
 // ============================================================
@@ -217,7 +170,6 @@ export async function createWorktree(
 		const result = await client.worktree.create({
 			worktreeCreateInput: {
 				name: sessionSlug,
-				startCommand: buildEnvSyncCommand(sourceDir, "$PWD"),
 			},
 		})
 
@@ -232,11 +184,9 @@ export async function createWorktree(
 			directory: data.directory,
 		})
 
-		// Wait for the worktree to be fully bootstrapped
-		await waitForWorktreeReady(client, data.directory)
-
 		// Compute the workspace subpath for monorepo support
-		const subPath = computeSubPath(projectDir, sourceDir)
+		const repoRoot = isElectron ? await window.devo.git.getRoot(sourceDir) ?? projectDir : projectDir
+		const subPath = computeSubPath(repoRoot, sourceDir)
 		const worktreeWorkspace = subPath ? `${data.directory}/${subPath}` : data.directory
 
 		return {
@@ -258,15 +208,14 @@ export async function createWorktree(
 export async function listWorktrees(projectDir: string): Promise<string[]> {
 	const client = getProjectClient(projectDir)
 	if (!client) {
-		return []
+		throw new Error("Not connected to server")
 	}
 
 	try {
 		const result = await client.worktree.list()
 		return (result.data ?? []) as string[]
-	} catch {
-		log.debug("Worktree list API not available")
-		return []
+	} catch (error) {
+		throw new Error(`Failed to list worktrees: ${error instanceof Error ? error.message : "Unknown error"}`)
 	}
 }
 
