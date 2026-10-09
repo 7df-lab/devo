@@ -22,7 +22,6 @@ import {
 	PlusIcon,
 	RefreshCwIcon,
 } from "lucide-react"
-import { useNavigate } from "@tanstack/react-router"
 import { useCallback, useMemo, useState } from "react"
 import { useProviderCatalog } from "../../hooks/use-devo-data"
 import { invalidateProviderDependentQueries } from "../../lib/invalidate-provider-queries"
@@ -44,7 +43,6 @@ import { ConnectionDetailDialog } from "./connection-detail-dialog"
 
 export function ProviderSettings() {
 	const { data: catalog, loading, error, reload } = useProviderCatalog()
-	const navigate = useNavigate()
 
 	// Dialog state
 	const [connectTemplate, setConnectTemplate] = useState<CatalogProviderInfo | null>(null)
@@ -52,6 +50,7 @@ export function ProviderSettings() {
 	const [connectionDetail, setConnectionDetail] = useState<CatalogProviderInfo | null>(null)
 	const [disconnectTarget, setDisconnectTarget] = useState<CatalogProviderInfo | null>(null)
 	const [disconnecting, setDisconnecting] = useState(false)
+	const [disconnectError, setDisconnectError] = useState<string | null>(null)
 	const [showAllTemplates, setShowAllTemplates] = useState(false)
 
 	// Split providers into connected vs templates
@@ -82,14 +81,17 @@ export function ProviderSettings() {
 	const handleDisconnect = useCallback(async () => {
 		if (!disconnectTarget) return
 		setDisconnecting(true)
+		setDisconnectError(null)
 		try {
 			const client = getBaseClient()
-			if (!client) return
+			if (!client) throw new Error("Not connected to server")
 			await client.provider.disconnect({ providerId: disconnectTarget.id })
 			invalidateProviderDependentQueries()
+			setDisconnectTarget(null)
+		} catch (error) {
+			setDisconnectError(error instanceof Error ? error.message : "Failed to remove provider")
 		} finally {
 			setDisconnecting(false)
-			setDisconnectTarget(null)
 		}
 	}, [disconnectTarget])
 
@@ -98,11 +100,11 @@ export function ProviderSettings() {
 		reload()
 	}, [reload])
 
-	/** After connecting a new provider, take the user to Models to review/enable them. */
+	/** Refresh the shared catalog after connecting without leaving Settings. */
 	const handleConnected = useCallback(() => {
 		handleSaved()
-		void navigate({ to: "/settings/models" })
-	}, [handleSaved, navigate])
+
+	}, [handleSaved])
 
 	if (loading) {
 		return <ProviderSettingsLoading />
@@ -139,9 +141,9 @@ export function ProviderSettings() {
 						<ConnectedProviderRow
 							key={provider.id}
 							provider={provider}
-							modelCount={Object.keys(catalog?.connectionModels[provider.id] ?? provider.models ?? {}).length}
+							modelCount={Object.keys(provider.models ?? {}).length}
 							onOpen={() => setConnectionDetail(provider)}
-							onDisconnect={() => setDisconnectTarget(provider)}
+							onDisconnect={() => { setDisconnectError(null); setDisconnectTarget(provider) }}
 						/>
 					))
 				)}
@@ -168,6 +170,7 @@ export function ProviderSettings() {
 						<TemplateProviderRow
 							key={provider.id}
 							provider={provider}
+							connected={catalog?.connectedIds.has(provider.id) ?? false}
 							onConnect={() => {
 								if (catalog?.connectedIds.has(provider.id)) {
 									setConnectionDetail(provider)
@@ -223,10 +226,7 @@ export function ProviderSettings() {
 
 			{connectionDetail && catalog && (
 				<ConnectionDetailDialog
-					provider={{
-						...connectionDetail,
-						models: catalog.connectionModels[connectionDetail.id] ?? {},
-					}}
+					provider={catalog.providers.find((provider) => provider.id === connectionDetail.id) ?? connectionDetail}
 					connectionModels={catalog.connectionModels[connectionDetail.id] ?? {}}
 					open={!!connectionDetail}
 					onOpenChange={(open) => { if (!open) setConnectionDetail(null) }}
@@ -244,8 +244,9 @@ export function ProviderSettings() {
 						<DialogDescription className="text-sm leading-5">
 							Removes this connection and its credential. The built-in template stays available to reconnect.
 						</DialogDescription>
-					</DialogHeader>
-					<DialogFooter className="gap-2 sm:justify-end">
+						</DialogHeader>
+						{disconnectError && <p role="alert" className="text-sm text-destructive">{disconnectError}</p>}
+						<DialogFooter className="gap-2 sm:justify-end">
 						<Button variant="outline" size="sm" onClick={() => setDisconnectTarget(null)}>
 							Cancel
 						</Button>
@@ -266,7 +267,7 @@ export function ProviderSettings() {
 function ProviderSettingsPageHeader({ onAddCustom }: { onAddCustom: () => void }) {
 	return (
 		<SettingsHeader
-			title="Providers"
+			title="Connections"
 			description="Connect AI providers and manage their credentials."
 			action={
 				<Button variant="secondary" size="sm" onClick={onAddCustom}>
@@ -337,9 +338,11 @@ function ConnectedProviderRow({
 
 function TemplateProviderRow({
 	provider,
+	connected,
 	onConnect,
 }: {
 	provider: CatalogProviderInfo
+	connected: boolean
 	onConnect: () => void
 }) {
 	const modelCount = Object.keys(provider.models ?? {}).length
@@ -353,8 +356,8 @@ function TemplateProviderRow({
 				</p>
 			</div>
 			<Button variant="outline" size="sm" onClick={onConnect}>
-				<PlusIcon className="size-3.5 stroke-[1.5]" />
-				Connect
+				{!connected && <PlusIcon className="size-3.5 stroke-[1.5]" />}
+				{connected ? "Manage" : "Connect"}
 			</Button>
 		</div>
 	)

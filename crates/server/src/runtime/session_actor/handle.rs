@@ -865,17 +865,32 @@ impl SessionHandle {
         reply_rx.await.ok()
     }
 
-    pub(crate) async fn shutdown(&self) {
+    async fn shutdown_actor(&self) -> Option<Arc<devo_kernel::KernelSession>> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let kernel = if self
+        if self
             .send(SessionCommand::Shutdown { reply: reply_tx })
             .await
         {
             reply_rx.await.ok().flatten()
         } else {
             None
-        };
-        if let Some(kernel) = kernel
+        }
+    }
+
+    /// Permanently discard a deleted session without waiting for its Python cell.
+    pub(crate) async fn shutdown_for_delete(&self) {
+        if let Some(kernel) = self.shutdown_actor().await
+            && tokio::time::timeout(std::time::Duration::from_millis(500), kernel.shutdown())
+                .await
+                .is_err()
+        {
+            kernel.terminate().await;
+        }
+        let _ = crate::runtime::kernel_host::take_bash_notices(self.session_id.as_str());
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        if let Some(kernel) = self.shutdown_actor().await
             && let Err(error) = kernel.shutdown().await
         {
             tracing::warn!(

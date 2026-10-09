@@ -11,6 +11,56 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
+  windows-kernel:
+    name: Windows kernel (Python ${{ matrix.python }})
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install dill==0.4.1
+      - run: python -m unittest discover -s crates/kernel/rlm-runtime/tests -v
+        env:
+          PYTHONPATH: crates/kernel/rlm-runtime/src
+
+  windows-check:
+    name: Windows Rust check and Clippy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - run: cargo test -p devo-windows-sandbox --bin devo-command-runner
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+      - run: bun test apps/desktop/scripts/dev-runtime.test.ts
+
+  desktop:
+    name: Desktop tests and types
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+      - run: bunx tsc --noEmit
+
   check:
     name: Check
     runs-on: ubuntu-latest

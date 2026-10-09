@@ -1693,7 +1693,6 @@ mod tests {
         for path in [
             &documents,
             &app_data,
-            &ssh_child,
             &tsh_child,
             &ssh_dir,
             &key_dir,
@@ -1789,6 +1788,7 @@ mod tests {
             &PermissionProfile::read_only(),
             workspace_roots_for(command_cwd.as_path()).as_slice(),
         );
+        fs::create_dir_all(helper_bin_dir(&devo_home)).expect("create helper dir");
         let helper = dunce::canonicalize(helper_bin_dir(&devo_home)).expect("canonical helper dir");
         assert!(
             gather_read_roots(&command_cwd, &read_only, &HashMap::new(), &devo_home)

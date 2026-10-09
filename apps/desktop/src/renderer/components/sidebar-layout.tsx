@@ -14,7 +14,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@devo/ui/components/too
 import { cn } from "@devo/ui/lib/utils"
 import { Outlet, useNavigate, useParams, useRouterState } from "@tanstack/react-router"
 import { useAtom, useAtomValue, useSetAtom } from "jotai"
-import { type MouseEvent, useCallback, useEffect, useRef, useState } from "react"
+import { type MouseEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import type { DesktopFolder, DesktopFolderStatus } from "../../preload/api"
 import {
@@ -225,14 +225,17 @@ export function SidebarLayout() {
 	useAppRoutePersistence()
 
 	const isSettingsOpen = isSettingsRoute(pathname)
-	if (settingsOverlayOpen !== isSettingsOpen) {
-		setSettingsOverlayOpen(isSettingsOpen)
-	}
+	// Shared atoms notify other mounted chats. Synchronize after commit,
+	// before paint, so navigation never updates another component in render.
+	useLayoutEffect(() => {
+		if (settingsOverlayOpen !== isSettingsOpen) setSettingsOverlayOpen(isSettingsOpen)
+	}, [isSettingsOpen, settingsOverlayOpen, setSettingsOverlayOpen])
 	const previousPathnameRef = useRef(pathname)
-	if (previousPathnameRef.current !== pathname) {
+	useLayoutEffect(() => {
+		if (previousPathnameRef.current === pathname) return
 		previousPathnameRef.current = pathname
 		if (customizeOpen) setCustomizeOpen(false)
-	}
+	}, [pathname, customizeOpen, setCustomizeOpen])
 
 	// ---- Sidebar-specific data ----
 	const agents = useAgents()

@@ -109,7 +109,10 @@ impl ServerRuntime {
         };
         let task_count = self
             .command_exec_manager
-            .terminate_session(connection_id, session_id)
+            .terminate_session(
+                session_id,
+                crate::runtime::command_exec::SessionCommandOwner::Connection(connection_id),
+            )
             .await;
         Ok(interrupted_turn || task_count > 0)
     }

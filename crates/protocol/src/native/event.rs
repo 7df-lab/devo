@@ -636,9 +636,21 @@ pub enum ControlRequestKind {
     GoalCompletion,
 }
 
+/// Native subscription bootstrap policy. Snapshot-only clients page durable
+/// history separately; defaults preserve cursor replay for existing clients.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum SubscriptionReplay {
+    #[default]
+    FromCursor,
+    SnapshotOnly,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscriptionCreateParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<SubscriptionReplay>,
     pub selectors: Vec<StreamSelector>,
     pub include_snapshot: bool,
     /// Positions from the client's last acks when resubscribing.

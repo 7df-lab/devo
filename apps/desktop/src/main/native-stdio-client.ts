@@ -33,19 +33,24 @@ type PendingRequest = {
 }
 
 const REQUEST_TIMEOUT_MS = 10_000
-/** Cold-starting the managed `devo server` process can exceed the default RPC budget. */
+/** Cold startup and session restore can exceed the default RPC budget on Windows. */
 export const INITIALIZE_REQUEST_TIMEOUT_MS = 60_000
 /** MCP admin RPCs may start a lazy server before listing tools. */
 export const MCP_ADMIN_REQUEST_TIMEOUT_MS = 60_000
 /** Git-backed workspace diffs can exceed the default 10s budget on large trees. */
 export const WORKSPACE_CHANGES_REQUEST_TIMEOUT_MS = 60_000
+/** Remote catalog refresh (30s HTTP budget) and discovery must finish before IPC expires. */
+export const MODEL_CATALOG_REQUEST_TIMEOUT_MS = 60_000
 
 export function requestTimeoutMsForMethod(method: string, fallbackMs: number): number | undefined {
-	if (method === "initialize") {
+	if (method === "initialize" || method === "session/new" || method === "session/resume") {
 		return Math.max(fallbackMs, INITIALIZE_REQUEST_TIMEOUT_MS)
 	}
 	if (method === "provider/validate") {
 		return undefined
+	}
+	if (method === "model/catalog/refresh" || method === "provider/discover") {
+		return Math.max(fallbackMs, MODEL_CATALOG_REQUEST_TIMEOUT_MS)
 	}
 	if (method === "mcp/tools" || method === "mcp/set_enabled") {
 		return Math.max(fallbackMs, MCP_ADMIN_REQUEST_TIMEOUT_MS)
@@ -53,6 +58,7 @@ export function requestTimeoutMsForMethod(method: string, fallbackMs: number): n
 	if (method === "workspace/changes/read") {
 		return Math.max(fallbackMs, WORKSPACE_CHANGES_REQUEST_TIMEOUT_MS)
 	}
+	if (method.startsWith("workspace/worktree/")) return Math.max(fallbackMs, 90_000)
 	return fallbackMs
 }
 

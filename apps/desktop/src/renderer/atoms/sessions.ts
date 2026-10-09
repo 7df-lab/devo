@@ -249,6 +249,7 @@ export const setSessionErrorAtom = atom(
 		set,
 		args: {
 			sessionId: string
+			turnId?: string
 			error: SessionError | undefined
 		},
 	) => {
@@ -263,12 +264,13 @@ export const setSessionErrorAtom = atom(
 				? args.error.data.message.trim()
 				: `${args.error.name}: ${JSON.stringify(args.error.data)}`
 		const turnId =
+			args.turnId ||
 			entry.retryStatus?.turnId ||
 			[...(entry.providerErrors ?? [])].reverse().find((item) => item.turnId)?.turnId ||
 			""
 		const id = `failed-${turnId || "session"}-${args.error.name}-${message.slice(0, 48)}`
 		const nextErrors = [...(entry.providerErrors ?? [])]
-		if (!nextErrors.some((item) => item.message === message && item.phase === "failed")) {
+		if (!nextErrors.some((item) => item.turnId === turnId && item.message === message && item.phase === "failed")) {
 			nextErrors.push({
 				id,
 				turnId,

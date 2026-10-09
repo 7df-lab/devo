@@ -1,17 +1,12 @@
 import { useAtomValue } from "jotai"
 import { useEffect } from "react"
 import { activeServerConfigAtom, serverConnectedAtom } from "../atoms/connection"
-import { desktopFolderStatusByDirectoryAtom, desktopFoldersAtom } from "../atoms/desktop-folders"
 import { discoveryAtom } from "../atoms/discovery"
 import { isMockModeAtom } from "../atoms/mock-mode"
 import { appStore } from "../atoms/store"
 import { createLogger } from "../lib/logger"
 import { resolveAuthHeader, resolveServerUrl } from "../services/backend"
-import {
-	connectToDevo,
-	loadAllProjects,
-	loadProjectSessions,
-} from "../services/connection-manager"
+import { connectToDevo, loadAllProjects } from "../services/connection-manager"
 
 const log = createLogger("discovery")
 
@@ -39,10 +34,8 @@ function setPhase(phase: import("../atoms/discovery").DiscoveryPhase): void {
  * 2. Resolves auth credentials if the server requires them
  * 3. Connects to the Devo server (Native events for all projects)
  * 4. Lists all projects from the API via `client.project.list()`
- * 5. Loads sessions for the top few most-recently-active projects
- *    (enough to populate "Recent" and "Active Now" sections)
  *
- * Remaining project sessions are loaded lazily when expanded in the sidebar.
+ * Project sessions are loaded lazily when expanded in the sidebar.
  * Active sessions also arrive in real-time via Native events.
  */
 export function useDiscovery() {
@@ -121,54 +114,14 @@ export function useDiscovery() {
 					projects,
 				})
 
-				// --- Step 5: Pre-fetch sessions for every known project ---
-				const desktopFolders = appStore.get(desktopFoldersAtom)
-				const folderStatuses = appStore.get(desktopFolderStatusByDirectoryAtom)
-				const storedAvailableFolders = desktopFolders.filter(
-					(folder) => (folderStatuses[folder.directory] ?? "available") === "available",
-				)
-
-				const prefetchDirectories = new Map<string, Set<string> | undefined>()
-				const projectSandboxMap = new Map<string, Set<string>>()
-				for (const project of projects) {
-					if (!project.worktree || !project.sandboxes?.length) continue
-					const sandboxSet = new Set<string>()
-					for (const s of project.sandboxes) sandboxSet.add(s)
-					projectSandboxMap.set(project.worktree, sandboxSet)
-				}
-
-				for (const folder of storedAvailableFolders) {
-					prefetchDirectories.set(
-						folder.directory,
-						projectSandboxMap.get(folder.directory),
-					)
-				}
-				for (const project of projects) {
-					if (!project.worktree) continue
-					if (prefetchDirectories.has(project.worktree)) continue
-					prefetchDirectories.set(
-						project.worktree,
-						projectSandboxMap.get(project.worktree),
-					)
-				}
-
-				if (prefetchDirectories.size > 0) {
-					await Promise.allSettled(
-						[...prefetchDirectories.entries()].map(([directory, sandboxDirs]) =>
-							loadProjectSessions(
-								directory,
-								sandboxDirs?.size ? sandboxDirs : undefined,
-								{ limit: 5, roots: true },
-							),
-						),
-					)
-				}
+				// Expanded sidebar sections request their first page themselves.
+				// Prefetching every stored/collapsed folder creates a startup RPC
+				// burst and delays the chat the user actually wants to open.
 
 				log.info("Discovery complete", {
 					server: activeServer.name,
 					url,
 					projects: projects.length,
-					prefetched: prefetchDirectories.size,
 				})
 			} catch (err) {
 				log.error("Discovery failed", err)

@@ -117,7 +117,7 @@ impl ServerRuntime {
             );
         }
 
-        let api_key = match provider_api_key(&provider, &user_config_dir) {
+        let api_key = match provider_api_key(&mut provider, &user_config_dir).await {
             Ok(api_key) => api_key,
             Err(error) => {
                 return self.error_response(
@@ -214,27 +214,62 @@ fn canonical_provider(
     mut provider: devo_protocol::ProviderInfo,
     catalog: &dyn ModelCatalog,
 ) -> devo_protocol::ProviderInfo {
-    if provider.models.is_empty() {
-        provider.models = catalog.list_provider_models(&provider.id);
+    if let Some(effective) = catalog
+        .list_providers()
+        .into_iter()
+        .find(|entry| entry.id == provider.id)
+    {
+        provider.name = effective.name;
+        if provider.description.is_none() {
+            provider.description = effective.description;
+        }
+        if provider.base_url.is_none() {
+            provider.base_url = effective.base_url;
+        }
+        // The sparse connection projection supplies a default protocol even
+        // when it inherits the builtin one. The effective catalog is authoritative.
+        provider.wire_apis = effective.wire_apis;
+        for (name, value) in effective.headers {
+            provider.headers.entry(name).or_insert(value);
+        }
+    }
+    let mut models = catalog.list_provider_models(&provider.id);
+    models.extend(provider.models);
+    provider.models = models;
+    for model in provider.models.values() {
+        if let Some(wire_api) = model.wire_api
+            && !provider.wire_apis.contains(&wire_api)
+        {
+            provider.wire_apis.push(wire_api);
+        }
     }
     provider
 }
 
-fn provider_api_key(
-    provider: &devo_protocol::ProviderInfo,
+async fn provider_api_key(
+    provider: &mut devo_protocol::ProviderInfo,
     config_dir: &std::path::Path,
 ) -> anyhow::Result<Option<String>> {
     let auth = read_user_auth_config(&config_dir.join(devo_core::AUTH_CONFIG_FILE_NAME))?;
-    let Some(credential_id) = provider.credential.as_deref() else {
-        return Ok(None);
+    let config = devo_core::ProviderConfigEntry {
+        credential: provider.credential.clone(),
+        ..Default::default()
     };
-    Ok(Some(
-        auth.credentials
-            .get(credential_id)
-            .with_context(|| format!("missing credential {credential_id} in auth.json"))?
-            .value
-            .clone(),
-    ))
+    let credential_id =
+        crate::provider_config::resolve_provider_credential_id(&provider.id, &config, &auth);
+    if provider.id == "openai-codex"
+        && let Some(account_id) = credential_id
+            .as_deref()
+            .and_then(|id| auth.credentials.get(id))
+            .and_then(|credential| credential.account_id.as_ref())
+            .filter(|value| !value.is_empty())
+    {
+        provider
+            .headers
+            .entry("chatgpt-account-id".to_string())
+            .or_insert_with(|| account_id.clone());
+    }
+    crate::provider_config::resolve_provider_api_key(&provider.id, &config, &auth, config_dir).await
 }
 
 async fn discover_models(
@@ -326,6 +361,10 @@ fn discovery_urls(provider: &devo_protocol::ProviderInfo) -> Vec<String> {
         .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
         .trim_end_matches('/')
         .to_string();
+    if provider.id == "openai-codex" {
+        // Codex's own bundled catalog fetch uses this forward-compatible version.
+        return vec![format!("{base}/models?client_version=99.99.99")];
+    }
     let is_ollama = provider.id.eq_ignore_ascii_case("ollama");
     let mut urls = Vec::new();
     // Prefer Ollama's native tag list first — older OpenAI-compat /v1/models
@@ -359,6 +398,7 @@ fn parse_models(value: Value) -> anyhow::Result<BTreeMap<String, ProviderModelIn
         // when both are present (see ollama /api/tags).
         let Some(id) = entry
             .get("id")
+            .or_else(|| entry.get("slug"))
             .or_else(|| entry.get("model"))
             .or_else(|| entry.get("name"))
             .and_then(Value::as_str)
@@ -408,11 +448,24 @@ fn parse_models(value: Value) -> anyhow::Result<BTreeMap<String, ProviderModelIn
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
         let capabilities = entry.get("capabilities").cloned();
-        let reasoning_capability = entry
-            .get("reasoning")
-            .and_then(Value::as_bool)
-            .filter(|reasoning| *reasoning)
-            .map(|_| ReasoningCapability::Toggle);
+        let remote_levels = entry
+            .get("supported_reasoning_levels")
+            .and_then(Value::as_array)
+            .map(|levels| {
+                levels
+                    .iter()
+                    .filter_map(|level| level.get("effort"))
+                    .filter_map(|effort| serde_json::from_value(effort.clone()).ok())
+                    .collect::<Vec<devo_protocol::ReasoningLevelChoice>>()
+            })
+            .filter(|levels| !levels.is_empty());
+        let reasoning_capability = remote_levels.map(ReasoningCapability::Levels).or_else(|| {
+            entry
+                .get("reasoning")
+                .and_then(Value::as_bool)
+                .filter(|reasoning| *reasoning)
+                .map(|_| ReasoningCapability::Toggle)
+        });
         let input_modalities = entry
             .get("input_modalities")
             .or_else(|| entry.get("inputModalities"))
@@ -443,8 +496,14 @@ fn parse_models(value: Value) -> anyhow::Result<BTreeMap<String, ProviderModelIn
                 cost,
                 reasoning_capability,
                 input_modalities,
+                default_reasoning_effort: entry
+                    .get("default_reasoning_level")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                effective_context_window_percent: entry
+                    .get("effective_context_window_percent")
+                    .and_then(Value::as_f64),
                 metadata: Some(entry.clone()),
-                enabled: Some(true),
+                enabled: Some(entry.get("visibility").and_then(Value::as_str) != Some("hide")),
                 ..ProviderModelInfo::default()
             },
         );
@@ -533,6 +592,119 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{discovery_urls, merge_discovered_model, parse_models};
+
+    #[test]
+    fn codex_directory_uses_authenticated_backend_and_slug_metadata() {
+        let catalog = devo_core::PresetModelCatalog::load().expect("builtin catalog");
+        let sparse = devo_protocol::ProviderInfo {
+            id: "openai-codex".to_string(),
+            name: "ChatGPT".to_string(),
+            credential: Some("openai-codex".to_string()),
+            enabled: true,
+            ..Default::default()
+        };
+        let effective = super::canonical_provider(
+            devo_protocol::ProviderInfo {
+                wire_apis: vec![devo_core::ProviderWireApi::OpenAIChatCompletions],
+                ..sparse
+            },
+            &catalog,
+        );
+        assert_eq!(effective.name, "ChatGPT");
+        assert_eq!(
+            effective.wire_apis.first(),
+            Some(&devo_core::ProviderWireApi::OpenAIResponses)
+        );
+        assert!(
+            effective
+                .models
+                .values()
+                .filter_map(|model| model.wire_api)
+                .all(|wire_api| effective.wire_apis.contains(&wire_api))
+        );
+        assert_eq!(
+            discovery_urls(&effective),
+            vec![
+                "https://chatgpt.com/backend-api/codex/models?client_version=99.99.99".to_string()
+            ]
+        );
+        let entry = serde_json::json!({"slug": "qa-codex", "display_name": "QA Codex",
+            "context_window": 128000, "effective_context_window_percent": 95,
+            "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}],
+            "default_reasoning_level": "high", "input_modalities": ["text", "image"]});
+        assert_eq!(
+            parse_models(serde_json::json!({"models": [entry.clone()]})).unwrap(),
+            [(
+                "qa-codex".to_string(),
+                ProviderModelInfo {
+                    name: Some("QA Codex".to_string()),
+                    context_window: Some(128000),
+                    effective_context_window_percent: Some(95.0),
+                    reasoning_capability: Some(
+                        serde_json::from_value(serde_json::json!({"levels": ["low", "high"]}))
+                            .unwrap()
+                    ),
+                    default_reasoning_effort: Some(devo_protocol::ReasoningEffort::High),
+                    input_modalities: Some(vec![InputModality::Text, InputModality::Image]),
+                    metadata: Some(entry),
+                    enabled: Some(true),
+                    ..Default::default()
+                }
+            )]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    #[test]
+    fn provider_hidden_models_are_not_enabled_in_ready_to_use() {
+        let entry = serde_json::json!({"slug": "internal-review", "visibility": "hide"});
+        assert_eq!(
+            parse_models(serde_json::json!({"models": [entry.clone()]})).unwrap(),
+            [(
+                "internal-review".to_string(),
+                ProviderModelInfo {
+                    enabled: Some(false),
+                    metadata: Some(entry),
+                    ..Default::default()
+                }
+            )]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_uses_oauth_access_and_account_header_after_restart() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(devo_core::AUTH_CONFIG_FILE_NAME),
+            serde_json::to_vec(&serde_json::json!({
+                "openai-codex": { "kind": "oauth", "access": "qa-access",
+                    "expiresAt": chrono::Utc::now().timestamp() + 86400, "accountId": "qa-account" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut provider = devo_protocol::ProviderInfo {
+            id: "openai-codex".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            (
+                super::provider_api_key(&mut provider, home.path())
+                    .await
+                    .unwrap(),
+                provider.headers
+            ),
+            (
+                Some("qa-access".to_string()),
+                [("chatgpt-account-id".to_string(), "qa-account".to_string())]
+                    .into_iter()
+                    .collect()
+            )
+        );
+    }
 
     #[test]
     fn parses_openai_and_anthropic_style_directory_entries() {

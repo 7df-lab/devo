@@ -7,7 +7,7 @@ import type {
 	WorkspaceChangesUpdatedEventProperties,
 } from "@devo-ai/sdk/v2/client"
 import { atom } from "jotai"
-import { atomFamily } from "jotai/utils"
+import { atomFamily } from "jotai-family"
 
 /** Scopes backed by live git state — partitioned by workspace cwd, not session. */
 export const GIT_SCOPES: WorkspaceChangeScope[] = ["staged", "unstaged", "uncommitted", "branch"]

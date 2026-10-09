@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs"
 import { describe, expect, test } from "bun:test"
 
 const source = readFileSync(new URL("./chat-turn.tsx", import.meta.url), "utf8")
+const activitySource = readFileSync(new URL("./turn-activity.tsx", import.meta.url), "utf8")
+const activityModelSource = readFileSync(new URL("./turn-activity-model.ts", import.meta.url), "utf8")
 const chatViewSource = readFileSync(new URL("./chat-view.tsx", import.meta.url), "utf8")
 const permissionOptionsSource = readFileSync(
 	new URL("./chat-permission-options.ts", import.meta.url),
@@ -27,16 +29,14 @@ describe("ChatTurnComponent Native transcript", () => {
 			noThoughtRow: !source.includes("ThoughtRow"),
 			usesItemsFamilyPath:
 				source.includes("nativeItemType") && source.includes("assistantOrReasoningText"),
-			toolRowsUseSharedDisclosure:
-				source.includes('type === "toolCall"') &&
-				source.includes("<TranscriptDisclosure>"),
-			reasoningRowsUseSharedDisclosure:
-				source.includes('type === "reasoning"') &&
-				source.includes('<TranscriptDisclosureTrigger label="Thinking" />'),
-			successfulToolCompletionVisible:
-				source.includes('state === "completed"') && source.includes('"Done"'),
+			activityUsesSharedDisclosure:
+				source.includes("<TurnActivity") && activitySource.includes("<TranscriptDisclosure"),
+			answersRemainVisible:
+				!source.includes("setExpanded") && !source.includes("BotIcon"),
+			completionIsQuiet:
+				!activitySource.includes('"Done"') && !source.includes("item" + "s · working"),
 			failedToolCompletionVisible:
-				source.includes('state === "failed"') && source.includes('"Failed"'),
+				activityModelSource.includes('item.state === "failed"') && activityModelSource.includes('"Failed"'),
 		}).toEqual({
 			nativeItemRow: true,
 			noProcessTimeline: true,
@@ -44,9 +44,9 @@ describe("ChatTurnComponent Native transcript", () => {
 			noChatToolCall: true,
 			noThoughtRow: true,
 			usesItemsFamilyPath: true,
-			toolRowsUseSharedDisclosure: true,
-			reasoningRowsUseSharedDisclosure: true,
-			successfulToolCompletionVisible: true,
+			activityUsesSharedDisclosure: true,
+			answersRemainVisible: true,
+			completionIsQuiet: true,
 			failedToolCompletionVisible: true,
 		})
 	})

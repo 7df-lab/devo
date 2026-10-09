@@ -5,6 +5,7 @@
  */
 
 export type ComposerSlashName =
+	| "model"
 	| "compact"
 	| "fork"
 	| "side"
@@ -19,6 +20,7 @@ export type ParsedComposerSlash = {
 }
 
 const FIRST_PARTY_NAMES = new Set<string>([
+	"model",
 	"compact",
 	"fork",
 	"side",

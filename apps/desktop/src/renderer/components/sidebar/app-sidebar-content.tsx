@@ -13,6 +13,7 @@ import {
 } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { activeServerConfigAtom } from "../../atoms/connection"
+import { discoveryAtom } from "../../atoms/discovery"
 import { sandboxMappingsAtom } from "../../atoms/derived/agents"
 import { automationsEnabledAtom } from "../../atoms/feature-flags"
 import { lastProjectDirectoryAtom } from "../../atoms/preferences"
@@ -79,14 +80,16 @@ function ProjectSection({
 }) {
 	const navigate = useNavigate()
 	const pagination = useAtomValue(projectPaginationFamily(item.project.directory))
+	const discoveryReady = useAtomValue(discoveryAtom).loaded
 	const canShowSessions = true
 	const isUnavailable = item.project.folderStatus ? item.project.folderStatus !== "available" : false
 
 	useEffect(() => {
-		if (isCollapsed || isUnavailable) return
+		if (!discoveryReady || isCollapsed || isUnavailable) return
 		if (pagination.loaded || pagination.loading) return
 		loadProjectSessions(item.project.directory, sandboxDirs, { limit: 5, roots: true })
 	}, [
+		discoveryReady,
 		isCollapsed,
 		isUnavailable,
 		item.project.directory,

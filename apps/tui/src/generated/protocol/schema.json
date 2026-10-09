@@ -17952,6 +17952,26 @@
         }
       }
     },
+    "CatalogRefreshPolicy": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "CatalogRefreshPolicy",
+      "type": "string",
+      "enum": [
+        "ifStale",
+        "force"
+      ]
+    },
+    "CatalogRefreshStatus": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "CatalogRefreshStatus",
+      "type": "string",
+      "enum": [
+        "updated",
+        "cached",
+        "offline",
+        "failed"
+      ]
+    },
     "CloseAgentParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "CloseAgentParams",
@@ -40027,6 +40047,35 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "CredentialDeleteResult",
       "type": "object"
+    },
+    "CredentialInfo": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "CredentialInfo",
+      "description": "Secrets are never echoed back; only id/provider/mask are returned.",
+      "type": "object",
+      "required": [
+        "id",
+        "masked",
+        "provider"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "`api_key` or `oauth` — never includes secret material.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "masked": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        }
+      }
     },
     "CredentialListParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
@@ -75751,6 +75800,341 @@
               "minimum": 0.0
             }
           }
+        }
+      }
+    },
+    "ModelCatalogRefreshParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ModelCatalogRefreshParams",
+      "type": "object",
+      "required": [
+        "policy"
+      ],
+      "properties": {
+        "policy": {
+          "$ref": "#/definitions/CatalogRefreshPolicy"
+        }
+      },
+      "definitions": {
+        "CatalogRefreshPolicy": {
+          "type": "string",
+          "enum": [
+            "ifStale",
+            "force"
+          ]
+        }
+      }
+    },
+    "ModelCatalogRefreshResult": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ModelCatalogRefreshResult",
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "message": {
+          "description": "A failed refresh preserves the last good on-disk directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/CatalogRefreshStatus"
+        }
+      },
+      "definitions": {
+        "CatalogRefreshStatus": {
+          "type": "string",
+          "enum": [
+            "updated",
+            "cached",
+            "offline",
+            "failed"
+          ]
+        }
+      }
+    },
+    "ModelInfo": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ModelInfo",
+      "type": "object",
+      "required": [
+        "contextWindow",
+        "displayName",
+        "inputModalities",
+        "provider",
+        "reasoningCapability",
+        "slug"
+      ],
+      "properties": {
+        "availableThinkingLevels": {
+          "description": "Precomputed chip list from [`crate::get_supported_thinking_levels`].",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": true,
+        "channel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "contextWindow": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "cost": true,
+        "defaultReasoningSelection": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultVariant": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "family": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "inputModalities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/InputModality"
+          }
+        },
+        "maxTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "metadata": true,
+        "modelId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "options": true,
+        "priority": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "provider": {
+          "description": "Wire API the model is invoked through (legacy enum reused; see `crate::ProviderWireApi`).",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProviderWireApi"
+            }
+          ]
+        },
+        "providerId": {
+          "description": "Provider id and provider-facing model id when this entry came from the canonical provider directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning": {
+          "description": "Whether the model exposes configurable thinking (pi-ai `reasoning`).",
+          "type": "boolean"
+        },
+        "reasoningCapability": {
+          "$ref": "#/definitions/ReasoningCapability"
+        },
+        "releaseDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request": true,
+        "slug": {
+          "type": "string"
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thinkingLevelMap": {
+          "description": "pi-ai-compatible map; `None` map values serialize as JSON `null`.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "variants": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/ProviderModelVariant"
+          }
+        }
+      },
+      "definitions": {
+        "InputModality": {
+          "description": "Supported input types that a model can accept.",
+          "oneOf": [
+            {
+              "description": "Plain text input.",
+              "type": "string",
+              "enum": [
+                "text"
+              ]
+            },
+            {
+              "description": "Image input.",
+              "type": "string",
+              "enum": [
+                "image"
+              ]
+            }
+          ]
+        },
+        "ProviderModelVariant": {
+          "description": "A named model variant, such as a provider's fast or high-reasoning mode.\n\n`request`, `options`, and `headers` are deliberately open-ended so a provider integration can add capabilities without a protocol migration.",
+          "type": "object",
+          "properties": {
+            "disabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "options": true,
+            "request": true,
+            "requestModel": {
+              "description": "Optional wire model id override when this variant is selected.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "ProviderWireApi": {
+          "description": "One supported provider wire protocol exposed by the runtime.",
+          "oneOf": [
+            {
+              "description": "OpenAI-compatible `/v1/chat/completions`.",
+              "type": "string",
+              "enum": [
+                "openai_chat_completions"
+              ]
+            },
+            {
+              "description": "OpenAI-compatible `/v1/responses`.",
+              "type": "string",
+              "enum": [
+                "openai_responses"
+              ]
+            },
+            {
+              "description": "Anthropic-compatible `/v1/messages`.",
+              "type": "string",
+              "enum": [
+                "anthropic_messages"
+              ]
+            },
+            {
+              "description": "Google AI Studio / Generative Language API.",
+              "type": "string",
+              "enum": [
+                "google_generative_ai"
+              ]
+            }
+          ]
+        },
+        "ReasoningCapability": {
+          "oneOf": [
+            {
+              "description": "Model reasoning effort cannot be controlled.",
+              "type": "string",
+              "enum": [
+                "unsupported"
+              ]
+            },
+            {
+              "description": "Model reasoning effort can be toggled on and off.",
+              "type": "string",
+              "enum": [
+                "toggle"
+              ]
+            },
+            {
+              "description": "Selectable reasoning chips in array order. Include [`ReasoningLevelChoice::Off`] when the model can disable reasoning; omit it when reasoning is always on.",
+              "type": "object",
+              "required": [
+                "levels"
+              ],
+              "properties": {
+                "levels": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/ReasoningLevelChoice"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "ReasoningLevelChoice": {
+          "type": "string"
         }
       }
     },
@@ -173284,6 +173668,16 @@
         "includeSnapshot": {
           "type": "boolean"
         },
+        "replay": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SubscriptionReplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "selectors": {
           "type": "array",
           "items": {
@@ -173372,6 +173766,14 @@
                 }
               }
             }
+          ]
+        },
+        "SubscriptionReplay": {
+          "description": "Native subscription bootstrap policy. Snapshot-only clients page durable history separately; defaults preserve cursor replay for existing clients.",
+          "type": "string",
+          "enum": [
+            "fromCursor",
+            "snapshotOnly"
           ]
         }
       }
@@ -231247,6 +231649,124 @@
           }
         }
       }
+    },
+    "WorktreeCreateParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WorktreeCreateParams",
+      "type": "object",
+      "required": [
+        "cwd",
+        "name"
+      ],
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "WorktreeInfo": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WorktreeInfo",
+      "type": "object",
+      "required": [
+        "branch",
+        "directory",
+        "name"
+      ],
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "directory": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "WorktreeListParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WorktreeListParams",
+      "type": "object",
+      "required": [
+        "cwd"
+      ],
+      "properties": {
+        "cwd": {
+          "type": "string"
+        }
+      }
+    },
+    "WorktreeListResult": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WorktreeListResult",
+      "type": "object",
+      "required": [
+        "worktrees"
+      ],
+      "properties": {
+        "worktrees": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/WorktreeInfo"
+          }
+        }
+      },
+      "definitions": {
+        "WorktreeInfo": {
+          "type": "object",
+          "required": [
+            "branch",
+            "directory",
+            "name"
+          ],
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "directory": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "WorktreeMutationParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WorktreeMutationParams",
+      "type": "object",
+      "required": [
+        "cwd",
+        "directory"
+      ],
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "directory": {
+          "type": "string"
+        }
+      }
+    },
+    "WorktreeMutationResult": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "WorktreeMutationResult",
+      "type": "object",
+      "required": [
+        "directory"
+      ],
+      "properties": {
+        "directory": {
+          "type": "string"
+        }
+      }
     }
   },
   "methods": {
@@ -231392,6 +231912,10 @@
     },
     "message/edit/recorded": {
       "incomingNotification": "MessageEditRecordedNotificationParams"
+    },
+    "model/catalog/refresh": {
+      "outgoingRequest": "ModelCatalogRefreshParams",
+      "incomingResult": "ModelCatalogRefreshResult"
     },
     "model/list": {
       "outgoingRequest": "ModelListParams",
@@ -231838,6 +232362,22 @@
     },
     "workspace/restoreStarted": {
       "incomingNotification": "WorkspaceRestoreStartedNotificationParams"
+    },
+    "workspace/worktree/create": {
+      "outgoingRequest": "WorktreeCreateParams",
+      "incomingResult": "WorktreeInfo"
+    },
+    "workspace/worktree/list": {
+      "outgoingRequest": "WorktreeListParams",
+      "incomingResult": "WorktreeListResult"
+    },
+    "workspace/worktree/remove": {
+      "outgoingRequest": "WorktreeMutationParams",
+      "incomingResult": "WorktreeMutationResult"
+    },
+    "workspace/worktree/reset": {
+      "outgoingRequest": "WorktreeMutationParams",
+      "incomingResult": "WorktreeMutationResult"
     }
   }
 }

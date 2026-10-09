@@ -11,7 +11,6 @@ import {
 	PromptInputButton,
 	PromptInputFooter,
 	PromptInputProvider,
-	PromptInputSubmit,
 	PromptInputTextarea,
 	PromptInputTools,
 	usePromptInputAttachments,
@@ -114,6 +113,7 @@ import {
 	diffCommentsFamily,
 	serializeCommentsForChat,
 } from "../review/review-comments"
+import { ComposerSubmitControls } from "./composer-submit-controls"
 import { ChatPermissionFlow } from "./chat-permission"
 import { ChatQuestionFlow } from "./chat-question"
 import { isAssistantItemError } from "./assistant-item-error"
@@ -1338,6 +1338,7 @@ export function ChatInputSection({
 	const [activeTrigger, setActiveTrigger] = useState<ComposerTrigger | null>(null)
 	const [activeGoal, setActiveGoal] = useState<ComposerGoal | null>(null)
 	const [goalAction, setGoalAction] = useState<ComposerGoalAction | null>(null)
+	const [modelPickerOpen, setModelPickerOpen] = useState(false)
 	const [skillPickerOpen, setSkillPickerOpen] = useState(false)
 	const {
 		queueItems,
@@ -1899,6 +1900,9 @@ export function ChatInputSection({
 				case "plan":
 					changeCollaborationMode("plan")
 					return true
+				case "model":
+					setModelPickerOpen(true)
+					return true
 				case "skills":
 					setSkillPickerOpen(true)
 					return true
@@ -2067,6 +2071,7 @@ export function ChatInputSection({
 				})
 			} catch (err) {
 				log.error("handleSend failed", { sessionId: agent.sessionId }, err)
+				throw err // PromptInput retains the text and attachments when submission rejects.
 			} finally {
 				setSending(false)
 			}
@@ -2414,15 +2419,13 @@ export function ChatInputSection({
 												effectiveModel={effectiveModel}
 												hasModelOverride={!!selectedModel}
 												onSelectModel={handleModelSelect}
+												modelPickerOpen={modelPickerOpen}
+												onModelPickerOpenChange={setModelPickerOpen}
 												selectedVariant={selectedVariant}
 												onSelectVariant={handleVariantSelect}
 												disabled={!isConnected}
 											/>
-											<PromptInputSubmit
-												disabled={!canSend}
-												status={isWorking ? "streaming" : undefined}
-												onStop={handleStop}
-											/>
+											<ComposerSubmitControls isWorking={isWorking} isConnected={isConnected} canSend={canSend} onStop={handleStop} />
 										</div>
 									</PromptInputFooter>
 								</PromptInput>

@@ -260,18 +260,30 @@ describe("StdioNativeClient", () => {
 	test("gives MCP admin RPCs a longer timeout than ordinary requests", () => {
 		expect({
 			initialize: requestTimeoutMsForMethod("initialize", 10_000),
+			sessionNew: requestTimeoutMsForMethod("session/new", 10_000),
+			sessionResume: requestTimeoutMsForMethod("session/resume", 10_000),
 			sessionList: requestTimeoutMsForMethod("session/list", 10_000),
 			mcpTools: requestTimeoutMsForMethod("mcp/tools", 10_000),
 			mcpSetEnabled: requestTimeoutMsForMethod("mcp/set_enabled", 5),
 			workspaceChanges: requestTimeoutMsForMethod("workspace/changes/read", 10_000),
 			providerValidate: requestTimeoutMsForMethod("provider/validate", 10_000),
+			worktreeRemove: requestTimeoutMsForMethod("workspace/worktree/remove", 10_000),
+			catalogRefresh: requestTimeoutMsForMethod("model/catalog/refresh", 10_000),
+			providerDiscover: requestTimeoutMsForMethod("provider/discover", 10_000),
+			customCatalogTimeout: requestTimeoutMsForMethod("model/catalog/refresh", 90_000),
 		}).toEqual({
 			initialize: 60_000,
+			sessionNew: 60_000,
+			sessionResume: 60_000,
 			sessionList: 10_000,
 			mcpTools: 60_000,
 			mcpSetEnabled: 60_000,
 			workspaceChanges: 60_000,
 			providerValidate: undefined,
+			worktreeRemove: 90_000,
+			catalogRefresh: 60_000,
+			providerDiscover: 60_000,
+			customCatalogTimeout: 90_000,
 		})
 	})
 

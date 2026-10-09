@@ -105,6 +105,11 @@ export function itemDisplayText(envelope: NativeItemEnvelope): string {
 	if (type === "contextCompaction") {
 		return String(envelope.item.summary ?? "Context compaction")
 	}
+	if (type === "warning") {
+		return typeof envelope.item.message === "string" && envelope.item.message.trim()
+			? envelope.item.message
+			: "Runtime warning."
+	}
 	if (type === "plan") {
 		const entries = Array.isArray(envelope.item.entries) ? envelope.item.entries : []
 		return entries

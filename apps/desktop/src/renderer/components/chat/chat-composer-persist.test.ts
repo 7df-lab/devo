@@ -133,3 +133,11 @@ describe("composer persist-on-selection", () => {
 		expect(newChatSource.includes("DEFAULT_COMPOSER_PERMISSION_PROFILE")).toBe(true)
 	})
 })
+
+
+test("new-chat defaults come from Native rather than an older local model override", () => {
+	expect({ restoresLocalModel: newChatSource.includes("setSelectedModel(stored)"),
+		restoresLocalEffort: newChatSource.includes("setSelectedVariant(stored.variant)"),
+		restoresAgent: newChatSource.includes("setSelectedAgent(stored?.agent ?? null)") })
+		.toEqual({ restoresLocalModel: false, restoresLocalEffort: false, restoresAgent: true })
+})

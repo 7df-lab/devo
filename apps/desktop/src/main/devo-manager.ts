@@ -43,6 +43,7 @@ let initializing: Promise<DevoServer> | null = null
 let lifecycleGeneration = 0
 let nativeTrafficLogger: NativeTrafficLogger | null = null
 const serverReadyListeners = new Set<() => void>()
+const nativeListeners = new Set<NativeTransportListener>()
 
 export async function ensureServer(): Promise<DevoServer> {
 	if (server && stdioClient?.connected()) return server
@@ -166,8 +167,9 @@ export async function respondNative(id: JsonRpcId, result: unknown): Promise<voi
 }
 
 export function subscribeNative(listener: NativeTransportListener): () => void {
-	const client = getOrCreateClient()
-	return client.subscribe(listener)
+	nativeListeners.add(listener)
+	getOrCreateClient()
+	return () => { nativeListeners.delete(listener) }
 }
 
 export function isNativeConnected(): boolean {
@@ -266,6 +268,13 @@ function handleTransportEvent(client: StdioNativeClient, event: NativeTransportE
 	if (event.type === "closed") {
 		log.warn("Devo Native stdio transport closed", { error: event.error })
 		server = null
+	}
+	for (const listener of nativeListeners) {
+		try {
+			listener(event)
+		} catch (error) {
+			log.warn("Native transport listener failed", error)
+		}
 	}
 }
 

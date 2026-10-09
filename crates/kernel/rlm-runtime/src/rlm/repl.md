@@ -158,6 +158,12 @@ payload is written atomically (tmp file + `os.replace`) and a JSON manifest
 `timestamp`) is written to `manifest_path`. A manifest write failure fails the
 snapshot (and nothing is pruned).
 
+OS file handles, including closed handles and handles nested in other values,
+are skipped because restoring them can reopen a file in write mode and erase
+its contents. In-memory `BytesIO` and `StringIO` buffers remain supported.
+Legacy snapshots containing file handles fail only those bindings before any
+file is reopened; other bindings still restore.
+
 `restore` loads the payload and revives each name independently; a missing
 file yields an ok empty restore with `reason:"snapshot not found"`, a corrupt
 file fails with a `reason`, and per-name failures are listed in `failed`.

@@ -308,7 +308,7 @@ async function nextPayloadOfType(stream: AsyncIterator<any>, type: string): Prom
 }
 
 describe("Native desktop SDK interactions", () => {
-	test("global event consumers subscribe to every existing Native session", async () => {
+	test("project event consumers subscribe to a lightweight Native folder roster", async () => {
 		const transport = new FakeNativeTransport()
 		const client = createDevoClient({ directory: "/repo", transport })
 
@@ -317,15 +317,11 @@ describe("Native desktop SDK interactions", () => {
 		expect(transport.requests).toEqual([
 			{ method: "initialize", params: DESKTOP_INITIALIZE_PARAMS, directory: "/repo" },
 			{
-				method: "session/list",
-				params: { cwds: ["/repo"] },
-				directory: "/repo",
-			},
-			{
 				method: "subscription/create",
 				params: {
-					selectors: [{ kind: "session", sessionId: "session-1" }],
+					selectors: [{ kind: "sessionsByCwd", cwd: "/repo" }],
 					includeSnapshot: true,
+					replay: "snapshotOnly",
 					after: [],
 				},
 				directory: "/repo",
@@ -354,6 +350,7 @@ describe("Native desktop SDK interactions", () => {
 				params: {
 					selectors: [{ kind: "session", sessionId: "session-1" }],
 					includeSnapshot: true,
+					replay: "snapshotOnly",
 					after: [],
 				},
 				directory: "/repo",
@@ -687,9 +684,10 @@ describe("Native desktop SDK interactions", () => {
 		expect(
 			transport.requests.filter((request) => request.method === "subscription/create").at(-1)?.params,
 		).toEqual({
-			selectors: [{ kind: "session", sessionId: "session-1" }],
+			selectors: [{ kind: "sessionsByCwd", cwd: "/repo" }],
 			includeSnapshot: true,
-			after: [{ streamId: "session:session-1", seq: 7 }],
+			replay: "snapshotOnly",
+			after: [],
 		})
 	})
 
@@ -1145,10 +1143,11 @@ describe("Native desktop SDK interactions", () => {
 		const client = createDevoClient({ directory: "/repo", transport })
 		await client.session.create()
 
-		await client.session.promptAsync({
+		const result = await client.session.promptAsync({
 			sessionId: "session-1",
 			parts: [{ type: "text", text: "hello" }],
 		})
+		expect(result.data).toEqual({ outcome: "started", turnId: nativeTurnInProgress.id })
 
 		expect(transport.requests.some((request) => request.method === "session/queue/push")).toBe(
 			true,
@@ -1206,6 +1205,7 @@ describe("Native desktop SDK interactions", () => {
 		const errorEvent = await nextPayloadOfType(stream, "session.error")
 		expect(errorEvent.properties).toEqual({
 			sessionId: nativeSession.id,
+			turnId: nativeTurnInProgress.id,
 			error: {
 				name: "PROVIDER_TEMPORARY_FAILURE",
 				data: {
@@ -1708,6 +1708,8 @@ describe("Native desktop SDK interactions", () => {
 			"item-user-1",
 		])
 		const stream = (await client.global.event()).stream[Symbol.asyncIterator]()
+		// Native history reads exclude the superseded branch.
+		transport.sessionItems = []
 		transport.emit({
 			type: "notification",
 			method: "turn/superseded",

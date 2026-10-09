@@ -37,8 +37,9 @@ const unused = () => {
 	throw new Error("Unrelated IPC handler invoked")
 }
 
+const app = { isPackaged: false, relaunch: mock(() => {}), exit: mock(() => {}) }
 mock.module("electron", () => ({
-	app: { isPackaged: false },
+	app,
 	BrowserWindow: { getAllWindows: () => [] },
 	dialog: {},
 	ipcMain: {
@@ -192,6 +193,30 @@ beforeEach(() => {
 	writes.length = 0
 	updates.length = 0
 	stored = {}
+	app.isPackaged = false
+	app.relaunch.mockClear()
+	app.exit.mockClear()
+	registerIpcHandlers()
+})
+
+describe("Desktop window recreation", () => {
+	test("development recreates the window without exiting electron-vite", async () => {
+		const recreateWindows = mock(async () => {})
+		registerIpcHandlers({ recreateWindows })
+		await handler("app:relaunch")(sender(1))
+		expect([recreateWindows.mock.calls.length, app.relaunch.mock.calls.length, app.exit.mock.calls.length]).toEqual([1, 0, 0])
+	})
+	test("a missing development recreation handler fails instead of terminating Vite", async () => {
+		await expect(handler("app:relaunch")(sender(1))).rejects.toThrow("Development window recreation is unavailable")
+		expect([app.relaunch.mock.calls.length, app.exit.mock.calls.length]).toEqual([0, 0])
+	})
+	test("installed builds relaunch the application", async () => {
+		app.isPackaged = true
+		const recreateWindows = mock(async () => {})
+		registerIpcHandlers({ recreateWindows })
+		await handler("app:relaunch")(sender(1))
+		expect([recreateWindows.mock.calls.length, app.relaunch.mock.calls.length, app.exit.mock.calls.length]).toEqual([0, 1, 1])
+	})
 })
 
 describe("Desktop OAuth credential cancellation", () => {

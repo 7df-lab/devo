@@ -7,6 +7,7 @@
 
 @import "@devo/ui/styles/globals.css";
 @import "./desktop-chrome.css";
+@import "./turn-activity.css";
 
 body {
 	margin: 0;

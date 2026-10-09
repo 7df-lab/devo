@@ -1,7 +1,6 @@
 import {
 	BellIcon,
 	BookOpenIcon,
-	BoxIcon,
 	GitForkIcon,
 	InfoIcon,
 	PlugIcon,
@@ -38,8 +37,7 @@ export const settingsGroups: SettingsTabGroup[] = [
 		label: "Connections",
 		tabs: [
 			{ id: "servers", label: "Servers", icon: ServerIcon },
-			{ id: "providers", label: "Providers", icon: PlugIcon },
-			{ id: "models", label: "Models", icon: BoxIcon },
+			{ id: "providers", label: "Models & providers", icon: PlugIcon },
 			{ id: "mcp", label: "MCP", icon: PlugIcon },
 		],
 	},

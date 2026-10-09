@@ -2,6 +2,7 @@ import os
 import unittest
 from importlib import import_module
 from pathlib import Path
+from tempfile import gettempdir
 from unittest.mock import patch
 
 import rlm
@@ -17,9 +18,10 @@ class AgentDirectoryTests(unittest.TestCase):
             "DEVO_HOME": "",
             "PI_CODING_AGENT_DIR": "",
         }
-        expected = Path("/tmp/devo-agent-dir-test") / ".devo"
+        home = Path(gettempdir()) / "devo-agent-dir-test"
+        expected = (home / ".devo").resolve()
         with patch.dict(os.environ, env), patch.object(
-            Path, "home", return_value=Path("/tmp/devo-agent-dir-test")
+            Path, "home", return_value=home
         ):
             self.assertEqual(harness._agent_dir(), expected)
             self.assertEqual(mcp_base._agent_dir(), expected)

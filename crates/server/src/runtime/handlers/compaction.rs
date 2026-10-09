@@ -926,7 +926,7 @@ impl ServerRuntime {
                             .total_cache_creation_tokens(),
                         total_cache_read_tokens: runtime_session.summary.total_cache_read_tokens(),
                         last_input_tokens: runtime_session.summary.prompt_token_estimate,
-                        turn_count: runtime_session.summary.updated_at.timestamp() as usize,
+                        turn_count: runtime_session.core_session.lock().await.turn_count,
                         prompt_token_estimate: runtime_session.summary.prompt_token_estimate,
                         last_context_occupancy: runtime_session
                             .summary

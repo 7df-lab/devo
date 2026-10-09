@@ -16,7 +16,8 @@ use devo_protocol::native::error::codes;
 use devo_protocol::native::event::{
     ControlRequestKind, EventCursor, EventEnvelope, PendingControlRequest, SnapshotData,
     StreamSelector, StreamSnapshot, SubscriptionAckParams, SubscriptionCreateParams,
-    SubscriptionCreateResult, SubscriptionUnsubscribeParams, SubscriptionUpdateParams,
+    SubscriptionCreateResult, SubscriptionReplay, SubscriptionUnsubscribeParams,
+    SubscriptionUpdateParams,
 };
 use devo_protocol::native::ids::{
     SessionId as NativeSessionId, SubscriptionId, TurnId as NativeTurnId,
@@ -70,6 +71,7 @@ pub(crate) fn notification_matches_selectors(
             matches!(
                 notification,
                 ServerNotification::SessionCreated { .. }
+                    | ServerNotification::SessionStatusChanged { .. }
                     | ServerNotification::SessionArchived { .. }
                     | ServerNotification::SessionDeleted { .. }
                     | ServerNotification::SessionMetadataUpdated { .. }
@@ -96,6 +98,13 @@ impl ServerRuntime {
                 );
             }
         };
+        if params.replay == Some(SubscriptionReplay::SnapshotOnly) && !params.include_snapshot {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InvalidParams,
+                "snapshotOnly replay requires includeSnapshot",
+            );
+        }
         let subscription_id = SubscriptionId::new();
 
         // CRITICAL SECTION (08 §4): the connections lock is held across the
@@ -111,11 +120,15 @@ impl ServerRuntime {
                 "connection is not registered",
             );
         }
-        let mut result =
-            match self.prepare_subscription(&request_id, &params.selectors, &params.after) {
-                Ok(result) => result,
-                Err(response) => return response,
-            };
+        let mut result = match self.prepare_subscription(
+            &request_id,
+            &params.selectors,
+            &params.after,
+            params.replay.unwrap_or_default(),
+        ) {
+            Ok(result) => result,
+            Err(response) => return response,
+        };
         if params.include_snapshot {
             for selector in &params.selectors {
                 let barrier = result
@@ -138,9 +151,6 @@ impl ServerRuntime {
             }
         }
         result.pending_control_requests = self.pending_control_requests(&params.selectors).await;
-        if !params.after.is_empty() {
-            result.recovery_snapshots = self.recovery_snapshots(&params.selectors).await;
-        }
 
         // Seed the ack floor with the create-time barriers: create already
         // handed the client everything up to `cursors`, so a later ack below
@@ -171,6 +181,11 @@ impl ServerRuntime {
             .await;
         self.refresh_cwd_selector_count().await;
         drop(connections);
+        // Transient text reads may wait on the stream lock. The connection
+        // barrier must be released first so the running turn can broadcast.
+        if !params.after.is_empty() || params.replay == Some(SubscriptionReplay::SnapshotOnly) {
+            result.recovery_snapshots = self.recovery_snapshots(&params.selectors).await;
+        }
         result.pending_control_requests = self
             .reissue_pending_control_requests(connection_id, result.pending_control_requests)
             .await;
@@ -219,7 +234,12 @@ impl ServerRuntime {
                 "unknown subscription id",
             );
         }
-        let mut result = match self.prepare_subscription(&request_id, &params.selectors, &[]) {
+        let mut result = match self.prepare_subscription(
+            &request_id,
+            &params.selectors,
+            &[],
+            SubscriptionReplay::FromCursor,
+        ) {
             Ok(result) => result,
             Err(response) => return response,
         };
@@ -380,58 +400,6 @@ impl ServerRuntime {
         self.refresh_cwd_selector_count().await;
     }
 
-    /// Full in-flight item text for reconnect. `nextChunkIndex` is 0 because
-    /// the snapshot replaces accumulated channel text rather than resuming
-    /// a lost delta sequence.
-    async fn recovery_snapshots(
-        &self,
-        selectors: &[StreamSelector],
-    ) -> Vec<devo_protocol::native::event::LiveItemSnapshot> {
-        use devo_protocol::native::event::DeltaChannel;
-
-        let mut snapshots = Vec::new();
-        for selector in selectors {
-            let StreamSelector::Session { session_id } = selector else {
-                continue;
-            };
-            let Some(handle) = self.session(*session_id).await else {
-                continue;
-            };
-            let Some(deferred) = handle.take_shutdown_deferred_snapshot().await else {
-                continue;
-            };
-            let Some(turn_id) = deferred.active_turn_id else {
-                continue;
-            };
-            if let Some((item_id, seq, text)) = deferred.deferred_assistant {
-                snapshots.push(super::native_surface::live_item_snapshot(
-                    *session_id,
-                    turn_id,
-                    item_id,
-                    seq,
-                    Item::AssistantMessage { text: text.clone() },
-                    DeltaChannel::AssistantMessage,
-                    text,
-                ));
-            }
-            if let Some((item_id, seq, text)) = deferred.deferred_reasoning {
-                snapshots.push(super::native_surface::live_item_snapshot(
-                    *session_id,
-                    turn_id,
-                    item_id,
-                    seq,
-                    Item::Reasoning {
-                        text: text.clone(),
-                        provider_payload_ref: None,
-                    },
-                    DeltaChannel::Reasoning,
-                    text,
-                ));
-            }
-        }
-        snapshots
-    }
-
     /// Computes barriers, validates `after` cursors, and collects replay for
     /// one selector set. Must be called inside the critical section (see
     /// `handle_subscription_create`). The `Err` variant is a ready-made
@@ -441,6 +409,7 @@ impl ServerRuntime {
         request_id: &serde_json::Value,
         selectors: &[StreamSelector],
         after: &[EventCursor],
+        replay: SubscriptionReplay,
     ) -> Result<SubscriptionCreateResult, serde_json::Value> {
         let mut result = SubscriptionCreateResult {
             subscription_id: SubscriptionId::new(),
@@ -482,7 +451,14 @@ impl ServerRuntime {
             let rows = self
                 .deps
                 .db
-                .event_log_rows(&stream_id, after_seq)
+                .event_log_rows(
+                    &stream_id,
+                    if replay == SubscriptionReplay::SnapshotOnly {
+                        barrier
+                    } else {
+                        after_seq
+                    },
+                )
                 .map_err(|error| {
                     self.error_response(
                         request_id.clone(),
@@ -541,9 +517,12 @@ impl ServerRuntime {
                 let Some(rollout_path) = self.snapshot_rollout_path(session_id).await else {
                     return Ok(None);
                 };
-                let history = devo_core::read_canonical_history(&rollout_path)
+                let history = self
+                    .history_cache
+                    .load(*session_id, rollout_path)
+                    .await
                     .map_err(|error| format!("failed to read session history: {error}"))?;
-                let Some(mut session) = history.session else {
+                let Some(mut session) = history.session.clone() else {
                     return Ok(None);
                 };
                 // Durable history may still say InProgress after a crash; live
@@ -593,29 +572,6 @@ impl ServerRuntime {
             // visible through its owning session's history.
             StreamSelector::BackgroundTask { .. } => Ok(None),
         }
-    }
-
-    /// Native sessions under one cwd: the rollout history reader is the
-    /// source of truth (the SQLite index is a cache that may lag or lack
-    /// rows for never-indexed files).
-    async fn native_sessions_for_cwd(
-        &self,
-        cwd: &std::path::Path,
-    ) -> anyhow::Result<Vec<devo_protocol::native::session::Session>> {
-        let mut sessions = Vec::new();
-        for rollout_path in self.rollout_store.rollout_paths()? {
-            let Ok(history) = devo_core::read_canonical_history(&rollout_path) else {
-                // Damaged files contribute nothing to the list snapshot;
-                // resume's fail-closed policy reports them separately.
-                continue;
-            };
-            if let Some(session) = history.session
-                && session.cwd == cwd
-            {
-                sessions.push(*session);
-            }
-        }
-        Ok(sessions)
     }
 
     /// Mailbox-free rollout-path resolution for the subscription critical

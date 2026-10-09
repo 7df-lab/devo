@@ -250,7 +250,10 @@ impl ServerRuntime {
         }
         let _ = self
             .command_exec_manager
-            .terminate_session(connection_id, params.session_id)
+            .terminate_session(
+                params.session_id,
+                crate::runtime::command_exec::SessionCommandOwner::Connection(connection_id),
+            )
             .await;
         Ok(())
     }

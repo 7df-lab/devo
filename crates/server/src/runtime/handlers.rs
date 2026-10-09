@@ -20,6 +20,7 @@ mod session_fork;
 mod session_interrupt;
 mod session_tree;
 pub(crate) mod subscription;
+mod subscription_snapshot;
 mod turn;
 mod turn_interrupt;
 mod workspace_changes;

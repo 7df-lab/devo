@@ -20,19 +20,17 @@ describe("Model selector menu", () => {
 		})
 	})
 
-	test("keeps provider grouping and active model selection", () => {
+	test("shares the searchable model picker across composers", () => {
+		const selector = readFileSync(new URL("./model-selector.tsx", import.meta.url), "utf8")
+		const list = readFileSync(new URL("./model-picker-list.tsx", import.meta.url), "utf8")
 		expect({
-			groupsFilteredModelsByProvider: source.includes("groupByProvider(models)"),
-			rendersProviderGroups: source.includes("<SearchableListPopoverGroup"),
-			keepsSessionModelsUngrouped: source.includes('providerId === "session"'),
-			keepsActiveModelCheck: source.includes("selected={model.value === activeValue}"),
-			omitsSearchField: !source.includes("SearchableListPopoverSearch") && !source.includes("Search models"),
+			sharedPicker: source.includes('import { ModelSelector } from "./model-selector"'),
+			catalog: selector.includes("useProviderCatalog()"),
+			search: list.includes("<SearchableListPopoverSearch"),
+			activeModel: list.includes("model.value === activeValue"),
+			providerIdentity: list.includes("model.providerName} · {model.modelID"),
 		}).toEqual({
-			groupsFilteredModelsByProvider: true,
-			rendersProviderGroups: true,
-			keepsSessionModelsUngrouped: true,
-			keepsActiveModelCheck: true,
-			omitsSearchField: true,
+			sharedPicker: true, catalog: true, search: true, activeModel: true, providerIdentity: true,
 		})
 	})
 })

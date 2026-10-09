@@ -240,12 +240,16 @@ fn json_result<T: serde::de::DeserializeOwned>(response: &serde_json::Value, met
 }
 
 async fn wait_turn_idle(runtime: &Arc<ServerRuntime>, session_id: SessionId) {
-    for _ in 0..200 {
-        if runtime.runtime_active_turn_id(session_id).await.is_none() {
-            return;
+    let wait = async {
+        while runtime.runtime_active_turn_id(session_id).await.is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    };
+    // Kernel startup can take several seconds on Windows under parallel load.
+    // Fail at the wait itself instead of silently continuing with a busy turn.
+    tokio::time::timeout(Duration::from_secs(30), wait)
+        .await
+        .expect("turn must reach idle before the next request");
 }
 
 async fn wait_flag(flag: &std::sync::atomic::AtomicBool, message: &str) {

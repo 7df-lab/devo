@@ -247,6 +247,7 @@ pub fn generate_protocol_typescript() -> String {
     push_decl::<native::session::Session>(&cfg, &mut output);
     push_decl::<native::rpc_session::SessionForkParams>(&cfg, &mut output);
     push_decl::<native::rpc_session::SessionForkResult>(&cfg, &mut output);
+    push_decl::<native::event::SubscriptionReplay>(&cfg, &mut output);
     // Keep the Native subscription event graph opaque in this compatibility
     // declaration file; the generated JSON Schema bundle remains precise.
     output.push_str(
@@ -257,7 +258,7 @@ export type StreamSnapshot = { streamId: string, barrierSeq: bigint, data: unkno
 export type EventEnvelope = { event: unknown, notification: unknown, };\n\n\
 export type LiveItemSnapshot = { item: unknown, accumulated: Array<unknown>, };\n\n\
 export type PendingControlRequest = { requestId: string, kind: string, item: unknown, };\n\n\
-export type SubscriptionCreateParams = { selectors: Array<StreamSelector>, includeSnapshot: boolean, after?: Array<EventCursor>, };\n\n\
+export type SubscriptionCreateParams = { selectors: Array<StreamSelector>, includeSnapshot: boolean, replay?: SubscriptionReplay, after?: Array<EventCursor>, };\n\n\
 export type SubscriptionCreateResult = { subscriptionId: SubscriptionId, snapshots?: Array<StreamSnapshot>, replay?: Array<EventEnvelope>, recoverySnapshots?: Array<LiveItemSnapshot>, cursors: Array<EventCursor>, pendingControlRequests?: Array<PendingControlRequest>, };\n\n\
 export type SubscriptionUpdateParams = { subscriptionId: SubscriptionId, selectors: Array<StreamSelector>, };\n\n\
 export type SubscriptionAckParams = { subscriptionId: SubscriptionId, cursors: Array<EventCursor>, };\n\n\
@@ -337,6 +338,22 @@ export type SubscriptionUnsubscribeParams = { subscriptionId: SubscriptionId, };
     push_decl::<ProviderModelInfo>(&cfg, &mut output);
     push_decl::<ProviderInfo>(&cfg, &mut output);
     push_decl::<ModelCatalogEntry>(&cfg, &mut output);
+    push_decl::<native::rpc_admin::ModelListParams>(&cfg, &mut output);
+    push_decl::<native::rpc_admin::ModelInfo>(&cfg, &mut output);
+    push_decl::<native::rpc_admin::ModelListResult>(&cfg, &mut output);
+    push_decl::<native::rpc_admin::CredentialListParams>(&cfg, &mut output);
+    push_decl::<native::rpc_admin::CredentialInfo>(&cfg, &mut output);
+    push_decl::<native::rpc_admin::CredentialListResult>(&cfg, &mut output);
+    push_decl::<native::rpc_worktree::WorktreeListParams>(&cfg, &mut output);
+    push_decl::<native::rpc_worktree::WorktreeCreateParams>(&cfg, &mut output);
+    push_decl::<native::rpc_worktree::WorktreeMutationParams>(&cfg, &mut output);
+    push_decl::<native::rpc_worktree::WorktreeInfo>(&cfg, &mut output);
+    push_decl::<native::rpc_worktree::WorktreeListResult>(&cfg, &mut output);
+    push_decl::<native::rpc_worktree::WorktreeMutationResult>(&cfg, &mut output);
+    push_decl::<native::rpc_catalog::CatalogRefreshPolicy>(&cfg, &mut output);
+    push_decl::<native::rpc_catalog::CatalogRefreshStatus>(&cfg, &mut output);
+    push_decl::<native::rpc_catalog::ModelCatalogRefreshParams>(&cfg, &mut output);
+    push_decl::<native::rpc_catalog::ModelCatalogRefreshResult>(&cfg, &mut output);
     push_decl::<native::rpc_admin::ProviderListParams>(&cfg, &mut output);
     push_decl::<native::rpc_admin::ProviderListResult>(&cfg, &mut output);
     push_decl::<native::rpc_admin::ProviderUpsertParams>(&cfg, &mut output);
@@ -978,6 +995,22 @@ fn register_devo_protocol_schemas(
     schema::<CloseAgentParams>(schemas);
     schema::<CloseAgentResult>(schemas);
 
+    schema::<native::rpc_admin::ModelListParams>(schemas);
+    schema::<native::rpc_admin::ModelInfo>(schemas);
+    schema::<native::rpc_admin::ModelListResult>(schemas);
+    schema::<native::rpc_admin::CredentialListParams>(schemas);
+    schema::<native::rpc_admin::CredentialInfo>(schemas);
+    schema::<native::rpc_admin::CredentialListResult>(schemas);
+    schema::<native::rpc_worktree::WorktreeListParams>(schemas);
+    schema::<native::rpc_worktree::WorktreeCreateParams>(schemas);
+    schema::<native::rpc_worktree::WorktreeMutationParams>(schemas);
+    schema::<native::rpc_worktree::WorktreeInfo>(schemas);
+    schema::<native::rpc_worktree::WorktreeListResult>(schemas);
+    schema::<native::rpc_worktree::WorktreeMutationResult>(schemas);
+    schema::<native::rpc_catalog::CatalogRefreshPolicy>(schemas);
+    schema::<native::rpc_catalog::CatalogRefreshStatus>(schemas);
+    schema::<native::rpc_catalog::ModelCatalogRefreshParams>(schemas);
+    schema::<native::rpc_catalog::ModelCatalogRefreshResult>(schemas);
     schema::<native::rpc_admin::ProviderListParams>(schemas);
     schema::<native::rpc_admin::ProviderListResult>(schemas);
     schema::<native::rpc_admin::ProviderUpsertParams>(schemas);
@@ -1055,6 +1088,34 @@ fn register_devo_protocol_schemas(
         methods,
         "search/cancel",
     );
+    native_method::<native::rpc_admin::ModelListParams, native::rpc_admin::ModelListResult>(
+        methods,
+        "model/list",
+    );
+    native_method::<native::rpc_admin::CredentialListParams, native::rpc_admin::CredentialListResult>(
+        methods,
+        "credential/list",
+    );
+    native_method::<
+        native::rpc_catalog::ModelCatalogRefreshParams,
+        native::rpc_catalog::ModelCatalogRefreshResult,
+    >(methods, "model/catalog/refresh");
+    native_method::<
+        native::rpc_worktree::WorktreeListParams,
+        native::rpc_worktree::WorktreeListResult,
+    >(methods, "workspace/worktree/list");
+    native_method::<native::rpc_worktree::WorktreeCreateParams, native::rpc_worktree::WorktreeInfo>(
+        methods,
+        "workspace/worktree/create",
+    );
+    native_method::<
+        native::rpc_worktree::WorktreeMutationParams,
+        native::rpc_worktree::WorktreeMutationResult,
+    >(methods, "workspace/worktree/remove");
+    native_method::<
+        native::rpc_worktree::WorktreeMutationParams,
+        native::rpc_worktree::WorktreeMutationResult,
+    >(methods, "workspace/worktree/reset");
     native_method::<native::rpc_admin::ProviderListParams, native::rpc_admin::ProviderListResult>(
         methods,
         "provider/list",

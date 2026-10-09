@@ -195,7 +195,7 @@ async fn mediated_read_pins_the_file_during_approval_for_both_read_modes() {
         let (started_tx, started_rx) = oneshot::channel();
         let started = Mutex::new(Some(started_tx));
         let gate = Arc::new(Notify::new());
-        let requested_for_check = requested.clone();
+        let requested_for_check = requested.canonicalize().unwrap();
         let approval_gate = Arc::clone(&gate);
         let mut bridge = HostBridge::for_tests("ses_00000000-0000-0000-0000-000000000001");
         bridge.permission = PermissionChecker::new(move |req| {

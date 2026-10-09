@@ -597,6 +597,7 @@ export function ModelEditDialog({
 							</Label>
 							<Select
 								value={wireApi}
+								items={Object.fromEntries(WIRE_API_OPTIONS.map((option) => [option.value, option.label]))}
 								onValueChange={(v) => {
 									if (v != null) setWireApi(v as CatalogWireApi)
 								}}
@@ -640,6 +641,7 @@ export function ModelEditDialog({
 							</Label>
 							<Select
 								value={reasoningMode}
+								items={{ unsupported: 'Unsupported', toggle: 'Toggle (off / on)', levels: 'Levels' }}
 								onValueChange={(value) => {
 									if (value == null) return
 									const mode = value as ReasoningMode

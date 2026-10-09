@@ -10,10 +10,8 @@ import { itemsFamily, setItemsAtom } from "../atoms/messages"
 import { isMockModeAtom } from "../atoms/mock-mode"
 import { appStore } from "../atoms/store"
 import { streamingVersionFamily } from "../atoms/streaming"
-import { queryClient } from "../lib/query-client"
 import type { NativeItemEnvelope } from "@devo-ai/sdk/v2/client"
 import { getBaseClient, getProjectClient } from "../services/connection-manager"
-import { queryKeys } from "./use-devo-data"
 import { shouldShowChatLoadingSkeleton } from "./chat-loading"
 
 export type { ChatMessageEntry, ChatTurn }
@@ -41,6 +39,8 @@ export function useSessionChat(
 	const [loadingEarlier, setLoadingEarlier] = useState(false)
 	const [hasEarlierMessages, setHasEarlierMessages] = useState(false)
 	const [error, setError] = useState<string | null>(null)
+	const activeSessionRef = useRef(sessionId)
+	activeSessionRef.current = sessionId
 	const syncedRef = useRef<string | null>(null)
 	const turnsRef = useRef<ChatTurn[]>([])
 	const loadedLimitsRef = useRef(new Map<string, number>())
@@ -81,21 +81,20 @@ export function useSessionChat(
 				})
 				const raw = (result.data ?? []) as Array<{ info: NativeItemEnvelope }>
 				loadedLimitsRef.current.set(sid, limit)
-				setHasEarlierMessages(raw.length >= limit)
+				if (activeSessionRef.current === sid) setHasEarlierMessages(raw.length >= limit)
 
 				appStore.set(setItemsAtom, {
 					sessionId: sid,
 					items: raw.map((m) => m.info),
 				})
-				if (directory) {
-					queryClient.invalidateQueries({ queryKey: queryKeys.providers(directory) })
-					queryClient.invalidateQueries({ queryKey: queryKeys.config(directory) })
-				}
+
 			} catch (err) {
 				console.error("Failed to fetch session messages:", err)
-				setError(err instanceof Error ? err.message : "Failed to load messages")
+				if (activeSessionRef.current === sid) {
+					setError(err instanceof Error ? err.message : "Failed to load messages")
+				}
 			} finally {
-				setLoading(false)
+				if (activeSessionRef.current === sid) setLoading(false)
 			}
 		},
 		[directory],
@@ -117,7 +116,7 @@ export function useSessionChat(
 			})
 			const raw = (result.data ?? []) as Array<{ info: NativeItemEnvelope }>
 			loadedLimitsRef.current.set(sessionId, nextLimit)
-			setHasEarlierMessages(raw.length >= nextLimit)
+			if (activeSessionRef.current === sessionId) setHasEarlierMessages(raw.length >= nextLimit)
 			appStore.set(setItemsAtom, {
 				sessionId,
 				items: raw.map((m) => m.info),
@@ -125,7 +124,7 @@ export function useSessionChat(
 		} catch (err) {
 			console.error("Failed to load earlier messages:", err)
 		} finally {
-			setLoadingEarlier(false)
+			if (activeSessionRef.current === sessionId) setLoadingEarlier(false)
 		}
 	}, [isActive, sessionId, directory, loadingEarlier, hasEarlierMessages])
 
@@ -133,6 +132,9 @@ export function useSessionChat(
 		if (!isActive || !sessionId || isMockMode) return
 		if (syncedRef.current === sessionId) return
 		syncedRef.current = sessionId
+		setLoadingEarlier(false)
+		setHasEarlierMessages(false)
+		setLoading(false)
 		void fetchAndHydrate(sessionId)
 	}, [isActive, sessionId, isMockMode, fetchAndHydrate])
 

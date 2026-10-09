@@ -210,8 +210,6 @@ async fn run_windows_sandbox_wrapper_request(request: WindowsSandboxWrapperReque
     Ok(crate::forward_sandbox_session_stdio(spawned).await)
 }
 
-pub(crate) fn probe_wrapper_main_reached() {}
-
 fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandboxWrapperRequest> {
     let mut args = args.into_iter();
     let mut devo_home = None;

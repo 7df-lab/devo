@@ -3,6 +3,7 @@
  *
  * Produces Cursor-compatible configuration files from canonical representation.
  */
+import { join } from "node:path"
 import type {
 	CanonicalAgentFile,
 	CanonicalCommandFile,
@@ -46,14 +47,14 @@ export function canonicalToCursor(scan: CanonicalScanResult): CanonicalConversio
 	// ─── Global agents -> ~/.cursor/agents/ ──────────────────────────
 	for (const agent of scan.global.agents) {
 		const { content, report } = convertAgentToCursor(agent)
-		result.agents.set(`${paths.cursorGlobalAgentsDir()}/${agent.name}.md`, content)
+		result.agents.set(join(paths.cursorGlobalAgentsDir(), `${agent.name}.md`), content)
 		reports.push(report)
 	}
 
 	// ─── Global commands -> ~/.cursor/commands/ ──────────────────────
 	for (const cmd of scan.global.commands) {
 		const { content, report } = convertCommandToCursor(cmd)
-		result.commands.set(`${paths.cursorGlobalCommandsDir()}/${cmd.name}.md`, content)
+		result.commands.set(join(paths.cursorGlobalCommandsDir(), `${cmd.name}.md`), content)
 		reports.push(report)
 	}
 
@@ -91,14 +92,14 @@ function convertProjectToCursor(
 	// Agents -> .cursor/agents/*.md
 	for (const agent of project.agents) {
 		const { content, report: agentReport } = convertAgentToCursor(agent)
-		result.agents.set(`${paths.cursorProjectAgentsDir(project.path)}/${agent.name}.md`, content)
+		result.agents.set(join(paths.cursorProjectAgentsDir(project.path), `${agent.name}.md`), content)
 		report.converted.push(...agentReport.converted)
 	}
 
 	// Commands -> .cursor/commands/*.md
 	for (const cmd of project.commands) {
 		const { content, report: cmdReport } = convertCommandToCursor(cmd)
-		result.commands.set(`${paths.cursorProjectCommandsDir(project.path)}/${cmd.name}.md`, content)
+		result.commands.set(join(paths.cursorProjectCommandsDir(project.path), `${cmd.name}.md`), content)
 		report.converted.push(...cmdReport.converted)
 	}
 
@@ -195,7 +196,7 @@ function convertRuleToCursorMdc(
 	}
 
 	const fileName = sanitizeRuleName(rule.name)
-	const targetPath = `${paths.cursorProjectRulesDir(projectPath)}/${fileName}.mdc`
+	const targetPath = join(paths.cursorProjectRulesDir(projectPath), `${fileName}.mdc`)
 	const content = serializeFrontmatter(
 		frontmatter,
 		rule.content.includes("---\n") ? extractBody(rule.content) : rule.content,

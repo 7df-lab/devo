@@ -77,7 +77,7 @@ export function useAgentActions() {
 			// Optimistic user message is added only when a turn starts immediately.
 			// Queued follow-ups stay in the composer queue strip, not the transcript.
 			const optimisticId = `optimistic-${Date.now()}`
-			const buildOptimistic = () => {
+			const buildOptimistic = (turnId: string | undefined) => {
 				const content: Array<Record<string, unknown>> = [{ type: "text", text }]
 				for (const file of options?.files ?? []) {
 					content.push({
@@ -90,7 +90,7 @@ export function useAgentActions() {
 				appStore.set(upsertItemAtom, {
 					id: optimisticId,
 					sessionId,
-					turnId: "",
+					turnId: turnId ?? "",
 					seq: Number.MAX_SAFE_INTEGER,
 					revision: 0,
 					createdAt: new Date().toISOString(),
@@ -132,8 +132,8 @@ export function useAgentActions() {
 					variant: options?.variant,
 					collaborationMode: options?.collaborationMode,
 				})
-				if (result.data?.outcome !== "queued") {
-					buildOptimistic()
+				if (result.data?.outcome === "started") {
+					buildOptimistic(result.data.turnId)
 				}
 				log.debug("sendPrompt: promptAsync returned", {
 					sessionId,

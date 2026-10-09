@@ -188,7 +188,7 @@ export function McpSettings({
 							<SettingsRow
 								label={server.name}
 								description={
-									enabled ? `${server.status} · ${server.toolCount} tools` : server.status
+									enabled ? `${server.status} · ${server.toolCount} tool${server.toolCount === 1 ? "" : "s"}` : server.status
 								}
 							>
 								<div className="flex items-center gap-2">

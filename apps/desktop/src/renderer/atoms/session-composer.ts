@@ -1,5 +1,5 @@
 import { atom } from "jotai"
-import { atomFamily } from "jotai/utils"
+import { atomFamily } from "jotai-family"
 import type { ModelRef } from "../hooks/use-devo-data"
 import type { PersistedModelRef } from "./preferences"
 

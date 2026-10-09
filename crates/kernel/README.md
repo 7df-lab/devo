@@ -7,6 +7,18 @@ CPython RLM REPL host (protocol v3). Spawns `python -m rlm.repl`.
 Set `DEVO_RLM_RUNTIME_SRC` to the directory that contains the `rlm` package,
 or use the default `crates/kernel/rlm-runtime/src`.
 
+On Windows the REPL uses an IOCP event loop with a named-pipe wakeup channel.
+CPython's default loopback TCP wakeup channel can block during initialization
+inside the network-restricted sandbox. The pipe keeps thread wakeups and
+asynchronous subprocess I/O working without requiring network access.
+
+## Session deletion
+
+Session deletion first attempts a short graceful shutdown, then calls
+`KernelSession::terminate` to stop and reap an unresponsive kernel. Deleting a
+session discards its Python namespace immediately; it does not wait for a
+running cell to finish. Normal shutdown retains the longer graceful timeout.
+
 ## Host requests
 
 `KernelSession` uses one session-owned stdout event pump. `HostRequestHandler`

@@ -1,3 +1,5 @@
+use pretty_assertions::assert_eq;
+
 #[test]
 fn generated_acp_typescript_contains_wire_discriminants_and_names() {
     let output = devo_protocol::acp_ts::generate_acp_typescript();
@@ -34,6 +36,8 @@ fn generated_protocol_typescript_contains_non_acp_client_method_roots() {
     assert!(output.contains("export type SkillListResult"));
     assert!(output.contains("export type CommandExecParams"));
     assert!(output.contains("export type SubscriptionCreateParams"));
+    assert!(output.contains("export type SubscriptionReplay ="));
+    assert!(output.contains("replay?: SubscriptionReplay"));
     assert!(output.contains("export type SearchStartParams"));
     assert!(output.contains("session_id"));
     assert!(output.contains("searchId"));
@@ -96,7 +100,7 @@ fn generated_native_typescript_has_unique_scoped_types_and_complete_item_graph()
 fn generated_native_typescript_matches_checked_in_tui_artifact() {
     let committed = include_str!("../../../apps/tui/src/generated/protocol/native.ts");
     assert_eq!(
-        committed,
+        committed.replace("\r\n", "\n"),
         devo_protocol::acp_ts::generate_protocol_typescript()
     );
 

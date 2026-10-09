@@ -344,6 +344,7 @@ impl ServerRuntime {
                 .expect("serialize runtime/ping response"),
             ),
             "model/list" => Some(self.handle_native_model_list(id?, params).await),
+            "model/catalog/refresh" => Some(self.handle_native_catalog_refresh(id?, params).await),
             "model/preferences/read" => {
                 Some(self.handle_native_model_preferences_read(id?, params).await)
             }
@@ -428,6 +429,34 @@ impl ServerRuntime {
                     .await,
             ),
             "turn/steer" => Some(self.handle_turn_steer(connection_id, id?, params).await),
+            "workspace/worktree/list" => Some(
+                self.handle_native_worktree(id?, params, super::worktrees::WorktreeOperation::List)
+                    .await,
+            ),
+            "workspace/worktree/create" => Some(
+                self.handle_native_worktree(
+                    id?,
+                    params,
+                    super::worktrees::WorktreeOperation::Create,
+                )
+                .await,
+            ),
+            "workspace/worktree/remove" => Some(
+                self.handle_native_worktree(
+                    id?,
+                    params,
+                    super::worktrees::WorktreeOperation::Remove,
+                )
+                .await,
+            ),
+            "workspace/worktree/reset" => Some(
+                self.handle_native_worktree(
+                    id?,
+                    params,
+                    super::worktrees::WorktreeOperation::Reset,
+                )
+                .await,
+            ),
             "workspace/changes/read" => Some(self.handle_workspace_changes_read(id?, params).await),
             "provider/list" => Some(self.handle_native_provider_list(id?).await),
             "provider/validate" => Some(self.handle_native_provider_validate(id?, params).await),

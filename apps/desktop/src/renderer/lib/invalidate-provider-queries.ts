@@ -13,6 +13,8 @@ export function invalidateProviderDependentQueries(): void {
 	void queryClient.invalidateQueries({ queryKey: ["providerCatalog"] })
 	void queryClient.invalidateQueries({ queryKey: ["allProviders"] })
 	void queryClient.invalidateQueries({ queryKey: ["connectedProviders"] })
+	void queryClient.invalidateQueries({ queryKey: ["modelDirectory"] })
+	void queryClient.invalidateQueries({ queryKey: ["modelDefaults"] })
 	// Prefix match: ["providers", directory] and ["config", directory]
 	void queryClient.invalidateQueries({ queryKey: ["providers"] })
 	void queryClient.invalidateQueries({ queryKey: ["config"] })

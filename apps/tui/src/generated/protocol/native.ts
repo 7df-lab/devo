@@ -522,6 +522,8 @@ cut?: SessionForkCut | null, };
 
 export type SessionForkResult = { session: Session, };
 
+export type SubscriptionReplay = "fromCursor" | "snapshotOnly";
+
 export type SubscriptionId = string;
 
 export type EventCursor = { streamId: string, seq: bigint, };
@@ -536,7 +538,7 @@ export type LiveItemSnapshot = { item: unknown, accumulated: Array<unknown>, };
 
 export type PendingControlRequest = { requestId: string, kind: string, item: unknown, };
 
-export type SubscriptionCreateParams = { selectors: Array<StreamSelector>, includeSnapshot: boolean, after?: Array<EventCursor>, };
+export type SubscriptionCreateParams = { selectors: Array<StreamSelector>, includeSnapshot: boolean, replay?: SubscriptionReplay, after?: Array<EventCursor>, };
 
 export type SubscriptionCreateResult = { subscriptionId: SubscriptionId, snapshots?: Array<StreamSnapshot>, replay?: Array<EventEnvelope>, recoverySnapshots?: Array<LiveItemSnapshot>, cursors: Array<EventCursor>, pendingControlRequests?: Array<PendingControlRequest>, };
 
@@ -827,6 +829,68 @@ compat?: JsonValue | null, wireApis: Array<ProviderWireApi>,
 modelOverrides?: { [key in string]: ProviderModelInfo }, models?: { [key in string]: ProviderModelInfo }, enabled: boolean, };
 
 export type ModelCatalogEntry = { slug: string, display_name: string, channel: string | null, description: string | null, provider: ProviderWireApi, context_window: number, reasoning_capability: ReasoningCapability, input_modalities: Array<InputModality>, max_tokens: number | null, default_reasoning_selection: string | null, };
+
+export type ModelListParams = Record<symbol, never>;
+
+export type ModelInfo = { slug: string, displayName: string,
+/**
+ * Provider id and provider-facing model id when this entry came from the
+ * canonical provider directory.
+ */
+providerId?: string | null, modelId?: string | null, channel?: string | null, description?: string | null,
+/**
+ * Wire API the model is invoked through (legacy enum reused; see
+ * `crate::ProviderWireApi`).
+ */
+provider: ProviderWireApi, contextWindow: number, reasoningCapability: ReasoningCapability,
+/**
+ * Whether the model exposes configurable thinking (pi-ai `reasoning`).
+ */
+reasoning?: boolean,
+/**
+ * pi-ai-compatible map; `None` map values serialize as JSON `null`.
+ */
+thinkingLevelMap?: { [key in string]: string | null } | null,
+/**
+ * Precomputed chip list from [`crate::get_supported_thinking_levels`].
+ */
+availableThinkingLevels?: Array<string>, inputModalities: Array<InputModality>, maxTokens?: number | null, family?: string | null, releaseDate?: string | null, status?: string | null, capabilities?: JsonValue | null, cost?: JsonValue | null, metadata?: JsonValue | null, request?: JsonValue | null, options?: JsonValue | null, headers?: { [key in string]: string }, variants?: { [key in string]: ProviderModelVariant }, defaultVariant?: string | null, defaultReasoningSelection?: string | null, enabled?: boolean | null, priority?: number | null, };
+
+export type ModelListResult = { models: Array<ModelInfo>, };
+
+export type CredentialListParams = Record<symbol, never>;
+
+export type CredentialInfo = { id: string, provider: string, masked: string,
+/**
+ * `api_key` or `oauth` — never includes secret material.
+ */
+kind?: string | null, };
+
+export type CredentialListResult = { credentials: Array<CredentialInfo>, };
+
+export type WorktreeListParams = { cwd: string, };
+
+export type WorktreeCreateParams = { cwd: string, name: string, };
+
+export type WorktreeMutationParams = { cwd: string, directory: string, };
+
+export type WorktreeInfo = { directory: string, name: string, branch: string, };
+
+export type WorktreeListResult = { worktrees: Array<WorktreeInfo>, };
+
+export type WorktreeMutationResult = { directory: string, };
+
+export type CatalogRefreshPolicy = "ifStale" | "force";
+
+export type CatalogRefreshStatus = "updated" | "cached" | "offline" | "failed";
+
+export type ModelCatalogRefreshParams = { policy: CatalogRefreshPolicy, };
+
+export type ModelCatalogRefreshResult = { status: CatalogRefreshStatus,
+/**
+ * A failed refresh preserves the last good on-disk directory.
+ */
+message?: string | null, };
 
 export type ProviderListParams = Record<symbol, never>;
 

@@ -15,6 +15,19 @@ function firstButtonClassList(html: string): string[] {
 }
 
 describe("ModelSelectorOptionRow", () => {
+	test("shows a readable connection identifier when duplicate model names need context", () => {
+		const html = renderToStaticMarkup(
+			<ModelSelectorOptionRow
+				displayName="DeepSeek V4 Flash"
+				providerName="deepseek-direct/deepseek-v4-flash"
+				reasoning
+				selected={false}
+				onSelect={() => undefined}
+			/>,
+		)
+		expect(html).toContain('class="break-all text-[11px] text-muted-foreground" title="deepseek-direct/deepseek-v4-flash"')
+		expect(html).toContain("deepseek-direct/deepseek-v4-flash</div>")
+	})
 	test("reserves the same leading check slot for selected and unselected rows", () => {
 		const html = renderToStaticMarkup(
 			<>

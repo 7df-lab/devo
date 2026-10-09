@@ -10,7 +10,8 @@ const uiStylesSource = readFileSync(
 	"utf8",
 )
 const rendererCssSource = readFileSync(new URL("../../index.css", import.meta.url), "utf8")
-const chatTurnSource = readFileSync(new URL("./chat-turn.tsx", import.meta.url), "utf8")
+const activitySource = readFileSync(new URL("./turn-activity.tsx", import.meta.url), "utf8")
+const activityCssSource = readFileSync(new URL("../../turn-activity.css", import.meta.url), "utf8")
 
 describe("MessageResponse markdown surfaces", () => {
 	test("wires Inter Variable, Noto Sans SC Variable, and IBM Plex Mono into theme font tokens", () => {
@@ -177,19 +178,19 @@ describe("MessageResponse markdown surfaces", () => {
 
 	test("renders thinking Markdown and Python tool input as code blocks", () => {
 		expect({
-			thinkingUsesMarkdown: chatTurnSource.includes('className="devo-reasoning-response"'),
+			thinkingUsesMarkdown: activitySource.includes('className="devo-reasoning-response"'),
 			reasoningKeepsMutedCompactStyle: rendererCssSource.includes(
 				".devo-message-response.devo-reasoning-response",
 			),
-			pythonToolUsesCodeBlock: chatTurnSource.includes('<CodeBlock code={pythonCode} language="python"'),
-			pythonCodeClass: chatTurnSource.includes("devo-python-tool-code-block max-h-48"),
-			pythonCodeWrapsLongLines: /devo-python-tool-code-block code\s*\{[^}]*white-space:\s*pre-wrap/.test(
-				rendererCssSource,
+			pythonToolUsesCodeBlock: activitySource.includes('<CodeBlock code={code} language="python"'),
+			pythonCodeClass: activitySource.includes('className="devo-activity-code"'),
+			pythonCodeWrapsLongLines: /devo-activity-code code\s*\{[^}]*white-space:\s*pre-wrap/.test(
+				activityCssSource,
 			),
-			pythonCodeUsesCompactType: /devo-python-tool-code-block pre\s*\{[^}]*font-size:\s*0\.75rem/.test(
-				rendererCssSource,
+			pythonCodeUsesCompactType: /devo-activity-code pre\s*\{[^}]*font-size:\s*0\.8125rem/.test(
+				activityCssSource,
 			),
-			pythonCopyHasAccessibleName: chatTurnSource.includes('aria-label="Copy Python tool input"'),
+			pythonCopyHasAccessibleName: activitySource.includes('aria-label="Copy Python code"'),
 		}).toEqual({
 			thinkingUsesMarkdown: true,
 			reasoningKeepsMutedCompactStyle: true,

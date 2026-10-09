@@ -26,7 +26,7 @@ function formatCountdown(ms: number): string {
 	return `${totalSeconds.toFixed(1)}s`
 }
 
-function summaryLabel(entry: ProviderErrorEntry, remainingMs: number, pending: boolean): string {
+export function providerErrorSummary(entry: ProviderErrorEntry, remainingMs: number, pending: boolean): string {
 	if (entry.phase === "scheduled") {
 		const attempt =
 			entry.attempt != null && entry.attempt > 0 ? ` (attempt ${entry.attempt})` : ""
@@ -35,9 +35,7 @@ function summaryLabel(entry: ProviderErrorEntry, remainingMs: number, pending: b
 		}
 		return `Provider retry${attempt}`
 	}
-	if (entry.code && entry.code !== "Error" && entry.code !== "TurnFailed") {
-		return entry.code
-	}
+	if (/insufficient balance/i.test(entry.message)) return "Insufficient provider balance"
 	return "Request failed"
 }
 
@@ -59,11 +57,12 @@ export const ProviderErrorRow = memo(function ProviderErrorRow({
 		return () => window.clearInterval(id)
 	}, [liveCountdown, entry.id, entry.scheduledAtMs, entry.backoffMs])
 
-	const label = summaryLabel(entry, remainingMs, pending)
+	const label = providerErrorSummary(entry, remainingMs, pending)
 	return (
 		<TranscriptDisclosure defaultOpen={false}>
 			<TranscriptDisclosureTrigger
 				label={<span className="tabular-nums">{label}</span>}
+				className={entry.phase === "failed" ? "text-destructive" : undefined}
 				aria-label={`${label}: expand to view details`}
 			/>
 			<TranscriptDisclosureContent rail className="space-y-1">

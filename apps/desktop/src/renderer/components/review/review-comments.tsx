@@ -8,7 +8,7 @@
  * - useDiffComments hook: manages comment CRUD
  */
 import { atom, useAtomValue, useSetAtom } from "jotai"
-import { atomFamily } from "jotai/utils"
+import { atomFamily } from "jotai-family"
 import { MessageSquarePlusIcon, XIcon } from "lucide-react"
 import { useCallback, useRef, useState } from "react"
 

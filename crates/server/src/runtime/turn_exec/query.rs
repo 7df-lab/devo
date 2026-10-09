@@ -289,9 +289,8 @@ impl ServerRuntime {
                             devo_protocol::native::item::Item::Warning {
                                 code: "rlmKernelUnfenced".to_string(),
                                 message: format!(
-                                    "RLM kernel runs UNFENCED with full user permissions: \
-                                     the OS sandbox fence could not be raised. {remediation} \
-                                     (design doc §5.3)."
+                                    "Python is running with full user permissions because \
+                                     the OS sandbox could not be enabled. {remediation}."
                                 ),
                                 retryable: false,
                             },

@@ -32,11 +32,13 @@ describe("sidebar folder dialogs", () => {
 			title: markup.includes("Remove folder from Devo Desktop"),
 			deletesSessions: markup.includes("permanently deletes all sessions in this folder"),
 			cannotUndo: markup.includes("cannot be undone"),
+			interruptsWorkingSessions: markup.includes("Working sessions will be interrupted"),
 			keepsDiskFolder: markup.includes("The folder on disk will not be deleted"),
 		}).toEqual({
 			title: true,
 			deletesSessions: true,
 			cannotUndo: true,
+			interruptsWorkingSessions: true,
 			keepsDiskFolder: true,
 		})
 	})
@@ -56,10 +58,12 @@ describe("sidebar folder dialogs", () => {
 			title: markup.includes("Folder no longer exists"),
 			removeQuestion: markup.includes("Remove it from Devo Desktop"),
 			deletesSessions: markup.includes("permanently deletes all sessions in this folder"),
+			interruptsWorkingSessions: markup.includes("Working sessions will be interrupted"),
 		}).toEqual({
 			title: true,
 			removeQuestion: true,
 			deletesSessions: true,
+			interruptsWorkingSessions: true,
 		})
 	})
 })

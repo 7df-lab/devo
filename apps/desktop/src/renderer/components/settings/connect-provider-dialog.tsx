@@ -260,7 +260,7 @@ export function ConnectProviderDialog({
 				? pluginAuthMethods
 				: DEFAULT_API_KEY_METHOD
 
-	// Reset state when dialog opens/closes
+	// Reset on a different provider, not on catalog refetch object identity.
 	useEffect(() => {
 		if (open) {
 			setState({ status: "idle" })
@@ -296,7 +296,7 @@ export function ConnectProviderDialog({
 				setStep({ type: "select-method" })
 			}
 		}
-	}, [open, authMethods, provider])
+	}, [open, authMethods, provider?.id])
 
 	const tryCancelOAuth = useCallback(async (): Promise<boolean> => {
 		try {

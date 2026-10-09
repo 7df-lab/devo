@@ -64,6 +64,7 @@ use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE;
 
 const DENY_ACCESS: i32 = 3;
+#[cfg(test)]
 const WRITE_ROOT_ALLOW_MASK: u32 =
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
 

@@ -41,14 +41,28 @@ export const upsertItemAtom = atom(null, (get, set, item: SessionItem) => {
 	const sessionId = item.sessionId
 	let existing = get(itemsFamily(sessionId))
 
+	// The canonical user item can arrive before queue/push returns. In that
+	// order, the late optimistic bubble is already represented by its turn.
+	if (
+		isUserMessageItem(item) &&
+		item.id.startsWith("optimistic-") &&
+		item.turnId &&
+		existing.some(
+			(m) => isUserMessageItem(m) && !m.id.startsWith("optimistic-") && m.turnId === item.turnId,
+		)
+	) {
+		return
+	}
+
 	if (isUserMessageItem(item) && !item.id.startsWith("optimistic-")) {
 		const optimisticIndex = existing.findIndex(
-			(m) => m.id.startsWith("optimistic-") && isUserMessageItem(m),
+			(m) =>
+				m.id.startsWith("optimistic-") &&
+				isUserMessageItem(m) &&
+				(!m.turnId || m.turnId === item.turnId),
 		)
 		if (optimisticIndex !== -1) {
-			const removed = existing[optimisticIndex]
 			existing = existing.filter((_, index) => index !== optimisticIndex)
-			void removed
 		}
 	}
 

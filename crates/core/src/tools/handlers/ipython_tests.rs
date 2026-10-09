@@ -473,13 +473,17 @@ async fn ensure_kernel_restores_namespace_from_session_dir() {
         second_restore_state,
         Some(KernelNamespaceRestoreState::Restored)
     );
-    let check = second.execute("print(resume_marker)").await.expect("check");
-    assert_eq!(check.status, "ok", "stderr={}", check.stderr);
-    assert!(
-        check.stdout.contains("4242"),
-        "expected restored resume_marker, stdout={:?} result={:?}",
-        check.stdout,
-        check.result
+    let check = second
+        .execute("print(resume_marker)\nawait asyncio.sleep(0)\nprint(asyncio.__name__)")
+        .await
+        .expect("check");
+    assert_eq!(
+        (
+            check.status.as_str(),
+            check.stdout.as_str(),
+            check.stderr.as_str()
+        ),
+        ("ok", "4242\nasyncio\n", "")
     );
 }
 
@@ -510,6 +514,7 @@ async fn rlm_bootstrap_imports_core_python_skill_modules() {
     let expected_json = serde_json::to_string(&expected).expect("skill names serialize");
     let code = format!(
         concat!(
+            "assert asyncio.__name__ == 'asyncio'\n",
             "expected = {}\n",
             "missing = [name for name in expected ",
             "if name not in globals() or globals()[name] is None]\n",
